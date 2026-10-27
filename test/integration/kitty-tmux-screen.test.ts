@@ -229,6 +229,7 @@ test('main screen first paint: one wrapped upload, then the placement and real g
     assert.equal(count(scan.text, P), body.columns * body.rows, 'every painted cell is real placeholder text')
     const grid = encodeKittyPlaceholderGrid(Number(placements[0]!.controls.i), Number(placements[0]!.controls.p), body.columns, body.rows)
     for (const row of grid) assert.ok(scan.text.includes(row), 'each grid row reached the text stream')
+    assert.equal(h.terminal.text.includes('pi:tmux-image'), false, 'the private provenance marker never reaches the terminal')
     screen.stop()
   } finally {
     h.dispose()
@@ -437,6 +438,7 @@ test('alt screen: the upload happens after ?1049h and a non-preserving stop repl
     screen.stop({ preserveScreen: false })
     const replay = scanOuter(h.terminal.text)
     assertNoUnwrappedGraphics(replay)
+    assert.equal(h.terminal.text.includes('pi:tmux-image'), false, 'the Alt replay path strips the marker too')
     const exitAt = h.terminal.text.lastIndexOf('\x1b[?1049l')
     assert.ok(exitAt !== -1)
     assert.ok(h.terminal.text.lastIndexOf(DCS_INTRODUCER) > exitAt, 'the replayed placement follows ?1049l')
@@ -658,6 +660,51 @@ test('tmux virtual: a revoked client permanently refuses managed batches and pai
   }
 })
 
+test('tmux virtual: a revoked handle drops a queued unpainted retirement and writes text', () => {
+  const h = harness()
+  try {
+    const pending = imageOf(h.graphics, source(), fallbackOptions())
+    pending.render(100) // registered, never offered to the screen/terminal
+    pending.dispose() // queued hard retirement
+    h.cli.setReply('show-options', { text: 'off\n' })
+    h.terminal.writes.length = 0
+    h.graphics.terminal.write('fallback text')
+    assert.equal(h.terminal.text, 'fallback text', 'the text frame is still writable after revocation')
+    assert.equal(h.terminal.text.includes('\x1b_G'), false, 'the old retirement never reaches the pane')
+    assert.equal(count(h.terminal.text, P), 0)
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: a real screen writes its fallback after a revoked queued retirement', () => {
+  const h = harness()
+  try {
+    const pending = imageOf(h.graphics, source(), fallbackOptions())
+    pending.render(100)
+    pending.dispose()
+    h.cli.setReply('show-options', { text: 'off\n' })
+    class Plain implements Component {
+      render(): string[] {
+        return ['plain fallback']
+      }
+      invalidate(): void {}
+    }
+    const screen = new TuiMainScreen(h.graphics.terminal)
+    screen.addChild(new Plain())
+    h.terminal.writes.length = 0
+    screen.start()
+    screen.renderNow()
+    const scan = scanOuter(h.terminal.text)
+    assert.equal(scan.commands.length, 0, 'no managed command')
+    assert.equal(count(scan.text, P), 0, 'no placeholder cell')
+    assert.ok(scan.text.includes('plain fallback'), 'the real screen painted the text fallback')
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
 test('tmux virtual: a revoked screen repaints its fallback without escaping one grid cell', () => {
   const h = harness()
   try {
@@ -745,7 +792,13 @@ test('tmux virtual: the component bounds the grid before the encoder, and a narr
   assert.equal(wideBody.columns, 297, 'the diacritic table bounds the painted body')
   assert.ok(wideBody.rows <= 297)
   assert.equal(wide.length, wideBody.rows)
-  assert.equal(wide[0]!.startsWith(encodeKittyVirtualPlacement(Number(image.imageId), Number(wide[0]!.match(/,p=(\d+)/)?.[1]), wideBody.columns, wideBody.rows)), true)
+  assert.ok(wide[0]!.startsWith(`\x1b_pi:tmux-image:v1:i=${image.imageId},p=`),
+    'the managed body is marked only after the Core handle exists')
+  const anchorAt = wide[0]!.indexOf('\x1b_G')
+  assert.ok(anchorAt > 0)
+  assert.equal(wide[0]!.slice(anchorAt).startsWith(
+    encodeKittyVirtualPlacement(Number(image.imageId), Number(wide[0]!.match(/,p=(\d+)/)?.[1]), wideBody.columns, wideBody.rows),
+  ), true)
 
   image.invalidate()
   const narrow = image.render(40)
@@ -759,7 +812,7 @@ test('tmux virtual: the component bounds the grid before the encoder, and a narr
   }
 })
 
-test('tmux virtual: scrolling into the middle keeps explicit row cells and never invents a per-row anchor', () => {
+test('tmux virtual: scrolling into the middle keeps explicit row cells and relocates exactly one anchor', () => {
   const h = harness()
   try {
     h.terminal.columns = 60
@@ -789,7 +842,15 @@ test('tmux virtual: scrolling into the middle keeps explicit row cells and never
     assert.equal(scroll.scrollTop, 4)
     const scan = scanOuter(h.terminal.text)
     assertNoUnwrappedGraphics(scan)
-    assert.equal(scan.commands.length, 0, 'the anchor is above the viewport: no new placement is invented')
+    const relocated = scan.commands.filter((command) => command.controls.a === 'p' && command.controls.U === '1')
+    assert.equal(relocated.length, 1, 'the clipped anchor is relocated exactly once')
+    assert.equal(scan.commands.filter((command) => command.controls.a === 't').length, 0,
+      'the existing prototype still owns the data')
+    assert.equal(scan.commands.filter((command) => command.controls.a === 'd').length, 0)
+    const firstVisibleAt = h.terminal.text.indexOf(grid[1]!)
+    assert.ok(firstVisibleAt !== -1)
+    assert.ok(h.terminal.text.slice(Math.max(0, firstVisibleAt - 200), firstVisibleAt).includes(DCS_INTRODUCER),
+      'the relocated anchor immediately precedes the first visible placeholder row')
     for (let row = 1; row < body.rows; row++) {
       assert.ok(scan.text.includes(grid[row]!), `visible image row ${row} keeps its own diacritics`)
     }
@@ -824,6 +885,224 @@ test('tmux virtual: scrolling into the middle keeps explicit row cells and never
     }
     assert.equal(clipped.text.includes(grid[5]!), false, 'rows below the viewport are never painted')
     screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('alt screen: the first visible frame relocates the anchor when the image is first mounted mid-scroll', () => {
+  const h = harness()
+  try {
+    h.terminal.columns = 60
+    h.terminal.rows = 10
+    const image = imageOf(h.graphics, source(PNG, 100, 500), { maxWidthCells: 20, maxHeightCells: 10, fallback: '[image]' })
+    const content = new LegacyContainer()
+    for (let index = 0; index < 3; index++) content.addChild(new LegacyText(`l${index}`, 0, 0))
+    const slot = new LegacyContainer()
+    content.addChild(slot)
+    for (let index = 0; index < 20; index++) content.addChild(new LegacyText(`t${index}`, 0, 0))
+    const scroll = new LegacyScrollView(content, { primary: true, follow: 'none' })
+    const screen = new TuiAltScreen(h.graphics.terminal, undefined, undefined, { mouse: false })
+    screen.setLayoutRoot(scroll)
+    screen.start()
+    screen.renderNow() // first frame: the image slot is still empty, no anchor exists
+
+    slot.addChild(image) // the image is mounted only now, while the view is mid-content
+    content.invalidate()
+    scroll.scrollTo(4)
+    h.terminal.writes.length = 0
+    screen.renderNow()
+
+    assert.equal(scroll.scrollTop, 4)
+    const scan = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    const transmissions = scan.commands.filter((command) => command.controls.a === 't')
+    const placements = scan.commands.filter((command) => command.controls.a === 'p' && command.controls.U === '1')
+    assert.equal(transmissions.length, 1, 'the first visible frame uploads the image')
+    assert.equal(placements.length, 1, 'exactly one placement is created')
+    assert.ok(scan.commands.indexOf(transmissions[0]!) < scan.commands.indexOf(placements[0]!),
+      'the upload precedes the placement')
+    assert.equal(transmissions[0]!.controls.i, placements[0]!.controls.i)
+    const body = image.paintedBodyAt(60)
+    assert.ok(body !== undefined)
+    assert.equal(Number(placements[0]!.controls.c), body.columns)
+    assert.equal(Number(placements[0]!.controls.r), body.rows)
+    assert.ok(count(scan.text, P) > 0, 'the first visible frame paints placeholder cells')
+    const grid = encodeKittyPlaceholderGrid(image.imageId!, Number(placements[0]!.controls.p), body.columns, body.rows)
+    const firstVisibleAt = h.terminal.text.indexOf(grid[1]!)
+    assert.ok(firstVisibleAt !== -1)
+    assert.ok(h.terminal.text.slice(Math.max(0, firstVisibleAt - 200), firstVisibleAt).includes(DCS_INTRODUCER),
+      'the first frame carries the anchor directly before its first visible row')
+    assert.equal(scan.text.includes(grid[0]!), false, 'the original first row is genuinely clipped')
+    assert.equal(scan.commands.filter((command) => command.controls.a === 'd').length, 0)
+    assert.equal(h.terminal.text.includes('pi:tmux-image'), false, 'the relocated marker is stripped')
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('alt screen: an overlay over the first visible row does not lose the relocated anchor', () => {
+  const h = harness()
+  try {
+    h.terminal.columns = 60
+    h.terminal.rows = 10
+    const image = imageOf(h.graphics, source(PNG, 100, 500), { maxWidthCells: 20, maxHeightCells: 10, fallback: '[image]' })
+    const content = new LegacyContainer()
+    for (let index = 0; index < 3; index++) content.addChild(new LegacyText(`l${index}`, 0, 0))
+    const slot = new LegacyContainer()
+    content.addChild(slot)
+    for (let index = 0; index < 20; index++) content.addChild(new LegacyText(`t${index}`, 0, 0))
+    const scroll = new LegacyScrollView(content, { primary: true, follow: 'none' })
+    const screen = new TuiAltScreen(h.graphics.terminal, undefined, undefined, { mouse: false })
+    screen.setLayoutRoot(scroll)
+    screen.start()
+    screen.renderNow()
+    slot.addChild(image)
+    content.invalidate()
+    scroll.scrollTo(4)
+    class Overlay implements Component {
+      render(): string[] {
+        return ['OVERLAY']
+      }
+      invalidate(): void {}
+    }
+    screen.showOverlay(new Overlay(), { anchor: 'top-left', width: 10 })
+    h.terminal.writes.length = 0
+    screen.renderNow()
+    const scan = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    assert.equal(scan.commands.filter((command) => command.controls.a === 't').length, 1)
+    assert.equal(scan.commands.filter((command) => command.controls.a === 'p' && command.controls.U === '1').length, 1,
+      'the overlay compositing keeps the relocated anchor')
+    assert.ok(count(scan.text, P) > 0)
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('main screen: a long first frame paints its anchor without any clipping seam', () => {
+  const h = harness()
+  try {
+    h.terminal.columns = 60
+    h.terminal.rows = 10
+    const image = imageOf(h.graphics, source(PNG, 100, 500), { maxWidthCells: 20, maxHeightCells: 10, fallback: '[image]' })
+    class LongRoot implements Component {
+      render(width: number): string[] {
+        const lines: string[] = []
+        for (let index = 0; index < 50; index++) lines.push(`lead ${index}`)
+        lines.push(...image.render(width))
+        lines.push('END')
+        return lines
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(h.graphics.terminal)
+    screen.addChild(new LongRoot())
+    screen.start()
+    h.terminal.writes.length = 0
+    screen.renderNow()
+    const scan = scanOuter(h.terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    assert.equal(scan.commands.filter((command) => command.controls.a === 't').length, 1)
+    assert.equal(scan.commands.filter((command) => command.controls.a === 'p' && command.controls.U === '1').length, 1,
+      'the main writer paints the anchor on its own row, so no relocation is needed')
+    assert.equal(h.terminal.text.includes('pi:tmux-image'), false, 'the Main path strips the marker through the facade')
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: the provenance marker never reaches the terminal across split writes', () => {
+  const h = harness()
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    const line = image.render(80)[0]!
+    const prefix = '\x1b_pi:tmux-image:v1:i='
+    assert.ok(line.startsWith(prefix), 'the managed component really marks its anchor line')
+    const markerEnd = line.indexOf('\x1b\\', prefix.length) + 2
+    const marker = line.slice(0, markerEnd)
+    for (let cut = 1; cut <= marker.length; cut++) {
+      const single = directFacade()
+      try {
+        const anchored = new TmuxKittyImage(single.core, source(), fallbackOptions(), single.admission)
+        const anchoredLine = anchored.render(80)[0]!
+        single.terminal.writes.length = 0
+        single.facade.write(anchoredLine.slice(0, cut))
+        single.facade.write(anchoredLine.slice(cut))
+        assert.equal(single.terminal.text.includes('pi:tmux-image'), false,
+          `no marker leaks when split at ${cut}`)
+        assert.ok(single.terminal.text.includes('\x1bPtmux;') || single.terminal.text.includes('\x1b_G'),
+          `the real anchor survives split ${cut}`)
+      } finally {
+        single.dispose()
+      }
+    }
+  } finally {
+    h.dispose()
+  }
+})
+
+test('alt screen: a complete foreign virtual image is never relocated', () => {
+  const h = harness()
+  try {
+    h.terminal.columns = 60
+    h.terminal.rows = 10
+    const foreignId = 0x345678
+    const foreignAnchor = encodeKittyVirtualPlacement(foreignId, 1, 4, 3)
+    const foreignGrid = encodeKittyPlaceholderGrid(foreignId, 1, 4, 3)
+    class ForeignImage implements Component {
+      render(): string[] {
+        return [foreignAnchor + foreignGrid[0]!, ...foreignGrid.slice(1)]
+      }
+      invalidate(): void {}
+    }
+    const content = new LegacyContainer()
+    for (let index = 0; index < 3; index++) content.addChild(new LegacyText(`l${index}`, 0, 0))
+    content.addChild(new ForeignImage())
+    for (let index = 0; index < 20; index++) content.addChild(new LegacyText(`t${index}`, 0, 0))
+    const scroll = new LegacyScrollView(content, { primary: true, follow: 'none' })
+    const screen = new TuiAltScreen(h.graphics.terminal, undefined, undefined, { mouse: false })
+    screen.setLayoutRoot(scroll)
+    screen.start()
+    screen.renderNow()
+    scroll.scrollTo(4)
+    content.invalidate()
+    h.terminal.writes.length = 0
+    screen.renderNow()
+    const scan = scanOuter(h.terminal.text)
+    assert.equal(scan.commands.length, 0, 'the foreign anchor is not invented or moved')
+    assert.ok(count(scan.text, P) > 0, 'the foreign placeholder cells are painted unchanged')
+    assert.equal(h.terminal.text.includes('pi:tmux-image'), false)
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: a revoked image component fallback wins over a queued unpainted retirement', () => {
+  const h = harness()
+  try {
+    const painted = imageOf(h.graphics, source(), fallbackOptions())
+    const anchor = painted.render(100)[0]!
+    h.graphics.terminal.write(anchor)
+    const pending = imageOf(h.graphics, source(), fallbackOptions())
+    pending.render(100) // registered, never offered
+    pending.dispose() // queued retirement
+    h.cli.setReply('show-options', { text: 'off\n' })
+    assert.throws(() => h.graphics.terminal.write(anchor), TmuxGraphicsRevokedError,
+      'the forced managed write latches the revocation and drops the queued retirement')
+    h.terminal.writes.length = 0
+    const fallback = painted.render(100)
+    assert.deepEqual(fallback, ['[fallback]'], 'the same image component really paints its fallback')
+    h.graphics.terminal.write(fallback.join('\r\n'))
+    assert.equal(h.terminal.text, '[fallback]', 'the fallback frame is written after the retirement is dropped')
+    assert.equal(h.terminal.text.includes('\x1b_G'), false)
+    assert.equal(count(h.terminal.text, P), 0)
   } finally {
     h.dispose()
   }

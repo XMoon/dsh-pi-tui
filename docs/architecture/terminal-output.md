@@ -242,8 +242,11 @@ by default and only the exact `PI_TUI_TMUX_KITTY_IMAGES=1` opt-in may attempt it
   identity fields latches the handle revoked for the rest of the process. The
   component then paints the text fallback, and the facade refuses an entire
   managed write batch (no DCS and no placeholder cell) once a managed command or
-  retirement needs admission. There is no hot client migration: re-enabling
-  requires a new TUI process. A component render may answer from a real probe at
+  retirement needs admission. A queued never-placed retirement is dropped
+  locally instead of being sent to a possibly different client (the abandoned
+  upload is invisible and is never reused); a text-only fallback frame is still
+  writable. There is no hot client migration: re-enabling requires a new TUI
+  process. A component render may answer from a real probe at
   most 250 ms old, while every managed physical write batch re-probes; a
   cross-process change is therefore caught before the next managed batch, never
   atomically.
@@ -268,6 +271,21 @@ by default and only the exact `PI_TUI_TMUX_KITTY_IMAGES=1` opt-in may attempt it
   underline = low 24 placement bits, explicit `39;59m` per row. Image ids keep
   the full 32-bit value (the upper byte is a diacritic, never truncated), and
   each grid axis is bounded by the 297-entry diacritic table before encoding.
+- **First visible frame survives vertical clipping.** If a managed image's
+  first row is already above the viewport when it is first painted, the layout
+  engine prefixes the exact existing `a=p,U=1` sequence to the first actually
+  visible placeholder row of the same image block (current-frame source and clip
+  only; at most the 297-row component bound is inspected). A zero-width private
+  provenance marker, created only from the live Core handle and stripped before
+  every real terminal write, identifies the managed anchor; the layout also
+  requires the marker/anchor/cell identity to agree. It never synthesizes an
+  id/geometry, never emits one anchor per row, never relocates an unmarked
+  foreign virtual image, and leaves visible-anchor, Native and text output
+  unchanged. Authority: `src/tui/graphics/tmux-image.ts`,
+  `src/tui/graphics/kitty-terminal.ts`, `src/layout.ts` +
+  `src/terminal-image.ts` (vendored divergence X067); proof:
+  `packages/pi-tui/test/layout.test.ts` plus the real-Screen first-middle and
+  foreign-negative cases in `test/integration/kitty-tmux-screen.test.ts`.
 - **No metadata shortcut.** The virtual component does not register the fork's
   Native placement metadata: its clipping is cell clipping by the real text
   layout, not a source-pixel crop of a cursor-positioned rectangle.

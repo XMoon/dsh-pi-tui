@@ -489,6 +489,24 @@ export class KittyGraphicsCore {
   }
 
   /**
+   * Release every queued, NEVER-PAINTED retirement WITHOUT terminal IO.
+   *
+   * Only a revoked tmux handle uses this: its old ids must not be sent to
+   * whatever client is attached now, and the bytes were never placed, so no
+   * screen or scrollback can reference them. The outer terminal may keep the
+   * abandoned upload (invisible, with no placements); the Core releases its own
+   * payload and record locally. A PAINTED occurrence is never affected.
+   */
+  discardQueuedRetirements(): void {
+    for (const [imageId, record] of this.records) {
+      if (!record.retireQueued || record.source === undefined) continue
+      this.payloadBytes -= record.source.pngBase64.length
+      this.decodedByteTotal -= decodedBytes(record.source)
+      this.records.delete(imageId)
+    }
+  }
+
+  /**
    * The queued own-ID deletions, offered to the sink but NOT yet committed: a
    * failing write must be able to put them back, because `Terminal.write()` is
    * only an offer — it never proves the terminal decoded the command.

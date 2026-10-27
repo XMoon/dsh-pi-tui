@@ -6,7 +6,7 @@ import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
 import { renderLayoutFrame } from "../src/layout.ts";
 import { encodeKitty, registerKittyImageMetadata } from "../src/terminal-image.ts";
-import { stripTerminalSequences } from "../src/utils.ts";
+import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 
 function visibleLines(lines: string[]): string[] {
 	return lines.map((line) => stripTerminalSequences(line).trimEnd());
@@ -486,5 +486,114 @@ describe("Stack dispose clears both representations (X007 follow-up P2)", () => 
 			["", "", "", ""],
 			"the disposed stack must paint nothing",
 		);
+	});
+});
+
+
+describe("virtual placement clipping", () => {
+	const placeholder = "\u{10eeee}";
+	const marker = (imageId: number): string => `\x1b_pi:tmux-image:v1:i=${imageId},p=1\x1b\\`;
+	const anchor = (imageId: number, rows = 3): string =>
+		`\x1b_Ga=p,U=1,i=${imageId},p=1,c=2,r=${rows},q=2;\x1b\\`;
+	const grid = (row: number, imageId = 42): string =>
+		`\x1b[38;2;0;0;${imageId & 0xff}m\x1b[58:2::0:0:1m${placeholder}${row}${placeholder}${row}\x1b[39;59m`;
+	const managed = (imageId = 42, rows = 3): string => marker(imageId) + anchor(imageId, rows) + grid(0, imageId);
+
+	function frameFor(lines: string[], viewportHeight: number, scrollTop: number) {
+		const scroll = new ScrollView({ render: () => lines, invalidate: () => {} }, { primary: true, follow: "none" });
+		scroll.updateLayout(lines.length, viewportHeight, () => {});
+		scroll.scrollTo(scrollTop);
+		return { scroll, frame: renderLayoutFrame(scroll, 20, viewportHeight, () => {}) };
+	}
+
+	it("relocates the clipped managed anchor onto the first visible placeholder row", () => {
+		const imageAnchor = anchor(42, 3);
+		const lines = ["l0", "l1", managed(42, 3), grid(1), grid(2), "tail"];
+		const { frame } = frameFor(lines, 3, 3);
+
+		assert.ok(frame.lines[0]!.startsWith(imageAnchor), "the first visible row carries the exact anchor bytes");
+		assert.ok(frame.lines[0]!.includes(grid(1)), "the moved anchor sits on the first visible placeholder row");
+		assert.strictEqual((frame.lines.join("").match(/\x1b_Ga=p,U=1/g) ?? []).length, 1, "exactly one anchor in the frame");
+		assert.strictEqual(visibleWidth(frame.lines[0]!), visibleWidth(grid(1)), "the APC adds no visible width");
+		assert.ok(!frame.lines[0]!.includes("pi:tmux-image"), "the private marker never reaches the painted frame");
+	});
+
+	it("leaves a visible managed anchor in place and strips its private marker", () => {
+		const imageAnchor = anchor(42, 3);
+		const lines = ["l0", "l1", managed(42, 3), grid(1), grid(2), "tail"];
+		const { frame } = frameFor(lines, 3, 2);
+
+		assert.ok(frame.lines[0]!.startsWith(imageAnchor), "the original anchor row is painted");
+		assert.strictEqual((frame.lines.join("").match(/\x1b_Ga=p,U=1/g) ?? []).length, 1, "no duplicate anchor");
+		assert.ok(!frame.lines.join("").includes("pi:tmux-image"), "a visible anchor's marker is stripped");
+	});
+
+	it("does not relocate when no same-image placeholder row is visible", () => {
+		const lines = ["l0", "l1", managed(42, 3), grid(1), grid(2), "tail"];
+		const { frame } = frameFor(lines, 2, 0);
+
+		assert.strictEqual((frame.lines.join("").match(/\x1b_Ga=p,U=1/g) ?? []).length, 0);
+	});
+
+	it("does not relocate a complete foreign virtual image that has no provenance marker", () => {
+		const foreignAnchor = anchor(99, 3);
+		const lines = ["l0", "l1", foreignAnchor + grid(0, 99), grid(1, 99), grid(2, 99), "tail"];
+		const { frame } = frameFor(lines, 3, 3);
+
+		assert.strictEqual((frame.lines.join("").match(/\x1b_Ga=p,U=1/g) ?? []).length, 0,
+			"a foreign virtual anchor+grid must be left to the original layout");
+	});
+
+	it("relocates the managed image but leaves an adjacent foreign virtual anchor untouched", () => {
+		const imageAnchor = anchor(42, 2);
+		const foreignAnchor = anchor(99, 2);
+		const lines = [managed(42, 2), grid(1, 42), foreignAnchor + grid(0, 99), grid(1, 99)];
+		const { frame } = frameFor(lines, 2, 1);
+
+		assert.ok(frame.lines[0]!.startsWith(imageAnchor), "the managed anchor is moved to its visible row");
+		assert.ok(frame.lines[1]!.startsWith(foreignAnchor), "the foreign anchor stays on its original row");
+		assert.strictEqual((frame.lines.join("").match(/\x1b_Ga=p,U=1/g) ?? []).length, 2,
+			"one moved managed anchor plus the untouched foreign anchor");
+	});
+
+	it("fails fast when a marker and its adjacent anchor name different ids", () => {
+		const mismatched = marker(42) + anchor(99, 2) + grid(0, 99);
+		assert.throws(() => frameFor(["l0", "l1", mismatched, grid(1, 99), grid(2, 99), "tail"], 3, 3),
+			/does not match its placement anchor/);
+	});
+
+	it("fails fast instead of leaking a malformed marker", () => {
+		const malformed = "\x1b_pi:tmux-image:v1:i=42,p=1" + anchor(42, 2) + grid(0, 42);
+		assert.throws(() => frameFor(["l0", "l1", malformed, grid(1, 42), grid(2, 42), "tail"], 3, 3),
+			/managed kitty virtual marker is malformed/);
+	});
+
+	it("does not move an anchor onto a placeholder row that names another image", () => {
+		const lines = ["l0", "l1", managed(42, 3), grid(1, 99), grid(2, 42), "tail"];
+		const { frame } = frameFor(lines, 3, 3);
+
+		assert.strictEqual((frame.lines.join("").match(/\x1b_Ga=p,U=1/g) ?? []).length, 0,
+			"a color/identity mismatch must not adopt another image's cells");
+	});
+
+	it("does not move a bare anchor line that has no marker or placeholder cell of its own", () => {
+		const imageAnchor = anchor(42, 2);
+		const lines = ["l0", "l1", imageAnchor, grid(0), grid(1), "tail"];
+		const { frame } = frameFor(lines, 3, 3);
+
+		assert.strictEqual((frame.lines.join("").match(/\x1b_Ga=p,U=1/g) ?? []).length, 0,
+			"a foreign anchor-only line is left to the original layout");
+	});
+
+	it("relocates an anchor that is exactly the maximum 297 rows above the viewport", () => {
+		const lines = [
+			managed(42, 297),
+			...Array.from({ length: 296 }, (_, index) => grid(index + 1)),
+			...Array.from({ length: 5 }, (_, index) => `tail ${index}`),
+		];
+		const { frame } = frameFor(lines, 3, 296);
+
+		assert.ok(frame.lines[0]!.startsWith(anchor(42, 297)), "the 297-row window still finds the anchor");
+		assert.ok(frame.lines[0]!.includes(grid(296)));
 	});
 });

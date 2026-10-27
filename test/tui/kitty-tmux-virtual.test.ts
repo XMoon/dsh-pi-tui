@@ -77,18 +77,21 @@ test('the upper id byte covers the whole 32-bit range', () => {
   assert.ok(grid[0]!.includes(P + diacritic(0) + diacritic(0) + upper), '255 is addressable')
 })
 
-test('the grid rows and columns clamp to the 297-entry diacritic table', () => {
+test('the encoder accepts the 297 boundary and rejects anything outside it', () => {
   assert.equal(KITTY_VIRTUAL_MAX_CELLS, 297)
   const wide = encodeKittyPlaceholderGrid(42, 1, KITTY_VIRTUAL_MAX_CELLS, 1)
   assert.equal(visibleWidth(wide[0]!), 297)
   assert.ok(wide[0]!.includes(P + diacritic(0) + String.fromCodePoint(0x1d244) + diacritic(0)),
     'column 296 is the last addressable cell')
 
-  const clamped = encodeKittyPlaceholderGrid(42, 1, 500, 500)
-  assert.equal(clamped.length, 297)
-  assert.equal(visibleWidth(clamped[0]!), 297)
-  assert.equal(encodeKittyVirtualPlacement(42, 1, 500, 500), '\x1b_Ga=p,U=1,i=42,p=1,c=297,r=297,q=2;\x1b\\')
-  assert.equal(encodeKittyVirtualPlacement(42, 1, 0, -3), '\x1b_Ga=p,U=1,i=42,p=1,c=1,r=1,q=2;\x1b\\')
+  assert.throws(() => encodeKittyPlaceholderGrid(42, 1, 298, 1), /columns/)
+  assert.throws(() => encodeKittyPlaceholderGrid(42, 1, 1, 298), /rows/)
+  assert.throws(() => encodeKittyPlaceholderGrid(42, 1, 0, 1), /columns/)
+  assert.throws(() => encodeKittyPlaceholderGrid(42, 1, 1, -3), /rows/)
+  assert.throws(() => encodeKittyVirtualPlacement(42, 1, 298, 1), /columns/)
+  assert.throws(() => encodeKittyVirtualPlacement(42, 1, 1, 298), /rows/)
+  assert.throws(() => encodeKittyVirtualPlacement(42, 1, 1.5, 1), /columns/,
+    'the encoder never silently floors a fractional cell count')
 })
 
 test('every grid row ends with an explicit foreground/underline reset', () => {

@@ -1,7 +1,16 @@
 import type { ScrollView } from "./components/scroll-view.ts";
 import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
-import { cropKittyImageLine, getKittyImageMetadata, isImageLine } from "./terminal-image.ts";
+import {
+	cropKittyImageLine,
+	getKittyImageMetadata,
+	MANAGED_KITTY_VIRTUAL_MARKER_PREFIX,
+	getKittyVirtualPlacementAnchor,
+	getManagedKittyVirtualMarker,
+	isImageLine,
+	isKittyVirtualPlaceholderLine,
+	matchesKittyVirtualPlaceholderIdentity,
+} from "./terminal-image.ts";
 import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
 import {
 	extractAnsiCode,
@@ -343,15 +352,94 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 	}
 }
 
+/** The managed virtual image row bound; only this window may be scanned. */
+const MAX_RELOCATABLE_VIRTUAL_ROWS = 297;
+
+interface RelocatedVirtualAnchor {
+	/** The source line index that must receive the anchor in this frame. */
+	readonly sourceIndex: number;
+	/** The exact source anchor APC; never a rebuilt command. */
+	readonly sequence: string;
+}
+
+/**
+ * Preserve ONE managed virtual placement whose anchor line is vertically
+ * clipped above this box's visible range. The only legal relocation target is
+ * the first really visible placeholder row of the SAME image block. The
+ * anchor bytes are reused verbatim; this helper invents no geometry, id or
+ * extra row. It scans at most the 297-row component bound above the first
+ * visible source line, so a viewport scroll never scans the whole transcript.
+ */
+function findRelocatedVirtualAnchor(
+	box: LayoutBox,
+	firstRow: number,
+	lastRow: number,
+): RelocatedVirtualAnchor | undefined {
+	if (box.lines === undefined || firstRow >= lastRow) return undefined;
+	const offset = box.lineOffset ?? 0;
+	const firstSource = offset + firstRow - box.rect.y;
+	const lastSource = offset + lastRow - 1 - box.rect.y;
+	if (firstSource <= 0 || firstSource > lastSource) return undefined;
+	const firstLine = box.lines[firstSource];
+	// A visible Native image line, an already-anchored line, or a non-placeholder
+	// line is never a relocation target.
+	if (firstLine === undefined || isImageLine(firstLine) || !isKittyVirtualPlaceholderLine(firstLine)) return undefined;
+	const scanStart = Math.max(0, firstSource - MAX_RELOCATABLE_VIRTUAL_ROWS);
+	for (let index = firstSource - 1; index >= scanStart; index--) {
+		const line = box.lines[index];
+		if (line === undefined) continue;
+		const marker = getManagedKittyVirtualMarker(line);
+		if (marker === undefined) {
+			if (line.startsWith(MANAGED_KITTY_VIRTUAL_MARKER_PREFIX)) {
+				throw new Error("managed kitty virtual marker is malformed");
+			}
+			continue;
+		}
+		const anchor = getKittyVirtualPlacementAnchor(line.slice(marker.sequence.length));
+		if (
+			anchor === undefined
+			|| anchor.imageId !== marker.imageId
+			|| anchor.placementId !== marker.placementId
+		) {
+			throw new Error("managed kitty virtual marker does not match its placement anchor");
+		}
+		// Our managed component keeps the row-0 placeholder cells on the anchor
+		// line itself. A different producer's bare anchor remains untouched.
+		if (!isKittyVirtualPlaceholderLine(line)) continue;
+		if (index + anchor.rows - 1 < firstSource) continue;
+		if (!matchesKittyVirtualPlaceholderIdentity(firstLine, anchor.imageId, anchor.placementId)) continue;
+		return { sourceIndex: firstSource, sequence: anchor.sequence };
+	}
+	return undefined;
+}
+
 function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 	if (box.lines) {
 		const offset = box.lineOffset ?? 0;
 		const firstRow = Math.max(box.rect.y, box.clip.y, 0);
 		const lastRow = Math.min(box.rect.y + box.rect.height, box.clip.y + box.clip.height, screen.length);
+		const relocated = findRelocatedVirtualAnchor(box, firstRow, lastRow);
 		for (let row = firstRow; row < lastRow; row++) {
-			const sourceLine = box.lines[offset + row - box.rect.y];
+			const sourceIndex = offset + row - box.rect.y;
+			const sourceLine = box.lines[sourceIndex];
 			if (sourceLine === undefined) continue;
 			let line = sourceLine.replace(OSC133_ZONE_PREFIX, "");
+			if (line.startsWith(MANAGED_KITTY_VIRTUAL_MARKER_PREFIX)) {
+				const marker = getManagedKittyVirtualMarker(line);
+				if (marker === undefined) {
+					throw new Error("managed kitty virtual marker is malformed");
+				}
+				const anchor = getKittyVirtualPlacementAnchor(line.slice(marker.sequence.length));
+				if (
+					anchor === undefined
+					|| anchor.imageId !== marker.imageId
+					|| anchor.placementId !== marker.placementId
+				) {
+					throw new Error("managed kitty virtual marker does not match its placement anchor");
+				}
+				line = line.slice(marker.sequence.length);
+			}
+			if (relocated !== undefined && sourceIndex === relocated.sourceIndex) line = relocated.sequence + line;
 			const imageMetadata = getKittyImageMetadata(line);
 			if (imageMetadata) {
 				const clipBottom = Math.min(screen.length, box.clip.y + box.clip.height);
