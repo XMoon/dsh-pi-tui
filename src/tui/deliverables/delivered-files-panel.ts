@@ -831,7 +831,6 @@ export class DeliveredFilesPanel implements Component {
   private previewLines(width: number): string[] {
     const contentWidth = Math.max(8, Math.floor(width))
     const lines: string[] = []
-    if (this.previewNotice !== '') lines.push(color.textDim(this.previewNotice))
     switch (this.preview.kind) {
       case 'idle':
         break
@@ -950,11 +949,58 @@ export class DeliveredFilesPanel implements Component {
     page: DeliveredFilePage
     width: number
     source: string[]
+    /** The CURRENT source line's safe projection (sanitized once). */
+    projected: string | undefined
     sourceLine: number
+    /** The CODE-UNIT offset inside `projected`: wrapping progress is exact. */
+    charOffset: number
     rows: string[]
   } | undefined
-  /** Internal diagnostic: logical source lines wrapped since the last reset. */
+  /** Internal diagnostic: source lines projected since the last reset. */
   private wrappedSourceLines = 0
+  /** Internal diagnostic: PHYSICAL rows materialised since the last reset. */
+  private wrappedPhysicalRows = 0
+
+  /**
+   * ONE physical row of the current page, advanced character by character.
+   *
+   * The previous version wrapped a whole source line with `wrapPreservingText`,
+   * which materialises every row of that line at once: one legal ~2 MiB line at
+   * 12 columns is ~175k rows, and spreading them into `push(...)` even threw
+   * `RangeError`. Wrapping progress is now the (line, code-unit offset) pair and
+   * each call yields exactly one row, so the work is bounded by the viewport.
+   */
+  private nextPhysicalRow(cache: NonNullable<DeliveredFilesPanel['wrapCache']>, limit: number): string | undefined {
+    while (cache.sourceLine < cache.source.length) {
+      if (cache.projected === undefined) {
+        // Source lines are NEVER dropped: a long line wraps losslessly.
+        cache.projected = sanitizeDisplayText(cache.source[cache.sourceLine]!)
+        cache.charOffset = 0
+        this.wrappedSourceLines += 1
+      }
+      const line = cache.projected
+      if (cache.charOffset >= line.length) {
+        // The line ended; an EMPTY line is still one physical row.
+        cache.sourceLine += 1
+        cache.projected = undefined
+        if (line.length > 0) continue
+        return ''
+      }
+      let row = ''
+      let rowWidth = 0
+      while (cache.charOffset < line.length) {
+        const code = line.codePointAt(cache.charOffset)!
+        const char = String.fromCodePoint(code)
+        const charWidth = visibleWidth(char)
+        if (rowWidth > 0 && rowWidth + charWidth > limit) break
+        row += char
+        rowWidth += charWidth
+        cache.charOffset += char.length
+      }
+      return row
+    }
+    return undefined
+  }
 
   private ensurePreviewRows(contentWidth: number, needed: number): { rows: string[]; complete: boolean } {
     const state = this.preview
@@ -962,17 +1008,26 @@ export class DeliveredFilesPanel implements Component {
     const page = state.page
     let cache = this.wrapCache
     if (cache === undefined || cache.page !== page || cache.width !== contentWidth) {
-      cache = { page, width: contentWidth, source: page.text.split('\n'), sourceLine: 0, rows: [] }
+      cache = {
+        page,
+        width: contentWidth,
+        source: page.text.split('\n'),
+        projected: undefined,
+        sourceLine: 0,
+        charOffset: 0,
+        rows: [],
+      }
       this.wrapCache = cache
       this.wrappedSourceLines = 0
+      this.wrappedPhysicalRows = 0
     }
-    while (cache.rows.length < needed && cache.sourceLine < cache.source.length) {
-      // Source lines are NEVER dropped: a long line wraps losslessly.
-      const source = sanitizeDisplayText(cache.source[cache.sourceLine]!)
-      cache.sourceLine += 1
-      this.wrappedSourceLines += 1
-      const wrapped = wrapPreservingText(source, contentWidth)
-      cache.rows.push(...wrapped)
+    const limit = Math.max(1, Math.floor(contentWidth))
+    while (cache.rows.length < needed) {
+      const row = this.nextPhysicalRow(cache, limit)
+      if (row === undefined) break
+      // Bounded append: never spread a huge array into one call.
+      cache.rows.push(row)
+      this.wrappedPhysicalRows += 1
     }
     return { rows: cache.rows, complete: cache.sourceLine >= cache.source.length }
   }
@@ -997,6 +1052,9 @@ export class DeliveredFilesPanel implements Component {
     }
     lines.push('')
     const previewStart = lines.length
+    // ONE place paints the page's notice, so a version restart stays visible
+    // after the NEW first page has already loaded.
+    if (this.previewNotice !== '') lines.push(color.textDim(this.previewNotice))
     if (this.preview.kind === 'text-page' && this.preview.page.lines > 0) {
       const { rows } = this.ensurePreviewRows(contentWidth, neededPreviewRows)
       lines.push(...rows)
