@@ -389,6 +389,24 @@ export class ImageThumbnail implements Component {
       return this.infoOnly(width, this.infoLine())
     }
     if (previewCandidate) return this.renderKittyPreview(width)
+    // A raster the protocol cannot display keeps its informational text row and
+    // must never reach the Core: the managed component transmits the payload as
+    // `f=100` (PNG), so handing it a GIF would paint a broken image instead of
+    // the fallback the legacy `Image` produced.
+    if (!imagePixelsSupported(protocol, this.ref.mediaType)) {
+      // Exactly the row the legacy fork `Image` painted for an undecodable
+      // raster: the constant identity line plus its styled text fallback.
+      this.releaseInstance()
+      this.paintedBody = undefined
+      return [
+        this.infoRow(width, this.infoLine()),
+        this.theme.fallbackColor(imageFallback(
+          this.ref.mediaType,
+          { widthPx: this.ref.width, heightPx: this.ref.height },
+          this.label(),
+        )),
+      ]
+    }
     const instanceKind = protocol === 'kitty' ? 'raw-kitty' : 'raw-iterm2'
     const native = this.nativeGraphics !== undefined
     if (this.instance === undefined || this.instanceKind !== instanceKind || this.instanceNative !== native) {

@@ -19,6 +19,9 @@ import {
   type KittyThumbnailConverter,
 } from '../../src/client/media/image/kitty-thumbnail.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
+import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
+import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
+import { NativeKittyImage } from '../../src/tui/graphics/native-image.ts'
 
 const REF: ImageAttachmentRefLike = {
   attachmentId: 'att-1',
@@ -775,4 +778,46 @@ test('a source evicted while its preview is queued recovers on the next visible 
   component.render(80)
   component.render(80)
   assert.equal(conversions, 3, 'steady renders never re-convert')
+})
+
+
+/**
+ * External review (PR #431): a raster the Kitty protocol cannot display keeps
+ * the legacy text fallback and NEVER reaches the managed Core. The Core
+ * transmits every payload as `f=100` (PNG), so handing it a GIF painted a
+ * placement kitty could not decode — an empty image band where the fallback
+ * used to be.
+ */
+test('a GIF keeps the text fallback and never reaches the managed core', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const writes: string[] = []
+  const terminal = {
+    writes, columns: 80, rows: 24, kittyProtocolActive: false,
+    start() {}, stop() {}, async drainInput() {}, write(data: string) { writes.push(data) },
+    moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {},
+    clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {}, setProgressState() {},
+  }
+  const core = new KittyGraphicsCore()
+  const graphics = {
+    image: (source: never, options: never) => new NativeKittyImage(core, source, options),
+    terminal: new KittyTerminalFacade(terminal, core),
+    dispose: () => {},
+  }
+  const gif = new Uint8Array([
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00,
+    0x21, 0xf9, 0x04, 0x01, 0, 0, 0, 0, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+  ])
+  const loader = new ImageLoader(async () => ({ ref: {}, data: gif }))
+  const ref = { attachmentId: 'gif-1', mediaType: 'image/gif' as const, bytes: gif.length, width: 1, height: 1, name: 'a.gif' }
+  loader.load(ref)
+  const component = new ImageThumbnail(ref, loader, THEME, () => {}, undefined, undefined, undefined, graphics)
+  component.render(80)
+  await new Promise((resolve) => setTimeout(resolve, 25))
+  const body = component.render(80).join('\n')
+
+  assert.ok(!body.includes('\x1b_G'), 'no graphics command is emitted for a GIF')
+  assert.ok(body.includes('🖼️ a.gif'), 'the identity row is still painted')
+  assert.ok(body.includes('[Image: a.gif [image/gif] 1x1]'), 'and the legacy text fallback with it')
+  assert.equal(component.paintedImageBody(80), undefined, 'a fallback row is never a clickable pixel body')
+  assert.equal(writes.join(''), '', 'nothing reached the terminal writer')
 })
