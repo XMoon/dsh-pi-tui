@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 65
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 49, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 66
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 50, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -157,6 +157,7 @@
 | X062 | ACTIVE | MEDIUM | PUBLIC_COMPONENT_CONTRACT, BUGFIX_MISSING_UPSTREAM | NO |
 | X063 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X064 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
+| X065 | ACTIVE | LOW | HARD_HOST_API | NO |
 
 ## Divergences
 
@@ -5492,3 +5493,83 @@ The composer preview must keep a draft image's bytes alive exactly as long as th
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Introduced under the Owner's explicit A authorization (2026-10-24) to unify Enter/Ctrl+Enter/submitDraft/Ctrl+S submission clearing and to tie image retention to the editor's REAL undo history. The host registers the editor owner and bridges actual mutations; the store owns bytes, budget and leases. The fork seam itself only exposes the submit/undo-edit facts.
+
+### X065 — Public export of the Kitty placement metadata registrar
+
+- Status: `ACTIVE`
+- Category: `HARD_HOST_API`
+- Risk: `LOW`
+- Files: `src/index.ts`
+- Last audited: `2026-10-27`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+The host Kitty Graphics Core owns image ids, placements and retirement, and paints through its own a=p anchors. The vendored layout engine crops a kitty placement at the viewport edges and when scrolling into its middle, but it resolves that geometry through a private id-keyed table that only the fork own Image.render()/renderImage() could write. Without a public writer, every managed placement was invisible to the cropping pass: a Native image straddling a viewport boundary could overdraw the rows below it, and scrolling into its middle could not show the remaining part. The Owner explicitly authorized this one-line export (APPROVED_MINIMAL_FORK_EXPORT) after the regression was reproduced with a control comparison against the legacy Image; the internal algorithm, layout engine and image pipeline are deliberately untouched, and no reader is exported.
+
+#### Changed surface
+
+- `registerKittyImageMetadata(metadata: KittyImageMetadata): void` and `type KittyImageMetadata` are re-exported from the package index (no implementation change: the function and type already existed in `terminal-image.ts`).
+
+#### Dependency map
+
+**Vendor internal**
+- `registerKittyImageMetadata()` writes only the private `kittyImageMetadata` map plus a monotonic `kittyTransmissionGeneration`; it performs no terminal IO and holds no other state.
+- Its reader `getKittyImageMetadata()` stays unexported, so a consumer can register geometry but cannot read the table or forge another id row without knowing that id.
+- The map is capped at 1000 entries (oldest evicted), so a long-lived registrar cannot grow it without bound.
+- Audit note: The registrar is an existing internal primitive with a single private table; the export adds no state and no terminal IO.
+
+**Inheritance / structural**
+- No structural inheritance seam is touched: the export does not add fields, hooks or editor/extension surfaces.
+- Audit note: No structural inheritance edge is affected; the export is a plain function/type re-export.
+
+**Host**
+- The only caller is `src/tui/graphics/native-image.ts` (`NativeKittyImage.render`), which registers its own placement geometry once per changed geometry key.
+- `prepareKittyScreen()` in the alt screen begins to recognise the managed `a=p` rows through the same table; the host verified behaviour (scoped placement removal, Core-owned retirement) is unchanged.
+- Audit note: The host is the only caller: NativeKittyImage registers its own placement geometry once per changed geometry key.
+
+**Public / extension**
+- The stable/advanced extension API is unchanged; `@xmoon76/dsh-pi-tui/extensions` does not re-export the registrar.
+- It reaches third-party code only through the private `@xmoon76/pi-tui` bundle, exactly like the other terminal-image helpers.
+- Audit note: Additive only: the extension entries do not re-export the registrar and no existing member is repurposed.
+
+**Behavioral coupling**
+- No behaviour changes unless a consumer calls the registrar: the export is a re-export of an existing function.
+- A registered id changes only the layout engine cropping answer for that id placement row; nothing else reads the table.
+- Audit note: The only observable change is that the layout cropping pass can now resolve a managed placement id; upload and retirement authority stay with the Core.
+
+#### Guarding tests
+
+- packages/pi-tui/test/terminal-image.test.ts: the existing registrar/reader round-trip and the metadata-driven crop assertions still pass unchanged (the export adds no behaviour).
+- test/tui/kitty-native-protocol.test.ts: the managed anchor keeps its `c`/`r`/`i` controls, so the registered row and the painted row cannot disagree.
+- test/integration/kitty-native-screen.test.ts: the managed placement on a real TuiMainScreen/TuiAltScreen keeps the Core as the only upload/retirement authority after registration.
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- src/terminal-image.ts
+- src/components/image.ts
+- src/layout.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream keeps `registerKittyImageMetadata` module-private; the fork exports it so a host that owns the Kitty lifecycle can keep the layout cropping pass working for placements it creates itself.
+
+#### Retirement conditions
+
+- Upstream exposes a public seam that lets a consumer register or pass placement geometry for an id it owns, and the fork cropping pass consumes it.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Introduced for Image-7A PR1 after an external review proved the cropping regression by comparing the managed component against the legacy Image in the same module graph.

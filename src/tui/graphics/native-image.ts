@@ -16,7 +16,13 @@
  * @module @xmoon76/dsh-pi-tui/tui/graphics/native-image
  */
 
-import { getCapabilities, getCellDimensions, type Component, type Terminal } from '@xmoon76/pi-tui'
+import {
+  getCapabilities,
+  getCellDimensions,
+  registerKittyImageMetadata,
+  type Component,
+  type Terminal,
+} from '@xmoon76/pi-tui'
 import { KittyGraphicsCore, type KittyGraphicsCoreOptions, type KittyImage, type KittyImageSource } from './kitty-core.ts'
 import { calculateNativeCellSize, encodeKittyPlacement, type KittyPlacementGeometry } from './kitty-native.ts'
 import { KittyTerminalFacade } from './kitty-terminal.ts'
@@ -75,6 +81,10 @@ export class NativeKittyImage implements Component {
   private cachedLines: string[] | undefined
   private cachedWidth: number | undefined
   private paintedBody: NativeKittyImageBody | undefined
+  /** The geometry last registered with the fork's placement metadata table,
+   *  or undefined before the first successful registration. Re-registering an
+   *  unchanged placement would only burn a `transmissionGeneration` value. */
+  private registeredGeometry: string | undefined
 
   constructor(core: KittyGraphicsCore, source: KittyImageSource, options: NativeKittyImageOptions) {
     this.core = core
@@ -104,6 +114,7 @@ export class NativeKittyImage implements Component {
 
   invalidate(): void {
     // The handle survives: a theme/width repaint re-places the same image.
+    // The registered geometry is re-checked on the next paint, so it is kept.
     this.cachedLines = undefined
     this.cachedWidth = undefined
     this.paintedBody = undefined
@@ -112,6 +123,7 @@ export class NativeKittyImage implements Component {
   dispose(): void {
     if (this.handle !== undefined) this.core.retire(this.handle)
     this.handle = undefined
+    this.registeredGeometry = undefined
     this.cachedLines = undefined
     this.cachedWidth = undefined
     this.paintedBody = undefined
@@ -139,6 +151,21 @@ export class NativeKittyImage implements Component {
       cell,
     )
     this.paintedBody = { width, columns: geometry.columns, rows: geometry.rows }
+    // The vendored layout engine crops a kitty image at the viewport edges and
+    // when scrolling into its middle, but only for a line whose id it can look
+    // up in the fork's placement metadata table. Registering the REAL geometry
+    // restores that established behavior for managed placements.
+    const geometryKey = `${handle.imageId}:${handle.placementId}:${geometry.columns}:${geometry.rows}:${width}`
+    if (this.registeredGeometry !== geometryKey) {
+      registerKittyImageMetadata({
+        imageId: handle.imageId,
+        columns: geometry.columns,
+        rows: geometry.rows,
+        widthPx: this.source.widthPx,
+        heightPx: this.source.heightPx,
+      })
+      this.registeredGeometry = geometryKey
+    }
     const lines = [encodeKittyPlacement(handle.imageId, handle.placementId, geometry)]
     for (let row = 1; row < geometry.rows; row++) lines.push('')
     return lines

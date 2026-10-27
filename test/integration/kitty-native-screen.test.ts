@@ -19,6 +19,7 @@ import {
   type Terminal,
   type TerminalProgressState,
 } from '@xmoon76/pi-tui'
+import { Image as LegacyImage } from '@xmoon76/pi-tui'
 import { ImageThumbnail } from '../../src/tui/components/media/image-thumbnail.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
@@ -438,5 +439,114 @@ test('a real screen paints the 33rd, 64th and 100th thumbnail without a fallback
   assert.equal(new Set(painted).size, 100, 'every occurrence got its own id')
   const ids = apcs(terminal.text)
   assert.equal(ids.filter((entry) => entry.a === 'p').length, 1, 'one placement in the final frame')
+  screen.stop()
+})
+
+
+/**
+ * External review (PR #431) Finding 2: the vendored layout engine crops a kitty
+ * placement at the viewport edges only for an id it can resolve in the fork's
+ * placement metadata table. The managed component must register its real
+ * geometry, or a tall image simply overdraws the rows below it.
+ *
+ * The control is the legacy `Image` in the SAME module graph: both must crop to
+ * the same source rectangle, and neither may crop when the whole image fits.
+ */
+function croppingCase(kind: 'legacy' | 'native', viewportRows: number): string | null {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const terminal = new RecordingTerminal()
+  terminal.columns = 60
+  terminal.rows = viewportRows
+  const core = new KittyGraphicsCore()
+  const image = kind === 'native'
+    ? new NativeKittyImage(core, { pngBase64: PNG, widthPx: 100, heightPx: 500 }, {
+      maxWidthCells: 20,
+      maxHeightCells: 10,
+      fallback: '[image]',
+    })
+    : new LegacyImage(PNG, 'image/png', { fallbackColor: (text: string) => text }, {
+      maxWidthCells: 20,
+      maxHeightCells: 10,
+    }, { widthPx: 100, heightPx: 500 })
+  class Rows implements Component {
+    render(width: number): string[] {
+      const lines = ['l0', 'l1', 'l2', 'l3']
+      lines.push(...image.render(width))
+      return lines
+    }
+    invalidate(): void {
+      image.invalidate()
+    }
+  }
+  const screen = new TuiAltScreen(new KittyTerminalFacade(terminal, core), undefined, undefined, { mouse: false })
+  screen.addChild(new Rows())
+  screen.start()
+  screen.renderNow()
+  const wire = terminal.text
+  const match = /,y=(\d+),h=(\d+),r=(\d+)/.exec(wire)
+  screen.stop()
+  return match === null ? null : `y=${match[1]},h=${match[2]},r=${match[3]}`
+}
+
+test('a managed placement is cropped exactly like the legacy image at the viewport edge', () => {
+  assert.equal(croppingCase('legacy', 8), 'y=100,h=400,r=8', 'the control crops')
+  assert.equal(croppingCase('native', 8), 'y=100,h=400,r=8', 'the managed placement crops to the same rectangle')
+  assert.equal(croppingCase('legacy', 12), null, 'the control never crops when the whole image fits')
+  assert.equal(croppingCase('native', 12), null, 'and neither does the managed placement')
+})
+
+
+/**
+ * Registering placement metadata makes the alternate screen's
+ * `prepareKittyScreen()` recognise a managed `a=p` row. It must NOT become a
+ * second upload authority: the Core still owns transmission and retirement,
+ * and a redraw must never re-transmit a resident image.
+ */
+test('metadata registration does not hand upload authority to the alt screen', () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const terminal = new RecordingTerminal()
+  const core = new KittyGraphicsCore()
+  const facade = new KittyTerminalFacade(terminal, core)
+  const image = new NativeKittyImage(core, { pngBase64: PNG, widthPx: 100, heightPx: 500 }, {
+    maxWidthCells: 20,
+    maxHeightCells: 10,
+    fallback: '[image]',
+  })
+  let extra = 0
+  class Rows implements Component {
+    render(width: number): string[] {
+      const lines = ['head', ...image.render(width)]
+      for (let index = 0; index < extra; index++) lines.push(`extra ${index}`)
+      return lines
+    }
+    invalidate(): void {
+      image.invalidate()
+    }
+  }
+  const screen = new TuiAltScreen(facade, undefined, undefined, { mouse: false })
+  screen.addChild(new Rows())
+  screen.start()
+  screen.renderNow()
+  const imageId = image.imageId!
+
+  // An ordinary text change repaints; the managed payload is already resident.
+  terminal.writes.length = 0
+  extra = 1
+  screen.invalidate()
+  screen.renderNow()
+  const wire = terminal.text
+  assert.equal(apcs(wire).filter((entry) => entry.a === 't').length, 0, 'no re-transmission from the alt screen')
+  assert.ok(!wire.includes('a=d,d=I'), 'and no data free')
+  assert.ok(core.owns(imageId), 'the Core still owns the image')
+
+  // Only the Core decides its lifetime. A PAINTED occurrence is terminal-
+  // retained (Owner ruling): its retire keeps the pixels and frees only the
+  // Core's own payload, so no hard delete appears here.
+  terminal.writes.length = 0
+  image.dispose()
+  facade.write('frame')
+  assert.ok(!terminal.text.includes(`a=d,d=I,i=${imageId}`), 'the alt screen never frees a painted image')
+  assert.equal(core.owns(imageId), false, 'the occurrence left the active ledger')
+  assert.equal(core.residentPayloadBytes, 0, 'its payload copy is released')
   screen.stop()
 })
