@@ -642,3 +642,73 @@ test('the transcript tail hit cells are the cells the row really painted', async
   assert.ok((await viewport(vt)).includes('a.md · Details'), 'the first painted cell of the verb opens it')
   app.stop()
 })
+
+test('a painted OSC 8 link wins over the delivered tail action (URL first, no overlay)', async () => {
+  // Delivered files PR1 plan U05/T09: the input is an ACTUAL painted HTTP OSC 8
+  // link inside the Assistant Markdown, and the expected sink is the URL opener
+  // ONCE — the delivered-files overlay must never open, and a drag/text
+  // selection must not open it either.
+  const { setCapabilityOverrides } = await import('@xmoon76/pi-tui')
+  setCapabilityOverrides({ hyperlinks: true })
+  try {
+    const vt = new VirtualTerminal(120, 40)
+    const opened: string[] = []
+    const snap = {
+      subjectKind: 'main' as const,
+      sessionId: 'session-1',
+      sourceIdentity: {},
+      turns: [{ turn: 2, files: [{ path: '/ws/a.md' }] }],
+    }
+    const app = new TuiApp(vt, {
+      onSubmit: () => {},
+      onExit: () => {},
+    }, {
+      displayState: { preset: 'full' },
+      deliveredFiles: { snapshot: () => snap, isCurrent: () => true },
+      openExternalUrl: (url) => { opened.push(url) },
+    })
+    app.start()
+    startedApps.add(app)
+    app.setTranscript([{
+      kind: 'assistant',
+      turn: 2,
+      text: 'See [the plan](https://example.test/plan) for details.',
+      deliverables: [{ path: '/ws/a.md' }],
+    }], new Map())
+    app.setFullscreen(true)
+    const view = await viewport(vt)
+    const rows = view.split('\n')
+    const linkRow = rows.findIndex(line => line.includes('the plan'))
+    assert.ok(linkRow >= 0, `the link text is painted:\n${view}`)
+    const linkCol = rows[linkRow]!.indexOf('the plan') + 2
+    const tailRow = rows.findIndex(line => line.includes('a.md') && line.includes('Details'))
+    assert.ok(tailRow >= 0, `the delivered tail is painted too:\n${view}`)
+
+    // A complete click on the painted URL: the opener fires EXACTLY once and no
+    // overlay appears (the delivered-files page never opens).
+    vt.sendInput(`\x1b[<0;${linkCol + 1};${linkRow + 1}M`)
+    vt.sendInput(`\x1b[<0;${linkCol + 1};${linkRow + 1}m`)
+    await viewport(vt)
+    assert.deepEqual(opened, ['https://example.test/plan'], 'the URL opener ran exactly once')
+    assert.ok(!(await viewport(vt)).includes('a.md · Details'),
+      'the delivered-files overlay never opened from a URL cell')
+
+    // A DRAG across the same link cell is a text selection, never an activation.
+    vt.sendInput(`\x1b[<0;${linkCol + 1};${linkRow + 1}M`)
+    vt.sendInput(`\x1b[<32;${linkCol + 8};${linkRow + 1}M`)
+    vt.sendInput(`\x1b[<0;${linkCol + 8};${linkRow + 1}m`)
+    await viewport(vt)
+    assert.deepEqual(opened, ['https://example.test/plan'], 'a drag never activates the URL a second time')
+    assert.ok(!(await viewport(vt)).includes('a.md · Details'), 'a drag never opens the overlay')
+
+    // The delivered tail's own verb still works: URL priority did not disable it.
+    const verbStart = rows[tailRow]!.lastIndexOf('Details')
+    vt.sendInput(`\x1b[<0;${verbStart + 1};${tailRow + 1}M`)
+    vt.sendInput(`\x1b[<0;${verbStart + 1};${tailRow + 1}m`)
+    assert.ok((await viewport(vt)).includes('a.md · Details'),
+      'the delivered action still opens its page from its own painted cells')
+    app.stop()
+  } finally {
+    setCapabilityOverrides({ hyperlinks: false })
+  }
+})

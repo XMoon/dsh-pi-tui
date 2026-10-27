@@ -339,8 +339,14 @@ export class DeliveredFilesPanel implements Component {
     if (files.length === 0) return
     const rows = Math.max(1, this.listRows())
     const maxTop = Math.max(0, files.length - rows)
-    this.listTop = Math.max(0, Math.min(maxTop, this.listTop + delta * rows))
-    const index = Math.max(this.listTop, Math.min(files.length - 1, this.selectedIndex()))
+    const top = Math.max(0, Math.min(maxTop, this.listTop + delta * rows))
+    // A page gesture owns BOTH the viewport and the cursor: the selection moves
+    // with the page and lands inside it. Moving only the top would be undone by
+    // the next paint's reveal (which must keep the selection visible), leaving
+    // PageUp stuck on the same page forever.
+    const last = Math.min(files.length - 1, top + rows - 1)
+    const index = Math.max(top, Math.min(last, this.selectedIndex() + delta * rows))
+    this.listTop = top
     this.selectedPath = files[index]!.path
     this.requestRender()
   }

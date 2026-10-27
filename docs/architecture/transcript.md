@@ -728,7 +728,10 @@ page filters the selected Turn's declarations by a locale-neutral substring over
 basename/full path/description; `Turns` lists only Turns that declare files,
 newest first. A painted tail verb opens the Turn the CARD belongs to, never the
 newest Turn, and resolves through the last painted frame with column-exact hit
-cells that are checked after OSC 8 link activation and text selection. The hit
+cells that are checked after OSC 8 link activation and text selection: a painted
+HTTP OSC 8 link inside the Assistant Markdown activates its URL (exactly once)
+and never a delivery action, a drag is a text selection rather than an
+activation, and the tail's own painted cells still open their file. The hit
 cells are the columns the row ACTUALLY painted (measured from the painted
 prefix, never inferred from the room the label left over), and they carry the
 `turn + raw path` identity of the frame that drew them: a state change that can
@@ -738,6 +741,11 @@ not see. The list keeps its selection VISIBLE across a filter AND across a viewp
 change — the scroll top is re-derived from the retained index in both
 directions on every render, not merely clamped, so shrinking the terminal never
 leaves the marked row below the new grant.
+
+A PAGE gesture owns BOTH the viewport and the cursor: `PgUp`/`PgDn` move the
+selected row with the page and land it inside the new window. Moving only the
+scroll top would be undone by the next paint's reveal, which is what made the
+backward page key stick on one page forever.
 
 A POINTER gesture follows the terminal layer's own contract: a PRESS may select
 a row and consume the cell, but entering a page requires the synthesized
