@@ -372,6 +372,14 @@ export class ImageThumbnail implements Component {
     if (previewCandidate && this.ref.bytes > MAX_KITTY_THUMBNAIL_SOURCE_BYTES) {
       return this.infoOnly(width, `${this.infoLine()} · Preview unavailable`)
     }
+    // A COLLAPSED occurrence paints its constant info row and nothing else, so
+    // it must not start (or keep) any attachment read: the fold is decided
+    // BEFORE `loader.get`/`load`, exactly like the narrow and unadmitted
+    // branches above. Deciding it after the read let a freshly mounted fold
+    // spend a full durable read it could never display.
+    if (this.collapsed()) {
+      return this.infoOnly(width, this.infoLine())
+    }
     const state = this.loader.get(this.ref, this.scope)
     if (state.state === 'idle') {
       // Fire the read; the settle notification invalidates this component.
@@ -385,13 +393,7 @@ export class ImageThumbnail implements Component {
       return this.infoOnly(width, `${this.infoLine()} — ${state.error.message}`)
     }
     // Ready: the info line stays constant — only the image rows collapse
-    // (the fullscreen click toggle). A collapsed image needs no placement;
-    // the fork's differential renderer deletes the vanished kitty tile of
-    // the previous frame automatically. A collapsed occurrence never starts
-    // the Image-6A conversion either.
-    if (this.collapsed()) {
-      return this.infoOnly(width, this.infoLine())
-    }
+    // (the fullscreen click toggle, decided before the read above).
     if (previewCandidate) return this.renderKittyPreview(width)
     // A raster the protocol cannot display keeps its informational text row and
     // must never reach the Core: the managed component transmits the payload as

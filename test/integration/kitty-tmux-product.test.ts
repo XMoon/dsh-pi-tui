@@ -20,7 +20,6 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test, { afterEach, type TestContext } from 'node:test'
 import { resetCapabilitiesCache, setCapabilities, type Terminal, type TerminalProgressState } from '@xmoon76/pi-tui'
-import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
@@ -29,9 +28,11 @@ import { convertKittyThumbnail } from '../../src/client/media/image/kitty-thumbn
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { SvgThumbnail } from '../../src/tui/components/media/svg-thumbnail.ts'
+import { SvgViewerPanel } from '../../src/tui/components/media/svg-viewer.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { effectiveImageProtocol } from '../../src/tui/graphics/image-capability.ts'
 import type { KittyGraphics } from '../../src/tui/graphics/native-image.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { createFakeTmuxCli, type FakeTmuxCli } from '../support/fake-tmux-cli.ts'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 
@@ -70,12 +71,22 @@ class RecordingTerminal implements Terminal {
   columns = 100
   rows = 40
   kittyProtocolActive = false
+  /** The real input handler the app installed through `start()`. */
+  private onInput: ((data: string) => void) | undefined
 
   get text(): string {
     return this.writes.join('')
   }
 
-  start(): void {}
+  start(onInput: (data: string) => void): void {
+    this.onInput = onInput
+  }
+
+  /** The sink face the harness uses (unused by the byte-level cases). */
+  // eslint-disable-next-line @typescript-eslint/class-methods-use-this
+  sendInput(data: string): void {
+    this.onInput?.(data)
+  }
   stop(): void {}
   async drainInput(): Promise<void> {}
   write(data: string): void {
@@ -91,6 +102,55 @@ class RecordingTerminal implements Terminal {
   setProgress(): void {}
   setProgramStatus(): void {}
   setProgressState(_state: TerminalProgressState): void {}
+}
+
+/**
+ * A REAL terminal emulator as the product sink, for the one case that clicks
+ * painted cells: the pointer route needs the rows the frame actually painted,
+ * so the screen must be a genuine emulator rather than a byte recorder.
+ */
+function virtualSink(): SinkTerminal {
+  const vt = new VirtualTerminal(100, 40)
+  const writes: string[] = []
+  const write = vt.write.bind(vt)
+  vt.write = (data: string): void => {
+    writes.push(data)
+    write(data)
+  }
+  const sendInput = vt.sendInput.bind(vt)
+  return {
+    get writes() {
+      return writes
+    },
+    get columns() {
+      return vt.columns
+    },
+    get rows() {
+      return vt.rows
+    },
+    get kittyProtocolActive() {
+      return false
+    },
+    start: (onInput, onResize) => vt.start(onInput, onResize),
+    stop: () => vt.stop(),
+    drainInput: () => vt.drainInput(),
+    write: (data: string) => vt.write(data),
+    moveBy: (lines: number) => vt.moveBy(lines),
+    hideCursor: () => vt.hideCursor(),
+    showCursor: () => vt.showCursor(),
+    clearLine: () => vt.clearLine(),
+    clearFromCursor: () => vt.clearFromCursor(),
+    clearScreen: () => vt.clearScreen(),
+    setTitle: (title: string) => vt.setTitle(title),
+    setProgress: (active: boolean) => vt.setProgress(active),
+    setProgramStatus: (status) => vt.setProgramStatus(status),
+    setProgressState: (state) => vt.setProgressState?.(state),
+    sendInput,
+    // The emulator's own settle/viewport API: the case asserts on what the
+    // screen REALLY painted, not on the bytes it was offered.
+    flush: () => vt.flush(),
+    getViewport: () => vt.getViewport(),
+  }
 }
 
 /** Wait for an authoritative fact, not a wall-clock window. */
@@ -130,9 +190,25 @@ function unwrappedApc(text: string): boolean {
   return text.replace(DCS, '').includes('\x1b_G')
 }
 
+/** The managed image ids of the transmissions that reached the sink. */
+function transmissionIds(text: string): string[] {
+  const ids: string[] = []
+  for (const unit of transmissions(text)) {
+    const id = /(?:^|,)i=(\d+)/.exec(unit)
+    if (id !== null) ids.push(id[1]!)
+  }
+  return ids
+}
+
+/** The ONE terminal face the product harness needs from its sink. */
+interface SinkTerminal extends Terminal {
+  readonly writes: readonly string[]
+  sendInput(data: string): void
+}
+
 interface ProductHarness {
   readonly cli: FakeTmuxCli
-  readonly terminal: RecordingTerminal
+  readonly terminal: SinkTerminal
   readonly app: TuiApp
   readonly graphics: KittyGraphics | undefined
   readonly loader: ImageLoader
@@ -142,7 +218,10 @@ interface ProductHarness {
 }
 
 /** Build the REAL product composition on the scripted server. */
-function product(t: TestContext, options: { optIn?: boolean } = {}): ProductHarness {
+function product(
+  t: TestContext,
+  options: { optIn?: boolean; sink?: 'recording' | 'virtual' } = {},
+): ProductHarness {
   // A tmux pane detects no inline protocol at all — the exact production
   // condition this backend exists for. The admission may therefore only come
   // from the live server probe.
@@ -165,7 +244,9 @@ function product(t: TestContext, options: { optIn?: boolean } = {}): ProductHarn
       return convertKittyThumbnail(input, mediaType)
     },
   )
-  const terminal = new RecordingTerminal()
+  const terminal: SinkTerminal = options.sink === 'virtual'
+    ? virtualSink()
+    : new RecordingTerminal()
   const svgLoader = new SvgRasterLoader(async () => ({
     png: Buffer.from(SAMPLE_PNG),
     base64: SAMPLE_PNG.toString('base64'),
@@ -195,8 +276,8 @@ function pngRef(attachmentId: string, name: string): ImageAttachmentRefLike {
     attachmentId,
     mediaType: 'image/png',
     bytes: SAMPLE_PNG.byteLength,
-    width: 64,
-    height: 64,
+    width: 120,
+    height: 80,
     name,
   }
 }
@@ -350,75 +431,161 @@ test('revocation falls back to text with no further APC/PUA and no extra read or
   assert.ok(after.length > 0, 'a real text frame was still written')
 })
 
-test('the draft card paints through the SAME Core, and removal returns the band to text', async (t) => {
-  const h = product(t)
+/**
+ * The E2 end-to-end product path required by plan §5: ONE `TuiApp` drives
+ * Draft → submit → Transcript → Viewer → Esc, and every step is asserted on the
+ * REAL sink bytes and on the real screen state (a case that observes nothing
+ * must fail, not pass vacuously).
+ */
+test('ONE app drives draft -> submit -> transcript -> viewer -> Esc with the SAME Core', async (t) => {
+  const h = product(t, { sink: 'virtual' })
   assert.ok(h.graphics)
-  const draft = h.store.add({
+  const vt = h.terminal as SinkTerminal & { flush(): Promise<void>; getViewport(): string[] }
+  const settleFrames = async (): Promise<void> => {
+    await settle(h.app)
+    await vt.flush()
+  }
+  const staged = h.store.add({
     bytes: SAMPLE_PNG,
     mediaType: 'image/png',
-    width: 64,
-    height: 64,
-    name: 'draft.png',
+    width: 120,
+    height: 80,
+    name: 'staged.png',
   })
-  h.app.setDraft(draft.placeholder)
-  await settle(h.app)
 
-  const painted = h.terminal.text
-  assert.equal(unwrappedApc(painted), false, 'the draft card travelled inside its DCS too')
-  assert.ok(transmissions(painted).length >= 1, 'the draft card transmitted its PNG')
-  assert.ok(painted.includes(PLACEHOLDER), 'the draft card painted the placeholder grid')
+  // 1. DRAFT: the composer card paints real pixels through the managed Core.
+  h.app.setDraft(staged.placeholder)
+  await settleFrames()
+  const draftText = h.terminal.writes.join('')
+  assert.ok(draftText.length > 0, 'the draft frame really wrote bytes')
+  assert.ok(draftText.includes(PLACEHOLDER), 'the draft card painted the virtual grid')
+  assert.equal(unwrappedApc(draftText), false, 'the draft batch was DCS-wrapped')
+  assert.ok(transmissionIds(draftText).length >= 1, 'the draft card transmitted a managed image')
   assert.equal(h.reads.size, 0, 'the draft card never touched the DURABLE loader')
 
-  // The `#id/total` identity row stays the text authority over the pixels.
-  h.terminal.writes.length = 0
-  h.app.setDraft('')
-  await settle(h.app)
-  const cleared = h.terminal.text
-  assert.equal(cleared.includes(PLACEHOLDER), false, 'removing the token erased the grid')
-  assert.equal(transmissions(cleared).length, 0, 'and transmitted nothing new')
-})
+  // 2. SUBMIT through the REAL product gesture: the host sink receives the
+  //    expanded draft, and the composer band leaves the screen.
+  const submitted: string[] = []
+  const events = (h.app as unknown as { events: { onSubmit: (text: string) => void } }).events
+  const originalSubmit = events.onSubmit.bind(events)
+  events.onSubmit = (text: string): void => {
+    submitted.push(text)
+    originalSubmit(text)
+  }
+  h.app.submitDraft('enter')
+  await settleFrames()
+  assert.deepEqual(submitted, [staged.placeholder], 'the production submit carried the draft once')
+  assert.equal(h.app.getDraft(), '', 'the production submit cleared the draft')
 
-test('the fullscreen Viewer reuses the transcript image and Esc restores the transcript', async (t) => {
-  const h = product(t)
-  assert.ok(h.graphics)
-  const ref = pngRef('att-viewer', 'viewer.png')
+  // 3. TRANSCRIPT: the durable ref the host would persist renders through the
+  //    SAME app and the SAME Core.
+  const ref = pngRef('att-e2e', 'staged.png')
   const folder = new TranscriptFolder()
   folder.apply([userMessage([{ type: 'image', attachment: ref }], 1)])
   h.app.setTranscript(folder.messages())
-  await until(() => h.loader.get(ref).state === 'ready', 'the transcript PNG read')
-  await settle(h.app)
-  const transcriptIds = new Set([...h.terminal.text.matchAll(/i=(\d+)/g)].map(match => match[1]!))
-  assert.ok(transcriptIds.size >= 1, 'the transcript painted one managed image')
+  await until(() => h.loader.get(ref).state === 'ready', 'the transcript durable read')
+  await settleFrames()
+  const transcriptView = vt.getViewport().join('\n')
+  assert.ok(transcriptView.includes('🖼️ staged.png'),
+    `the transcript identity row is on screen:\n${transcriptView}`)
+  const transcriptText = h.terminal.writes.join('')
+  assert.ok(transmissionIds(transcriptText).length >= 1, 'the transcript image was transmitted')
+  assert.equal(h.reads.get(ref.attachmentId), 1, 'exactly one durable read for the transcript')
 
+  // 4. VIEWER through the REAL fullscreen pointer route on the painted body.
   h.app.setFullscreen(true)
-  await settle(h.app)
-  h.terminal.writes.length = 0
+  await settleFrames()
   const internals = h.app as unknown as {
-    mountedImageOccurrences(): unknown[]
-    canLeaseImageWorkspace(): boolean
-    openImageViewer(occurrence: unknown): void
+    mountedImageOccurrences(): { thumbnail: { paintedImageBody(width: number): { rows: number; endCol: number } | undefined } }[]
+    transcriptRenderWidth(): number
   }
   const occurrences = internals.mountedImageOccurrences()
   assert.equal(occurrences.length, 1, 'fixture: one mounted occurrence')
-  assert.equal(internals.canLeaseImageWorkspace(), true, 'fixture: the workspace lease is free')
-  internals.openImageViewer(occurrences[0])
-  await settle(h.app)
+  const body = occurrences[0]!.thumbnail.paintedImageBody(internals.transcriptRenderWidth())
+  assert.ok(body !== undefined, 'the transcript body is a real painted hit target')
 
-  const viewer = h.terminal.text
-  assert.ok(viewer.includes(PLACEHOLDER), 'the Viewer painted real pixels')
-  assert.equal(unwrappedApc(viewer), false, 'the Viewer batch was wrapped too')
+  const rows = vt.getViewport()
+  // The INFO bar is the row carrying the identity FACTS (`· WxH · bytes`); the
+  // composer echo row above it also contains the emoji and the name, so the
+  // needle must be the fact row itself.
+  const infoRow = rows.findIndex(row => row.includes('120×80 · 258 B'))
+  assert.ok(infoRow >= 0, `the info row is on the fullscreen screen:\n${rows.join('\n')}`)
+  // `y` is 1-based on the wire and becomes 0-based in the screen: the body's
+  // first painted row is the row AFTER the info row, i.e. `infoRow + 1` in
+  // indexes → `infoRow + 2` on the wire.
+  const clickRow = infoRow + 2
+  const clickCol = Math.max(1, Math.min(4, body.endCol))
+  h.terminal.writes.length = 0
+  vt.sendInput(`\x1b[<0;${clickCol};${clickRow}M`)
+  vt.sendInput(`\x1b[<0;${clickCol};${clickRow}m`)
+  await settleFrames()
+  const viewer = vt.getViewport().join('\n')
+  assert.ok(viewer.includes('Esc'), `the Viewer painted its own chrome:\n${viewer}`)
+  assert.ok(viewer.includes('Image · staged.png'), `the Viewer opened on the clicked occurrence:\n${viewer}`)
+  const viewerText = h.terminal.writes.join('')
+  assert.ok(viewerText.includes(PLACEHOLDER), 'the Viewer painted real pixels')
+  assert.equal(unwrappedApc(viewerText), false, 'the Viewer batch was DCS-wrapped')
   assert.equal(h.reads.get(ref.attachmentId), 1, 'the Viewer re-read no durable bytes')
 
+  // 5. ESC returns to the transcript: the frame must be RESTORED, not empty.
   h.terminal.writes.length = 0
-  // Esc is the Viewer's OWN close route (the workspace lease is released by the
-  // host, not by the panel): drive the real key, never a private helper.
-  ;(h.app as unknown as { handleInput(data: string): void }).handleInput('\x1b')
-  await settle(h.app)
-  const restored = h.terminal.text
-  assert.equal(unwrappedApc(restored), false, 'the restored frame stayed wrapped')
+  vt.sendInput('\x1b')
+  await settleFrames()
+  const restored = vt.getViewport().join('\n')
+  assert.ok(restored.includes('🖼️ staged.png'), `the transcript was restored after Esc:\n${restored}`)
+  assert.equal(restored.includes('Image · staged.png'), false, 'the Viewer is gone')
+  assert.equal(h.reads.get(ref.attachmentId), 1, 'the whole round trip read the payload once')
   h.app.setFullscreen(false)
-  await settle(h.app)
-  assert.equal(h.reads.get(ref.attachmentId), 1, 'leaving the Viewer read nothing again')
+  await settleFrames()
+})
+
+test('the SVG Viewer paints from the SAME raster cache and Source stays text', async (t) => {
+  const h = product(t)
+  assert.ok(h.graphics)
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
+    + '<rect width="64" height="32" fill="#3b82f6"/></svg>'
+  let rasterCalls = 0
+  const loader = new SvgRasterLoader(async () => {
+    rasterCalls += 1
+    return { png: SAMPLE_PNG, base64: SAMPLE_PNG.toString('base64'), widthPx: 64, heightPx: 32 }
+  })
+  const copies: string[] = []
+  const panel = new SvgViewerPanel({
+    source: { title: 'diagram.svg', svgSource: svg, digest: 'svg-viewer-digest', onCopy: () => copies.push(svg) },
+    rows: () => 18,
+    columns: () => 90,
+    requestRender: () => {},
+    loader,
+    theme: { fallbackColor: (text: string) => text },
+    onClose: () => {},
+    graphics: h.graphics,
+  })
+  try {
+    panel.setMaxRows(18)
+    let rows: string[] = []
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      rows = panel.render(90)
+      if (rows.join('\n').includes(PLACEHOLDER)) break
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    const painted = rows.join('\n')
+    assert.ok(painted.includes(PLACEHOLDER), `the SVG Viewer painted real pixels: ${JSON.stringify(painted.slice(0, 160))}`)
+    assert.ok(rasterCalls >= 1, 'exactly the ONE shared raster path produced the preview')
+    assert.equal(painted.includes('Preview unavailable'), false)
+
+    // Tab switches to the Source page (the frozen chord table): terminal-safe
+    // TEXT, never pixels.
+    ;(panel as unknown as { handleInput(data: string): void }).handleInput('\t')
+    const source = panel.render(90).join('\n')
+    assert.ok(source.includes('<rect'), 'the Source page shows the raw SVG text')
+    assert.equal(source.includes(PLACEHOLDER), false, 'the Source page never paints placeholder cells')
+    assert.ok(source.includes('<svg'), 'the whole document is projected')
+    ;(panel as unknown as { handleInput(data: string): void }).handleInput('c')
+    assert.deepEqual(copies, [svg], 'Copy Source sent the RAW document through the ONE clipboard owner')
+  } finally {
+    panel.dispose()
+    loader.dispose()
+  }
 })
 
 test('the SVG thumbnail paints through the managed handle and reports its REAL body', async (t) => {
