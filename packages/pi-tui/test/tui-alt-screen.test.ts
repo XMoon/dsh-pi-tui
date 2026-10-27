@@ -4139,6 +4139,117 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 		tui.stop();
 	});
 
+	it("retires a COMPLETED overlay selection on focus-out, stop and hide before the next paint", async () => {
+		// The gesture is fully RELEASED first, so `selectionPressActive` is false:
+		// this is the case the in-flight-only clearing missed. Every assertion
+		// reads through the public sink (`getActiveSelectionText` via
+		// `hasActiveSelection` / `copyActiveSelectionToClipboard`), because a
+		// release-time check cannot cover a direct read.
+		const armCompletedSelection = async (
+			terminal: RecordingTerminal,
+			tui: TuiAltScreen,
+		): Promise<import("../src/tui.js").OverlayHandle> => {
+			const overlay = framed(["first line", "second line"]);
+			const handle = tui.showOverlay(overlay, { width: 24, textSelectionInsets: overlay.insets });
+			await terminal.waitForRender();
+			const painted = paintedBounds(handle);
+			terminal.sendInput(`\x1b[<0;${painted.col + 3};${painted.row + 2}M`);
+			terminal.sendInput(`\x1b[<32;${painted.col + 8};${painted.row + 2}M`);
+			terminal.sendInput(`\x1b[<0;${painted.col + 8};${painted.row + 2}m`);
+			await terminal.waitForRender();
+			assert.strictEqual(tui.hasActiveSelection(), true, "fixture: the completed drag left a selection");
+			return handle;
+		};
+
+		// (a) FOCUS-OUT after the release.
+		{
+			const terminal = new RecordingTerminal(40, 14);
+			const tui = new TuiAltScreen(terminal, undefined, undefined, {
+				copySelection: async () => true,
+			});
+			tui.addChild(new Text("background alpha", 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			await armCompletedSelection(terminal, tui);
+			terminal.sendInput("\x1b[O");
+			await terminal.waitForRender();
+			assert.strictEqual(tui.hasActiveSelection(), false, "focus-out retires a completed overlay selection");
+			assert.strictEqual(
+				await tui.copyActiveSelectionToClipboard(),
+				false,
+				"a retired overlay selection cannot be copied after focus-out",
+			);
+			tui.stop();
+		}
+
+		// (b) STOP after the release.
+		{
+			const terminal = new RecordingTerminal(40, 14);
+			const tui = new TuiAltScreen(terminal, undefined, undefined, {
+				copySelection: async () => true,
+			});
+			tui.addChild(new Text("background alpha", 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			await armCompletedSelection(terminal, tui);
+			tui.stop({ preserveScreen: true });
+			assert.strictEqual(tui.hasActiveSelection(), false, "stop retires a completed overlay selection");
+			assert.strictEqual(
+				await tui.copyActiveSelectionToClipboard(),
+				false,
+				"a retired overlay selection cannot be copied after stop",
+			);
+		}
+
+		// (c) HIDE, read BEFORE the next frame paints.
+		{
+			const terminal = new RecordingTerminal(40, 14);
+			const tui = new TuiAltScreen(terminal, undefined, undefined, {
+				copySelection: async () => true,
+			});
+			tui.addChild(new Text("background alpha", 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			const handle = await armCompletedSelection(terminal, tui);
+			handle.hide();
+			// No await: the region is dead the instant the entry is hidden.
+			assert.strictEqual(tui.hasActiveSelection(), false, "a hidden overlay's selection is not readable before the next paint");
+			assert.strictEqual(
+				await tui.copyActiveSelectionToClipboard(),
+				false,
+				"a hidden overlay's selection cannot be copied before the next paint",
+			);
+			tui.stop();
+		}
+	});
+
+	it("keeps a COMPLETED BACKGROUND selection across focus-out (upstream #9311 semantics)", async () => {
+		// Negative control for the fix above: the overlay-origin retirement must
+		// not start clearing ordinary transcript selections.
+		const terminal = new RecordingTerminal(40, 14);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("background alpha", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;1;2M");
+		terminal.sendInput("\x1b[<32;12;2M");
+		terminal.sendInput("\x1b[<0;12;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasActiveSelection(), true, "fixture: the background drag left a selection");
+		terminal.sendInput("\x1b[O");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasActiveSelection(), true, "a completed background selection survives focus-out");
+		assert.strictEqual(await tui.copyActiveSelectionToClipboard(), true, "and it is still copyable");
+		assert.strictEqual(copied.length >= 1, true, "the background text really reached the clipboard");
+		tui.stop();
+	});
+
 	it("drops the overlay selection when the overlay moves or the screen resizes", async () => {
 		const terminal = new RecordingTerminal(40, 14);
 		const copied: string[] = [];

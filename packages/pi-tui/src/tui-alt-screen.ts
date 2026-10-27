@@ -557,6 +557,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.closeSearch();
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = false;
+		// A stop ends the screen that painted the overlay frame, so an
+		// overlay-owned range names cells that are about to be replaced. Retire
+		// it whether the gesture was still in flight or already released; a
+		// completed background selection keeps its upstream #9311 semantics.
+		// (dsh-pi-tui divergence X068.)
+		if (this.overlaySelectionOrigin !== undefined) this.clearTextSelection();
 		this.stopScrollbarHover();
 		this.stopScrollbarDrag();
 		this.clearComponentMouseGesture();
@@ -1000,7 +1006,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (data === FOCUS_OUT) {
-			const hadActiveSelection = this.selectionPressActive;
+			// A focus-out aborts the IN-FLIGHT gesture. A COMPLETED background
+			// selection survives it (upstream #9311 behavior, unchanged), but an
+			// overlay-owned range may not: the frame it names is no longer the
+			// one the terminal is presenting. (dsh-pi-tui divergence X068.)
+			const hadOverlaySelection = this.overlaySelectionOrigin !== undefined;
+			const hadActiveSelection = this.selectionPressActive || hadOverlaySelection;
 			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
 			this.selectionPressActive = false;
 			this.stopSelectionAutoScroll();
@@ -2110,7 +2121,22 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const selection = this.getSelectionBounds();
 		if (!selection) return undefined;
 		const region = this.overlaySelectionOrigin;
-		if (region !== undefined) return this.getOverlaySelectionText(selection, region);
+		if (region !== undefined) {
+			// This is the ONE sink every read and copy path funnels through
+			// (`hasActiveSelection`, `copyActiveSelectionToClipboard`, the
+			// release copy), so liveness must hold HERE and not only at the
+			// input handlers and the post-composite revalidation: a hidden
+			// overlay, a newer overlay painted above it, a screen stop or a
+			// focus-out can all invalidate the region BEFORE the next frame
+			// runs that revalidation, and a read in that window would still
+			// copy cells of a frame that is no longer painted. Retire the range
+			// and the latch together. (dsh-pi-tui divergence X068.)
+			if (!this.isOverlayTextSelectionRegionLive(region)) {
+				this.clearTextSelection();
+				return undefined;
+			}
+			return this.getOverlaySelectionText(selection, region);
+		}
 		let sourceLines: readonly string[] = this.previousScreen;
 		if (selection.start.scrollView) {
 			if (!this.currentLayout) return undefined;

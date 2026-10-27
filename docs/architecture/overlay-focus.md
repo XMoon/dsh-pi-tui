@@ -241,10 +241,16 @@ source — today only the Delivered files browser uses it. The contract:
   painted placement changes (resize, reflow, remount), when any other visible
   overlay holds a HIGHER focus order, on a screen swap, on focus-out/stop, on a
   host content replacement, and on the render-time revalidation right after
-  overlays are re-composited. The focus-order test is the pre-paint authority: a
-  newer modal already owns the pointer between its mount and the frame that
-  draws it, so a release in that window must not copy a range it now covers. A
-  stale selection is cleared, never repainted onto the new frame.
+  overlays are re-composited. A COMPLETED (already released) overlay range dies
+  on focus-out and on stop exactly like an in-flight one; an ordinary background
+  selection keeps upstream's behavior, which is why the retirement is keyed on
+  the overlay origin and not on "any selection".
+- **The read sink is authoritative, not the frame.** Liveness is checked where
+  the range is READ, not only at the input handlers and after a composite: hide,
+  a higher focus order, a stop or a focus-out can invalidate the region before
+  the next frame paints, and a caller that reads `hasActiveSelection()` or asks
+  for a copy in that window must get nothing. A stale selection is cleared,
+  never repainted onto the new frame and never copied from the old one.
 - **Repaint vs corpus.** `resetTextSelection()` still drops the multi-click
   history (upstream #9311); `resetTextSelection({ preserveClickHistory: true })`
   drops only the range, for a host repaint of an overlay's OWN content where the
