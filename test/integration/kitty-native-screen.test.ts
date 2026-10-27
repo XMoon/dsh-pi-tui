@@ -209,22 +209,31 @@ test('main screen: a full redraw re-transmits after its clear and before its pla
   screen.stop()
 })
 
-test('main screen: stop retires only never-painted uploads and preserves painted scrollback', () => {
+test('a screen stop never destroys a registration a live component still holds', () => {
   const { terminal, core, facade } = setup()
+  // Rendered (so the id is registered) but never written to the terminal — the
+  // occurrence is still owned by a live component.
   const root = new Root(core)
   const screen = new TuiMainScreen(facade)
   screen.addChild(root)
-  screen.start()
-  screen.renderNow()
-  const paintedId = root.imageA.imageId!
-  const unplaced = core.register({ pngBase64: PNG, widthPx: 8, heightPx: 8 })!
-  facade.write(core.transmissionFor(unplaced.imageId, 'main'))
+  const anchor = root.imageA.render(100)
+  assert.ok(anchor.length > 1, 'the occurrence registered and painted lines')
+  const imageId = root.imageA.imageId!
 
   terminal.writes.length = 0
+  screen.start()
   screen.stop()
-  const text = terminal.text
-  assert.ok(text.includes(`a=d,d=I,i=${unplaced.imageId}`), 'the invisible upload is freed')
-  assert.ok(!text.includes(`a=d,d=I,i=${paintedId}`), 'the painted scrollback image is preserved')
+  assert.equal(core.owns(imageId), true, 'the stop kept the live registration')
+  assert.ok(!terminal.text.includes('a=d'), 'and sent no delete for it')
+
+  // The screen comes back and the SAME component re-renders its cached lines.
+  screen.start()
+  terminal.writes.length = 0
+  screen.renderNow()
+  const commands = apcs(terminal.text)
+  assert.equal(commands.filter((entry) => entry.a === 't').length, 1, 'the payload is sent on the first real placement')
+  assert.ok(commands.findIndex((entry) => entry.a === 't') < commands.findIndex((entry) => entry.a === 'p'))
+  screen.stop()
 })
 
 test('alt screen: foreign and managed deletes stay isolated in both directions', () => {

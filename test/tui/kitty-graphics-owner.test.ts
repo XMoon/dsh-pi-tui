@@ -446,6 +446,27 @@ test('the alternate screen still releases an id it painted before it retired', (
   assert.ok(!terminal.text.includes(`i=${imageId}`), 'that session is over')
 })
 
+test('an alt repaint clear also removes a retired image\'s placement', () => {
+  const { core, facade, terminal } = harness()
+  facade.write('\x1b[?1049h')
+  const component = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
+  facade.write(component.render(80).join('\r\n'))
+  const imageId = component.imageId!
+  // The occurrence goes away: its pixels stay, its active record does not.
+  component.dispose()
+  terminal.writes.length = 0
+  // The alternate screen repaints because the image anchor changed and emits
+  // its scoped placement delete (`d=a`). Erasing text never erases graphics,
+  // so the retired image's placement must be removed explicitly.
+  facade.write('\x1b_Ga=d,d=a,q=2\x1b\\')
+  assert.ok(terminal.text.includes(encodeKittyDeletePlacement(imageId)),
+    'the retired image\'s placement is removed')
+  assert.ok(!terminal.text.includes('d=a'), 'the global form never reaches the terminal')
+  // A MAIN-retained image is never in the alt session's set, so an alt repaint
+  // can never touch it.
+  assert.ok(!terminal.text.includes(`a=d,d=I,i=${imageId}`), 'and its data is not freed here')
+})
+
 test('a clear inside the alternate session does not end its placement ownership', () => {
   const { core, facade, terminal } = harness()
   facade.write('\x1b[?1049h')
@@ -478,19 +499,27 @@ test('the payload budget refuses an oversized resident set', () => {
   assert.equal(core.register(source(big, 4, 4)), undefined, 'the payload ceiling is enforced')
 })
 
-test('stop releases uploaded-but-never-placed images and preserves painted ones', () => {
-  const { terminal, facade, core } = harness()
+test('stop keeps a live registration and leaves painted images alone', () => {
+  const { terminal, core, facade } = harness()
   const painted = new NativeKittyImage(core, source(), { maxWidthCells: 40, fallback: '[image]' })
   facade.write(painted.render(80).join('\r\n'))
   const paintedId = painted.imageId!
-  // An occurrence whose bytes were offered but whose placement never landed.
-  const unplaced = core.register(source('AAAA', 8, 8))!
-  facade.write(core.transmissionFor(unplaced.imageId, 'main'))
+  // A live occurrence that was registered but whose placement never landed.
+  const pending = new NativeKittyImage(core, source('AAAA', 8, 8), { maxWidthCells: 40, fallback: '[image]' })
+  pending.render(80)
+  const pendingId = pending.imageId!
 
   terminal.writes.length = 0
   facade.stop()
-  assert.equal(terminal.text, encodeKittyDeleteImage(unplaced.imageId), 'only the never-visible data is freed')
-  assert.ok(!terminal.text.includes(`d=I,i=${paintedId}`), 'a painted scrollback image is left to the screen policy')
+  assert.equal(core.owns(pendingId), true, 'the screen stop did not destroy a live registration')
+  assert.ok(!terminal.text.includes(`a=d,d=I,i=${paintedId}`), 'a painted scrollback image is preserved')
+  assert.ok(!terminal.text.includes(`a=d,d=I,i=${pendingId}`), 'nothing was freed at the stop')
+
+  // The occurrence's own retire is what ends it.
+  facade.write('frame')
+  pending.dispose()
+  facade.write('frame')
+  assert.equal(core.owns(pendingId), false, 'the component retire released it')
 })
 
 test('the alternate screen release at stop frees the managed ids before the terminal stops', () => {
