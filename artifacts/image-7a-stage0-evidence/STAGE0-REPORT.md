@@ -2,8 +2,8 @@
 
 Environment: Kitty 0.41.1, WSL2/WSLg, `DISPLAY=:0`, Node v24.21.0,
 pnpm 12.11.2, worktree `feat/image-7a-pr1-unified-kitty-core` at
-`92a36f719552573a6afe193bededbf5467057fc1` (the branch rebased onto
-`main` `496e2722`), working tree clean at run time. One real Kitty window per
+`3a818f4a2f995a3840a8f2d4dd96596f9bc426c7` (the branch rebased onto
+`main` `901b5dfe`), working tree clean at run time. One real Kitty window per
 case, raw bytes captured with `kitty script`, screenshots with `maim` on the
 case's own window id. Harness: `temp/image-7a-stage0/` (adapter drives the
 REAL `TuiMainScreen`/`TuiAltScreen` + REAL `KittyTerminalFacade` +
@@ -15,10 +15,23 @@ the clean `git status`, the display and the exact case list; every case
 directory carries its own `command.json`, `stage-events.jsonl`, `raw-outer.bin`
 and `protocol.json`. Suite: 14/14 cases.
 
+## Superseded statements (read before quoting this report)
+
+This report was started at an earlier head. Three conclusions in it have since
+been replaced by Owner decisions and later code; the CURRENT contract is the one
+in `docs/architecture/terminal-output.md`:
+
+| Earlier statement here | Current contract |
+| --- | --- |
+| "no fork change is needed for any gate" | ONE minimal fork export was approved later as divergence **X065** (`registerKittyImageMetadata` + its type) so the layout engine can crop a managed placement at the viewport edge and when scrolling into its middle. No implementation, layout or algorithm change; no reader export. |
+| "a fixed 256-id memory window keeps a late legacy delete recognisable" | Ids come from a **monotonic, never-wrapping range** starting at a random offset, so ownership is exact for the id's whole life with O(1) memory; a historical id is never re-used. |
+| "the Core is bounded to 32 resident/pending ids" | There is **no cumulative id quota**. The Core bounds only its own ACTIVE working set (64 MiB base64 payload cache / 256 MiB estimated decoded footprint); painted occurrences are terminal-retained and count against no quota. |
+
 ## Verdict
 
 `GO_UNIFIED_CONSUMER` — the public `Component` + `Terminal` surface is
-sufficient; no fork change is needed for any gate.
+sufficient for the graphics lifecycle. ONE cropping-related export (X065)
+was approved later — see "Superseded statements" below.
 
 | Gate | Verdict | Evidence |
 |---|---|---|
@@ -27,7 +40,7 @@ sufficient; no fork change is needed for any gate.
 | S0-3 automatic lifecycle / invalidation generation | **PASS** (Main preserve policy adjudicated by the Owner, see below) | `cases/S0-3-alt`, `cases/S0-3-main` |
 | S0-4 independent clear comparison | **PASS** (with a measured 3J rule) | `cases/S0-4-none`, `S0-4-2j`, `S0-4-3j`, `S0-4-2j3j` |
 | S0-5 producer→writer→terminal permission trace | **PASS** | `cases/S0-5-permission` |
-| S0-6 consumer sufficiency | **PASS** | no fork seam required |
+| S0-6 consumer sufficiency | **PASS** (graphics lifecycle); X065 export added later for cropping |
 | Product-shaped consumers through the REAL factory | **PASS** | `cases/S0-6-product` |
 | Main + leased Alt share one Core; Alt exit never touches Main | **PASS** | `cases/S0-7-mixed` |
 
@@ -95,7 +108,7 @@ sufficient; no fork change is needed for any gate.
   quota. The Core bounds only its own ACTIVE working set (pending uploads and
   the re-transmittable payload cache: 64 MiB base64 / 256 MiB estimated decoded
   footprint). A painted occurrence leaves the active set, keeps no payload, and
-  stays terminal-retained; a fixed 256-id memory window keeps a late legacy
+  stays terminal-retained; ids come from a monotonic, never-wrapping range,
   delete recognisable as a placement removal. 100 sequential painted
   thumbnails are covered by `test/tui/kitty-graphics-owner.test.ts` and the real
   main-screen case in `test/integration/kitty-native-screen.test.ts`.
@@ -156,6 +169,28 @@ included) and the REAL `ImageThumbnail` (transcript) + `ImageViewerPanel`
 removes both placements in-frame, show re-places with no re-upload, the raw
 once-per-session id churn is the same one the legacy path already pays when the
 terminal reports its real cell size.
+
+## Unresolved observation: one transient retire-frame ghost
+
+During evidence assembly, ONE earlier run of `S0-2-core-first` showed the red
+image still painted after the core retire: the captured wire for that frame had
+the text rows but no `d=i`, and the screenshot still measured `red=4761`. The
+same case in the final 14-case sweep on the same commit emits `i:<own>` before
+the stop's `I:<own>`, the screenshot measures `red=0`, and a `getScreenLines()`
+dump confirmed the anchor row was replaced by text.
+
+Controlled E2 investigations on the final tree did NOT reproduce it:
+
+| interleaving | scoped delete emitted |
+|---|---|
+| explicit `renderNow()` only | yes |
+| queued `requestRender()` then explicit `renderNow()` | yes |
+| explicit `renderNow()` then queued `requestRender()` | yes |
+
+So the queued-render hypothesis is unsupported, and the transient state is
+recorded here as UNEXPLAINED rather than fixed: a repaint that removes an image
+row must always emit the scoped placement removal, and if some interleaving can
+skip it, a real product repaint could ghost until the next clear.
 
 ## Not covered here (recorded, not claimed)
 
