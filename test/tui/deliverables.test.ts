@@ -6,7 +6,12 @@ import { stripTerminalSequences, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { DeliveredFilesComponent } from '../../src/tui/components/transcript-leaves.ts'
-import { deliveredFilesCapabilityStub } from '../support/delivered-files.ts'
+import {
+  deliveredFilesCapabilityStub,
+  deliveredFolder,
+  deliveredSurfaceRouting,
+  mountDeliveredSurface,
+} from '../support/delivered-files.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 const startedApps = new Set<TuiApp>()
@@ -852,4 +857,81 @@ test('a subject change retires an IN-FLIGHT preview read and never paints it', a
   assert.ok(!after.includes('STALE PAGE BYTES'), `the abandoned page never paints:\n${after}`)
   assert.ok(!after.includes('a.md · Details'), `the stale overlay is gone:\n${after}`)
   app.stop()
+})
+
+test('a REAL subject switch through SurfaceRuntime aborts the in-flight read (same path/turn)', async () => {
+  // Two REAL folders with the SAME declared path and the SAME turn number: the
+  // identity fence must key on the subject, not on the shape of the data.
+  // Two REAL folders with the IDENTICAL declared path and turn number: only the
+  // subject identity can tell them apart.
+  const folderA = deliveredFolder([{ turn: 3, files: [{ path: '/ws/same.md' }] }])
+  const folderB = deliveredFolder([{ turn: 3, files: [{ path: '/ws/same.md' }] }])
+  let currentSession = 'session-a'
+  const routing = deliveredSurfaceRouting({
+    sessionId: () => currentSession,
+    mainFolder: () => (currentSession === 'session-a' ? folderA : folderB),
+  })
+  const surface = mountDeliveredSurface(routing)
+  try {
+    const vt = new VirtualTerminal(100, 30)
+    let heldSignal: AbortSignal | undefined
+    let release: ((stat: { version: string; bytes: number }) => void) | undefined
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      displayState: { preset: 'full' },
+      deliveredFiles: {
+        snapshot: () => surface.deliveredFilesSnapshot(),
+        isCurrent: (snapshot) => surface.isDeliveredFilesSnapshotCurrent(snapshot),
+      },
+      deliveredFilePreview: () => ({
+        stat: (_path: string, signal: AbortSignal) => {
+          heldSignal = signal
+          return new Promise(resolve => { release = value => resolve(value) })
+        },
+        read: async () => ({
+          stat: { version: 'v1', bytes: 15 },
+          offset: 1,
+          limit: 120,
+          text: 'STALE SUBJECT PAGE',
+          lines: 1,
+          eof: true,
+        }),
+      }),
+    })
+    app.start()
+    startedApps.add(app)
+    app.setTranscript([{ kind: 'assistant', turn: 3, text: 'done' }], new Map())
+    app.setFullscreen(true)
+    const snapshotA = surface.deliveredFilesSnapshot()
+    assert.ok(snapshotA !== undefined)
+    app.openDeliveredFiles(snapshotA)
+    await viewport(vt)
+    assert.ok((await viewport(vt)).includes('same.md'), 'the panel opened on subject A')
+    vt.sendInput('\r')
+    await viewport(vt)
+    assert.ok(heldSignal !== undefined, 'the preview request really started')
+    assert.equal(heldSignal!.aborted, false, 'it is not aborted while the subject is current')
+
+    // The display subject REALLY changes: another Session with the identical
+    // path/turn shape, so only the subject identity can tell them apart.
+    currentSession = 'session-b'
+    assert.equal(surface.isDeliveredFilesSnapshotCurrent(snapshotA), false,
+      'the application owner sees the old subject as stale')
+    const snapshotB = surface.deliveredFilesSnapshot()
+    assert.ok(snapshotB !== undefined)
+    assert.equal(snapshotB.sessionId !== snapshotA.sessionId, true, 'the subject identity really changed')
+    app.setTranscript([{ kind: 'assistant', turn: 3, text: 'done' }], new Map())
+    await viewport(vt)
+
+    // The in-flight read is ABORTED and its page can never paint.
+    assert.equal(heldSignal!.aborted, true, 'retirement aborts the in-flight read')
+    const afterSwitch = await viewport(vt)
+    assert.ok(!afterSwitch.includes('same.md · Details'), `the stale overlay is gone:\n${afterSwitch}`)
+    release?.({ version: 'v1', bytes: 15 })
+    await new Promise(resolve => setTimeout(resolve, 20))
+    const settled = await viewport(vt)
+    assert.ok(!settled.includes('STALE SUBJECT PAGE'), `the late result never paints:\n${settled}`)
+    app.stop()
+  } finally {
+    surface.dispose()
+  }
 })
