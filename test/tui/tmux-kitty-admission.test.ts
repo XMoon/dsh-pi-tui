@@ -23,8 +23,8 @@ function admitted(cli: FakeTmuxCli): TmuxKittyIdentity {
   return identity
 }
 
-test('the real CLI probe reads the one trusted topology from raw server output', () => {
-  const cli = createFakeTmuxCli()
+test('the real CLI probe reads the one trusted topology from raw server output', (t) => {
+  const cli = createFakeTmuxCli(t)
   try {
     assert.deepEqual(probeTmuxKittyIdentity(cli.env), {
       paneId: '%7',
@@ -44,8 +44,8 @@ test('the real CLI probe reads the one trusted topology from raw server output',
   }
 })
 
-test('a bare kitty termtype is accepted; a derived family is not', () => {
-  const cli = createFakeTmuxCli()
+test('a bare kitty termtype is accepted; a derived family is not', (t) => {
+  const cli = createFakeTmuxCli(t)
   try {
     cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty\n' })
     assert.ok(probeTmuxKittyIdentity(cli.env), 'kitty without a version suffix is Kitty itself')
@@ -56,7 +56,7 @@ test('a bare kitty termtype is accepted; a derived family is not', () => {
   }
 })
 
-test('every environment gate rejects BEFORE any tmux command is spawned', () => {
+test('every environment gate rejects BEFORE any tmux command is spawned', (t) => {
   const cases: ReadonlyArray<{ name: string; mutate: (env: NodeJS.ProcessEnv) => void }> = [
     { name: 'opt-in unset', mutate: (env) => { delete env.PI_TUI_TMUX_KITTY_IMAGES } },
     { name: 'opt-in 0', mutate: (env) => { env.PI_TUI_TMUX_KITTY_IMAGES = '0' } },
@@ -75,7 +75,7 @@ test('every environment gate rejects BEFORE any tmux command is spawned', () => 
     { name: 'protocol iterm2', mutate: (env) => { env.PI_IMAGE_PROTOCOL = 'iterm2' } },
   ]
   for (const entry of cases) {
-    const cli = createFakeTmuxCli()
+    const cli = createFakeTmuxCli(t)
     try {
       entry.mutate(cli.env)
       assert.equal(probeTmuxKittyIdentity(cli.env), undefined, entry.name)
@@ -86,8 +86,8 @@ test('every environment gate rejects BEFORE any tmux command is spawned', () => 
   }
 })
 
-test('the pane option must read exactly all', () => {
-  const cli = createFakeTmuxCli()
+test('the pane option must read exactly all', (t) => {
+  const cli = createFakeTmuxCli(t)
   try {
     for (const value of ['on\n', 'off\n', '', 'all \n off\n']) {
       cli.setReply('show-options', { text: value })
@@ -104,8 +104,8 @@ test('the pane option must read exactly all', () => {
   }
 })
 
-test('an empty session name is not an identity', () => {
-  const cli = createFakeTmuxCli()
+test('an empty session name is not an identity', (t) => {
+  const cli = createFakeTmuxCli(t)
   try {
     cli.setReply('display-message', { text: '\n' })
     assert.equal(probeTmuxKittyIdentity(cli.env), undefined)
@@ -114,7 +114,7 @@ test('an empty session name is not an identity', () => {
   }
 })
 
-test('the whole server must have exactly one matching, non-empty Kitty client', () => {
+test('the whole server must have exactly one matching, non-empty Kitty client', (t) => {
   const cases: ReadonlyArray<{ name: string; text: string }> = [
     { name: 'no client', text: '' },
     { name: 'mixed clients', text: 'a\t/dev/pts/1\twork\txterm-kitty\tkitty(0.41.1)\nb\t/dev/pts/2\twork\txterm-kitty\tkitty(0.41.1)\n' },
@@ -126,7 +126,7 @@ test('the whole server must have exactly one matching, non-empty Kitty client', 
     { name: 'empty termtype', text: 'main\t/dev/pts/12\twork\txterm-kitty\t\n' },
   ]
   for (const entry of cases) {
-    const cli = createFakeTmuxCli()
+    const cli = createFakeTmuxCli(t)
     try {
       cli.setReply('list-clients', { text: entry.text })
       assert.equal(probeTmuxKittyIdentity(cli.env), undefined, entry.name)
@@ -136,8 +136,8 @@ test('the whole server must have exactly one matching, non-empty Kitty client', 
   }
 })
 
-test('an inherited KITTY_WINDOW_ID cannot manufacture the live client binding', () => {
-  const cli = createFakeTmuxCli()
+test('an inherited KITTY_WINDOW_ID cannot manufacture the live client binding', (t) => {
+  const cli = createFakeTmuxCli(t)
   try {
     cli.env.KITTY_WINDOW_ID = '7'
     cli.env.TERM_PROGRAM = 'kitty'
@@ -150,8 +150,8 @@ test('an inherited KITTY_WINDOW_ID cannot manufacture the live client binding', 
   }
 })
 
-test('an overflowing CLI reply fails closed instead of being truncated into a client', () => {
-  const cli = createFakeTmuxCli()
+test('an overflowing CLI reply fails closed instead of being truncated into a client', (t) => {
+  const cli = createFakeTmuxCli(t)
   try {
     cli.setReply('list-clients', {
       text: `main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n${'x'.repeat(70 * 1024)}\n`,
@@ -162,8 +162,8 @@ test('an overflowing CLI reply fails closed instead of being truncated into a cl
   }
 })
 
-test('admission re-probes the real server and latches on a client change', () => {
-  const cli = createFakeTmuxCli()
+test('admission re-probes the real server and latches on a client change', (t) => {
+  const cli = createFakeTmuxCli(t)
   try {
     const admission = new TmuxKittyAdmission(admitted(cli), cli.env)
     assert.equal(admission.isAllowed(false), true)
@@ -177,7 +177,7 @@ test('admission re-probes the real server and latches on a client change', () =>
   }
 })
 
-test('a client disappearing, the option changing or the session renaming all revoke', () => {
+test('a client disappearing, the option changing or the session renaming all revoke', (t) => {
   const changes: ReadonlyArray<{ name: string; apply: (cli: FakeTmuxCli) => void }> = [
     { name: 'client detached', apply: (cli) => cli.setReply('list-clients', { text: '' }) },
     { name: 'option no longer all', apply: (cli) => cli.setReply('show-options', { text: 'on\n' }) },
@@ -190,7 +190,7 @@ test('a client disappearing, the option changing or the session renaming all rev
     },
   ]
   for (const change of changes) {
-    const cli = createFakeTmuxCli()
+    const cli = createFakeTmuxCli(t)
     try {
       const admission = new TmuxKittyAdmission(admitted(cli), cli.env)
       assert.equal(admission.isAllowed(true), true, change.name)
@@ -204,7 +204,7 @@ test('a client disappearing, the option changing or the session renaming all rev
 
 test('the component TTL answers from one real probe, and the forced write probe bypasses it', (t) => {
   t.mock.timers.enable({ apis: ['Date'] })
-  const cli = createFakeTmuxCli()
+  const cli = createFakeTmuxCli(t)
   try {
     const admission = new TmuxKittyAdmission(admitted(cli), cli.env)
     const baseline = cli.calls().length
@@ -226,7 +226,7 @@ test('the component TTL answers from one real probe, and the forced write probe 
 
 test('a change inside the short TTL is invisible to render but fatal to the next managed write', (t) => {
   t.mock.timers.enable({ apis: ['Date'] })
-  const cli = createFakeTmuxCli()
+  const cli = createFakeTmuxCli(t)
   try {
     const admission = new TmuxKittyAdmission(admitted(cli), cli.env)
     assert.equal(admission.isAllowed(false), true)
@@ -239,8 +239,8 @@ test('a change inside the short TTL is invisible to render but fatal to the next
   }
 })
 
-test('admission never grants after the opt-in itself disappears', () => {
-  const cli = createFakeTmuxCli()
+test('admission never grants after the opt-in itself disappears', (t) => {
+  const cli = createFakeTmuxCli(t)
   try {
     const admission = new TmuxKittyAdmission(admitted(cli), cli.env)
     assert.equal(admission.isAllowed(true), true)

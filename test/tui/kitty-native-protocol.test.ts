@@ -159,9 +159,9 @@ test('the native geometry matches the fork Image placement at every width', () =
  * width. A drift here would make the text grid and the click band disagree, or
  * would silently clamp a cell count the painted body still claims.
  */
-test('the virtual placeholder geometry matches the native placement at every width', () => {
+test('the virtual placeholder geometry matches the native placement at every width', (t) => {
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
-  const cli = createFakeTmuxCli()
+  const cli = createFakeTmuxCli(t)
   try {
     const identity = probeTmuxKittyIdentity(cli.env)
     assert.ok(identity)

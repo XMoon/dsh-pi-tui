@@ -11,7 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { type TestContext } from 'node:test'
 import {
   Container as LegacyContainer,
   ScrollView as LegacyScrollView,
@@ -148,9 +148,9 @@ interface Harness {
   dispose(): void
 }
 
-function harness(): Harness {
+function harness(t: TestContext): Harness {
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
-  const cli = createFakeTmuxCli()
+  const cli = createFakeTmuxCli(t)
   const terminal = new RecordingTerminal()
   const graphics = createTmuxKittyGraphics(terminal, {}, cli.env)
   assert.ok(graphics, 'the default scripted server is the admitted topology')
@@ -173,7 +173,7 @@ function fallbackOptions(): NativeKittyImageOptions {
   return { maxWidthCells: 30, maxHeightCells: 10, fallback: '[fallback]' }
 }
 
-test('the factory refuses to create a handle unless the live server admits it', () => {
+test('the factory refuses to create a handle unless the live server admits it', (t) => {
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   const cases: ReadonlyArray<{ name: string; mutate: (cli: FakeTmuxCli) => void }> = [
     { name: 'opt-in absent', mutate: (cli) => { delete cli.env.PI_TUI_TMUX_KITTY_IMAGES } },
@@ -182,7 +182,7 @@ test('the factory refuses to create a handle unless the live server admits it', 
     { name: 'non-Kitty client', mutate: (cli) => cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\ttmux-256color\t\n' }) },
   ]
   for (const entry of cases) {
-    const cli = createFakeTmuxCli()
+    const cli = createFakeTmuxCli(t)
     const terminal = new RecordingTerminal()
     try {
       entry.mutate(cli)
@@ -194,8 +194,8 @@ test('the factory refuses to create a handle unless the live server admits it', 
   }
 })
 
-test('main screen first paint: one wrapped upload, then the placement and real grid cells', () => {
-  const h = harness()
+test('main screen first paint: one wrapped upload, then the placement and real grid cells', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     class Root implements Component {
@@ -236,8 +236,8 @@ test('main screen first paint: one wrapped upload, then the placement and real g
   }
 })
 
-test('a payload above the APC chunk ceiling uploads as separate wrapped chunks', () => {
-  const h = harness()
+test('a payload above the APC chunk ceiling uploads as separate wrapped chunks', (t) => {
+  const h = harness(t)
   try {
     const payload = 'A'.repeat(4096 * 2 + 128)
     const image = imageOf(h.graphics, { pngBase64: payload, widthPx: 64, heightPx: 64 }, fallbackOptions())
@@ -259,8 +259,8 @@ test('a payload above the APC chunk ceiling uploads as separate wrapped chunks',
   }
 })
 
-test('main screen steady frame: a text change never re-uploads or re-places the image', () => {
-  const h = harness()
+test('main screen steady frame: a text change never re-uploads or re-places the image', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     let status = 0
@@ -289,8 +289,8 @@ test('main screen steady frame: a text change never re-uploads or re-places the 
   }
 })
 
-test('main screen hide/show is text-cell visibility, never a Kitty delete', () => {
-  const h = harness()
+test('main screen hide/show is text-cell visibility, never a Kitty delete', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     let show = true
@@ -330,8 +330,8 @@ test('main screen hide/show is text-cell visibility, never a Kitty delete', () =
   }
 })
 
-test('main screen clear: the next placement re-uploads after the clear and before the grid', () => {
-  const h = harness()
+test('main screen clear: the next placement re-uploads after the clear and before the grid', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     class Root implements Component {
@@ -368,8 +368,8 @@ test('main screen clear: the next placement re-uploads after the clear and befor
   }
 })
 
-test('main screen scrollback: a retired painted image is never hard-deleted, and ids are not reused', () => {
-  const h = harness()
+test('main screen scrollback: a retired painted image is never hard-deleted, and ids are not reused', (t) => {
+  const h = harness(t)
   try {
     let current = imageOf(h.graphics, source(), fallbackOptions())
     class Root implements Component {
@@ -410,8 +410,8 @@ test('main screen scrollback: a retired painted image is never hard-deleted, and
   }
 })
 
-test('alt screen: the upload happens after ?1049h and a non-preserving stop replays the image without deletes', () => {
-  const h = harness()
+test('alt screen: the upload happens after ?1049h and a non-preserving stop replays the image without deletes', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     class Root implements Component {
@@ -452,8 +452,8 @@ test('alt screen: the upload happens after ?1049h and a non-preserving stop repl
   }
 })
 
-test('alt screen: preserveScreen leaves no ghost image behind', () => {
-  const h = harness()
+test('alt screen: preserveScreen leaves no ghost image behind', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     class Root implements Component {
@@ -482,8 +482,8 @@ test('alt screen: preserveScreen leaves no ghost image behind', () => {
   }
 })
 
-test('alt screen: a fresh session re-uploads after its own clear and re-places', () => {
-  const h = harness()
+test('alt screen: a fresh session re-uploads after its own clear and re-places', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     class Root implements Component {
@@ -520,14 +520,14 @@ test('alt screen: a fresh session re-uploads after its own clear and re-places',
  * own admission is exercised separately, and this fixture needs direct control
  * of core ids to pick a guaranteed-foreign id.
  */
-function directFacade(): {
+function directFacade(t: TestContext): {
   terminal: RecordingTerminal
   core: KittyGraphicsCore
   facade: KittyTerminalFacade
   admission: TmuxKittyAdmission
   dispose(): void
 } {
-  const cli = createFakeTmuxCli()
+  const cli = createFakeTmuxCli(t)
   const identity = probeTmuxKittyIdentity(cli.env)
   assert.ok(identity)
   const admission = new TmuxKittyAdmission(identity, cli.env)
@@ -547,8 +547,8 @@ function directFacade(): {
   }
 }
 
-test('tmux virtual: foreign per-id commands stay byte-for-byte while own/global deletes emit nothing', () => {
-  const { terminal, core, facade, dispose } = directFacade()
+test('tmux virtual: foreign per-id commands stay byte-for-byte while own/global deletes emit nothing', (t) => {
+  const { terminal, core, facade, dispose } = directFacade(t)
   try {
   let foreign = 1
   while (core.ownsIdSpace(foreign)) foreign += 1
@@ -575,8 +575,8 @@ test('tmux virtual: foreign per-id commands stay byte-for-byte while own/global 
   }
 })
 
-test('tmux virtual: an unpainted occurrence retires with a wrapped own-ID delete', () => {
-  const { terminal, core, facade, admission, dispose } = directFacade()
+test('tmux virtual: an unpainted occurrence retires with a wrapped own-ID delete', (t) => {
+  const { terminal, core, facade, admission, dispose } = directFacade(t)
   try {
     const component = new TmuxKittyImage(core, source(), fallbackOptions(), admission)
     component.render(80)
@@ -595,8 +595,8 @@ test('tmux virtual: an unpainted occurrence retires with a wrapped own-ID delete
   }
 })
 
-test('tmux virtual: a failed frame clears residency and the next placement re-uploads', () => {
-  const h = harness()
+test('tmux virtual: a failed frame clears residency and the next placement re-uploads', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     class Root implements Component {
@@ -630,8 +630,8 @@ test('tmux virtual: a failed frame clears residency and the next placement re-up
   }
 })
 
-test('tmux virtual: a revoked client permanently refuses managed batches and paints text fallback', () => {
-  const h = harness()
+test('tmux virtual: a revoked client permanently refuses managed batches and paints text fallback', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     const anchor = image.render(100)[0]!
@@ -660,8 +660,8 @@ test('tmux virtual: a revoked client permanently refuses managed batches and pai
   }
 })
 
-test('tmux virtual: a revoked handle drops a queued unpainted retirement and writes text', () => {
-  const h = harness()
+test('tmux virtual: a revoked handle drops a queued unpainted retirement and writes text', (t) => {
+  const h = harness(t)
   try {
     const pending = imageOf(h.graphics, source(), fallbackOptions())
     pending.render(100) // registered, never offered to the screen/terminal
@@ -677,8 +677,8 @@ test('tmux virtual: a revoked handle drops a queued unpainted retirement and wri
   }
 })
 
-test('tmux virtual: a real screen writes its fallback after a revoked queued retirement', () => {
-  const h = harness()
+test('tmux virtual: a real screen writes its fallback after a revoked queued retirement', (t) => {
+  const h = harness(t)
   try {
     const pending = imageOf(h.graphics, source(), fallbackOptions())
     pending.render(100)
@@ -705,8 +705,8 @@ test('tmux virtual: a real screen writes its fallback after a revoked queued ret
   }
 })
 
-test('tmux virtual: a revoked screen repaints its fallback without escaping one grid cell', () => {
-  const h = harness()
+test('tmux virtual: a revoked screen repaints its fallback without escaping one grid cell', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     let status = 0
@@ -740,8 +740,8 @@ test('tmux virtual: a revoked screen repaints its fallback without escaping one 
   }
 })
 
-test('tmux virtual: the budget falls back to text, and 100 painted images keep their ids and pixels', () => {
-  const { terminal, core, facade, admission, dispose } = directFacade()
+test('tmux virtual: the budget falls back to text, and 100 painted images keep their ids and pixels', (t) => {
+  const { terminal, core, facade, admission, dispose } = directFacade(t)
   try {
   const side = Math.floor(Math.sqrt((256 * 1024 * 1024) / 4)) + 1
   const oversized = core.register(source(PNG, side, side))
@@ -783,8 +783,8 @@ test('tmux virtual: the budget falls back to text, and 100 painted images keep t
   }
 })
 
-test('tmux virtual: the component bounds the grid before the encoder, and a narrow width narrows the image', () => {
-  const { core, admission, dispose } = directFacade()
+test('tmux virtual: the component bounds the grid before the encoder, and a narrow width narrows the image', (t) => {
+  const { core, admission, dispose } = directFacade(t)
   try {
   const image = new TmuxKittyImage(core, source(PNG, 4000, 2000), { maxWidthCells: 700, fallback: '[fallback]' }, admission)
   const wide = image.render(600)
@@ -812,8 +812,8 @@ test('tmux virtual: the component bounds the grid before the encoder, and a narr
   }
 })
 
-test('tmux virtual: scrolling into the middle keeps explicit row cells and relocates exactly one anchor', () => {
-  const h = harness()
+test('tmux virtual: scrolling into the middle keeps explicit row cells and relocates exactly one anchor', (t) => {
+  const h = harness(t)
   try {
     h.terminal.columns = 60
     h.terminal.rows = 10
@@ -890,8 +890,8 @@ test('tmux virtual: scrolling into the middle keeps explicit row cells and reloc
   }
 })
 
-test('alt screen: the first visible frame relocates the anchor when the image is first mounted mid-scroll', () => {
-  const h = harness()
+test('alt screen: the first visible frame relocates the anchor when the image is first mounted mid-scroll', (t) => {
+  const h = harness(t)
   try {
     h.terminal.columns = 60
     h.terminal.rows = 10
@@ -942,8 +942,8 @@ test('alt screen: the first visible frame relocates the anchor when the image is
   }
 })
 
-test('alt screen: an overlay over the first visible row does not lose the relocated anchor', () => {
-  const h = harness()
+test('alt screen: an overlay over the first visible row does not lose the relocated anchor', (t) => {
+  const h = harness(t)
   try {
     h.terminal.columns = 60
     h.terminal.rows = 10
@@ -982,8 +982,8 @@ test('alt screen: an overlay over the first visible row does not lose the reloca
   }
 })
 
-test('main screen: a long first frame paints its anchor without any clipping seam', () => {
-  const h = harness()
+test('main screen: a long first frame paints its anchor without any clipping seam', (t) => {
+  const h = harness(t)
   try {
     h.terminal.columns = 60
     h.terminal.rows = 10
@@ -1017,8 +1017,8 @@ test('main screen: a long first frame paints its anchor without any clipping sea
   }
 })
 
-test('tmux virtual: the provenance marker never reaches the terminal across split writes', () => {
-  const h = harness()
+test('tmux virtual: the provenance marker never reaches the terminal across split writes', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     const line = image.render(80)[0]!
@@ -1027,7 +1027,7 @@ test('tmux virtual: the provenance marker never reaches the terminal across spli
     const markerEnd = line.indexOf('\x1b\\', prefix.length) + 2
     const marker = line.slice(0, markerEnd)
     for (let cut = 1; cut <= marker.length; cut++) {
-      const single = directFacade()
+      const single = directFacade(t)
       try {
         const anchored = new TmuxKittyImage(single.core, source(), fallbackOptions(), single.admission)
         const anchoredLine = anchored.render(80)[0]!
@@ -1047,8 +1047,8 @@ test('tmux virtual: the provenance marker never reaches the terminal across spli
   }
 })
 
-test('alt screen: a complete foreign virtual image is never relocated', () => {
-  const h = harness()
+test('alt screen: a complete foreign virtual image is never relocated', (t) => {
+  const h = harness(t)
   try {
     h.terminal.columns = 60
     h.terminal.rows = 10
@@ -1084,8 +1084,8 @@ test('alt screen: a complete foreign virtual image is never relocated', () => {
   }
 })
 
-test('tmux virtual: a revoked image component fallback wins over a queued unpainted retirement', () => {
-  const h = harness()
+test('tmux virtual: a revoked image component fallback wins over a queued unpainted retirement', (t) => {
+  const h = harness(t)
   try {
     const painted = imageOf(h.graphics, source(), fallbackOptions())
     const anchor = painted.render(100)[0]!
@@ -1108,8 +1108,8 @@ test('tmux virtual: a revoked image component fallback wins over a queued unpain
   }
 })
 
-test('tmux virtual: dispose is idempotent and a factory handle owns exactly one Core lifetime', () => {
-  const h = harness()
+test('tmux virtual: dispose is idempotent and a factory handle owns exactly one Core lifetime', (t) => {
+  const h = harness(t)
   try {
     const image = imageOf(h.graphics, source(), fallbackOptions())
     const anchor = image.render(80)
@@ -1129,8 +1129,8 @@ test('tmux virtual: dispose is idempotent and a factory handle owns exactly one 
  * must still suppress the fork's global cleanup: that global form has no
  * virtual location and must never reach the outer terminal.
  */
-test('the fork Kitty capability in a tmux pane never lets a global cleanup escape', () => {
-  const cli = createFakeTmuxCli()
+test('the fork Kitty capability in a tmux pane never lets a global cleanup escape', (t) => {
+  const cli = createFakeTmuxCli(t)
   const terminal = new RecordingTerminal()
   const graphics = createTmuxKittyGraphics(terminal, {}, cli.env)
   assert.ok(graphics)

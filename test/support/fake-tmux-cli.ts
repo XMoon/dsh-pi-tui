@@ -9,9 +9,10 @@
  * @module @xmoon76/dsh-pi-tui/test/support/fake-tmux-cli
  */
 
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import type { TestContext } from 'node:test'
 import { join } from 'node:path'
+import { testLifecycle } from './temp-lifecycle.ts'
 
 export type FakeTmuxCommand = 'show-options' | 'display-message' | 'list-clients'
 
@@ -52,8 +53,8 @@ fi
  * ONE admitted topology. The caller can mutate any reply to model a real server
  * state change between probes.
  */
-export function createFakeTmuxCli(): FakeTmuxCli {
-  const root = mkdtempSync(join(tmpdir(), 'image-7ba-tmux-'))
+export function createFakeTmuxCli(t: TestContext): FakeTmuxCli {
+  const root = testLifecycle(t).tempDir('image-7ba-tmux-')
   const binDir = join(root, 'bin')
   mkdirSync(binDir)
   const executable = join(binDir, 'tmux')
