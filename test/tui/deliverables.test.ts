@@ -1217,3 +1217,69 @@ test('a regular surface paints no dead Browse all and no dead footer buttons', a
   assert.ok(!view.includes('Browse all'), `the regular tail paints no dead list verb:\n${view}`)
   assert.ok(!view.includes('Details'), `the regular tail paints no dead per-file verb:\n${view}`)
 })
+
+test('the width cache restores the hits and search spans of the re-rendered width', () => {
+  const files = [
+    { path: '/ws/docs/a.md', description: 'first' },
+    { path: '/ws/output/b.md', description: 'second' },
+  ]
+  const component = new DeliveredFilesComponent(files, false, {
+    pointerActions: true,
+    commandEntry: true,
+    workspaceRoot: '/ws',
+  })
+  const rows80 = component.render(80)
+  const hits80 = component.paintedFileActionHits(80)
+  const spans80 = component.lastFieldSpans
+  assert.ok(hits80.length >= 2, 'fixture: 80 columns paints the verbs')
+  assert.equal(spans80.length, 2)
+  component.render(100)
+  assert.notEqual(component.lastFieldSpans, spans80, 'fixture: 100 columns re-derives spans')
+  const again = component.render(80)
+  assert.equal(again, rows80, 'the reference-stable row cache still hits')
+  assert.deepEqual(component.paintedFileActionHits(80), hits80, 'the 80-column hit map is restored')
+  assert.deepEqual(component.lastFieldSpans, spans80, 'the 80-column search spans are restored')
+  for (const hit of component.paintedFileActionHits(80)) {
+    const text = stripTerminalSequences(again[hit.row]!).slice(hit.startCol, hit.endCol)
+    assert.ok(text === 'Details' || text === 'Browse all', `the restored hit paints ${JSON.stringify(text)}`)
+  }
+})
+
+test('a fullscreen transcript Details verb still works after a 120→160→120 resize round-trip', async () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 2 }, 0),
+    delivery(1, [{ path: 'out/report.md', description: 'round trip' }], 2),
+    assistant(2, 0, 'done', 2),
+    event('turn/end', { turn: 2, reason: { kind: 'completed' } }, 3),
+  ])
+  const snap = {
+    subjectKind: 'main' as const,
+    sessionId: 'session-1',
+    sourceIdentity: {},
+    turns: [{ turn: 2, files: [{ path: 'out/report.md', description: 'round trip' }] }],
+  }
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    deliveredFiles: { snapshot: () => snap, isCurrent: () => true },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  app.setFullscreen(true)
+  let view = await viewport(vt)
+  assert.ok(view.includes('out/report.md') && view.includes('Details'), view)
+  vt.resize(160, 50)
+  await viewport(vt)
+  vt.resize(120, 40)
+  view = await viewport(vt)
+  const rows = view.split('\n')
+  const row = rows.findIndex(line => line.includes('out/report.md') && line.includes('Details'))
+  assert.ok(row >= 0, `the Details verb is re-painted after the round-trip:\n${view}`)
+  const column = rows[row]!.lastIndexOf('Details') + 2
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+  const after = await viewport(vt)
+  assert.ok(after.includes('report.md · Details'), `the re-painted Details verb is clickable:\n${after}`)
+})
