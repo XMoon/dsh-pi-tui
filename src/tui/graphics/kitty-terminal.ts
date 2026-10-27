@@ -145,9 +145,10 @@ function trailingHoldbackLength(text: string): number {
 }
 
 /**
- * Whether one placeholder row's OWN colors name the given image/placement. This
- * validates existing identity bytes (the anchor's `i`/`p` stay authoritative); it
- * does not reconstruct geometry. A plain-text `U+10EEEE` has no such color pair.
+ * Parse one placeholder row's OWN identity colors: the low 24 bits of the image
+ * id in the foreground and of the placement id in the underline. The anchor's
+ * `i`/`p` stay authoritative; this validates existing bytes and never
+ * reconstructs geometry. A plain-text `U+10EEEE` has no such color pair.
  */
 function gridIdentityOf(line: string): { imageId: number; placementId: number } | undefined {
   const foreground = /\x1b\[38;2;(\d{1,3});(\d{1,3});(\d{1,3})m/.exec(line)
@@ -383,8 +384,8 @@ export class KittyTerminalFacade implements Terminal {
     // of `U+10EEEE`: that code point is ordinary Unicode and legal user text,
     // so a character test would classify a plain transcript line as an image and
     // (once revoked) refuse the whole text frame forever. A managed grid row
-    // carries explicit foreground/underline colors naming the image/placement of
-    // an anchor this facade actually wrote (`placedVirtual`).
+    // carries explicit foreground/underline colors naming an id inside this
+    // Core's reserved slice.
     const hasManagedPlacement = segments.some((segment) => {
       if (segment.kind === 'apc') return this.managedPlacementId(segment.apc) !== undefined
       return this.managedGridIn(segment.text)

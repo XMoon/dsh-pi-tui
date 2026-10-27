@@ -275,15 +275,13 @@ export class KittyGraphicsCore {
    * is an exact interval test on the low bits, not a second id registry.
    */
   ownsLowImageBits(low: number): boolean {
+    const span = this.nextImageId - this.imageIdFloor
+    // A slice at least 2^24 wide names EVERY low value at least once.
+    if (span >= 0x1000000) return true
     const first = this.imageIdFloor & 0xffffff
     const last = (this.nextImageId - 1) & 0xffffff
-    if (this.nextImageId - 1 < this.imageIdFloor) return false
-    // The slice may wrap the 24-bit boundary; both ends then cover the whole
-    // space, and any low value belongs to some allocated id.
-    if (first <= last && this.nextImageId - 1 - this.imageIdFloor < 0xffffff) {
-      return low >= first && low <= last
-    }
-    return true
+    // A narrower slice that crosses the 24-bit boundary covers both ends.
+    return first <= last ? low >= first && low <= last : low >= first || low <= last
   }
 
 
