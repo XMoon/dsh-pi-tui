@@ -2,7 +2,7 @@
 
 Environment: Kitty 0.41.1, WSL2/WSLg, `DISPLAY=:0`, Node v24.21.0,
 pnpm 12.11.2, worktree `feat/image-7a-pr1-unified-kitty-core` at
-`3a818f4a2f995a3840a8f2d4dd96596f9bc426c7` (the branch rebased onto
+`5eb67da0548ca92b2b2ceeaba3322e04ce379c85` (the branch rebased onto
 `main` `901b5dfe`), working tree clean at run time. One real Kitty window per
 case, raw bytes captured with `kitty script`, screenshots with `maim` on the
 case's own window id. Harness: `temp/image-7a-stage0/` (adapter drives the
@@ -169,6 +169,18 @@ included) and the REAL `ImageThumbnail` (transcript) + `ImageViewerPanel`
 removes both placements in-frame, show re-places with no re-upload, the raw
 once-per-session id churn is the same one the legacy path already pays when the
 terminal reports its real cell size.
+
+## Teardown failure recovery (X066, Owner-approved)
+
+The alternate screen's own stop writes the global image release from
+`beforeTerminalStop()`. A failing write there used to abort the fork's linear
+teardown, so the terminal was never released, the cursor stayed hidden and
+`?1049l` was never emitted. Reproduced with the real `TuiAltScreen` + the
+production facade; `TuiBase.stop()` now attempts every step and rethrows the
+first failure (`APPROVED_MINIMAL_FORK_STOP_HARDENING`, divergence X066). Covered
+by `packages/pi-tui/test/stop-exception-safety.test.ts` and, at this head, by the
+host-side regression in `test/integration/kitty-native-screen.test.ts` (both
+`preserveScreen` modes; a normal main stop unaffected).
 
 ## Unresolved observation: one transient retire-frame ghost
 
