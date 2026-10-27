@@ -1073,7 +1073,6 @@ test('a surface without a real pointer owner paints no dead Details verb', () =>
 test('a superseded read is discarded SILENTLY and ends in a neutral, recoverable state', async () => {
   const diagnostics: string[] = []
   const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/a.md'] }]), { diagnostics })
-  let reads = 0
   h.setSize(100, 30)
   h.type('enter')
   assert.equal(h.preview().kind, 'loading-stat')
@@ -1097,11 +1096,14 @@ test('a superseded read is discarded SILENTLY and ends in a neutral, recoverable
   assert.ok(rows.some(row => row.includes('· Details')), 'the page is still the Details page')
 
   // Recovery is the user's next explicit action: leave and re-enter re-requests.
+  // The FIRST entry already counted one stat, so a bare `>= 1` would pass even if
+  // the re-entry asked nothing: compare against the count taken right before.
   h.type('esc')
   h.rows()
+  const statsBeforeReentry = h.statCalls()
+  assert.equal(statsBeforeReentry, 1, 'the superseded attempt asked exactly once')
   h.type('enter')
   assert.equal(h.preview().kind, 'loading-stat', 're-entering issues a NEW request')
-  reads = h.statCalls()
-  assert.ok(reads >= 1, 'the re-entry really asked the Host again')
+  assert.equal(h.statCalls(), statsBeforeReentry + 1, 'the re-entry really asked the Host again')
 })
 

@@ -23502,7 +23502,9 @@ export class TuiApp {
       ...(preview === undefined ? {} : { preview }),
       // A per-row verb is painted only where a pointer can reach it: PiTui
       // enables terminal mouse reporting on the fullscreen alt screen alone.
-      pointerActions: this.deliveredFilesPointerOwned(),
+      // LIVE, not captured: the SAME panel survives a fullscreen screen swap, so
+      // the answer must follow the surface it is painted on.
+      pointerActions: () => this.deliveredFilesPointerOwned(),
       // The ONE owned-task entry (AGENTS.md): every preview request is an owned
       // workflow, so its failure reaches diagnostics instead of escaping.
       ...(this.events.runOwned === undefined
