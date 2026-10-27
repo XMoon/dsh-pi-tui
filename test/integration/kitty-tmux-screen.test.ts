@@ -1084,6 +1084,50 @@ test('alt screen: a complete foreign virtual image is never relocated', (t) => {
   }
 })
 
+test('tmux virtual: a client change between the retirement batch and the frame batch refuses the frame', (t) => {
+  const cli = createFakeTmuxCli(t)
+  const terminal = new RecordingTerminal()
+  const identity = probeTmuxKittyIdentity(cli.env)
+  assert.ok(identity)
+  const admission = new TmuxKittyAdmission(identity, cli.env)
+  const core = new KittyGraphicsCore({ placementMode: 'tmux-virtual' })
+  const facade = new KittyTerminalFacade(terminal, core, { placementMode: 'tmux-virtual', admission })
+  try {
+    const pending = new TmuxKittyImage(core, source(), fallbackOptions(), admission)
+    pending.render(80) // registered, never offered to a screen
+    pending.dispose() // queued never-painted retirement
+    const painted = new TmuxKittyImage(core, source(), fallbackOptions(), admission)
+    const anchor = painted.render(80)[0]!
+    assert.ok(core.hasQueuedRetirements())
+
+    // The sink observes the client change exactly during the retirement batch,
+    // i.e. between the two physical writes of this one facade call.
+    let writes = 0
+    const originalWrite = terminal.write.bind(terminal)
+    terminal.write = (data: string) => {
+      originalWrite(data)
+      writes += 1
+      if (writes === 1) cli.setReply('show-options', { text: 'off\n' })
+    }
+    assert.throws(() => facade.write(anchor), TmuxGraphicsRevokedError)
+
+    const scan = scanOuter(terminal.text)
+    assert.equal(writes, 1, 'the retirement batch was the only physical write')
+    assert.equal(scan.commands.some((command) => command.controls.a === 'p'), false,
+      'no placement reached the changed client')
+    assert.equal(scan.commands.some((command) => command.controls.a === 't'), false,
+      'no transmission reached the changed client')
+    assert.equal(count(scan.text, P), 0, 'no placeholder cell reached the changed client')
+    assert.equal(scan.commands.length, 1, 'only the already-admitted retirement batch was written')
+    assert.equal(scan.commands[0]!.controls.d, 'I')
+    assert.equal(admission.isAllowed(true), false, 'the latch is permanent')
+  } finally {
+    facade.dispose()
+    core.dispose()
+    cli.dispose()
+  }
+})
+
 test('tmux virtual: a revoked image component fallback wins over a queued unpainted retirement', (t) => {
   const h = harness(t)
   try {
