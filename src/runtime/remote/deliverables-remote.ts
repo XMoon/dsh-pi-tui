@@ -19,13 +19,7 @@
  */
 
 import { SupersededReadError } from '../read-error.ts'
-import {
-  DeliveredFileReadError,
-  deliveredFileReadErrorFrom,
-  type DeliveredFilePage,
-  type DeliveredFileReadPort,
-  type DeliveredFileStat,
-} from '../deliverables-port.ts'
+import { DELIVERED_FILE_PAGE_LINES, DeliveredFileReadError, deliveredFileReadErrorFrom, type DeliveredFilePage, type DeliveredFileReadPort, type DeliveredFileStat } from '../deliverables-port.ts'
 import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
 import type { RemoteResultLike } from './session-writer-remote.ts'
 
@@ -94,9 +88,9 @@ export class RemoteDeliveredFileReadPort implements DeliveredFileReadPort {
     sessionId: string,
     path: string,
     offset: number,
-    limit: number,
     signal: AbortSignal,
   ): Promise<DeliveredFilePage> {
+    const limit = DELIVERED_FILE_PAGE_LINES
     const page = await this.fenced('read', signal, namespace =>
       namespace.read(sessionId, path, { offset, limit }, signal))
     return { stat: statOf(page), offset, limit, text: page.text, lines: page.lines, eof: page.eof }

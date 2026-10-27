@@ -33,13 +33,7 @@ import {
   type DeliveredFilesSnapshot,
 } from '../../domain/deliverables/catalog.ts'
 import type { PresentedFilePresentation } from '../../domain/transcript/types.ts'
-import {
-  DeliveredFileReadError,
-  type DeliveredFilePage,
-  type DeliveredFilePreviewCapability,
-  type DeliveredFileReadFailureCode,
-  type DeliveredFileStat,
-} from '../../runtime/deliverables-port.ts'
+import { DELIVERED_FILE_PAGE_LINES, DeliveredFileReadError, type DeliveredFilePage, type DeliveredFilePreviewCapability, type DeliveredFileReadFailureCode, type DeliveredFileStat } from '../../runtime/deliverables-port.ts'
 import { SupersededReadError } from '../../runtime/read-error.ts'
 import { isCancellation } from '../../runtime/process/tasks.ts'
 
@@ -108,7 +102,6 @@ export interface DeliveredFilesPanelOptions {
 /** The per-file `Details` verb needs a distinguishable filename beside it. */
 const DETAILS_VERB = 'Details'
 /** One preview page: the plan's fixed 120-line window. */
-const PREVIEW_PAGE_LINES = 120
 /** Declared files with these suffixes are never read: metadata only. */
 const PREVIEW_BINARY_SUFFIXES = [
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.pdf', '.zip', '.gz', '.tar', '.7z',
@@ -547,7 +540,7 @@ export class DeliveredFilesPanel implements Component {
       }
       // At the top of the page: the previous 120-line window, when one exists.
       const page = this.preview.kind === 'text-page' ? this.preview.page : undefined
-      if (page !== undefined && page.offset > 1) this.requestPreviewPage(Math.max(1, page.offset - PREVIEW_PAGE_LINES))
+      if (page !== undefined && page.offset > 1) this.requestPreviewPage(Math.max(1, page.offset - DELIVERED_FILE_PAGE_LINES))
       return
     }
     if (matchesKey(data, 'pageDown')) {
@@ -558,7 +551,7 @@ export class DeliveredFilesPanel implements Component {
       }
       // At the bottom of the page: the next 120-line window, never past EOF.
       const page = this.preview.kind === 'text-page' ? this.preview.page : undefined
-      if (page !== undefined && !page.eof) this.requestPreviewPage(page.offset + PREVIEW_PAGE_LINES)
+      if (page !== undefined && !page.eof) this.requestPreviewPage(page.offset + DELIVERED_FILE_PAGE_LINES)
     }
   }
 
@@ -731,9 +724,9 @@ export class DeliveredFilesPanel implements Component {
       }
       this.preview = { kind: 'loading-page', stat, offset: 1 }
       this.requestRender()
-      const page = await capability.read(path, 1, PREVIEW_PAGE_LINES, signal)
+      const page = await capability.read(path, 1, signal)
       if (!this.ownsPreview(serial)) return
-      this.preview = { kind: 'text-page', page, nextOffset: page.offset + PREVIEW_PAGE_LINES }
+      this.preview = { kind: 'text-page', page, nextOffset: page.offset + DELIVERED_FILE_PAGE_LINES }
       this.previewStat = page.stat
       this.previewScrollToContent = true
       this.requestRender()
@@ -768,7 +761,7 @@ export class DeliveredFilesPanel implements Component {
     const capability = this.previewCapability
     if (capability === undefined) return
     try {
-      const page = await capability.read(path, offset, PREVIEW_PAGE_LINES, signal)
+      const page = await capability.read(path, offset, signal)
       if (!this.ownsPreview(serial)) return
       if (page.stat.version !== previous.version) {
         // The Host file changed between pages: never splice two versions.
@@ -777,7 +770,7 @@ export class DeliveredFilesPanel implements Component {
         this.requestRender()
         return
       }
-      this.preview = { kind: 'text-page', page, nextOffset: page.offset + PREVIEW_PAGE_LINES }
+      this.preview = { kind: 'text-page', page, nextOffset: page.offset + DELIVERED_FILE_PAGE_LINES }
       this.previewStat = page.stat
       this.previewScrollToContent = true
       this.requestRender()
@@ -792,21 +785,18 @@ export class DeliveredFilesPanel implements Component {
     // The caller's own cancellation is not a state: the request was revoked by a
     // newer navigation, and that newer flow owns the page.
     if (isCancellation(error)) return
-    // A SUPERSEDED read is not a Host refusal either: the connection generation
-    // moved on, so the reply describes a transport epoch this page no longer
-    // talks to. §7.5 forbids disguising it as `service-unavailable` and forbids
-    // retrying inside the same operation — but it must still settle into a
-    // DEFINITE, honest state instead of a `Loading…` that never ends. It therefore
-    // reports through diagnostics and paints the §7.7 generic sentence; asking
-    // again is the user's next explicit action.
+    // A SUPERSEDED read is UI-SILENT by contract (`docs/architecture/host-client.md`,
+    // `read-error.ts`, plan §7.5): the connection generation moved on, so the reply
+    // describes a transport epoch this page no longer talks to. It must therefore
+    // not be presented, not be mapped to a Host refusal, not be retried inside the
+    // same operation, and not reach diagnostics as an error. It still has to END
+    // the loading state, so the page falls back to the neutral `idle` body (the
+    // declared path/description stay painted); the user's next explicit entry
+    // re-requests from `stat`.
     if (error instanceof SupersededReadError) {
-      this.reportUnclassifiedFailure?.('delivered file preview superseded by a newer connection generation', error)
-      const supersededStat = this.previewStat
-      this.preview = {
-        kind: 'failure',
-        code: undefined,
-        ...(supersededStat === undefined ? {} : { stat: supersededStat }),
-      }
+      this.preview = { kind: 'idle' }
+      this.previewStat = undefined
+      this.previewNotice = ''
       this.requestRender()
       return
     }

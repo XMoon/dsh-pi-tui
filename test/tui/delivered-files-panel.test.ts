@@ -18,6 +18,7 @@ import {
   type DeliveredFilesPreviewState,
 } from '../../src/tui/deliverables/delivered-files-panel.ts'
 import {
+  DELIVERED_FILE_PAGE_LINES,
   DeliveredFileReadError,
   type DeliveredFilePage,
   type DeliveredFileReadFailureCode,
@@ -835,6 +836,8 @@ function previewHarness(
     initial?: { turn?: number; path?: string; page?: 'files' | 'details' }
     preview?: boolean
     autoResolve?: DeliveredFilePage
+    /** An EXTERNAL sink so a test can assert what reached diagnostics. */
+    diagnostics?: string[]
     pointerActions?: boolean
   } = {},
 ): PreviewHarness {
@@ -860,7 +863,9 @@ function previewHarness(
           }
           return new Promise<DeliveredFileStat>((resolve, reject) => { pendingStats.push({ resolve, reject }) })
         },
-        read: (path, offset, limit, _signal) => {
+        read: (path: string, offset: number, _signal: AbortSignal) => {
+          // The panel never chooses a page size: the fixture records the PORT's.
+          const limit = DELIVERED_FILE_PAGE_LINES
           readCalls.push({ offset, limit })
           if (options.autoResolve !== undefined) {
             return Promise.resolve({ ...options.autoResolve, offset, limit, text: options.autoResolve.text })
@@ -870,7 +875,10 @@ function previewHarness(
         },
       },
     }),
-    reportUnclassifiedFailure: (message) => { diagnostics.push(message) },
+    reportUnclassifiedFailure: (message) => {
+      diagnostics.push(message)
+      options.diagnostics?.push(message)
+    },
   })
   // Honor `setSize` exactly like the plain harness: the production chain grants
   // `min(24, rows - 2) - 2` content rows and the frame renders `columns - 4`.
@@ -1061,3 +1069,39 @@ test('a surface without a real pointer owner paints no dead Details verb', () =>
   const pointerRows = pointerPanel.render(96).map(row => stripTerminalSequences(row))
   assert.ok(pointerRows.join('\n').includes('Details'), 'a fullscreen surface paints it')
 })
+
+test('a superseded read is discarded SILENTLY and ends in a neutral, recoverable state', async () => {
+  const diagnostics: string[] = []
+  const h = previewHarness(snapshotOf([{ turn: 1, files: ['/ws/a.md'] }]), { diagnostics })
+  let reads = 0
+  h.setSize(100, 30)
+  h.type('enter')
+  assert.equal(h.preview().kind, 'loading-stat')
+  h.rows()
+
+  // The connection generation moves on while the request is in flight: the port
+  // refuses with the UI-silent `SupersededReadError`.
+  const { SupersededReadError } = await import('../../src/runtime/read-error.ts')
+  h.rejectStat(new SupersededReadError('generation'))
+  await new Promise(resolve => setTimeout(resolve, 10))
+  const rows = h.rows()
+  const text = rows.join('\n')
+  // A neutral, NON-claiming state: no loading, no stale bytes, no failure claim.
+  assert.ok(!text.includes('Loading'), `the loading state ends:\n${text}`)
+  assert.ok(!text.includes('Unable to preview file'), `a superseded read is not a failure claim:\n${text}`)
+  assert.ok(!text.includes('File no longer exists'), text)
+  assert.equal(h.preview().kind, 'idle', 'the page falls back to its neutral body')
+  assert.equal(diagnostics.length, 0, 'a UI-silent supersede is never reported as an error')
+  // The page still shows the REAL declared metadata.
+  assert.ok(text.includes('/ws/a.md'), text)
+  assert.ok(rows.some(row => row.includes('· Details')), 'the page is still the Details page')
+
+  // Recovery is the user's next explicit action: leave and re-enter re-requests.
+  h.type('esc')
+  h.rows()
+  h.type('enter')
+  assert.equal(h.preview().kind, 'loading-stat', 're-entering issues a NEW request')
+  reads = h.statCalls()
+  assert.ok(reads >= 1, 'the re-entry really asked the Host again')
+})
+

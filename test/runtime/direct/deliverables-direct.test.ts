@@ -42,23 +42,37 @@ test('the Direct adapter answers real Host metadata, pages and refusals', async 
   assert.equal(typeof stat.version, 'string')
   assert.equal(stat.bytes, Buffer.byteLength(content))
 
-  const page = await port.read(sessionId, filePath, 1, 120, abort)
+  const page = await port.read(sessionId, filePath, 1, abort)
   assert.deepEqual(
     { offset: page.offset, limit: page.limit, lines: page.lines, eof: page.eof, text: page.text },
     { offset: 1, limit: 120, lines: 3, eof: true, text: 'alpha\nbeta\ngamma' },
   )
   assert.equal(page.stat.version, stat.version)
 
-  // A windowed second page: the Host's own line accounting decides EOF.
-  const windowed = await port.read(sessionId, filePath, 2, 1, abort)
-  assert.deepEqual({ lines: windowed.lines, eof: windowed.eof, text: windowed.text }, { lines: 1, eof: false, text: 'beta' })
+  // A file LONGER than one page: the port's fixed 120-line bound and the Host's
+  // own line accounting decide the page, never a caller-supplied limit.
+  const longPath = join(docsDir, 'long.txt')
+  const longLines = Array.from({ length: 130 }, (_, index) => `l${index + 1}`)
+  writeFileSync(longPath, longLines.join('\n'))
+  const firstPage = await port.read(sessionId, longPath, 1, abort)
+  assert.deepEqual(
+    { offset: firstPage.offset, limit: firstPage.limit, lines: firstPage.lines, eof: firstPage.eof },
+    { offset: 1, limit: 120, lines: 120, eof: false },
+  )
+  assert.equal(firstPage.text.split('\n').at(-1), 'l120')
+  const secondPage = await port.read(sessionId, longPath, 121, abort)
+  assert.deepEqual(
+    { offset: secondPage.offset, limit: secondPage.limit, lines: secondPage.lines, eof: secondPage.eof },
+    { offset: 121, limit: 120, lines: 10, eof: true },
+  )
+  assert.equal(secondPage.text.split('\n')[0], 'l121')
 
   // The path resolves RELATIVE to the Session's header cwd (never the Client cwd).
-  const relative = await port.read(sessionId, 'docs/report.md', 1, 120, abort)
+  const relative = await port.read(sessionId, 'docs/report.md', 1, abort)
   assert.equal(relative.text, 'alpha\nbeta\ngamma')
 
   await assertRejectionCode(port.stat(sessionId, join(workspace, 'missing.md'), abort), 'not-found')
-  await assertRejectionCode(port.read(sessionId, join(workspace, 'binary.bin'), 1, 120, abort), 'not-text')
+  await assertRejectionCode(port.read(sessionId, join(workspace, 'binary.bin'), 1, abort), 'not-text')
   await assertRejectionCode(port.stat(sessionId, docsDir, abort), 'not-regular-file')
   await assertRejectionCode(port.stat('unknown-session', filePath, abort), 'session-unavailable')
   // The Session resolves, but the Host service is not mounted: a definite

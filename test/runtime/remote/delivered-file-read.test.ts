@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SupersededReadError } from '../../../src/runtime/read-error.ts'
 import { DeliveredFileReadError } from '../../../src/runtime/deliverables-port.ts'
+import { DELIVERED_FILE_PAGE_LINES } from '../../../src/runtime/deliverables-port.ts'
 import { RemoteDeliveredFileReadPort } from '../../../src/runtime/remote/deliverables-remote.ts'
 import type { RemoteConnectionGeneration } from '../../../src/runtime/remote/session-reader-remote.ts'
 import type { RemoteResultLike } from '../../../src/runtime/remote/session-writer-remote.ts'
@@ -146,22 +147,28 @@ test('the caller\'s cancellation is never rewritten as a Host outcome', async ()
   await assert.rejects(pending, /cancelled while reading/)
 })
 
-test('the read page carries the requested window and the Host version', async () => {
+test('the read page carries the PORT page size and the Host version', async () => {
+  let askedRange: { offset?: number; limit?: number } | undefined
   const port = new RemoteDeliveredFileReadPort(
     {
       stat: async () => STAT,
-      read: async (_session, _path, range) => ({
-        ok: true,
-        value: { version: 'v2', bytes: 20, text: 'beta', lines: 1, eof: false, offset: range.offset ?? 1 },
-      }),
+      read: async (_session, _path, range) => {
+        askedRange = range
+        return {
+          ok: true,
+          value: { version: 'v2', bytes: 20, text: 'beta', lines: 1, eof: false, offset: range.offset ?? 1 },
+        }
+      },
     },
     generationSource({ id: 'g1' }).source,
   )
-  const page = await port.read('s', '/ws/a.md', 2, 1, abort)
+  const page = await port.read('s', '/ws/a.md', 2, abort)
+  // The caller chooses the OFFSET only: the page bound is the port's contract.
+  assert.deepEqual(askedRange, { offset: 2, limit: DELIVERED_FILE_PAGE_LINES })
   assert.deepEqual(page, {
     stat: { version: 'v2', bytes: 20 },
     offset: 2,
-    limit: 1,
+    limit: DELIVERED_FILE_PAGE_LINES,
     text: 'beta',
     lines: 1,
     eof: false,

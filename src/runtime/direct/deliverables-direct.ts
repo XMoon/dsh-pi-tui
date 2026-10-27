@@ -20,13 +20,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/direct/deliverables-direct
  */
 
-import {
-  DeliveredFileReadError,
-  deliveredFileReadErrorFrom,
-  type DeliveredFilePage,
-  type DeliveredFileReadPort,
-  type DeliveredFileStat,
-} from '../deliverables-port.ts'
+import { DELIVERED_FILE_PAGE_LINES, DeliveredFileReadError, deliveredFileReadErrorFrom, type DeliveredFilePage, type DeliveredFileReadPort, type DeliveredFileStat } from '../deliverables-port.ts'
 
 /** One Session header's workspace-relevant field, when the Host reports it. */
 interface SessionHeaderLike {
@@ -112,9 +106,9 @@ export class DirectDeliveredFileReadPort implements DeliveredFileReadPort {
     sessionId: string,
     path: string,
     offset: number,
-    limit: number,
     signal: AbortSignal,
   ): Promise<DeliveredFilePage> {
+    const limit = DELIVERED_FILE_PAGE_LINES
     const scope = await this.scopeOf(sessionId)
     const files = this.files()
     try {
