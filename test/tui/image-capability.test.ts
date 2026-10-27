@@ -167,6 +167,7 @@ test('source to sink: the admitted component really emits the managed grid, and 
       cli.setReply('list-clients', { text: '' })
       // Past the 250 ms component-probe window, so this frame is really
       // re-probed (a managed physical write would force the probe sooner).
+      // The contract IS a time window: the 250 ms probe TTL must expire first.
       await new Promise<void>(resolve => setTimeout(resolve, 260))
       assert.equal(effectiveImageProtocol(graphics), null, 'the classifier reports the revocation')
       terminal.writes.length = 0
