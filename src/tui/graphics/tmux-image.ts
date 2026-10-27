@@ -144,7 +144,12 @@ export class TmuxKittyImage implements Component {
     this.paintedBody = { width, columns, rows }
     const grid = encodeKittyPlaceholderGrid(handle.imageId, handle.placementId, columns, rows)
     const marker = encodeManagedVirtualMarker(handle.imageId, handle.placementId)
-    const lines = [marker + encodeKittyVirtualPlacement(handle.imageId, handle.placementId, columns, rows) + grid[0]!]
+    // The grid marker follows the anchor command so the fork's anchor parser
+    // (which reads the line right after the image marker) still sees the APC
+    // first. Row 0 needs its own marker too: a 1 MiB cut can land inside its
+    // cells, and the continuation must still prove its provenance.
+    const lines = [marker + encodeKittyVirtualPlacement(handle.imageId, handle.placementId, columns, rows)
+      + KITTY_VIRTUAL_GRID_MARKER + grid[0]!]
     for (let row = 1; row < rows; row++) lines.push(KITTY_VIRTUAL_GRID_MARKER + grid[row]!)
     return lines
   }
