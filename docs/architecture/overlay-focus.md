@@ -238,11 +238,13 @@ source — today only the Delivered files browser uses it. The contract:
 - **One gesture, one owner.** A background press that lands on the modal is still
   cancelled by the barrier and can never be adopted mid-gesture by the opt-in.
 - **Currentness.** The latch dies when the entry is hidden/closed, when its
-  painted placement changes (resize, reflow, remount), when a newer visible
-  overlay paints above it, on a screen swap, on focus-out/stop, on a host content
-  replacement, and on the render-time revalidation right after overlays are
-  re-composited. A stale selection is cleared, never repainted onto the new
-  frame.
+  painted placement changes (resize, reflow, remount), when any other visible
+  overlay holds a HIGHER focus order, on a screen swap, on focus-out/stop, on a
+  host content replacement, and on the render-time revalidation right after
+  overlays are re-composited. The focus-order test is the pre-paint authority: a
+  newer modal already owns the pointer between its mount and the frame that
+  draws it, so a release in that window must not copy a range it now covers. A
+  stale selection is cleared, never repainted onto the new frame.
 - **Repaint vs corpus.** `resetTextSelection()` still drops the multi-click
   history (upstream #9311); `resetTextSelection({ preserveClickHistory: true })`
   drops only the range, for a host repaint of an overlay's OWN content where the

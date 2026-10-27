@@ -797,8 +797,9 @@ declared path, because a text selection copies what is painted. It is the
 CURRENT viewport's text: a Preview page is only ever selected as painted, never
 by reading neighbouring 120-line windows. The selection is dropped when the
 modal is closed, when its painted placement moves (resize, reflow, remount),
-when a newer overlay covers it, on a screen swap, and before the panel repaints
-its own content (a page/Turn/filter/scroll change), so a stale range can never
+when any other visible overlay holds a higher focus order (which includes a
+newer modal that is mounted but not painted yet), on a screen swap, and before
+the panel repaints its own content (a page/Turn/filter/scroll change), so a stale range can never
 copy text from another frame. The selection lives on the alt screen only: a
 regular surface has no application-owned text selection and paints no dead
 entry for it.
