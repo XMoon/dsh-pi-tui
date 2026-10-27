@@ -257,3 +257,129 @@ test('126 delivered files: only the SELECTED file reaches the Host, counted at t
     service.read = originalRead
   }
 })
+
+test('a binary suffix shows metadata only: ZERO Host reads, counted at the real service', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, 'pr2-binary-preset')
+  const workspace = life.tempDir('dsh-pr2-binary-ws-')
+  mkdirSync(workspace, { recursive: true })
+  const sessionId = SessionId('pr2-binary-session')
+  await host.harness.create(sessionId, undefined, { cwd: workspace })
+  const binaryPath = join(workspace, 'chart.png')
+  writeFileSync(binaryPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]))
+
+  const service = host.ctx.get('workspaceFiles') as unknown as {
+    stat(...args: unknown[]): Promise<unknown>
+    read(...args: unknown[]): Promise<unknown>
+  }
+  const originalStat = service.stat
+  const originalRead = service.read
+  let stats = 0
+  let reads = 0
+  service.stat = function patchedStat(this: unknown, ...args: unknown[]) {
+    stats += 1
+    return originalStat.apply(this, args)
+  }
+  service.read = function patchedRead(this: unknown, ...args: unknown[]) {
+    reads += 1
+    return originalRead.apply(this, args)
+  }
+  try {
+    const port = new DirectDeliveredFileReadPort(host.ctx)
+    const panel = new DeliveredFilesPanel({
+      snapshot: {
+        subjectKind: 'main',
+        sessionId,
+        sourceIdentity: {},
+        turns: [{ turn: 1, files: [{ path: binaryPath, description: 'the chart' }] }],
+      },
+      initial: { turn: 1, path: binaryPath, page: 'details' },
+      preview: {
+        stat: (path: string, signal: AbortSignal) => port.stat(sessionId, path, signal),
+        read: (path: string, offset: number, signal: AbortSignal) => port.read(sessionId, path, offset, signal),
+      },
+      requestRender: () => {},
+      close: () => {},
+      copyPath: (_path, settle) => settle(true),
+    })
+    panel.setMaxRows(20)
+    const paint = (): string => panel.render(96).map(row => stripTerminalSequences(row)).join('\n')
+    const deadline = Date.now() + 2_000
+    while (!paint().includes('Preview unavailable for this file type') && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    const painted = paint()
+    assert.ok(painted.includes('Preview unavailable for this file type'), painted)
+    assert.ok(painted.includes('chart.png'), 'the metadata still names the file')
+    // T24: metadata only — the content read NEVER happens on a real binary path.
+    assert.equal(reads, 0, `a binary suffix issues no Host read (reads=${reads})`)
+    assert.equal(stats, 1, `exactly one metadata probe, never a content read (stats=${stats})`)
+  } finally {
+    service.stat = originalStat
+    service.read = originalRead
+  }
+})
+
+test('a real Remote generation replacement never paints its late success or refusal', async (t) => {
+  const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, 'pr2-gen-preset')
+  const workspace = life.tempDir('dsh-pr2-gen-ws-')
+  mkdirSync(workspace, { recursive: true })
+  const filePath = join(workspace, 'gen.md')
+  writeFileSync(filePath, 'generation one\n')
+  const sessionId = SessionId('pr2-gen-session')
+  await host.harness.create(sessionId, undefined, { cwd: workspace })
+  let hostRuntime: RemoteHostRuntime | undefined
+  let client: RemoteClientRuntime | undefined
+  try {
+    hostRuntime = await createRemoteHostRuntime(host.ctx)
+    client = await createRemoteClientRuntime({ carrier: hostRuntime.carrier })
+    // The REAL Remote adapter over the official generated namespace, with a
+    // generation source this test can advance.
+    let generation: unknown = client.connection.generation
+    const port = new RemoteDeliveredFileReadPort(client.remote.workspaceFiles, {
+      getSnapshot: () => generation as never,
+      subscribe: () => () => {},
+    })
+    const panel = new DeliveredFilesPanel({
+      snapshot: {
+        subjectKind: 'main',
+        sessionId,
+        sourceIdentity: {},
+        turns: [{ turn: 1, files: [{ path: filePath }] }],
+      },
+      initial: { turn: 1, path: filePath, page: 'details' },
+      preview: {
+        stat: (path: string, signal: AbortSignal) => {
+          // DISPATCH FIRST (the adapter captures the generation there), then
+          // advance it before the reply is awaited: the reply must be classified
+          // as superseded.
+          const pending = port.stat(sessionId, path, signal)
+          generation = { id: 'superseded' }
+          return pending
+        },
+        read: (path: string, offset: number, signal: AbortSignal) => port.read(sessionId, path, offset, signal),
+      },
+      requestRender: () => {},
+      close: () => {},
+      copyPath: (_path, settle) => settle(true),
+    })
+    panel.setMaxRows(20)
+    const paint = (): string => panel.render(96).map(row => stripTerminalSequences(row)).join('\n')
+    const deadline = Date.now() + 5_000
+    while (paint().includes('Loading') && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    const painted = paint()
+    // T21: the late reply is UI-silent — no success, no Host refusal, no stale
+    // bytes, and no endless loading.
+    assert.ok(!painted.includes('generation one'), `a superseded success never paints:\n${painted}`)
+    assert.ok(!painted.includes('Unable to preview file'), `a superseded reply is not a failure claim:\n${painted}`)
+    assert.ok(!painted.includes('File no longer exists'), painted)
+    assert.ok(!painted.includes('Loading'), `the page settles:\n${painted}`)
+    assert.ok(painted.includes(filePath), `the declared metadata stays:\n${painted}`)
+  } finally {
+    await client?.dispose()
+    await hostRuntime?.dispose()
+  }
+})
