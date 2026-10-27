@@ -38,7 +38,7 @@ import type {
 } from './kitty-core.ts'
 import { KITTY_APC_INTRODUCER, KITTY_APC_TERMINATOR, parseKittyApc } from './kitty-native.ts'
 import type { TmuxKittyAdmission } from './tmux-admission.ts'
-import { encodeTmuxPassthrough } from './tmux-virtual.ts'
+import { KITTY_VIRTUAL_PLACEHOLDER, encodeTmuxPassthrough } from './tmux-virtual.ts'
 
 /**
  * The physical-write refusal of a tmux virtual handle whose live admission was
@@ -358,7 +358,16 @@ export class KittyTerminalFacade implements Terminal {
     const input = this.takeInput(data)
     if (input === undefined && !this.core.hasQueuedRetirements()) return
     const segments = input === undefined ? [] : this.scanSegments(input)
-    const hasManagedPlacement = segments.some(
+    // A managed image reaches the OUTER client two ways, and BOTH are managed
+    // bytes: the `a=p,U=1` prototype AND the placeholder TEXT cells that make it
+    // visible. The fork's frame writer splits one frame into multiple physical
+    // writes, so a later chunk can carry only grid rows — no `a=p` at all. Such
+    // a chunk must pass the same admission gate, or a revocation between chunks
+    // would let the old image's cells reach a different client.
+    const hasManagedGrid = segments.some(
+      (segment) => segment.kind === 'text' && segment.text.includes(KITTY_VIRTUAL_PLACEHOLDER),
+    )
+    const hasManagedPlacement = hasManagedGrid || segments.some(
       (segment) => segment.kind === 'apc' && this.managedPlacementId(segment.apc) !== undefined,
     )
     const hasRetirements = this.core.hasQueuedRetirements()

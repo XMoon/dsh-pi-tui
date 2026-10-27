@@ -35,6 +35,7 @@ import { svgHumanText } from '../../src/domain/visual/svg.ts'
 
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { effectiveImageProtocol } from '../../src/tui/graphics/image-capability.ts'
+import { TmuxGraphicsRevokedError } from '../../src/tui/graphics/kitty-terminal.ts'
 import type { KittyGraphics } from '../../src/tui/graphics/native-image.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { createFakeTmuxCli, type FakeTmuxCli } from '../support/fake-tmux-cli.ts'
@@ -917,4 +918,86 @@ test('a malformed SVG tool message is refused by the app and paints text only', 
   const painted = rows.join('\n')
   assert.ok(painted.includes('Broken drawing') || painted.includes('Drawing unavailable'),
     `the card keeps a truthful text presentation:\n${painted.slice(0, 400)}`)
+})
+
+test('a frame split across physical chunks transmits ONCE and paints the grid', async (t) => {
+  // The symmetric positive control for the split path: with an admitted client
+  // the SAME multi-chunk frame must transmit its payload once and paint every
+  // placeholder row, i.e. the admission gate never truncates a healthy frame.
+  const h = product(t)
+  assert.ok(h.graphics)
+  const ref = pngRef('att-split-ok', 'split-ok.png')
+  const padding = Array.from({ length: 1200 }, (_, index) => userMessage(
+    [{ type: 'text', text: `pad ${index} ${'y'.repeat(990)}` }], 100 + index))
+  const folder = new TranscriptFolder()
+  folder.apply([...(padding as never[]), userMessage([{ type: 'image', attachment: ref }], 1)])
+  h.app.setTranscript(folder.messages())
+  await until(() => h.loader.get(ref).state === 'ready', 'the split positive read')
+  await settle(h.app)
+  const text = h.terminal.writes.join('')
+  assert.ok(text.includes(PLACEHOLDER), 'the split frame painted its placeholder grid')
+  assert.ok(unwrappedApc(text) === false, 'every managed command stayed DCS-wrapped')
+  assert.ok(transmissions(text).length >= 1, 'the split frame transmitted its payload')
+  assert.equal(h.reads.get(ref.attachmentId), 1, 'and read the durable bytes once')
+})
+
+test('an ordinary terminal write error still propagates out of the app boundary', async (t) => {
+  // The revocation boundary must swallow ONLY `TmuxGraphicsRevokedError`. Any
+  // other write failure is a real error and has to surface unchanged.
+  const h = product(t)
+  assert.ok(h.graphics)
+  const ref = pngRef('att-propagate', 'propagate.png')
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage([{ type: 'image', attachment: ref }], 1)])
+  h.app.setTranscript(folder.messages())
+  await until(() => h.loader.get(ref).state === 'ready', 'the propagation read')
+  await settle(h.app)
+  const original = h.terminal.write.bind(h.terminal)
+  h.terminal.write = (data: string): void => {
+    original(data)
+    throw new Error('sink exploded')
+  }
+  assert.throws(() => h.graphics!.terminal.write('plain text'), /sink exploded/,
+    'a non-revocation write error must not be swallowed')
+  h.terminal.write = original
+})
+
+test('a revocation between the anchor write and a PUA-ONLY grid write refuses the grid', async (t) => {
+  // A managed virtual image reaches the outer client as TWO byte shapes: the
+  // `a=p,U=1` anchor row (which also carries the first grid row) and the
+  // REMAINING placeholder TEXT rows. The fork's frame writer can split exactly
+  // there. A chunk that carries only placeholder cells has no `a=p` at all, so
+  // it must still be treated as a managed batch and pass the SAME admission
+  // gate — otherwise a revocation between the two writes leaks the grid.
+  const h = product(t)
+  assert.ok(h.graphics)
+  const image = h.graphics.image(
+    { pngBase64: SAMPLE_PNG.toString('base64'), widthPx: 3200, heightPx: 2400 },
+    { maxWidthCells: 150, maxHeightCells: 40, fallback: '[img]' },
+  ) as { render(width: number): string[] }
+  const rows = image.render(190)
+  assert.ok(rows.length > 1, 'the managed image really paints multiple grid rows')
+  const anchor = rows[0]!
+  const grid = rows.slice(1).join('\r\n')
+  assert.ok(anchor.includes('a=p'), 'the first row carries the virtual placement')
+  assert.ok(grid.includes(PLACEHOLDER), 'the remaining rows are placeholder cells only')
+  assert.equal(grid.includes('a=p'), false, 'and they carry NO placement command')
+
+  h.terminal.writes.length = 0
+  // 1) The anchor batch is admitted and written.
+  h.graphics.terminal.write(anchor)
+  assert.ok(h.terminal.writes.join('').includes('a=p'), 'the anchor write reached the sink')
+  // 2) The client changes; 3) the PUA-only grid is refused as a managed batch.
+  h.cli.setReply('list-clients', { text: '' })
+  const before = h.terminal.writes.join('')
+  const cellsBefore = (before.match(/\u{10EEEE}/gu) ?? []).length
+  // Through the PRODUCT terminal the refusal is converted into a forced text
+  // repaint (the app boundary), so assert on what reached the sink: the grid
+  // must NOT be written. The facade's own throw contract is covered directly by
+  // the unit suite (`kitty-tmux-screen.test.ts`).
+  h.graphics!.terminal.write(grid)
+  const after = h.terminal.writes.join('')
+  const cellsAfter = (after.match(/\u{10EEEE}/gu) ?? []).length
+  assert.equal(cellsAfter, cellsBefore, 'the refused grid write emitted NO additional cell')
+  assert.equal(after.slice(before.length).includes('a=p'), false, 'and no command either')
 })

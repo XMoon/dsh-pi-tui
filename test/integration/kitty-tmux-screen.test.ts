@@ -19,6 +19,7 @@ import {
   TuiAltScreen,
   TuiMainScreen,
   setCapabilities,
+  setCellDimensions,
   type Component,
   type Terminal,
   type TerminalProgressState,
@@ -1225,5 +1226,82 @@ test('the fork Kitty capability in a tmux pane never lets a global cleanup escap
     graphics.dispose()
     cli.dispose()
     setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  }
+})
+
+test('tmux virtual: a frame larger than one writer chunk paints its grid across physical writes', (t) => {
+  // The real `TuiMainScreen` flushes one frame in 1 MiB physical chunks. A
+  // managed image whose rows land in a LATER chunk must still paint: the grid is
+  // text, not a placement, so the success path has to survive the split.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  setCellDimensions({ widthPx: 9, heightPx: 18 })
+  try {
+    const image = imageOf(h.graphics, source(PNG, 3200, 2400), {
+      maxWidthCells: 150,
+      maxHeightCells: 40,
+      fallback: '[fallback]',
+    })
+    class BigRoot implements Component {
+      render(width: number): string[] {
+        return [
+          ...Array.from({ length: 12000 }, (_, index) => `pad ${index} ${'z'.repeat(740)}`),
+          ...image.render(width),
+        ]
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(h.graphics.terminal)
+    screen.addChild(new BigRoot())
+    screen.start()
+    screen.renderNow()
+    const text = h.terminal.text
+    const chunks = h.terminal.writes.length
+    assert.ok(chunks >= 2, `the frame must really split across physical writes, got ${chunks}`)
+    const scan = scanOuter(text)
+    assert.equal(scan.commands.some(command => command.controls.a === 't'), true,
+      'the managed payload was transmitted')
+    assert.equal(scan.commands.some(command => command.controls.a === 'p' && command.controls.U === '1'), true,
+      'the virtual placement was written')
+    assert.ok(count(scan.text, P) > 0, 'the placeholder grid reached the sink')
+    screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: a revocation between writer chunks refuses every later placeholder chunk', (t) => {
+  // The refusal has to hold for a PUA-ONLY physical chunk, i.e. one that carries
+  // grid cells but NO `a=p`. Without that, a revocation in the middle of a
+  // frame would leak the old image's cells to a different client.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  setCellDimensions({ widthPx: 9, heightPx: 18 })
+  try {
+    const image = imageOf(h.graphics, source(PNG, 3200, 2400), {
+      maxWidthCells: 150,
+      maxHeightCells: 40,
+      fallback: '[fallback]',
+    })
+    const rows = image.render(190)
+    assert.ok(rows.length > 1, 'fixture: the image really paints several grid rows')
+    const anchor = rows[0]!
+    const grid = rows.slice(1).join('\r\n')
+    assert.ok(anchor.includes('a=p'), 'fixture: the first row carries the placement')
+    assert.equal(grid.includes('a=p'), false, 'fixture: the remaining rows carry NO placement')
+    assert.ok(grid.includes(P), 'fixture: the remaining rows are placeholder cells')
+
+    h.graphics.terminal.write(anchor)
+    const before = h.terminal.text
+    assert.ok(before.includes('a=p'), 'the admitted anchor reached the sink')
+
+    h.cli.setReply('list-clients', { text: '' })
+    assert.throws(() => h.graphics.terminal.write(grid), TmuxGraphicsRevokedError,
+      'a PUA-only managed batch must be refused once the admission is revoked')
+    assert.equal(h.terminal.text, before, 'the refused grid emitted nothing at all')
+  } finally {
+    h.dispose()
   }
 })
