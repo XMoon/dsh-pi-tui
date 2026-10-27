@@ -131,7 +131,7 @@ Client-local:
 | Fact | Authority |
 | --- | --- |
 | Locality | Host-owned (the file lives in the Host workspace) |
-| Semantic port | `DeliveredFileReadPort` — `stat(sessionId, path)` and `read(sessionId, path, offset, limit)` |
+| Semantic port | `DeliveredFileReadPort` — `stat(sessionId, path, signal)` and `read(sessionId, path, offset, signal)`: the caller chooses the OFFSET only, the page bound is the port's own (`DELIVERED_FILE_PAGE_LINES`, one page per read) |
 | Direct adapter | `runtime/direct/deliverables-direct.ts` over the in-process official Host file service |
 | Remote adapter | `runtime/remote/deliverables-remote.ts` over the official generated `workspaceFiles` namespace |
 | Host service | `@deepseek-ai/dsh-api-workspace-files` (`workspaceFiles`), mounted ONCE by the bundle's `cordis.patch.yml` row and reused by the Remote Host graph |

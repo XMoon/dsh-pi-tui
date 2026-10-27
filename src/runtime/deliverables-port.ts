@@ -6,8 +6,8 @@
  * It is Host-owned and read-only by contract:
  *
  * ```text
- * stat(sessionId, path)              -> the Host's freshness token + byte size
- * read(sessionId, path, offset, limit) -> one decoded UTF-8 page of lines
+ * stat(sessionId, path, signal)          -> the Host's freshness token + byte size
+ * read(sessionId, path, offset, signal)  -> one decoded UTF-8 page of lines
  * ```
  *
  * Both Direct and Remote serve this SAME vocabulary; the Direct adapter reads
@@ -94,8 +94,8 @@ export interface DeliveredFileReadPort {
    */
   stat(sessionId: string, path: string, signal: AbortSignal): Promise<DeliveredFileStat>
   /**
-   * Read ONE page of exactly `DELIVERED_FILE_PAGE_LINES` lines starting at
-   * `offset` (1-based). The page size is the PORT's contract, not a caller
+   * Read ONE page of AT MOST `DELIVERED_FILE_PAGE_LINES` lines starting at
+   * `offset` (1-based) — fewer at end of file. The page size is the PORT's contract, not a caller
    * choice: the Host decodes UTF-8 and refuses non-text, and the port never
    * reads whole files.
    */
