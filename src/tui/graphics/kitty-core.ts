@@ -267,16 +267,6 @@ export class KittyGraphicsCore {
   }
 
   /**
-   * Whether ANY id in this Core's allocated slice has the given low 24 bits.
-   *
-   * The virtual grid's identity colors carry only the low 24 bits (the high
-   * byte rides a diacritic), so a grid row cannot be matched against a full
-   * 32-bit id without the Core's own authority. The slice is contiguous, so this
-   * is an exact interval test on the low bits, not a second id registry.
-   */
-
-
-  /**
    * The wire the facade must emit immediately BEFORE a placement of
    * `imageId`: the full quiet transmission when the current buffer no longer
    * holds the data, otherwise an empty string. Transmitting is the only way
