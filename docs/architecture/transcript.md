@@ -734,8 +734,18 @@ prefix, never inferred from the room the label left over), and they carry the
 `turn + raw path` identity of the frame that drew them: a state change that can
 reorder or replace the list (a committed filter, a Turn switch) invalidates the
 recorded cells until the next frame, so a click never acts on a row the user did
-not see. The list keeps its selection VISIBLE across a filter — the scroll top is
-re-derived from the retained index in both directions, not merely clamped.
+not see. The list keeps its selection VISIBLE across a filter AND across a viewport
+change — the scroll top is re-derived from the retained index in both
+directions on every render, not merely clamped, so shrinking the terminal never
+leaves the marked row below the new grant.
+
+A POINTER gesture follows the terminal layer's own contract: a PRESS may select
+a row and consume the cell, but entering a page requires the synthesized
+`click` (same cell, no drag), so press-then-drag-away opens nothing. Copy
+feedback belongs to ONE request token: only the latest copy may paint
+`Path copied` / `Could not copy path`, a slower earlier write can never
+overwrite a newer attempt, and leaving the page (or entering it again) retires
+the previous visit's pending settlement.
 
 **Details is metadata in this contract**: the declared Host path and
 description, with `C` copying the RAW declared path string (the display is

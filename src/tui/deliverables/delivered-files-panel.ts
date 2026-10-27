@@ -169,6 +169,8 @@ export class DeliveredFilesPanel implements Component {
   private listTop = 0
   private detailsTop = 0
   private copyState: 'idle' | 'ok' | 'failed' = 'idle'
+  /** The copy request token: only the LATEST request may paint feedback. */
+  private copySerial = 0
   private maxRows = 20
   private disposed = false
 
@@ -481,6 +483,9 @@ export class DeliveredFilesPanel implements Component {
     this.seat = 'list'
     this.detailsTop = 0
     this.copyState = 'idle'
+    // A pending clipboard settlement from an EARLIER visit is stale now: this
+    // page is a new read of the file, not the old page's outcome.
+    this.copySerial += 1
     this.requestRender()
   }
 
@@ -511,8 +516,13 @@ export class DeliveredFilesPanel implements Component {
     const file = this.selectedFile()
     if (file === undefined) return
     const turn = this.currentTurn()
+    // ONE request token per copy: only the LATEST request may paint feedback, so
+    // a slower earlier write can never overwrite a newer attempt, and a
+    // settlement belonging to a page the user already left stays stale.
+    this.copySerial += 1
+    const serial = this.copySerial
     this.copyPath(file.path, (ok) => {
-      if (this.disposed) return
+      if (this.disposed || serial !== this.copySerial) return
       // The selection may have moved while the clipboard write was pending: a
       // settlement for another Turn/file must never paint "copied" over it.
       if (this.page !== 'details' || this.currentTurn() !== turn || this.selectedPath !== file.path) return
@@ -527,6 +537,11 @@ export class DeliveredFilesPanel implements Component {
     if (this.disposed) return undefined
     if (event.type !== 'press' && event.type !== 'click') return undefined
     if (event.button !== 'left') return undefined
+    // A PRESS may only SELECT a row. Entering a page is a complete gesture:
+    // the terminal layer synthesizes `click` only when the press and the release
+    // stayed on the same cell without a drag, so a press-then-drag-away must not
+    // have opened anything already.
+    const completeClick = event.type === 'click'
     // Only a frame painted at THIS width can be hit: a resize invalidates the
     // recorded rows before the next paint.
     if (Math.floor(event.width) !== this.paintedWidth || Math.floor(event.height) !== this.paintedRows) return undefined
@@ -541,6 +556,12 @@ export class DeliveredFilesPanel implements Component {
       const file = this.filteredFiles().find(candidate => candidate.path === action.path)
       if (file === undefined) return undefined
       this.selectedPath = file.path
+      // The press consumes the cell (so the row does not also change owner) but
+      // opens nothing; only the synthesized click enters the page.
+      if (!completeClick) {
+        this.requestRender()
+        return { handled: true, render: true }
+      }
       this.openDetails()
       return { handled: true, render: true }
     }
@@ -671,6 +692,11 @@ export class DeliveredFilesPanel implements Component {
     const area = Math.max(1, this.maxRows - rows.length - 1)
     const listWidth = twoColumn ? Math.max(24, Math.floor((safeWidth - 3) * 0.58)) : safeWidth
     const sideWidth = twoColumn ? Math.max(8, safeWidth - listWidth - 3) : 0
+    // The granted area changes with the terminal: a shrink must REVEAL the
+    // selection again instead of leaving it below the new viewport (the stored
+    // top was legal for the previous, taller frame).
+    const currentIndex = filtered.findIndex(file => file.path === this.selectedPath)
+    if (currentIndex >= 0) this.revealSelection(filtered, currentIndex)
     const listTop = Math.max(0, Math.min(this.listTop, Math.max(0, filtered.length - area)))
     this.listTop = listTop
     const visible = filtered.slice(listTop, listTop + area)
