@@ -1331,3 +1331,141 @@ test('tmux virtual: a revocation between writer chunks refuses every later place
     h.dispose()
   }
 })
+
+test('tmux virtual: a chunk cut INSIDE a grid row is refused as a continuation', (t) => {
+  // The fork's 1 MiB writer only avoids splitting surrogate pairs: it can cut a
+  // grid row AFTER that row's colour prefix and inside its placeholder cells.
+  // The tail then carries cells but no colours of its own, so the facade must
+  // attribute it to the row that was still open.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  setCellDimensions({ widthPx: 9, heightPx: 18 })
+  try {
+    const image = imageOf(h.graphics, source(PNG, 3200, 2400), {
+      maxWidthCells: 150,
+      maxHeightCells: 40,
+      fallback: '[fallback]',
+    })
+    const rows = image.render(190)
+    const anchor = rows[0]!
+    const row = rows[1]!
+    const cut = row.indexOf(P) + 40
+    assert.ok(cut > 40 && cut < row.length, 'fixture: the cut is inside a placeholder run')
+    const head = row.slice(0, cut)
+    const tail = row.slice(cut)
+    assert.ok(head.includes('38;2;'), 'fixture: the head carries the row colour prefix')
+    assert.equal(tail.includes('38;2;'), false, 'fixture: the tail carries cells but NO colours')
+    assert.ok(tail.includes(P), 'fixture: the tail really carries placeholder cells')
+
+    h.graphics.terminal.write(anchor)
+    h.graphics.terminal.write(head)
+    const before = h.terminal.text
+    h.cli.setReply('list-clients', { text: '' })
+    assert.throws(() => h.graphics.terminal.write(tail), TmuxGraphicsRevokedError,
+      'a mid-row continuation must be refused after the revocation')
+    assert.equal(h.terminal.text, before, 'the refused continuation emitted nothing')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: a REAL 1 MiB writer cut inside the grid leaks no cell on revocation', (t) => {
+  // Same contract at the REAL writer boundary: build a frame larger than 1 MiB
+  // whose image starts just before the boundary, so the first physical chunk
+  // ends inside a grid row and the next chunk begins with cells but no colours.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  setCellDimensions({ widthPx: 9, heightPx: 18 })
+  const h = harness(t)
+  h.terminal.columns = 400
+  try {
+    const build = (sink: RecordingTerminal, fill: string[]): {
+      graphics: NonNullable<ReturnType<typeof createTmuxKittyGraphics>>
+      screen: TuiMainScreen
+      image: ReturnType<typeof imageOf>
+    } => {
+      const graphics = createTmuxKittyGraphics(sink, {}, h.cli.env)
+      assert.ok(graphics)
+      const image = imageOf(graphics, source(PNG, 3200, 2400), {
+        maxWidthCells: 90,
+        maxHeightCells: 40,
+        fallback: '[fallback]',
+      })
+      class Root implements Component {
+        private readonly rows = image.render(400)
+        render(width: number): string[] {
+          return [...fill, ...this.rows]
+        }
+        invalidate(): void {
+          image.invalidate()
+        }
+      }
+      const screen = new TuiMainScreen(graphics.terminal)
+      screen.addChild(new Root())
+      screen.start()
+      return { graphics, screen, image }
+    }
+
+    // Calibrate the frame prefix with no filler, then place the image start just
+    // before the 1 MiB boundary so the cut lands inside the grid.
+    const calibSink = new RecordingTerminal()
+    calibSink.columns = 400
+    const calib = build(calibSink, [])
+    calib.screen.renderNow()
+    const calibText = calibSink.text
+    const imageStart = calibText.indexOf('\x1b_Ga=p')
+    assert.ok(imageStart > 0, 'calibration: the anchor is on the wire')
+    calib.screen.stop()
+    calib.graphics.dispose()
+
+    const target = 1024 * 1024 - 30_000
+    const filler: string[] = []
+    let need = target - imageStart
+    const perLine = 398
+    while (need > perLine) {
+      filler.push('x'.repeat(396))
+      need -= perLine
+    }
+    if (need > 2) filler.push('x'.repeat(need - 2))
+
+    const real = build(h.terminal, filler)
+    const calls: string[] = []
+    const originalWrite = real.graphics.terminal.write.bind(real.graphics.terminal)
+    ;(real.graphics.terminal as { write: (data: string) => void }).write = (data: string): void => {
+      calls.push(data)
+      originalWrite(data)
+    }
+    let revoked = false
+    const originalSinkWrite = h.terminal.write.bind(h.terminal)
+    h.terminal.write = (data: string): void => {
+      originalSinkWrite(data)
+      if (!revoked) {
+        revoked = true
+        h.cli.setReply('list-clients', { text: '' })
+      }
+    }
+    let thrown: unknown
+    try {
+      real.screen.renderNow()
+    } catch (error) {
+      thrown = error
+    }
+    const text = h.terminal.text
+    // The split must REALLY be inside a grid row: chunk 1 ends with cells and
+    // no newline, and chunk 2 starts with cells whose line has no colours.
+    assert.ok(calls.length >= 2, `the frame must split into at least two physical writes, got ${calls.length}`)
+    const first = calls[0]!
+    const second = calls[1]!
+    assert.ok(first.includes(P) && !first.endsWith('\n'), 'chunk 1 ends inside a grid row')
+    const secondHead = second.split('\n')[0]!
+    assert.ok(secondHead.includes(P), 'chunk 2 begins with placeholder cells')
+    assert.equal(secondHead.includes('38;2;'), false, 'chunk 2 begins WITHOUT a colour prefix')
+    assert.equal(thrown instanceof TmuxGraphicsRevokedError, true,
+      `the mid-row continuation must be refused, got ${String(thrown)}`)
+    assert.equal((text.match(new RegExp(P, 'gu')) ?? []).length,
+      (first.match(new RegExp(P, 'gu')) ?? []).length,
+      'no cell beyond the first (pre-revocation) chunk reached the sink')
+    real.screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
