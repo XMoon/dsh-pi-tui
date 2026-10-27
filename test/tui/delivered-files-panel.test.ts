@@ -1522,3 +1522,44 @@ test('a held Details [Back] cannot retarget to the Files [Close] after a page ch
   assert.equal(h.closes(), 0)
   assert.equal(h.panel.currentPage(), 'files')
 })
+
+test('a Files body press leaves the cell for overlay text selection; a button press stays owned', () => {
+  const h = harness(ONE_TURN)
+  h.setSize(100, 30)
+  const rows = h.rows()
+  const dataRow = rows.findIndex(row => row.includes('report-final.md'))
+  assert.ok(dataRow > 0, rows.join('\n'))
+  const width = contentWidth(100, 30)
+  const height = contentRows(100, 30)
+  const event = (type: 'press' | 'click', x: number, y: number) => h.panel.handleMouse({
+    type, button: 'left', x, y, screenX: x, screenY: y, width, height,
+    shift: false, alt: false, ctrl: false,
+  })
+
+  // The list BODY (left of the painted verb) does not consume the press: the
+  // fork's opt-in turns it into a text selection clipped to the frame.
+  assert.equal(event('press', 4, dataRow), undefined, 'a body press must reach the overlay opt-in')
+  // The release-synthesized click still selects THAT row, so a normal click
+  // keeps its PR A behavior.
+  const click = event('click', 4, dataRow)
+  assert.equal(click?.handled, true)
+  assert.deepEqual(h.panel.selection(), { turn: 24, path: '/ws/output/report-final.md' })
+
+  // Buttons keep owning their press: the painted `Details` verb and the action
+  // bar both consume it, so no selection gesture can start on them.
+  const verbColumn = rows[dataRow]!.lastIndexOf('Details') + 2
+  assert.equal(event('press', verbColumn, dataRow)?.handled, true, 'the Details verb owns its press')
+  const bar = rows.at(-1)!
+  assert.equal(event('press', bar.indexOf('[Close]') + 2, rows.length - 1)?.handled, true,
+    'an action-bar button owns its press')
+
+  // A drag between press and release never completes the row click.
+  event('press', 4, dataRow)
+  h.panel.handleMouse({
+    type: 'drag', button: 'left', x: 12, y: dataRow, screenX: 12, screenY: dataRow, width, height,
+    shift: false, alt: false, ctrl: false,
+  })
+  assert.equal(h.panel.selection().path, '/ws/output/report-final.md',
+    'fixture: the row was already selected by the click above')
+  assert.equal(event('click', 12, dataRow), undefined, 'a dragged release is not a row click')
+})

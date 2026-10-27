@@ -78,6 +78,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Ctrl+O keeps its existing expand/collapse ownership where it is available;
   where it belongs to another owner the tail stays capped behind the command;
   with neither owner it fails open and paints no inoperable hint.
+- **The `/deliverables` panel's own text is now selectable and copyable with the
+  mouse.**
+  Dragging over a file row's path or description, the sidebar, the Details
+  header lines or the preview text selects exactly the visible cells inside the
+  panel's content area and copies them on release, with the original spacing and
+  indentation preserved. Double-click selects the word under the pointer (a
+  path such as `report-2026.md` stays one word) and triple-click the visible
+  line, respecting wide CJK characters and emoji. The selection can never leave
+  the panel: it stops at the frame border, a drag taken outside maps back to the
+  nearest content cell, and the transcript behind the panel is never selected or
+  copied. Buttons keep working as buttons — a click on `Details`, `[Filter]`,
+  `[Turns]`, `[Copy path]`, `[Back]` or `[Close]` still runs that action instead
+  of starting a selection, and a single click on a file row still just selects
+  it. The selection is dropped when the panel closes, when the terminal is
+  resized, when another panel covers it or when its own content changes, so a
+  late release can never copy text from a frame that is no longer there. A
+  regular split surface is unchanged: it has no application-owned text
+  selection, and `Copy path` / `Shift+C` remains the way to get the exact raw
+  path. Other panels keep their previous behavior — none of them becomes
+  selectable.
 - **PiTUI final answers now carry real actions for published charts/SVGs and a fullscreen SVG reader.**
   A chart keeps its exact values and gains `Copy Data` (the final ChartFact as pretty JSON);
   an SVG keeps its description and admitted thumbnail and gains `View` / `Copy SVG` (the raw

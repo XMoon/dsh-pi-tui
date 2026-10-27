@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import type { Component, TUI } from "../src/tui.ts";
+import type { Component, OverlayOptions, TUI, TuiMouseEvent } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -577,6 +577,41 @@ describe("TUI overlay options", () => {
 			handle.hide();
 
 			assert.strictEqual(terminal.cursorVisible, true);
+		});
+	});
+	describe("textSelectionInsets (X068)", () => {
+		/** Records the mouse events a component receives. */
+		class MouseRecorder implements Component {
+			readonly events: string[] = [];
+			render(): string[] {
+				return ["content row"];
+			}
+			invalidate(): void {}
+			handleMouse(event: TuiMouseEvent): { handled: true } | undefined {
+				this.events.push(event.type);
+				return undefined;
+			}
+		}
+
+		it("is inert on the regular main screen, which owns no text selection", () => {
+			const terminal = new VirtualTerminal(80, 24);
+			const tui: TUI = new TuiMainScreen(terminal);
+			tui.start();
+			const overlay = new MouseRecorder();
+			const options: OverlayOptions = { textSelectionInsets: { top: 0, right: 0, bottom: 0, left: 0 } };
+			tui.showOverlay(overlay, options);
+			assert.strictEqual(overlay.events.length, 0, "showing the overlay must not synthesize a mouse event");
+			tui.stop();
+		});
+
+		it("keeps the option optional, so an overlay without it compiles and behaves as before", () => {
+			const terminal = new VirtualTerminal(80, 24);
+			const tui: TUI = new TuiMainScreen(terminal);
+			tui.start();
+			const overlay = new MouseRecorder();
+			tui.showOverlay(overlay, { width: 20 });
+			assert.strictEqual(overlay.events.length, 0);
+			tui.stop();
 		});
 	});
 });

@@ -966,22 +966,23 @@ export class DeliveredFilesPanel implements Component {
         this.pressedCell = undefined
         return undefined
       }
+      // A BUTTON keeps its press: a row's `Details` verb, every action-bar
+      // button, and a Turns-page row (that page is a navigation list, not
+      // selectable content). The press half owns the gesture, so a drag never
+      // completes it.
+      if (target.kind !== 'list') {
+        this.pressedCell = { page: this.page, seat: liveSeat, x: event.x, y: event.y, identity: target.identity }
+        return { handled: true }
+      }
+      // A Files BODY row (a listed file's path/description, never its verb)
+      // leaves the press UNCONSUMED: the modal's fork opt-in
+      // (`textSelectionInsets`, divergence X068) turns it into a text selection
+      // clipped to the frame's content rectangle. The row is still selected by
+      // the complete click the release synthesizes when the press did not drag,
+      // and the recorded identity keeps that click from retargeting a list
+      // repainted under the held pointer.
       this.pressedCell = { page: this.page, seat: liveSeat, x: event.x, y: event.y, identity: target.identity }
-      if (target.kind === 'details' && target.path !== undefined) {
-        this.selectedPath = target.path
-        this.requestRender()
-        return { handled: true, render: true }
-      }
-      if (target.kind === 'list' && target.path !== undefined) {
-        // A non-verb Files row selects on BOTH press and click: the opaque
-        // overlay does not turn an unconsumed press into native selection, so
-        // a click-only row would leave that gesture with no selection. They
-        // must change together if text selection is ever added here.
-        this.selectedPath = target.path
-        this.requestRender()
-        return { handled: true, render: true }
-      }
-      return { handled: true }
+      return undefined
     }
 
     // A synthesized click is only valid for the EXACT cell and semantic target
