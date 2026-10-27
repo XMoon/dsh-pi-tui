@@ -93,7 +93,7 @@ The callbacks to consider (not just `focus()`): Advanced `onFocus` /
 | fullscreen rebind / restore | the logical graph survives; rebind with `initialFocus:false` | rebind / one restore focus | none |
 | session switch / final teardown | close the Job/Settings workspace before its parent browser; clear refs | — | none |
 | Job workspace open / close | commit the screen lease, latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the workspace panel's `Esc`/`tasks.stop` intents | `activeScreen` derives the physical owner from the lease (see §10.1) |
-| Settings workspace open / close | commit the screen lease (mutually exclusive with the Job lease), latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the Settings panel's `Esc` intents, `TuiApp.dispose()`/`stop()` and a blocking owner that pre-empts by closure | `activeScreen` derives the physical owner from the lease (see §10.3) |
+| Settings workspace open / close | commit the screen lease (mutually exclusive with the Job lease), latch it BEFORE any callback, pause the return screen (`preserveScreen`) | the Settings panel's `Esc` intents, `TuiApp.dispose()`/`stop()`, and the `closeLeasedWorkspaces` choke point (session switch, blocking-owner pre-emption, retired visual viewer) | `activeScreen` derives the physical owner from the lease (see §10.3) |
 | `custom()` done/close (factory or callback) | `settled` latch; the mounted lease is reclaimed | focus callbacks | no stale `pendingBrokerSettles` entry |
 
 ## 4. Reentrancy matrix
@@ -387,13 +387,18 @@ that grant instead of the whole terminal height.
   frame grants at most 26 content rows on any terminal taller than 30 rows. This
   is a viewport/grant rule of that component, NOT the Settings Workspace:
   `/settings` opens the Settings Workspace, whose Keyboard shortcuts and Footer
-  pages are same-lease pages with their own budget contract above. No row
-  producer opens a nested submenu any more (the retired complete editor supplied
-  the only one, `Keyboard shortcuts`); the component's `submenu` slot and its
-  budget forwarding stay as the fork's contract, exercised by its own divergences
-  rather than by a live settings row. The fork's SettingsList still lacks
-  filtered-state Home/End paging, and such a list still shows at most six visible
-  rows. A blocking owner pre-empts by closure (§10.1 above).
+  pages are same-lease pages with their own budget contract above. No live row
+  producer opens a nested submenu any more: the retired complete editor was the
+  only one that did, for its `Theme`, `Keyboard shortcuts`, `Subagent allowed
+  models`, Web endpoint and Web credential rows. Each of those fields is now
+  edited by the workspace's own choice, by a same-lease specialist page, or by
+  the embedded Web page (which reuses `WebEndpointPanel` as its own draft
+  editor, not as a row submenu). The component's `submenu` slot and its budget
+  forwarding stay as the fork's contract, exercised by its own divergences and
+  by the picker unit tests rather than by a live settings row. The fork's
+  SettingsList still lacks filtered-state Home/End paging, and such a list still
+  shows at most six visible rows. A blocking owner pre-empts by closure (§10.1
+  above).
 
 ## 10. One-shot closure: output viewer and task browser
 
