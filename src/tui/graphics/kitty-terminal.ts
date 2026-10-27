@@ -38,7 +38,7 @@ import type {
 } from './kitty-core.ts'
 import { KITTY_APC_INTRODUCER, KITTY_APC_TERMINATOR, parseKittyApc } from './kitty-native.ts'
 import type { TmuxKittyAdmission } from './tmux-admission.ts'
-import { encodeTmuxPassthrough, hasKittyVirtualCells } from './tmux-virtual.ts'
+import { KITTY_VIRTUAL_PLACEHOLDER, encodeTmuxPassthrough } from './tmux-virtual.ts'
 
 /**
  * The physical-write refusal of a tmux virtual handle whose live admission was
@@ -200,6 +200,14 @@ export class KittyTerminalFacade implements Terminal {
   private buffer: KittyScreenBuffer = 'main'
   /** Global image deletes offered by THIS write, committed only on success. */
   private pendingGlobalDeletes: KittyGlobalImageDeletePlan[] = []
+  /**
+   * Grid ROWS still owed by the managed anchor this stream last wrote. The
+   * anchor's own `r=` is the authority: while this is non-zero every placeholder
+   * in the text belongs to that managed image, however the writer cuts the
+   * bytes. Plain text outside such a block is never managed, even when it
+   * happens to contain a glyph identical to a grid cell.
+   */
+  private managedGridRows = 0
   private disposed = false
 
   constructor(inner: Terminal, core: KittyGraphicsCore, options: KittyTerminalFacadeOptions = {}) {
@@ -355,6 +363,8 @@ export class KittyTerminalFacade implements Terminal {
   }
 
   private writeTmuxVirtual(data: string): void {
+    // A synchronised frame starts a fresh text grid: no row spans frames.
+    if (data.includes('\x1b[?2026h')) this.managedGridRows = 0
     const input = this.takeInput(data)
     if (input === undefined && !this.core.hasQueuedRetirements()) return
     const segments = input === undefined ? [] : this.scanSegments(input)
@@ -372,10 +382,14 @@ export class KittyTerminalFacade implements Terminal {
     // image and (once revoked) refuse the whole text frame forever. The
     // structure also survives a physical cut inside a row, where the tail
     // carries cells but no colour prefix.
-    const hasManagedPlacement = segments.some((segment) => {
-      if (segment.kind === 'apc') return this.managedPlacementId(segment.apc) !== undefined
-      return this.managedGridIn(segment.text)
-    })
+    let hasManagedPlacement = false
+    for (const segment of segments) {
+      if (segment.kind === 'apc') {
+        if (this.managedPlacementId(segment.apc) !== undefined) hasManagedPlacement = true
+      } else if (this.consumeGridText(segment.text)) {
+        hasManagedPlacement = true
+      }
+    }
     const hasRetirements = this.core.hasQueuedRetirements()
     this.pendingGlobalDeletes = []
     // The retirements and the frame are TWO physical sink batches (the flush
@@ -389,7 +403,10 @@ export class KittyTerminalFacade implements Terminal {
         // screen instead of throwing forever. Nothing is sent to the possibly
         // different client and no painted image is affected.
         this.core.discardQueuedRetirements()
-        if (hasManagedPlacement) throw new TmuxGraphicsRevokedError()
+        if (hasManagedPlacement) {
+          this.managedGridRows = 0
+          throw new TmuxGraphicsRevokedError()
+        }
       } else {
         // Queued retirements go first, each one individually DCS-wrapped.
         this.flushVirtualRetirements()
@@ -398,6 +415,7 @@ export class KittyTerminalFacade implements Terminal {
     if (hasManagedPlacement && this.admission?.isAllowed(true) !== true) {
       // The frame's managed batch was NOT written: no placeholder cell and no
       // DCS escaped. The scan below (which mutates Core residency) never ran.
+      this.managedGridRows = 0
       throw new TmuxGraphicsRevokedError()
     }
     let wire = ''
@@ -497,21 +515,27 @@ export class KittyTerminalFacade implements Terminal {
     const imageId = numericControl(command.controls.i)
     if (imageId === undefined || !this.core.ownsIdSpace(imageId)) return undefined
     const placementId = numericControl(command.controls.p)
-    if (placementId === undefined) return undefined
+    const rows = numericControl(command.controls.r)
+    if (placementId === undefined || rows === undefined) return undefined
+    // The anchor names how many text rows its grid occupies; the anchor line
+    // itself is row 0, so the whole count is owed from here.
+    this.managedGridRows = rows
     return imageId
   }
 
   /**
-   * Whether one TEXT segment carries at least one REAL managed grid row.
-   *
-   * The classifier is the COMPLETE cell structure — placeholder base plus the
-   * row, column and high-byte diacritics — never the bare `U+10EEEE` codepoint,
-   * which is legal user text. It also never depends on a colour prefix being in
-   * the SAME physical chunk: the fork's 1 MiB writer can cut inside a row, and a
-   * tail of cells alone still carries complete cells.
+   * Account for one TEXT segment against the grid the current anchor opened, and
+   * report whether it carries managed placeholder cells. While rows are owed,
+   * ANY placeholder cell belongs to that image — the writer may cut inside a row
+   * or even between a cell's base and its diacritics. Outside such a block the
+   * same glyph is ordinary text and never classified.
    */
-  private managedGridIn(text: string): boolean {
-    return hasKittyVirtualCells(text)
+  private consumeGridText(text: string): boolean {
+    const managed = this.managedGridRows > 0 && text.includes(KITTY_VIRTUAL_PLACEHOLDER)
+    for (let index = 0; index < text.length && this.managedGridRows > 0; index += 1) {
+      if (text.charCodeAt(index) === 0x0a) this.managedGridRows -= 1
+    }
+    return managed
   }
 
   /**

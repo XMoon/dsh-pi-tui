@@ -1414,18 +1414,31 @@ test('tmux virtual: a REAL 1 MiB writer cut inside the grid leaks no cell on rev
     const calibText = calibSink.text
     const imageStart = calibText.indexOf('\x1b_Ga=p')
     assert.ok(imageStart > 0, 'calibration: the anchor is on the wire')
+    const imageChars = calib.image.render(400).reduce((sum, row) => sum + row.length + 2, 0)
     calib.screen.stop()
     calib.graphics.dispose()
 
-    const target = 1024 * 1024 - 30_000
+    // Measure what ONE filler line really contributes after the screen's own
+    // normalisation (padding/reset), so the arithmetic is not a guess.
+    const stepSink = new RecordingTerminal()
+    stepSink.columns = 400
+    const step = build(stepSink, Array.from({ length: 100 }, () => 'x'.repeat(396)))
+    step.screen.renderNow()
+    const stepStart = stepSink.text.indexOf('\x1b_Ga=p')
+    step.screen.stop()
+    step.graphics.dispose()
+    const perLine = (stepStart - imageStart) / 100
+
+    // Aim the 1 MiB boundary at the MIDDLE of the grid so the first chunk really
+    // ends inside a row.
+    const target = 1024 * 1024 - Math.floor(imageChars / 2)
     const filler: string[] = []
     let need = target - imageStart
-    const perLine = 398
     while (need > perLine) {
       filler.push('x'.repeat(396))
       need -= perLine
     }
-    if (need > 2) filler.push('x'.repeat(need - 2))
+    if (need > 2) filler.push('x'.repeat(Math.max(1, Math.floor(need - 2))))
 
     const real = build(h.terminal, filler)
     const calls: string[] = []
@@ -1465,6 +1478,57 @@ test('tmux virtual: a REAL 1 MiB writer cut inside the grid leaks no cell on rev
       (first.match(new RegExp(P, 'gu')) ?? []).length,
       'no cell beyond the first (pre-revocation) chunk reached the sink')
     real.screen.stop()
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: plain text that visually mimics a grid cell stays ordinary text', (t) => {
+  // The grid is delimited by PROVENANCE — a Core-owned `a=p,U=1` anchor and its
+  // own `r=` row budget — not by what the bytes look like. A legal text line can
+  // carry the placeholder base plus three diacritics from the same table; with no
+  // managed anchor open it must still be written, even on a revoked handle.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  setCellDimensions({ widthPx: 9, heightPx: 18 })
+  try {
+    const mimic = `${P}\u0305\u030d\u030e` // base + three table diacritics
+    const line = `ordinary text ${mimic} continues`
+    h.cli.setReply('list-clients', { text: '' })
+    h.graphics.terminal.write(line)
+    assert.equal(h.terminal.text.endsWith(line), true,
+      'a cell-looking plain text line must still be written after a revocation')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: a chunk holding only a cell BASE is still refused as managed', (t) => {
+  // The 1 MiB writer can cut between a cell's base and its diacritics. While the
+  // anchor's row budget is open, a chunk that holds only the base still belongs
+  // to the managed grid and must be refused.
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  setCellDimensions({ widthPx: 9, heightPx: 18 })
+  try {
+    const image = imageOf(h.graphics, source(PNG, 3200, 2400), {
+      maxWidthCells: 150,
+      maxHeightCells: 40,
+      fallback: '[fallback]',
+    })
+    const rows = image.render(190)
+    const row = rows[1]!
+    const baseAt = row.indexOf(P, row.indexOf(P) + 1) // the SECOND cell's base
+    assert.ok(baseAt > 0, 'fixture: a later cell exists')
+    h.graphics.terminal.write(rows[0]!) // anchor: opens the row budget
+    h.graphics.terminal.write(row.slice(0, baseAt)) // prefix ending BEFORE the base
+    const before = h.terminal.text
+    h.cli.setReply('list-clients', { text: '' })
+    const baseOnly = row.slice(baseAt, baseAt + P.length)
+    assert.equal(baseOnly, P, 'fixture: the chunk is exactly one placeholder base')
+    assert.throws(() => h.graphics.terminal.write(baseOnly), TmuxGraphicsRevokedError,
+      'a base-only chunk inside the anchor budget must be refused')
+    assert.equal(h.terminal.text, before, 'and it emitted nothing')
   } finally {
     h.dispose()
   }

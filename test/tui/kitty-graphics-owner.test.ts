@@ -686,4 +686,3 @@ test('a revoked handle can discard a never-painted retirement without terminal I
   assert.equal(core.takeRetirements().wire, '', 'and no d=I is ever emitted')
   assert.equal(core.ownsIdSpace(pending.imageId), true, 'the id still belongs to the Core forever')
 })
-
