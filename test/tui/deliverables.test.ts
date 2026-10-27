@@ -1874,6 +1874,19 @@ function previewApp(
   return { vt, app, path }
 }
 
+/** Slice one painted row by CELL columns (never JS character indices). */
+function sliceCells(line: string, startColumn: number, cells: number): string {
+  let column = 0
+  let out = ''
+  for (const glyph of line) {
+    const width = visibleWidth(glyph)
+    if (column >= startColumn && column < startColumn + cells) out += glyph
+    column += width
+    if (column >= startColumn + cells) break
+  }
+  return out
+}
+
 /** The painted terminal COLUMN of `needle` on one viewport row. */
 function columnOf(lines: readonly string[], row: number, needle: string): number {
   const line = stripTerminalSequences(lines[row] ?? '')
@@ -2049,9 +2062,10 @@ test('B04: a drag out of EACH of the four frame edges stays inside the content r
       const rows = payload.split('\n')
       // The drag moved only VERTICALLY, so the range starts at the FIRST content
       // row and at the press COLUMN (the range's left edge is the press column).
+      // Length from the painted bounds and the gesture endpoint: the press
+      // column runs to the last content column.
       const expectedFirstRow = stripTerminalSequences(lines[contentTop] ?? '')
-      const startColumn = column + 2 // the press column used above
-      const expected = expectedFirstRow.slice(startColumn, startColumn + visibleWidth(rows[0] ?? ''))
+      const expected = sliceCells(expectedFirstRow, column + 2, contentRight - (column + 2) + 1)
       assert.equal(
         rows[0],
         expected,
@@ -2068,10 +2082,11 @@ test('B04: a drag out of EACH of the four frame edges stays inside the content r
       // is pinned to the FIRST content column and the range runs right from it
       // — it may not start further right (a wrongly shortened range) nor
       // include a chrome cell.
-      const firstContentColumn = contentLeft
+      // The length is derived from the PAINTED bounds and the gesture endpoint:
+      // the range runs from the first content column to the press column.
       const paintedRow = stripTerminalSequences(lines[row] ?? '')
-      const expectedTail = paintedRow.slice(firstContentColumn)
-      const expectedCells = expectedTail.slice(0, visibleWidth(payload))
+      const expectedWidth = column - contentLeft + 1
+      const expectedCells = sliceCells(paintedRow, contentLeft, expectedWidth)
       assert.equal(
         payload,
         expectedCells,
@@ -2586,7 +2601,16 @@ test('B06: a real managed plugin overlay never becomes a selection source (no op
   })
   app.start()
   startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
+  // The barrier this control must disprove is the ALTERNATE screen's, where an
+  // application text selection exists at all: mount on a REAL fullscreen
+  // AltScreen, not on the main screen (which owns no selection).
+  app.setFullscreen(true)
   await vt.waitForRender()
+  assert.ok(
+    (app as unknown as { fullscreen?: unknown }).fullscreen !== undefined,
+    'fixture: the app runs on a real fullscreen AltScreen',
+  )
   // A REAL managed overlay through the public extension lease (the same
   // OverlayOptions path the Delivered files modal uses).
   const lease = app.showExtensionOverlay({
@@ -2673,4 +2697,54 @@ test('B08: terminal focus-out and stop each retire an overlay-origin selection t
     startedApps.delete(app)
     app.dispose()
   }
+})
+
+test('B08: replacing the display subject retires an overlay-origin selection that was LIVE', async () => {
+  const copied: string[] = []
+  const vt = new VirtualTerminal(100, 30)
+  let current = true
+  const snapshot = {
+    subjectKind: 'main' as const,
+    sessionId: 'session-1',
+    sourceIdentity: {},
+    turns: [{ turn: 1, files: [{ path: '/ws/alpha.md', description: 'first report' }] }],
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    copySelection: async (text) => {
+      copied.push(text)
+      return true
+    },
+    deliveredFiles: { snapshot: () => snapshot, isCurrent: () => current },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snapshot)
+  let view = ''
+  for (let attempt = 0; attempt < 40 && !view.includes('alpha.md'); attempt += 1) {
+    await vt.waitForRender()
+    view = vt.getViewport().join('\n')
+  }
+  const lines = view.split('\n')
+  const frame = modalFrame(lines)
+  const row = lines.findIndex((line, index) => index > frame.top && line.includes('alpha.md'))
+  const column = columnOf(lines, row, 'alpha.md')
+  resetWrites(vt)
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<32;${column + 7};${row + 1}M`)
+  await vt.waitForRender()
+  assert.ok(inverseRuns(vt.writes).join('').trim().length > 0, 'fixture: live overlay selection')
+
+  // The display subject is replaced: the captured catalog no longer describes
+  // the current projection, so the browser is retired before the frame paints.
+  current = false
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'the new subject' }], new Map())
+  const replaced = await viewport(vt)
+  assert.ok(!replaced.includes('alpha.md'), `the browser is retired with the old subject:\n${replaced}`)
+  vt.sendInput(`\x1b[<0;${column + 7};${row + 1}m`)
+  await vt.waitForRender()
+  assert.equal(copied.length, 0, `a display-subject replacement never copies the retired range (saw ${JSON.stringify(copied)})`)
+  app.stop()
 })
