@@ -205,7 +205,53 @@ discipline as Question:
 A sheet rebuild (resize/expand) keeps the same request, the one settlement path
 and the modal focus ownership; it never creates a second dialog hit map.
 
-### 6.1 Timed and continued Questions
+### 6.1 Pointer ownership and opt-in overlay text selection
+
+A visible capturing overlay owns the pointer in its rectangle and its content is
+inert chrome unless a component consumes the event: upstream clears any
+background text selection and returns, and the covered transcript stays
+unselectable. That opaque barrier is the DEFAULT and stays byte-for-byte
+unchanged for every overlay that does not opt in.
+
+`OverlayOptions.textSelectionInsets` (`{ top, right, bottom, left }`, divergence
+X068) is the ONE opt-in that makes an overlay's own visible text a selection
+source — today only the Delivered files browser uses it. The contract:
+
+- **Placement, not guesses.** The selectable rectangle is the overlay's LAST
+  PAINTED placement (`renderedOverlayLayouts`) minus the declared chrome insets,
+  resolved only after overlay dispatch found no consumer. Absent insets = the
+  original modal barrier.
+- **One authority.** The alternate screen's EXISTING selection stays the only
+  range: its anchor/focus, highlight painter, word/line segmenter, painted-row
+  reader and clipboard path. The opt-in adds one discardable `origin` latch
+  (entry identity + half-open rect + placement) that BOUNDS that range; there is
+  no second selection, no second clipboard, no extra terminal listener and no
+  selection state in the host panel.
+- **Component priority.** A press is offered to the overlay's components first,
+  so a button (action-bar cell, a row's verb, the filter Input) keeps its press
+  and its synthesized click and never starts a selection.
+- **Highlight == copy, clipped.** Drag/word/line points are clamped into the
+  rectangle, so a drag outside the frame maps to its nearest content cell;
+  `applySelection` paints and the copy path slices the SAME rectangle, and the
+  copy preserves the selected cells' real spaces and indentation instead of the
+  transcript's `trimEnd`/indent normalization.
+- **One gesture, one owner.** A background press that lands on the modal is still
+  cancelled by the barrier and can never be adopted mid-gesture by the opt-in.
+- **Currentness.** The latch dies when the entry is hidden/closed, when its
+  painted placement changes (resize, reflow, remount), when a newer visible
+  overlay paints above it, on a screen swap, on focus-out/stop, on a host content
+  replacement, and on the render-time revalidation right after overlays are
+  re-composited. A stale selection is cleared, never repainted onto the new
+  frame.
+- **Repaint vs corpus.** `resetTextSelection()` still drops the multi-click
+  history (upstream #9311); `resetTextSelection({ preserveClickHistory: true })`
+  drops only the range, for a host repaint of an overlay's OWN content where the
+  click history must survive (otherwise the first click's disclosure repaint
+  would restart the double-click count).
+- The regular main screen owns no application text selection, so the option is
+  inert there and no dead "copyable" affordance is painted.
+
+### 6.2 Timed and continued Questions
 
 Three layers stay separate:
 
@@ -237,7 +283,7 @@ frame, auto-reopen, report a Host-driven end as user cancel, or add an
 Proof: `test/app/question-park-reopen.test.ts`,
 `test/app/question-remote-lifecycle.test.ts`.
 
-### 6.2 Esc and visible-seat priority
+### 6.3 Esc and visible-seat priority
 
 - The Host busy-cancel runs before the shell-mode exit and before a replacement
   editor's Esc; a DECLINED plugin Esc falls through to the host ladder; a

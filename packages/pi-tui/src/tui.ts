@@ -382,6 +382,28 @@ export interface OverlayOptions {
 	 * viewport block. Ignored for `nonCapturing` overlays.
 	 */
 	viewportPassthrough?: boolean;
+	/**
+	 * Allow selecting the visible text INSIDE this overlay's painted content
+	 * rectangle (dsh-pi-tui divergence X068). Insets describe the overlay's own
+	 * chrome (border rows, side padding) measured from the LAST PAINTED
+	 * placement, so the selectable region is that placement minus the insets
+	 * and never depends on a guessed coordinate.
+	 *
+	 * The overlay stays a complete modal: pointer ownership of its rectangle,
+	 * keyboard focus, background blocking and every component's hit testing are
+	 * unchanged. Only a press that NO component consumed and that lands inside
+	 * the region starts the alternate screen's existing text selection, which is
+	 * clipped to that region for the whole gesture (drag outside maps to the
+	 * nearest region cell; the background is never selectable or copyable). The
+	 * selection is dropped when the overlay's painted placement moves, when it
+	 * is hidden/closed or replaced, or when a newer overlay covers it.
+	 *
+	 * DEFAULT UNDEFINED (upstream): an unconsumed press on the overlay neither
+	 * selects nor copies anything. This is not `viewportPassthrough`; it never
+	 * exposes the transcript behind the overlay, and it is inert on the regular
+	 * main screen, which has no application-owned text selection.
+	 */
+	textSelectionInsets?: Readonly<{ top: number; right: number; bottom: number; left: number }>;
 }
 
 /** Options for {@link OverlayHandle.unfocus}. */
@@ -443,7 +465,14 @@ export interface OverlayHandle {
 	getBounds(): OverlayBounds | undefined;
 }
 
-type OverlayStackEntry = {
+/**
+ * One mounted overlay entry. Exported as a TYPE only for the alternate
+ * screen's `textSelectionInsets` origin (dsh-pi-tui divergence X068): the
+ * captured origin must prove it still names the SAME painted entry, and entry
+ * identity is the only value that changes on a rebind/remount. It is not part
+ * of the package's public entry point and carries no runtime value.
+ */
+export type OverlayStackEntry = {
 	component: Component;
 	options?: OverlayOptions;
 	preFocus: Component | null;
@@ -459,6 +488,34 @@ type RenderedOverlayLayout = {
 	width: number;
 	height: number;
 };
+
+/**
+ * The overlay-owned text-selection region captured at press time
+ * (dsh-pi-tui divergence X068): the entry that was actually PAINTED, the
+ * half-open screen-cell rectangle inside its chrome, and the outer placement
+ * the rectangle was derived from. It is a discardable latch, never a second
+ * selection: {@link TuiAltScreen}'s anchor/focus remain the one range.
+ */
+export interface OverlayTextSelectionRegion {
+	entry: OverlayStackEntry;
+	rect: { minX: number; maxX: number; minY: number; maxY: number };
+	placement: { col: number; row: number; width: number; height: number };
+}
+
+/** The half-open content rectangle of one painted overlay placement after its
+ *  declared chrome insets, or undefined when it has no selectable cell
+ *  (dsh-pi-tui divergence X068). */
+function overlayTextSelectionRect(
+	layout: RenderedOverlayLayout,
+	insets: Readonly<{ top: number; right: number; bottom: number; left: number }>,
+): { minX: number; maxX: number; minY: number; maxY: number } | undefined {
+	const minX = layout.col + Math.max(0, Math.floor(insets.left));
+	const maxX = layout.col + layout.width - Math.max(0, Math.floor(insets.right));
+	const minY = layout.row + Math.max(0, Math.floor(insets.top));
+	const maxY = layout.row + layout.height - Math.max(0, Math.floor(insets.bottom));
+	if (maxX <= minX || maxY <= minY) return undefined;
+	return { minX, maxX, minY, maxY };
+}
 
 type OverlayBlockedFocusResume = { status: "restore-overlay" } | { status: "focus-target"; target: Component | null };
 type EligibleOverlayFocusRestoreState = { status: "eligible"; overlay: OverlayStackEntry };
@@ -809,6 +866,81 @@ export abstract class TuiBase extends Container implements TUI {
 
 	get hasOverlayEntries(): boolean {
 		return this.overlayStack.length > 0;
+	}
+
+	/**
+	 * The text-selection region an unconsumed press at one screen cell would
+	 * start, resolved from the LAST PAINTED overlay placement (dsh-pi-tui
+	 * divergence X068), or undefined when that cell is not selectable content.
+	 *
+	 * The TOPMOST painted overlay that opted in with `textSelectionInsets` wins;
+	 * an ordinary overlay above it keeps upstream's opaque block (the caller
+	 * only reaches this after the overlay dispatch found no consumer). The
+	 * region is the painted placement minus the declared insets, as a half-open
+	 * cell rectangle, and is refused when either inner dimension is < 1.
+	 */
+	protected overlayTextSelectionRegionAt(x: number, y: number): OverlayTextSelectionRegion | undefined {
+		for (let index = this.renderedOverlayLayouts.length - 1; index >= 0; index--) {
+			const layout = this.renderedOverlayLayouts[index]!;
+			const insets = layout.entry.options?.textSelectionInsets;
+			// An overlay whose cached geometry is stale (hidden, removed or
+			// conditional) must not claim the pointer: the same liveness rule
+			// the overlay dispatch applies. (dsh-pi-tui divergence X018.)
+			if (insets === undefined || !this.overlayStack.includes(layout.entry) || !this.isOverlayVisible(layout.entry)) {
+				continue;
+			}
+			if (x < layout.col || x >= layout.col + layout.width || y < layout.row || y >= layout.row + layout.height) {
+				continue;
+			}
+			const rect = overlayTextSelectionRect(layout, insets);
+			if (rect === undefined) return undefined;
+			if (x < rect.minX || x >= rect.maxX || y < rect.minY || y >= rect.maxY) return undefined;
+			return {
+				entry: layout.entry,
+				rect,
+				placement: { col: layout.col, row: layout.row, width: layout.width, height: layout.height },
+			};
+		}
+		return undefined;
+	}
+
+	/**
+	 * Whether a captured overlay text-selection region still describes the
+	 * CURRENT paint: the entry is still a mounted, visible overlay, its painted
+	 * placement is byte-identical, and no other visible overlay paints above it
+	 * (dsh-pi-tui divergence X068). A resize/remount, a hide/close, or a newer
+	 * modal therefore retires the region instead of letting a stale selection
+	 * land on the new frame.
+	 */
+	protected isOverlayTextSelectionRegionLive(region: OverlayTextSelectionRegion): boolean {
+		if (!this.overlayStack.includes(region.entry) || !this.isOverlayVisible(region.entry)) return false;
+		// A newer visible overlay with a HIGHER focus order will paint above this
+		// region on the very next frame — and it already owns the pointer in the
+		// window before that paint. Retire NOW: a release between the mount and
+		// the next frame must not copy a range the new owner covers.
+		for (const entry of this.overlayStack) {
+			if (
+				entry !== region.entry &&
+				entry.focusOrder > region.entry.focusOrder &&
+				this.isOverlayVisible(entry)
+			) {
+				return false;
+			}
+		}
+		for (let index = this.renderedOverlayLayouts.length - 1; index >= 0; index--) {
+			const layout = this.renderedOverlayLayouts[index]!;
+			if (layout.entry !== region.entry) {
+				if (this.isOverlayVisible(layout.entry)) return false;
+				continue;
+			}
+			return (
+				layout.col === region.placement.col &&
+				layout.row === region.placement.row &&
+				layout.width === region.placement.width &&
+				layout.height === region.placement.height
+			);
+		}
+		return false;
 	}
 
 	/** Whether a component is still a mounted, visible overlay. Subclasses

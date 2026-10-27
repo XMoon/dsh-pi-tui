@@ -9,7 +9,7 @@
  * reentrancy fences (`commitOther` / `deliverOtherInput` / tab+Input
  * identity).
  *
- * Ownership split (docs/architecture/overlay-focus.md §6.1 Timed and continued Questions):
+ * Ownership split (docs/architecture/overlay-focus.md §6.2 Timed and continued Questions):
  *
  * ```text
  * Host/Client projection     -> whether a question exists / open / continued / settled

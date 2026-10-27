@@ -41,6 +41,7 @@ import {
 	compositeTuiLine,
 	dispatchMouseEvent,
 	type OverlayHandle,
+	type OverlayTextSelectionRegion,
 	retargetMouseEvent,
 	TuiBase,
 	type TuiMouseButton,
@@ -306,6 +307,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	 * the press (a structural repaint between press and release) must not
 	 * receive it. (dsh-pi-tui divergence X018 hardening.) */
 	private selectionPressDispatchComponents: Set<Component> | undefined;
+	/** The overlay-owned selection region of the CURRENT gesture, when the press
+	 * started inside an overlay that opted into `textSelectionInsets`
+	 * (dsh-pi-tui divergence X068). A discardable latch, never a second
+	 * selection: {@link selectionAnchor}/{@link selectionFocus} remain the one
+	 * range, and this only bounds and revalidates it. */
+	private overlaySelectionOrigin: OverlayTextSelectionRegion | undefined;
 	private scrollbarDrag?: ScrollbarDrag;
 	private scrollbarHover?: ScrollView;
 	private scrollToEndIndicatorRect?: ScrollToEndIndicatorRect;
@@ -434,10 +441,21 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return this.copyTextToClipboard(text);
 	}
 
-	/** Drop the text selection and multi-click history, e.g. before the host replaces the transcript. */
-	resetTextSelection(): void {
+	/**
+	 * Drop the text selection and multi-click history, e.g. before the host
+	 * replaces the transcript.
+	 *
+	 * `preserveClickHistory` (dsh-pi-tui divergence X068) keeps the multi-click
+	 * window alive for a repaint that does NOT replace the corpus — the host
+	 * repainting an overlay's own content while the user is mid gesture. The
+	 * selection range still dies (its cells name the frame being replaced), but
+	 * dropping `lastClick` there would turn every double-click into two single
+	 * clicks, because the first click's own disclosure repaint runs through the
+	 * same host callback.
+	 */
+	resetTextSelection(options?: { preserveClickHistory?: boolean }): void {
 		this.clearTextSelection();
-		this.lastClick = undefined;
+		if (options?.preserveClickHistory !== true) this.lastClick = undefined;
 	}
 
 	/** The lines of the last rendered frame, one per terminal row, as written to the terminal. */
@@ -512,6 +530,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionFocus = undefined;
 		this.selectionGranularity = "character";
 		this.selectionInitialRange = undefined;
+		this.overlaySelectionOrigin = undefined;
 		this.lastClick = undefined;
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
@@ -1002,6 +1021,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				this.selectionFocus = undefined;
 				this.selectionGranularity = "character";
 				this.selectionInitialRange = undefined;
+				this.overlaySelectionOrigin = undefined;
 				if (hadNonEmptyActiveSelection) this.requestRender();
 			}
 			this.lastClick = undefined;
@@ -1268,6 +1288,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionFocus = undefined;
 		this.selectionGranularity = "character";
 		this.selectionInitialRange = undefined;
+		// The captured overlay region dies with the range it bounded, whether
+		// the clear came from resetTextSelection() (host content/screen change),
+		// the modal barrier, focus-out, a stale region, the scrollbar or stop.
+		// (dsh-pi-tui divergence X068.)
+		this.overlaySelectionOrigin = undefined;
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
 		// The press-time dispatch snapshot is dead once the selection
@@ -1383,6 +1408,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			}
 		}
 
+		// An overlay-owned text-selection gesture OWNS the pointer for its whole
+		// duration (dsh-pi-tui divergence X068): drag and release belong to the
+		// captured region even when the pointer leaves the overlay's rectangle,
+		// and must never reach a background component, the scrollbar, the
+		// jump-to-end label or the modal barrier. The handler revalidates the
+		// region and clips every point into it.
+		if (this.overlaySelectionOrigin !== undefined && this.selectionPressActive) {
+			this.handleSelectionMouseEvent(raw);
+			return;
+		}
+
 		if (this.handleSearchMouseEvent(raw)) return;
 
 		const overlay = this.dispatchMouseToOverlay(event);
@@ -1434,6 +1470,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// never select/copy the hidden underlying text. (dsh-pi-tui
 		// divergence X018 hardening.)
 		if (overlay.hit) {
+			// An unconsumed press inside the painted content rectangle of an
+			// overlay that opted into `textSelectionInsets` starts the
+			// alternate screen's OWN selection there. Every component still
+			// gets first refusal (the dispatch above), so a button press keeps
+			// its normal gesture; the region comes from the LAST PAINTED
+			// placement, never from a guessed coordinate. (dsh-pi-tui
+			// divergence X068.)
+			if (type === "press") {
+				const region = this.overlayTextSelectionRegionAt(raw.x, raw.y);
+				if (region !== undefined) {
+					this.handleSelectionMouseEvent(raw, region);
+					return;
+				}
+			}
 			// A gesture that STARTED outside and lands on the overlay must
 			// be cancelled: an in-flight selection (or scrollbar drag) must
 			// not stay armed under the modal — the hidden selection must
@@ -1639,6 +1689,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionFocus = undefined;
 		this.selectionGranularity = "character";
 		this.selectionInitialRange = undefined;
+		this.overlaySelectionOrigin = undefined;
 		this.lastClick = undefined;
 		this.pressedUrl = undefined;
 		this.selectionDragged = false;
@@ -1688,10 +1739,26 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const point = this.getScrollSelectionPoint(scrollView, event.x, event.y);
 			if (point) return point;
 		}
-		return {
+		return this.clampSelectionPoint({
 			row: Math.max(0, Math.min(this.terminal.rows - 1, event.y)),
 			col: Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
-		};
+		});
+	}
+
+	/**
+	 * Clip one selection point into the captured overlay region, if any
+	 * (dsh-pi-tui divergence X068). A drag that leaves the region maps to its
+	 * nearest cell (the last visible cell for an exclusive boundary point), so
+	 * neither the highlight nor the copied text can ever reach the frame chrome
+	 * or the background behind the modal.
+	 */
+	private clampSelectionPoint(point: SelectionPoint): SelectionPoint {
+		const region = this.overlaySelectionOrigin;
+		if (region === undefined) return point;
+		const { rect } = region;
+		const row = Math.max(rect.minY, Math.min(rect.maxY - 1, point.row));
+		const maxCol = point.boundary === true ? rect.maxX : rect.maxX - 1;
+		return { ...point, row, col: Math.max(rect.minX, Math.min(maxCol, point.col)) };
 	}
 
 	private getSelectionSourceLine(point: SelectionPoint): string {
@@ -1734,15 +1801,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			selectionEnd = segments[index + 1].end;
 		}
 		return {
-			start: { ...point, col: selectionStart },
-			end: { ...point, col: selectionEnd, boundary: true },
+			start: this.clampSelectionPoint({ ...point, col: selectionStart }),
+			end: this.clampSelectionPoint({ ...point, col: selectionEnd, boundary: true }),
 		};
 	}
 
 	private getLineSelection(point: SelectionPoint): SelectionRange {
+		// An overlay-owned line selection covers the visible content rectangle
+		// of that row, never the frame chrome around it (divergence X068).
+		const region = this.overlaySelectionOrigin;
+		const start = region?.rect.minX ?? 0;
+		const end = region?.rect.maxX ?? visibleWidth(this.getSelectionSourceLine(point));
 		return {
-			start: { ...point, col: 0 },
-			end: { ...point, col: visibleWidth(this.getSelectionSourceLine(point)), boundary: true },
+			start: this.clampSelectionPoint({ ...point, col: start }),
+			end: this.clampSelectionPoint({ ...point, col: end, boundary: true }),
 		};
 	}
 
@@ -1847,9 +1919,22 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionDragPointer = undefined;
 	}
 
-	private handleSelectionMouseEvent(event: SgrMouseEvent): void {
+	private handleSelectionMouseEvent(event: SgrMouseEvent, overlayOrigin?: OverlayTextSelectionRegion): void {
 		const button = event.button & 3;
 		if (button !== 0 && !(event.release && button === 3)) return;
+		// An overlay-owned range is only valid while the overlay it was captured
+		// from is still painted at the SAME placement (dsh-pi-tui divergence
+		// X068): a resize/remount, a hide/close or a newer modal clears the
+		// gesture instead of copying text that no longer sits there. A PRESS is
+		// exempt: its region was just resolved from the live paint.
+		if (
+			overlayOrigin === undefined &&
+			this.overlaySelectionOrigin !== undefined &&
+			!this.isOverlayTextSelectionRegionLive(this.overlaySelectionOrigin)
+		) {
+			this.clearTextSelection();
+			return;
+		}
 		const anchorScrollView = this.selectionAnchor?.scrollView;
 		const point = this.getSelectionPoint(event, anchorScrollView);
 		if (event.release) {
@@ -1943,6 +2028,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		this.stopSelectionAutoScroll();
 		this.selectionPressActive = true;
+		// ONE gesture has ONE owner: a press always installs ITS origin, so a
+		// completed overlay selection can never clamp a later background press
+		// into the old rectangle. (dsh-pi-tui divergence X068.)
+		this.overlaySelectionOrigin = overlayOrigin;
 		this.selectionPressDispatchComponents = new Set(this.lastMouseDispatchComponents);
 		// The press half of a same-cell click: the host records a
 		// press-time semantic identity so the release click can reject
@@ -1967,7 +2056,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.selectionAnchor = range?.start ?? anchor;
 		this.selectionFocus = range?.end ?? anchor;
 		this.selectionDragged = false;
-		this.pressedUrl = range
+		// An overlay-owned selection never arms a hyperlink: the region's text is
+		// the modal's own content, not a transcript link under it.
+		// (dsh-pi-tui divergence X068.)
+		this.pressedUrl = range || overlayOrigin !== undefined
 			? undefined
 			: getOsc8LinkAtColumn(
 					this.previousScreen[Math.max(0, Math.min(this.terminal.rows - 1, event.y))] ?? "",
@@ -2017,6 +2109,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private getActiveSelectionText(): string | undefined {
 		const selection = this.getSelectionBounds();
 		if (!selection) return undefined;
+		const region = this.overlaySelectionOrigin;
+		if (region !== undefined) return this.getOverlaySelectionText(selection, region);
 		let sourceLines: readonly string[] = this.previousScreen;
 		if (selection.start.scrollView) {
 			if (!this.currentLayout) return undefined;
@@ -2038,6 +2132,32 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			// 1-2 cell content indents are rare and dropped. (dsh-pi-tui
 			// divergence X024.)
 			lines.push(columns.start === 0 ? sliced.replace(/^ {1,3}/, "") : sliced);
+		}
+		const text = lines.join("\n");
+		return text.length === 0 ? undefined : text;
+	}
+
+	/**
+	 * The visible text of one overlay-owned selection (dsh-pi-tui divergence
+	 * X068): each row is sliced to the capture's column range inside the overlay
+	 * content rectangle, terminal sequences are stripped and real spaces and
+	 * indentation are PRESERVED. The transcript branch's `trimEnd` and its 1-3
+	 * cell bullet-strip (X024) are deliberately not applied: file content and
+	 * paths must copy exactly as painted.
+	 */
+	private getOverlaySelectionText(
+		selection: { start: SelectionPoint; end: SelectionPoint },
+		region: OverlayTextSelectionRegion,
+	): string | undefined {
+		const lines: string[] = [];
+		for (let row = selection.start.row; row <= selection.end.row; row++) {
+			const line = this.previousScreen[row] ?? "";
+			const columns = this.getSelectionColumns(line, row, selection, region.rect.minX, region.rect.maxX);
+			if (columns.end <= columns.start) {
+				lines.push("");
+				continue;
+			}
+			lines.push(stripTerminalSequences(sliceByColumn(line, columns.start, columns.end - columns.start, true)));
 		}
 		const text = lines.join("\n");
 		return text.length === 0 ? undefined : text;
@@ -2176,6 +2296,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		let maxRow = screen.length - 1;
 		let minColumn = 0;
 		let maxColumn = this.terminal.columns;
+		// An overlay-owned selection paints ONLY inside the captured content
+		// rectangle: interior rows would otherwise span the whole line and
+		// invert the frame border and the covered background, while the copied
+		// text is already clipped to the same rectangle (dsh-pi-tui divergence
+		// X068 keeps ONE range for highlight and copy).
+		const region = this.overlaySelectionOrigin;
+		if (region !== undefined) {
+			minRow = Math.max(minRow, region.rect.minY);
+			maxRow = Math.min(maxRow, region.rect.maxY - 1);
+			minColumn = Math.max(minColumn, region.rect.minX);
+			maxColumn = Math.min(maxColumn, region.rect.maxX);
+		}
 		if (selection.start.scrollView) {
 			if (!layout) return screen;
 			const box = getScrollViewBox(layout, selection.start.scrollView);
@@ -2280,6 +2412,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
 		screen = this.compositeOverlays(screen, width, height);
 		if (screen.length > height) screen = screen.slice(screen.length - height);
+		// An overlay-owned selection names cells of the frame it was captured
+		// from. The overlays were just re-composited, so this is the FIRST point
+		// where the new paint is authoritative: if the opted-in overlay moved,
+		// was hidden/closed, or a newer overlay now covers it, the range must not
+		// paint over the replacement frame. (dsh-pi-tui divergence X068.)
+		if (this.overlaySelectionOrigin !== undefined && !this.isOverlayTextSelectionRegionLive(this.overlaySelectionOrigin)) {
+			this.clearTextSelection();
+		}
 		screen = this.applySelection(screen, nextLayout);
 		screen = this.compositeFlashes(screen, width, height);
 

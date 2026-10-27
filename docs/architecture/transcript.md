@@ -768,10 +768,40 @@ backward page key stick on one page forever.
 A POINTER gesture follows the terminal layer's own contract: a PRESS may select
 a row and consume the cell, but entering a page requires the synthesized
 `click` (same cell, no drag), so press-then-drag-away opens nothing. A Files
-list row selects on BOTH press and click: the opaque overlay consumes the press
-without providing native text selection, so a click-only row would leave that
-first gesture with no selection. A text-selection contract must change those
-two behaviors together; this surface does not implement one.
+list BODY row (its path/description cells, never its painted `Details` verb)
+leaves the press UNCONSUMED and selects on the synthesized `click` alone: the
+modal opts into the fork's overlay text selection (`overlay-focus.md`,
+divergence X068), so an unconsumed press is a real drag-select gesture over the
+visible text rather than an inert cell. Every BUTTON — a row's `Details` verb,
+each action-bar button, a Turns-page row — still consumes its press, so a drag
+never completes a button. Both halves of that split belong to ONE contract: a
+row that consumed the press without providing text selection would break the
+browser, and a button that released its press would lose its own gesture.
+
+**Selecting overlay text.** Dragging inside the modal selects exactly the
+painted cells of its CONTENT rectangle (the left-painted frame minus one border
+row top and bottom and two columns — one border plus one padding cell — on each
+side); double-click selects the word under the pointer with the fork's own
+segmenter, and triple-click the visible content row. The rule holds on the
+`Files` body, the wide side pane, the `Details` header lines and the preview
+text: the selection never crosses the frame border, never includes the padding
+or the background the modal covers, and a drag taken outside the frame is
+clamped to its nearest content cell instead of extending. Copy joins the
+selected rows with `\n` and preserves the selected cells byte-for-byte
+(indentation and interior runs of spaces), which is why the transcript's own
+`trimEnd`/indent normalization is deliberately not applied here. Copying is
+the alternate screen's ONE selection path (its injected clipboard sink, its
+`Copied!`/failure feedback, its OSC 52 fallback) — there is no second clipboard
+implementation, and `Copy path` / `Shift+C` remain the ONLY way to get the RAW
+declared path, because a text selection copies what is painted. It is the
+CURRENT viewport's text: a Preview page is only ever selected as painted, never
+by reading neighbouring 120-line windows. The selection is dropped when the
+modal is closed, when its painted placement moves (resize, reflow, remount),
+when a newer overlay covers it, on a screen swap, and before the panel repaints
+its own content (a page/Turn/filter/scroll change), so a stale range can never
+copy text from another frame. The selection lives on the alt screen only: a
+regular surface has no application-owned text selection and paints no dead
+entry for it.
 
 On a real AltScreen the action bar paints real buttons — Files
 `[Filter] · [Turns] · [Close]`, Turns `[Back]`, Details

@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 68
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 52, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 69
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 53, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -160,6 +160,7 @@
 | X065 | ACTIVE | LOW | HARD_HOST_API | NO |
 | X066 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X067 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
+| X068 | ACTIVE | MEDIUM | LOCAL_UX | NO |
 
 ## Divergences
 
@@ -5737,3 +5738,97 @@ The host's tmux virtual image backend creates ONE Kitty virtual placement anchor
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Introduced for Image-7B-A RFL-002 after the Owner authorized the bounded fork seam, then extended under the RFL-004 Owner ruling with a private provenance marker so foreign virtual images are never relocated. The real first-visible-middle reproduction had zero graphics bytes before the seam and shows pixels after it; the marker never reaches the terminal.
+
+### X068 — Opt-in text selection inside an overlay's painted content rectangle
+
+- Status: `ACTIVE`
+- Category: `LOCAL_UX`
+- Risk: `MEDIUM`
+- Files: `src/tui.ts`, `src/tui-alt-screen.ts`
+- Last audited: `2026-10-27`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+Upstream owns text selection only in the alternate screen's BACKGROUND viewport: TuiAltScreen keeps selectionAnchor/selectionFocus, paints them in applySelection(), reads painted rows through getSelectionSourceLine() and copies via copyTextToClipboard(), and a capturing overlay that does not consume a press is a hard modal barrier (the press clears the background selection and returns). The Delivered files browser is a capturing modal whose body is the user's file paths, descriptions and file-preview text, and the Owner requires selecting that text with drag, double-click and triple-click and copying it. A host-only implementation cannot reach those owners: the selection anchor/focus, the highlight painter, the word segmenter and the clipboard path all live inside TuiAltScreen, and the host must not add a second selection truth, its own terminal mouse listener, its own clipboard implementation or a widened modal that lets the transcript behind the frame be selected. The seam is therefore one optional OverlayOptions field plus a region latch inside the existing selection implementation; every overlay without the option keeps the upstream opaque-modal behavior byte-for-byte.
+
+#### Changed surface
+
+- OverlayOptions.textSelectionInsets?: { top, right, bottom, left } — opt-in: an unconsumed press inside the LAST PAINTED placement minus these chrome insets starts the alternate screen's existing text selection, clipped to that rectangle. Absent means the original opaque modal.
+- TuiBase.overlayTextSelectionRegionAt(x, y): the topmost painted, still-visible overlay that opted in, resolved from renderedOverlayLayouts only, refused when either inner dimension is < 1.
+- TuiBase.isOverlayTextSelectionRegionLive(region): the captured entry is still mounted and visible, its painted placement is identical, and no other visible overlay holds a higher focus order. The focus-order test is the pre-paint authority: a newer modal already owns the pointer in the window between its mount and the frame that draws it, so a release there must not copy a range it now covers.
+- TuiAltScreen.overlaySelectionOrigin: a discardable latch (entry + half-open rect + placement) that bounds and revalidates the ONE existing selection range — never a second selection, list or cache.
+- TuiAltScreen press/drag/release: an unconsumed opt-in press starts the gesture; while that gesture is active it owns the pointer (a drag outside the frame maps to the nearest region cell, and never reaches background components, the scrollbar, the jump-to-end label or the modal barrier); word/line granularity and the OSC 8 arming path are clipped or skipped.
+- TuiAltScreen.applySelection() clips highlight rows and columns to the captured rectangle, and getOverlaySelectionText() copies exactly those painted cells with real spaces/indentation preserved (the transcript trimEnd/1-3-cell indent rule of X024 is NOT applied).
+- Every lifecycle clear drops the latch: clearTextSelection() (resetTextSelection, host content/screen replacement), stop/start, focus-out, the scrollbar press, a stale region on any gesture event, and the render-time liveness check after overlays are re-composited.
+- TuiAltScreen.resetTextSelection({ preserveClickHistory }) — the host repaint of an overlay's OWN content drops the range but keeps the multi-click window; without it the first click's own disclosure repaint would turn every double-click into two single clicks. The default (no options) still drops the click history exactly as upstream #9311 requires.
+- Host: src/tui-app.ts routes the ONE Delivered files modal's mount, fullscreen remount and resize rebind through deliveredFilesOverlayOptions(); the panel repaint path and closeDeliveredFiles() call the alt screen's resetTextSelection().
+
+#### Dependency map
+
+**Vendor internal**
+- The region readers live in TuiBase, which already owns overlayStack/renderedOverlayLayouts/isOverlayVisible, so the alternate screen reads painted overlay geometry without new public accessors or a second copy of the stack.
+- handleSelectionMouseEvent keeps ONE protocol parser and ONE anchor/focus pair: overlay gestures reuse getSelectionPoint, getWordSelection, getLineSelection, getClickCount, updateSelectionFocus, updateSelectionAutoScroll, applySelection and copyTextToClipboard, and only add a clamp.
+- withMouseDispatchContext isolation, the X018 press-time dispatch snapshot and the X018 click synthesis are unchanged; an overlay-origin gesture never synthesizes a component click into a background element.
+- Audit note: All new state is one discardable field and one optional option field; no selection list, no durable cache, no new listener.
+
+**Inheritance / structural**
+- The predicates are protected members of TuiBase, so TuiMainScreen and TuiAltScreen inherit them without exposing overlay entries or options through a new public API.
+- TuiMainScreen has no application-owned text selection, so the option is inert there (guarded by packages/pi-tui/test/overlay-options.test.ts).
+- Audit note: OverlayStackEntry is exported as a TYPE only for the latch's identity field; it carries no runtime value and is not re-exported from the package entry.
+
+**Host**
+- src/tui-app.ts injects { top: 1, right: 2, bottom: 1, left: 2 } — the ResponsiveOverlayFrame's real chrome (1 border row each side; 2 columns = 1 border + 1 padding) — from ONE constant in src/tui/deliverables/overlay-size.ts, for the initial mount, the fullscreen remount and the resize rebind.
+- No other host overlay (transcript search, model picker, task browser, settings, question/approval, plugin manager, history search) receives the option; the X058 viewportPassthrough box in particular keeps its own contract.
+- The panel's requestRender callback (its own content changes) and closeDeliveredFiles() reset the screen selection, so a repaint or a close can never leave a highlight or copy text from the previous frame.
+- Audit note: The option is a literal object and is inert on the main screen.
+
+**Public / extension**
+- OverlayOptions is a public fork type; the new field is optional and additive, so existing consumers compile and behave unchanged.
+- The extension-facing TuiOverlayOptions surface is deliberately NOT widened: plugins cannot opt in.
+- The root package's public entry does not re-export the new field, so the emitted declaration graph is unchanged.
+- Audit note: Absent option = upstream behavior.
+
+**Behavioral coupling**
+- Opted-in overlay, unconsumed press inside the content rectangle: drag/release select and copy exactly the painted cells inside that rectangle; a drag outside it is clamped, and the transcript behind the modal is neither selectable nor copyable.
+- A component that consumes the press (a footer button, a row's Details verb, the filter Input) keeps its gesture and its synthesized click; no selection starts.
+- Double-click still selects a word (the fork's own segmenter, `/` and `-` kept as joiners) and triple-click the visible content row, both clipped to the rectangle.
+- The selection dies on: overlay hide/close, a moved placement (resize, reflow, remount), a newer visible overlay above it, a screen swap, focus-out, stop, and a host content replacement.
+- An overlay WITHOUT the option keeps the exact upstream block: an unconsumed press selects nothing, copies nothing and never touches the background.
+- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X068 group) and the host deliverables-panel/fullscreen regressions.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: X068 — selects only the visible overlay text (content spaces preserved), keeps drag and copy inside the content rectangle, does not start a selection without the opt-in, lets a consuming component keep its press and click, selects a word on double-click and the row on triple-click, never copies the frame chrome or the covered background, drops the selection when a newer overlay covers it, drops it when the placement moves, clears it through resetTextSelection, paints the highlight only inside the rectangle, and refuses a release that arrives before the covering frame is painted, and the preserveClickHistory repaint path keeps the multi-click window
+- packages/pi-tui/test/overlay-options.test.ts: X068 — the option is optional, and it is inert on the regular main screen
+- test/tui/delivered-files-panel.test.ts: a Files body press is unconsumed while every button press stays owned by the panel
+- test/tui/deliverables.test.ts: the real application chain — the painted modal, a real SGR drag, the alternate screen's selection, the injected clipboard sink — copies the overlay's own text and never the transcript behind it
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- src/tui.ts
+- src/tui-alt-screen.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream has no overlay-level text selection: a capturing overlay that does not consume a press is an opaque modal barrier and the alternate screen's selection can only address the background viewport. The fork adds one optional opt-in consulted only on the press that no component consumed, plus a region latch that clips the EXISTING selection and copy paths to the overlay's last-painted content rectangle. With the option absent, every pointer, selection, click and copy path is unchanged.
+
+#### Retirement conditions
+
+- Retire when upstream exposes an equivalent way to select and copy text inside an overlay's painted content rectangle (or the Delivered files browser stops needing pointer text selection), then run the X068 fork group and the host deliverables regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Owner-authorized necessary fork support for Delivered files PR B (overlay text selection). Confirmed against the pinned v1.1.0 tree that no existing OverlayOptions field or public member can select overlay content, whereas the selection anchor/focus, highlight painter, word segmenter, painted-row reader and clipboard path all live inside TuiAltScreen.

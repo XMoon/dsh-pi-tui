@@ -1330,3 +1330,333 @@ test('a POSIX-root workspace still paints workspace-relative delivered paths', a
   assert.ok(!lines.some(line => line.startsWith('  /artifacts/a.md')),
     `the absolute path must not win over the valid root:\n${lines.join('\n')}`)
 })
+
+/** A real fullscreen app with the ONE delivered-files modal open, plus a
+ * clipboard sink so the fork's selection copy can be observed end to end. */
+function selectionApp(copied: string[], columns = 100, rows = 30) {
+  const vt = new VirtualTerminal(columns, rows)
+  const snapshot = {
+    subjectKind: 'main' as const,
+    sessionId: 'session-1',
+    sourceIdentity: {},
+    turns: [{ turn: 1, files: [{ path: '/ws/alpha.md', description: 'first report' }] }],
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    copySelection: async (text) => {
+      copied.push(text)
+      return true
+    },
+    deliveredFiles: { snapshot: () => snapshot, isCurrent: () => true },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snapshot)
+  return { vt, app, snapshot }
+}
+
+/** Locate the modal's painted outer frame: its top border row and its left
+ * column. The frame is the ONLY rounded box in the fullscreen frame. */
+function modalFrame(lines: readonly string[]): { top: number; left: number; width: number } {
+  const top = lines.findIndex(line => line.includes('╭'))
+  assert.ok(top >= 0, `fixture: the modal paints a frame:\n${lines.join('\n')}`)
+  const line = lines[top]!
+  const left = line.indexOf('╭')
+  const right = line.lastIndexOf('╮')
+  return { top, left, width: right - left + 1 }
+}
+
+test('B01/B03/B04: a real SGR drag inside the modal copies the modal text, never the transcript', async () => {
+  const copied: string[] = []
+  const { vt, app } = selectionApp(copied)
+  const view = await viewport(vt)
+  const frame = modalFrame(view.split('\n'))
+  // The first CONTENT row is below the top border; the content column starts
+  // after the border cell and its padding cell.
+  const row = frame.top + 1
+  const column = frame.left + 2
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<32;${column + 6};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${column + 6};${row + 1}m`)
+  const after = await viewport(vt)
+
+  assert.equal(copied.length, 1, `one drag copies once (saw ${JSON.stringify(copied)})`)
+  const text = copied[0]!
+  assert.ok(text.trim().length > 0, JSON.stringify(text))
+  assert.ok(!text.includes('╭') && !text.includes('│'), `the frame chrome is never copied: ${JSON.stringify(text)}`)
+  assert.ok(!text.includes('done'), `the transcript behind the modal is never copied: ${JSON.stringify(text)}`)
+  assert.ok(after.includes('Copied!'), `the copy reports a real success:\n${after}`)
+  app.stop()
+})
+
+test('B07: the modal buttons stay real click targets under the selection opt-in', async () => {
+  const copied: string[] = []
+  const { vt, app } = selectionApp(copied)
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  const frame = modalFrame(lines)
+  const barRow = frame.top + lines.slice(frame.top).findIndex(line => line.includes('[Close]'))
+  const closeColumn = view.split('\n')[barRow]!.lastIndexOf('[Close]') + 2
+  vt.sendInput(`\x1b[<0;${closeColumn + 1};${barRow + 1}M`)
+  vt.sendInput(`\x1b[<0;${closeColumn + 1};${barRow + 1}m`)
+  const after = await viewport(vt)
+
+  assert.equal(copied.length, 0, 'a button click must never copy text')
+  assert.ok(!after.includes('[Close]'), `the complete click really closed the modal:\n${after}`)
+  app.stop()
+})
+
+test('B08: closing the modal drops its selection, and a later release cannot copy it', async () => {
+  const copied: string[] = []
+  const { vt, app } = selectionApp(copied)
+  const view = await viewport(vt)
+  const frame = modalFrame(view.split('\n'))
+  const row = frame.top + 1
+  const column = frame.left + 2
+  // Arm a visible selection without releasing.
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<32;${column + 5};${row + 1}M`)
+  await viewport(vt)
+  assert.equal(copied.length, 0, 'fixture: nothing is copied until the release')
+
+  app.closeDeliveredFiles()
+  await viewport(vt)
+  // The release lands on the now-uncovered transcript: it must not copy the
+  // modal's text, and it must not resume the retired gesture.
+  vt.sendInput(`\x1b[<0;${column + 5};${row + 1}m`)
+  const after = await viewport(vt)
+  assert.equal(copied.length, 0, `a closed modal never copies: ${JSON.stringify(copied)}`)
+  assert.ok(!after.includes('╭'), `fixture: the modal is really gone:\n${after}`)
+  app.stop()
+})
+
+test('B05: a transcript drag that starts OUTSIDE the modal never becomes an overlay selection', async () => {
+  const copied: string[] = []
+  const { vt, app } = selectionApp(copied)
+  const view = await viewport(vt)
+  const frame = modalFrame(view.split('\n'))
+  // Start on the transcript below the modal, drag INTO the modal, release.
+  const startRow = frame.top + 12
+  vt.sendInput(`\x1b[<0;1;${startRow + 1}M`)
+  vt.sendInput(`\x1b[<32;${frame.left + 4};${frame.top + 2}M`)
+  vt.sendInput(`\x1b[<0;${frame.left + 4};${frame.top + 2}m`)
+  await viewport(vt)
+
+  assert.equal(copied.length, 0, 'the modal barrier cancels a background gesture, it never adopts it')
+  app.stop()
+})
+
+test('B02: a double-click inside the modal selects the visible word, and a single click only selects the row', async () => {
+  const copied: string[] = []
+  const { vt, app } = selectionApp(copied)
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  const frame = modalFrame(lines)
+  // The Files body paints one row per file; its path cell is the painted one.
+  const row = lines.findIndex((line, index) => index > frame.top && line.includes('alpha.md'))
+  assert.ok(row > frame.top, `fixture: the path row is painted:\n${view}`)
+  const pathStart = lines[row]!.indexOf('alpha.md')
+  // Click INSIDE the path text (never the row's leading marker cell).
+  const cell = pathStart + 3
+
+  const clickAt = (column: number) => {
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+    vt.sendInput(`\x1b[<0;${column + 1};${row + 1}m`)
+  }
+  // ONE complete click on a body cell is a DISCLOSURE click, not a copy.
+  clickAt(cell)
+  await viewport(vt)
+  assert.equal(copied.length, 0, 'a plain single click must not copy')
+
+  // A SECOND complete click on the same cell within the multi-click window is
+  // the double-click that selects the word, so exactly ONE copy is observed.
+  clickAt(cell)
+  await viewport(vt)
+  assert.equal(copied.length, 1, `a double-click copies the word (saw ${JSON.stringify(copied)})`)
+  assert.ok(copied[0]!.includes('alpha.md'), JSON.stringify(copied[0]))
+  assert.ok(!copied[0]!.includes('╭') && !copied[0]!.includes('│'), 'the frame chrome is never copied')
+
+  // A THIRD click on the same word cell is the triple-click: the visible
+  // content row of the modal, still clipped to the frame.
+  clickAt(cell)
+  await viewport(vt)
+  assert.equal(copied.length, 2, `a triple-click copies the row (saw ${JSON.stringify(copied)})`)
+  assert.ok(copied[1]!.includes('alpha.md'), JSON.stringify(copied[1]))
+  assert.ok(!copied[1]!.includes('╭') && !copied[1]!.includes('╰'), 'the row copy never includes a border')
+  app.stop()
+})
+
+test('B03: a wide CJK/emoji path copies whole graphemes, never a half-wide cell', async () => {
+  const copied: string[] = []
+  const vt = new VirtualTerminal(100, 30)
+  const snapshot = {
+    subjectKind: 'main' as const,
+    sessionId: 'session-1',
+    sourceIdentity: {},
+    turns: [{ turn: 1, files: [{ path: '/ws/报告-📄.md' }] }],
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    copySelection: async (text) => {
+      copied.push(text)
+      return true
+    },
+    deliveredFiles: { snapshot: () => snapshot, isCurrent: () => true },
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snapshot)
+  const view = await viewport(vt)
+  const lines = view.split('\n')
+  const frame = modalFrame(lines)
+  const row = lines.findIndex((line, index) => index > frame.top && line.includes('报告'))
+  assert.ok(row > frame.top, `fixture: the CJK path is painted:\n${view}`)
+  const pathStart = lines[row]!.indexOf('报告')
+  // Drag across the whole wide-character run, one cell short of its end.
+  vt.sendInput(`\x1b[<0;${pathStart + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<32;${pathStart + 1 + visibleWidth('报告-📄.md') - 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${pathStart + 1 + visibleWidth('报告-📄.md') - 1};${row + 1}m`)
+  await viewport(vt)
+
+  assert.equal(copied.length, 1, JSON.stringify(copied))
+  const text = copied[0]!
+  assert.ok(text.includes('报告'), `the wide characters survive: ${JSON.stringify(text)}`)
+  // No lone half of a wide grapheme: every CJK/emoji glyph appears whole.
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(text), 'no lone high surrogate')
+  assert.ok(!/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text), 'no lone low surrogate')
+  app.stop()
+})
+
+test('B10: the selectable rectangle tracks the frozen geometry matrix in all three presets', async () => {
+  // The frozen PR A matrix (design-language §12.2): the modal is a centered
+  // percentage window, so its painted placement — and therefore the selectable
+  // rectangle — must follow it exactly at every size.
+  const matrix: ReadonlyArray<readonly [number, number]> = [
+    [44, 20], [72, 24], [80, 24], [120, 40], [160, 50], [200, 50],
+  ]
+  for (const preset of ['full', 'compact', 'focus'] as const) {
+    for (const [columns, rows] of matrix) {
+      const copied: string[] = []
+      const vt = new VirtualTerminal(columns, rows)
+      const snapshot = {
+        subjectKind: 'main' as const,
+        sessionId: 'session-1',
+        sourceIdentity: {},
+        turns: [{ turn: 1, files: [{ path: '/ws/alpha.md', description: 'first report' }] }],
+      }
+      const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+        displayState: { preset },
+        copySelection: async (text) => {
+          copied.push(text)
+          return true
+        },
+        deliveredFiles: { snapshot: () => snapshot, isCurrent: () => true },
+      })
+      app.start()
+      startedApps.add(app)
+      app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
+      app.setFullscreen(true)
+      app.openDeliveredFiles(snapshot)
+      const view = await viewport(vt)
+      const lines = view.split('\n')
+      const frame = modalFrame(lines)
+      const row = lines.findIndex((line, index) => index > frame.top && line.includes('alpha.md'))
+      assert.ok(row > frame.top, `${preset} ${columns}x${rows}: the list row is painted:\n${view}`)
+      const pathStart = lines[row]!.indexOf('alpha.md')
+      // Drag from the first path cell onto the frame's RIGHT border cell: the
+      // range must stop at the border, never at the terminal edge.
+      const rightBorder = frame.left + frame.width - 1
+      vt.sendInput(`\x1b[<0;${pathStart + 1};${row + 1}M`)
+      vt.sendInput(`\x1b[<32;${rightBorder + 1};${row + 1}M`)
+      vt.sendInput(`\x1b[<0;${rightBorder + 1};${row + 1}m`)
+      const after = await viewport(vt)
+
+      assert.equal(copied.length, 1, `${preset} ${columns}x${rows}: the drag copies once`)
+      const text = copied[0]!
+      assert.ok(text.includes('alpha.md'), `${preset} ${columns}x${rows}: ${JSON.stringify(text)}`)
+      // The frame's row shape is `│ content… │`: the content runs from
+      // `left + 2` to `left + width - 3`. A drag taken onto the RIGHT border
+      // must therefore copy exactly the cells from the press column to that
+      // last content cell — no border, no padding column, and nothing past the
+      // frame's edge.
+      const contentEnd = frame.left + frame.width - 3
+      const expectedWidth = contentEnd - pathStart + 1
+      assert.equal(
+        visibleWidth(text),
+        expectedWidth,
+        `${preset} ${columns}x${rows}: the copy is clipped to the content rectangle `
+        + `(want ${expectedWidth} cells, got ${visibleWidth(text)}): ${JSON.stringify(text)}`,
+      )
+      assert.ok(!text.includes('│'), `${preset} ${columns}x${rows}: the border is never copied: ${JSON.stringify(text)}`)
+      assert.ok(after.includes('Copied!'), `${preset} ${columns}x${rows}: the copy really settled`)
+      // One live TuiApp per process: release the slot before the next matrix
+      // cell, not merely at the end of the whole sweep.
+      app.stop()
+      startedApps.delete(app)
+      app.dispose()
+    }
+  }
+})
+
+test('B09: a very long preview line selects without an eager whole-page wrap or a second Host read', async () => {
+  const copied: string[] = []
+  const vt = new VirtualTerminal(100, 30)
+  const reads: number[] = []
+  // 40 flat columns and a folded 2 MiB line: the preview paints it as lazily
+  // wrapped physical rows (PR #435), so resolving the selection must not
+  // re-mount the page or read the Host again.
+  const long = 'x'.repeat(2 * 1024 * 1024)
+  const snapshot = {
+    subjectKind: 'main' as const,
+    sessionId: 'session-1',
+    sourceIdentity: {},
+    turns: [{ turn: 1, files: [{ path: '/ws/huge.txt' }] }],
+  }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'full' },
+    copySelection: async (text) => {
+      copied.push(text)
+      return true
+    },
+    deliveredFiles: { snapshot: () => snapshot, isCurrent: () => true },
+    deliveredFilePreview: () => ({
+      stat: async () => ({ version: 'v1', bytes: long.length }),
+      read: async () => {
+        reads.push(1)
+        return { stat: { version: 'v1', bytes: long.length }, offset: 1, limit: 120, text: long, lines: 1, eof: true }
+      },
+    }),
+  })
+  app.start()
+  startedApps.add(app)
+  app.setTranscript([{ kind: 'assistant', turn: 1, text: 'done' }], new Map())
+  app.setFullscreen(true)
+  app.openDeliveredFiles(snapshot, { turn: 1, path: '/ws/huge.txt', page: 'details' })
+  await viewport(vt)
+  // Enter Preview starts the ONE read of the current page.
+  vt.sendInput('\r')
+  await viewport(vt)
+  const readsAfterOpen = reads.length
+  assert.ok(readsAfterOpen >= 1, 'fixture: the preview really read a page')
+
+  const lines = (await viewport(vt)).split('\n')
+  const frame = modalFrame(lines)
+  // Drag across the first preview row inside the content rectangle.
+  const row = lines.findIndex((line, index) => index > frame.top && line.includes('xxxx'));
+  assert.ok(row > frame.top, `fixture: the preview row is painted:\n${lines.join('\n')}`)
+  const column = frame.left + 2
+  vt.sendInput(`\x1b[<0;${column + 1};${row + 1}M`)
+  vt.sendInput(`\x1b[<32;${column + 20};${row + 1}M`)
+  vt.sendInput(`\x1b[<0;${column + 20};${row + 1}m`)
+  await viewport(vt)
+
+  assert.equal(copied.length, 1, 'the drag copies once')
+  assert.ok(copied[0]!.includes('x'), JSON.stringify(copied[0]!.slice(0, 40)))
+  // Selecting the painted text never re-reads the Host.
+  assert.equal(reads.length, readsAfterOpen, 'a text selection must not issue another Host read')
+  app.stop()
+})

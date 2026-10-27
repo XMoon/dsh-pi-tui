@@ -24,6 +24,16 @@ export interface DeliveredFilesOverlayGeometry {
   readonly maxHeight: number
 }
 
+/**
+ * The one overlay's text-selection content insets: the `ResponsiveOverlayFrame`
+ * chrome measured from the painted placement — 1 border row above and below, and
+ * 2 columns on each side (1 border cell + 1 padding cell). The fork derives the
+ * selectable rectangle from the LAST PAINTED placement minus these insets, so
+ * the region can never include the border, the padding or the background beside
+ * the frame.
+ */
+export const DELIVERED_FILES_TEXT_SELECTION_INSETS = { top: 1, right: 2, bottom: 1, left: 2 } as const
+
 /** The formula's hard ceiling: the host options must never exceed this even on
  *  an unbounded terminal. */
 const DELIVERED_FILES_OVERLAY_MAX_WIDTH = 120

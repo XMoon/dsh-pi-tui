@@ -135,7 +135,10 @@ import {
   DeliveredFilesPanel,
   type DeliveredFilesOpenIntent,
 } from './tui/deliverables/delivered-files-panel.ts'
-import { deliveredFilesOverlayGeometry } from './tui/deliverables/overlay-size.ts'
+import {
+  DELIVERED_FILES_TEXT_SELECTION_INSETS,
+  deliveredFilesOverlayGeometry,
+} from './tui/deliverables/overlay-size.ts'
 import type { DeliveredFilePreviewCapability } from './runtime/deliverables-port.ts'
 import { DraftImagePreview, DRAFT_PREVIEW_COMPACT_WIDTH, DRAFT_PREVIEW_MAX_ROWS, type DraftPreviewRemoveHit } from './tui/components/media/draft-image-preview.ts'
 import { selectDraftImageOccurrences, type DraftImageOccurrence } from './client/media/image/placeholder.ts'
@@ -23532,7 +23535,20 @@ export class TuiApp {
     const panel = new DeliveredFilesPanel({
       snapshot,
       ...(intent === undefined ? {} : { initial: intent }),
-      requestRender: () => this.requestRender(),
+      // The panel repaints for ITS OWN content changes (filter, page, Turn,
+      // selection, copy/preview state). A painted text selection names cells of
+      // the frame being replaced, so it is dropped BEFORE that frame is
+      // repainted (dsh-pi-tui divergence X068). The fork's own drag-highlight
+      // repaint never runs through this callback, so an in-flight gesture
+      // survives it.
+      requestRender: () => {
+        // `preserveClickHistory`: repainting the panel's own content is not a
+        // corpus replacement, and dropping the fork's multi-click window here
+        // would turn every double-click into two single clicks (the first
+        // click's own disclosure repaint runs through this callback).
+        this.fullscreen?.resetTextSelection({ preserveClickHistory: true })
+        this.requestRender()
+      },
       close: () => this.closeDeliveredFiles(),
       copyPath: (path, settle) => this.copyDeliveredFilePath(snapshot, path, settle),
       // Delivered files PR2: the Host read capability BOUND to this snapshot's
@@ -23562,6 +23578,7 @@ export class TuiApp {
     // SAME logical lease with fresh options instead of using a wider canvas
     // (a wider canvas would overwrite the transcript beside the frame).
     const size = this.deliveredFilesOverlaySize()
+    const overlayOptions = this.deliveredFilesOverlayOptions(size)
     // PUBLISH THE LEASE BEFORE THE MOUNT. `showOverlayOnHost` can synchronously
     // run a plugin onFocus callback or start a fullscreen swap whose remount
     // pass re-creates this node's projection, and BOTH must observe the
@@ -23576,7 +23593,7 @@ export class TuiApp {
     try {
       handle = this.showOverlayOnHost(
         frame,
-        { width: size.width, maxHeight: size.maxHeight },
+        overlayOptions,
         {
           // REMOUNTABLE: a fullscreen screen swap must keep the SAME panel
           // (filter/turn/selection/scroll survive it) behind a fresh projection.
@@ -23588,10 +23605,7 @@ export class TuiApp {
             this.deliveredFilesScreen = this.activeScreen
             const nextSize = this.deliveredFilesOverlaySize()
             this.deliveredFilesGeometryKey = this.currentDeliveredFilesGeometryKey()
-            this.rebindOverlayRaw(logical, next, {
-              width: nextSize.width,
-              maxHeight: nextSize.maxHeight,
-            })
+            this.rebindOverlayRaw(logical, next, this.deliveredFilesOverlayOptions(nextSize))
           },
         },
       )
@@ -23633,6 +23647,13 @@ export class TuiApp {
   closeDeliveredFiles(): void {
     const overlay = this.deliveredFilesOverlay
     const panel = this.deliveredFilesPanel
+    // The selection lives on the SCREEN, not in the panel: closing the modal
+    // must drop it before the frame disappears, so a stale highlight or a
+    // later release can never copy text from this overlay. (dsh-pi-tui
+    // divergence X068.)
+    if (this.deliveredFilesScreen !== undefined && this.deliveredFilesScreen === this.activeScreen) {
+      this.fullscreen?.resetTextSelection()
+    }
     this.deliveredFilesOverlay = undefined
     this.deliveredFilesFrame = undefined
     this.deliveredFilesPanel = undefined
@@ -23702,8 +23723,7 @@ export class TuiApp {
     // legally open and focus an even newer overlay — the outer rebind must not
     // then steal that newer focus.
     const raw = screen.showOverlay(frame, {
-      width: size.width,
-      maxHeight: size.maxHeight,
+      ...this.deliveredFilesOverlayOptions(size),
       disposeOnHide: false,
       initialFocus: false,
     })
@@ -23724,6 +23744,24 @@ export class TuiApp {
   private deliveredFilesOverlaySize(): { width: number; maxHeight: number; margin: number | undefined } {
     const geometry = deliveredFilesOverlayGeometry(this.terminal.columns, this.terminal.rows)
     return { width: geometry.width, maxHeight: geometry.maxHeight, margin: undefined }
+  }
+
+  /**
+   * The ONE overlay-options assembly of the Delivered files modal: the frozen
+   * geometry plus the text-selection opt-in. Every mount path (initial mount,
+   * fullscreen remount and resize rebind) goes through THIS function so a
+   * projection can never be repainted without the opt-in, and no OTHER overlay
+   * can acquire it by accident (dsh-pi-tui divergence X068).
+   */
+  private deliveredFilesOverlayOptions(
+    size: { width: number; maxHeight: number; margin: number | undefined },
+  ): OverlayOptions {
+    return {
+      width: size.width,
+      maxHeight: size.maxHeight,
+      textSelectionInsets: DELIVERED_FILES_TEXT_SELECTION_INSETS,
+
+    }
   }
 
   private createDeliveredFilesFrame(panel: DeliveredFilesPanel): ResponsiveOverlayFrame {
