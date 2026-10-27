@@ -1380,7 +1380,7 @@ test('tmux virtual: a REAL 1 MiB writer cut inside the grid leaks no cell on rev
   const WIDTH = 1200
   h.terminal.columns = WIDTH
   try {
-    const build = (revokeAfterFirstWrite = false): {
+    const build = (imageCount: number, revokeAfterFirstWrite = false): {
       calls: string[]
       text: string
       graphics: NonNullable<ReturnType<typeof createTmuxKittyGraphics>>
@@ -1391,7 +1391,7 @@ test('tmux virtual: a REAL 1 MiB writer cut inside the grid leaks no cell on rev
       sink.columns = WIDTH
       const graphics = createTmuxKittyGraphics(sink, {}, h.cli.env)
       assert.ok(graphics)
-      const images = Array.from({ length: 8 }, () => imageOf(graphics, source(PNG, 3200, 2400), {
+      const images = Array.from({ length: imageCount }, () => imageOf(graphics, source(PNG, 3200, 2400), {
         maxWidthCells: 297,
         maxHeightCells: 297,
         fallback: '[fallback]',
@@ -1434,20 +1434,38 @@ test('tmux virtual: a REAL 1 MiB writer cut inside the grid leaks no cell on rev
       return { calls, text: sink.text, graphics, screen, thrown }
     }
 
-    const real = build()
-    const calls = real.calls
-    assert.ok(calls.length >= 2, `the frame must split into at least two physical writes, got ${calls.length}`)
-    const first = calls[0]!
-    const second = calls[1]!
-    assert.ok(first.includes(P) && !first.endsWith('\n'), 'chunk 1 ends inside a grid row')
-    const secondHead = second.split('\n')[0]!
-    assert.ok(secondHead.includes(P), 'chunk 2 begins with placeholder cells')
-    assert.equal(secondHead.includes('38;2;'), false, 'chunk 2 begins WITHOUT a colour prefix')
+    // The exact cut position depends on terminal geometry, so scan image counts
+    // until the first physical chunk ends INSIDE a row's cells and the next
+    // chunk's first line still carries cells: that is the hazard being tested.
+    let real: ReturnType<typeof build> | undefined
+    let first: string | undefined
+    let secondHead: string | undefined
+    let chosenCount = 0
+    for (let imageCount = 3; imageCount <= 16; imageCount += 1) {
+      const candidate = build(imageCount)
+      const candidateCalls = candidate.calls
+      if (candidateCalls.length >= 2) {
+        const head = candidateCalls[0]!
+        const nextHead = candidateCalls[1]!.split('\n')[0]!
+        if (head.includes(P) && !head.endsWith('\n') && nextHead.includes(P)
+          && !nextHead.includes('38;2;')) {
+          real = candidate
+          first = head
+          secondHead = nextHead
+          chosenCount = imageCount
+          break
+        }
+      }
+      candidate.screen.stop()
+      candidate.graphics.dispose()
+    }
+    assert.ok(real !== undefined && first !== undefined && secondHead !== undefined,
+      'no image count produced a chunk cut inside a row followed by a cell-bearing chunk')
     real.screen.stop()
     real.graphics.dispose()
 
     // Fresh screen on the SAME construction: revoke after the first write.
-    const finalRun = build(true)
+    const finalRun = build(chosenCount, true)
     assert.ok(finalRun.calls.length >= 2, 'the revoking run also split physically')
     const refusedHead = finalRun.calls[0]!
     assert.ok(refusedHead.includes(P) && !refusedHead.endsWith('\n'),
