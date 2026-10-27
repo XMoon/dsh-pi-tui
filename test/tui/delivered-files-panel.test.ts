@@ -754,3 +754,46 @@ test('copy feedback belongs to the LATEST request and never outlives its page', 
   assert.ok(!rows().at(-1)!.includes('Path copied'),
     `the abandoned visit's settlement cannot paint on the re-entered page:\n${rows().at(-1)}`)
 })
+
+test('PageUp walks back through the list instead of sticking (every step repaints)', () => {
+  const files = Array.from({ length: 120 }, (_, index) => `/ws/f-${String(index + 1).padStart(3, '0')}.md`)
+  const h = harness(snapshotOf([{ turn: 1, files }]))
+  h.setSize(100, 30)
+  const paint = () => h.rows()
+  const rowsPerPage = 17
+  const marked = (rows: readonly string[]): string => {
+    const row = rows.find(line => line.startsWith('> '))
+    assert.ok(row !== undefined, `a selected row is painted:\n${rows.join('\n')}`)
+    // `> f-001.md   Details`
+    return row.trim().split(/\s+/)[1]!
+  }
+  const pageDown = (): void => h.type('pageDown')
+  const pageUp = (): void => h.type('pageUp')
+
+  let rows = paint()
+  assert.equal(marked(rows), 'f-001.md')
+  // Deep enough that three backward pages cannot hit the top: three pages down.
+  for (let step = 0; step < 3; step += 1) { pageDown(); rows = paint() }
+  const deepIndex = files.findIndex(file => file.endsWith(`/${marked(rows)}`))
+  assert.ok(deepIndex >= rowsPerPage * 2, `fixture: the selection is deep (${marked(rows)})`)
+
+  // THREE pages back: every step must really move BACKWARDS and repaint, and the
+  // marked row must always be inside the painted window.
+  const indexes: number[] = [deepIndex]
+  for (let step = 0; step < 3; step += 1) {
+    pageUp()
+    rows = paint()
+    const label = marked(rows)
+    const index = files.findIndex(file => file.endsWith(`/${label}`))
+    assert.ok(index >= 0, `the marked row is a real file: ${label}`)
+    assert.equal(rows.filter(line => line.startsWith('> ')).length, 1, 'exactly one selected row')
+    assert.ok(rows.some(line => line.includes(label)), 'the selected row is painted')
+    assert.ok(index < indexes.at(-1)!, `PageUp step ${step + 1} moved backwards: ${indexes.at(-1)} -> ${index}`)
+    indexes.push(index)
+  }
+  // And the forward direction still walks the same way.
+  const before = indexes.at(-1)!
+  pageDown()
+  const after = files.findIndex(file => file.endsWith(`/${marked(paint())}`))
+  assert.ok(after > before, `PageDown moved forward again: ${before} -> ${after}`)
+})
