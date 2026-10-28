@@ -38,7 +38,9 @@ const SCRIPT = `#!/bin/sh
 printf '%s\\n' "$*" >> "$TMUX_FAKE_LOG"
 out="$TMUX_FAKE_ROOT/$1"
 if [ -f "$out.delay" ]; then
-  sleep "$(cat "$out.delay")"
+  # exec so the timeout kills this process directly; a shell parent would
+  # leave an orphan sleep in the test runner's process group.
+  exec sleep "$(cat "$out.delay")"
 fi
 if [ -f "$out.exit" ]; then
   exit "$(cat "$out.exit")"
