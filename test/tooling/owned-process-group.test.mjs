@@ -11,12 +11,14 @@
 
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { isExecuting, killStillExecuting, startTimeOf, waitForNoExecuting } from '../support/pid-records.ts'
+import {
+  isExecuting, killStillExecuting, readPidRecords, startTimeOf, waitForNoExecuting, waitForPidRecords,
+} from '../support/pid-records.ts'
 import { waitForFileLine } from '../support/wait-for-file.ts'
 import { groupStillAlive, stopOwnedGroup } from '../../scripts/lib/owned-process-group.mjs'
 
@@ -27,32 +29,112 @@ const POSIX_ONLY = process.platform === 'win32' ? 'process groups are POSIX-only
 // reported as NOT_VERIFIED rather than exercised.
 const PROC_ONLY = process.platform !== 'linux' ? 'the verifiable-identity escalation needs /proc' : false
 
+/** Whether `promise` settles within `deadlineMs`; the timer never outlives the wait. */
+async function settlesWithin(promise, deadlineMs) {
+  let timer
+  const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(false), deadlineMs) })
+  const result = await Promise.race([promise.then(() => true), timedOut])
+  clearTimeout(timer)
+  return result
+}
+
 /**
- * Start one owned group: the leader dies on the forwarded signal, and the
- * descendant it started ignores it.
+ * Start the signal-tree fixture and register its test-owned cleanup BEFORE the
+ * first wait. Returns the owned pieces plus the SAME idempotent cleanup that
+ * `life.defer` runs at teardown, so a case can invoke it deliberately.
  */
-async function startOwnedGroup(t, prefix) {
+function startFixture(t, prefix) {
   const life = testLifecycle(t)
   const dir = life.tempDir(prefix)
   const marker = join(dir, 'evidence.log')
+  const pidsFile = join(dir, 'pids.log')
   const child = spawn(process.execPath, [HOLDER], {
     env: { ...process.env, PROBE_MARKER: marker },
     stdio: 'ignore',
     // The leader must lead its OWN group, exactly as the wrappers spawn it.
     detached: true,
   })
-  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
-  life.defer(() => {
-    if (child.pid !== undefined) {
-      try { process.kill(-child.pid, 'SIGKILL') } catch { /* the group is already gone */ }
-    }
+  const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })))
+  let cleanedUp = false
+  /**
+   * Last-resort test-owned teardown. The launcher is stopped FIRST and awaited,
+   * so it cannot spawn another descendant while identities are collected; only
+   * then are the descendants killed by their own records. The numeric negative
+   * PGID is NEVER signalled — the production module forbids that without
+   * ownership proof, and this fixture's one leader and one descendant are
+   * individually identified.
+   *
+   * A record that has not been published yet is NOT proof that nothing started.
+   * `holder.mjs` writes `holder <pid> ready` BEFORE spawning and
+   * `descendant <pid>` immediately AFTER: a non-empty marker without a
+   * descendant announcement means the launcher may have stopped inside that
+   * window, and an announced descendant without a record means its identity is
+   * not provable yet. Both states fail loudly instead of claiming a clean
+   * teardown. Idempotent, because `t.after` invokes it again after a case ran it
+   * on purpose.
+   */
+  const cleanUp = async () => {
+    if (cleanedUp) return
+    cleanedUp = true
+    const problems = []
     try { child.kill('SIGKILL') } catch { /* already gone */ }
-  })
-  const ready = await waitForFileLine(marker, /ready tmpdir=/u, 20_000)
-  const [, rawPid] = ready.split(' ')
-  const descendant = { kind: 'descendant', pid: Number(rawPid), startTime: startTimeOf(Number(rawPid)) }
-  life.defer(() => { killStillExecuting([descendant]) })
-  return { child, descendant, exited, marker }
+    if (!await settlesWithin(exited, 5_000)) {
+      problems.push(`the group leader did not reach exit (pid=${child.pid ?? 'not-spawned'})`)
+    }
+    const markerText = existsSync(marker) ? readFileSync(marker, 'utf8') : ''
+    const announcedMatch = /^descendant (\d+)$/mu.exec(markerText)
+    const announced = announcedMatch === null ? undefined : Number(announcedMatch[1])
+    let records = readPidRecords(pidsFile)
+    if (announced !== undefined && !records.some((record) => record.kind === 'descendant' && record.pid === announced)) {
+      // The fixture announced a descendant whose identity record has not been
+      // published yet: wait for THAT record (the file content is the authority),
+      // then stop it like any other recorded descendant.
+      try {
+        await waitForFileLine(pidsFile, new RegExp(`^descendant ${announced} \\S+$`, 'u'), 10_000)
+      } catch (error) {
+        problems.push(`the announced descendant ${announced} never published its identity: ${error.message}`)
+      }
+      records = readPidRecords(pidsFile)
+    }
+    if (announced === undefined && markerText !== '') {
+      // The marker proves the fixture STARTED, but no descendant was announced:
+      // the leader may have been stopped inside the spawn -> announcement
+      // window. A descendant that DID start publishes its own identity record;
+      // wait for that (the file content is the authority) and stop it. When no
+      // identity ever arrives the state is unprovable and fails loudly — never
+      // a guessed PID/PGID.
+      try {
+        await waitForFileLine(pidsFile, /^descendant \d+ \S+$/u, 10_000)
+      } catch (error) {
+        problems.push(`the fixture started but no descendant identity was published: ${error.message}`)
+      }
+      records = readPidRecords(pidsFile)
+    }
+    killStillExecuting(records)
+    const survivors = await waitForNoExecuting(records, 5_000)
+    if (survivors.length > 0) {
+      problems.push(`the test-owned fixture cleanup left recorded helpers executing: ${JSON.stringify(survivors)}`)
+    }
+    if (problems.length > 0) throw new Error(problems.join('; '))
+  }
+  life.defer(cleanUp)
+  return { marker, pidsFile, child, exited, cleanUp }
+}
+
+/**
+ * Start one owned group and wait until its descendant announced readiness: the
+ * leader dies on the forwarded signal, and the descendant it started ignores it.
+ */
+async function startOwnedGroup(t, prefix) {
+  const fixture = startFixture(t, prefix)
+  await waitForFileLine(fixture.marker, /ready tmpdir=/u, 20_000)
+  // The descendant records its own identity BEFORE that readiness line, so the
+  // record — not a start time read after the fact — is the identity teardown
+  // and the assertions compare.
+  const descendant = readPidRecords(fixture.pidsFile).find((record) => record.kind === 'descendant')
+  assert.ok(descendant !== undefined,
+    `the descendant recorded its own identity before readiness: ${JSON.stringify(readPidRecords(fixture.pidsFile))}`)
+  return { ...fixture, descendant }
 }
 
 test('the group probe reports a live descendant and never signals it', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
@@ -189,4 +271,27 @@ test('a reused pgid is never signalled', { skip: POSIX_ONLY, timeout: 30_000 }, 
   assert.equal(settled, false)
   await exited
   assert.equal(isExecuting(descendant), true, 'a reused pgid must never receive SIGKILL')
+})
+
+test('a failed startup-witness wait still reaps the recorded descendant', { skip: POSIX_ONLY, timeout: 30_000 }, async (t) => {
+  const fixture = startFixture(t, 'owned-group-wait-failure-')
+  // The real descendant wrote its identity before announcing readiness.
+  const records = await waitForPidRecords(fixture.pidsFile, 1, 20_000)
+  const descendant = records.find((record) => record.kind === 'descendant')
+  assert.ok(descendant !== undefined, `the descendant recorded its identity: ${JSON.stringify(records)}`)
+
+  // A CONTROLLED waiter failure: the witness a startup would wait for is never
+  // produced, which is the early failure that used to leave the descendant
+  // executing.
+  await assert.rejects(
+    waitForFileLine(fixture.marker, /^never-produced-witness$/u, 40),
+    /no line matching/u,
+  )
+
+  // The SAME cleanup that `life.defer` registered must run even though the test
+  // failed before its readiness wait; `t.after` then invokes it again safely.
+  await fixture.cleanUp()
+  const survivors = await waitForNoExecuting([descendant], 5_000)
+  assert.deepEqual(survivors, [],
+    `the test-owned cleanup ended the recorded descendant: ${JSON.stringify(survivors)}`)
 })
