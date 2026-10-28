@@ -78,7 +78,11 @@ interface TmuxDisplayClient {
  */
 function parseDisplayClients(report: string): TmuxDisplayClient[] | undefined {
   const displayClients: TmuxDisplayClient[] = []
-  for (const line of report.split('\n')) {
+  // `list-clients` terminates every record with exactly one newline. Remove
+  // that one command terminator only: any extra blank/whitespace record must
+  // stay visible to the strict six-column parse and fail closed.
+  const records = report.endsWith('\n') ? report.slice(0, -1) : report
+  for (const line of records.split('\n')) {
     const fields = line.split('\t')
     if (fields.length !== 6) return undefined
     const [name, tty, session, termname, termtype, controlMode] = fields as [
@@ -112,7 +116,9 @@ function environmentAdmits(env: NodeJS.ProcessEnv): boolean {
  * Run one tmux query with the fixed production argv shape: no shell, a 500 ms
  * timeout and a bounded output buffer. Any failure (missing binary, non-zero
  * exit, timeout, overflow) is indistinguishable from "no answer" and the
- * caller fails closed.
+ * caller fails closed. The RAW stdout is returned: a caller that parses
+ * positional columns must not let whitespace normalization hide a malformed
+ * record, while single-value queries may trim their own command terminator.
  */
 function runTmux(args: readonly string[], env: NodeJS.ProcessEnv): string | undefined {
   try {
@@ -123,7 +129,7 @@ function runTmux(args: readonly string[], env: NodeJS.ProcessEnv): string | unde
       maxBuffer: PROBE_MAX_OUTPUT_BYTES,
       stdio: ['ignore', 'pipe', 'ignore'],
       shell: false,
-    }).trim()
+    })
   } catch {
     return undefined
   }
@@ -209,10 +215,10 @@ export function probeTmuxKittyIdentity(env: NodeJS.ProcessEnv = process.env): Tm
   const paneId = env.TMUX_PANE
   if (paneId === undefined) return undefined
 
-  const passthrough = runTmux(['show-options', '-Apqv', '-t', paneId, 'allow-passthrough'], env)
+  const passthrough = runTmux(['show-options', '-Apqv', '-t', paneId, 'allow-passthrough'], env)?.trim()
   if (passthrough !== 'all') return undefined
 
-  const sessionName = runTmux(['display-message', '-p', '-t', paneId, '#{session_name}'], env)
+  const sessionName = runTmux(['display-message', '-p', '-t', paneId, '#{session_name}'], env)?.trim()
   if (!nonEmpty(sessionName)) return undefined
 
   const report = runTmux([

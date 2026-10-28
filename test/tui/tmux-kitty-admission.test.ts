@@ -243,6 +243,9 @@ test('exactly one matching, non-empty ordinary display client is required', (t) 
       name: 'one display plus a malformed control record',
       text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\nclient-1\t\t\tunknown\t\n',
     },
+    { name: 'trailing space in the control column', text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0 \n' },
+    { name: 'carriage return in the control column', text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\r\n' },
+    { name: 'extra trailing blank record', text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n\n' },
   ]
   for (const entry of cases) {
     const cli = createFakeTmuxCli(t)
@@ -262,6 +265,9 @@ test('one ordinary display client coexists with any number of Control Mode clien
     'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\nclient-3383511\t\twork\tunknown\t\t1\n',
     'client-3383511\t\twork\tunknown\t\t1\nmain\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n',
     'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\nclient-1\t\t\t\t\t1\nclient-2\t\t\tunknown\t\t1\n',
+    // A single record does not require a trailing terminator; only a real
+    // extra blank record after the command terminator is malformed.
+    'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0',
   ]
   for (const text of reports) {
     const cli = createFakeTmuxCli(t)
@@ -371,6 +377,25 @@ test('a second ordinary display client revokes even next to Control Mode clients
     assert.equal(admission.isAllowed(true), false, 'the revocation is one-way')
   } finally {
     cli.dispose()
+  }
+})
+
+test('a malformed last list-clients record revokes the live admission on re-probe', (t) => {
+  const reports = [
+    'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0 \n',
+    'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\r\n',
+    'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n\n',
+  ]
+  for (const report of reports) {
+    const cli = createFakeTmuxCli(t)
+    try {
+      const admission = new TmuxKittyAdmission(admitted(cli), cli.env)
+      assert.equal(admission.isAllowed(true), true)
+      cli.setReply('list-clients', { text: report })
+      assert.equal(admission.isAllowed(true), false, JSON.stringify(report))
+    } finally {
+      cli.dispose()
+    }
   }
 })
 
