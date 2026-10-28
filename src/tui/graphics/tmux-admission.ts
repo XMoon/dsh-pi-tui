@@ -129,6 +129,22 @@ export function tmuxKittyHasKnownUnicodePlaceholders(identity: TmuxKittyIdentity
   return false
 }
 
+/**
+ * Whether the live tmux client reports another terminal multiplexer as its
+ * terminal. A nested tmux/screen client is a transport boundary, not an
+ * unknown terminal to hand to a feature probe: the inner server's DCS would
+ * have to cross another multiplexer whose forwarding/lifecycle contract this
+ * backend does not implement. Any other unknown renderer may still probe.
+ */
+function isMultiplexerClient(identity: TmuxKittyIdentity): boolean {
+  const termname = identity.clientTermname.toLowerCase()
+  const program = clientProgramName(identity.clientTermtype)
+  return termname.startsWith('tmux')
+    || termname.startsWith('screen')
+    || program === 'tmux'
+    || program === 'screen'
+}
+
 function sameIdentity(left: TmuxKittyIdentity, right: TmuxKittyIdentity): boolean {
   return left.paneId === right.paneId
     && left.sessionName === right.sessionName
@@ -153,7 +169,9 @@ function sameIdentity(left: TmuxKittyIdentity, right: TmuxKittyIdentity): boolea
  *
  * The client's terminal name/type are recorded for the U1 evidence decision,
  * but an unknown renderer is NOT rejected here: it may proceed to the live
- * `e=T,U=1` feature probe.
+ * `e=T,U=1` feature probe. A live client that identifies itself as another
+ * tmux/screen instance IS rejected: nested multiplexers remain outside this
+ * transport contract.
  */
 export function probeTmuxKittyIdentity(env: NodeJS.ProcessEnv = process.env): TmuxKittyIdentity | undefined {
   if (!environmentAdmits(env)) return undefined
@@ -181,8 +199,10 @@ export function probeTmuxKittyIdentity(env: NodeJS.ProcessEnv = process.env): Tm
   ]
   if (!nonEmpty(clientName) || !nonEmpty(clientTty)) return undefined
   if (clientSession !== sessionName) return undefined
+  const identity = { paneId, sessionName, clientName, clientTty, clientTermname, clientTermtype }
+  if (isMultiplexerClient(identity)) return undefined
 
-  return { paneId, sessionName, clientName, clientTty, clientTermname, clientTermtype }
+  return identity
 }
 
 /**
@@ -195,6 +215,9 @@ export function probeTmuxKittyIdentity(env: NodeJS.ProcessEnv = process.env): Tm
  * or the six identity fields change, `revoked` latches and nothing can grant
  * again. A client change inside the 250 ms window is not detected atomically;
  * that is the documented hot-migration boundary, not an acknowledgement.
+ * When a U1 feature gate is present it is consulted only AFTER the live identity
+ * check: pending/denied feature state is not an identity failure, but a client
+ * change during that state still revokes the handle.
  */
 export class TmuxKittyAdmission {
   private readonly initial: TmuxKittyIdentity
@@ -212,11 +235,22 @@ export class TmuxKittyAdmission {
   }
 
   isAllowed(force = false): boolean {
-    if (this.revoked) return false
+    if (!this.isIdentityAllowed(force)) return false
     // The U1 feature probe owns its own pending/probing/allowed/denied state.
-    // Pending/denied is not an identity failure: report no pixels without
-    // spawning a tmux probe and without latching the identity revoke.
-    if (this.placeholderAllowed !== undefined && !this.placeholderAllowed()) return false
+    // Pending/denied is not an identity failure, but the identity probe above
+    // still observes and latches a live client change during that state.
+    return this.placeholderAllowed === undefined || this.placeholderAllowed()
+  }
+
+  /**
+   * The live-client half of the admission, independent of the U1 feature gate.
+   * Pending feature state must still observe a live client change and latch the
+   * one-way revoke; otherwise another client's later feature reply could be
+   * attributed to the original identity. The 250 ms cache and the forced
+   * physical-write re-probe keep their existing semantics.
+   */
+  isIdentityAllowed(force = false): boolean {
+    if (this.revoked) return false
     const now = Date.now()
     if (!force && this.hasProbed && now - this.lastProbeAt < PROBE_CACHE_TTL_MS) {
       return this.lastProbeAllowed

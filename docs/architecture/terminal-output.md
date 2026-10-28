@@ -270,13 +270,17 @@ the live server, identity, hard-off or revoke checks.
   DCS-wrapped Kitty `a=q,i=<random>,e=T,U=1` query after the real input listener is
   installed; only a reply with the same id, `e=T`, `U=1` and `OK` admits. A base
   Kitty `a=q` `OK` without `e`/`U` is not U1 evidence, and this transport never
-  falls back to ordinary `a=p` or legacy `a=T`. Pane environment (`TMUX`,
+  falls back to ordinary `a=p` or legacy `a=T`. Pending feature state does not
+  suspend the live identity check: a client change during probing still latches
+  the one-way revoke, and a feature reply is committed only while the bound
+  client identity is still current. Pane environment (`TMUX`,
   `TMUX_PANE`, `TERM`) is necessary context only: inherited
   `TERM_PROGRAM`/`KITTY_WINDOW_ID` never grant admission. Option
-  `on`/`off`, no client, mixed clients, a nested multiplexer or any query
-  failure fails closed before image work. The backend never writes tmux
-  configuration: `allow-passthrough=all` and the single attached client are
-  user-provided preconditions, and no option is ever set for the user.
+  `on`/`off`, no client, mixed clients, a live outer tmux/screen client, a
+  nested multiplexer or any query failure fails closed before image work. The
+  backend never writes tmux configuration: `allow-passthrough=all` and the
+  single attached client are user-provided preconditions, and no option is ever
+  set for the user.
 - **Revocation is one-way.** Any real probe failure or change to the six
   identity fields latches the handle revoked for the rest of the process. The
   component then paints the text fallback, and the facade refuses an entire

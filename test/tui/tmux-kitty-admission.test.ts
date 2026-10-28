@@ -348,7 +348,7 @@ test('a one-way latch survives an explicit opt-out and a restored opt-in', (t) =
   }
 })
 
-test('a pending U1 gate keeps the live admission text-only without probing or latching', (t) => {
+test('a pending U1 gate still observes the live identity and keeps pixels text-only', (t) => {
   const cli = createFakeTmuxCli(t)
   try {
     const identity = admitted(cli)
@@ -356,16 +356,49 @@ test('a pending U1 gate keeps the live admission text-only without probing or la
     const admission = new TmuxKittyAdmission(identity, cli.env, () => featureReady)
     const baseline = cli.calls().length
     assert.equal(admission.isAllowed(false), false, 'pending feature proof is text-only')
-    assert.equal(cli.calls().length, baseline, 'no tmux subprocess runs while the feature probe is pending')
+    assert.equal(cli.calls().length, baseline + 3, 'pending still observes the live client identity')
 
     featureReady = true
-    assert.equal(admission.isAllowed(false), true, 'the live identity is checked once the feature gate allows')
-    assert.equal(cli.calls().length, baseline + 3)
+    assert.equal(admission.isAllowed(false), true, 'the live identity is already current when the feature gate allows')
 
     cli.setReply('show-options', { text: 'on\n' })
     assert.equal(admission.isAllowed(true), false, 'the identity revoke still works after the feature gate')
   } finally {
     cli.dispose()
+  }
+})
+
+test('a pending feature gate revokes when the live client changes', (t) => {
+  const cli = createFakeTmuxCli(t)
+  try {
+    const identity = admitted(cli)
+    const admission = new TmuxKittyAdmission(identity, cli.env, () => false)
+    assert.equal(admission.isAllowed(false), false)
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/99\twork\txterm-256color\twezterm 20240203\n' })
+    assert.equal(admission.isAllowed(false), false, 'the pending gate never reports pixels')
+    assert.equal(admission.isIdentityAllowed(true), false, 'the changed live client latched the revoke')
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n' })
+    assert.equal(admission.isAllowed(true), false, 'the revoke is one-way')
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('a live outer tmux/screen client is a transport boundary, not a feature-probe candidate', (t) => {
+  const cases = [
+    'main\t/dev/pts/12\twork\ttmux-256color\t\n',
+    'main\t/dev/pts/12\twork\tscreen-256color\t\n',
+    'main\t/dev/pts/12\twork\txterm-256color\ttmux 3.5a\n',
+    'main\t/dev/pts/12\twork\txterm-256color\tscreen 4.9\n',
+  ]
+  for (const text of cases) {
+    const cli = createFakeTmuxCli(t)
+    try {
+      cli.setReply('list-clients', { text })
+      assert.equal(probeTmuxKittyIdentity(cli.env), undefined, text)
+    } finally {
+      cli.dispose()
+    }
   }
 })
 
@@ -433,6 +466,19 @@ test('a wrong-id feature reply reaches the screen while a matching reply is cons
   assert.equal(second.allowed, true)
   first.dispose()
   second.dispose()
+})
+
+test('a feature reply observed under a changed client denies before promotion', () => {
+  let allowed = 0
+  const probe = new TmuxKittyFeatureProbe(() => { allowed += 1 }, PROBE_ID)
+  probe.markInputStarted()
+  probe.start(() => {})
+  assert.equal(probe.consume(probeReply(probe), () => false), true)
+  assert.equal(probe.allowed, false, 'the changed identity denies the feature evidence')
+  assert.equal(allowed, 0)
+  assert.equal(probe.consume(probeReply(probe)), true)
+  assert.equal(probe.allowed, false, 'the denial is one-way')
+  probe.dispose()
 })
 
 test('an unanswered U1 probe denies at the bounded window and a late OK never promotes', async () => {

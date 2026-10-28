@@ -11,6 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test, { type TestContext } from 'node:test'
 import {
   Container as LegacyContainer,
@@ -24,6 +25,12 @@ import {
   type Terminal,
   type TerminalProgressState,
 } from '@xmoon76/pi-tui'
+import { TuiApp } from '../../src/tui-app.ts'
+import { TranscriptFolder } from '../../src/transcript.ts'
+import { ImageLoader } from '../../src/client/media/image/loader.ts'
+import { ImageCache } from '../../src/client/media/image/cache.ts'
+import { convertKittyThumbnail } from '../../src/client/media/image/kitty-thumbnail.ts'
+import type { ImageAttachmentRefLike, ImageMediaType } from '../../src/domain/media/types.ts'
 import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
 import { parseKittyApc, type KittyApc } from '../../src/tui/graphics/kitty-native.ts'
 import { KittyTerminalFacade, TmuxGraphicsRevokedError } from '../../src/tui/graphics/kitty-terminal.ts'
@@ -38,6 +45,7 @@ import {
 import { createFakeTmuxCli, type FakeTmuxCli } from '../support/fake-tmux-cli.ts'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+const SAMPLE_WEBP = readFileSync(new URL('../fixtures/images/transcript-sample.webp', import.meta.url))
 const DCS_INTRODUCER = '\x1bPtmux;'
 const P = KITTY_VIRTUAL_PLACEHOLDER
 
@@ -180,6 +188,77 @@ function imageOf(graphics: KittyGraphics, payload: ReturnType<typeof source>, op
 
 function fallbackOptions(): NativeKittyImageOptions {
   return { maxWidthCells: 30, maxHeightCells: 10, fallback: '[fallback]' }
+}
+
+/** Apply the scripted pane environment for the real TuiApp composition. */
+function useTmuxEnvironment(t: TestContext, cli: FakeTmuxCli): void {
+  const saved = new Map<string, string | undefined>()
+  const keys = new Set([
+    ...Object.keys(cli.env),
+    'PI_TUI_TMUX_KITTY_IMAGES',
+    'PI_TUI_TMUX_KITTY_PLACEHOLDERS',
+    'KITTY_WINDOW_ID',
+    'TERM_PROGRAM',
+    'ZELLIJ',
+    'STY',
+    'PI_IMAGE_PROTOCOL',
+  ])
+  for (const key of keys) {
+    saved.set(key, process.env[key])
+    const value = cli.env[key]
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  t.after(() => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  })
+}
+
+function countingImageLoader(): {
+  readonly loader: ImageLoader
+  readonly reads: string[]
+  readonly conversions: () => number
+} {
+  const reads: string[] = []
+  let conversions = 0
+  const loader = new ImageLoader(
+    async (ref) => {
+      reads.push(ref.attachmentId)
+      return { ref: {}, data: SAMPLE_WEBP }
+    },
+    new ImageCache(),
+    async (input, mediaType) => {
+      conversions += 1
+      return convertKittyThumbnail(input, mediaType)
+    },
+  )
+  return { loader, reads, conversions: () => conversions }
+}
+
+function tuiImageAttachment(attachmentId: string, name: string, mediaType: ImageMediaType = 'image/png'): ImageAttachmentRefLike {
+  return {
+    attachmentId,
+    mediaType,
+    bytes: mediaType === 'image/webp' ? SAMPLE_WEBP.byteLength : Buffer.from(PNG, 'base64').byteLength,
+    width: 120,
+    height: 80,
+    name,
+  }
+}
+
+function tuiImageMessage(content: unknown[], seq: number): never {
+  return { type: 'user/message', seq, time: seq, data: { content, source: { kind: 'user' } } } as never
+}
+
+/** Let the real TuiApp's throttled render pipeline settle several frames. */
+async function settleTuiApp(app: TuiApp): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    app.requestRender()
+    await new Promise(resolve => setTimeout(resolve, 15))
+  }
 }
 
 test('the factory refuses to create a handle unless the live server admits it', (t) => {
@@ -330,6 +409,102 @@ test('a base OK from an unknown tmux client leaves the real screen text-only', a
   } finally {
     graphics.dispose()
     cli.dispose()
+  }
+})
+
+test('a real TuiApp reads and paints an unknown tmux client only after the live U1 feature reply', async (t) => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const cli = createFakeTmuxCli(t)
+  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+  useTmuxEnvironment(t, cli)
+  const terminal = new RecordingTerminal()
+  const media = countingImageLoader()
+  const app = new TuiApp(terminal, { onSubmit: () => {}, onExit: () => {} }, {
+    imageLoader: media.loader,
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  let disposed = false
+  t.after(() => {
+    if (!disposed) app.dispose()
+  })
+  try {
+    app.start()
+    const graphics = (app as unknown as { graphics: KittyGraphics | undefined }).graphics
+    assert.ok(graphics, 'the production composition created the pending tmux handle')
+    assert.equal(graphics.canPaint(), false)
+    const query = /a=q,i=(\d+),e=T,U=1/.exec(terminal.text)
+    assert.ok(query, 'the real TuiApp terminal sent the feature query after installing input')
+
+    const ref = tuiImageAttachment('att-tui-u1', 'tui-u1.webp', 'image/webp')
+    const folder = new TranscriptFolder()
+    folder.apply([tuiImageMessage([{ type: 'image', attachment: ref }], 1)])
+    app.setTranscript(folder.messages())
+    await settleTuiApp(app)
+    assert.equal(media.reads.length, 0, 'pending never reads the payload')
+    assert.equal(media.conversions(), 0, 'pending never converts the payload')
+    assert.equal(terminal.text.includes(P), false, 'pending paints no placeholder cell')
+
+    terminal.sendInput(`\x1b_Gi=${query[1]},e=T,C=1,U=1;OK\x1b\\`)
+    await Promise.resolve()
+    assert.equal(graphics.canPaint(), true, 'the matching feature reply admits the same handle')
+    await settleTuiApp(app)
+    assert.deepEqual(media.reads, [ref.attachmentId], 'the real consumer read the payload once')
+    assert.ok(media.conversions() >= 1, 'the real consumer converted the payload')
+    const scan = scanOuter(terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    assert.ok(scan.commands.some(command => command.controls.a === 't'), 'the real TuiApp transmitted the image')
+    assert.ok(scan.commands.some(command => command.controls.a === 'p'), 'the real TuiApp placed the image')
+    assert.ok(count(scan.text, P) > 0, 'the real TuiApp painted placeholder cells')
+    assert.equal(terminal.text.includes('a=T,'), false, 'the virtual path never uses legacy a=T')
+    assert.equal(terminal.text.includes('\x1b]1337;File='), false, 'the virtual path never uses iTerm2 images')
+  } finally {
+    disposed = true
+    app.dispose()
+  }
+})
+
+test('a real TuiApp with an unknown tmux client keeps a base-OK failure text-only with zero reads', async (t) => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const cli = createFakeTmuxCli(t)
+  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+  useTmuxEnvironment(t, cli)
+  const terminal = new RecordingTerminal()
+  const media = countingImageLoader()
+  const app = new TuiApp(terminal, { onSubmit: () => {}, onExit: () => {} }, {
+    imageLoader: media.loader,
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  let disposed = false
+  t.after(() => {
+    if (!disposed) app.dispose()
+  })
+  try {
+    app.start()
+    const graphics = (app as unknown as { graphics: KittyGraphics | undefined }).graphics
+    assert.ok(graphics)
+    const probeId = /a=q,i=(\d+)/.exec(terminal.text)?.[1]
+    assert.ok(probeId)
+    const ref = tuiImageAttachment('att-tui-fail', 'tui-fail.png')
+    const folder = new TranscriptFolder()
+    folder.apply([tuiImageMessage([{ type: 'image', attachment: ref }], 1)])
+    app.setTranscript(folder.messages())
+    terminal.sendInput(`\x1b_Gi=${probeId};OK\x1b\\`)
+    await Promise.resolve()
+    assert.equal(graphics.canPaint(), false, 'base Kitty OK without e/U is not U1 admission')
+    await settleTuiApp(app)
+    assert.equal(media.reads.length, 0, 'the failed admission read no payload')
+    assert.equal(media.conversions(), 0, 'the failed admission converted no payload')
+    const scan = scanOuter(terminal.text)
+    assert.equal(scan.commands.some(command => command.controls.a === 't'), false,
+      'the failed admission transmitted no image')
+    assert.equal(scan.commands.some(command => command.controls.a === 'p'), false,
+      'the failed admission placed no image')
+    assert.equal(count(scan.text, P), 0, 'the failed admission painted no placeholder cell')
+    assert.equal(terminal.text.includes('a=T,'), false, 'the failed admission never fell back to legacy a=T')
+    assert.ok(/\u{1F5BC}/u.test(terminal.text), 'the text identity row is still painted')
+  } finally {
+    disposed = true
+    app.dispose()
   }
 })
 

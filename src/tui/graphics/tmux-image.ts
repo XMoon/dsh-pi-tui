@@ -176,6 +176,7 @@ interface TmuxFeatureProbeBinding {
 
 class TmuxKittyTerminal extends KittyTerminalFacade {
   private readonly featureBinding: TmuxFeatureProbeBinding | undefined
+  private readonly identityAdmission: TmuxKittyAdmission
 
   constructor(
     inner: Terminal,
@@ -185,6 +186,7 @@ class TmuxKittyTerminal extends KittyTerminalFacade {
   ) {
     super(inner, core, { placementMode: 'tmux-virtual', admission })
     this.featureBinding = featureBinding
+    this.identityAdmission = admission
   }
 
   override start(onInput: (data: string) => void, onResize: () => void): void {
@@ -195,7 +197,7 @@ class TmuxKittyTerminal extends KittyTerminalFacade {
     }
     binding.probe.markInputStarted()
     super.start((data) => {
-      if (binding.probe.consume(data)) return
+      if (binding.probe.consume(data, () => this.identityAdmission.isIdentityAllowed(true))) return
       onInput(data)
     }, onResize)
     binding.probe.start(binding.sendQuery)
