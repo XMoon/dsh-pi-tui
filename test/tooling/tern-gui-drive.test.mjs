@@ -54,7 +54,7 @@ const driver = joinPath(repo, 'scripts', 'tern-gui-drive.mjs')
 function writeFakeTern(dir) {
   const log = joinPath(dir, 'calls.log')
   const script = `import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
 const args = process.argv.slice(2)
 appendFileSync(${JSON.stringify(log)}, args.join(' ') + '\\n')
@@ -86,9 +86,17 @@ if (args[0] === 'daemon') {
     writeFileSync(${JSON.stringify(join(log, '..'))} + '/holder.pid', String(holder.pid))
   }
   recordPid('daemon')
+  // The run's OWN startup witness, keyed by the run directory: a readiness
+  // reply is only allowed once THIS run's daemon really executed. It states
+  // "the daemon reached its startup record", never that the socket is live.
+  writeFileSync(join(process.cwd(), 'daemon-started'), '')
   // FAKE_DAEMON_EXITS=1 models a daemon that died before the flow finished.
   if (process.env.FAKE_DAEMON_EXITS === '1') process.exit(0)
+  // Stay alive like the real daemon: the interval keeps the event loop alive
+  // and the await keeps the branch from falling through to the non-control
+  // exit below (an unsettled top-level await alone would let Node exit).
   setInterval(() => {}, 1 << 30)
+  await new Promise(() => {})
 }
 // The WINDOW invocation ("tern --control EP") must STAY ALIVE: the driver
 // spawns it and talks to the control socket it creates. It also RECORDS the
@@ -98,13 +106,20 @@ if (args[0] === 'daemon') {
 if (args[0] === '--control') {
   const socket = args[args.indexOf('--control') + 1]
   recordPid('window')
+  // The run's OWN startup witness, written before the early-exit model below:
+  // an early-exiting window still STARTED, so the readiness reply may see it.
+  writeFileSync(join(process.cwd(), 'window-started'), '')
   // FAKE_WINDOW_EXITS=1 models a client that died before it opened its control
   // socket, which is the driver's startup-failure path.
   if (process.env.FAKE_WINDOW_EXITS === '1') process.exit(0)
   const outFlag = args.indexOf('--out')
   if (outFlag >= 0) writeFileSync(${JSON.stringify(join(log, '..'))} + '/window-out.txt', args[outFlag + 1])
   writeFileSync(socket, '')
+  // Stay alive like the real window: the interval keeps the event loop alive
+  // and the await keeps the branch from falling through to the non-control
+  // exit below (an unsettled top-level await alone would let Node exit).
   setInterval(() => {}, 1 << 30)
+  await new Promise(() => {})
 }
 if (args[0] !== 'ctl') process.exit(0)
 // FAKE_CTL_FAIL=1 makes every control command unacknowledged: the driver can
@@ -135,6 +150,18 @@ if (command === 'move') {
   reply({ ok: true })
 }
 if (command === 'stats') {
+  // Readiness is THIS run's startup facts, never a shared accumulated log:
+  // the control socket names the run directory, and both helpers must have
+  // written their own startup witness there. A reply before those facts would
+  // let the driver run a flow whose helpers have not started (or, worse, whose
+  // startup log does not exist yet) — the race that made the exit(7) case read
+  // a daemon-sockets.log from the wrong moment. A non-zero exit is exactly how
+  // this fake refuses an unacknowledged control command, so the driver's own
+  // startup loop retries.
+  const runDir = rest[0] === undefined ? undefined : dirname(rest[0])
+  if (runDir === undefined
+    || !existsSync(join(runDir, 'daemon-started'))
+    || !existsSync(join(runDir, 'window-started'))) process.exit(1)
   let pointer = [0, 0]
   try { pointer = JSON.parse(readFileSync(join(${JSON.stringify(join(log, '..'))}, 'pointer.txt'), 'utf8')) } catch { /* no move yet */ }
   reply({ ok: true, viewport, pointer, frames: 1, nodes: 1 })
@@ -350,6 +377,36 @@ test('the GUI driver reads shots from THIS run\'s own client directory', (t) => 
   assert.equal(readFileSync(joinPath(out, 'shots', '01-one-shot.png'), 'utf8'), 'PNG')
 })
 
+test('the fake control socket reports ready only after THIS run recorded both helpers', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-ready-')
+  const fake = writeFakeTern(dir)
+  // The control socket names the run directory: a readiness reply is bound to
+  // the witnesses living in THAT directory, never to a shared fixture log.
+  const runDir = joinPath(dir, 'out')
+  mkdirSync(runDir, { recursive: true })
+  const socket = joinPath(runDir, 'gui.sock')
+  const stats = (env = {}) => spawnSync(fake.file, ['ctl', '--control', socket, 'stats'], {
+    encoding: 'utf8',
+    env: { ...process.env, DISPLAY: ':0', ...env },
+  })
+
+  // No witness at all: an unconditional OK would let the driver run a flow
+  // before its helpers started — the startup race this fake must not model.
+  assert.notEqual(stats().status, 0, 'stats must refuse before any startup witness')
+  // One helper alone is not readiness either.
+  writeFileSync(joinPath(runDir, 'daemon-started'), '')
+  assert.notEqual(stats().status, 0, 'a daemon witness alone must not grant readiness')
+  assert.notEqual(stats({ FAKE_CTL_FAIL: '1' }).status, 0, 'FAKE_CTL_FAIL still refuses')
+  writeFileSync(joinPath(runDir, 'window-started'), '')
+  // Both THIS run's witnesses: the command answers the shape the driver reads.
+  const ready = stats()
+  assert.equal(ready.status, 0, ready.stdout + ready.stderr)
+  assert.equal(JSON.parse(ready.stdout).ok, true)
+  // A witness never overrides the explicit control failure.
+  assert.notEqual(stats({ FAKE_CTL_FAIL: '1' }).status, 0, 'FAKE_CTL_FAIL still refuses after the witnesses exist')
+})
+
 test('two runs whose --out basenames collide still get DIFFERENT private daemons', (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-daemons-')
@@ -369,6 +426,11 @@ test('two runs whose --out basenames collide still get DIFFERENT private daemons
   for (const out of [outA, outB]) {
     const result = spawnSync(process.execPath, [driver, flow, '--out', out], { encoding: 'utf8', env })
     assert.equal(result.status, 0, result.stdout + result.stderr)
+    // Each run's readiness witnesses live in ITS OWN run directory: the shared
+    // fake fixture directory grants nothing, so run B cannot start on run A's
+    // records.
+    assert.ok(existsSync(joinPath(out, 'daemon-started')), `this run wrote its daemon witness: ${out}`)
+    assert.ok(existsSync(joinPath(out, 'window-started')), `this run wrote its window witness: ${out}`)
   }
 
   const sockets = readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8')
@@ -616,10 +678,23 @@ test('an exit path the driver does not own keeps a socket directory it cannot pr
   })
   assert.equal(result.status, 7, result.stdout + result.stderr)
   const records = readPidRecords(joinPath(dir, 'pids.log'))
+  // The test's cleanup uses the CAPTURED identity (PID + start time), never a
+  // bare PID: a reused PID must not be signalled. It runs after the assertions.
   life.defer(() => { killStillExecuting(records) })
+  assert.deepEqual(records.map((record) => record.kind).sort(), ['daemon', 'window'],
+    `the exit run started BOTH helpers and recorded each identity: ${JSON.stringify(records)}`)
+  assert.ok(records.every((record) => Number.isInteger(record.pid) && record.pid > 0),
+    `every recorded identity carries a real PID: ${JSON.stringify(records)}`)
 
-  const socket = readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim()
-  const daemonDir = dirname(socket)
+  // A missing socket log is a FAILURE, not an empty pass: the exit(7) flow may
+  // only run after this run's daemon recorded the socket it started.
+  const socketsFile = joinPath(dir, 'daemon-sockets.log')
+  assert.ok(existsSync(socketsFile),
+    'the exit run must have recorded its daemon socket before the flow could exit')
+  const sockets = readFileSync(socketsFile, 'utf8').trim().split('\n').filter(Boolean)
+  assert.equal(sockets.length, 1, `the exit run started one private daemon: ${JSON.stringify(sockets)}`)
+  assert.match(sockets[0], /tern-gui-daemon-/, 'the socket lives in the atomically unique daemon directory')
+  const daemonDir = dirname(sockets[0])
   life.defer(() => rmSync(daemonDir, { recursive: true, force: true }))
   assert.equal(existsSync(daemonDir), true, 'an unproven teardown keeps the socket directory')
   assert.match(readFileSync(joinPath(out, 'run.log'), 'utf8'), /TEARDOWN-UNPROVEN keeping socket dir/u)
