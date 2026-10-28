@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Images in a tmux pane are no longer limited to Kitty clients.**
+  Kitty/Ghostty clients already known to implement Unicode placeholders keep their existing
+  behavior. Every other terminal (including WezTerm, Tern and unknown hosts), after the live
+  tmux server accepts the passthrough, single-client and session identity checks, sends one
+  real `a=q,i=<id>,e=T,U=1` feature query through tmux DCS passthrough; only a reply with the
+  same id and `e=T,U=1;OK` enables pixels. No reply, a plain `OK`, an error or a timeout stays
+  text-only and never falls back to the legacy image path. `allow-passthrough=all`, the single
+  client, `PI_IMAGE_PROTOCOL=none/0` and `PI_TUI_TMUX_KITTY_IMAGES=0` limits are unchanged.
+  An older but genuinely U1-capable unknown terminal may explicitly set
+  `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1`; this replaces only the U1 capability proof and never
+  bypasses the live tmux identity or revoke checks.
 - **Direct terminals that implement the Kitty graphics protocol no longer need a brand allowlist, and every Zellij host paints images based on its live pane capability.**
   Kitty, Ghostty, WezTerm, Warp, Tern and any other direct terminal explicitly given
   `PI_IMAGE_PROTOCOL=kitty` share the same managed image lifecycle for PNG/JPEG/WebP

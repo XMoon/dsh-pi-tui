@@ -14,11 +14,18 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { StdinBuffer } from '@xmoon76/pi-tui'
 import {
   TmuxKittyAdmission,
   probeTmuxKittyIdentity,
+  tmuxKittyHasKnownUnicodePlaceholders,
   type TmuxKittyIdentity,
 } from '../../src/tui/graphics/tmux-admission.ts'
+import {
+  TMUX_FEATURE_PROBE_TIMEOUT_MS,
+  TmuxKittyFeatureProbe,
+  tmuxFeatureQueryWire,
+} from '../../src/tui/graphics/tmux-kitty-feature-probe.ts'
 import { createFakeTmuxCli, type FakeTmuxCli } from '../support/fake-tmux-cli.ts'
 
 function admitted(cli: FakeTmuxCli): TmuxKittyIdentity {
@@ -48,13 +55,29 @@ test('the real CLI probe reads the one trusted topology from raw server output',
   }
 })
 
-test('a bare kitty termtype is accepted; a derived family is not', (t) => {
+test('the live client report distinguishes known U1 evidence from an unknown renderer', (t) => {
   const cli = createFakeTmuxCli(t)
   try {
     cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty\n' })
-    assert.ok(probeTmuxKittyIdentity(cli.env), 'kitty without a version suffix is Kitty itself')
+    const bareKitty = probeTmuxKittyIdentity(cli.env)
+    assert.ok(bareKitty, 'a bare Kitty termtype is still a valid server identity')
+    assert.equal(tmuxKittyHasKnownUnicodePlaceholders(bareKitty), true, 'bare Kitty is known U1 evidence')
+
     cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty-direct\n' })
-    assert.equal(probeTmuxKittyIdentity(cli.env), undefined, 'a kitty-derived termtype is not Kitty')
+    const derivedKitty = probeTmuxKittyIdentity(cli.env)
+    assert.ok(derivedKitty, 'a derived termtype is an identity, not a server rejection')
+    assert.equal(tmuxKittyHasKnownUnicodePlaceholders(derivedKitty), false, 'a kitty-derived family is not Kitty itself')
+
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-ghostty\tghostty 1.4.0\n' })
+    const ghostty = probeTmuxKittyIdentity(cli.env)
+    assert.ok(ghostty)
+    assert.equal(tmuxKittyHasKnownUnicodePlaceholders(ghostty), true,
+      'Ghostty XTVERSION uses a space, not a parentheses version')
+
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    const unknown = probeTmuxKittyIdentity(cli.env)
+    assert.ok(unknown, 'an unknown renderer reaches the feature probe instead of being rejected')
+    assert.equal(tmuxKittyHasKnownUnicodePlaceholders(unknown), false)
   } finally {
     cli.dispose()
   }
@@ -188,16 +211,14 @@ test('an empty session name is not an identity', (t) => {
   }
 })
 
-test('the whole server must have exactly one matching, non-empty Kitty client', (t) => {
+test('the whole server must have exactly one matching, non-empty client', (t) => {
   const cases: ReadonlyArray<{ name: string; text: string }> = [
     { name: 'no client', text: '' },
     { name: 'mixed clients', text: 'a\t/dev/pts/1\twork\txterm-kitty\tkitty(0.41.1)\nb\t/dev/pts/2\twork\txterm-kitty\tkitty(0.41.1)\n' },
     { name: 'session mismatch', text: 'main\t/dev/pts/12\tother\txterm-kitty\tkitty(0.41.1)\n' },
-    { name: 'non-Kitty termname', text: 'main\t/dev/pts/12\twork\ttmux-256color\tkitty(0.41.1)\n' },
     { name: 'empty client name', text: '\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n' },
     { name: 'empty client tty', text: 'main\t\twork\txterm-kitty\tkitty(0.41.1)\n' },
     { name: 'missing termtype field', text: 'main\t/dev/pts/12\twork\txterm-kitty\n' },
-    { name: 'empty termtype', text: 'main\t/dev/pts/12\twork\txterm-kitty\t\n' },
   ]
   for (const entry of cases) {
     const cli = createFakeTmuxCli(t)
@@ -325,4 +346,150 @@ test('a one-way latch survives an explicit opt-out and a restored opt-in', (t) =
   } finally {
     cli.dispose()
   }
+})
+
+test('a pending U1 gate keeps the live admission text-only without probing or latching', (t) => {
+  const cli = createFakeTmuxCli(t)
+  try {
+    const identity = admitted(cli)
+    let featureReady = false
+    const admission = new TmuxKittyAdmission(identity, cli.env, () => featureReady)
+    const baseline = cli.calls().length
+    assert.equal(admission.isAllowed(false), false, 'pending feature proof is text-only')
+    assert.equal(cli.calls().length, baseline, 'no tmux subprocess runs while the feature probe is pending')
+
+    featureReady = true
+    assert.equal(admission.isAllowed(false), true, 'the live identity is checked once the feature gate allows')
+    assert.equal(cli.calls().length, baseline + 3)
+
+    cli.setReply('show-options', { text: 'on\n' })
+    assert.equal(admission.isAllowed(true), false, 'the identity revoke still works after the feature gate')
+  } finally {
+    cli.dispose()
+  }
+})
+
+const PROBE_ID = 0x90000001
+
+function probeReply(probe: TmuxKittyFeatureProbe, controls = 'e=T,U=1', payload = 'OK'): string {
+  return `\x1b_Gi=${probe.probeId}${controls === '' ? '' : `,${controls}`};${payload}\x1b\\`
+}
+
+test('the U1 probe sends one exact feature query after input starts and promotes once', () => {
+  const sent: string[] = []
+  let allowed = 0
+  const probe = new TmuxKittyFeatureProbe(() => { allowed += 1 }, PROBE_ID)
+  assert.equal(probe.allowed, false, 'a fresh probe is pending')
+
+  probe.markInputStarted()
+  probe.start(() => sent.push(probe.probeWire))
+  assert.deepEqual(sent, [tmuxFeatureQueryWire(PROBE_ID)], 'the exact e=T,U=1 feature query is sent once')
+  probe.start(() => sent.push('second'))
+  assert.equal(sent.length, 1, 'a repeated start never sends a second query')
+
+  assert.equal(probe.consume(probeReply(probe, 'e=T,C=1,U=1')), true)
+  assert.equal(probe.allowed, true, 'the matching e=T,U=1;OK reply promotes')
+  assert.equal(allowed, 1, 'onAllowed fires exactly once')
+  assert.equal(probe.consume(probeReply(probe)), true, 'a duplicate reply is still consumed')
+  assert.equal(allowed, 1, 'a duplicate reply never promotes twice')
+  probe.dispose()
+})
+
+test('a base Kitty OK or an incomplete feature reply permanently denies the U1 probe', () => {
+  const replies = [
+    probeReplyWith(PROBE_ID, '', 'OK'),
+    probeReplyWith(PROBE_ID, 'e=T', 'OK'),
+    probeReplyWith(PROBE_ID, 'U=1', 'OK'),
+    probeReplyWith(PROBE_ID, 'e=T,U=1', 'ENOTSUPPORTED:disabled'),
+  ]
+  for (const reply of replies) {
+    let allowed = 0
+    const probe = new TmuxKittyFeatureProbe(() => { allowed += 1 }, PROBE_ID)
+    probe.markInputStarted()
+    probe.start(() => {})
+    assert.equal(probe.consume(reply), true, reply)
+    assert.equal(probe.allowed, false, `denied by ${reply}`)
+    assert.equal(allowed, 0)
+    assert.equal(probe.consume(probeReply(probe)), true, 'a late valid reply is consumed')
+    assert.equal(probe.allowed, false, 'denial is one-way')
+    probe.dispose()
+  }
+})
+
+function probeReplyWith(id: number, controls: string, payload: string): string {
+  return `\x1b_Gi=${id}${controls === '' ? '' : `,${controls}`};${payload}\x1b\\`
+}
+
+test('a wrong-id feature reply reaches the screen while a matching reply is consumed', () => {
+  const first = new TmuxKittyFeatureProbe(undefined, 0x90000002)
+  const second = new TmuxKittyFeatureProbe(undefined, 0x90000003)
+  first.markInputStarted()
+  second.markInputStarted()
+  first.start(() => {})
+  second.start(() => {})
+  assert.equal(second.consume(probeReply(first)), false, 'another handle’s id is not this probe’s reply')
+  assert.equal(second.allowed, false)
+  assert.equal(second.consume(probeReply(second)), true)
+  assert.equal(second.allowed, true)
+  first.dispose()
+  second.dispose()
+})
+
+test('an unanswered U1 probe denies at the bounded window and a late OK never promotes', async () => {
+  let allowed = 0
+  const probe = new TmuxKittyFeatureProbe(() => { allowed += 1 }, PROBE_ID)
+  probe.markInputStarted()
+  probe.start(() => {})
+  await new Promise(resolve => setTimeout(resolve, TMUX_FEATURE_PROBE_TIMEOUT_MS + 60))
+  assert.equal(probe.allowed, false, 'no answer leaves the handle text-only')
+  assert.equal(probe.consume(probeReply(probe)), true)
+  assert.equal(probe.allowed, false, 'the timeout denial is permanent')
+  assert.equal(allowed, 0)
+  probe.dispose()
+})
+
+test('a throwing feature query denies immediately and preserves the real failure', () => {
+  const probe = new TmuxKittyFeatureProbe(undefined, PROBE_ID)
+  probe.markInputStarted()
+  assert.throws(() => probe.start(() => { throw new Error('feature write failed') }), /feature write failed/)
+  assert.equal(probe.allowed, false)
+  probe.start(() => {})
+  assert.equal(probe.allowed, false, 'a denied probe never retries')
+  probe.dispose()
+})
+
+test('a screen stop clears inputListening but keeps the one-way U1 admission', () => {
+  let sends = 0
+  const probe = new TmuxKittyFeatureProbe(undefined, PROBE_ID)
+  probe.markInputStarted()
+  probe.start(() => { sends += 1 })
+  assert.equal(probe.consume(probeReply(probe)), true)
+  probe.markInputStopped()
+  assert.equal(probe.allowed, true, 'the one-way feature admission survives a screen stop')
+  assert.equal(probe.inputListening, false, 'the stopped screen no longer owns an input listener')
+  probe.markInputStarted()
+  probe.start(() => { sends += 1 })
+  assert.equal(probe.allowed, true, 'restart keeps the same admission')
+  assert.equal(sends, 1, 'restart never sends a second query')
+  probe.dispose()
+})
+
+test('StdinBuffer rebuilds a split U1 feature reply into one consumed sequence', () => {
+  const probe = new TmuxKittyFeatureProbe(undefined, PROBE_ID)
+  probe.markInputStarted()
+  probe.start(() => {})
+  const buffer = new StdinBuffer()
+  const consumed: string[] = []
+  buffer.on('data', sequence => {
+    if (probe.consume(sequence)) consumed.push(sequence)
+  })
+  for (const chunk of ['\x1b', '_G', 'i=', String(PROBE_ID), ',e=T,U=1;OK', '\x1b\\']) {
+    buffer.process(chunk)
+  }
+  assert.deepEqual(consumed, [probeReply(probe)], 'the real stdin framing completes the feature reply')
+  assert.equal(probe.allowed, true)
+  buffer.process('a')
+  assert.deepEqual(consumed, [probeReply(probe)], 'ordinary input still reaches the screen')
+  buffer.destroy()
+  probe.dispose()
 })

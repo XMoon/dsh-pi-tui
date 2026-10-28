@@ -24,12 +24,19 @@ import {
 import { calculateNativeCellSize } from './kitty-native.ts'
 import type { KittyGraphics, NativeKittyImageBody, NativeKittyImageOptions } from './native-image.ts'
 import { KittyTerminalFacade } from './kitty-terminal.ts'
-import { TmuxKittyAdmission, probeTmuxKittyIdentity } from './tmux-admission.ts'
+import {
+  TMUX_KITTY_PLACEHOLDERS_ENV,
+  TmuxKittyAdmission,
+  probeTmuxKittyIdentity,
+  tmuxKittyHasKnownUnicodePlaceholders,
+} from './tmux-admission.ts'
+import { TmuxKittyFeatureProbe } from './tmux-kitty-feature-probe.ts'
 import {
   KITTY_VIRTUAL_GRID_MARKER,
   KITTY_VIRTUAL_MAX_CELLS,
   encodeKittyPlaceholderGrid,
   encodeKittyVirtualPlacement,
+  encodeTmuxPassthrough,
 } from './tmux-virtual.ts'
 
 /** The private provenance prefix shared with the fork layout (X067). */
@@ -156,25 +163,104 @@ export class TmuxKittyImage implements Component {
 }
 
 /**
+ * The virtual facade with ONE extra input/ownership step: consume this
+ * handle's U1 feature reply before the screen sees it, and send the query once
+ * the real input listener is installed. Every byte-level lifecycle
+ * (transmission, placement, clear/alt, delete, stop) remains
+ * `KittyTerminalFacade`'s.
+ */
+interface TmuxFeatureProbeBinding {
+  readonly probe: TmuxKittyFeatureProbe
+  readonly sendQuery: () => void
+}
+
+class TmuxKittyTerminal extends KittyTerminalFacade {
+  private readonly featureBinding: TmuxFeatureProbeBinding | undefined
+
+  constructor(
+    inner: Terminal,
+    core: KittyGraphicsCore,
+    admission: TmuxKittyAdmission,
+    featureBinding: TmuxFeatureProbeBinding | undefined,
+  ) {
+    super(inner, core, { placementMode: 'tmux-virtual', admission })
+    this.featureBinding = featureBinding
+  }
+
+  override start(onInput: (data: string) => void, onResize: () => void): void {
+    const binding = this.featureBinding
+    if (binding === undefined) {
+      super.start(onInput, onResize)
+      return
+    }
+    binding.probe.markInputStarted()
+    super.start((data) => {
+      if (binding.probe.consume(data)) return
+      onInput(data)
+    }, onResize)
+    binding.probe.start(binding.sendQuery)
+  }
+
+  override stop(): void {
+    this.featureBinding?.probe.markInputStopped()
+    super.stop()
+  }
+
+  override dispose(): void {
+    this.featureBinding?.probe.dispose()
+    super.dispose()
+  }
+}
+
+/**
  * Create the ONE tmux virtual graphics handle for a real PiTui mount, or
  * `undefined` when the live server is not the single admitted topology. The
- * admission is re-probed before every managed physical write (facade) and, at
- * most once per 250 ms, before a component paints.
+ * identity admission is re-probed before every managed physical write (facade)
+ * and, at most once per 250 ms, before a component paints.
+ *
+ * When the live client is one of the terminals already known to implement
+ * Unicode placeholders, or the user explicitly asserts
+ * `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1`, the same handle paints immediately. Every
+ * other renderer gets the same handle in a pending feature state: it paints
+ * text until its one DCS-wrapped `e=T,U=1` query is answered with the matching
+ * `OK`. A plain base Kitty acknowledgement never grants the virtual transport.
  */
 export function createTmuxKittyGraphics(
   terminal: Terminal,
   options: KittyGraphicsCoreOptions = {},
   environment: NodeJS.ProcessEnv = process.env,
+  onAllowed?: () => void,
 ): KittyGraphics | undefined {
   const identity = probeTmuxKittyIdentity(environment)
   if (identity === undefined) return undefined
-  const admission = new TmuxKittyAdmission(identity, environment)
-  const core = new KittyGraphicsCore({ ...options, placementMode: 'tmux-virtual' })
-  const facade = new KittyTerminalFacade(terminal, core, {
-    placementMode: 'tmux-virtual',
-    admission,
-  })
+
+  const hasKnownPlaceholderSupport = tmuxKittyHasKnownUnicodePlaceholders(identity)
+  const hasUserAssertion = environment[TMUX_KITTY_PLACEHOLDERS_ENV] === '1'
   let disposed = false
+  let featureProbe: TmuxKittyFeatureProbe | undefined
+  if (!hasKnownPlaceholderSupport && !hasUserAssertion) {
+    const created = new TmuxKittyFeatureProbe(() => {
+      queueMicrotask(() => {
+        if (!disposed && created.allowed && created.inputListening) onAllowed?.()
+      })
+    })
+    featureProbe = created
+  }
+
+  const probe = featureProbe
+  const admission = new TmuxKittyAdmission(
+    identity,
+    environment,
+    probe === undefined ? undefined : () => probe.allowed,
+  )
+  const core = new KittyGraphicsCore({ ...options, placementMode: 'tmux-virtual' })
+  const featureBinding: TmuxFeatureProbeBinding | undefined = probe === undefined
+    ? undefined
+    : {
+        probe,
+        sendQuery: () => terminal.write(encodeTmuxPassthrough(probe.probeWire)),
+      }
+  const facade = new TmuxKittyTerminal(terminal, core, admission, featureBinding)
   return {
     mode: 'tmux-virtual',
     canPaint: () => admission.isAllowed(false),

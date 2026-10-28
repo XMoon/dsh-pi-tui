@@ -47,13 +47,21 @@ class RecordingTerminal implements Terminal {
   rows = 40
   kittyProtocolActive = true
   failWhen: ((data: string) => boolean) | undefined
+  private onInput: ((data: string) => void) | undefined
 
   get text(): string {
     return this.writes.join('')
   }
 
-  start(): void {}
-  stop(): void {}
+  start(onInput: (data: string) => void): void {
+    this.onInput = onInput
+  }
+  stop(): void {
+    this.onInput = undefined
+  }
+  sendInput(data: string): void {
+    this.onInput?.(data)
+  }
   async drainInput(): Promise<void> {}
   write(data: string): void {
     this.writes.push(data)
@@ -181,7 +189,6 @@ test('the factory refuses to create a handle unless the live server admits it', 
     { name: 'invalid opt-in value', mutate: (cli) => { cli.env.PI_TUI_TMUX_KITTY_IMAGES = 'true' } },
     { name: 'passthrough on', mutate: (cli) => cli.setReply('show-options', { text: 'on\n' }) },
     { name: 'no client', mutate: (cli) => cli.setReply('list-clients', { text: '' }) },
-    { name: 'non-Kitty client', mutate: (cli) => cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\ttmux-256color\t\n' }) },
   ]
   for (const entry of cases) {
     const cli = createFakeTmuxCli(t)
@@ -233,6 +240,92 @@ test('an unset opt-in creates the factory handle through the same real probe', (
     assert.ok(count(scan.text, P) > 0, 'placeholder cells reached the physical sink')
     assert.equal(terminal.text.includes('pi:tmux-image'), false, 'the anchor marker never reaches the terminal')
     assert.equal(terminal.text.includes('pi:tmux-grid'), false, 'the grid marker never reaches the terminal')
+    screen.stop()
+  } finally {
+    graphics.dispose()
+    cli.dispose()
+  }
+})
+
+test('an unknown tmux client paints text until the live U1 feature reply then paints one virtual Core', async (t) => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const cli = createFakeTmuxCli(t)
+  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+  const terminal = new RecordingTerminal()
+  let repaints = 0
+  const graphics = createTmuxKittyGraphics(terminal, {}, cli.env, () => { repaints += 1 })
+  assert.ok(graphics)
+  try {
+    const image = imageOf(graphics, source(), fallbackOptions())
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['title', ...image.render(width), 'END']
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(graphics.terminal)
+    screen.addChild(new Root())
+    screen.start()
+    const query = /a=q,i=(\d+),e=T,U=1/.exec(terminal.text)
+    assert.ok(query, 'the real screen start installed input before sending the feature query')
+    assert.equal(graphics.canPaint(), false, 'the reply has not arrived yet')
+
+    terminal.writes.length = 0
+    screen.renderNow()
+    assert.equal(terminal.text.includes(P), false, 'pending paints no placeholder cell')
+    assert.equal(terminal.text.includes('a=t,f=100') || terminal.text.includes('a=p,'), false,
+      'pending sends no managed virtual command')
+
+    terminal.sendInput(`\x1b_Gi=${query[1]},e=T,C=1,U=1;OK\x1b\\`)
+    await Promise.resolve()
+    assert.equal(graphics.canPaint(), true, 'the matching feature reply admits the same virtual handle')
+    assert.equal(repaints, 1, 'the production repaint callback fires once')
+    terminal.writes.length = 0
+    screen.renderNow()
+    const scan = scanOuter(terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    assert.equal(scan.commands.filter((command) => command.controls.a === 't').length, 1)
+    assert.equal(scan.commands.filter((command) => command.controls.a === 'p').length, 1)
+    assert.ok(count(scan.text, P) > 0, 'the admitted real screen paints the placeholder grid')
+    screen.stop()
+  } finally {
+    graphics.dispose()
+    cli.dispose()
+  }
+})
+
+test('a base OK from an unknown tmux client leaves the real screen text-only', async (t) => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const cli = createFakeTmuxCli(t)
+  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+  const terminal = new RecordingTerminal()
+  const graphics = createTmuxKittyGraphics(terminal, {}, cli.env)
+  assert.ok(graphics)
+  try {
+    const image = imageOf(graphics, source(), fallbackOptions())
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['title', ...image.render(width), 'END']
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(graphics.terminal)
+    screen.addChild(new Root())
+    screen.start()
+    const probeId = /a=q,i=(\d+)/.exec(terminal.text)?.[1]
+    assert.ok(probeId)
+    terminal.sendInput(`\x1b_Gi=${probeId};OK\x1b\\`)
+    await Promise.resolve()
+    assert.equal(graphics.canPaint(), false, 'a base OK without e/U proves only the base Kitty protocol')
+    terminal.writes.length = 0
+    screen.renderNow()
+    assert.equal(terminal.text.includes(P), false)
+    assert.equal(terminal.text.includes('a=t,f=100') || terminal.text.includes('a=p,'), false)
+    assert.ok(terminal.text.includes('[fallback]'), 'the text fallback is still painted')
     screen.stop()
   } finally {
     graphics.dispose()

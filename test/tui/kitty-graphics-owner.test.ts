@@ -33,6 +33,8 @@ import {
 import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
 import { KITTY_VIRTUAL_PLACEHOLDER } from '../../src/tui/graphics/tmux-virtual.ts'
 import { NativeKittyImage, admitsNativeKitty, createNativeKittyGraphics } from '../../src/tui/graphics/native-image.ts'
+import { createTmuxKittyGraphics, TmuxKittyImage } from '../../src/tui/graphics/tmux-image.ts'
+import { createFakeTmuxCli } from '../support/fake-tmux-cli.ts'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 
@@ -845,4 +847,24 @@ test('a revoked handle can discard a never-painted retirement without terminal I
   assert.equal(core.residentPayloadBytes, 0, 'the local payload is released')
   assert.equal(core.takeRetirements().wire, '', 'and no d=I is ever emitted')
   assert.equal(core.ownsIdSpace(pending.imageId), true, 'the id still belongs to the Core forever')
+})
+
+test('a pending tmux U1 probe never registers or paints a virtual occurrence', (t) => {
+  const cli = createFakeTmuxCli(t)
+  const terminal = new RecordingTerminal()
+  try {
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    const graphics = createTmuxKittyGraphics(terminal, {}, cli.env)
+    assert.ok(graphics)
+    const image = graphics.image(
+      { pngBase64: PNG, widthPx: 64, heightPx: 64 },
+      { maxWidthCells: 20, maxHeightCells: 6, fallback: '[image]' },
+    ) as TmuxKittyImage
+    assert.equal(graphics.canPaint(), false)
+    assert.deepEqual(image.render(80), ['[image]'], 'pending paints only text')
+    assert.equal(image.imageId, undefined, 'pending never registers a Core occurrence')
+    graphics.dispose()
+  } finally {
+    cli.dispose()
+  }
 })

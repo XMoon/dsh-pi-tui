@@ -216,6 +216,171 @@ test('PI_IMAGE_PROTOCOL none/0 closes the Zellij candidate before any query or i
   }
 })
 
+test('an unknown tmux renderer stays text-only until the live e=T,U=1 feature reply', async (t) => {
+  const cli = createFakeTmuxCli(t)
+  const terminal = new RecordingTerminal()
+  try {
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    resetCapabilitiesCache()
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+    let repaints = 0
+    const graphics = createTmuxKittyGraphics(terminal, {}, tmuxPaneEnvironment(cli), () => { repaints += 1 })
+    assert.ok(graphics, 'the unknown renderer gets the pending managed handle')
+    assert.equal(graphics.mode, 'tmux-virtual')
+    assert.equal(graphics.canPaint(), false, 'pending feature proof paints no pixels')
+    assert.equal(effectiveImageProtocol(graphics), null)
+    graphics.terminal.start(() => {}, () => {})
+    const query = /a=q,i=(\d+),e=T,U=1/.exec(terminal.text)
+    assert.ok(query, 'the exact feature query was sent after the input listener started')
+    const image = graphics.image(
+      { pngBase64: PNG, widthPx: 64, heightPx: 64 },
+      { maxWidthCells: 20, maxHeightCells: 6, fallback: '[fallback]' },
+    )
+    assert.deepEqual(image.render(80), ['[fallback]'], 'pending never registers or paints a virtual grid')
+    assert.equal(terminal.text.includes('a=t,f=100'), false)
+
+    terminal.sendInput(`\x1b_Gi=${query[1]},e=T,C=1,U=1;OK\x1b\\`)
+    await Promise.resolve()
+    assert.equal(graphics.canPaint(), true, 'the matching feature reply admits the same virtual handle')
+    assert.equal(effectiveImageProtocol(graphics), 'kitty')
+    assert.equal(repaints, 1, 'the product repaint callback fires exactly once')
+    const rows = image.render(80)
+    assert.ok(rows.join('').includes('\u{10EEEE}'), 'the admitted component paints the virtual grid')
+    graphics.terminal.write(rows.join('\r\n'))
+    assert.ok(terminal.text.includes('a=t,f=100') && terminal.text.includes('a=p,'))
+    assert.ok(terminal.text.includes('\x1bPtmux;'), 'the managed command travels inside tmux DCS')
+    graphics.dispose()
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('a base Kitty OK without e/U leaves an unknown renderer text-only', (t) => {
+  const cli = createFakeTmuxCli(t)
+  const terminal = new RecordingTerminal()
+  try {
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    resetCapabilitiesCache()
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+    const graphics = createTmuxKittyGraphics(terminal, {}, tmuxPaneEnvironment(cli))
+    assert.ok(graphics)
+    graphics.terminal.start(() => {}, () => {})
+    const probeId = /a=q,i=(\d+)/.exec(terminal.text)?.[1]
+    assert.ok(probeId)
+    terminal.sendInput(`\x1b_Gi=${probeId};OK\x1b\\`)
+    assert.equal(graphics.canPaint(), false, 'base Kitty OK is not U1 evidence')
+    const image = graphics.image(
+      { pngBase64: PNG, widthPx: 64, heightPx: 64 },
+      { maxWidthCells: 20, maxHeightCells: 6, fallback: '[fallback]' },
+    )
+    assert.deepEqual(image.render(80), ['[fallback]'])
+    assert.equal(terminal.text.includes('a=t,f=100'), false)
+    graphics.dispose()
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('a screen stop between the U1 reply and the queued repaint drops only that repaint', async (t) => {
+  const cli = createFakeTmuxCli(t)
+  const terminal = new RecordingTerminal()
+  try {
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    resetCapabilitiesCache()
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+    let repaints = 0
+    const graphics = createTmuxKittyGraphics(terminal, {}, tmuxPaneEnvironment(cli), () => { repaints += 1 })
+    assert.ok(graphics)
+    graphics.terminal.start(() => {}, () => {})
+    const probeId = /a=q,i=(\d+),e=T,U=1/.exec(terminal.text)?.[1]
+    assert.ok(probeId)
+    terminal.sendInput(`\x1b_Gi=${probeId},e=T,U=1;OK\x1b\\`)
+    graphics.terminal.stop()
+    await Promise.resolve()
+    assert.equal(graphics.canPaint(), true, 'the feature admission is one-way')
+    assert.equal(repaints, 0, 'the stopped screen gets no repaint notification')
+    graphics.terminal.start(() => {}, () => {})
+    await Promise.resolve()
+    assert.equal(repaints, 0, 'a stopped notification is never replayed on restart')
+    assert.equal((terminal.text.match(/a=q,/g) ?? []).length, 1, 'restart never re-sends the query')
+    graphics.dispose()
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('a disposed U1 handle never notifies the product from a late feature reply', async (t) => {
+  const cli = createFakeTmuxCli(t)
+  const terminal = new RecordingTerminal()
+  try {
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    resetCapabilitiesCache()
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+    let repaints = 0
+    const graphics = createTmuxKittyGraphics(terminal, {}, tmuxPaneEnvironment(cli), () => { repaints += 1 })
+    assert.ok(graphics)
+    graphics.terminal.start(() => {}, () => {})
+    const probeId = /a=q,i=(\d+),e=T,U=1/.exec(terminal.text)?.[1]
+    assert.ok(probeId)
+    graphics.dispose()
+    terminal.sendInput(`\x1b_Gi=${probeId},e=T,U=1;OK\x1b\\`)
+    await Promise.resolve()
+    assert.equal(repaints, 0, 'a disposed handle never calls the repaint callback')
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('the known Kitty and Ghostty client reports skip the feature query', (t) => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  for (const report of [
+    'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n',
+    'main\t/dev/pts/12\twork\txterm-ghostty\tghostty 1.4.0\n',
+  ]) {
+    const cli = createFakeTmuxCli(t)
+    const terminal = new RecordingTerminal()
+    try {
+      cli.setReply('list-clients', { text: report })
+      const graphics = createTmuxKittyGraphics(terminal, {}, tmuxPaneEnvironment(cli))
+      assert.ok(graphics, report)
+      graphics.terminal.start(() => {}, () => {})
+      assert.equal(terminal.text.includes('a=q,'), false, `${report}: known evidence never sends a feature query`)
+      assert.equal(graphics.canPaint(), true, `${report}: known evidence is immediately paintable`)
+      graphics.dispose()
+    } finally {
+      cli.dispose()
+    }
+  }
+})
+
+test('PI_TUI_TMUX_KITTY_PLACEHOLDERS=1 replaces only the U1 proof and never bypasses hard-off', (t) => {
+  const cli = createFakeTmuxCli(t)
+  const terminal = new RecordingTerminal()
+  try {
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    cli.env.PI_TUI_TMUX_KITTY_PLACEHOLDERS = '1'
+    resetCapabilitiesCache()
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+    const graphics = createTmuxKittyGraphics(terminal, {}, tmuxPaneEnvironment(cli))
+    assert.ok(graphics)
+    graphics.terminal.start(() => {}, () => {})
+    assert.equal(terminal.text.includes('a=q,'), false, 'the explicit assertion skips the feature query')
+    assert.equal(graphics.canPaint(), true, 'the live server identity still admits the handle')
+    graphics.dispose()
+
+    cli.env.PI_TUI_TMUX_KITTY_IMAGES = '0'
+    assert.equal(createTmuxKittyGraphics(new RecordingTerminal(), {}, tmuxPaneEnvironment(cli)), undefined,
+      'the assertion cannot bypass PI_TUI_TMUX_KITTY_IMAGES=0')
+    cli.env.PI_TUI_TMUX_KITTY_IMAGES = '1'
+    cli.env.PI_IMAGE_PROTOCOL = 'none'
+    assert.equal(createTmuxKittyGraphics(new RecordingTerminal(), {}, tmuxPaneEnvironment(cli)), undefined,
+      'the assertion cannot bypass PI_IMAGE_PROTOCOL=none')
+  } finally {
+    cli.dispose()
+  }
+})
+
 test('source to sink: the admitted component really emits the managed grid, and none after revocation', async (t) => {
   const cli = createFakeTmuxCli(t)
   const terminal = new RecordingTerminal()
