@@ -5202,10 +5202,8 @@ The host's state chips (`[current]`/`[default]`) live in the vendored value slot
 
 #### Guarding tests
 
-- packages/pi-tui/test/settings-list.test.ts: a chip is kept whole and the rest dropped whole (no `[curre`, no dangling separator) at 60/45/15/14 cells; a label wider than its column is clipped with `…` and the chip survives at 40 and 120 cells; a label wider than its column is clamped even without parts; `currentValue`/`values` still cycle while the slot paints the parts; a wide -> narrow -> wide resize reflows both chips back
-- test/preset-command.test.ts: the real `/preset` overlay paints both chips whole and no retired prose marker; the 120/67/66/59/58/57/56/52/48/44-column matrix (one whole chip, no half chip, no separator, no row wider than the terminal); a wide -> narrow -> wide resize restores both chips and a click on the long-name row at the narrow geometry still selects THAT row
-- test/surface-row-grant.test.ts: the Theme submenu chip keeps `textMuted` in both selection states; the chip survives 120/48/44 columns with an over-wide plugin theme name (label clipped, no overflow)
-- test/theme-picker.test.ts: the identity matcher follows the painted prefix of an over-wide label; the `file:`/plugin identity marker is unaffected
+- packages/pi-tui/test/settings-list.test.ts: `keeps a state chip whole and drops the rest whole, never leaving a dangling separator` (no `[curre` and no dangling separator at 60/45/15/14 cells); `reserves one whole chip by clipping a label wider than its column (no row overflow)` (the chip survives at 40 and 120 cells); `clamps a label wider than its column even without value parts`; `leaves currentValue and the values cycle untouched (the parts are a display fact)`; `reflows both chips back after a wide → narrow → wide resize (no cached width)`
+- test/app/preset-command.test.ts: `the preset picker paints BOTH state chips whole and no retired prose marker (real overlay frame)`; `the preset state chips stay WHOLE at every supported frame width (real overlay frames)` (the 120/67/66/59/58/57/56/52/48/44-column matrix: one whole chip, no half chip, no separator, no row wider than the terminal); `a wide → narrow → wide resize restores both chips and keeps the row clickable` (a click on the long-name row at the narrow geometry still selects THAT row)
 
 #### Upstream comparison
 
@@ -5247,7 +5245,7 @@ The host's state chips (`[current]`/`[default]`) live in the vendored value slot
 
 #### Why it exists
 
-The host abbreviates a long row NAME (head…tail around one `…`) so the label column can hold a name that would otherwise be clipped to its head — two same-prefix names would otherwise paint identically while Enter still runs different ids. The list's own search, however, filters on `item.label` ONLY, so the abbreviation made a keyword from the MIDDLE of the name unfindable: the Theme submenu runs with `enableSearch: true` and /preset and /skill use the same list, and the description never participates in search. The host cannot repair this through the public surface: one string is both painted and searched, and no call-site shaping can be the abbreviation for the column and the complete name for the filter. Upstream has neither the abbreviation need nor the split.
+The host abbreviates a long row NAME (head…tail around one `…`) so the label column can hold a name that would otherwise be clipped to its head — two same-prefix names would otherwise paint identically while Enter still runs different ids. The list's own search, however, filters on `item.label` ONLY, so the abbreviation made a keyword from the MIDDLE of the name unfindable: the SettingsList rows that abbreviate for the column — today `/preset` and `/skill` — run with `enableSearch: true`, and the description never participates in search. The Theme submenu was the third such row the external review reported, but it belongs to the retired legacy settings editor's trigger scenario; today's live consumers are `/preset` and `/skill`, plus the fork's default label-only fallback for every caller that declares no `searchText`. The host cannot repair this through the public surface: one string is both painted and searched, and no call-site shaping can be the abbreviation for the column and the complete name for the filter. Upstream has neither the abbreviation need nor the split.
 
 #### Changed surface
 
@@ -5284,10 +5282,9 @@ The host abbreviates a long row NAME (head…tail around one `…`) so the label
 
 #### Guarding tests
 
-- packages/pi-tui/test/settings-list.test.ts: a row painting an abbreviation (`Classic Dark…l Edition v9`) is still found by a middle keyword (`quasar`) declared in `searchText`; a row with no `searchText` keeps the historical label-only basis (the same query answers `No matching settings`), which is also the mutation witness for the split
-- test/command-catalog.test.ts: the real `/skill` picker answers a middle keyword of a long skill name through the real search input, and a row hands the COMPLETE name as `searchText` while its label stays the 34-cell abbreviation
-- test/preset-command.test.ts: the real `/preset` overlay answers a middle keyword of a long preset name; the 44-column regressions keep the abbreviation and the whole-ID labeling intact
-- test/surface-row-grant.test.ts: the real Theme submenu (the case the external review reported) answers `quasar` for `Classic Dark quasar Special Edition v9`, and the two long same-prefix theme names still paint apart at 44 columns
+- packages/pi-tui/test/settings-list.test.ts: `filters on searchText when the painted label is an abbreviation` (a row painting `Classic Dark…l Edition v9` is still found by the middle keyword `quasar` declared in `searchText`); `keeps the label as the search basis when no searchText is declared` (the same query answers `No matching settings`), which is also the mutation witness for the split
+- test/app/command-catalog.test.ts: `the /skill search still finds a keyword the label abbreviation cut away (PR #309 review)` — driven through the real search input of the live `/skill` picker, whose row hands the COMPLETE name as `searchText` while its label stays the 34-cell abbreviation (the same test asserts that field on the captured row)
+- test/app/preset-command.test.ts: `/preset search still finds a keyword the label abbreviation cut away (PR #309 review)` — driven through the real search input of the live `/preset` overlay, whose rows declare the abbreviation's source name as `searchText`
 
 #### Upstream comparison
 
@@ -5316,7 +5313,7 @@ The host abbreviates a long row NAME (head…tail around one `…`) so the label
 #### Audit record
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
-- Notes: Introduced in PR #309 (rollout PR5b) after the external review found the pre-abbreviated label had broken the search contract on the Theme submenu, /preset and /skill. Scope checked against every SettingsList caller (the three abbreviated-name rows declare `searchText`; every other caller declares none and inherits the label basis), the fork's own render path (the field is filter-only), and the real pickers' search inputs.
+- Notes: Introduced in PR #309 (rollout PR5b) after the external review found the pre-abbreviated label had broken the search contract on three rows; the Theme submenu is the retired legacy settings editor's historical trigger scenario, and today's live consumers are `/preset` and `/skill`. Scope checked against every SettingsList caller (the abbreviated-name rows declare `searchText`; every other caller declares none and inherits the label basis), the fork's own render path (the field is filter-only), and the real pickers' search inputs.
 
 ### X063 — A read-only Down-boundary seam on the Editor's own visual-line classifier
 
