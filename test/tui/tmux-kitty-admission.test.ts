@@ -48,7 +48,7 @@ test('the real CLI probe reads the one trusted topology from raw server output',
     assert.deepEqual(cli.calls(), [
       'show-options -Apqv -t %7 allow-passthrough',
       'display-message -p -t %7 #{session_name}',
-      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}',
+      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}\t#{client_control_mode}',
     ], 'the probe uses the fixed argv and never a shell')
   } finally {
     cli.dispose()
@@ -58,35 +58,35 @@ test('the real CLI probe reads the one trusted topology from raw server output',
 test('the live client report distinguishes known U1 evidence from an unknown renderer', (t) => {
   const cli = createFakeTmuxCli(t)
   try {
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty\t0\n' })
     const bareKitty = probeTmuxKittyIdentity(cli.env)
     assert.ok(bareKitty, 'a bare Kitty termtype is still a valid server identity')
     assert.equal(tmuxKittyHasKnownUnicodePlaceholders(bareKitty), true, 'bare Kitty is known U1 evidence')
 
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\tkitty(0.41.1)\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\tkitty(0.41.1)\t0\n' })
     const fallbackTermnameKitty = probeTmuxKittyIdentity(cli.env)
     assert.ok(fallbackTermnameKitty, 'Kitty with a generic terminfo is still a valid server identity')
     assert.equal(tmuxKittyHasKnownUnicodePlaceholders(fallbackTermnameKitty), true,
       'the live XTVERSION Kitty identity is sufficient; client_termname is not a brand condition')
 
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty-direct\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty-direct\t0\n' })
     const derivedKitty = probeTmuxKittyIdentity(cli.env)
     assert.ok(derivedKitty, 'a derived termtype is an identity, not a server rejection')
     assert.equal(tmuxKittyHasKnownUnicodePlaceholders(derivedKitty), false, 'a kitty-derived family is not Kitty itself')
 
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-ghostty\tghostty 1.4.0\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-ghostty\tghostty 1.4.0\t0\n' })
     const ghostty = probeTmuxKittyIdentity(cli.env)
     assert.ok(ghostty)
     assert.equal(tmuxKittyHasKnownUnicodePlaceholders(ghostty), true,
       'Ghostty XTVERSION uses a space, not a parentheses version')
 
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\tghostty 1.4.0\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\tghostty 1.4.0\t0\n' })
     const fallbackTermnameGhostty = probeTmuxKittyIdentity(cli.env)
     assert.ok(fallbackTermnameGhostty)
     assert.equal(tmuxKittyHasKnownUnicodePlaceholders(fallbackTermnameGhostty), true,
       'the live XTVERSION Ghostty identity is sufficient with a generic terminfo fallback')
 
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
     const unknown = probeTmuxKittyIdentity(cli.env)
     assert.ok(unknown, 'an unknown renderer reaches the feature probe instead of being rejected')
     assert.equal(tmuxKittyHasKnownUnicodePlaceholders(unknown), false)
@@ -143,7 +143,7 @@ test('an unset opt-in attempts the strict admission automatically', (t) => {
     assert.deepEqual(cli.calls(), [
       'show-options -Apqv -t %7 allow-passthrough',
       'display-message -p -t %7 #{session_name}',
-      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}',
+      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}\t#{client_control_mode}',
     ], 'the automatic attempt runs the same fixed argv')
   } finally {
     cli.dispose()
@@ -165,14 +165,14 @@ test('the explicit 1 uses the identical admission flow and never forces it', (t)
     assert.deepEqual(cli.calls(), [
       'show-options -Apqv -t %7 allow-passthrough',
       'display-message -p -t %7 #{session_name}',
-      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}',
+      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}\t#{client_control_mode}',
     ], '1 runs the same three fixed queries')
     cli.setReply('show-options', { text: 'on\n' })
     assert.equal(probeTmuxKittyIdentity(cli.env), undefined, '1 does not turn on into all')
     assert.equal(cli.calls().length, 4, 'the refused option stops after its own first query')
     cli.setReply('show-options', { text: 'all\n' })
     cli.setReply('list-clients', {
-      text: 'a\t/dev/pts/1\twork\txterm-kitty\tkitty(0.41.1)\nb\t/dev/pts/2\twork\txterm-kitty\tkitty(0.41.1)\n',
+      text: 'a\t/dev/pts/1\twork\txterm-kitty\tkitty(0.41.1)\t0\nb\t/dev/pts/2\twork\txterm-kitty\tkitty(0.41.1)\t0\n',
     })
     assert.equal(probeTmuxKittyIdentity(cli.env), undefined, '1 does not admit a second client')
     assert.equal(cli.calls().length, 7, 'the two-client attempt ran exactly its three fixed queries')
@@ -223,20 +223,58 @@ test('an empty session name is not an identity', (t) => {
   }
 })
 
-test('the whole server must have exactly one matching, non-empty client', (t) => {
+test('exactly one matching, non-empty ordinary display client is required', (t) => {
   const cases: ReadonlyArray<{ name: string; text: string }> = [
     { name: 'no client', text: '' },
-    { name: 'mixed clients', text: 'a\t/dev/pts/1\twork\txterm-kitty\tkitty(0.41.1)\nb\t/dev/pts/2\twork\txterm-kitty\tkitty(0.41.1)\n' },
-    { name: 'session mismatch', text: 'main\t/dev/pts/12\tother\txterm-kitty\tkitty(0.41.1)\n' },
-    { name: 'empty client name', text: '\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n' },
-    { name: 'empty client tty', text: 'main\t\twork\txterm-kitty\tkitty(0.41.1)\n' },
-    { name: 'missing termtype field', text: 'main\t/dev/pts/12\twork\txterm-kitty\n' },
+    {
+      name: 'two ordinary display clients',
+      text: 'a\t/dev/pts/1\twork\txterm-kitty\tkitty(0.41.1)\t0\nb\t/dev/pts/2\twork\txterm-kitty\tkitty(0.41.1)\t0\n',
+    },
+    { name: 'only a Control Mode client', text: 'client-3383511\t\twork\tunknown\t\t1\n' },
+    { name: 'session mismatch', text: 'main\t/dev/pts/12\tother\txterm-kitty\tkitty(0.41.1)\t0\n' },
+    { name: 'empty client name', text: '\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n' },
+    { name: 'empty client tty', text: 'main\t\twork\txterm-kitty\tkitty(0.41.1)\t0\n' },
+    { name: 'missing termtype and control columns', text: 'main\t/dev/pts/12\twork\txterm-kitty\n' },
+    { name: 'missing control column', text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n' },
+    { name: 'empty control column', text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t\n' },
+    { name: 'unknown control value', text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t2\n' },
+    { name: 'malformed control record', text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\textra\n' },
+    {
+      name: 'one display plus a malformed control record',
+      text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\nclient-1\t\t\tunknown\t\n',
+    },
   ]
   for (const entry of cases) {
     const cli = createFakeTmuxCli(t)
     try {
       cli.setReply('list-clients', { text: entry.text })
       assert.equal(probeTmuxKittyIdentity(cli.env), undefined, entry.name)
+    } finally {
+      cli.dispose()
+    }
+  }
+})
+
+test('one ordinary display client coexists with any number of Control Mode clients', (t) => {
+  const reports = [
+    // The real tmux 3.5a shape: the Control Mode client reports an empty TTY
+    // and an `unknown` terminal name/type, yet control=1 already excludes it.
+    'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\nclient-3383511\t\twork\tunknown\t\t1\n',
+    'client-3383511\t\twork\tunknown\t\t1\nmain\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n',
+    'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\nclient-1\t\t\t\t\t1\nclient-2\t\t\tunknown\t\t1\n',
+  ]
+  for (const text of reports) {
+    const cli = createFakeTmuxCli(t)
+    try {
+      cli.setReply('list-clients', { text })
+      assert.deepEqual(probeTmuxKittyIdentity(cli.env), {
+        paneId: '%7',
+        sessionName: 'work',
+        clientName: 'main',
+        clientTty: '/dev/pts/12',
+        clientTermname: 'xterm-kitty',
+        clientTermtype: 'kitty(0.41.1)',
+      }, text)
     } finally {
       cli.dispose()
     }
@@ -261,7 +299,20 @@ test('an overflowing CLI reply fails closed instead of being truncated into a cl
   const cli = createFakeTmuxCli(t)
   try {
     cli.setReply('list-clients', {
-      text: `main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n${'x'.repeat(70 * 1024)}\n`,
+      text: `main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n${'x'.repeat(70 * 1024)}\n`,
+    })
+    assert.equal(probeTmuxKittyIdentity(cli.env), undefined)
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('a failing list-clients query is not an admission', (t) => {
+  const cli = createFakeTmuxCli(t)
+  try {
+    cli.setReply('list-clients', {
+      text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n',
+      exitCode: 1,
     })
     assert.equal(probeTmuxKittyIdentity(cli.env), undefined)
   } finally {
@@ -274,11 +325,50 @@ test('admission re-probes the real server and latches on a client change', (t) =
   try {
     const admission = new TmuxKittyAdmission(admitted(cli), cli.env)
     assert.equal(admission.isAllowed(false), true)
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/99\twork\txterm-kitty\tkitty(0.41.1)\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/99\twork\txterm-kitty\tkitty(0.41.1)\t0\n' })
     assert.equal(admission.isAllowed(true), false, 'a changed tty revokes the handle')
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n' })
     assert.equal(admission.isAllowed(true), false, 'the revocation is a one-way latch')
     assert.equal(admission.isAllowed(false), false)
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('Control Mode clients joining and leaving never revoke the ordinary display binding', (t) => {
+  const cli = createFakeTmuxCli(t)
+  try {
+    const admission = new TmuxKittyAdmission(admitted(cli), cli.env)
+    const display = 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n'
+    const control = 'client-3383511\t\twork\tunknown\t\t1\n'
+    const secondControl = 'client-1\t\t\t\t\t1\n'
+    assert.equal(admission.isAllowed(true), true)
+    cli.setReply('list-clients', { text: display + control })
+    assert.equal(admission.isAllowed(true), true, 'a Control Mode client joining does not revoke')
+    cli.setReply('list-clients', { text: control + display + secondControl })
+    assert.equal(admission.isAllowed(true), true, 'multiple Control Mode clients do not revoke')
+    cli.setReply('list-clients', { text: display })
+    assert.equal(admission.isAllowed(true), true, 'Control Mode clients leaving do not revoke')
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('a second ordinary display client revokes even next to Control Mode clients', (t) => {
+  const cli = createFakeTmuxCli(t)
+  try {
+    const admission = new TmuxKittyAdmission(admitted(cli), cli.env)
+    assert.equal(admission.isAllowed(true), true)
+    cli.setReply('list-clients', {
+      text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n'
+        + 'other\t/dev/pts/13\twork\txterm-kitty\tkitty(0.41.1)\t0\n'
+        + 'client-3383511\t\twork\tunknown\t\t1\n',
+    })
+    assert.equal(admission.isAllowed(true), false, 'a second ordinary display client revokes')
+    cli.setReply('list-clients', {
+      text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\nclient-3383511\t\twork\tunknown\t\t1\n',
+    })
+    assert.equal(admission.isAllowed(true), false, 'the revocation is one-way')
   } finally {
     cli.dispose()
   }
@@ -292,7 +382,7 @@ test('a client disappearing, the option changing or the session renaming all rev
       name: 'session renamed',
       apply: (cli) => {
         cli.setReply('display-message', { text: 'renamed\n' })
-        cli.setReply('list-clients', { text: 'main\t/dev/pts/12\trenamed\txterm-kitty\tkitty(0.41.1)\n' })
+        cli.setReply('list-clients', { text: 'main\t/dev/pts/12\trenamed\txterm-kitty\tkitty(0.41.1)\t0\n' })
       },
     },
   ]
@@ -386,10 +476,10 @@ test('a pending feature gate revokes when the live client changes', (t) => {
     const identity = admitted(cli)
     const admission = new TmuxKittyAdmission(identity, cli.env, () => false)
     assert.equal(admission.isAllowed(false), false)
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/99\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/99\twork\txterm-256color\twezterm 20240203\t0\n' })
     assert.equal(admission.isAllowed(false), false, 'the pending gate never reports pixels')
     assert.equal(admission.isIdentityAllowed(true), false, 'the changed live client latched the revoke')
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n' })
     assert.equal(admission.isAllowed(true), false, 'the revoke is one-way')
   } finally {
     cli.dispose()
@@ -398,10 +488,10 @@ test('a pending feature gate revokes when the live client changes', (t) => {
 
 test('a live outer tmux/screen client is a transport boundary, not a feature-probe candidate', (t) => {
   const cases = [
-    'main\t/dev/pts/12\twork\ttmux-256color\t\n',
-    'main\t/dev/pts/12\twork\tscreen-256color\t\n',
-    'main\t/dev/pts/12\twork\txterm-256color\ttmux 3.5a\n',
-    'main\t/dev/pts/12\twork\txterm-256color\tscreen 4.9\n',
+    'main\t/dev/pts/12\twork\ttmux-256color\t\t0\n',
+    'main\t/dev/pts/12\twork\tscreen-256color\t\t0\n',
+    'main\t/dev/pts/12\twork\txterm-256color\ttmux 3.5a\t0\n',
+    'main\t/dev/pts/12\twork\txterm-256color\tscreen 4.9\t0\n',
   ]
   for (const text of cases) {
     const cli = createFakeTmuxCli(t)

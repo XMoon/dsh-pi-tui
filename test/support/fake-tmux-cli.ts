@@ -112,7 +112,7 @@ export function createFakeTmuxCli(t: TestContext): FakeTmuxCli {
   cli.setReply('show-options', { text: 'all\n' })
   cli.setReply('display-message', { text: 'work\n' })
   cli.setReply('list-clients', {
-    text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n',
+    text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n',
   })
   return cli
 }

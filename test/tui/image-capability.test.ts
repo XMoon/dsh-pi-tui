@@ -220,7 +220,7 @@ test('an unknown tmux renderer stays text-only until the live e=T,U=1 feature re
   const cli = createFakeTmuxCli(t)
   const terminal = new RecordingTerminal()
   try {
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
     resetCapabilitiesCache()
     setCapabilities({ images: null, trueColor: true, hyperlinks: false })
     let repaints = 0
@@ -259,7 +259,7 @@ test('a base Kitty OK without e/U leaves an unknown renderer text-only', (t) => 
   const cli = createFakeTmuxCli(t)
   const terminal = new RecordingTerminal()
   try {
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
     resetCapabilitiesCache()
     setCapabilities({ images: null, trueColor: true, hyperlinks: false })
     const graphics = createTmuxKittyGraphics(terminal, {}, tmuxPaneEnvironment(cli))
@@ -285,7 +285,7 @@ test('a screen stop between the U1 reply and the queued repaint drops only that 
   const cli = createFakeTmuxCli(t)
   const terminal = new RecordingTerminal()
   try {
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
     resetCapabilitiesCache()
     setCapabilities({ images: null, trueColor: true, hyperlinks: false })
     let repaints = 0
@@ -313,7 +313,7 @@ test('a disposed U1 handle never notifies the product from a late feature reply'
   const cli = createFakeTmuxCli(t)
   const terminal = new RecordingTerminal()
   try {
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
     resetCapabilitiesCache()
     setCapabilities({ images: null, trueColor: true, hyperlinks: false })
     let repaints = 0
@@ -335,7 +335,7 @@ test('a client change during the pending U1 probe revokes before another client 
   const cli = createFakeTmuxCli(t)
   const terminal = new RecordingTerminal()
   try {
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
     resetCapabilitiesCache()
     setCapabilities({ images: null, trueColor: true, hyperlinks: false })
     const graphics = createTmuxKittyGraphics(terminal, {}, tmuxPaneEnvironment(cli))
@@ -344,11 +344,11 @@ test('a client change during the pending U1 probe revokes before another client 
     const probeId = /a=q,i=(\d+),e=T,U=1/.exec(terminal.text)?.[1]
     assert.ok(probeId)
 
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/99\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/99\twork\txterm-256color\twezterm 20240203\t0\n' })
     terminal.sendInput(`\x1b_Gi=${probeId},e=T,U=1;OK\x1b\\`)
     await Promise.resolve()
     assert.equal(graphics.canPaint(), false, 'the other client’s feature reply never promotes the original identity')
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
     assert.equal(graphics.canPaint(), false, 'the identity revoke is one-way even after the original client returns')
     graphics.dispose()
   } finally {
@@ -361,7 +361,7 @@ test('a permanently denied U1 probe stops tmux CLI queries after the cache windo
   const cli = createFakeTmuxCli(t)
   const terminal = new RecordingTerminal()
   try {
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
     resetCapabilitiesCache()
     setCapabilities({ images: null, trueColor: true, hyperlinks: false })
     const graphics = createTmuxKittyGraphics(terminal, {}, tmuxPaneEnvironment(cli))
@@ -394,10 +394,10 @@ test('the known Kitty and Ghostty client reports skip the feature query', (t) =>
   resetCapabilitiesCache()
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   for (const report of [
-    'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n',
-    'main\t/dev/pts/12\twork\txterm-256color\tkitty(0.41.1)\n',
-    'main\t/dev/pts/12\twork\txterm-ghostty\tghostty 1.4.0\n',
-    'main\t/dev/pts/12\twork\txterm-256color\tghostty 1.4.0\n',
+    'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n',
+    'main\t/dev/pts/12\twork\txterm-256color\tkitty(0.41.1)\t0\n',
+    'main\t/dev/pts/12\twork\txterm-ghostty\tghostty 1.4.0\t0\n',
+    'main\t/dev/pts/12\twork\txterm-256color\tghostty 1.4.0\t0\n',
   ]) {
     const cli = createFakeTmuxCli(t)
     const terminal = new RecordingTerminal()
@@ -419,7 +419,7 @@ test('PI_TUI_TMUX_KITTY_PLACEHOLDERS=1 replaces only the U1 proof and never bypa
   const cli = createFakeTmuxCli(t)
   const terminal = new RecordingTerminal()
   try {
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
     cli.env.PI_TUI_TMUX_KITTY_PLACEHOLDERS = '1'
     resetCapabilitiesCache()
     setCapabilities({ images: null, trueColor: true, hyperlinks: false })
@@ -439,7 +439,7 @@ test('PI_TUI_TMUX_KITTY_PLACEHOLDERS=1 replaces only the U1 proof and never bypa
       'the assertion cannot bypass PI_IMAGE_PROTOCOL=none')
 
     delete cli.env.PI_IMAGE_PROTOCOL
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\ttmux-256color\t\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\ttmux-256color\t\t0\n' })
     assert.equal(createTmuxKittyGraphics(new RecordingTerminal(), {}, tmuxPaneEnvironment(cli)), undefined,
       'the assertion cannot bypass a nested tmux/screen transport')
   } finally {

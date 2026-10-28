@@ -853,7 +853,7 @@ test('a pending tmux U1 probe never registers or paints a virtual occurrence', (
   const cli = createFakeTmuxCli(t)
   const terminal = new RecordingTerminal()
   try {
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
     const graphics = createTmuxKittyGraphics(terminal, {}, cli.env)
     assert.ok(graphics)
     const image = graphics.image(

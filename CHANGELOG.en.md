@@ -468,6 +468,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **tmux Control Mode clients no longer block image admission.** When one ordinary display
+  terminal shares a tmux server with one or more tmux Control Mode clients (`tmux -CC`), the
+  image backend used to count those management connections as display clients and refused
+  admission through its "exactly one client" rule. Admission now counts only real ordinary
+  display TTY clients (`client_control_mode=0`); explicit Control Mode clients
+  (`client_control_mode=1`, even with an empty TTY or an `unknown` terminal type) may coexist,
+  and their join, exit or change never revokes an admitted image handle. Two ordinary display
+  clients, a missing or non-`0/1` control-mode value, a malformed record and every query
+  failure still fail closed, and the one-way revoke semantics are unchanged.
 - **Releasing an old extension handle no longer removes a re-registered contribution or
   its diagnostics.** Each of the six Stable registrations — themes, autocomplete,
   keybindings, message/tool renderers and editors — is now released at most once: the

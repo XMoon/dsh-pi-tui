@@ -468,7 +468,7 @@ test('an unset opt-in admits the automatic handle and paints real pixels end to 
   assert.deepEqual(h.cli.calls().slice(0, 3), [
     'show-options -Apqv -t %7 allow-passthrough',
     'display-message -p -t %7 #{session_name}',
-    'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}',
+    'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}\t#{client_control_mode}',
   ], 'the automatic product admission ran the fixed real-server probe')
 
   const ref = pngRef('att-auto', 'auto.png')
