@@ -215,30 +215,27 @@ retirement and the resident budget.
   it. The facade observes `CSI 2J`, `CSI 3J` and a screen-buffer switch as
   residency invalidations and never rewrites text, OSC 8/52, mouse or keyboard
   modes, or a foreign APC.
-- **Admission is narrower than capability.** The Native managed path is shared
-  by a real Kitty terminal, a direct Ghostty, and one Ghostty-host Zellij pane,
-  each attached without another multiplexer; every other Kitty-capable terminal
-  (WezTerm, Warp), iTerm2 and unknown terminals keeps the legacy `Image`/text
-  fallback. Ghostty is admitted by its `TERM_PROGRAM=ghostty` environment hint
-  together with the fork's `images === 'kitty'` capability; `TERM` is not an
-  identity fact — `xterm-ghostty`, `xterm-256color`, a custom value or an
-  absent `TERM` all remain eligible, while a `tmux*`/`screen*` value (or
-  `TMUX`/`ZELLIJ`/`STY`, or Herdr) still denies the DIRECT path. A `TERM` name
-  or `GHOSTTY_RESOURCES_DIR` alone never grants the path, an inherited or
-  forwarded hint is not proof of the physical terminal, and no environment
-  override can force admission; `PI_IMAGE_PROTOCOL=none` wins over every hint.
-  A Zellij pane always inherits the host's hints, so `ZELLIJ=0`, a non-empty
-  `ZELLIJ_SESSION_NAME` and the Ghostty hint only make the process a CANDIDATE:
-  a separate Zellij factory creates the same one `KittyGraphicsCore` /
-  `KittyTerminalFacade` Native path, and the pane is admitted only after the
-  live Zellij server answers one bounded `a=q` query with the matching `OK`.
-  Pending or denied admission paints the existing text fallback and can never
-  fall back to legacy `a=T`; any `ZELLIJ` environment without an admitted
-  handle is text-only in the capability classifier. `PI_IMAGE_PROTOCOL=none/0`
-  closes the candidate before any query, read, conversion or APC.
-  WezTerm-host Zellij and every unknown or mixed host topology remain
-  unsupported. The tmux virtual path is a separate strict automatic admission
-  with its own live-server probe (below); all paths fail closed.
+- **Admission follows protocol capability, not a terminal brand.** The Native
+  managed path is shared by any Direct terminal whose effective fork
+  capability is `images === 'kitty'` (Kitty, Ghostty, WezTerm, Warp, Tern and
+  an explicit `PI_IMAGE_PROTOCOL=kitty` override all qualify), attached with
+  no multiplexer in between. `TERM` is not an identity fact; a `tmux*`/`screen*`
+  value (or `TMUX`/`ZELLIJ`/`STY`, or Herdr) still denies the DIRECT path
+  because it is a transport boundary, not a brand policy. `PI_IMAGE_PROTOCOL=none/0`
+  is the global hard opt-out and `iterm2` keeps the iTerm2 path; no environment
+  override can force admission past a null or non-Kitty effective capability.
+  A non-empty `ZELLIJ` marker makes the process a CANDIDATE: a separate Zellij
+  factory creates the same one `KittyGraphicsCore` / `KittyTerminalFacade`
+  Native path, sends exactly one per-handle bounded `a=q` query after the real
+  input listener is installed, and admits only the matching `OK` from that
+  pane. Pending, denied, errored or timed-out admission paints the existing
+  text fallback and can never fall back to legacy `a=T`; an empty `ZELLIJ`
+  value is not a session marker. A connected Tern TSP renderer keeps its own
+  `image`+`blobs` native node path and never mounts a PiTui graphics handle;
+  the Tern PiTui fallback uses the same Direct capability above. The tmux
+  virtual path is a separate strict automatic admission with its own
+  live-server probe (below). All paths fail closed, and every managed path
+  deletes only its own ids.
 
 ### tmux virtual backend (strict automatic admission)
 

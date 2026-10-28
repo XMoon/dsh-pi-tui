@@ -1,24 +1,24 @@
 /**
- * Ghostty-host Zellij Native admission and factory (Image-7C-3).
+ * Zellij Native admission and factory (Image-7C-3, generalized by Image-7C).
  *
  * A Zellij pane inherits its parent terminal's environment, so the fork's
  * `TERM_PROGRAM`/`GHOSTTY_RESOURCES_DIR` hints cannot prove that the CURRENT
  * Zellij pane really supports Kitty graphics. This module therefore asks the
  * live Zellij server one bounded Kitty `a=q` query after the physical terminal
  * input listener is installed, and only the matching `OK` reply promotes the
- * SAME Native `KittyGraphicsCore` + `KittyTerminalFacade` used by direct
- * Ghostty.
+ * SAME Native `KittyGraphicsCore` + `KittyTerminalFacade` used by a Direct
+ * capable Kitty protocol terminal.
  *
  * The admission is deliberately small: it owns no image id, placement,
  * payload or terminal frame. It answers two questions only — "is this process
- * a Ghostty-host Zellij pane worth querying?" and "did this pane answer the
- * probe?". `mode` stays `native`: Zellij is an admission boundary, not a
- * second graphics transport.
+ * a Zellij pane worth querying?" and "did this pane answer the probe?".
+ * `mode` stays `native`: Zellij is an admission boundary, not a second
+ * graphics transport.
  * @module @xmoon76/dsh-pi-tui/tui/graphics/zellij-image
  */
 
 import { randomInt } from 'node:crypto'
-import { getCapabilities, type Terminal } from '@xmoon76/pi-tui'
+import type { Terminal } from '@xmoon76/pi-tui'
 import {
   KittyGraphicsCore,
   type KittyGraphicsCoreOptions,
@@ -49,26 +49,21 @@ export function zellijProbeWire(probeId: number): string {
 export const ZELLIJ_PROBE_TIMEOUT_MS = 500
 
 /**
- * Whether this process is the one Zellij topology this stage certifies:
- * a Ghostty host with a Zellij pane in between.
+ * Whether this process is a Zellij pane worth one live protocol query.
  *
- * Every fact is necessary. `TERM` only rejects known multiplexer prefixes; it
- * never grants identity. `PI_IMAGE_PROTOCOL=none/0` is the absolute image
- * opt-out and `iterm2` also leaves this Kitty-only path. WezTerm/Warp markers
- * deny because their inherited presence means the pane is not a clean
- * Ghostty-host topology, and `TMUX`/`STY` deny every other multiplexer.
+ * The candidate decision is deliberately transport-only: a non-empty `ZELLIJ`
+ * session marker, no explicit `TMUX`/`STY` session in between, and no explicit
+ * image opt-out (`PI_IMAGE_PROTOCOL=none/0`) or iTerm2 override. Host brand,
+ * `TERM_PROGRAM`, `TERM`, session name, inherited WezTerm/Warp markers and the
+ * fork's static capability verdict are NOT admission facts: the per-handle
+ * live `a=q` answer is the authority for this pane.
  */
-export function candidateGhosttyZellij(environment: NodeJS.ProcessEnv = process.env): boolean {
+export function candidateZellijKitty(environment: NodeJS.ProcessEnv = process.env): boolean {
   const protocol = (environment.PI_IMAGE_PROTOCOL ?? '').toLowerCase()
   if (protocol === 'none' || protocol === '0' || protocol === 'iterm2') return false
-  if (environment.ZELLIJ !== '0' || !environment.ZELLIJ_SESSION_NAME) return false
-  if ((environment.TERM_PROGRAM ?? '').toLowerCase() !== 'ghostty') return false
-  if (environment.TMUX !== undefined || environment.STY !== undefined) return false
-  if (environment.WEZTERM_PANE !== undefined || environment.WARP_SESSION_ID !== undefined ||
-      environment.WARP_TERMINAL_SESSION_UUID !== undefined) return false
-  const term = (environment.TERM ?? '').toLowerCase()
-  if (term.startsWith('tmux') || term.startsWith('screen')) return false
-  return getCapabilities().images === 'kitty'
+  if ((environment.ZELLIJ ?? '') === '') return false
+  if ((environment.TMUX ?? '') !== '' || (environment.STY ?? '') !== '') return false
+  return true
 }
 
 type ZellijAdmissionState = 'pending' | 'probing' | 'allowed' | 'denied'
@@ -217,10 +212,10 @@ export class ZellijKittyTerminal extends KittyTerminalFacade {
 }
 
 /**
- * Create the ONE graphics handle for a Ghostty-host Zellij pane, or
- * `undefined` when the process is not that candidate (no Core, no facade, no
- * query). The returned handle is Native: the same Core/Facade/component path
- * as direct Ghostty, gated by the one-way live-pane admission.
+ * Create the ONE graphics handle for a Zellij pane, or `undefined` when the
+ * process is not a candidate (no Core, no facade, no query). The returned
+ * handle is Native: the same Core/Facade/component path as a Direct capable
+ * Kitty protocol terminal, gated by the one-way live-pane admission.
  */
 export function createZellijKittyGraphics(
   terminal: Terminal,
@@ -228,7 +223,7 @@ export function createZellijKittyGraphics(
   environment: NodeJS.ProcessEnv = process.env,
   onAllowed: () => void,
 ): KittyGraphics | undefined {
-  if (!candidateGhosttyZellij(environment)) return undefined
+  if (!candidateZellijKitty(environment)) return undefined
   const core = new KittyGraphicsCore(options)
   let disposed = false
   const admission = new ZellijKittyAdmission(() => {

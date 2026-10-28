@@ -31,6 +31,7 @@ import { connect as sdkConnect, concatBytes } from '@stencil-hq/tern'
 import type { Op } from '@stencil-hq/tern'
 import type { ConnectOptions, Session, TermInput, TermOutput } from '@stencil-hq/tern'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { getCapabilities, resetCapabilitiesCache } from '@xmoon76/pi-tui'
 import type { RoutedSessionEvent } from '../../src/app/surface/event-routing.ts'
 import type { SurfaceEventRoutingSource } from '../../src/app/surface/event-routing.ts'
 import {
@@ -368,6 +369,10 @@ test('A-01: the PRODUCTION selection + a real SDK connect mounts the TSP rendere
     harness.surface.paintNow()
     await settle()
     assert.ok(tern.output.text().includes('selects the renderer'), 'the routed message rendered on the TSP wire')
+    assert.equal(tern.output.text().includes('\u001b_Ga=t'), false,
+      'the successful TSP session never writes a Kitty transmission')
+    assert.equal(tern.output.text().includes('\u001b_Ga=p'), false,
+      'the successful TSP session never writes a Kitty placement')
   } finally {
     await harness.dispose()
   }
@@ -386,17 +391,34 @@ test('A-02: SDK connect null falls back to the PiTui mount (opt-in present)', as
   })
   assert.equal(renderer, undefined, 'the selection seam yields no renderer mount on null')
 
+  const savedTermProgram = process.env.TERM_PROGRAM
+  process.env.TERM_PROGRAM = 'tern'
+  resetCapabilitiesCache()
   const harness = mountHarness()
   try {
     harness.mount(renderer)
     // The PiTui mount succeeded: a TuiApp exists and renders.
     assert.equal(typeof harness.surface.app.start, 'function', 'the PiTui TuiApp mounted')
+    // Tern's PiTui fallback is a Direct Kitty-capable terminal: the shared
+    // fork detector classifies it and the production composition creates the
+    // ONE managed graphics handle. The real image sink is covered by the
+    // integration media suite (test/integration/kitty-native-screen.test.ts).
+    assert.equal(getCapabilities().images, 'kitty', 'the fork really classifies TERM_PROGRAM=tern as Kitty')
+    const graphics = (harness.surface.app as unknown as {
+      graphics: { mode: string; canPaint(): boolean } | undefined
+    }).graphics
+    assert.ok(graphics, 'the PiTui fallback factory created the managed handle')
+    assert.equal(graphics.mode, 'native')
+    assert.equal(graphics.canPaint(), true)
     harness.route(userMessage(1, 'pitui fallback'))
     harness.surface.paintNow()
     await settle()
     const wire = tern.output.text()
     assert.ok(!wire.includes('\u001b_tsp;o;') && !wire.includes('\u001b_tsp;f;'), 'no TSP surface opened or framed after the declined probe')
   } finally {
+    if (savedTermProgram === undefined) delete process.env.TERM_PROGRAM
+    else process.env.TERM_PROGRAM = savedTermProgram
+    resetCapabilitiesCache()
     await harness.dispose()
   }
 })

@@ -92,7 +92,10 @@ function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean)
 		return { images: null, trueColor: hasTrueColorHint, hyperlinks: true };
 	}
 
-	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty") {
+	// Tern's terminal pane speaks the Kitty graphics protocol; classify it with
+	// the other known Kitty-capable terminals so the main and alternate screens
+	// and the host share ONE capability answer.
+	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty" || termProgram === "tern") {
 		return { images: "kitty", trueColor: true, hyperlinks: true };
 	}
 

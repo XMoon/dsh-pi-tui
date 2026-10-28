@@ -632,59 +632,92 @@ test('the alternate screen release at stop frees the managed ids before the term
   assert.ok(!terminal.writes.join('').includes('d=A'), 'never the global form')
 })
 
-test('native admission requires a direct Kitty or the Ghostty TERM_PROGRAM hint', () => {
+test('native admission follows the effective Direct Kitty capability with no brand allowlist', () => {
+  const direct = [
+    { name: 'Kitty', environment: { TERM_PROGRAM: 'kitty' } },
+    { name: 'Ghostty', environment: { TERM_PROGRAM: 'ghostty', TERM: 'xterm-ghostty' } },
+    { name: 'lone Ghostty TERM', environment: { TERM: 'xterm-ghostty' } },
+    { name: 'lone Ghostty resource directory', environment: { GHOSTTY_RESOURCES_DIR: '/usr/share/ghostty' } },
+    { name: 'WezTerm', environment: { TERM_PROGRAM: 'wezterm', WEZTERM_PANE: '0' } },
+    { name: 'Warp', environment: { TERM_PROGRAM: 'WarpTerminal' } },
+    { name: 'Tern', environment: { TERM_PROGRAM: 'tern' } },
+    { name: 'unknown terminal with an explicit Kitty override', environment: { PI_IMAGE_PROTOCOL: 'kitty' } },
+  ] as const
+  for (const entry of direct) {
+    withDetectedEnvironment(entry.environment, () => {
+      assert.equal(getCapabilities().images, 'kitty', `${entry.name}: the fork really detects the Kitty capability`)
+      assert.equal(admitsNativeKitty(entry.environment), true, `${entry.name}: the Direct Native path is admitted`)
+      const graphics = createNativeKittyGraphics(new RecordingTerminal(), {}, entry.environment)
+      assert.ok(graphics, `${entry.name}: the factory creates the managed handle`)
+      graphics.dispose()
+    })
+  }
+
+  // The multiplexer transport exclusions are not brand policy and stay put.
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
-  // Existing 7A Kitty identity is unchanged.
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty' }), true)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'Kitty' }), true, 'the identity compare is case-insensitive')
-  assert.equal(admitsNativeKitty({ KITTY_WINDOW_ID: '3' }), true)
+  for (const environment of [
+    { TERM_PROGRAM: 'ghostty', TMUX: '/tmp/tmux-1000/default,1,0' },
+    { TERM_PROGRAM: 'ghostty', ZELLIJ: '1' },
+    { TERM_PROGRAM: 'ghostty', STY: '1' },
+    { TERM_PROGRAM: 'ghostty', TERM: 'tmux-256color' },
+    { TERM_PROGRAM: 'ghostty', TERM: 'screen-256color' },
+    { TERM_PROGRAM: 'wezterm', WEZTERM_PANE: '0', TMUX: '/tmp/tmux-1000/default,1,0' },
+    { TERM_PROGRAM: 'tern', ZELLIJ: '1' },
+    { TERM_PROGRAM: 'herdr', KITTY_WINDOW_ID: '1' },
+  ]) {
+    assert.equal(admitsNativeKitty(environment), false, JSON.stringify(environment))
+  }
 
-  // Image-7C-2: the direct Ghostty hint admits the SAME Native Core.
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'xterm-ghostty' }), true,
-    'Ghostty with its own terminfo name is a positive')
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'xterm-256color' }), true,
-    'the official SSH/terminfo fallback is not degraded to legacy')
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'custom-xterm' }), true,
-    'a custom TERM is not identity evidence, only a mux prefix is rejected')
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty' }), true,
-    'an absent TERM is not an identity failure')
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', GHOSTTY_RESOURCES_DIR: '/x' }), true,
-    'the resource directory neither grants nor denies the hint')
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'Ghostty', TERM: 'xterm-256color' }), true,
-    'the hint compare is case-insensitive')
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', KITTY_WINDOW_ID: '3', TERM: 'xterm-256color' }), true,
-    'an inherited legacy Kitty id does not turn off the Ghostty positive')
-
-  // A single soft signal is not identity, and no known multiplexer may be
-  // promoted to a direct native topology.
-  assert.equal(admitsNativeKitty({ TERM: 'xterm-ghostty' }), false, 'a lone TERM name cannot admit')
-  assert.equal(admitsNativeKitty({ GHOSTTY_RESOURCES_DIR: '/x' }), false, 'a lone resource directory cannot admit')
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TMUX: '/tmp/tmux-1000/default,1,0' }), false)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', ZELLIJ: '1' }), false)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', STY: '1' }), false)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'tmux-256color' }), false)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'screen-256color' }), false)
-
-  // Existing exclusions stay put: Herdr, later stages and the capability gate.
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty', TMUX: '/tmp/tmux-1000/default,1,0' }), false)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty', ZELLIJ: '1' }), false)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty', STY: '1' }), false)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty', TERM: 'tmux-256color' }), false)
-  assert.equal(admitsNativeKitty({ KITTY_WINDOW_ID: '1', TERM: 'screen-256color' }), false)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'herdr', KITTY_WINDOW_ID: '1' }), false)
-  assert.equal(admitsNativeKitty({ PI_IMAGE_PROTOCOL: 'kitty' }), false,
-    'a legacy env override cannot manufacture the Kitty identity evidence')
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'wezterm', WEZTERM_PANE: '1' }), false)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'warpterminal', WARP_SESSION_ID: '1' }), false)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'iTerm.app', ITERM_SESSION_ID: '1' }), false)
+  // A hard opt-out and a non-Kitty override stay closed even on a brand that
+  // would otherwise be a positive.
+  for (const protocol of ['none', '0', 'iterm2'] as const) {
+    withDetectedEnvironment({ TERM_PROGRAM: 'wezterm', WEZTERM_PANE: '0', PI_IMAGE_PROTOCOL: protocol }, () => {
+      assert.notEqual(getCapabilities().images, 'kitty', `${protocol}: the fork capability is not Kitty`)
+      assert.equal(createNativeKittyGraphics(new RecordingTerminal()), undefined, `${protocol}: the factory is refused`)
+    })
+  }
   setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: true })
   assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty' }), false, 'the capability must be Kitty')
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'xterm-256color' }), false,
-    'the Ghostty hint does not bypass the capability gate')
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty' }), false)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', PI_IMAGE_PROTOCOL: 'kitty' }), false,
-    'PI_IMAGE_PROTOCOL=kitty cannot replace a null capability')
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'tern' }), false, 'a null capability is never admitted')
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'wezterm', PI_IMAGE_PROTOCOL: 'kitty' }), false,
+    'the environment override cannot replace a null capability')
+})
+
+test('Direct WezTerm, Warp and Tern paint the ONE managed Core with no virtual or global delete', () => {
+  const hosts = [
+    { name: 'WezTerm', environment: { TERM_PROGRAM: 'wezterm', WEZTERM_PANE: '0' } },
+    { name: 'Warp', environment: { TERM_PROGRAM: 'WarpTerminal' } },
+    { name: 'Tern', environment: { TERM_PROGRAM: 'tern' } },
+  ] as const
+  for (const host of hosts) {
+    withDetectedEnvironment(host.environment, () => {
+      const terminal = new RecordingTerminal()
+      const graphics = createNativeKittyGraphics(terminal, {}, host.environment)
+      assert.ok(graphics, `${host.name}: the real environment reaches the factory`)
+      const component = graphics.image(source(), { maxWidthCells: 40, fallback: '[image]' })
+      graphics.terminal.write(component.render(80).join('\r\n'))
+      const text = terminal.text
+      assert.equal(count(text, 'a=t,f=100'), 1, `${host.name}: one managed transmission`)
+      assert.equal(count(text, 'a=p,'), 1, `${host.name}: one managed placement`)
+      assert.ok(text.indexOf('a=t,f=100') < text.indexOf('a=p,'), `${host.name}: transmission precedes placement`)
+      assert.ok(!text.includes('a=T,'), `${host.name}: no fork legacy combined form`)
+      assert.ok(!text.includes('\x1bPtmux;'), `${host.name}: no tmux DCS`)
+      assert.ok(!text.includes(',U=1'), `${host.name}: no virtual placeholder flag`)
+      assert.ok(!text.includes(KITTY_VIRTUAL_PLACEHOLDER), `${host.name}: no virtual placeholder cell`)
+
+      const imageId = (component as NativeKittyImage).imageId!
+      terminal.writes.length = 0
+      graphics.terminal.write('\x1b_Ga=d,d=A,q=2\x1b\\')
+      const cleared = terminal.text
+      assert.ok(!cleared.includes('d=A'), `${host.name}: a legacy global delete never reaches the terminal`)
+      assert.ok(cleared.includes(encodeKittyDeleteImage(imageId)), `${host.name}: the own image is released`)
+      terminal.writes.length = 0
+      graphics.terminal.write('\x1b_Ga=d,d=I,i=424242,q=2\x1b\\')
+      assert.equal(terminal.text, '\x1b_Ga=d,d=I,i=424242,q=2\x1b\\', `${host.name}: a foreign id delete passes untouched`)
+      graphics.dispose()
+    })
+  }
 })
 
 test('the Ghostty factory creates ONE native handle and paints native commands', () => {

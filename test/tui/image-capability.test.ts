@@ -127,7 +127,7 @@ test('a native factory handle keeps its admitted state even when the fork cache 
   }
 })
 
-test('a Zellij pane stays text-only without an admitted handle and becomes kitty after the live OK', async (t) => {
+test('a Zellij pane stays text-only until the live OK for every fork capability', async (t) => {
   const savedZellij = process.env.ZELLIJ
   const savedProtocol = process.env.PI_IMAGE_PROTOCOL
   t.after(() => {
@@ -139,26 +139,67 @@ test('a Zellij pane stays text-only without an admitted handle and becomes kitty
   })
   process.env.ZELLIJ = '0'
   process.env.PI_IMAGE_PROTOCOL = 'kitty'
-  resetCapabilitiesCache()
-  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
-  assert.equal(effectiveImageProtocol(undefined), null,
-    'the inherited Ghostty/kitty capability never becomes a legacy image path inside Zellij')
+  for (const capability of ['kitty', 'iterm2', null] as const) {
+    resetCapabilitiesCache()
+    setCapabilities({ images: capability, trueColor: true, hyperlinks: false })
+    assert.equal(effectiveImageProtocol(undefined), null,
+      `fork images=${capability}: an unattended Zellij pane never becomes a legacy image path`)
 
-  const terminal = new RecordingTerminal()
-  const graphics = createZellijKittyGraphics(terminal, {}, {
-    TERM: 'xterm-256color',
-    TERM_PROGRAM: 'ghostty',
-    ZELLIJ: '0',
-    ZELLIJ_SESSION_NAME: 'classifier-test',
-  }, () => {})
-  assert.ok(graphics, 'the candidate factory exists before its live answer')
-  assert.equal(effectiveImageProtocol(graphics), null, 'probing is text-only')
-  graphics.terminal.start(() => {}, () => {})
-  const probeId = /a=q,i=(\d+)/.exec(terminal.text)?.[1]
-  assert.ok(probeId)
-  terminal.sendInput(`\x1b_Gi=${probeId};OK\x1b\\`)
-  assert.equal(effectiveImageProtocol(graphics), 'kitty', 'the one-way live OK admits the same Native handle')
-  graphics.dispose()
+    const terminal = new RecordingTerminal()
+    const graphics = createZellijKittyGraphics(terminal, {}, {
+      TERM: 'xterm-256color',
+      TERM_PROGRAM: 'tern',
+      ZELLIJ: '1',
+      ZELLIJ_SESSION_NAME: 'classifier-test',
+    }, () => {})
+    assert.ok(graphics, `fork images=${capability}: the candidate factory exists before its live answer`)
+    assert.equal(effectiveImageProtocol(graphics), null, `fork images=${capability}: probing is text-only`)
+    graphics.terminal.start(() => {}, () => {})
+    const probeId = /a=q,i=(\d+)/.exec(terminal.text)?.[1]
+    assert.ok(probeId)
+    terminal.sendInput(`\x1b_Gi=${probeId};OK\x1b\\`)
+    assert.equal(effectiveImageProtocol(graphics), 'kitty',
+      `fork images=${capability}: the one-way live OK admits the same Native handle`)
+    graphics.dispose()
+  }
+})
+
+test('an empty ZELLIJ marker is not a Zellij session', () => {
+  const savedZellij = process.env.ZELLIJ
+  try {
+    process.env.ZELLIJ = ''
+    resetCapabilitiesCache()
+    setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+    assert.equal(effectiveImageProtocol(undefined), 'kitty',
+      'the empty value must not suppress a direct terminal capability')
+  } finally {
+    if (savedZellij === undefined) delete process.env.ZELLIJ
+    else process.env.ZELLIJ = savedZellij
+    resetCapabilitiesCache()
+  }
+})
+
+test('PI_IMAGE_PROTOCOL none/0 closes the Zellij candidate before any query or image work', () => {
+  const savedZellij = process.env.ZELLIJ
+  try {
+    process.env.ZELLIJ = '1'
+    for (const protocol of ['none', '0'] as const) {
+      const terminal = new RecordingTerminal()
+      const environment = {
+        TERM: 'xterm-256color',
+        TERM_PROGRAM: 'ghostty',
+        ZELLIJ: '1',
+        PI_IMAGE_PROTOCOL: protocol,
+      }
+      assert.equal(createZellijKittyGraphics(terminal, {}, environment, () => {}), undefined, protocol)
+      assert.equal(terminal.writes.length, 0, `${protocol}: no query byte`)
+      assert.equal(effectiveImageProtocol(undefined), null, `${protocol}: text only`)
+    }
+  } finally {
+    if (savedZellij === undefined) delete process.env.ZELLIJ
+    else process.env.ZELLIJ = savedZellij
+    resetCapabilitiesCache()
+  }
 })
 
 test('source to sink: the admitted component really emits the managed grid, and none after revocation', async (t) => {

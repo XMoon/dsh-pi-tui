@@ -9,14 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Direct terminals that implement the Kitty graphics protocol no longer need a brand allowlist, and every Zellij host paints images based on its live pane capability.**
+  Kitty, Ghostty, WezTerm, Warp, Tern and any other direct terminal explicitly given
+  `PI_IMAGE_PROTOCOL=kitty` share the same managed image lifecycle for PNG/JPEG/WebP
+  transcript, draft and viewer images. A Zellij pane is no longer prejudged by its host
+  brand: after the real input listener is installed it sends one capability query to the
+  current pane, and only the matching `OK` enables pixels; a failed, timed-out or rejected
+  query stays text-only and never falls back to the legacy escape image path. Tern's normal
+  PiTui path paints images by its Kitty capability, while a connected TSP renderer keeps
+  using the SDK's native image and blob path and never creates a terminal graphics handle
+  at the same time. `PI_IMAGE_PROTOCOL=none` (or `0`) still closes the capability before
+  any image read, conversion or upload.
 - **Images in a Zellij pane running on a Ghostty host now paint as real pixels too.**
   When a Zellij pane inside Ghostty confirms its live Kitty graphics capability through one
   real query, transcript, draft, image-viewer and authorized SVG preview images use the same
   managed lifecycle as a direct Kitty/Ghostty terminal. Until that query settles, and when it
   is denied or times out, the pane stays text-only and never falls back to the legacy escape
   image path; `PI_IMAGE_PROTOCOL=none` (or `0`) closes the capability before any image read,
-  conversion or upload. Zellij on a WezTerm host and every other unknown host remain
-  unsupported and paint text only.
+  conversion or upload.
 - **Images in a direct Ghostty terminal now use the same managed native image lifecycle as Kitty.**
   When Ghostty (`TERM_PROGRAM=ghostty`) is attached directly — without tmux, Zellij, screen
   or another multiplexer — PNG/JPEG/WebP transcript, draft and viewer images paint as real

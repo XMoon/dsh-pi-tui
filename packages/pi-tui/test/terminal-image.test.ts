@@ -352,6 +352,35 @@ describe("detectCapabilities", () => {
 		});
 	});
 
+	it("enables images and hyperlinks for Tern", () => {
+		withEnv({ TERM_PROGRAM: "tern" }, () => {
+			assert.deepStrictEqual(detectCapabilities(), { images: "kitty", trueColor: true, hyperlinks: true });
+		});
+	});
+
+	it("does not reopen Tern images through a tmux or screen multiplexer", () => {
+		withEnv({ TERM_PROGRAM: "tern", TMUX: "/tmp/tmux-1000/default,1234,0" }, () => {
+			assert.strictEqual(detectCapabilities(() => true).images, null);
+		});
+		withEnv({ TERM_PROGRAM: "tern", TERM: "tmux-256color" }, () => {
+			assert.strictEqual(detectCapabilities().images, null);
+		});
+		withEnv({ TERM_PROGRAM: "tern", TERM: "screen-256color" }, () => {
+			assert.strictEqual(detectCapabilities().images, null);
+		});
+	});
+
+	it("keeps the image-protocol override authoritative for Tern", () => {
+		for (const protocol of ["none", "0"] as const) {
+			withEnv({ TERM_PROGRAM: "tern", PI_IMAGE_PROTOCOL: protocol }, () => {
+				assert.strictEqual(detectCapabilities().images, null, protocol);
+			});
+		}
+		withEnv({ TERM_PROGRAM: "tern", PI_IMAGE_PROTOCOL: "iterm2" }, () => {
+			assert.strictEqual(detectCapabilities().images, "iterm2");
+		});
+	});
+
 	it("enables hyperlinks for WezTerm", () => {
 		withEnv({ WEZTERM_PANE: "0" }, () => {
 			const caps = detectCapabilities();
