@@ -10,7 +10,14 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { setCapabilities, type Terminal, type TerminalProgressState } from '@xmoon76/pi-tui'
+import {
+  getCapabilities,
+  resetCapabilitiesCache,
+  setCapabilities,
+  setCapabilityOverrides,
+  type Terminal,
+  type TerminalProgressState,
+} from '@xmoon76/pi-tui'
 import {
   KittyGraphicsCore,
   MAX_RESIDENT_DECODED_BYTES,
@@ -83,6 +90,48 @@ function count(haystack: string, needle: string): number {
     index = haystack.indexOf(needle, index + needle.length)
   }
   return total
+}
+
+/** The environment keys the real capability detection reads for this gate. */
+const CAPABILITY_ENV_KEYS = [
+  'TERM',
+  'TERM_PROGRAM',
+  'KITTY_WINDOW_ID',
+  'GHOSTTY_RESOURCES_DIR',
+  'TMUX',
+  'ZELLIJ',
+  'STY',
+  'PI_IMAGE_PROTOCOL',
+] as const
+
+/**
+ * Run `probe` under EXACTLY `environment` through the fork's real capability
+ * detection: every key above is cleared first, the capability cache and
+ * overrides are reset, and both the environment and the cache are restored
+ * afterwards. Unlike `setCapabilities`, this proves the source-of-truth path
+ * an actual process would take.
+ */
+function withDetectedEnvironment(environment: Record<string, string | undefined>, probe: () => void): void {
+  const saved = new Map<string, string | undefined>()
+  for (const key of CAPABILITY_ENV_KEYS) {
+    saved.set(key, process.env[key])
+    delete process.env[key]
+  }
+  for (const [key, value] of Object.entries(environment)) {
+    if (value !== undefined) process.env[key] = value
+  }
+  setCapabilityOverrides({})
+  resetCapabilitiesCache()
+  try {
+    probe()
+  } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    setCapabilityOverrides({})
+    resetCapabilitiesCache()
+  }
 }
 
 test('a placement transmits once, then only re-places', () => {
@@ -582,14 +631,40 @@ test('the alternate screen release at stop frees the managed ids before the term
   assert.ok(!terminal.writes.join('').includes('d=A'), 'never the global form')
 })
 
-test('native admission requires the one measured Kitty topology', () => {
+test('native admission requires a direct Kitty or the Ghostty TERM_PROGRAM hint', () => {
   setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  // Existing 7A Kitty identity is unchanged.
   assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty' }), true)
   assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'Kitty' }), true, 'the identity compare is case-insensitive')
   assert.equal(admitsNativeKitty({ KITTY_WINDOW_ID: '3' }), true)
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', GHOSTTY_RESOURCES_DIR: '/x' }), false,
-    'no measured evidence for another Kitty-compatible terminal')
-  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'wezterm', WEZTERM_PANE: '1' }), false)
+
+  // Image-7C-2: the direct Ghostty hint admits the SAME Native Core.
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'xterm-ghostty' }), true,
+    'Ghostty with its own terminfo name is a positive')
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'xterm-256color' }), true,
+    'the official SSH/terminfo fallback is not degraded to legacy')
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'custom-xterm' }), true,
+    'a custom TERM is not identity evidence, only a mux prefix is rejected')
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty' }), true,
+    'an absent TERM is not an identity failure')
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', GHOSTTY_RESOURCES_DIR: '/x' }), true,
+    'the resource directory neither grants nor denies the hint')
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'Ghostty', TERM: 'xterm-256color' }), true,
+    'the hint compare is case-insensitive')
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', KITTY_WINDOW_ID: '3', TERM: 'xterm-256color' }), true,
+    'an inherited legacy Kitty id does not turn off the Ghostty positive')
+
+  // A single soft signal is not identity, and no known multiplexer may be
+  // promoted to a direct native topology.
+  assert.equal(admitsNativeKitty({ TERM: 'xterm-ghostty' }), false, 'a lone TERM name cannot admit')
+  assert.equal(admitsNativeKitty({ GHOSTTY_RESOURCES_DIR: '/x' }), false, 'a lone resource directory cannot admit')
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TMUX: '/tmp/tmux-1000/default,1,0' }), false)
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', ZELLIJ: '1' }), false)
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', STY: '1' }), false)
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'tmux-256color' }), false)
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'screen-256color' }), false)
+
+  // Existing exclusions stay put: Herdr, later stages and the capability gate.
   assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty', TMUX: '/tmp/tmux-1000/default,1,0' }), false)
   assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty', ZELLIJ: '1' }), false)
   assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty', STY: '1' }), false)
@@ -598,10 +673,61 @@ test('native admission requires the one measured Kitty topology', () => {
   assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'herdr', KITTY_WINDOW_ID: '1' }), false)
   assert.equal(admitsNativeKitty({ PI_IMAGE_PROTOCOL: 'kitty' }), false,
     'a legacy env override cannot manufacture the Kitty identity evidence')
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'wezterm', WEZTERM_PANE: '1' }), false)
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'warpterminal', WARP_SESSION_ID: '1' }), false)
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'iTerm.app', ITERM_SESSION_ID: '1' }), false)
   setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: true })
   assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty' }), false, 'the capability must be Kitty')
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', TERM: 'xterm-256color' }), false,
+    'the Ghostty hint does not bypass the capability gate')
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'kitty' }), false)
+  assert.equal(admitsNativeKitty({ TERM_PROGRAM: 'ghostty', PI_IMAGE_PROTOCOL: 'kitty' }), false,
+    'PI_IMAGE_PROTOCOL=kitty cannot replace a null capability')
+})
+
+test('the Ghostty factory creates ONE native handle and paints native commands', () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const terminal = new RecordingTerminal()
+  const graphics = createNativeKittyGraphics(terminal, {}, {
+    TERM_PROGRAM: 'ghostty',
+    TERM: 'xterm-256color',
+  })
+  assert.ok(graphics, 'the direct Ghostty topology admits the factory')
+  assert.equal(graphics.mode, 'native')
+  assert.equal(graphics.canPaint(), true)
+  const image = graphics.image(source(), { maxWidthCells: 40, fallback: '[image]' })
+  graphics.terminal.write(image.render(80).join('\r\n'))
+  const text = terminal.text
+  assert.equal(count(text, 'a=t,f=100'), 1, 'one managed transmission')
+  assert.equal(count(text, 'a=p,'), 1, 'one managed placement')
+  assert.ok(text.indexOf('a=t,f=100') < text.indexOf('a=p,'), 'the transmission precedes the placement')
+  assert.ok(!text.includes('\x1bPtmux;'), 'Ghostty is never the tmux virtual transport')
+  assert.ok(!text.includes(',U=1'), 'no virtual placeholder flag')
+  assert.ok(!text.includes('\u10EEEE'), 'no virtual placeholder cell')
+  graphics.dispose()
+})
+
+test('the real PI_IMAGE_PROTOCOL=none environment refuses the Ghostty factory', () => {
+  withDetectedEnvironment({
+    TERM_PROGRAM: 'ghostty',
+    TERM: 'xterm-256color',
+    PI_IMAGE_PROTOCOL: 'none',
+  }, () => {
+    assert.equal(getCapabilities().images, null, 'the hard opt-out wins over the Ghostty capability hint')
+    assert.equal(createNativeKittyGraphics(new RecordingTerminal()), undefined,
+      'the production composition creates no managed handle')
+  })
+})
+
+test('the real Ghostty environment reaches the factory through the fork capability', () => {
+  withDetectedEnvironment({ TERM_PROGRAM: 'ghostty', TERM: 'xterm-256color' }, () => {
+    assert.equal(getCapabilities().images, 'kitty', 'the fork really classifies the detected environment')
+    const graphics = createNativeKittyGraphics(new RecordingTerminal())
+    assert.ok(graphics, 'the real environment to factory path admits Ghostty')
+    assert.equal(graphics.mode, 'native')
+    graphics.dispose()
+  })
 })
 
 test('ordinary text and OSC sequences pass through byte-for-byte', () => {

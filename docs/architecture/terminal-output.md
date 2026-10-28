@@ -215,10 +215,18 @@ retirement and the resident budget.
   it. The facade observes `CSI 2J`, `CSI 3J` and a screen-buffer switch as
   residency invalidations and never rewrites text, OSC 8/52, mouse or keyboard
   modes, or a foreign APC.
-- **Admission is narrower than capability.** The Native managed path requires a
-  real Kitty terminal directly attached (no multiplexer); Kitty-compatible
-  terminals, iTerm2 and unknown terminals keep the legacy `Image`/text fallback,
-  and no environment override can force admission. The tmux virtual path is a
+- **Admission is narrower than capability.** The Native managed path is shared
+  by a real Kitty terminal and a direct Ghostty, both attached without a
+  multiplexer; every other Kitty-capable terminal (WezTerm, Warp), Zellij,
+  iTerm2 and unknown terminals keeps the legacy `Image`/text fallback. Ghostty
+  is admitted by its `TERM_PROGRAM=ghostty` environment hint together with the
+  fork's `images === 'kitty'` capability; `TERM` is not an identity fact —
+  `xterm-ghostty`, `xterm-256color`, a custom value or an absent `TERM` all
+  remain eligible, while a `tmux*`/`screen*` value (or `TMUX`/`ZELLIJ`/`STY`,
+  or Herdr) still denies admission. A `TERM` name or `GHOSTTY_RESOURCES_DIR`
+  alone never grants the path, an inherited or forwarded hint is not proof of
+  the physical terminal, and no environment override can force admission;
+  `PI_IMAGE_PROTOCOL=none` wins over every hint. The tmux virtual path is a
   separate strict automatic admission with its own live-server probe (below);
   both paths fail closed.
 

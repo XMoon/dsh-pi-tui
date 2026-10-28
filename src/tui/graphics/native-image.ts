@@ -8,11 +8,13 @@
  * returns describe intent only; the facade decides when the payload must be
  * re-transmitted and the Core owns the id/placement lifetime.
  *
- * The factory admits this path only on a terminal that already had positive
- * native Kitty evidence before this PR (Kitty itself, outside a multiplexer).
- * Every other terminal — including Kitty-compatible ones such as Ghostty and
- * WezTerm — keeps its existing legacy `Image`/text fallback path, because this
- * stage has no measured evidence for their deletion/clear behavior.
+ * The factory admits this path on a direct Kitty terminal, or on a direct
+ * Ghostty whose environment carries the `TERM_PROGRAM=ghostty` hint, with no
+ * multiplexer in between. Ghostty's `TERM` value is not an identity condition;
+ * it only rejects a known `tmux*`/`screen*` multiplexer. Every other terminal —
+ * including WezTerm and Warp — keeps its existing legacy `Image`/text fallback
+ * path, because this stage has no measured evidence for their deletion/clear
+ * behavior.
  * @module @xmoon76/dsh-pi-tui/tui/graphics/native-image
  */
 
@@ -194,21 +196,25 @@ export class NativeKittyImage implements Component {
 const MULTIPLEXER_ENV_KEYS = ['TMUX', 'ZELLIJ', 'STY'] as const
 
 /**
- * Whether the ONE tested native topology is present: a real Kitty terminal,
- * directly attached (no multiplexer in between).
+ * Whether the managed native topology is present: a real Kitty terminal or a
+ * direct Ghostty (`TERM_PROGRAM=ghostty`), with no multiplexer in between.
  *
- * This is deliberately narrower than `getCapabilities().images === 'kitty'`,
- * which also covers Ghostty/WezTerm/Warp: those were never measured for the
- * scoped-delete lifecycle this Core relies on, so they keep the legacy path.
- * A `PI_IMAGE_PROTOCOL=kitty` override cannot manufacture Kitty identity —
- * the legacy env override must not bypass the admission rule.
+ * The first gate is deliberately the fork's `images === 'kitty'` capability, a
+ * rendering hint that also covers WezTerm/Warp and can be overridden by
+ * `PI_IMAGE_PROTOCOL=kitty`; those terminals are never admitted by this
+ * predicate, so an env override cannot manufacture native identity. Ghostty's
+ * `TERM` is not an identity fact — `xterm-ghostty`, `xterm-256color`, a custom
+ * value or no `TERM` at all are accepted — it only rejects a known multiplexer
+ * prefix (`tmux*`/`screen*`), alongside the `TMUX`/`ZELLIJ`/`STY` keys and
+ * Herdr. WezTerm and Warp remain on the legacy path because they have no
+ * measured evidence for this Core's scoped-delete lifecycle.
  */
 export function admitsNativeKitty(environment: NodeJS.ProcessEnv = process.env): boolean {
   if (getCapabilities().images !== 'kitty') return false
   const termProgram = (environment.TERM_PROGRAM ?? '').toLowerCase()
   const term = (environment.TERM ?? '').toLowerCase()
   if (termProgram === 'herdr') return false
-  if (termProgram !== 'kitty' && environment.KITTY_WINDOW_ID === undefined) return false
+  if (termProgram !== 'kitty' && termProgram !== 'ghostty' && environment.KITTY_WINDOW_ID === undefined) return false
   for (const key of MULTIPLEXER_ENV_KEYS) {
     if (environment[key] !== undefined) return false
   }
