@@ -612,6 +612,16 @@ jobs:
             --wall-clock-seconds "$((end - start))" \
             --out diagnostics/runner-spec.json
 
+      # TEMPORARY PROBE — NEVER MERGE. Negative control: shard 2 fails on
+      # attempts 1 AND 2, so a retry that does not recover must stay red and
+      # must never produce the qualified tarball. It runs AFTER the shard's
+      # records exist, so the failed artifact carries real attempt-1 evidence.
+      - name: PROBE fail shard 2 on attempts 1 and 2
+        if: ${{ matrix.shard == 2 && github.run_attempt <= 2 }}
+        run: |
+          echo "probe: deterministic shard 2 failure on attempt ${{ github.run_attempt }}" >&2
+          exit 1
+
       - name: Require this shard's diagnostics
         # A SUCCESSFUL shard that produced no provenance must not be able to
         # let the aggregate reuse a stale same-name artifact from an earlier
