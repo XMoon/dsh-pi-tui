@@ -305,7 +305,7 @@
     "smoke:remote-d2-closure": "node scripts/dsh-remote-d2-closure-smoke.mjs",
     "smoke:remote-session-lifecycle-parity": "node scripts/dsh-remote-session-lifecycle-parity-smoke.mjs",
     "smoke:boundary": "node scripts/dsh-runtime-boundary-smoke.mjs",
-    "smoke:m4-a0-process": "node scripts/m4-a0-process-smoke.mjs",
+    "smoke:split-process": "node scripts/split-process-smoke.mjs",
     "smoke:pi-tui-file-reference-built": "node --import tsx/esm scripts/pi-tui-file-reference-built-smoke.mjs",
     "smoke:startup-strictness": "node scripts/startup-strictness-smoke.mjs",
     "dsh:source:pack": "node scripts/dsh-source-pack.mjs",

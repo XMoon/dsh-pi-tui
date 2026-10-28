@@ -138,5 +138,5 @@ test('the package exposes no public Host/Client process entry or bin', () => {
   }
   const exported = Object.keys(manifest.exports ?? {})
   assert.ok(!exported.some(name => /local-(host|client)/u.test(name)), 'process entries stay internal artifacts')
-  assert.equal(manifest.bin, undefined, 'M4-A0 adds no CLI command')
+  assert.equal(manifest.bin, undefined, 'the split-process entries add no CLI command')
 })

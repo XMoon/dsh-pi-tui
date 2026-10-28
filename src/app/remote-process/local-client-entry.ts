@@ -9,7 +9,7 @@
  * the official authenticated Connection.
  *
  * The launcher supplies the DSH installation anchor and profile name through
- * `M4_DSH_ANCHOR` / `M4_PROFILE` so this process can install the same official
+ * `SPLIT_PROCESS_DSH_ANCHOR` / `SPLIT_PROCESS_PROFILE` so this process can install the same official
  * package-resolution interception the dsh launcher uses. The package's own
  * `dist/` location stays the installation point — no repository source path or
  * tsx loader is involved.
@@ -65,7 +65,7 @@ export interface LocalClientEntryOptions {
  */
 export async function runLocalClientEntry(options: LocalClientEntryOptions): Promise<void> {
   const host = await loadOfficialClientHost(options.dshAnchor)
-  const loadedProfile = host.loadProfile('m4-a0-client', options.profile, options.dshAnchor)
+  const loadedProfile = host.loadProfile('split-process-client', options.profile, options.dshAnchor)
   const resolution = await host.createRuntimeResolution({
     installAnchor: options.dshAnchor,
     profile: loadedProfile,
@@ -174,11 +174,11 @@ export async function stopLocalClient(
 
 /** Read the launcher environment; a missing anchor is a hard startup failure. */
 function optionsFromEnvironment(): LocalClientEntryOptions {
-  const dshAnchor = process.env.M4_DSH_ANCHOR
+  const dshAnchor = process.env.SPLIT_PROCESS_DSH_ANCHOR
   if (dshAnchor === undefined || dshAnchor === '') {
-    throw new Error('local client entry: M4_DSH_ANCHOR must name the installed @deepseek-ai/dsh/package.json')
+    throw new Error('local client entry: SPLIT_PROCESS_DSH_ANCHOR must name the installed @deepseek-ai/dsh/package.json')
   }
-  return { dshAnchor, profile: process.env.M4_PROFILE ?? 'pi-tui' }
+  return { dshAnchor, profile: process.env.SPLIT_PROCESS_PROFILE ?? 'pi-tui' }
 }
 
 if (import.meta.main) {

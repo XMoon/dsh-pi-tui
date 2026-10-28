@@ -12,7 +12,7 @@
  *
  * The entry is an internal qualification artifact, not a package export or a
  * CLI command: the launcher supplies the DSH installation anchor, profile name
- * and scratch directory through `M4_DSH_ANCHOR` / `M4_PROFILE` / `M4_SCRATCH`.
+ * and scratch directory through `SPLIT_PROCESS_DSH_ANCHOR` / `SPLIT_PROCESS_PROFILE` / `SPLIT_PROCESS_SCRATCH`.
  *
  * @module app/remote-process/local-host-entry
  */
@@ -173,17 +173,17 @@ export async function finishHostFailureCleanup(
 
 /** Read the launcher environment; a missing anchor is a hard startup failure. */
 function optionsFromEnvironment(): LocalHostEntryOptions {
-  const dshAnchor = process.env.M4_DSH_ANCHOR
+  const dshAnchor = process.env.SPLIT_PROCESS_DSH_ANCHOR
   if (dshAnchor === undefined || dshAnchor === '') {
-    throw new Error('local host entry: M4_DSH_ANCHOR must name the installed @deepseek-ai/dsh/package.json')
+    throw new Error('local host entry: SPLIT_PROCESS_DSH_ANCHOR must name the installed @deepseek-ai/dsh/package.json')
   }
   return {
     dshAnchor,
-    profile: process.env.M4_PROFILE ?? 'pi-tui',
-    scratchDir: process.env.M4_SCRATCH ?? mkdtempSync(join(tmpdir(), 'm4-a0-host-')),
-    ...(process.env.M4_EXTRA_PATCH === undefined || process.env.M4_EXTRA_PATCH === ''
+    profile: process.env.SPLIT_PROCESS_PROFILE ?? 'pi-tui',
+    scratchDir: process.env.SPLIT_PROCESS_SCRATCH ?? mkdtempSync(join(tmpdir(), 'split-process-host-')),
+    ...(process.env.SPLIT_PROCESS_EXTRA_PATCH === undefined || process.env.SPLIT_PROCESS_EXTRA_PATCH === ''
       ? {}
-      : { extraPatchFiles: [process.env.M4_EXTRA_PATCH] }),
+      : { extraPatchFiles: [process.env.SPLIT_PROCESS_EXTRA_PATCH] }),
   }
 }
 
