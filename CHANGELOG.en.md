@@ -422,6 +422,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Manager's `Diagnostics` page (`/plugins` or `Settings → Plugins`, press `d`),
   with Host package state and install logs kept separate. The old dedicated
   `/status` page is removed.
+- **Images in tmux now appear automatically without an explicit environment variable.**
+  Inside tmux that satisfies the strict conditions (`allow-passthrough=all` and a
+  single Kitty client), images now appear automatically without setting an
+  environment variable; `PI_TUI_TMUX_KITTY_IMAGES=0` or `PI_IMAGE_PROTOCOL=none`
+  disables them. tmux configuration is never modified automatically.
 
 ### Fixed
 

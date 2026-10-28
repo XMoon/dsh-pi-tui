@@ -1,5 +1,9 @@
 /**
- * Image-7B-A — strict tmux + Kitty admission.
+ * Image-7B-A / Image-7C-1 — strict tmux + Kitty admission.
+ *
+ * 7C-1 changed the environment gate: an UNSET opt-in and the exact value `1`
+ * both attempt the same live-server probe; `0` and every other value deny
+ * before any subprocess runs.
  *
  * Evidence level: every decision here is derived from the RAW stdout of a real
  * `execFileSync('tmux', fixedArgv, …)` call (a scripted executable on PATH),
@@ -58,9 +62,12 @@ test('a bare kitty termtype is accepted; a derived family is not', (t) => {
 
 test('every environment gate rejects BEFORE any tmux command is spawned', (t) => {
   const cases: ReadonlyArray<{ name: string; mutate: (env: NodeJS.ProcessEnv) => void }> = [
-    { name: 'opt-in unset', mutate: (env) => { delete env.PI_TUI_TMUX_KITTY_IMAGES } },
     { name: 'opt-in 0', mutate: (env) => { env.PI_TUI_TMUX_KITTY_IMAGES = '0' } },
+    { name: 'opt-in empty', mutate: (env) => { env.PI_TUI_TMUX_KITTY_IMAGES = '' } },
     { name: 'opt-in true', mutate: (env) => { env.PI_TUI_TMUX_KITTY_IMAGES = 'true' } },
+    { name: 'opt-in auto', mutate: (env) => { env.PI_TUI_TMUX_KITTY_IMAGES = 'auto' } },
+    { name: 'opt-in false', mutate: (env) => { env.PI_TUI_TMUX_KITTY_IMAGES = 'false' } },
+    { name: 'opt-in trailing space', mutate: (env) => { env.PI_TUI_TMUX_KITTY_IMAGES = '1 ' } },
     { name: 'TMUX missing', mutate: (env) => { delete env.TMUX } },
     { name: 'TMUX empty', mutate: (env) => { env.TMUX = '' } },
     { name: 'TMUX_PANE missing', mutate: (env) => { delete env.TMUX_PANE } },
@@ -80,6 +87,73 @@ test('every environment gate rejects BEFORE any tmux command is spawned', (t) =>
       entry.mutate(cli.env)
       assert.equal(probeTmuxKittyIdentity(cli.env), undefined, entry.name)
       assert.deepEqual(cli.calls(), [], `${entry.name}: no tmux subprocess may run`)
+    } finally {
+      cli.dispose()
+    }
+  }
+})
+
+test('an unset opt-in attempts the strict admission automatically', (t) => {
+  const cli = createFakeTmuxCli(t)
+  try {
+    delete cli.env.PI_TUI_TMUX_KITTY_IMAGES
+    assert.deepEqual(probeTmuxKittyIdentity(cli.env), {
+      paneId: '%7',
+      sessionName: 'work',
+      clientName: 'main',
+      clientTty: '/dev/pts/12',
+      clientTermname: 'xterm-kitty',
+      clientTermtype: 'kitty(0.41.1)',
+    }, 'without the variable the automatic attempt reaches the real server')
+    assert.deepEqual(cli.calls(), [
+      'show-options -Apqv -t %7 allow-passthrough',
+      'display-message -p -t %7 #{session_name}',
+      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}',
+    ], 'the automatic attempt runs the same fixed argv')
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('the explicit 1 uses the identical admission flow and never forces it', (t) => {
+  const cli = createFakeTmuxCli(t)
+  try {
+    assert.equal(cli.env.PI_TUI_TMUX_KITTY_IMAGES, '1')
+    assert.deepEqual(probeTmuxKittyIdentity(cli.env), {
+      paneId: '%7',
+      sessionName: 'work',
+      clientName: 'main',
+      clientTty: '/dev/pts/12',
+      clientTermname: 'xterm-kitty',
+      clientTermtype: 'kitty(0.41.1)',
+    }, 'the configured opt-in keeps working')
+    assert.deepEqual(cli.calls(), [
+      'show-options -Apqv -t %7 allow-passthrough',
+      'display-message -p -t %7 #{session_name}',
+      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}',
+    ], '1 runs the same three fixed queries')
+    cli.setReply('show-options', { text: 'on\n' })
+    assert.equal(probeTmuxKittyIdentity(cli.env), undefined, '1 does not turn on into all')
+    assert.equal(cli.calls().length, 4, 'the refused option stops after its own first query')
+    cli.setReply('show-options', { text: 'all\n' })
+    cli.setReply('list-clients', {
+      text: 'a\t/dev/pts/1\twork\txterm-kitty\tkitty(0.41.1)\nb\t/dev/pts/2\twork\txterm-kitty\tkitty(0.41.1)\n',
+    })
+    assert.equal(probeTmuxKittyIdentity(cli.env), undefined, '1 does not admit a second client')
+    assert.equal(cli.calls().length, 7, 'the two-client attempt ran exactly its three fixed queries')
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('an unset opt-in outside tmux spawns no probe', (t) => {
+  for (const key of ['TMUX', 'TMUX_PANE'] as const) {
+    const cli = createFakeTmuxCli(t)
+    try {
+      delete cli.env.PI_TUI_TMUX_KITTY_IMAGES
+      delete cli.env[key]
+      assert.equal(probeTmuxKittyIdentity(cli.env), undefined, `${key} absent`)
+      assert.deepEqual(cli.calls(), [], `${key}: the automatic attempt still requires a tmux pane`)
     } finally {
       cli.dispose()
     }
@@ -239,13 +313,13 @@ test('a change inside the short TTL is invisible to render but fatal to the next
   }
 })
 
-test('admission never grants after the opt-in itself disappears', (t) => {
+test('a one-way latch survives an explicit opt-out and a restored opt-in', (t) => {
   const cli = createFakeTmuxCli(t)
   try {
     const admission = new TmuxKittyAdmission(admitted(cli), cli.env)
     assert.equal(admission.isAllowed(true), true)
-    delete cli.env.PI_TUI_TMUX_KITTY_IMAGES
-    assert.equal(admission.isAllowed(true), false)
+    cli.env.PI_TUI_TMUX_KITTY_IMAGES = '0'
+    assert.equal(admission.isAllowed(true), false, 'an explicit opt-out revokes the live handle')
     cli.env.PI_TUI_TMUX_KITTY_IMAGES = '1'
     assert.equal(admission.isAllowed(true), false, 'even a restored opt-in cannot re-admit the same handle')
   } finally {
