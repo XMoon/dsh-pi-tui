@@ -261,6 +261,15 @@ async function settleTuiApp(app: TuiApp): Promise<void> {
   }
 }
 
+/** Wait for a real observable product fact without requesting a render. */
+async function waitForTuiApp(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.fail(`timed out waiting for ${label}`)
+}
+
 test('the factory refuses to create a handle unless the live server admits it', (t) => {
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   const cases: ReadonlyArray<{ name: string; mutate: (cli: FakeTmuxCli) => void }> = [
@@ -429,6 +438,12 @@ test('a real TuiApp reads and paints an unknown tmux client only after the live 
   })
   try {
     app.start()
+    const originalRequestRender = app.requestRender.bind(app)
+    let requestRenderCalls = 0
+    app.requestRender = (force = false) => {
+      requestRenderCalls += 1
+      originalRequestRender(force)
+    }
     const graphics = (app as unknown as { graphics: KittyGraphics | undefined }).graphics
     assert.ok(graphics, 'the production composition created the pending tmux handle')
     assert.equal(graphics.canPaint(), false)
@@ -444,10 +459,15 @@ test('a real TuiApp reads and paints an unknown tmux client only after the live 
     assert.equal(media.conversions(), 0, 'pending never converts the payload')
     assert.equal(terminal.text.includes(P), false, 'pending paints no placeholder cell')
 
+    requestRenderCalls = 0
     terminal.sendInput(`\x1b_Gi=${query[1]},e=T,C=1,U=1;OK\x1b\\`)
     await Promise.resolve()
     assert.equal(graphics.canPaint(), true, 'the matching feature reply admits the same handle')
-    await settleTuiApp(app)
+    // Do NOT request a render here: the only allowed trigger is the production
+    // onAllowed callback. Wait for the real consumer read and painted cell.
+    await waitForTuiApp(() => media.reads.length === 1 && terminal.text.includes(P),
+      'the onAllowed repaint to reach the real consumer')
+    assert.ok(requestRenderCalls >= 1, 'the production onAllowed callback requested the repaint')
     assert.deepEqual(media.reads, [ref.attachmentId], 'the real consumer read the payload once')
     assert.ok(media.conversions() >= 1, 'the real consumer converted the payload')
     const scan = scanOuter(terminal.text)
@@ -488,10 +508,16 @@ test('a real TuiApp with an unknown tmux client keeps a base-OK failure text-onl
     const folder = new TranscriptFolder()
     folder.apply([tuiImageMessage([{ type: 'image', attachment: ref }], 1)])
     app.setTranscript(folder.messages())
+    await settleTuiApp(app)
+    assert.equal(media.reads.length, 0, 'the pending transcript frame still performs no payload read')
+    assert.equal(media.conversions(), 0, 'the pending transcript frame still performs no conversion')
     terminal.sendInput(`\x1b_Gi=${probeId};OK\x1b\\`)
     await Promise.resolve()
     assert.equal(graphics.canPaint(), false, 'base Kitty OK without e/U is not U1 admission')
-    await settleTuiApp(app)
+    // Negative fact: a denied feature probe must not request a render. Observe
+    // one bounded window without calling app.requestRender(); no producer is
+    // expected after the base-OK denial.
+    await new Promise(resolve => setTimeout(resolve, 60))
     assert.equal(media.reads.length, 0, 'the failed admission read no payload')
     assert.equal(media.conversions(), 0, 'the failed admission converted no payload')
     const scan = scanOuter(terminal.text)
