@@ -9,6 +9,12 @@
 
 ### 新增
 
+- **Ghostty 中运行的 Zellij 窗格现在也能显示真实图片像素。**
+  当 Ghostty 宿主内的 Zellij 窗格通过一次真实能力查询确认支持 Kitty 图形协议时，转录、草稿、
+  图片查看器与已授权的 SVG 预览会使用与直连 Kitty/Ghostty 相同的受管生命周期显示真实图片。
+  查询完成前、查询被拒绝或超时都保持纯文字，不会退回旧的转义图片路径；`PI_IMAGE_PROTOCOL=none`
+  （或 `0`）会在任何图片读取、转换或上传之前关闭该能力。WezTerm 宿主下的 Zellij 与其他未知宿主
+  仍然不受支持，只显示文字。
 - **Ghostty 直连终端的图片现在使用与 Kitty 相同的受管原生图片生命周期。**
   Ghostty（`TERM_PROGRAM=ghostty`）直接连接、未经过 tmux/Zellij/screen 等复用器时，
   转录、草稿与图片查看器中的 PNG/JPEG/WebP 都会显示真实像素；已授权的 SVG 预览也按现有

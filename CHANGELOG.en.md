@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Images in a Zellij pane running on a Ghostty host now paint as real pixels too.**
+  When a Zellij pane inside Ghostty confirms its live Kitty graphics capability through one
+  real query, transcript, draft, image-viewer and authorized SVG preview images use the same
+  managed lifecycle as a direct Kitty/Ghostty terminal. Until that query settles, and when it
+  is denied or times out, the pane stays text-only and never falls back to the legacy escape
+  image path; `PI_IMAGE_PROTOCOL=none` (or `0`) closes the capability before any image read,
+  conversion or upload. Zellij on a WezTerm host and every other unknown host remain
+  unsupported and paint text only.
 - **Images in a direct Ghostty terminal now use the same managed native image lifecycle as Kitty.**
   When Ghostty (`TERM_PROGRAM=ghostty`) is attached directly — without tmux, Zellij, screen
   or another multiplexer — PNG/JPEG/WebP transcript, draft and viewer images paint as real
