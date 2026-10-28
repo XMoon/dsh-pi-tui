@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Images in a direct Ghostty terminal now use the same managed native image lifecycle as Kitty.**
+  When Ghostty (`TERM_PROGRAM=ghostty`) is attached directly — without tmux, Zellij, screen
+  or another multiplexer — PNG/JPEG/WebP transcript, draft and viewer images paint as real
+  pixels, and authorized SVG previews rasterize and paint wherever the platform supports SVG
+  rasterization. This applies whether its `TERM` is `xterm-ghostty`, `xterm-256color`, a custom
+  value or absent. `PI_IMAGE_PROTOCOL=none` (or `0`) remains the global opt-out: no image is
+  read, converted or uploaded after it is set.
 - **The `/deliverables` Details page now really reads and previews Host text files, and names
   each way a read can fail.**
   `Enter Preview` fetches live Host metadata first (a delivery declaration is no longer treated

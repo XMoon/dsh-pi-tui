@@ -9,6 +9,12 @@
 
 ### 新增
 
+- **Ghostty 直连终端的图片现在使用与 Kitty 相同的受管原生图片生命周期。**
+  Ghostty（`TERM_PROGRAM=ghostty`）直接连接、未经过 tmux/Zellij/screen 等复用器时，
+  转录、草稿与图片查看器中的 PNG/JPEG/WebP 都会显示真实像素；已授权的 SVG 预览也按现有
+  平台能力光栅化并显示。无论 Ghostty 的 `TERM` 是 `xterm-ghostty`、`xterm-256color`、
+  自定义值还是缺失都同样适用。`PI_IMAGE_PROTOCOL=none`（或 `0`）仍然是全局关闭开关：
+  关闭后不读取、不转换、不上传任何图片。
 - **`/deliverables` 的 Details 页现在会真实读取并预览 Host 文本文件，且明确区分“读不到”的各种原因。**
   `Enter Preview` 先向 Host 取实时 metadata（不再把交付声明当成快照），随后只读取一页 120 行的
   UTF-8 文本；内容按等宽纯文本原样显示（保留 Markdown 源码，不做不完整的富文本重排，源码不丢行、

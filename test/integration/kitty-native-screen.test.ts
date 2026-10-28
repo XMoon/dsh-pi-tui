@@ -14,7 +14,10 @@ import test from 'node:test'
 import {
   TuiAltScreen,
   TuiMainScreen,
+  getCapabilities,
+  resetCapabilitiesCache,
   setCapabilities,
+  setCapabilityOverrides,
   type Component,
   type Terminal,
   type TerminalProgressState,
@@ -30,6 +33,10 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
+import { ImageCache } from '../../src/client/media/image/cache.ts'
+import { convertKittyThumbnail } from '../../src/client/media/image/kitty-thumbnail.ts'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
+import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
 import { parseKittyApc } from '../../src/tui/graphics/kitty-native.ts'
 import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
@@ -409,6 +416,306 @@ test('TuiApp routes the real main screen through the managed facade', async () =
   }
 })
 
+
+/**
+ * Image-7C-2 — the direct Ghostty product path.
+ *
+ * These cases set the REAL process environment and let the fork's own
+ * `detectCapabilities()` classify it: no `setCapabilities` shortcut is used,
+ * because a hand-set cache would only prove the classifier, not the source
+ * (environment) → decision (admission) → sink (TuiApp screens) chain.
+ *
+ * The tmux-virtual fallback is disabled (`PI_TUI_TMUX_KITTY_IMAGES=0`) in these
+ * cases: Image-7C-1 owns that transport's live-server admission, and the native
+ * factory is evaluated BEFORE that fallback either way.
+ */
+const GHOSTTY_ENV_KEYS = [
+  'TERM',
+  'TERM_PROGRAM',
+  'KITTY_WINDOW_ID',
+  'GHOSTTY_RESOURCES_DIR',
+  'TMUX',
+  'ZELLIJ',
+  'STY',
+  'PI_IMAGE_PROTOCOL',
+  'PI_TUI_TMUX_KITTY_IMAGES',
+] as const
+
+/** Apply EXACTLY one environment through the real detection path; returns its restorer. */
+function applyGhosttyEnvironment(environment: Record<string, string | undefined>): () => void {
+  const saved = new Map<string, string | undefined>()
+  for (const key of GHOSTTY_ENV_KEYS) {
+    saved.set(key, process.env[key])
+    delete process.env[key]
+  }
+  for (const [key, value] of Object.entries(environment)) {
+    if (value !== undefined) process.env[key] = value
+  }
+  setCapabilityOverrides({})
+  resetCapabilitiesCache()
+  return () => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    setCapabilityOverrides({})
+    resetCapabilitiesCache()
+  }
+}
+
+/** A bounded event wait, not a wall-clock guess. */
+async function untilFact(predicate: () => boolean, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 600; attempt += 1) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  assert.fail(`timed out waiting for ${label}`)
+}
+
+/** Let the throttled frame pipeline settle, awaiting each rendered frame. */
+async function settleApp(app: TuiApp, vt: VirtualTerminal): Promise<void> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    app.requestRender()
+    await new Promise((resolve) => setTimeout(resolve, 15))
+    await vt.waitForRender()
+  }
+}
+
+interface CountingLoader {
+  readonly loader: ImageLoader
+  readonly reads: Map<string, number>
+  readonly conversions: { count: number }
+}
+
+/** A REAL ImageLoader whose read/conversion boundaries are counted. */
+function countingLoader(): CountingLoader {
+  const reads = new Map<string, number>()
+  const conversions = { count: 0 }
+  const loader = new ImageLoader(
+    async (ref) => {
+      reads.set(ref.attachmentId, (reads.get(ref.attachmentId) ?? 0) + 1)
+      return { ref: {}, data: Buffer.from(PNG, 'base64') }
+    },
+    new ImageCache(),
+    async (input, mediaType) => {
+      conversions.count += 1
+      return convertKittyThumbnail(input, mediaType)
+    },
+  )
+  return { loader, reads, conversions }
+}
+
+function transcriptOfImage(ref: ImageAttachmentRefLike): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  folder.apply([{
+    type: 'user/message',
+    seq: 1,
+    time: 1,
+    data: { content: [{ type: 'image', attachment: ref }], source: { kind: 'user' } },
+  }] as never)
+  return folder
+}
+
+function ghosttyImageRef(attachmentId: string, name: string): ImageAttachmentRefLike {
+  return {
+    attachmentId,
+    mediaType: 'image/png',
+    bytes: Buffer.from(PNG, 'base64').byteLength,
+    width: 64,
+    height: 64,
+    name,
+  }
+}
+
+test('direct Ghostty reaches the Native Core through the real environment and TuiApp', async (t) => {
+  const apps = createAppLifecycleGuard<TuiApp>()
+  t.after(() => apps.disposeAll())
+  for (const term of ['xterm-ghostty', 'xterm-256color'] as const) {
+    await t.test(`TERM=${term}`, async () => {
+      const restore = applyGhosttyEnvironment({
+        TERM_PROGRAM: 'ghostty',
+        TERM: term,
+        PI_TUI_TMUX_KITTY_IMAGES: '0',
+      })
+      try {
+        assert.equal(getCapabilities().images, 'kitty', 'the fork really classified the detected Ghostty environment')
+        const { loader, reads, conversions } = countingLoader()
+        const vt = new VirtualTerminal(100, 30)
+        const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+          imageLoader: loader,
+          imageTheme: { fallbackColor: (text: string) => text },
+        })
+        app.start()
+        apps.started.add(app)
+        try {
+          const graphics = (app as unknown as { graphics: KittyGraphics | undefined }).graphics
+          assert.ok(graphics, 'the production composition created the managed handle')
+          assert.equal(graphics.mode, 'native', 'direct Ghostty is the native transport, not tmux-virtual')
+          assert.equal(graphics.canPaint(), true)
+          assert.equal((app as unknown as { terminal: unknown }).terminal, graphics.terminal,
+            'the ONE facade is the terminal both screens write through')
+
+          const ref = ghosttyImageRef(`att-ghostty-${term}`, `wire-${term}.png`)
+          const folder = transcriptOfImage(ref)
+          app.setTranscript(folder.messages())
+          await untilFact(() => loader.get(ref).state === 'ready', 'the real durable PNG read')
+          await settleApp(app, vt)
+
+          const text = vt.writes.join('')
+          assert.equal(reads.get(ref.attachmentId), 1, 'the durable attachment was read once')
+          assert.equal(conversions.count, 0, 'a PNG needs no derived conversion')
+          assert.equal(text.includes('\x1bPtmux;'), false, 'Ghostty never travels inside tmux passthrough')
+          assert.equal(text.includes(',U=1'), false, 'no virtual placeholder flag')
+          assert.equal(text.includes('\u10EEEE'), false, 'no virtual placeholder cell')
+          assert.equal(text.includes('a=T,'), false, 'no legacy combined transmit+place form')
+          assert.equal(text.includes('d=A') || text.includes('d=a'), false, 'no global delete')
+
+          const upload = apcs(text).filter((entry) => entry.a === 't')
+          const placements = apcs(text).filter((entry) => entry.a === 'p')
+          assert.equal(upload.length, 1, 'one managed upload')
+          assert.equal(placements.length, 1, 'one managed placement')
+          assert.ok(text.indexOf('a=t,f=100') < text.indexOf('a=p,'), 'the upload precedes the placement')
+          assert.equal(placements[0]!.i, upload[0]!.i, 'the placement names the uploaded image')
+
+          const scrollView = vt.getScrollBuffer().join('\n')
+          assert.ok(scrollView.includes(`🖼️ wire-${term}.png`), `the identity row is painted:\n${scrollView}`)
+          assert.ok(scrollView.includes('64×64 · 70 B'), `the info row reports the real dimensions and bytes:\n${scrollView}`)
+
+          const internals = app as unknown as {
+            mountedImageOccurrences(): { thumbnail: { paintedImageBody(width: number): { rows: number; endCol: number } | undefined } }[]
+            transcriptRenderWidth(): number
+          }
+          const body = internals.mountedImageOccurrences()[0]?.thumbnail.paintedImageBody(internals.transcriptRenderWidth())
+          assert.ok(body !== undefined, 'the occurrence registered a real clickable body')
+          assert.equal(Number(placements[0]!.c), body.endCol, 'the body width equals the painted placement width')
+          assert.equal(Number(placements[0]!.r), body.rows, 'the body rows equal the painted placement rows')
+
+          // The real pointer route proves the body data is what opens the Viewer.
+          app.setFullscreen(true)
+          await settleApp(app, vt)
+          const rows = await vt.flushAndGetViewport()
+          const infoRow = rows.findIndex((row) => row.includes('64×64 · 70 B'))
+          assert.ok(infoRow >= 0, `the fullscreen info row is on screen:\n${rows.join('\n')}`)
+          // The fullscreen transcript may re-derive its width, so the click
+          // column comes from the body the fullscreen frame really painted.
+          const fullscreenBody = internals.mountedImageOccurrences()[0]?.thumbnail
+            .paintedImageBody(internals.transcriptRenderWidth())
+          assert.ok(fullscreenBody !== undefined, 'the fullscreen occurrence registered a real clickable body')
+          const clickColumn = Math.max(1, Math.min(4, fullscreenBody.endCol))
+          vt.sendInput(`\x1b[<0;${clickColumn};${infoRow + 2}M`)
+          vt.sendInput(`\x1b[<0;${clickColumn};${infoRow + 2}m`)
+          await settleApp(app, vt)
+          const viewer = vt.getViewport().join('\n')
+          assert.ok(viewer.includes('Esc'), `the Viewer painted its own chrome:\n${viewer}`)
+          assert.ok(viewer.includes(`Image · wire-${term}.png`), `the Viewer opened on the real body:\n${viewer}`)
+          assert.equal(reads.get(ref.attachmentId), 1, 'the Viewer re-read no durable bytes')
+          vt.sendInput('\x1b')
+          await settleApp(app, vt)
+          assert.equal(vt.getViewport().join('\n').includes(`Image · wire-${term}.png`), false, 'Esc restored the transcript')
+          app.setFullscreen(false)
+          await settleApp(app, vt)
+        } finally {
+          app.dispose()
+          apps.started.delete(app)
+        }
+      } finally {
+        restore()
+      }
+    })
+  }
+})
+
+test('PI_IMAGE_PROTOCOL=none closes the real Ghostty path before any read or APC', async (t) => {
+  const apps = createAppLifecycleGuard<TuiApp>()
+  t.after(() => apps.disposeAll())
+  const restore = applyGhosttyEnvironment({
+    TERM_PROGRAM: 'ghostty',
+    TERM: 'xterm-256color',
+    PI_IMAGE_PROTOCOL: 'none',
+    PI_TUI_TMUX_KITTY_IMAGES: '0',
+  })
+  try {
+    assert.equal(getCapabilities().images, null, 'the real hard opt-out zeroes the fork capability')
+    const { loader, reads, conversions } = countingLoader()
+    const vt = new VirtualTerminal(100, 30)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      imageLoader: loader,
+      imageTheme: { fallbackColor: (text: string) => text },
+    })
+    app.start()
+    apps.started.add(app)
+    try {
+      assert.equal((app as unknown as { graphics: KittyGraphics | undefined }).graphics, undefined,
+        'no managed handle exists under the real hard opt-out')
+      const ref = ghosttyImageRef('att-ghostty-none', 'none.png')
+      app.setTranscript(transcriptOfImage(ref).messages())
+      await settleApp(app, vt)
+      const text = vt.writes.join('')
+      assert.equal(reads.get(ref.attachmentId), undefined, 'no payload byte was read')
+      assert.equal(conversions.count, 0, 'no conversion ran')
+      assert.equal(text.includes('\x1b_G'), false, 'no Kitty APC at all')
+      assert.equal(text.includes('\x1bPtmux;'), false, 'no tmux passthrough')
+      assert.equal(text.includes('\x1b]1337;File='), false, 'no iTerm2 image sequence')
+      assert.equal(text.includes('\u10EEEE'), false, 'no placeholder cell')
+      const view = vt.getScrollBuffer().join('\n')
+      assert.ok(view.includes('🖼️ none.png'), `the text identity row still paints:\n${view}`)
+      assert.ok(view.includes('64×64 · 70 B'), `the text info row still reports the attachment facts:\n${view}`)
+    } finally {
+      app.dispose()
+      apps.started.delete(app)
+    }
+  } finally {
+    restore()
+  }
+})
+
+test('the same TuiApp composition creates no managed native handle for rejected topologies', async (t) => {
+  const apps = createAppLifecycleGuard<TuiApp>()
+  t.after(() => apps.disposeAll())
+  const cases = [
+    { label: 'a lone TERM=xterm-ghostty', environment: { TERM: 'xterm-ghostty' }, capability: 'kitty' },
+    { label: 'a lone GHOSTTY_RESOURCES_DIR', environment: { GHOSTTY_RESOURCES_DIR: '/usr/share/ghostty' }, capability: 'kitty' },
+    {
+      label: 'Ghostty under Zellij',
+      environment: { TERM_PROGRAM: 'ghostty', TERM: 'xterm-256color', ZELLIJ: '1' },
+      capability: 'kitty',
+    },
+    {
+      label: 'Ghostty under tmux',
+      environment: { TERM_PROGRAM: 'ghostty', TERM: 'xterm-256color', TMUX: '/tmp/tmux-1000/default,1,0' },
+      capability: null,
+    },
+  ] as const
+  for (const [index, entry] of cases.entries()) {
+    const restore = applyGhosttyEnvironment({ ...entry.environment, PI_TUI_TMUX_KITTY_IMAGES: '0' })
+    try {
+      assert.equal(getCapabilities().images, entry.capability, `${entry.label}: the fork capability fact`)
+      const { loader } = countingLoader()
+      const vt = new VirtualTerminal(100, 30)
+      const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+        imageLoader: loader,
+        imageTheme: { fallbackColor: (text: string) => text },
+      })
+      app.start()
+      apps.started.add(app)
+      try {
+        assert.equal((app as unknown as { graphics: KittyGraphics | undefined }).graphics, undefined,
+          `${entry.label}: no managed native handle`)
+        const ref = ghosttyImageRef(`att-negative-${index}`, 'rejected.png')
+        app.setTranscript(transcriptOfImage(ref).messages())
+        await settleApp(app, vt)
+        const text = vt.writes.join('')
+        assert.equal(text.includes('a=t,f=100'), false, `${entry.label}: no managed transmission`)
+        assert.equal(text.includes('a=p,'), false, `${entry.label}: no managed placement`)
+      } finally {
+        app.dispose()
+        apps.started.delete(app)
+      }
+    } finally {
+      restore()
+    }
+  }
+})
 
 /**
  * The Owner's amended budget (2026-10-27): a new image may never be refused
