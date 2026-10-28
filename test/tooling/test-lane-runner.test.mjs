@@ -28,7 +28,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
-import { parseConcurrency } from '../../scripts/run-test-lane.mjs'
+import { parseConcurrency, sanitizeTestEnvironment } from '../../scripts/run-test-lane.mjs'
 import { resolveLane } from '../../scripts/test-discovery.mjs'
 import { LANES } from '../../scripts/test-lanes.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -277,6 +277,38 @@ test('a malformed concurrency is a FAILURE, not a silent default', () => {
   assert.throws(() => parseConcurrency(['--test-concurrency=zero']), /whole number/u)
   assert.throws(() => parseConcurrency(['--test-concurrency=0']), /at least 1/u)
   assert.throws(() => parseConcurrency(['--test-concurrency=-1']), /whole number/u)
+})
+
+test('the lane child never inherits the developer terminal identity', () => {
+  const sanitized = sanitizeTestEnvironment({
+    PATH: '/bin',
+    HOME: '/home/dev',
+    TERM_PROGRAM: 'tern',
+    TERM_PROGRAM_VERSION: '0.9.5',
+    KITTY_WINDOW_ID: '3',
+    KITTY_PID: '556',
+    ZELLIJ: '0',
+    ZELLIJ_PANE_ID: '0',
+    ZELLIJ_SESSION_NAME: 'main',
+    _ZL_MATCH_MODE: '1',
+    TMUX: '/tmp/tmux,1,0',
+    TMUX_PANE: '%1',
+    STY: '123.pts-0.host',
+    TERN_ACP: '',
+    TERN_BLOB_DIR: '/home/dev/.cache/tern/blobs',
+    TERN_COMPLETE: '1',
+    TERN_IDENTITY: '{}',
+    TERN_LENSES: '1',
+    TERN_PANE: '1',
+    TERN_PANE_SOCKET: '/run/tern.sock',
+    TERN_WINDOW_SOCKET: '/run/window.sock',
+    PI_IMAGE_PROTOCOL: 'kitty',
+    PI_TUI_TMUX_KITTY_IMAGES: '1',
+    PI_TUI_TMUX_KITTY_PLACEHOLDERS: '1',
+  })
+  assert.deepEqual(sanitized, { PATH: '/bin', HOME: '/home/dev' },
+    'only the developer terminal identity is removed; ordinary environment stays')
+  assert.deepEqual(sanitizeTestEnvironment({ PATH: '/bin' }), { PATH: '/bin' })
 })
 
 test('the runner FORWARDS the concurrency to Node, and Node applies it', () => {
