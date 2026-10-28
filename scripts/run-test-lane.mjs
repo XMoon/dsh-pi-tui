@@ -50,6 +50,32 @@ import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const TEST_ROOT = join(ROOT, 'test')
 
+/**
+ * Ambient terminal-identity variables describe the DEVELOPER's enclosing
+ * terminal (a Tern pane inside Zellij on Kitty, a tmux session, ...), not the
+ * test fixture. Product tests construct their own capability and progress
+ * environment; inheriting the developer's changes which branch a test takes
+ * and makes a local run disagree with clean CI. A test that needs one of these
+ * facts sets it explicitly (and restores it), so the lane child never inherits
+ * them.
+ */
+const AMBIENT_TERMINAL_ENV = Object.freeze([
+  'TERM_PROGRAM', 'TERM_PROGRAM_VERSION',
+  'KITTY_WINDOW_ID', 'KITTY_PID',
+  'ZELLIJ', 'ZELLIJ_PANE_ID', 'ZELLIJ_SESSION_NAME', '_ZL_MATCH_MODE',
+  'TMUX', 'TMUX_PANE', 'STY',
+  'TERN_ACP', 'TERN_BLOB_DIR', 'TERN_COMPLETE', 'TERN_IDENTITY', 'TERN_LENSES',
+  'TERN_PANE', 'TERN_PANE_SOCKET', 'TERN_WINDOW_SOCKET',
+  'PI_IMAGE_PROTOCOL', 'PI_TUI_TMUX_KITTY_IMAGES', 'PI_TUI_TMUX_KITTY_PLACEHOLDERS',
+])
+
+/** The lane child environment without the developer's terminal identity. */
+export function sanitizeTestEnvironment(env = process.env) {
+  const sanitized = { ...env }
+  for (const name of AMBIENT_TERMINAL_ENV) delete sanitized[name]
+  return sanitized
+}
+
 /** A command's trimmed output, or null when it cannot be read. */
 function commandOutput(file, args) {
   try {
@@ -217,7 +243,7 @@ function main() {
     stdio: 'inherit',
     shell: false,
     detached: ownsGroup,
-    env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
+    env: { ...sanitizeTestEnvironment(process.env), TMPDIR: root, TMP: root, TEMP: root },
   })
 
   let childResult
