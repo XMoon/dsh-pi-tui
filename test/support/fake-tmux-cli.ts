@@ -80,6 +80,7 @@ export function createFakeTmuxCli(t: TestContext): FakeTmuxCli {
   delete env.TERM_PROGRAM
   delete env.PI_IMAGE_PROTOCOL
   delete env.KITTY_WINDOW_ID
+  delete env.PI_TUI_TMUX_KITTY_PLACEHOLDERS
 
   const cli: FakeTmuxCli = {
     env,

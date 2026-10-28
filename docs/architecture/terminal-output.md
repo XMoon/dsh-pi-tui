@@ -251,21 +251,32 @@ who already configured it, and it never forces admission. `0` and every other
 value disable the backend before any admission query runs. `PI_IMAGE_PROTOCOL=none`
 remains the global image opt-out and wins over the automatic attempt; the
 `0`/`iterm2` protocol values are also refused by this admission. Admission is
-always the live server's answer, never the pane's environment.
+always the live server's answer, never the pane's environment. A user may set
+`PI_TUI_TMUX_KITTY_PLACEHOLDERS=1` to assert that an older outer terminal really
+implements Unicode placeholders despite being unable to answer the feature
+query; the assertion replaces only the U1 capability proof and never bypasses
+the live server, identity, hard-off or revoke checks.
 
-- **Admission is a live server fact, not pane environment.** The backend asks
-  the real tmux server (`show-options … allow-passthrough`, `display-message …
-  '#{session_name}'`, `list-clients …`) with fixed argv, no shell, a 500 ms
-  timeout and a bounded reply. It requires the pane option to be exactly `all`,
-  exactly one attached client whose session is the pane's,
-  `client_termname = xterm-kitty` and `client_termtype = kitty[(version)]`.
-  Pane environment (`TMUX`, `TMUX_PANE`, `TERM`) is necessary context only:
-  inherited `TERM_PROGRAM`/`KITTY_WINDOW_ID` never grant admission, and option
-  `on`/`off`, no client, mixed clients, a non-Kitty client, a nested multiplexer
-  or any query failure fails closed before image work. The backend never writes
-  tmux configuration: `allow-passthrough=all` and the single attached Kitty
-  client are user-provided preconditions, and no option is ever set for the
-  user.
+- **Admission is a live server fact; U1 is a separate capability fact.** The
+  backend asks the real tmux server (`show-options … allow-passthrough`,
+  `display-message … '#{session_name}'`, `list-clients …`) with fixed argv, no
+  shell, a 500 ms timeout and a bounded reply. It requires the pane option to be
+  exactly `all`, exactly one attached client whose session is the pane's, and a
+  non-empty client name/tty. An unknown renderer is not rejected at this server
+  boundary. The live client report itself may be known pre-feature-query U1
+  evidence: Kitty is `client_termname = xterm-kitty` with a Kitty
+  `client_termtype`, and Ghostty is `xterm-ghostty` with a `ghostty …`
+  terminal-type reply. Otherwise the backend sends exactly one per-handle
+  DCS-wrapped Kitty `a=q,i=<random>,e=T,U=1` query after the real input listener is
+  installed; only a reply with the same id, `e=T`, `U=1` and `OK` admits. A base
+  Kitty `a=q` `OK` without `e`/`U` is not U1 evidence, and this transport never
+  falls back to ordinary `a=p` or legacy `a=T`. Pane environment (`TMUX`,
+  `TMUX_PANE`, `TERM`) is necessary context only: inherited
+  `TERM_PROGRAM`/`KITTY_WINDOW_ID` never grant admission. Option
+  `on`/`off`, no client, mixed clients, a nested multiplexer or any query
+  failure fails closed before image work. The backend never writes tmux
+  configuration: `allow-passthrough=all` and the single attached client are
+  user-provided preconditions, and no option is ever set for the user.
 - **Revocation is one-way.** Any real probe failure or change to the six
   identity fields latches the handle revoked for the rest of the process. The
   component then paints the text fallback, and the facade refuses an entire

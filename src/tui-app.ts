@@ -4279,7 +4279,7 @@ export class TuiApp {
     // legacy `Image`/text path.
     const graphics = createNativeKittyGraphics(resizeAware)
       ?? createZellijKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
-      ?? createTmuxKittyGraphics(resizeAware)
+      ?? createTmuxKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
     this.graphics = graphics
     this.terminal = graphics?.terminal ?? resizeAware
     // A revoked tmux admission refuses a whole managed physical batch from

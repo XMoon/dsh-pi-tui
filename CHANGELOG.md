@@ -9,6 +9,14 @@
 
 ### 新增
 
+- **tmux 窗格中的图片不再只限于 Kitty 客户端。**
+  已知支持 Unicode placeholder 的 Kitty/Ghostty 客户端保持原有行为；其他终端（包括
+  WezTerm、Tern 与未知宿主）在真实 tmux server 的 passthrough、单客户端与会话身份检查
+  通过后，会通过一次真实 tmux DCS 透传发送 `a=q,i=<id>,e=T,U=1` 能力查询，只有匹配 id
+  且返回 `e=T,U=1;OK` 才显示图片；无回复、普通 `OK`、错误或超时都保持纯文字，不会退回
+  旧的图片路径。`allow-passthrough=all`、单客户端、`PI_IMAGE_PROTOCOL=none/0` 与
+  `PI_TUI_TMUX_KITTY_IMAGES=0` 等限制不变。旧版但确实支持 U1 的未知终端可显式设置
+  `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1`，它只代替 U1 能力证明，不绕过 tmux 实时身份与撤销检查。
 - **支持 Kitty 图形协议的直连终端不再需要品牌白名单，Zellij 各宿主按当前窗格能力显示图片。**
   Kitty、Ghostty、WezTerm、Warp、Tern 以及其他由 `PI_IMAGE_PROTOCOL=kitty` 明确启用 Kitty
   协议的直连终端，都使用同一套受管图片生命周期显示转录、草稿与查看器中的 PNG/JPEG/WebP。
