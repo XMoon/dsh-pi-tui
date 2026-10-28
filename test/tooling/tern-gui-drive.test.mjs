@@ -650,6 +650,9 @@ async function assertSignalTearDown(t, prefix, signal) {
     env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0' },
     stdio: 'ignore',
   })
+  // The child's terminal state is observed from the moment it exists, so an
+  // exit that lands while the test still waits for startup facts is not missed.
+  const exited = new Promise((resolve) => child.once('exit', (code, exitSignal) => resolve({ code, signal: exitSignal })))
   // The test's OWN cleanup runs in `t.after`, i.e. only AFTER the assertions:
   // it must never stop the helpers first and then claim the driver did.
   life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
@@ -673,7 +676,6 @@ async function assertSignalTearDown(t, prefix, signal) {
   const sockets = readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim().split('\n').filter(Boolean)
   assert.equal(sockets.length, 1, 'the driver started one private daemon')
 
-  const exited = new Promise((resolve) => child.on('exit', (code, exitSignal) => resolve({ code, signal: exitSignal })))
   child.kill(signal)
   const exit = await exited
   // A cancelled run must keep its interruption status: a teardown must not
@@ -745,6 +747,13 @@ test('the driver does not exit while its daemon still holds stdio open', async (
     env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0', FAKE_STDIO_HOLD: '1' },
     stdio: 'ignore',
   })
+  // The child's terminal state is observed from the moment it exists, so an
+  // early exit cannot land unobserved while the test still waits for startup.
+  let exitedEarly = false
+  const exited = new Promise((resolve) => child.once('exit', (code, signal) => {
+    exitedEarly = true
+    resolve({ code, signal })
+  }))
   life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
   // Registered before the PID wait, so a failed wait still ends the holder;
   // registered after the driver kill, so reverse order ends the holder FIRST
@@ -754,11 +763,6 @@ test('the driver does not exit while its daemon still holds stdio open', async (
   const records = await waitForPidRecords(pidsFile, 2, 30_000)
   const holderPid = Number(readFileSync(joinPath(dir, 'holder.pid'), 'utf8').trim().split(/\s+/u)[0])
 
-  let exitedEarly = false
-  const exited = new Promise((resolve) => child.on('exit', (code, signal) => {
-    exitedEarly = true
-    resolve({ code, signal })
-  }))
   child.kill('SIGTERM')
   // reason: a bounded observation of a NEGATIVE fact — the teardown must not finish while the child holds stdio.
   await new Promise((resolve) => setTimeout(resolve, 200))
