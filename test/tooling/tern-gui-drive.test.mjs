@@ -74,7 +74,6 @@ if (args[0] === '--version') { process.stdout.write('tern 0.0.0-fake\\n'); proce
 // NOT share one, then stay alive like the real daemon does.
 if (args[0] === 'daemon') {
   const at = args.indexOf('--socket')
-  if (at >= 0) appendFileSync(${JSON.stringify(log)}.replace('calls.log', 'daemon-sockets.log'), args[at + 1] + '\\n')
   // FAKE_STDIO_HOLD=1 makes a GRANDCHILD inherit this daemon's stdout/stderr
   // and keep them open until the test releases it. The driver's ChildProcess
   // close event cannot arrive while that pipe is open, which is what proves the
@@ -85,7 +84,11 @@ if (args[0] === 'daemon') {
     const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30); process.on("SIGUSR1", () => process.exit(0))'], { stdio: 'inherit' })
     writeFileSync(${JSON.stringify(join(log, '..'))} + '/holder.pid', String(holder.pid))
   }
+  // The IDENTITY comes BEFORE the socket line: a socket record must always be
+  // attributable to a recorded daemon, or a test-owned cleanup cannot prove the
+  // owner stopped before it removes the socket directory.
   recordPid('daemon')
+  if (at >= 0) appendFileSync(${JSON.stringify(log)}.replace('calls.log', 'daemon-sockets.log'), args[at + 1] + '\\n')
   // The run's OWN startup witness, keyed by the run directory: a readiness
   // reply is only allowed once THIS run's daemon really executed. It states
   // "the daemon reached its startup record", never that the socket is live.
@@ -242,27 +245,59 @@ function runDriver(fake, extraEnv = {}, dir) {
  * ran is signalled. The ORDER is part of the contract: a possibly-live helper
  * must never have its socket directory removed underneath it, so the kill
  * happens first and the directory removal last. Registering here — before any
- * spawn or assertion — also covers a failure before the run wrote its records
- * (then there is simply nothing to clean).
+ * spawn or assertion — covers a failure before the run wrote its records.
+ *
+ * A missing record is NOT evidence that a process stopped. The fake daemon
+ * writes its identity BEFORE its socket line, so every socket record must map
+ * to a recorded daemon; an unmatched socket keeps its directory and fails the
+ * cleanup loudly instead of deleting a possibly-live daemon's path.
  */
-function deferHelperCleanup(life, dir) {
+async function cleanUpRecordedHelpers(dir) {
   const pidsFile = joinPath(dir, 'pids.log')
   const socketsFile = joinPath(dir, 'daemon-sockets.log')
-  life.defer(async () => {
-    const records = readPidRecords(pidsFile)
-    killStillExecuting(records)
-    // A stop request is not termination evidence: confirm the recorded helpers
-    // no longer execute before deleting a directory one of them may still use.
-    const survivors = await waitForNoExecuting(records, 5_000)
-    if (survivors.length > 0) {
-      throw new Error(`the test-owned helper cleanup left ${JSON.stringify(survivors)} executing; keeping the daemon socket directories`)
-    }
-    const sockets = existsSync(socketsFile)
-      ? readFileSync(socketsFile, 'utf8').trim().split('\n').filter(Boolean)
-      : []
-    for (const socket of sockets) rmSync(dirname(socket), { recursive: true, force: true })
-  })
+  const records = readPidRecords(pidsFile)
+  const daemons = records.filter((record) => record.kind === 'daemon')
+  const sockets = existsSync(socketsFile)
+    ? readFileSync(socketsFile, 'utf8').trim().split('\n').filter(Boolean)
+    : []
+  killStillExecuting(records)
+  // A stop request is not termination evidence: confirm the recorded helpers
+  // no longer execute before deleting a directory one of them may still use.
+  const survivors = await waitForNoExecuting(records, 5_000)
+  if (survivors.length > 0 || sockets.length > daemons.length) {
+    throw new Error('the test-owned helper cleanup cannot prove every daemon socket stopped '
+      + `(survivors: ${JSON.stringify(survivors)}, daemon records: ${daemons.length}, `
+      + `socket records: ${sockets.length}); keeping ${JSON.stringify(sockets)}`)
+  }
+  for (const socket of sockets) rmSync(dirname(socket), { recursive: true, force: true })
 }
+
+function deferHelperCleanup(life, dir) {
+  life.defer(() => cleanUpRecordedHelpers(dir))
+}
+
+test('the cleanup keeps an unattributable daemon socket and removes a proven one', async (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('tern-gui-cleanup-')
+  const socketsFile = joinPath(dir, 'daemon-sockets.log')
+  const unmatched = joinPath(dir, 'unmatched-daemon')
+  mkdirSync(unmatched, { recursive: true })
+  writeFileSync(socketsFile, joinPath(unmatched, 'daemon.sock') + '\n')
+  // No daemon identity: a missing record is NOT evidence that the owner
+  // stopped, so the directory must be kept and the cleanup must fail loudly.
+  writeFileSync(joinPath(dir, 'pids.log'), '')
+  await assert.rejects(cleanUpRecordedHelpers(dir), /cannot prove every daemon socket stopped/u)
+  assert.equal(existsSync(unmatched), true, 'an unattributable socket directory is kept')
+
+  const proven = joinPath(dir, 'proven-daemon')
+  mkdirSync(proven, { recursive: true })
+  writeFileSync(socketsFile, joinPath(proven, 'daemon.sock') + '\n')
+  // A recorded daemon that no longer executes: the PID is above Linux's
+  // pid_max, so no process can hold it and the identity probe is ESRCH.
+  writeFileSync(joinPath(dir, 'pids.log'), 'daemon 999999999 -\n')
+  await cleanUpRecordedHelpers(dir)
+  assert.equal(existsSync(proven), false, 'a socket with a stopped recorded daemon is removed')
+})
 
 test('the GUI driver isolates the window from the user\'s real Tern profile', (t) => {
   const life = testLifecycle(t)
@@ -565,6 +600,10 @@ async function assertSignalTearDown(t, prefix, signal) {
   const life = testLifecycle(t)
   const dir = life.tempDir(prefix)
   const fake = writeFakeTern(dir)
+  // Registered BEFORE the spawn, so the unified fixture cleanup runs LAST in
+  // the reverse-order teardown: the driver kill below runs first, then the
+  // helpers are stopped, confirmed and their socket directories removed.
+  deferHelperCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   // The flow parks so the driver stays alive long enough to be signalled: the
   // test must interrupt a LIVE driver, so the flow never finishes on its own.
@@ -579,7 +618,6 @@ async function assertSignalTearDown(t, prefix, signal) {
   // The test's OWN cleanup runs in `t.after`, i.e. only AFTER the assertions:
   // it must never stop the helpers first and then claim the driver did.
   life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
-  life.defer(() => { killStillExecuting(readPidRecords(pidsFile)) })
 
   // Deadline reason: the helpers record their identity synchronously at
   // startup; this only bounds a broken fake, it is not a settle window.
@@ -647,6 +685,10 @@ test('the driver does not exit while its daemon still holds stdio open', async (
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-stdio-')
   const fake = writeFakeTern(dir)
+  // Registered BEFORE the spawn: the unified cleanup runs LAST and removes the
+  // socket directory only after the holder (registered later) and the driver
+  // had their own teardown turn.
+  deferHelperCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, 'export default async function () { await new Promise(() => {}) }\n')
   const out = joinPath(dir, 'out')
@@ -657,10 +699,11 @@ test('the driver does not exit while its daemon still holds stdio open', async (
     stdio: 'ignore',
   })
   life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
-  life.defer(() => { killStillExecuting(readPidRecords(pidsFile)) })
 
   const records = await waitForPidRecords(pidsFile, 2, 30_000)
   const holderPid = Number(readFileSync(joinPath(dir, 'holder.pid'), 'utf8'))
+  // Registered LAST, so the reverse-order teardown ends the holder FIRST: the
+  // daemon's stdio pipe is released before the driver/helper cleanup runs.
   life.defer(() => { killStillExecuting([{ kind: 'holder', pid: holderPid, startTime: startTimeOf(holderPid) }]) })
 
   let exitedEarly = false
