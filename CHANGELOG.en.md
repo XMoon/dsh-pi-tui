@@ -545,6 +545,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   package as published on npm, paired with `@deepseek-ai/dsh@0.2.1-rc.3`. The `0.5.3`
   minimum DSH version stays `0.2.1-rc.2`; the package version and its published
   contents are unchanged, and no new TUI version was released.
+- **The published `0.5.3` is also verified on DeepSeek Harness `0.2.1-rc.4` by the
+  official preset assembly.** This was checked with the `@xmoon76/dsh-pi-tui@0.5.3`
+  package as published on npm, paired with `@deepseek-ai/dsh@0.2.1-rc.4`. The `0.5.3`
+  minimum DSH version stays `0.2.1-rc.2`; the package version and its published
+  contents are unchanged, and no new TUI version was released. This checkout only
+  updates its exact validation target and the corresponding statements.
 
 ## [0.5.3] - 2026-10-20
 
