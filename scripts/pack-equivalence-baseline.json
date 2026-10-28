@@ -1,10 +1,10 @@
 {
-  "digest": "d6ad207132f1745801b4b9a3cfcb04862f091aecd0affca7467dec7971cf1750",
+  "digest": "5597f70ad289d70c4e37688e63ef1f81b4bd0c1dae3a758aae236ff69351e57f",
   "inputs": [
     {
       "path": "package.json",
       "present": true,
-      "sha256": "e8578007b5649f1f367a5bb79de1bf441f1e70a13d49b5b69937e15598897e43",
+      "sha256": "31c848e0d3031ba4b9ab2228f2a143477bcb50c238f6685cd1ae62f1eb0578af",
       "why": "the manifest decides what is packed and how it is rewritten"
     },
     {
@@ -59,9 +59,8 @@
       "entryCount": 46,
       "differingFiles": [],
       "manifestDifferences": [],
-      "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/40629959654",
-      "commit": "71afd2d63c895457cb73554c91da6630cf37c111",
-      "note": "Recorded from the PR #397 CI comparison: a REAL ordinary-vs-lifecycle-free pack of the exact inputs digested above (40 entries each, no differing file, no manifest difference). Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof."
+      "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/40741173987",
+      "commit": "487b8406d749685c543f806845cf2882acdda9be"
     }
   }
 }
