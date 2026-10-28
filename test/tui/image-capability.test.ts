@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resetCapabilitiesCache, setCapabilities, type Terminal, type TerminalProgressState } from '@xmoon76/pi-tui'
 import { effectiveImageProtocol } from '../../src/tui/graphics/image-capability.ts'
+import { createZellijKittyGraphics } from '../../src/tui/graphics/zellij-image.ts'
 import { createTmuxKittyGraphics, TmuxKittyImage } from '../../src/tui/graphics/tmux-image.ts'
 import { TmuxKittyAdmission, probeTmuxKittyIdentity } from '../../src/tui/graphics/tmux-admission.ts'
 import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
@@ -32,12 +33,19 @@ class RecordingTerminal implements Terminal {
   columns = 100
   rows = 40
   kittyProtocolActive = false
+  private onInput: ((data: string) => void) | undefined
 
   get text(): string {
     return this.writes.join('')
   }
 
-  start(): void {}
+  start(onInput: (data: string) => void): void {
+    this.onInput = onInput
+  }
+
+  sendInput(data: string): void {
+    this.onInput?.(data)
+  }
   stop(): void {}
   async drainInput(): Promise<void> {}
   write(data: string): void {
@@ -97,24 +105,58 @@ test('an admitted tmux handle paints kitty where the fork detects none, and revo
   }
 })
 
-test('the native factory reports native and always paintable, whatever the fork says now', (t) => {
+test('a native factory handle keeps its admitted state even when the fork cache changes later', (t) => {
   const cli = createFakeTmuxCli(t)
   try {
     resetCapabilitiesCache()
     setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
     const admission = probeTmuxKittyIdentity(tmuxPaneEnvironment(cli))
     assert.ok(admission)
-    // A native handle is only created on the native topology; the classifier's
-    // native branch must defer to the fork, not to the tmux admission.
+    // A native handle is created only by an admitted factory; its `canPaint()`
+    // is the admission fact every consumer must follow.
     const native = { mode: 'native' as const, canPaint: () => true }
     assert.equal(effectiveImageProtocol(native as never), 'kitty')
     resetCapabilitiesCache()
     setCapabilities({ images: null, trueColor: true, hyperlinks: false })
-    assert.equal(effectiveImageProtocol(native as never), null,
-      'a native handle does not override the fork capability')
+    assert.equal(effectiveImageProtocol(native as never), 'kitty',
+      'the existing native handle does not re-read a changed fork cache')
+    assert.equal(effectiveImageProtocol({ mode: 'native', canPaint: () => false } as never), null,
+      'a native handle that reports no live pixels stays text')
   } finally {
     cli.dispose()
   }
+})
+
+test('a Zellij pane stays text-only without an admitted handle and becomes kitty after the live OK', async (t) => {
+  const savedZellij = process.env.ZELLIJ
+  const savedProtocol = process.env.PI_IMAGE_PROTOCOL
+  t.after(() => {
+    if (savedZellij === undefined) delete process.env.ZELLIJ
+    else process.env.ZELLIJ = savedZellij
+    if (savedProtocol === undefined) delete process.env.PI_IMAGE_PROTOCOL
+    else process.env.PI_IMAGE_PROTOCOL = savedProtocol
+    resetCapabilitiesCache()
+  })
+  process.env.ZELLIJ = '0'
+  process.env.PI_IMAGE_PROTOCOL = 'kitty'
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined), null,
+    'the inherited Ghostty/kitty capability never becomes a legacy image path inside Zellij')
+
+  const terminal = new RecordingTerminal()
+  const graphics = createZellijKittyGraphics(terminal, {}, {
+    TERM: 'xterm-256color',
+    TERM_PROGRAM: 'ghostty',
+    ZELLIJ: '0',
+    ZELLIJ_SESSION_NAME: 'classifier-test',
+  }, () => {})
+  assert.ok(graphics, 'the candidate factory exists before its live answer')
+  assert.equal(effectiveImageProtocol(graphics), null, 'probing is text-only')
+  graphics.terminal.start(() => {}, () => {})
+  terminal.sendInput('\x1b_Gi=2147483647;OK\x1b\\')
+  assert.equal(effectiveImageProtocol(graphics), 'kitty', 'the one-way live OK admits the same Native handle')
+  graphics.dispose()
 })
 
 test('source to sink: the admitted component really emits the managed grid, and none after revocation', async (t) => {

@@ -245,6 +245,7 @@ import {
   type KittyGraphics,
 } from './tui/graphics/native-image.ts'
 import { createTmuxKittyGraphics } from './tui/graphics/tmux-image.ts'
+import { createZellijKittyGraphics } from './tui/graphics/zellij-image.ts'
 import { TmuxGraphicsRevokedError } from './tui/graphics/kitty-terminal.ts'
 import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
@@ -4258,11 +4259,14 @@ export class TuiApp {
     // The managed graphics handle is created ONCE per physical terminal, from
     // the real terminal the screens will write through, and both screens plus
     // every first-party graphics consumer share the SAME facade/Core. The
-    // native transport is preferred; only when it is not admitted does the
-    // strict tmux virtual factory get its own chance. Both factories fail
-    // closed, so a terminal that admits neither keeps `getCapabilities()`
-    // untouched and every consumer keeps its legacy `Image`/text path.
-    const graphics = createNativeKittyGraphics(resizeAware) ?? createTmuxKittyGraphics(resizeAware)
+    // native transport is preferred; a Ghostty-host Zellij pane gets its own
+    // live-query admission; only then does the strict tmux virtual factory get
+    // its own chance. Every factory fails closed, so a terminal that admits
+    // none keeps `getCapabilities()` untouched and every consumer keeps its
+    // legacy `Image`/text path.
+    const graphics = createNativeKittyGraphics(resizeAware)
+      ?? createZellijKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
+      ?? createTmuxKittyGraphics(resizeAware)
     this.graphics = graphics
     this.terminal = graphics?.terminal ?? resizeAware
     // A revoked tmux admission refuses a whole managed physical batch from
