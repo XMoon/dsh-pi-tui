@@ -31,6 +31,7 @@ import {
   parseKittyApc,
 } from '../../src/tui/graphics/kitty-native.ts'
 import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
+import { KITTY_VIRTUAL_PLACEHOLDER } from '../../src/tui/graphics/tmux-virtual.ts'
 import { NativeKittyImage, admitsNativeKitty, createNativeKittyGraphics } from '../../src/tui/graphics/native-image.ts'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
@@ -704,7 +705,7 @@ test('the Ghostty factory creates ONE native handle and paints native commands',
   assert.ok(text.indexOf('a=t,f=100') < text.indexOf('a=p,'), 'the transmission precedes the placement')
   assert.ok(!text.includes('\x1bPtmux;'), 'Ghostty is never the tmux virtual transport')
   assert.ok(!text.includes(',U=1'), 'no virtual placeholder flag')
-  assert.ok(!text.includes('\u10EEEE'), 'no virtual placeholder cell')
+  assert.ok(!text.includes(KITTY_VIRTUAL_PLACEHOLDER), 'no virtual placeholder cell')
   graphics.dispose()
 })
 

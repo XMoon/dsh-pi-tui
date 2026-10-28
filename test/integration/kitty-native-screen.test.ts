@@ -39,6 +39,7 @@ import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
 import { parseKittyApc } from '../../src/tui/graphics/kitty-native.ts'
+import { KITTY_VIRTUAL_PLACEHOLDER } from '../../src/tui/graphics/tmux-virtual.ts'
 import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
 import { NativeKittyImage } from '../../src/tui/graphics/native-image.ts'
 import type { KittyGraphics } from '../../src/tui/graphics/native-image.ts'
@@ -566,7 +567,7 @@ test('direct Ghostty reaches the Native Core through the real environment and Tu
           assert.equal(conversions.count, 0, 'a PNG needs no derived conversion')
           assert.equal(text.includes('\x1bPtmux;'), false, 'Ghostty never travels inside tmux passthrough')
           assert.equal(text.includes(',U=1'), false, 'no virtual placeholder flag')
-          assert.equal(text.includes('\u10EEEE'), false, 'no virtual placeholder cell')
+          assert.equal(text.includes(KITTY_VIRTUAL_PLACEHOLDER), false, 'no virtual placeholder cell')
           assert.equal(text.includes('a=T,'), false, 'no legacy combined transmit+place form')
           assert.equal(text.includes('d=A') || text.includes('d=a'), false, 'no global delete')
 
@@ -656,7 +657,7 @@ test('PI_IMAGE_PROTOCOL=none closes the real Ghostty path before any read or APC
       assert.equal(text.includes('\x1b_G'), false, 'no Kitty APC at all')
       assert.equal(text.includes('\x1bPtmux;'), false, 'no tmux passthrough')
       assert.equal(text.includes('\x1b]1337;File='), false, 'no iTerm2 image sequence')
-      assert.equal(text.includes('\u10EEEE'), false, 'no placeholder cell')
+      assert.equal(text.includes(KITTY_VIRTUAL_PLACEHOLDER), false, 'no placeholder cell')
       const view = vt.getScrollBuffer().join('\n')
       assert.ok(view.includes('🖼️ none.png'), `the text identity row still paints:\n${view}`)
       assert.ok(view.includes('64×64 · 70 B'), `the text info row still reports the attachment facts:\n${view}`)
