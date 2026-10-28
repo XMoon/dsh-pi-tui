@@ -63,6 +63,12 @@ test('the live client report distinguishes known U1 evidence from an unknown ren
     assert.ok(bareKitty, 'a bare Kitty termtype is still a valid server identity')
     assert.equal(tmuxKittyHasKnownUnicodePlaceholders(bareKitty), true, 'bare Kitty is known U1 evidence')
 
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\tkitty(0.41.1)\n' })
+    const fallbackTermnameKitty = probeTmuxKittyIdentity(cli.env)
+    assert.ok(fallbackTermnameKitty, 'Kitty with a generic terminfo is still a valid server identity')
+    assert.equal(tmuxKittyHasKnownUnicodePlaceholders(fallbackTermnameKitty), true,
+      'the live XTVERSION Kitty identity is sufficient; client_termname is not a brand condition')
+
     cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty-direct\n' })
     const derivedKitty = probeTmuxKittyIdentity(cli.env)
     assert.ok(derivedKitty, 'a derived termtype is an identity, not a server rejection')
@@ -73,6 +79,12 @@ test('the live client report distinguishes known U1 evidence from an unknown ren
     assert.ok(ghostty)
     assert.equal(tmuxKittyHasKnownUnicodePlaceholders(ghostty), true,
       'Ghostty XTVERSION uses a space, not a parentheses version')
+
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\tghostty 1.4.0\n' })
+    const fallbackTermnameGhostty = probeTmuxKittyIdentity(cli.env)
+    assert.ok(fallbackTermnameGhostty)
+    assert.equal(tmuxKittyHasKnownUnicodePlaceholders(fallbackTermnameGhostty), true,
+      'the live XTVERSION Ghostty identity is sufficient with a generic terminfo fallback')
 
     cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
     const unknown = probeTmuxKittyIdentity(cli.env)

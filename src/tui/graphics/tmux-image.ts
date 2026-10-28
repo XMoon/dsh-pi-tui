@@ -254,6 +254,7 @@ export function createTmuxKittyGraphics(
     identity,
     environment,
     probe === undefined ? undefined : () => probe.allowed,
+    probe === undefined ? undefined : () => probe.denied,
   )
   const core = new KittyGraphicsCore({ ...options, placementMode: 'tmux-virtual' })
   const featureBinding: TmuxFeatureProbeBinding | undefined = probe === undefined

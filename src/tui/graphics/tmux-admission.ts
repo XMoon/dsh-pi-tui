@@ -113,20 +113,17 @@ function clientProgramName(termtype: string): string | undefined {
  * implement Kitty Unicode placeholders (`U=1`) from the pre-feature-query
  * compatibility line. This is ONE source of U1 evidence, not an allowlist:
  * every other renderer can still earn admission through the live feature
- * query. It reads only the real server report, never an inherited
- * `TERM_PROGRAM`/`KITTY_WINDOW_ID` hint.
+ * query. The XTVERSION program in `client_termtype` is the authoritative live
+ * identity; `client_termname` is only a transport hint and may legitimately be
+ * a generic fallback such as `xterm-256color` when the dedicated terminfo is
+ * unavailable. It never reads an inherited `TERM_PROGRAM`/`KITTY_WINDOW_ID`.
  */
 export function tmuxKittyHasKnownUnicodePlaceholders(identity: TmuxKittyIdentity): boolean {
   const program = clientProgramName(identity.clientTermtype)
-  const termname = identity.clientTermname.toLowerCase()
-  if (program === 'kitty') return termname === 'xterm-kitty' || termname === 'kitty'
-  // Ghostty's XTVERSION reply uses a space ("ghostty 1.4.0"). Its own terminfo
-  // entry may fall back to xterm-256color when the remote terminfo install is
-  // unavailable; the live XTVERSION reply still identifies the emulator.
-  if (program === 'ghostty') {
-    return termname === 'xterm-ghostty' || termname === 'ghostty' || termname === 'xterm-256color'
-  }
-  return false
+  // A real XTVERSION reply (Kitty: `kitty(0.41.1)`, Ghostty: `ghostty 1.4.0`)
+  // is sufficient. Requiring a brand-specific client_termname would regress a
+  // Kitty/Ghostty client using the generic xterm-256color fallback.
+  return program === 'kitty' || program === 'ghostty'
 }
 
 /**
@@ -223,18 +220,28 @@ export class TmuxKittyAdmission {
   private readonly initial: TmuxKittyIdentity
   private readonly env: NodeJS.ProcessEnv
   private readonly placeholderAllowed: (() => boolean) | undefined
+  private readonly placeholderDenied: (() => boolean) | undefined
   private revoked = false
   private hasProbed = false
   private lastProbeAt = 0
   private lastProbeAllowed = false
 
-  constructor(initial: TmuxKittyIdentity, env: NodeJS.ProcessEnv = process.env, placeholderAllowed?: () => boolean) {
+  constructor(
+    initial: TmuxKittyIdentity,
+    env: NodeJS.ProcessEnv = process.env,
+    placeholderAllowed?: () => boolean,
+    placeholderDenied?: () => boolean,
+  ) {
     this.initial = initial
     this.env = env
     this.placeholderAllowed = placeholderAllowed
+    this.placeholderDenied = placeholderDenied
   }
 
   isAllowed(force = false): boolean {
+    // A denied U1 proof is permanent: the handle can never paint pixels, so
+    // do not spawn synchronous tmux queries on every later image render.
+    if (this.placeholderDenied?.() === true) return false
     if (!this.isIdentityAllowed(force)) return false
     // The U1 feature probe owns its own pending/probing/allowed/denied state.
     // Pending/denied is not an identity failure, but the identity probe above

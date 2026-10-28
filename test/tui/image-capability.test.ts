@@ -356,12 +356,48 @@ test('a client change during the pending U1 probe revokes before another client 
   }
 })
 
+test('a permanently denied U1 probe stops tmux CLI queries after the cache window', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'] })
+  const cli = createFakeTmuxCli(t)
+  const terminal = new RecordingTerminal()
+  try {
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    resetCapabilitiesCache()
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+    const graphics = createTmuxKittyGraphics(terminal, {}, tmuxPaneEnvironment(cli))
+    assert.ok(graphics)
+    graphics.terminal.start(() => {}, () => {})
+    const probeId = /a=q,i=(\d+)/.exec(terminal.text)?.[1]
+    assert.ok(probeId)
+    terminal.sendInput(`\x1b_Gi=${probeId};OK\x1b\\`)
+    await Promise.resolve()
+    assert.equal(graphics.canPaint(), false, 'base OK without e/U permanently denies the U1 proof')
+    const callsAfterDenial = cli.calls().length
+
+    t.mock.timers.tick(251)
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      assert.equal(graphics.canPaint(), false)
+      const image = graphics.image(
+        { pngBase64: PNG, widthPx: 64, heightPx: 64 },
+        { maxWidthCells: 20, maxHeightCells: 6, fallback: '[fallback]' },
+      )
+      assert.deepEqual(image.render(80), ['[fallback]'])
+    }
+    assert.equal(cli.calls().length, callsAfterDenial, 'a denied handle must not spawn later tmux queries')
+    graphics.dispose()
+  } finally {
+    cli.dispose()
+  }
+})
+
 test('the known Kitty and Ghostty client reports skip the feature query', (t) => {
   resetCapabilitiesCache()
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   for (const report of [
     'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\n',
+    'main\t/dev/pts/12\twork\txterm-256color\tkitty(0.41.1)\n',
     'main\t/dev/pts/12\twork\txterm-ghostty\tghostty 1.4.0\n',
+    'main\t/dev/pts/12\twork\txterm-256color\tghostty 1.4.0\n',
   ]) {
     const cli = createFakeTmuxCli(t)
     const terminal = new RecordingTerminal()
