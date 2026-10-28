@@ -23,17 +23,25 @@ import {
   type TerminalProgressState,
 } from '@xmoon76/pi-tui'
 import {
-  ZELLIJ_PROBE_ID,
   ZELLIJ_PROBE_TIMEOUT_MS,
-  ZELLIJ_PROBE_WIRE,
   candidateGhosttyZellij,
   createZellijKittyGraphics,
+  zellijProbeWire,
 } from '../../src/tui/graphics/zellij-image.ts'
 import { parseKittyApc } from '../../src/tui/graphics/kitty-native.ts'
 import type { KittyGraphics } from '../../src/tui/graphics/native-image.ts'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
-const PROBE_REPLY = `\x1b_Gi=${ZELLIJ_PROBE_ID};OK\x1b\\`
+
+function probeIdOf(terminal: RecordingTerminal): string {
+  const matches = [...terminal.text.matchAll(/a=q,i=(\d+)/g)]
+  assert.ok(matches.length > 0, 'the facade sent a probe query')
+  return matches.at(-1)![1]!
+}
+
+function probeReply(terminal: RecordingTerminal, payload = 'OK'): string {
+  return `\x1b_Gi=${probeIdOf(terminal)};${payload}\x1b\\`
+}
 
 /** A sink that records every byte the facade offered it and exposes its input handler. */
 class RecordingTerminal implements Terminal {
@@ -194,17 +202,18 @@ test('the real facade sends exactly one probe after start and only the matching 
   const input: string[] = []
   graphics.terminal.start((data) => input.push(data), () => {})
   assert.equal(terminal.writes.length, 1, 'one physical write')
-  assert.equal(terminal.writes[0], ZELLIJ_PROBE_WIRE, 'the exact official-shape a=q query')
+  const probeId = probeIdOf(terminal)
+  assert.equal(terminal.writes[0], zellijProbeWire(Number(probeId)), 'the exact official-shape a=q query')
   assert.equal((terminal.text.match(/a=q,/g) ?? []).length, 1, 'exactly one query')
   assert.equal(graphics.canPaint(), false, 'no pixels before the live answer')
 
-  terminal.sendInput(PROBE_REPLY)
+  terminal.sendInput(probeReply(terminal))
   assert.equal(graphics.canPaint(), true, 'the matching OK promotes')
   await Promise.resolve()
   assert.equal(allowed(), 1, 'the render callback fires exactly once')
   assert.deepEqual(input, [], 'the probe reply never reaches the editor')
 
-  terminal.sendInput(PROBE_REPLY)
+  terminal.sendInput(probeReply(terminal))
   await Promise.resolve()
   assert.equal(allowed(), 1, 'a duplicate OK never promotes twice')
   assert.deepEqual(input, [], 'a duplicate reply is still consumed')
@@ -216,7 +225,7 @@ test('the real facade sends exactly one probe after start and only the matching 
 test('the same facade transmits once, then re-places the same id without a second upload', () => {
   const { graphics, terminal } = admittedFactory()
   graphics.terminal.start(() => {}, () => {})
-  terminal.sendInput(PROBE_REPLY)
+  terminal.sendInput(probeReply(terminal))
   terminal.writes.length = 0
 
   const component = graphics.image(
@@ -249,7 +258,7 @@ test('a synchronous probe reply is handled after probing and timer installation'
   class SyncReplyTerminal extends RecordingTerminal {
     override write(data: string): void {
       super.write(data)
-      if (data.includes('a=q,')) this.sendInput(PROBE_REPLY)
+      if (data.includes('a=q,')) this.sendInput(`\x1b_Gi=${/a=q,i=(\d+)/.exec(data)?.[1]};OK\x1b\\`)
     }
   }
   const terminal = new SyncReplyTerminal()
@@ -266,7 +275,7 @@ test('a synchronous probe reply is handled after probing and timer installation'
 test('a stop between the live OK and the queued notification drops only that notification', async () => {
   const { graphics, terminal, allowed } = admittedFactory()
   graphics.terminal.start(() => {}, () => {})
-  terminal.sendInput(PROBE_REPLY)
+  terminal.sendInput(probeReply(terminal))
   graphics.terminal.stop()
   await Promise.resolve()
   assert.equal(graphics.canPaint(), true, 'the one-way admission survives a normal screen stop')
@@ -277,6 +286,28 @@ test('a stop between the live OK and the queued notification drops only that not
   assert.equal((terminal.text.match(/a=q,/g) ?? []).length, 1, 'restart never re-sends the query')
   assert.equal(allowed(), 0, 'no stale notification is replayed after restart')
   graphics.dispose()
+})
+
+test('a late OK from a previous graphics handle never promotes a new probing handle', async () => {
+  const terminal = new RecordingTerminal()
+  const first = createZellijKittyGraphics(terminal, {}, zellijEnvironment(), () => {})
+  assert.ok(first)
+  first.terminal.start(() => {}, () => {})
+  const firstProbeId = probeIdOf(terminal)
+  first.dispose()
+
+  const second = createZellijKittyGraphics(terminal, {}, zellijEnvironment(), () => {})
+  assert.ok(second)
+  second.terminal.start(() => {}, () => {})
+  const secondProbeId = probeIdOf(terminal)
+  assert.notEqual(firstProbeId, secondProbeId, 'each handle gets an independent probe id')
+  terminal.sendInput(`\x1b_Gi=${firstProbeId};OK\x1b\\`)
+  await Promise.resolve()
+  assert.equal(second.canPaint(), false, 'the previous handle’s late reply must not promote the new handle')
+  terminal.sendInput(`\x1b_Gi=${secondProbeId};OK\x1b\\`)
+  await Promise.resolve()
+  assert.equal(second.canPaint(), true, 'the new handle’s own reply promotes')
+  second.dispose()
 })
 
 test('a throwing probe write denies immediately and preserves the real failure', () => {
@@ -298,7 +329,7 @@ test('an unanswered probe is denied at the bounded window and a late OK never pr
   assert.equal(graphics.canPaint(), false)
   // The contract IS this bounded window: the probe may only wait 500 ms.
   await new Promise((resolve) => setTimeout(resolve, ZELLIJ_PROBE_TIMEOUT_MS + 60))
-  terminal.sendInput(PROBE_REPLY)
+  terminal.sendInput(probeReply(terminal))
   await Promise.resolve()
   assert.equal(graphics.canPaint(), false, 'the timeout permanent denial is never undone')
   assert.equal(allowed(), 0, 'a late reply never notifies the product')
@@ -306,16 +337,13 @@ test('an unanswered probe is denied at the bounded window and a late OK never pr
 })
 
 test('ENOTSUPPORTED and non-OK replies leave a permanent text fallback', async () => {
-  for (const reply of [
-    `\x1b_Gi=${ZELLIJ_PROBE_ID};ENOTSUPPORTED:disabled\x1b\\`,
-    `\x1b_Gi=${ZELLIJ_PROBE_ID};EINVAL:bad\x1b\\`,
-  ]) {
+  for (const payload of ['ENOTSUPPORTED:disabled', 'EINVAL:bad']) {
     const { graphics, terminal, allowed } = admittedFactory()
     graphics.terminal.start(() => {}, () => {})
-    terminal.sendInput(reply)
+    terminal.sendInput(probeReply(terminal, payload))
     await Promise.resolve()
-    assert.equal(graphics.canPaint(), false, reply)
-    terminal.sendInput(PROBE_REPLY)
+    assert.equal(graphics.canPaint(), false, payload)
+    terminal.sendInput(probeReply(terminal))
     await Promise.resolve()
     assert.equal(graphics.canPaint(), false, 'denied is one-way')
     assert.equal(allowed(), 0)
@@ -333,7 +361,7 @@ test('stop/start never sends a second query and dispose before the reply never p
 
   graphics.dispose()
   graphics.dispose()
-  terminal.sendInput(PROBE_REPLY)
+  terminal.sendInput(probeReply(terminal))
   await Promise.resolve()
   assert.equal(graphics.canPaint(), false, 'a disposed admission never promotes')
   assert.equal(allowed(), 0, 'no callback after dispose')
@@ -345,7 +373,8 @@ test('StdinBuffer rebuilds the split probe reply into one complete consumed sequ
   graphics.terminal.start((data) => input.push(data), () => {})
   const buffer = new StdinBuffer()
   buffer.on('data', (sequence) => terminal.sendInput(sequence))
-  for (const chunk of ['\x1b', '_G', 'i=', String(ZELLIJ_PROBE_ID), ';OK', '\x1b\\']) {
+  const probeId = probeIdOf(terminal)
+  for (const chunk of ['\x1b', '_G', 'i=', probeId, ';OK', '\x1b\\']) {
     buffer.process(chunk)
   }
   assert.equal(graphics.canPaint(), true, 'the real stdin framing completes the reply')

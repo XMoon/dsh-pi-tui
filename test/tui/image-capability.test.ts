@@ -154,7 +154,9 @@ test('a Zellij pane stays text-only without an admitted handle and becomes kitty
   assert.ok(graphics, 'the candidate factory exists before its live answer')
   assert.equal(effectiveImageProtocol(graphics), null, 'probing is text-only')
   graphics.terminal.start(() => {}, () => {})
-  terminal.sendInput('\x1b_Gi=2147483647;OK\x1b\\')
+  const probeId = /a=q,i=(\d+)/.exec(terminal.text)?.[1]
+  assert.ok(probeId)
+  terminal.sendInput(`\x1b_Gi=${probeId};OK\x1b\\`)
   assert.equal(effectiveImageProtocol(graphics), 'kitty', 'the one-way live OK admits the same Native handle')
   graphics.dispose()
 })

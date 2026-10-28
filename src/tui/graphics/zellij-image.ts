@@ -17,6 +17,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/graphics/zellij-image
  */
 
+import { randomInt } from 'node:crypto'
 import { getCapabilities, type Terminal } from '@xmoon76/pi-tui'
 import {
   KittyGraphicsCore,
@@ -31,11 +32,19 @@ import {
   type NativeKittyImageOptions,
 } from './native-image.ts'
 
-/** The single probe id; fixed so a stale reply can never be adopted. */
-export const ZELLIJ_PROBE_ID = 2147483647
-/** The ONE live-pane query: `a=q` stores no image and moves no cursor. */
-export const ZELLIJ_PROBE_WIRE =
-  `\x1b_Ga=q,i=${ZELLIJ_PROBE_ID},s=1,v=1,t=d,f=24;AAAA${KITTY_APC_TERMINATOR}`
+/** The high-half range reserved for per-admission probe ids (Core ids stay below). */
+const ZELLIJ_PROBE_ID_MIN = 0x80000000
+const ZELLIJ_PROBE_ID_MAX = 0xffffffff
+
+/** Create a fresh, unpredictable probe id for ONE graphics handle. */
+export function createZellijProbeId(): number {
+  return randomInt(ZELLIJ_PROBE_ID_MIN, ZELLIJ_PROBE_ID_MAX)
+}
+
+/** Encode the ONE live-pane query: `a=q` stores no image and moves no cursor. */
+export function zellijProbeWire(probeId: number): string {
+  return `\x1b_Ga=q,i=${probeId},s=1,v=1,t=d,f=24;AAAA${KITTY_APC_TERMINATOR}`
+}
 /** The bounded wait after which an unanswered probe is denied for this lifetime. */
 export const ZELLIJ_PROBE_TIMEOUT_MS = 500
 
@@ -75,14 +84,26 @@ type ZellijAdmissionState = 'pending' | 'probing' | 'allowed' | 'denied'
  */
 export class ZellijKittyAdmission {
   private readonly onAllowed: (() => void) | undefined
+  private readonly probeIdValue: number
   private state: ZellijAdmissionState = 'pending'
   private timer: NodeJS.Timeout | undefined
   private disposed = false
   /** Whether the facade currently has a real input listener installed. */
   private inputActive = false
 
-  constructor(onAllowed?: () => void) {
+  constructor(onAllowed?: () => void, probeId: number = createZellijProbeId()) {
     this.onAllowed = onAllowed
+    this.probeIdValue = probeId
+  }
+
+  /** The one unpredictable id this handle owns. */
+  get probeId(): number {
+    return this.probeIdValue
+  }
+
+  /** The exact query this handle must send once. */
+  get probeWire(): string {
+    return zellijProbeWire(this.probeIdValue)
   }
 
   /** Whether this pane's live query was answered with `OK`. */
@@ -140,7 +161,7 @@ export class ZellijKittyAdmission {
   consume(data: string): boolean {
     if (!data.startsWith(KITTY_APC_INTRODUCER) || !data.endsWith(KITTY_APC_TERMINATOR)) return false
     const command = parseKittyApc(data)
-    if (command === undefined || command.controls.i !== String(ZELLIJ_PROBE_ID)) return false
+    if (command === undefined || command.controls.i !== String(this.probeIdValue)) return false
     if (this.state === 'probing' && !this.disposed) {
       this.clearTimer()
       if (command.payload === 'OK') {
@@ -186,7 +207,7 @@ export class ZellijKittyTerminal extends KittyTerminalFacade {
       if (this.zellijAdmission.consume(data)) return
       onInput(data)
     }, onResize)
-    this.zellijAdmission.start(() => this.write(ZELLIJ_PROBE_WIRE))
+    this.zellijAdmission.start(() => this.write(this.zellijAdmission.probeWire))
   }
 
   override stop(): void {
