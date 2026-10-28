@@ -121,16 +121,20 @@ export class TmuxKittyFeatureProbe {
    * A reply for any other id (or any other input) returns `false` and flows to
    * the screen untouched. A matching-id reply is always consumed so it cannot
    * surface as editor input, but it only promotes while probing and only with
-   * the exact `e=T,U=1;OK` feature result. A late reply after allowed/denied or
-   * dispose never changes the one-way state.
+   * the exact `e=T,U=1;OK` feature result. `canCommit` is the live identity
+   * check: a reply observed after the bound client changed must deny instead of
+   * promoting, even if the terminal that sent it supports the feature. A late
+   * reply after allowed/denied or dispose never changes the one-way state.
    */
-  consume(data: string): boolean {
+  consume(data: string, canCommit?: () => boolean): boolean {
     if (!data.startsWith(KITTY_APC_INTRODUCER) || !data.endsWith(KITTY_APC_TERMINATOR)) return false
     const command = parseKittyApc(data)
     if (command === undefined || command.controls.i !== String(this.probeIdValue)) return false
     if (this.state === 'probing' && !this.disposed) {
       this.clearTimer()
-      if (command.controls.e === 'T' && command.controls.U === '1' && command.payload === 'OK') {
+      if (canCommit !== undefined && !canCommit()) {
+        this.state = 'denied'
+      } else if (command.controls.e === 'T' && command.controls.U === '1' && command.payload === 'OK') {
         this.state = 'allowed'
         this.onAllowed?.()
       } else {

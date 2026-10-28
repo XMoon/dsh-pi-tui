@@ -331,6 +331,31 @@ test('a disposed U1 handle never notifies the product from a late feature reply'
   }
 })
 
+test('a client change during the pending U1 probe revokes before another client can authorize', async (t) => {
+  const cli = createFakeTmuxCli(t)
+  const terminal = new RecordingTerminal()
+  try {
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    resetCapabilitiesCache()
+    setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+    const graphics = createTmuxKittyGraphics(terminal, {}, tmuxPaneEnvironment(cli))
+    assert.ok(graphics)
+    graphics.terminal.start(() => {}, () => {})
+    const probeId = /a=q,i=(\d+),e=T,U=1/.exec(terminal.text)?.[1]
+    assert.ok(probeId)
+
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/99\twork\txterm-256color\twezterm 20240203\n' })
+    terminal.sendInput(`\x1b_Gi=${probeId},e=T,U=1;OK\x1b\\`)
+    await Promise.resolve()
+    assert.equal(graphics.canPaint(), false, 'the other client’s feature reply never promotes the original identity')
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+    assert.equal(graphics.canPaint(), false, 'the identity revoke is one-way even after the original client returns')
+    graphics.dispose()
+  } finally {
+    cli.dispose()
+  }
+})
+
 test('the known Kitty and Ghostty client reports skip the feature query', (t) => {
   resetCapabilitiesCache()
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
@@ -376,6 +401,11 @@ test('PI_TUI_TMUX_KITTY_PLACEHOLDERS=1 replaces only the U1 proof and never bypa
     cli.env.PI_IMAGE_PROTOCOL = 'none'
     assert.equal(createTmuxKittyGraphics(new RecordingTerminal(), {}, tmuxPaneEnvironment(cli)), undefined,
       'the assertion cannot bypass PI_IMAGE_PROTOCOL=none')
+
+    delete cli.env.PI_IMAGE_PROTOCOL
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\ttmux-256color\t\n' })
+    assert.equal(createTmuxKittyGraphics(new RecordingTerminal(), {}, tmuxPaneEnvironment(cli)), undefined,
+      'the assertion cannot bypass a nested tmux/screen transport')
   } finally {
     cli.dispose()
   }
