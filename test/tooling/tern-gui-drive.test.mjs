@@ -233,17 +233,35 @@ function runDriver(fake, extraEnv = {}, dir) {
 }
 
 /**
- * Register the test's OWN teardown for the helpers THIS fixture recorded.
+ * Register the test's OWN teardown for THIS fixture: stop the helpers it
+ * recorded, then remove the private daemon socket directories they used.
  *
  * The fake daemon/window are long-lived by contract, so a case that fails
  * before the driver's own teardown must still stop them. The records are read
  * at cleanup time and carry PID + start time, so only the helper that really
- * ran is signalled. Registration happens before any spawn or assertion: a
- * failed assertion must never be the reason a long-lived process survives.
+ * ran is signalled. The ORDER is part of the contract: a possibly-live helper
+ * must never have its socket directory removed underneath it, so the kill
+ * happens first and the directory removal last. Registering here — before any
+ * spawn or assertion — also covers a failure before the run wrote its records
+ * (then there is simply nothing to clean).
  */
 function deferHelperCleanup(life, dir) {
   const pidsFile = joinPath(dir, 'pids.log')
-  life.defer(() => { killStillExecuting(readPidRecords(pidsFile)) })
+  const socketsFile = joinPath(dir, 'daemon-sockets.log')
+  life.defer(async () => {
+    const records = readPidRecords(pidsFile)
+    killStillExecuting(records)
+    // A stop request is not termination evidence: confirm the recorded helpers
+    // no longer execute before deleting a directory one of them may still use.
+    const survivors = await waitForNoExecuting(records, 5_000)
+    if (survivors.length > 0) {
+      throw new Error(`the test-owned helper cleanup left ${JSON.stringify(survivors)} executing; keeping the daemon socket directories`)
+    }
+    const sockets = existsSync(socketsFile)
+      ? readFileSync(socketsFile, 'utf8').trim().split('\n').filter(Boolean)
+      : []
+    for (const socket of sockets) rmSync(dirname(socket), { recursive: true, force: true })
+  })
 }
 
 test('the GUI driver isolates the window from the user\'s real Tern profile', (t) => {
@@ -685,7 +703,6 @@ test('a helper that never reaches close is reported and its socket directory is 
   life.defer(() => killStillExecuting([{ kind: 'holder', pid: holderPid, startTime: startTimeOf(holderPid) }]))
   const socket = readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim()
   const daemonDir = dirname(socket)
-  life.defer(() => rmSync(daemonDir, { recursive: true, force: true }))
 
   // The run is a RED run, not a clean one: the teardown could not be proved.
   assert.equal(result.status, 1, result.stdout + result.stderr)
@@ -729,7 +746,6 @@ test('an exit path the driver does not own keeps a socket directory it cannot pr
   assert.equal(sockets.length, 1, `the exit run started one private daemon: ${JSON.stringify(sockets)}`)
   assert.match(sockets[0], /tern-gui-daemon-/, 'the socket lives in the atomically unique daemon directory')
   const daemonDir = dirname(sockets[0])
-  life.defer(() => rmSync(daemonDir, { recursive: true, force: true }))
   assert.equal(existsSync(daemonDir), true, 'an unproven teardown keeps the socket directory')
   assert.match(readFileSync(joinPath(out, 'run.log'), 'utf8'), /TEARDOWN-UNPROVEN keeping socket dir/u)
 })
