@@ -612,12 +612,12 @@ jobs:
             --wall-clock-seconds "$((end - start))" \
             --out diagnostics/runner-spec.json
 
-      # TEMPORARY PROBE — NEVER MERGE. Negative control: shard 2 fails on
-      # attempts 1 AND 2, so a retry that does not recover must stay red and
-      # must never produce the qualified tarball. It runs AFTER the shard's
-      # records exist, so the failed artifact carries real attempt-1 evidence.
-      - name: PROBE fail shard 2 on attempts 1 and 2
-        if: ${{ matrix.shard == 2 && github.run_attempt <= 2 }}
+      # TEMPORARY PROBE — NEVER MERGE. Positive recovery: shard 2 fails only
+      # on attempt 1 of this run, so `gh run rerun --failed` must recover it on
+      # attempt 2. It runs AFTER the shard's records exist, so the failed
+      # artifact carries real attempt-1 evidence that must be replaced.
+      - name: PROBE fail shard 2 on attempt 1 only
+        if: ${{ matrix.shard == 2 && github.run_attempt == 1 }}
         run: |
           echo "probe: deterministic shard 2 failure on attempt ${{ github.run_attempt }}" >&2
           exit 1
