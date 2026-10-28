@@ -11,10 +11,12 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { isExecuting, killStillExecuting, startTimeOf, waitForNoExecuting } from '../support/pid-records.ts'
+import {
+  isExecuting, killStillExecuting, readPidRecords, startTimeOf, waitForNoExecuting,
+} from '../support/pid-records.ts'
 import { waitForFileLine } from '../support/wait-for-file.ts'
 import { buildSpawnPlan } from '../../scripts/run-with-temp-root.mjs'
 
@@ -23,6 +25,115 @@ const HOLDER = fileURLToPath(new URL('../fixtures/signal-tree/holder.mjs', impor
 const LINGERING_HOLDER = fileURLToPath(new URL('../fixtures/signal-tree/lingering-holder.mjs', import.meta.url))
 const EXIT_ZERO_HOLDER = fileURLToPath(new URL('../fixtures/signal-tree/exit-zero-on-signal.mjs', import.meta.url))
 const POSIX_ONLY = process.platform === 'win32' ? 'signal forwarding to a process group is POSIX-only' : false
+
+/** Whether `promise` settles within `deadlineMs`; the timer never outlives the wait. */
+async function settlesWithin(promise, deadlineMs) {
+  let timer
+  const timedOut = new Promise((resolve) => { timer = setTimeout(() => resolve(false), deadlineMs) })
+  const result = await Promise.race([promise.then(() => true), timedOut])
+  clearTimeout(timer)
+  return result
+}
+
+/**
+ * The exact disposable TMPDIR this run's own startup marker names, or undefined
+ * while the marker has no `tmpdir=` line. Only the wrapper's own root prefix is
+ * accepted, so cleanup never removes an arbitrary path.
+ */
+function recordedTmpRoot(marker) {
+  let content
+  try { content = readFileSync(marker, 'utf8') } catch { return undefined }
+  const line = content.split('\n').find((entry) => entry.includes(' tmpdir='))
+  if (line === undefined) return undefined
+  const root = line.slice(line.lastIndexOf(' tmpdir=') + ' tmpdir='.length).trim()
+  if (root === '') return undefined
+  if (!basename(root).startsWith('dsh-pi-tui-test-run-')) {
+    throw new Error(`this run's recorded TMPDIR is not the wrapper's own root: ${root}`)
+  }
+  return root
+}
+
+/**
+ * The descendant PID this run's own startup marker ANNOUNCED, if any. The
+ * fixture writes the bare announcement immediately after spawning the
+ * descendant and BEFORE the descendant publishes its own identity record.
+ */
+function announcedDescendant(marker) {
+  if (!existsSync(marker)) return undefined
+  const match = /^descendant (\d+)$/mu.exec(readFileSync(marker, 'utf8'))
+  return match === null ? undefined : Number(match[1])
+}
+
+/**
+ * Register the test's OWN teardown for one wrapper case BEFORE its first wait.
+ *
+ * A still-running wrapper first receives the NORMAL interruption, so only its
+ * production signal path may settle the owned group and release the root. The
+ * recorded close observer is attached at spawn; when it does not settle within
+ * the bound, only the recorded DIRECT child may be SIGKILLed — the numeric PGID
+ * is never signalled without the production module's ownership proof. The
+ * descendants the fixture recorded in `pids.log` are then stopped by their own
+ * identity and observed.
+ *
+ * An EMPTY record is not proof that nothing started: an announced descendant
+ * whose self-record has not been published yet is awaited, and an unprovable
+ * spawn window (`descendantFixture` with a non-empty marker but no descendant
+ * announcement) fails loudly. The disposable TMPDIR is removed only when the
+ * cleanup has no open problem and no recorded survivor.
+ */
+function deferWrapperCleanup(life, { child, closed, marker, descendantFixture = false }) {
+  life.defer(async () => {
+    const problems = []
+    // reason: the bound covers the production group grace + settle (2 s + 2 s)
+    // plus scheduling margin; the close observer itself is attached at spawn.
+    try { child.kill('SIGTERM') } catch { /* already gone */ }
+    if (!await settlesWithin(closed, 10_000)) {
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+      problems.push(`the wrapper did not reach close before the test-owned cleanup deadline (pid=${child.pid ?? 'not-spawned'})`)
+    }
+    const pidsFile = join(dirname(marker), 'pids.log')
+    const markerText = existsSync(marker) ? readFileSync(marker, 'utf8') : ''
+    const announced = announcedDescendant(marker)
+    let records = readPidRecords(pidsFile)
+    if (announced !== undefined
+      && !records.some((record) => record.kind === 'descendant' && record.pid === announced)) {
+      // The fixture announced a descendant whose identity is not published yet:
+      // wait for THAT record (the file content is the authority), then stop it.
+      try {
+        await waitForFileLine(pidsFile, new RegExp(`^descendant ${announced} \\S+$`, 'u'), 10_000)
+      } catch (error) {
+        problems.push(`the announced descendant ${announced} never published its identity: ${error.message}`)
+      }
+      records = readPidRecords(pidsFile)
+    } else if (descendantFixture && announced === undefined && markerText !== '') {
+      // The marker proves the fixture STARTED, but no descendant was announced:
+      // the launcher may have been stopped inside the spawn -> announcement
+      // window. A descendant that DID start publishes its own identity record;
+      // wait for that (file content is the authority) and stop it. When no
+      // identity ever arrives the state is unprovable and fails loudly — never
+      // a guessed PID/PGID.
+      try {
+        await waitForFileLine(pidsFile, /^descendant \d+ \S+$/u, 10_000)
+      } catch (error) {
+        problems.push(`the fixture started but no descendant identity was published: ${error.message}`)
+      }
+      records = readPidRecords(pidsFile)
+    }
+    killStillExecuting(records)
+    const survivors = await waitForNoExecuting(records, 5_000)
+    if (survivors.length > 0) {
+      problems.push(`the test-owned wrapper cleanup left recorded descendants executing: ${JSON.stringify(survivors)}`)
+    }
+    // The root WAS a live descendant's TMPDIR: remove it only once every recorded
+    // identity is observed stopped, for this run's own path, and with no open
+    // cleanup problem (a timed-out wrapper may still be using it).
+    const root = recordedTmpRoot(marker)
+    if (root !== undefined && survivors.length === 0 && problems.length === 0) {
+      rmSync(root, { recursive: true, force: true })
+    }
+    if (problems.length > 0) throw new Error(problems.join('; '))
+  })
+}
 
 function run(args, options = {}) {
   return spawnSync(process.execPath, [RUNNER, ...args], { encoding: 'utf8', ...options })
@@ -62,16 +173,18 @@ async function assertSignalReachesDescendant(t, signal) {
     env: { ...process.env, PROBE_MARKER: marker, DSH_TEST_KEEP_TMP: undefined },
     stdio: 'ignore',
   })
-  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
-  // The test's OWN cleanup runs in `t.after`, i.e. only AFTER its assertions:
-  // it must never stop the tree first and then claim the runner did.
-  life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+  const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })))
+  const closed = new Promise((resolve) => child.once('close', resolve))
+  // The test's OWN cleanup runs in `t.after`, i.e. only AFTER its assertions;
+  // it is registered before the readiness wait so an early failure still stops
+  // what this run started. The holder fixture spawns a descendant, so an
+  // ambiguous spawn window must fail rather than pass as "nothing started".
+  deferWrapperCleanup(life, { child, closed, marker, descendantFixture: true })
 
   const ready = await waitForFileLine(marker, /ready tmpdir=/u, 20_000)
   const [, rawPid, , tmpdirField] = ready.split(' ')
   const descendant = { kind: 'descendant', pid: Number(rawPid), startTime: startTimeOf(Number(rawPid)) }
   const tmpRoot = tmpdirField.slice('tmpdir='.length)
-  life.defer(() => { killStillExecuting([descendant]) })
 
   child.kill(signal)
   const result = await exited
@@ -111,13 +224,13 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
     })
     let stderr = ''
     child.stderr.on('data', (chunk) => { stderr += String(chunk) })
-    const exited = new Promise((resolve) => child.on('exit', (code, exitSignal) => resolve({ code, signal: exitSignal })))
-    life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+    const exited = new Promise((resolve) => child.once('exit', (code, exitSignal) => resolve({ code, signal: exitSignal })))
+    const closed = new Promise((resolve) => child.once('close', resolve))
+    deferWrapperCleanup(life, { child, closed, marker })
 
     const ready = await waitForFileLine(marker, /ready tmpdir=/u, 20_000)
     const [, , tmpdirField] = ready.split(' ')
     const tmpRoot = tmpdirField.slice('tmpdir='.length)
-    life.defer(() => { rmSync(tmpRoot, { recursive: true, force: true }) })
 
     child.kill(signal)
     const result = await exited
@@ -142,15 +255,16 @@ test('a direct child that exits normally leaves the root to a live descendant', 
   })
   let stderr = ''
   child.stderr.on('data', (chunk) => { stderr += String(chunk) })
-  const exited = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
-  life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+  const exited = new Promise((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })))
+  const closed = new Promise((resolve) => child.once('close', resolve))
+  // The lingering holder SPAWNS a descendant: an ambiguous spawn window fails
+  // loudly instead of being reported as "nothing started".
+  deferWrapperCleanup(life, { child, closed, marker, descendantFixture: true })
 
   const ready = await waitForFileLine(marker, /ready tmpdir=/u, 20_000)
   const [, rawPid, , tmpdirField] = ready.split(' ')
   const descendant = { kind: 'descendant', pid: Number(rawPid), startTime: startTimeOf(Number(rawPid)) }
   const tmpRoot = tmpdirField.slice('tmpdir='.length)
-  life.defer(() => { killStillExecuting([descendant]) })
-  life.defer(() => { rmSync(tmpRoot, { recursive: true, force: true }) })
 
   const result = await exited
   // The child SUCCEEDED, but the wrapper cannot prove its group is gone: that
