@@ -41,7 +41,7 @@ dsh --profile pi-tui
 > `0.5.2-rc.1` (peer floor `>=0.2.0-rc.2`, and npm semver excludes a
 > different-major.minor.patch prerelease). Use the pairing table below and
 > [compatibility guide](docs/guides/dsh-compatibility.md) for the matching rules; the
-> stable `0.5.3` publishes to `@latest`, not `@next`, so no installable compatible
+> stable `0.5.4` publishes to `@latest`, not `@next`, so no installable compatible
 > combination exists on those two moving channels. Validate this exact checkout
 > with `pnpm compat:dsh:npm`.
 
@@ -64,27 +64,25 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.3` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Current published stable line; the peer floor stays 0.2.1-rc.2, and this checkout's exact validation target is 0.2.1-rc.4 (the published 0.5.3 passes the official preset assembly on it) |
+| `0.5.4` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Current stable line; the minimum DSH version is 0.2.1-rc.2, and this checkout's exact validation target is 0.2.1-rc.4 |
+| `0.5.3` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.1` (stable, previous) | `dsh-v0.2.0-rc.2` | Previous stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
 | `0.5.2-rc.1` (published next-channel preview) | `dsh-v0.2.0-rc.2` | Previous next preview: published to the npm `next` dist-tag on 2026-10-17; its whole peer floor stays `>=0.2.0-rc.2`, so it does not cover 0.2.1-rc.2 |
-| `dsh-v0.2.1-rc.1` (no paired TUI) | none | No released TUI in this matrix claims that intermediate release; never reuse `0.5.3` for it |
+| `dsh-v0.2.1-rc.1` (no paired TUI) | none | No released TUI in this matrix claims that intermediate release; never reuse `0.5.4` for it |
 | `0.5.0` (stable, previous) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Previous stable; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
 | `0.4.9` (stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable; the compatible TUI for a 0.1.7-rc.2 runtime |
 | `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. `0.5.3` is the current
-published stable release: its minimum DSH version (peer floor) stays the
-`0.2.1-rc.2` family. The unmodified npm `@xmoon76/dsh-pi-tui@0.5.3` package
-passes the official preset assembly against `@deepseek-ai/dsh@0.2.1-rc.4`,
-after the earlier `dsh-v0.2.1-rc.3` pairing. This checkout's exact validation
-target is `0.2.1-rc.4`, which does not change the published `0.5.3` identity
-or its floor and requires no new TUI release. The intermediate
+Do not mix the stable and `@next` prerelease lines. `0.5.4` is the current
+stable release: its minimum DSH version (peer floor) stays the `0.2.1-rc.2`
+family, and this checkout's exact validation target is `0.2.1-rc.4`. The
+published `0.5.3` is the previous stable line and also pairs with `0.2.1-rc.2`,
+`0.2.1-rc.3` and `0.2.1-rc.4`. The intermediate
 `dsh-v0.2.1-rc.1` has no paired TUI, and `0.5.2-rc.1` is the previous preview
 published to the npm `next` channel (its pairing, 0.2.0-rc.2, stays in the table
-above; it does not cover 0.2.1-rc.2, which is why the new stable line uses the
-`0.5.3` identity). The previous stable
+above; it does not cover 0.2.1-rc.2). The previous stable
 `0.5.1` keeps pairing with 0.2.0-rc.2: it lifts the whole DSH peer floor to
 `>=0.2.0-rc.2` (the Question lifecycle consumes contracts published only in
 that rc.2 family). The previous stable `0.5.0`
@@ -143,7 +141,12 @@ dsh --profile pi-tui --session <session-id>
 * Full-text Transcript search
 * Folding for long Session history
 * Context, token, model, and runtime status
+* Full-screen Settings workspace: About status, Models / Account, Agent and dynamic Extensions
 * Approval and `ask_user_question` dialogs
+* Images: terminal-capability admission, JPEG/WebP previews, draft images and a read-only viewer
+* Chart/SVG tools, `present_visual` publication and inline final-answer rendering
+* Delivered-files tail and the `/deliverables` browser
+* Experimental TSP renderer: native tool cards, Work Hub, images and published figures
 * Plan Review
 * Todo / Goal status
 * Human-readable terminal window titles
@@ -152,6 +155,8 @@ dsh --profile pi-tui --session <session-id>
 * No duplicate ghost Tool Cards after compaction / pruning
 
 `Ctrl+O` controls Tool and System details and expands/collapses long user prompts in regular mode and in fullscreen outside Focus — in fullscreen Focus it bulk-expands the recent Thought roots or collapses them all, while long user prompts are expanded by clicking the marker (or by a search hit) and collapsed with `Ctrl+O`. `Alt+T` controls Thinking separately.
+
+Tool approvals appear in the editor seat: the full Reason/Arguments body is readable in a scrollable area (no six-line preview), with `y` to allow once, `n` to reject, `Esc`/`Ctrl+C` to cancel, `c` to copy the raw arguments and `e` to expand. Fullscreen can click the actually painted Allow once / Reject / Cancel actions and wheel the body; regular mode stays keyboard-only. Short viewports show the real compact payload or `Resize to inspect more`, never a cropped decision.
 
 ### Conversation display
 
@@ -309,6 +314,24 @@ provider/model per call (bounded by the allowlist). The setting is sampled at
 session composition and never rewrites the tools of an already-running
 session.
 
+### Delivered files and `/deliverables`
+
+A final answer's `present` files render as a compact tail: at most four files,
+two rows each (path relative to the current display subject's workspace plus
+description), with `+N more · /deliverables` beyond four. On a fullscreen
+AltScreen, Full, Compact and Focus can click `Browse all` and per-file
+`Details`; a regular split keeps only the command entry.
+
+`/deliverables` opens the delivery panel for the currently displayed session
+(including a viewed child) with Files / Turns / Details: `↑↓` selects, `Enter`
+opens details, `/` filters by filename, full Host path and description, `T`
+switches among Turns with deliveries, `C` copies the raw Host path and `Esc`
+goes back or closes. `Enter Preview` on Details reads one 120-line page of UTF-8
+Host text; binary/document suffixes show that preview is unavailable without
+reading bytes; a file that changes between pages restarts from the beginning.
+Panel text is mouse-selectable, the panel is centered, and a terminal resize
+keeps the current page, filter, cursor and scroll position.
+
 ### Shell
 
 The editor supports two Shell modes:
@@ -386,6 +409,8 @@ Common entry points:
 /model
 /settings
 /status
+/deliverables
+/view-image
 /login
 /permission
 /plan
@@ -395,286 +420,67 @@ Common entry points:
 /statusline
 ```
 
-Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics. `/model` candidates come only from the Host catalog: rc.2's `deepseek-flash` is identified by the exact `(provider, model)` pair (the display name `DeepSeek-V4.1-Flash` is never the ID), and a selection writes the official Session/global default. A deployment catalog that no longer offers the ID shows no invented row.
+Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics. `/model` candidates come only from the Host catalog: `deepseek-flash` is identified by the exact `(provider, model)` pair (the display name `DeepSeek-V4.1-Flash` is never the ID), and a selection writes the official Session/global default. A deployment catalog that no longer offers the ID shows no invented row.
 
-`/settings` opens a real full-screen workspace where the three-, two- and
-single-column layouts are projections of the SAME `categories → rows → detail`
-levels: wide terminals show all three columns, medium ones show
-`categories + rows` or `rows + details` for the current level, and narrow ones
-show only the current level. At every width ASCII `Right` advances exactly one
-level and `Left` returns one level (inert at L0); `Enter` follows the same
-transitions, and `Esc`/`Backspace` step back, closing at the outermost level.
-`Tab`/`Shift+Tab` remain inert. The Action Bar stays pinned to the last physical
-row. Multi-column choosing retains the active `[Details]` marker unless that
-heading would consume the only content row. It presents the real Appearance /
-Display facts: the theme's source-qualified raw value plus its friendly name,
-Icon style, the live Transcript display preset alongside the persisted preference,
-the live Thinking detail state, and each row's configuration Scope and backend
-readiness. `R`
-re-reads. Browsing and choosing never write configuration. The ordinary
-configuration detail is view-only: it offers no copy action and no replacement
-copy entry. About's `c`/`C` copy About's own facts (runtime, Session identity,
-statistics, performance and Context) and never a configuration field.
+`/settings` and `/status` open the same full-screen settings workspace on the
+About home. Wide and medium terminals show a category rail plus the content
+column; narrow terminals (under 76 columns) show About directly. The fixed
+categories are About / Models / Account / Agent / Appearance / Conversation /
+Input & Terminal / Tools / Plugins, with Extensions appended only while the
+extension settings registry has rows. `Tab`/`Shift+Tab` move focus between
+regions, `Right`/`Enter` go one level deeper, `Left`/`Esc`/`Backspace` step
+back, and the outermost back closes the workspace; the Action Bar stays on the
+last row.
 
-About's copy actions live on the keyboard: with a fact selected, `c` copies that
-fact's exact raw value (the Action Bar advertises `c copy fact` only while the
-fact is really painted), and `C` copies the whole About report to the clipboard.
-The body carries at most one `Copy All [C]`; facts no longer get a `Copy [C]`
-button and clicking an ordinary fact never copies. `Shift+C` works from the
-category rail too. A copy still only proves the bytes were emitted to the local
-clipboard delivery path, and never writes configuration.
+About shows the TUI/DSH versions, backend, captured session identity,
+whole-session statistics, TTFB/throughput and Context occupancy; `c` copies the
+selected fact's raw value, `C` copies the full report and `r` refreshes. The old
+`/status` page is gone; extension diagnostics moved to
+`Settings → Plugins → Diagnostics` (`d`).
 
-`/status` is a real alias of `/settings`: the same handler, the same initial
-About focus and the same reads; neither creates a session or reads statistics
-while sessionless. `/footer` and its `/statusline` alias open the SAME full-screen Settings
-workspace at Appearance → Configure footer layout; bare `/keybindings` likewise
-opens Input & Terminal → Keyboard shortcuts. Both pages share the one Settings
-lease, the one physical Action Bar and the existing Footer / Keybinding write
-authorities — no second overlay is mounted. Closing either editor returns
-straight to the owning row's Rows list (no intermediate Detail panel), so the
-next back key reaches the category rail. On each page's root state (the
-Footer row selector, the Keyboard list with an empty query) `←` goes back like
-`Esc` and the bar says `← Back`; a dirty Footer asks Save/Discard/Keep first,
-`←` still switches zones inside the row editor, and a non-empty search query
-still keeps `←` as cursor movement. The Settings categories are the fixed `About / Models / Account / Agent /
-Appearance / Conversation / Input & Terminal / Tools / Plugins`, and `Extensions` is appended only
-while the extension settings registry really has rows; `/settings` (and `/status`) land on About.
-Adding, removing or same-id re-registering an extension row revokes the previous frame's keyboard
-and pointer grants first, and only `Esc` can still return safely until that frame repaints.
+Models lists the Host provider catalog, API-key presence (not a connectivity
+test), provider details, masked input and clear confirmations, the Add Provider
+wizard and provider-native sign-in; the home lists only configured providers,
+with unconfigured ones in the Add Provider catalog. Account shows sign-in state,
+the browser authorization URL, SSH tunnel guidance, independent wallets, exact
+attempt cancellation, refresh and a confirmed sign-out. `/login` and `/logout`
+open the matching page deep link. DeepSeek Account sign-in uses the official Host
+`host-webserver` loopback `/oauth/callback` on `127.0.0.1:0`; the TUI never
+receives a token or grant, and `--help` opens no port.
 
-`Extensions` is a real configuration category rather than a transition entry: its Rows project the
-live settings of ONE registering owner at a time. Groups follow each owner's first appearance in
-the registry's global `order ASC, id ASC` stream, and each group keeps that registry order. With two
-or more groups `Tab` / `Shift+Tab` cycle the groups (landing on the target group's first row), while
-`↑`/`↓`, Home/End, paging and the wheel stay inside the group; a single group keeps the root region
-keys. The header states `[i/N]` before the group label, so a narrow frame truncates the name rather
-than the position, and the Rows pane header degrades `Rows (m) · label` → `Rows (m) · i/N` →
-`Rows (m)` by width. Each row opens the native Detail/Choice: Owner and ID are shown raw, a
-registration with no selectable values is read-only, and a current value outside the choices is
-reported instead of auto-selected. Only an explicit Confirm calls
-`SettingsRegistry.applyDetailed`; an accepted change is `Verified` only after the live readback
-agrees, a plugin refusal paints `Not saved` and records health only for the INVOKING owner, and a
-superseded or unloaded registration is reported as such instead of being faked into a plugin
-refusal. Extension settings are runtime-only: they never write the TUI settings document or a Host
-profile. A same-id HMR re-registration discards old confirmations, retries and settlements. `Models` is an in-place page: it lists
-the Host provider directory, whether an API key is configured (presence only, never a
-connection test) and the DeepSeek Account entry; it exposes provider facts, a masked API-key
-editor, the Add Provider draft wizard, and provider-native sign-in with a persistent notice,
-prompts and cancel. `Account` is the independent DeepSeek Account page: it shows the Host state,
-the browser authorization URL and SSH tunnel guidance, and independent Profile / recharge-wallet
-/ bonus-wallet outcomes (a failure is never shown as a zero balance); it can cancel the exact
-attempt, refresh, and sign out after an explicit confirmation. Closing the page does not cancel
-an already-started browser sign-in. `/login` and `/logout` now only resolve a target and open the
-corresponding page (`/login` opens Models, a known route opens its detail, a known/novel reference
-opens the API Key Reference, a new route prefills Add Provider, and `deepseek-account` opens
-Account; `/logout` opens the stored-credentials list or one clear confirmation). The final write
-or clear always requires an explicit confirmation in the page. Account authorization stays
-separate from generic provider flows: it signs in only through the official PlatformAccount and
-the Host loopback `/oauth/callback`, and is never cleared as a generic credential record.
+Settings edits in place: Appearance (Icon style, Status line mode), Conversation
+(Transcript detail, Thinking detail, Progress updates, Response style, Submit
+while busy, Git attribution), Input & Terminal (Home/End keys, Fullscreen, wheel
+lines, notifications, Terminal progress, Footer layout, Keyboard shortcuts),
+Agent (approval policy, default permission, subagent model allowlist/selection,
+user shell sandbox), Tools (Web Search / Fetch, Visual tools) and Extensions
+(dynamic settings grouped by plugin). Every write needs explicit confirmation
+and reports `Verified` / `Not saved` / `Outcome unknown` from the authoritative
+read-back; `Fullscreen` applies after Settings closes normally. `/footer`,
+`/statusline`, bare `/keybindings` and `/plugins` are deep links into the same
+workspace; the legacy main settings editor and standalone plugin screen are
+gone.
 
-The **`Configured theme`, `Transcript display`, `Icon style`, `Transcript detail`,
-`Thinking detail`, `Progress updates` and `Response style` rows — plus the `Visual
-tools` switch under Tools — are directly editable**:
-from L1, `Right` or `Enter`, the painted `[Change…]` button, or ordinary visible
-Detail content opens the candidate choice in the SAME L2 pane. Current-value and
-Runtime/Persisted facts stay in the same pane above the candidate region and scroll
-independently. `Up`/`Down`/`Home`/`End` move the candidate; `PgUp`/`PgDn` and the
-wheel over facts scroll only the fact region, while the candidate wheel scrolls
-independently. During choice the copy keys copy nothing and never commit the
-draft candidate. `Enter`
-or `[Confirm]` confirms explicitly, and `Left`/`Esc`/`Backspace` or `[Cancel]`
-cancels directly to L1 without writing anything. If the selected candidate identity
-has scrolled out of view, the first Enter only reveals it; confirmation requires a
-later Enter. From L2 browse or a settled outcome, Enter reopens choice for a
-writable non-pending row. At 44×8, a long identity may first reclaim the optional
-`Choose value` heading; if still needed, the fact area shrinks only to one original
-`Value` row. The complete identity, `Confirm` and `Enter confirm` must be visible
-before a write.
-An identity beyond the remaining candidate capacity stays unconfirmable. Only
-buttons and candidates that are really painted can be clicked. A confirmed change is stored through the existing
-serialized whole-document write path and then re-read from the authority: the
-detail keeps the two facts apart: a runtime-primary row (`Icon style`,
-`Transcript display`, `Progress updates`, `Response style`, `Git attribution`,
-`Home/End keys`, `Mouse wheel lines`, `Notifications`, `Notification method`,
-`Terminal progress`) shows the value that took effect as `Value` and the stored
-preference as `Persisted`, while `Configured theme`, the `Visual tools` switch,
-`Submit while busy` and `Fullscreen` — the rows whose primary fact IS the
-persisted value — also carry an explicit `Runtime` row (e.g. the current
-palette, the next busy-Enter delivery, the current transcript mode). `[current]` is a separate decision: `Configured theme` and `Transcript display`
-mark it from the persisted preference and `Icon style`, `Progress updates` and
-`Response style` from the live value, while the `Visual tools` switch under Tools
-is its own case — its candidate `[current]` reflects the **Host configuration
-value** (`state.enabled`), and whether the runtime registration took effect is
-stated separately by its `Runtime` row. Both kinds state `Saving…`, `Verified`,
-`Not saved · <reason>`, `Commit accepted · verification unavailable` or
-`Outcome unknown · <reason>` — only a completed write whose authoritative
-re-read agrees is called Verified; a rejected write re-reads the authority first
-and reports Not saved only while it still carries the value the request started
-from; a third value, a value already in place or an unreadable authority is
-Outcome unknown, and a success whose readable readback disagrees is a failure
-rather than "verification unavailable". On a non-ready backend the theme is
-neither applied nor written; a display preset may already be live locally and
-then says that it was not stored instead of pretending it was. A plugin theme is
-resolved again by its source-qualified identity at confirm time, so an unloaded
-plugin theme is listed as unavailable and refused rather than degrading into a
-same-named file theme. The writers never blur together: `Icon style`,
-`Progress updates` and `Response style` apply their live owner first (the icon
-palette; the very same progress/response state objects the Agent's prompt
-provider reads) and then persist through the one serialized whole-document
-write; `Transcript detail` (the `Ctrl+O` switch) and `Thinking detail` (the
-`Alt+T` switch) are runtime-only and have no document field, so their Detail says
-`not applicable — runtime-only` and their Verified covers the live runtime fact
-only. Those three mark `[current]` from the live value they apply first, while
-`Persisted` reports the raw stored value separately (`not set` when the readable
-document declares none, an explicit unknown when it cannot be read), and a
-normalizer's fallback is never presented as
-a stored value. `Configured theme` and `Transcript display` keep their existing
-semantics: the theme refuses a non-ready backend before any runtime apply, and
-both mark `[current]` from the persisted preference rather than the live value.
-`Progress updates` and `Response style` take effect on the next
-prompt assembly without re-registering a section or rebuilding the Agent, and
-Focus only suppresses progress narration without changing the saved cadence. The
-Conversation and Input & Terminal now edit all eight historical settings in place: Conversation is
-Transcript display → Transcript detail → Thinking detail → Progress updates → Response style →
-Submit while busy → Git attribution, and Input & Terminal is Home/End keys → Fullscreen →
-Mouse wheel lines → Notifications → Notification method → Terminal progress →
-Keyboard shortcuts…; the last entry opens the SAME same-lease page as bare
-`/keybindings` instead of the existing editor.
+The **Visual tools** switch under `Settings → Tools` (default On) is the
+profile-wide `pi-tui-visual-tools.enabled` and controls `dsh_pi_tui_chart`,
+`dsh_pi_tui_svg` and `present_visual` together. After it is turned off, new
+model requests no longer see the three tools, while historical results remain
+displayable, copyable, searchable and exportable. Direct verifies the Host
+registry state before showing Verified; Remote only reports that the preference
+was saved.
 
-`Submit while busy` and `Fullscreen` are the two PERSIST-FIRST rows: only a completed write whose
-authoritative re-read agrees shows `Verified`, and no runtime state is pretended to have switched.
-`Submit while busy`'s `Value` is the raw stored value (`not set` when absent, `invalid stored
-value: <raw>` when illegal), and its `Runtime` says what the NEXT busy Enter really does — the
-default is named as `queue (default; no valid saved value)` instead of being presented as saved.
-Its confirmation never rewrites a turn that is already running. A `Fullscreen` preference keeps
-the workspace usable and switches the transcript screen only after you leave Settings
-normally; a Question/Approval takeover, a forced close or an unverified write switches nothing,
-and the stored preference still applies at the next TUI start.
+`Settings → Tools → Web Search / Fetch` is a page in the same workspace: search
+and fetch providers, result count, `Share Original Question`, HTTPS endpoint and
+a read-only API-key reference. Each value is written only by an explicit Enter
+confirmation and shows the Host's authoritative read-back. The two APIs are
+separately billed providers; the default Messages/HTTP pair calls no billed API.
 
-The other six apply their real runtime owner first and then persist (a failed write never rolls
-the runtime back, and `Persisted` keeps reporting the raw stored value): `Git attribution`
-mutates the same `tui:git-attribution` prompt state and stays prompt guidance only (no Git hook,
-no automatic commit edits, and `minimal` personas keep receiving nothing); `Home/End keys`
-rewrites the bindings the fullscreen viewport really resolves without touching any other binding;
-`Mouse wheel lines` applies on the NEXT fullscreen entry only, so the mounted viewport keeps its
-constructor step; `Notifications` and `Notification method` drive the same completion controller,
-and changing the method never emits a notification by itself; `Terminal progress` controls only the
-terminal-native protocols (OSC 9;4 / OSC 7501) and is independent of the `Progress updates`
-narration cadence, while a legacy `on` value is normalized on READ and never written back without
-confirmation.
-
-`/settings → Agent` now edits five settings in place, in this frozen order:
-`Approval policy (this session)` → `Default permission` → `Subagent allowed models` →
-`Subagent model selection` → `User shell sandbox policy`. Each one has exactly one authority and
-the five are never conflated. `Approval policy` is the official override of the CURRENT session:
-the workspace captures that session once on open and never re-targets a later one (the Confirm is
-refused synchronously and reopening Settings is what speaks about the new session); its `Persisted`
-fact says `not applicable — current session only`, while a separate `Runtime` fact states whether
-the next approval uses the session override or the consumer's own `ask` fallback. `Default
-permission` is the Host's `permission.defaultPreset`: its candidates are the Host-advertised raw
-preset ids, it applies to NEW sessions only (the running session's preset, sandbox and approval
-knobs are untouched), and a failed or unconfirmed Host read is never shown as `Verified`; a Host
-port without a settings service refuses explicitly instead of succeeding as a no-op. `Subagent
-allowed models` opens the existing searchable multi-select list through `Manage allowed models…`
-inside the SAME workspace lease (same grouping, filtering, scrolling and `Enter toggle`), where
-`Esc` returns to the Agent rows rather than leaving Settings; `Subagent model selection` is that
-official section's `enabled` — enabling with no allowed route performs ZERO writes, states the
-guidance and moves the selection to the allowed-models row, while disabling keeps every saved
-route. Both subagent surfaces share ONE write queue, and each action writes
-only its own half (the picker writes the allowed-route list, the toggle writes `enabled`) while the
-other half is re-read from the official section when its turn comes — so an earlier slow write is
-never overwritten by a later stale snapshot. `User shell sandbox policy` is stored in the TUI settings
-document: `Value` is the raw stored value (a missing, illegal or unreadable one is stated as such),
-`Runtime` names what the next `!`/`!!` really does (including "no valid saved value, default
-bypass"), and only an agreed read-back is `Verified`. It is the Host user-shell execution policy,
-not the model's tool sandbox policy and not a permission preset, which is why it does not live in
-Input & Terminal.
-
-The Settings workspace is the one settings surface: every field is edited in its native rows and
-`Extensions` lists the real live registrations directly (grouped and paged by owner). Theme, the
-Plugin Manager, keybindings and extension settings keep every existing write path; Footer and
-Keyboard shortcuts remain same-lease pages, and `Appearance`, `Input & Terminal`, `Agent` and
-`Extensions` carry no transition entry. The `SettingsList` component remains in use only by its
-independent consumers (`/help`, `/skill`, `/preset`, `/keybindings conflicts`), which supply their
-own rows.
-
-`/settings → Tools` adds one profile-wide **Visual tools** switch (default On) backed by the
-Host's `pi-tui-visual-tools.enabled` configuration. That one switch governs THREE model tools:
-the generators `dsh_pi_tui_chart` and `dsh_pi_tui_svg`, and the explicit publication tool
-`present_visual`. Turning it Off unregisters all three from that Host's global tool registry, so
-later model requests no longer see them; turning it back On restores the original definitions.
-Group consistency is a settled-state guarantee: a successful On ends up holding all three
-registrations, a successful Off holds none, and a failed registration rolls back the definitions
-that transition already added. The official registry publishes one change notification per
-registration and offers no transactional seam, so a synchronous observer can see the running
-transition's intermediate states — but no half-enabled group survives the drain. The setting
-belongs to the whole
-DSH Host profile (across sessions and agents, not just the current TUI). Off affects only future
-tool availability: chart/SVG results already recorded in a transcript, their model-visible
-`visual-ref-v1` references and their historical publications still render, copy, search and
-export normally. The Direct backend shows `Verified` only after also confirming the Host
-registry state; Remote has no registry read and therefore reports the saved configuration
-without claiming the runtime registration took effect.
-
-`/settings → Tools → Web Search / Fetch` is now a **page inside the same Settings workspace**
-instead of a hand-off to the existing editor. It paints exactly six rows: the search provider
-(`Messages`, the official default, or the separately billed `DeepSeek Search API`), the fetch
-provider (`HTTP`, the official default, or `DeepSeek Fetch API`), the Search API result count (the
-official domain is 1–50 with 5/10/20/50 quick picks; another stored integer is reported exactly and
-never rewritten), `Share Original Question` (on by default; each new Search API call carries up to
-128 characters of the triggering human question as `ori_question`, never the full history or system
-prompt) and the API endpoint base (the existing endpoint editor: a full URL draft plus an explicit
-Enter confirm and the warning that the credential and query are sent to that HTTPS target — the URL
-shape is validated, the host's trust is the human's call), then the read-only `DeepSeek API Key`.
-Both APIs are separate opt-in billed providers: a login or an ordinary Messages plan does not
-guarantee coverage of their fees, and the default `Messages`/`HTTP` combination calls no billed API.
-This Web configuration belongs to the base profile, not to a Bxx Optional Bundle, so installing or
-enabling another bundle never changes these providers.
-
-A value is written only by its own explicit Enter confirm; moving the focus, opening a detail, Tab,
-refresh and exit never write. The authoritative read-back then decides `Verified` /
-`Not saved` (naming the value the Host keeps) / `Outcome unknown` — a submitted intent never becomes
-a fake success. A custom provider id is reported verbatim, offers no confirmable candidate and is
-never silently replaced by `Messages`/`HTTP`; confirming a value the Host already holds performs no
-redundant write. The choice applies to the next search/fetch; a running operation is never changed
-retroactively. The DeepSeek API key row shows only whether the reference is configured and its
-source layer; `Configure in Models…` / `Clear in Models…` switch to the existing Models
-`API Key Reference` page in the SAME Settings lease for the masked input or the clear confirmation —
-the Web page never collects the key and never runs `/login` / `/logout` text. Esc steps from a detail
-back to the Web list and then back to the `Web Search / Fetch` row; a Remote or unavailable Host
-section still opens a read-only page with its reason but offers no write. No second settings editor
-exists: the Web page is the only Web configuration surface, its writes enter the ONE command-owner
-FIFO, and its facts come from the same authoritative Host read-back.
-
-The `Icon style` option in `/settings` (also directly editable under Appearance) switches the TUI's structural icons:
-`Emoji` (default, colorful), `Symbols` (compact single-cell terminal
-symbols), or `Minimal` (decorative icons hidden; only status/interaction
-markers remain). Switching applies immediately and persists.
-
-The `Terminal progress` row in `/settings` selects the native terminal status
-reporting in four modes: `9;4+7501` (default — both the OSC 9;4 progress bar and
-the OSC 7501 semantic state), `9;4` (progress-bar compatibility only), `7501`
-(semantic state only: working, waiting for approval/answer, done, error) and
-`Off` (clear and stop reporting). Switching applies immediately; done and error
-are reported only once a real run's last turn result is proven, while a
-cancelled or interrupted run returns to idle. A persisted `On` reads as the
-dual-protocol default.
-
-Terminal compatibility: a terminal that does not know OSC 7501 simply ignores
-it — Ghostty's GUI currently shows the OSC 9;4 progress bar and not the 7501
-semantic state, which is expected and not a reporting failure. Inside tmux and
-other terminal multiplexers an unknown OSC may not be forwarded to the outer
-terminal (this feature deliberately implements no tmux DCS passthrough and does
-not change multiplexer settings); use an outer terminal that supports it when
-the state must survive a multiplexer. The OSC 7501 semantic state describes the
-current Main Agent only.
-
-This project's own Remote composition (experimental, our Host) reports the same
-state: the Host side is served by this extension's private Host status stream and
-shares ONE interval classifier with Direct. **A third-party DSH Host without this
-extension's Host plugin is not supported** (it has no equivalent event source).
-
-Slash Commands registered by other plugins through `ctx.commands` are discovered automatically.
+`Extensions` groups the live registration rows by owner with `Tab`/`Shift+Tab`
+cycling groups and arrows/Home/End/paging/wheel staying inside the group.
+Entries open native Detail/Choice; only an explicit Confirm writes to the
+running plugin, `Verified` requires a live read-back, and a same-id HMR
+re-registration inherits no old state. Extension settings never write the TUI
+settings document or a Host profile.
 
 ### Footer customization
 
@@ -705,7 +511,17 @@ For the full `/footer` workflow, Custom Text / Command items, YAML reference, se
 
 Ctrl+V reads the system clipboard: an image becomes the canonical placeholder `[image #N (WxH)]` with draft thumbnails in one row above the composer (a short window lets the client hide that row, while typing and sending still work and the status line keeps reporting the real draft count); text is inserted at the live caret. `/image` and `/attach` can also add an image or a regular file to the current draft. A placeholder that appears several times shows several positions while the bytes are read and uploaded once.
 
-Images in user messages, assistant messages and tool results are shown inside their own card, in their original order: one identity line (name, pixel size, byte count) plus one image. Clicking an image and zooming are the terminal client's own affordances (moving between neighbouring images depends on the client's version and capabilities); this project adds no window or page for them. When an image cannot be read, its format is unsupported, or it exceeds the 16 MiB single-image limit, the card states the identity and the real reason instead of drawing a fabricated image. On a native Kitty terminal, transcript thumbnails, the composer draft card and the fullscreen image viewer all first convert JPEG/WebP to a bounded PNG in the background before painting pixels (WebP uses only its first frame, EXIF orientation is applied, and the longest edge is capped at 768 pixels; the identity row and the viewer keep the original name, dimensions, media type and byte count; the draft card only derives the one last local image it is allowed to show). A collapsed occurrence never starts a conversion; while converting or after a failure only text is shown (a failure reads `Preview unavailable`), and only a body that really painted pixels is clickable. The fullscreen viewer shows that same bounded derivative rather than a full-resolution original; PNG, iTerm2, GIF, narrow and graphics-unsupported terminals keep their existing behavior.
+Images in user messages, assistant messages and tool results are shown inside their own card, in their original order: one identity line (name, pixel size, byte count) plus one image. The PiTUI viewer is described below; in the experimental TSP renderer, viewing and zooming are the Tern client's own affordances (moving between neighbouring images depends on the client's version and capabilities). When an image cannot be read, its format is unsupported, or it exceeds the 16 MiB single-image limit, the card states the identity and the real reason instead of drawing a fabricated image. On a native Kitty terminal, transcript thumbnails, the composer draft card and the fullscreen image viewer all first convert JPEG/WebP to a bounded PNG in the background before painting pixels (WebP uses only its first frame, EXIF orientation is applied, and the longest edge is capped at 768 pixels; the identity row and the viewer keep the original name, dimensions, media type and byte count; the draft card only derives the one last local image it is allowed to show). A collapsed occurrence never starts a conversion; while converting or after a failure only text is shown (a failure reads `Preview unavailable`), and only a body that really painted pixels is clickable. The fullscreen viewer shows that same bounded derivative rather than a full-resolution original; PNG, iTerm2, GIF, narrow and graphics-unsupported terminals keep their existing behavior.
+
+The rightmost three cells of a fullscreen image info row are `[-]`/`[+]`, folding only that image; clicking its body opens the read-only viewer. `/view-image` lists the images of the currently mounted transcript window; `Enter` views one and `Esc back` returns to the same list.
+
+### TSP renderer (experimental)
+
+Set `DSH_PI_TUI_RENDERER=tsp` to enable the experimental Tern TSP renderer:
+native tool cards, Preparing rows, PTC child calls, the Work Hub
+(`/tasks`, `/subagents`), image paste and historical images, and native display
+with Copy for published charts/SVGs. The default renderer remains PiTui;
+Settings and Plugins pages that TSP cannot host are refused explicitly.
 
 ## Common keys
 
@@ -725,6 +541,9 @@ Images in user messages, assistant messages and tool results are shown inside th
 | `Ctrl+End`    | Jump to the latest Transcript output in fullscreen; a clickable `↓ Latest` appears after leaving the live tail |
 | `Ctrl+O`      | Expand / collapse Tool and System details and long user prompts in regular/fullscreen-non-Focus; in fullscreen Focus, bulk-toggle the Thought roots (expand long user prompts by clicking the marker) |
 | `Alt+T`       | Expand / collapse Thinking                          |
+| `Alt+V`       | Select / cycle the current window's published charts or SVGs |
+| `Alt+C`       | Copy the selected chart / SVG                       |
+| `Alt+O`       | Open the selected SVG                               |
 | `Ctrl+G`      | Edit current input in `$VISUAL`/`$EDITOR`           |
 | `Ctrl+V`      | Paste image                                         |
 | `Tab`         | Autocomplete slash commands and file paths          |

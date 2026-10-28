@@ -38,7 +38,7 @@ dsh --profile pi-tui
 > `@deepseek-ai/dsh@alpha` 指向 `0.2.1-alpha.5`，而 `@xmoon76/dsh-pi-tui@next`
 > 仍指向 `0.5.2-rc.1`（peer floor `>=0.2.0-rc.2`，npm semver 不接受不同
 > major.minor.patch tuple 的 prerelease）。请以下方版本对应表和
-> [兼容性指南](docs/guides/dsh-compatibility.md) 的通用匹配原则为准；稳定版 `0.5.3` 发布在
+> [兼容性指南](docs/guides/dsh-compatibility.md) 的通用匹配原则为准；稳定版 `0.5.4` 发布在
 > `@latest` 而不是 `@next`，因此这两个移动 channel 上没有可安装的兼容组合。
 > 本 checkout 的精确验证请使用 `pnpm compat:dsh:npm`。
 
@@ -60,26 +60,25 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.5.3`（stable / `@latest`） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 当前已发布稳定版；peer floor 仍是 0.2.1-rc.2，本仓库当前 checkout 的精确验证目标为 0.2.1-rc.4（已发布的 0.5.3 已在该版本通过官方 preset assembly） |
+| `0.5.4`（stable / `@latest`） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 当前稳定版；最低 DSH 版本为 0.2.1-rc.2，本仓库当前 checkout 的精确验证目标为 0.2.1-rc.4 |
+| `0.5.3`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
 | `0.5.1`（stable，历史） | `dsh-v0.2.0-rc.2` | 上一稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
 | `0.5.2-rc.1`（next 通道预览，已发布） | `dsh-v0.2.0-rc.2` | 上一轮 next 预览：已发布到 npm `next` 通道（2026-10-17）；整套 peer floor 仍是 `>=0.2.0-rc.2`，不覆盖 0.2.1-rc.2 |
-| `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.3` |
+| `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.4` |
 | `0.5.0`（stable，历史） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 上一稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
 | `0.4.9`（stable，历史） | `dsh-v0.1.7-rc.2` | 上一稳定版；0.1.7-rc.2 runtime 的兼容 TUI |
 | `0.4.8`（stable，历史） | `dsh-v0.1.7-rc.1` | 上一稳定版；0.1.7-rc.1 runtime 的兼容 TUI |
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `@next` 预发布线混装。`0.5.3` 是当前已发布稳定版：它的最低 DSH
-版本（peer floor）仍是 `0.2.1-rc.2` family；使用原封不动的 npm
-`@xmoon76/dsh-pi-tui@0.5.3` 搭配 `@deepseek-ai/dsh@0.2.1-rc.4` 已通过官方 preset
-assembly，此前与 `0.2.1-rc.3` 的配合同样通过。本仓库当前 checkout 的精确验证目标
-是 `0.2.1-rc.4`，这不改变 `0.5.3` 已发布包的身份与 floor，也无需发布新的 TUI
-版本。中间的
+不要把稳定线与 `@next` 预发布线混装。`0.5.4` 是当前稳定版：它的最低 DSH
+版本（peer floor）仍是 `0.2.1-rc.2` family，本仓库当前 checkout 的精确验证目标
+是 `0.2.1-rc.4`。已发布的 `0.5.3` 是上一稳定版，同样可与 `0.2.1-rc.2`、
+`0.2.1-rc.3`、`0.2.1-rc.4` 配对使用。中间的
 `dsh-v0.2.1-rc.1` 没有配对 TUI，`0.5.2-rc.1` 是上一轮已发布到 npm `next` 通道的
-预览身份（配对 0.2.0-rc.2；它不覆盖 0.2.1-rc.2，因此新的稳定线使用 `0.5.3`
-身份）。上一稳定版 `0.5.1` 继续配对 0.2.0-rc.2：它把整个 DSH peer floor 提升到
-`>=0.2.0-rc.2`（Question 生命周期消费 rc.2 才发布的公开契约）。更早的 `0.5.0`
+预览身份（配对 0.2.0-rc.2；它不覆盖 0.2.1-rc.2）。上一稳定版 `0.5.1` 继续配对
+0.2.0-rc.2：它把整个 DSH peer floor 提升到 `>=0.2.0-rc.2`（Question 生命周期消费
+rc.2 才发布的公开契约）。更早的 `0.5.0`
 保持 `>=0.1.7-rc.2` floor 不变（精确验证目标 0.2.0-rc.1）；旧 runtime 会在正常的
 不兼容边界以非零状态失败，请按上表安装配对的 TUI 线。上方的版本对应表是已发布
 线的摘要；通用版本匹配原则与回退/诊断流程见[兼容性指南](docs/guides/dsh-compatibility.md)；要查看 `@next` 的最新集成
@@ -128,7 +127,12 @@ dsh --profile pi-tui --session <session-id>
 * Transcript 全文搜索
 * 长会话历史折叠
 * Context、Token、模型和运行状态显示
+* 全屏 Settings 工作区：About 状态、Models / Account、Agent 与动态 Extensions
 * Approval 与 `ask_user_question` 交互
+* 图片：终端能力准入、JPEG/WebP 预览、草稿图片与只读查看器
+* 图表/SVG 工具、`present_visual` 发布与最终回答内联显示
+* 交付文件尾部与 `/deliverables` 浏览器
+* 实验性 TSP renderer：原生工具卡、Work Hub、图片与已发布图
 * Plan Review
 * Todo / Goal 状态展示
 * 可读的终端窗口标题
@@ -137,6 +141,8 @@ dsh --profile pi-tui --session <session-id>
 * Compaction / prune 后不会出现重复的幽灵 Tool Card
 
 `Ctrl+O` 控制工具和系统详情，并在普通模式与全屏非 Focus 下展开/收起超长用户 Prompt;全屏 Focus 下它整体展开最近几个 Thought root 或全部收起，超长用户 Prompt 改用点击提示行（或搜索命中）展开、`Ctrl+O` 收回。`Alt+T` 单独控制 Thinking。
+
+工具审批显示在编辑器座位：完整 Reason/Arguments 在可滚动正文中阅读（不再只显示前六行），`y` 允许一次、`n` 拒绝、`Esc`/`Ctrl+C` 取消、`c` 复制原始参数、`e` 展开；全屏可点击实际绘制的 Allow once / Reject / Cancel 并滚轮滚动正文，普通模式保持键盘。窄窗口显示真实精简内容或 `Resize to inspect more`，不会画出被裁掉的决定。
 
 ### Conversation display
 
@@ -231,6 +237,19 @@ Footer `↓` 打开的 Quick 窗口默认不占行，只在编辑器最后一个
 选择子 Agent 的 provider/model（受 allowlist 限制）。设置在 Session 组合时采样，
 不会改写已在运行的 Session 的工具。
 
+### 交付文件与 `/deliverables`
+
+最终回答中的 `present` 交付文件以紧凑尾部显示：最多四项，每项两行（相对当前显示会话
+工作区的路径 + 描述），超出显示 `+N more · /deliverables`。全屏 AltScreen 的
+Full/Compact/Focus 可直接点击 `Browse all` 与逐文件 `Details`，普通分屏只保留命令入口。
+
+`/deliverables` 打开当前显示会话（含正在查看的子代理）的交付面板，含 Files / Turns /
+Details：`↑↓` 选择、`Enter` 详情、`/` 过滤（文件名、完整 Host 路径与描述）、`T` 切换
+有交付的 Turn、`C` 复制原始 Host 路径、`Esc` 返回/关闭。Details 的 `Enter Preview`
+读取 Host 文本文件的一页 120 行 UTF-8；二进制/文档后缀只显示不可预览而不读字节；文件
+在分页之间变化时从头重启。面板内文字可用鼠标选中复制，面板居中且终端缩放保留当前页、
+筛选、光标与滚动位置。
+
 ### Shell
 
 编辑器支持两种 Shell 模式：
@@ -307,6 +326,8 @@ TUI 使用 DSH 提供的模型和设置服务。
 /model
 /settings
 /status
+/deliverables
+/view-image
 /login
 /permission
 /plan
@@ -316,201 +337,48 @@ TUI 使用 DSH 提供的模型和设置服务。
 /statusline
 ```
 
-模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。`/model` 的候选完全来自 Host 的模型目录：rc.2 的 `deepseek-flash` 以精确 `(provider, model)` 身份出现（显示名 `DeepSeek-V4.1-Flash` 不当作 ID），选择后写回官方 Session/global 默认；部署覆盖目录不再提供该 ID 时不会凭空显示。
+模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。`/model` 的候选完全来自 Host 的模型目录：`deepseek-flash` 以精确 `(provider, model)` 身份出现（显示名 `DeepSeek-V4.1-Flash` 不当作 ID），选择后写回官方 Session/global 默认；部署覆盖目录不再提供该 ID 时不会凭空显示。
 
-`/settings` 打开一个真正的全屏工作区，三栏 / 两栏 / 单栏只是同一套
-`分类 → 设置行 → 详情` 三层的投影：宽屏同时显示三栏，中屏按当前层显示
-`分类 + 设置行` 或 `设置行 + 详情`，窄屏只显示当前层。所有宽度上 `Right` 只前进一层，
-`Left` 返回一层（在最外层无效）；`Enter` 遵循相同层级，`Esc`/`Backspace` 逐级返回，
-最外层关闭工作区。`Tab`/`Shift+Tab` 不承担导航，底部操作栏始终固定在最后一行。多栏编辑态仍
-保留 `[Details]` 焦点标识；只有标题会占掉唯一内容行时才让位。
-它展示 Appearance / Conversation 的真实事实：主题的 source-qualified 原始值与友好名称、
-Icon style、Transcript display 的运行时当前值与持久偏好、Thinking detail 的当前运行
-态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取；浏览与选择本身都不写入配置。
-普通配置详情只保留查看：它没有内置复制动作，也没有替代的复制入口。About 的 `c`/`C` 只
-复制 About 自己的事实（运行时、Session 身份、统计、性能与 Context），不会复制配置页字段。
+`/settings` 与 `/status` 打开同一个全屏设置工作区，默认落在 About。宽/中屏为分类栏
++ 内容栏，窄屏（<76 列）直接显示 About；一级分类固定为 About / Models / Account /
+Agent / Appearance / Conversation / Input & Terminal / Tools / Plugins，只有扩展设置
+注册表存在行时才追加 Extensions。`Tab`/`Shift+Tab` 在区域间移动焦点，`Right`/`Enter`
+进入下一层，`Left`/`Esc`/`Backspace` 逐层返回，最外层关闭；底部操作栏固定在最后一行。
 
-About 的复制入口只留在键盘上：选中一事实按 `c` 复制该事实的精确原始值（动作栏只在它真的
-画在屏幕上时提示 `c copy fact`），按 `C` 把整份 About 报告复制到剪贴板；正文里最多只有
-一个 `Copy All [C]`，每条事实后面不再有 `Copy [C]` 按钮，点击普通事实也不会复制。
-`Shift+C` 在分类栏焦点下同样可用。复制仍只证明已交给本地剪贴板交付路径，不写入任何配置。
+About 显示 TUI/DSH 版本、后端、当前会话身份、整会话统计、TTFB/吞吐与 Context 占用；
+`c` 复制选中事实的原始值，`C` 复制完整报告，`r` 刷新。旧 `/status` 页面已删除，扩展
+诊断移到 `Settings → Plugins` 的 `Diagnostics`（`d`）。
 
-`/status` 是 `/settings` 的真实别名：同一 handler、同一初始 About 焦点与同一套读取；无 Session
-时两者都不创建会话、不读统计。`/footer` 与它的别名 `/statusline` 直接打开同一个 Settings
-全屏工作区的 Appearance → Configure footer layout 页；裸 `/keybindings` 同样直接打开
-Input & Terminal → Keyboard shortcuts 页。两者共用唯一 Settings lease、唯一底栏和原有
-的 Footer / Keybinding 保存权威，不再打开第二个 overlay。关闭这两个编辑页会直接回到所属设置行的
-Rows 列表（不经过中间的 Detail 面板），下一次返回键即到分类栏。在两个页面的根状态（Footer 行选择器、
-键盘快捷键在搜索为空时的列表）按 `←` 与 `Esc` 一样返回来源设置行，底栏会显示 `← Back`；Footer
-有未保存修改时 `←` 先打开 Save/Discard/Keep 确认，进入行编辑器后 `←` 仍是切换左右分区，
-搜索框非空时 `←` 仍只移动光标。
-Settings 的一级分类是固定的 `About / Models / Account / Agent / Appearance / Conversation / Input & Terminal / Tools / Plugins`，
-并且只在扩展设置注册表确实有设置行时才在末尾追加 `Extensions`；`/settings`
-（以及 `/status`）默认落在 About。`Extensions` 的增删与同一 id 重新注册都会先作废旧帧的
-键盘与鼠标授权，重绘完成前只有 `Esc` 还能安全返回。
+Models 列出 Host provider 目录、API key 是否存在（不是连通性测试）、provider 详情、
+遮蔽输入/清除确认、Add Provider 向导与 provider 原生登录；首页只列已配置 provider，
+未配置的进入 Add Provider 可选目录。Account 显示登录状态、浏览器授权 URL、SSH 隧道
+提示、独立钱包、取消当前尝试、刷新与二次确认 sign out。`/login`、`/logout` 直接打开
+对应页面深链。DeepSeek Account 登录走官方 Host `host-webserver` 的 `127.0.0.1:0`
+回环 `/oauth/callback`，TUI 不接触 token/grant，`--help` 不监听端口。
 
-`Extensions` 是真实配置分类而不是过渡入口：Rows 每次只显示**一个注册 owner** 的实时设置；
-组序按该 owner 在注册表全局 `order ASC, id ASC` 流中首次出现的顺序，组内保持注册表原顺序。
-至少两组时 `Tab` / `Shift+Tab` 循环切换组（落在目标组第一行），`↑↓`、Home/End、翻页与滚轮
-只移动组内设置；只有一组时保留原有区域焦点键。标题栏先显示 `[i/N]` 再显示组名，窄屏先截断
-组名而不是位置；Rows 面栏按宽度退化为 `Rows (m) · 组名` → `Rows (m) · i/N` → `Rows (m)`。
-每行进入原生 Detail/Choice：Owner 与 ID 显示原始值，未注册候选值的设置只读，当前值不在候选里
-会明确说明而不会自动选中；只有显式 Confirm 才经 `SettingsRegistry.applyDetailed` 写入运行中的
-扩展，`accepted` 后回读一致才 `Verified`，插件拒绝显示 `Not saved` 并把健康错误只记在发起调用
-的 owner 上，被更新版本取代或已卸载则如实报告而不伪装成插件拒绝。扩展设置只作用于运行中的
-插件，不写 TUI 设置文档或 Host profile；同一 id 的 HMR 重注册会作废旧确认/重试/结算。`Models` 是原位页：列出 Host 的 provider 目录、API key 是否已配置（只是存在性，
-不是连通性测试）与 DeepSeek Account 入口；可查看 provider 事实、在遮蔽输入中写入/清除 API key、
-完成 Add Provider 草稿向导，以及发起 provider-native 登录（页面内持续显示 URL、提示与取消）。
-`Account` 是独立的 DeepSeek Account 页：显示 Host 的登录状态、浏览器授权 URL 与 SSH 隧道提示、
-以及各自独立的 Profile / 充值钱包 / 赠送钱包状态（失败不伪造为 0），可显式取消当前 attempt、刷新，
-并在二次确认后 sign out；关闭页面不会取消已经开始的浏览器登录。`/login` 与 `/logout` 现在只解析目标并
-打开对应页面（`/login` 打开 Models、已知 route 进详情、已知/新 ref 进 API Key Reference、新 route
-预填 Add Provider、`deepseek-account` 进 Account；`/logout` 打开已存凭据列表或单一清除确认），最终
-写入/清除必须在页面里明确确认。Account 授权与普通 provider flow 分开：Account 只通过官方
-PlatformAccount 与 Host 的 loopback `/oauth/callback` 登录，不会被当作普通 credential record 清除。
+Settings 内可直接编辑：Appearance（Icon style、Status line mode）、Conversation
+（Transcript detail、Thinking detail、Progress updates、Response style、Submit while
+busy、Git attribution）、Input & Terminal（Home/End 键、Fullscreen、滚轮行数、通知、
+Terminal progress、Footer 布局、Keyboard shortcuts）、Agent（审批策略、默认权限、
+子代理模型白名单/选择、用户 shell 沙箱）、Tools（Web Search / Fetch、Visual tools）
+与 Extensions（按插件分组的动态设置）。所有写入需显式确认，按权威回读显示 `Verified` /
+`Not saved` / `Outcome unknown`；`Fullscreen` 在正常退出 Settings 后切屏。`/footer`、
+`/statusline`、裸 `/keybindings` 和 `/plugins` 都是同一工作区内深链；旧主设置编辑器与
+独立插件全屏页已移除。
 
-其中 **Theme、Transcript display、Icon style、Transcript detail、Thinking detail、Progress
-updates、Response style 七行，以及 Tools 里的 Visual tools 开关，都可以直接修改**：在 L1 设置行按
-`Right` 或 `Enter`，或点击 `[Change…]` / 可见的 Detail 内容，即可在同一 L2 详情中打开
-候选选择；当前值与 Runtime / Persisted 事实留在同一详情事实区，并与候选列表独立滚动。`Up`/`Down`/`Home`/`End`
-移动候选，`PgUp`/`PgDn` 和事实区上的滚轮只滚动详情事实，候选区滚轮独立滚动候选；
-选择期间的复制键不复制任何内容，也不会提交候选。
-`Enter` 或点击 `[Confirm]` 明确确认，`Left`/`Esc`/`Backspace` 或 `[Cancel]` 取消并直接回到
-L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选择；pending 写入时不触发新选择。若当前候选身份已滚出可见区域，第一次 `Enter` 只将其重新显示，之后才能确认；
-44×8 短屏在长身份需要空间时先省略可选的 `Choose value` 标题；若仍不足，再将事实区压到只保留旧 `Value` 的一行。只有完整身份、`Confirm` 与 `Enter confirm` 同屏可见时才能确认，超过剩余容量仍拒绝写入。只有实际绘制出来的
-按钮与候选行可以点击。确认后走既有的串行整文档写入路径落盘，再从权威来源重读目标字段核对：
-详情把两类事实分开显示：以运行态为主的行（`Icon style`、`Transcript display`、`Progress updates`、
-`Response style`、`Git attribution`、`Home/End keys`、`Mouse wheel lines`、`Notifications`、
-`Notification method`、`Terminal progress`）用 `Value` 呈现已生效的运行值、另用 `Persisted` 呈现存储值；
-主事实是持久值的只有 `Configured theme`、Tools 下的 `Visual tools`、`Submit while busy` 与
-`Fullscreen`，它们因此额外画出 `Runtime` 行（如当前 palette、下一次忙时提交策略、当前 transcript 模式）。
-`[current]` 是另一件事：`Configured theme` 与 `Transcript display` 按持久偏好标记，`Icon style`、
-`Progress updates`、`Response style` 按实时值标记；Tools 下的 `Visual tools` 单独一类，它的候选项
-`[current]` 反映 **Host 配置值**（`state.enabled`），运行态注册是否生效另由 `Runtime` 行表达。
-两类行都会显示
-`Saving…` / `Verified` / `Not saved · 原因` / `Commit accepted · verification unavailable` /
-`Outcome unknown · 原因`，只有写入完成、backend `ready` 且权威回读一致才显示 Verified；
-被拒绝的写入会先重读权威：仍停留在请求起点值才报 Not saved，出现第三个值、已是目标值或无法读取
-则如实报 Outcome unknown；写返回成功但权威可读地不一致同样按失败显示，而不是
-"verification unavailable"。backend 不 ready 时主题不会被应用或写入；显示预设可以先在本机生效，
-此时会明确说明未能保存，而不是假装保存成功。插件主题在确认时再次按 source-qualified 身份解析，
-已卸载的插件主题标记为 unavailable 并拒绝确认，不会退化成同名文件主题。这三类写入器互不混同：
-`Icon style`、`Progress updates`、`Response style` 先作用于各自的实时 owner（图标调色板；Agent
-提示词实际读取的同一份 progress/response state 对象），再经唯一串行整文档写入落盘；`Transcript
-detail`（与 `Ctrl+O` 同一份开关）与 `Thinking detail`（与 `Alt+T` 同一份开关）是纯运行态，
-没有持久字段，详情里明确写 `not applicable — runtime-only`，其 Verified 只代表运行态已生效。
-三者的 `[current]` 标记实时生效值（先应用后落盘），`Persisted` 另行显示文档里的原始存储值
-（未声明显示 `not set`，文档不可读显示 unknown）；归一化后的回退值永远不会伪装成已保存值。
-`Configured theme` 与 `Transcript display` 保持原有语义不变：主题在 backend 非 ready 时先拒绝、
-不应用运行时，二者的 `[current]` 依据持久偏好而不是实时值。`Progress updates` 与
-`Response style` 的切换在下一次提示词组装时生效，不重新注册 section、不重建 Agent；Focus
-只是暂时抑制进度叙述，不修改已选择的节奏。
+`Settings → Tools` 的 **Visual tools** 开关（默认 On）对应整个 Host profile 的
+`pi-tui-visual-tools.enabled`，一处开关同时管理 `dsh_pi_tui_chart`、`dsh_pi_tui_svg`
+与 `present_visual`。关闭后新模型请求不再看到三个工具，历史结果仍可显示、复制、搜索与
+导出；Direct 会核对 Host 注册状态后显示 Verified，Remote 只如实显示配置已保存。
 
-`/settings → Tools` 提供一个 profile 级 **Visual tools** 总开关（默认 On）：它对应 Host 的
-`pi-tui-visual-tools.enabled` 配置，一处开关同时管三个模型工具 —— 生成图的 `dsh_pi_tui_chart`、
-`dsh_pi_tui_svg`，以及显式发布的 `present_visual`。关闭后三者会从该 Host 的全局工具注册表一起
-注销，之后新的模型请求不会再看到它们；重新打开会一起恢复原定义。三个注册保证的是**收敛后**的
-一致性：一次成功的开启最终持有全部三个，成功的关闭最终一个都不持有，任一注册失败会把本次已
-注册的定义回滚掉；官方工具注册表每次注册都会同步发出一次变更通知、没有事务化接口，所以同步
-观察者可能看到过渡中的中间状态，但收敛后不会留下半启用状态。设置属于整个 DSH Host profile（跨会话、
-跨 Agent，不只是当前 TUI）；关闭只影响未来的工具可用性，已经记录在 transcript 里的图表/SVG
-结果、模型可见的 `visual-ref-v1` 引用与历史发布记录仍可正常显示、复制、搜索与导出。Direct
-后端会同时核对 Host 注册表状态后才显示 `Verified`；Remote 没有注册表读取通道，只如实显示配置
-已保存，不宣称运行态已生效。
+`Settings → Tools → Web Search / Fetch` 是同一工作区内的专页：搜索/获取 provider、
+结果数、`Share Original Question`、HTTPS endpoint 与只读 API key 引用；每个值只有明确
+Enter 确认才写入，并显示 Host 权威回读结果。两套 API 是独立计费 provider，默认
+Messages/HTTP 不调用收费 API。
 
-Conversation 与 Input & Terminal 的八个历史设置现在都在工作区里直接编辑：Conversation 顺序固定
-为 Transcript display → Transcript detail → Thinking detail → Progress updates → Response style →
-Submit while busy → Git attribution；Input & Terminal 固定为 Home/End keys → Fullscreen →
-Mouse wheel lines → Notifications → Notification method → Terminal progress →
-Keyboard shortcuts…；最后一项打开的是与裸 `/keybindings` 相同的同 lease 全屏页，不再进入旧编辑器。
-
-`Submit while busy` 与 `Fullscreen` 是**先写文档**的两项：只有写入完成且权威回读一致才显示
-`Verified`，运行态不会被假装已切换。`Submit while busy` 的 `Value` 就是文档里的原始值（缺失显示
-`not set`，非法显示 `invalid stored value: <原值>`），`Runtime` 明确写出下一次忙时 Enter 的策略，
-默认值会标注为 `queue (default; no valid saved value)`，绝不冒充已保存值；确认后不影响正在进行的
-回合。`Fullscreen` 的偏好确认后工作区照常可操作，**正常退出 Settings 后才切换 transcript 屏幕**；
-被 Question/Approval 抢占、被强制关闭或写入未确认都不会切屏，已保存的偏好会在下次 TUI 启动时生效。
-
-其余六项先改真实运行态再持久化（失败不回滚运行态，`Persisted` 单独显示文档原始值）：
-`Git attribution` 改的是同一个 `tui:git-attribution` 提示词状态，仍只是提示词引导（不生成 Git hook、
-不自动修改 commit，`minimal` persona 依旧不接收该引导）；`Home/End keys` 改的是全屏视口实际生效的
-按键绑定，其他键位不受影响；`Mouse wheel lines` 只对**下一次**全屏生效，当前视口保持进入时的步进；
-`Notifications` 与 `Notification method` 改同一个完成通知控制器，改 method 本身不会发出通知；
-`Terminal progress` 只控制终端原生状态协议（OSC 9;4 / OSC 7501），与 `Progress updates` 的叙述节奏
-互不影响；旧文档里的 `on` 只在读取时归一为 `9;4+7501`，不会在未确认时被写回。
-
-`/settings → Agent` 现在直接编辑五项，不必再进旧编辑器，顺序固定为
-`Approval policy (this session)` → `Default permission` → `Subagent allowed models` →
-`Subagent model selection` → `User shell sandbox policy`。五项各有唯一权威，语义互不混同：
-`Approval policy` 是**当前会话**的官方 approval override，本工作区打开时只捕获一次该会话，
-之后即使切换会话也不会改投到新会话（确认被同步拒绝，需重开工作区）；它的 `Persisted` 明确写着
-`not applicable — current session only`，`Runtime` 单独说明下一次审批实际会用的是会话 override
-还是消费者的 `ask` 回退。`Default permission` 是 Host 的 `permission.defaultPreset`：候选就是
-Host 公布的 preset 原始 id，只影响**以后新建**的会话，当前会话的 preset、sandbox 与 approval
-不变；写入返回成功但 Host 回读不一致时不会显示 `Verified`，而缺少 settings 服务时会明确失败，
-不再把 no-op 当成功。`Subagent allowed models` 用 `Manage allowed models…` 在**同一个工作区租约**
-里打开原有的可搜索多选列表（同一套分组/过滤/滚动与 `Enter toggle`），
-`Esc` 只回到 Agent 行而不是退出设置；`Subagent model selection` 是该官方 section 的 `enabled`：
-没有 allowed route 时开启会**零写入**、给出提示并把选中行移到 allowed models 行，关闭则保留全部
-已存 route。两个子代理入口共用唯一一条写入队列，而且每个操作只写自己拥有的那一半
-（picklist 只写 allowed route 列表、开关只写 enabled），另一半在轮到它时从官方 section 重新读取，
-所以先前的慢写不会再被后到的旧快照覆盖。
-`User shell sandbox policy` 存在 TUI 设置文档里，`Value` 是原始存储值（未设置/非法值/不可读都分别
-如实显示），`Runtime` 说明下一次 `!`/`!!` 的实际效果（包括「无可信存档值，使用默认 bypass」），
-只有写入完成且回读一致才 `Verified`；它是 Host 的用户 shell 执行策略，不是模型工具 sandbox 策略，
-也不是权限 preset，因此不放在 Input & Terminal。
-
-Settings 工作区是唯一的设置界面：所有字段都在原生行里编辑，`Extensions` 也直接列出
-真实动态设置行（按 owner 分组分页）。Theme、Plugin Manager、键位与扩展设置的写入路径全部不变；
-Footer 与 Keyboard shortcuts 仍是同一 Settings lease 内的专页，`Appearance`、`Input & Terminal`、
-`Agent` 与 `Extensions` 都没有过渡入口。`SettingsList` 组件仍由 `/help`、`/skill`、`/preset`、
-`/keybindings conflicts` 这些独立消费方使用，它们各自提供自己的行。
-
-`/settings → Tools → Web Search / Fetch` 现在是**同一个 Settings 工作区里的专页**（不再先关工作区、
-再进旧编辑器）。页面固定六行：搜索 Provider（`Messages`，官方默认，或独立计费的
-`DeepSeek Search API`）、Fetch Provider（`HTTP`，官方默认，或 `DeepSeek Fetch API`）、Search API
-结果数（官方范围 1–50，快选 5/10/20/50；Host 里已有的其他整数照原样显示、不会被改写）、
-`Share Original Question`（官方默认开启；每次新的 Search API 调用附带最多 128 字符的触发人类问题
-`ori_question`，不发送完整历史或系统提示词）与 API endpoint base（沿用原有 endpoint 编辑器：完整
-URL 草稿 + 明确 Enter 确认，并警告凭据与查询会发往该 HTTPS 地址；URL 形状会校验，但目标是否可信
-必须由人判断），最后是只读的 `DeepSeek API Key`。两套 API 都是独立的 opt-in 收费 provider：登录或
-普通 Messages 套餐不保证覆盖其费用，默认的 `Messages`/`HTTP` 组合也不会调用收费 API。Web 配置是
-base profile 所有的设置，不是 Bxx Optional Bundle；安装或启用任何其他 Bundle 都不会改变这两个
-provider。
-
-每个值只有**明确 Enter 确认**才写入，移动焦点、展开详情、Tab、刷新、退出都不会写入；写入后由权威
-回读判定 `Verified` / `Not saved`（并显示 Host 保留的值）/ `Outcome unknown`，从不按提交意图伪造
-成功。自定义的 provider id 原样显示、不提供可确认候选，也不会被导航悄悄替换成 `Messages`/`HTTP`；
-确认一个 Host 已有的值不会产生多余写入。选择对下一次搜索/获取生效，运行中的操作不会被追溯切换。
-DeepSeek API key 只显示是否配置与来源层，`Configure in Models…` / `Clear in Models…` 会在同一个
-Settings lease 里跳到既有的 Models `API Key Reference` 页完成遮蔽输入或清除确认——Web 页自身从不
-收集密钥，也不执行 `/login` / `/logout` 文本命令。按 `Esc` 从详情回到 Web 列表、再回到
-`Web Search / Fetch` 行；Remote 或不可用的 Host 段仍可打开只读说明页，但不提供任何写入入口。
-不存在第二个设置编辑器：Web 页是唯一的 Web 配置界面，它的写入走同一条命令层 FIFO，
-读取来自同一份 Host 权威回读。
-
-`/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格(也可在 Appearance 里直接改):`Emoji`(默认,
-彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只
-保留状态/交互标记);切换立即生效并持久化。
-
-`/settings` 中的 `Terminal progress` 控制原生终端状态上报,共四档:
-`9;4+7501`(默认,同时上报 OSC 9;4 进度条与 OSC 7501 语义状态)、
-`9;4`(只保留进度条兼容协议)、`7501`(只上报语义状态:运行中 / 等待审批 /
-等待回答 / 完成 / 出错)、`Off`(清除并停止上报)。切换立即生效;完成与出错
-只在一次真实运行的最后一个 turn 结果被证实后上报,中断或取消会回到空闲。
-旧的 `On` 配置读作默认双协议。
-
-终端兼容性说明:不认识 OSC 7501 的终端会直接忽略它——目前 Ghostty 的 GUI
-只显示 OSC 9;4 进度条、不显示 7501 语义状态,这是预期行为,不代表上报失败。
-在 tmux 等终端复用器里,未知 OSC 可能不会被转发到外层终端(本功能有意不实现
-tmux 的 DCS passthrough,也不修改复用器设置);需要跨复用器保留状态时请直接
-使用支持它的外层终端。此外,OSC 7501 的语义状态只作用于当前 Main Agent。
-
-本项目的 Remote(实验性、自有 Host 组合)同样上报这套状态:Host 侧由本扩展自带的
-私有状态流提供,并与 Direct 共用同一份区间判定。**未安装本项目 Host 扩展的第三方
-DSH Host 不支持**这套上报(它没有对应的事件源)。
-
-其他插件注册到 `ctx.commands` 的 Slash Command 也会被自动发现。
+`Extensions` 按注册 owner 分组分页：`Tab`/`Shift+Tab` 切组，方向键/Home/End/翻页/滚轮
+组内移动；条目进入原生 Detail/Choice，只有显式 Confirm 才写入运行中的插件，`Verified`
+以实时回读为准，同名 HMR 重注册不继承旧状态。扩展设置不写 TUI 设置文档或 Host profile。
 
 ### Footer 自定义
 
@@ -540,7 +408,16 @@ Importance，也可以创建自己的 Footer 条目。
 
 Ctrl+V 会读取系统剪贴板：剪贴板里是图片时得到规范占位符 `[image #N (宽×高)]` 并在输入框上方一行显示草稿缩略图（窗口过矮时客户端会把这一行隐藏，输入与发送不受影响，状态行仍报出真实草稿数），是文字时插在当前光标处。`/image` 与 `/attach` 也可以把图片或普通文件加入当前草稿；同一个占位符出现多次会显示多个位置，但只读取、上传一次。
 
-用户消息、助手消息和工具结果里的图片都按原始顺序显示在各自的卡片中：一行身份信息（名称、像素尺寸、字节数）加一张图片。点开图片后的查看与缩放由终端客户端自己提供（相邻图片导航取决于客户端版本与能力），本项目不另外弹出窗口或页面。图片读取失败、格式不支持或超出单张 16 MiB 限制时，卡片会显示身份与真实原因，不会显示伪造的图片。在原生 Kitty 终端中，Transcript 缩略图、输入框上方的草稿预览卡以及从图片打开的全屏查看页都会先在后台把 JPEG/WebP 转换成受限的 PNG 再显示像素（WebP 只取第一帧、按 EXIF 方向摆正、最长边不超过 768 像素；身份行与查看页仍使用原始名称、尺寸、格式与字节数；草稿卡只处理当前最后一张有权限显示的本地图片）。折叠的缩略图不会触发转换；转换中或失败时只显示文字（失败为 `Preview unavailable`），只有真正画出像素的正文才能点击。全屏查看页展示的是同一份受限缩略图，不提供高清原图浏览；PNG、iTerm2、GIF、窄屏与不支持图形的终端行为不变。
+用户消息、助手消息和工具结果里的图片都按原始顺序显示在各自的卡片中：一行身份信息（名称、像素尺寸、字节数）加一张图片。PiTUI 的查看器见下；实验性 TSP renderer 的查看与缩放由 Tern 客户端提供（相邻图片导航取决于客户端版本与能力）。图片读取失败、格式不支持或超出单张 16 MiB 限制时，卡片会显示身份与真实原因，不会显示伪造的图片。在原生 Kitty 终端中，Transcript 缩略图、输入框上方的草稿预览卡以及从图片打开的全屏查看页都会先在后台把 JPEG/WebP 转换成受限的 PNG 再显示像素（WebP 只取第一帧、按 EXIF 方向摆正、最长边不超过 768 像素；身份行与查看页仍使用原始名称、尺寸、格式与字节数；草稿卡只处理当前最后一张有权限显示的本地图片）。折叠的缩略图不会触发转换；转换中或失败时只显示文字（失败为 `Preview unavailable`），只有真正画出像素的正文才能点击。全屏查看页展示的是同一份受限缩略图，不提供高清原图浏览；PNG、iTerm2、GIF、窄屏与不支持图形的终端行为不变。
+
+全屏图片信息行最右 3 格 `[-]`/`[+]` 只折叠该图片；点击图片正文打开只读查看器。`/view-image` 列出当前已挂载 transcript window 的图片，`Enter` 查看、`Esc back` 返回原列表。
+
+### TSP renderer（实验性）
+
+设置 `DSH_PI_TUI_RENDERER=tsp` 后启用实验性 Tern TSP renderer：支持原生工具卡、
+Preparing 行、PTC 子调用、Work Hub（`/tasks`、`/subagents`）、图片粘贴与历史图片，
+以及已发布图表/SVG 的原生显示与 Copy。默认 renderer 仍是 PiTui；TSP 不支持的
+Settings / Plugins 页面会明确拒绝。
 
 ## 常用按键
 
@@ -560,6 +437,9 @@ Ctrl+V 会读取系统剪贴板：剪贴板里是图片时得到规范占位符 
 | `Ctrl+End`    | 全屏时跳到最新 Transcript 输出；离开 live tail 时底部显示可点击的 `↓ Latest` |
 | `Ctrl+O`      | 展开 / 折叠工具和系统详情；普通与全屏非 Focus 下展开/收起超长用户 Prompt；全屏 Focus 下整体切换 Thought root（超长用户 Prompt 用点击/搜索展开） |
 | `Alt+T`       | 展开 / 折叠 Thinking       |
+| `Alt+V`       | 选择 / 循环当前窗口的已发布图表或 SVG |
+| `Alt+C`       | 复制选中的图表 / SVG          |
+| `Alt+O`       | 打开选中的 SVG             |
 | `Ctrl+G`      | 使用 `$VISUAL`/`$EDITOR` 编辑输入 |
 | `Ctrl+V`      | 粘贴图片                   |
 | `Tab`         | 补全斜杠命令与文件路径           |

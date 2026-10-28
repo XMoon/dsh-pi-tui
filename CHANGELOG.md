@@ -7,428 +7,129 @@
 
 ## [Unreleased]
 
-### 新增
-
-- **tmux 窗格中的图片不再只限于 Kitty 客户端。**
-  已知支持 Unicode placeholder 的 Kitty/Ghostty 客户端保持原有行为；其他终端（包括
-  WezTerm、Tern 与未知宿主）在真实 tmux server 的 passthrough、单客户端与会话身份检查
-  通过后，会通过一次真实 tmux DCS 透传发送 `a=q,i=<id>,e=T,U=1` 能力查询，只有匹配 id
-  且返回 `e=T,U=1;OK` 才显示图片；无回复、普通 `OK`、错误或超时都保持纯文字，不会退回
-  旧的图片路径。`allow-passthrough=all`、单客户端、`PI_IMAGE_PROTOCOL=none/0` 与
-  `PI_TUI_TMUX_KITTY_IMAGES=0` 等限制不变。旧版但确实支持 U1 的未知终端可显式设置
-  `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1`，它只代替 U1 能力证明，不绕过 tmux 实时身份与撤销检查。
-- **支持 Kitty 图形协议的直连终端不再需要品牌白名单，Zellij 各宿主按当前窗格能力显示图片。**
-  Kitty、Ghostty、WezTerm、Warp、Tern 以及其他由 `PI_IMAGE_PROTOCOL=kitty` 明确启用 Kitty
-  协议的直连终端，都使用同一套受管图片生命周期显示转录、草稿与查看器中的 PNG/JPEG/WebP。
-  Zellij 窗格不再按宿主品牌预判，而是在真实输入监听安装后向当前窗格发送一次能力查询，只有
-  匹配的 `OK` 才显示图片；失败、超时或拒绝时保持纯文字，且不会退回旧的转义图片路径。Tern 的
-  普通 PiTui 路径按 Kitty 能力显示图片；已连接的 TSP 渲染器继续使用 SDK 原生图片与 blob
-  通道，不会同时创建终端图片句柄。全屏视图跟随实际受管图片协议清理图片，移除、移动或反复
-  进出全屏不会留下残影或误删其他图片。`PI_IMAGE_PROTOCOL=none`（或 `0`）仍在任何图片读取、
-  转换或上传之前关闭该能力。
-- **Ghostty 中运行的 Zellij 窗格现在也能显示真实图片像素。**
-  当 Ghostty 宿主内的 Zellij 窗格通过一次真实能力查询确认支持 Kitty 图形协议时，转录、草稿、
-  图片查看器与已授权的 SVG 预览会使用与直连 Kitty/Ghostty 相同的受管生命周期显示真实图片。
-  查询完成前、查询被拒绝或超时都保持纯文字，不会退回旧的转义图片路径；`PI_IMAGE_PROTOCOL=none`
-  （或 `0`）会在任何图片读取、转换或上传之前关闭该能力。
-- **Ghostty 直连终端的图片现在使用与 Kitty 相同的受管原生图片生命周期。**
-  Ghostty（`TERM_PROGRAM=ghostty`）直接连接、未经过 tmux/Zellij/screen 等复用器时，
-  转录、草稿与图片查看器中的 PNG/JPEG/WebP 都会显示真实像素；已授权的 SVG 预览也按现有
-  平台能力光栅化并显示。无论 Ghostty 的 `TERM` 是 `xterm-ghostty`、`xterm-256color`、
-  自定义值还是缺失都同样适用。`PI_IMAGE_PROTOCOL=none`（或 `0`）仍然是全局关闭开关：
-  关闭后不读取、不转换、不上传任何图片。
-- **`/deliverables` 的 Details 页现在会真实读取并预览 Host 文本文件，且明确区分“读不到”的各种原因。**
-  `Enter Preview` 先向 Host 取实时 metadata（不再把交付声明当成快照），随后只读取一页 120 行的
-  UTF-8 文本；内容按等宽纯文本原样显示（保留 Markdown 源码，不做不完整的富文本重排，源码不丢行、
-  也不会有原始 ANSI/OSC 注入）。已知二进制/文档后缀只显示 metadata 与
-  `Preview unavailable for this file type`，不读取任何字节；`↑↓` 滚动当前页，`PgDn`/`PgUp`
-  在本页未到边界时只滚 viewport（`PgDn` 仅在未到文件尾、`PgUp` 仅在非第一页时才请求相邻 120 行），
-  到边界才请求相邻页，不预取、不聚合成整本文件。Host 上文件在两页之间变化时丢弃旧页并重新从
-  metadata + 第 1 行开始，提示 `File changed; preview restarted`，绝不拼接不同版本；空页 + EOF 显示
-  `(end of file)`。文件已删除、非 UTF-8、不再是普通文件、页面超过 Host 读取上限、Session scope
-  不可用、Host 预览服务不可用各有固定、可理解的提示，并始终保留 `Shift+C Copy path` 与返回；
-  无法归类的原因显示 `Unable to preview file` 并写入诊断，不会被伪装成成功。切换文件/轮次、离开
-  该页或退出面板都会撤销进行中的读取，过期回复不会再画到界面上。`C` 复制的仍是原始 Host 路径字符串。
-  Direct 与 experimental Remote 走同一个只读语义端口（Remote 用官方 `workspaceFiles` 生成 Remote），
-  不提供本地文件系统回退、不新增 TUI 专用 RPC，也没有图片/PDF/native 打开或下载能力。
-- **Settings 的 `Extensions` 现在是按插件分组的真实动态设置页。**
-  每个 TUI 扩展通过 `registerSetting` 贡献的设置都会以真实条目出现在
-  `Settings → Extensions`，并按注册 owner 自动分组分页：一次只显示一个插件的设置，
-  `Tab` / `Shift+Tab` 在两组及以上时循环切组并落在目标组第一行，`↑↓`、Home/End、翻页与滚轮
-  只在当前组内移动；只有一组时 `Tab` 保留原有区域焦点行为。标题栏先显示 `[i/N]` 再显示组名，
-  窄屏优先保住位置；Rows 面栏显示 `Rows (m) · 组名`，宽度不足时依次退化为 `Rows (m) · i/N`
-  与 `Rows (m)`。条目进入原生 Detail/Choice：Owner 与 ID 显示原始值，未注册候选值的设置只读，
-  当前值不在候选里会明确说明；只有显式 Confirm 才写入运行中的扩展，回读一致才 `Verified`，
-  插件拒绝显示 `Not saved` 并只把健康错误记在发起调用的 owner 上，被更新版本取代或已卸载不会
-  伪装成拒绝。设置只作用于本次运行的插件，不写 TUI 设置文档或 Host profile；同一 id 的 HMR
-  重注册不会继承旧确认/重试/结算。原先的 `Extensions → Configure extension settings…`
-  过渡入口已移除，Settings 不再跳转旧设置编辑器。
-- **Transcript 的交付文件尾部现在只展开前四项，并可通过新的 `/deliverables`
-  在一个面板内浏览、筛选和复制路径。**
-  PiTui 的最终回答把 `present` 声明的交付文件附在一条紧凑尾部：每个文件最多两行，
-  第一行是当前显示会话工作区内的相对路径（查看子代理时用子代理自己的工作区；根外路径
-  保持绝对），第二行是单独缩进的描述；两行各自只占一条物理行并使用首尾保留的缩写，
-  完整 raw 路径与描述仍在详情页和复制动作中。超过四项时以
-  `+N more · /deliverables` 收口；全屏 AltScreen 的 Full/Compact/Focus 都绘制可点击的
-  `Browse all` 与逐文件 `Details`，鼠标命中只落在真实绘制的文字上，OSC 8 链接与文本
-  拖选始终优先；普通分屏不画无法点击的死按钮，仍以 `/deliverables` 作为入口。
-  `/deliverables` 打开覆盖当前显示会话（含正在查看的子代理会话）的单个受管面板，
-  内含 `Files / Turns / Details` 三页：`↑↓` 选择、`Enter` 进入详情、`/` 过滤
-  （大小写无关地匹配文件名、完整 Host 路径与描述）、`T` 切换有交付的 Turn、
-  `C` 复制原始 Host 路径、`Esc` 按当前页返回/关闭；鼠标可用，底部提供
-  `[Filter] · [Turns] · [Close]`、`[Back]`、`[Copy path]` 等真实按钮，Turns 行也可直接
-  点击打开；普通分屏只保留键盘提示，不画没有指针所有者的按钮。面板改为居中的百分比
-  窗口：窄终端按实际宽度铺满，宽终端最多 120×38 且不再突然放大到几乎全屏，切换页面
-  不改变尺寸；终端缩放时面板保留当前页、筛选、光标与滚动位置并重新计算尺寸。详情页
-  展示声明中的 Host 路径、描述与现有的一页只读预览，`Copy path`
-  复制的始终是原始字符串，不会把声明当成文件快照。Ctrl+O 仍在可用时保有原来的
-  展开/收起语义；Ctrl+O 属于别的所有者时尾部保持四项并由命令提供入口；两者都不存在时
-  尾部完全展开，不再绘制无法执行的提示。
-- **`/deliverables` 面板内的文字现在可以用鼠标选中并复制。**
-  在文件行的路径/描述、右侧信息栏、详情页头部行或预览正文上拖选，只会选中面板内容区内
-  真实绘制出来的文字，松开鼠标即复制，并保留原有的空格与缩进；双击选中指针所在词
-  （`report-2026.md` 这类路径保持整词），三击选中当前可见行，宽字符 CJK 与 emoji 不会被
-  截成半个字。选区永远出不了面板：碰到边框就停，拖到面板外会回落到最近的内容单元格，
-  面板背后被遮住的 transcript 绝不会被选中或复制。按钮仍是按钮：点击 `Details`、
-  `[Filter]`、`[Turns]`、`[Copy path]`、`[Back]`、`[Close]` 仍执行对应动作而不是开始
-  选区，单击文件行也仍然只是选中该行。面板关闭、终端缩放、被新面板覆盖或自身内容变化时
-  选区立即清除，所以迟到的松开鼠标不会复制另一帧的文字。普通分屏行为不变：它没有
-  应用层文本选区，取原始路径仍靠 `Copy path` / `Shift+C`。其他面板保持原状，不会因此
-  变得可选中。
-- **PiTUI 的最终回答现在为已发布的图表/SVG 提供真实操作行与全屏 SVG 阅读器。**
-  图表保留精确数值并新增 `Copy Data`（复制最终 ChartFact 的格式化 JSON）；SVG 保留描述与
-  已授权的缩略图，并新增 `View` / `Copy SVG`（复制未经修改的原始源码）。`Alt+V` 在当前窗口
-  的已发布图之间循环选中，图内以 `[Selected]` 文字标记、底部提示 `Selected i/n · <标题>`；
-  `Alt+C` 复制选中的图，`Alt+O` 打开选中的 SVG。三者都是可重映射的 Host 动作，未选中时只
-  提示先按选择键；图表没有阅读器。SVG 阅读器复用现有的全屏图片工作区租约（不是新页面或
-  overlay）：默认 Preview 按当前终端真实尺寸重新派生自己的高清变体（绝不放大缩略图），
-  Tab 切到只读且已做终端净化的 Source，可用行/页/Home/End 滚动，C 与 `Copy SVG` 发送完全
-  相同、未 trim 的原始字符串，Esc 回到原来的 transcript 位置。没有图片协议或派生失败时
-  Preview 明确显示 `Preview unavailable`，Source/Copy 仍然可用；鼠标只点击真实绘出的操作
-  文字或缩略像素。`/copy` 现在复制用户看到的显示正文（不含已被渲染消费的 marker 行），
-  原始 Session、搜索与 `/transcript` 导出保持完整。
-- **Footer 与键盘快捷键编辑器现在统一进入全屏 Settings 工作区，不再打开独立的 88 列 overlay。**
-  `/footer`、它的别名 `/statusline` 和裸 `/keybindings` 都会直接打开同一个 Settings lease 中的
-  `Appearance → Configure footer layout` 或 `Input & Terminal → Keyboard shortcuts` 页：顶部仍是
-  Settings 的唯一标题、状态与作用域，底部仍只有一条操作栏。Footer 的行/条目/样式/自定义条目、
-  实时预览、脏草稿退出确认和“先持久化再应用”的保存事务保持原语义；键盘快捷键的搜索、动作详情、
-  直接/leader 录键、冲突与安全模式、FIFO 写入与实时 keymap 也保持不变。`Esc` 先按各页自己的层级
-  返回来源行，再按 Settings 的既有层级退出，不会打开第二个全屏或第二个编辑器。`/keybindings
-  conflicts|reload|reset` 保持原有独立诊断语义。两个页面的根状态还支持 `←` 返回：Footer 行选择器
-  与搜索为空时的键盘快捷键列表按 `←` 等同 `Esc` 回到来源设置行（底栏显示 `← Back`），Footer 有
-  未保存修改时先进入 Save/Discard/Keep 确认；行编辑器的 `←` 仍是切换左右分区，搜索非空时 `←`
-  仍只移动光标。关闭这两个编辑页会直接回到所属设置行的 Rows 列表（不经过中间的 Detail 面板），
-  下一次返回键即到分类栏。只剩一行操作栏时页面只承认并显示自己真正接受的返回键（根页面为
-  `← Back` 与 `Esc`，子页面只剩 `Esc`），不会提示或执行看不见的搜索/保存动作。写入进行中任何
-  按键都不会离开，结果会先在页面上呈现。
-
-
-- **实验性 TSP renderer 的最终回答现在支持原生图文混排，并为每张已发布图提供 Copy 操作。**
-  `DSH_PI_TUI_RENDERER=tsp` 下，经 `present_visual` 发布的图表/SVG 会按各自的标记位置进入
-  同一个 Assistant 卡：Tern 协商了原生图表/图片时直接绘制原生控件，未协商时始终保留完整
-  标题、精确数值或 SVG 描述，绝不伪造图形；正文的链接定义、代码、列表与脚注语义不变。
-  每张图带一个真正的 Copy 按钮：图表复制最终 ChartFact 的格式化 JSON，SVG 复制原始源码；
-  `Alt+V` 按当前窗口的已发布图顺序循环选中并在图内显示 `Selected · i/n` 标记，Dock 同时
-  显示当前选中的图与编号（`Selected i/n · <标题>`），`Alt+C` 复制当前选中的图，未选中时
-  给出提示。选中图是否已在当前视口内由 Tern 客户端自己的转录滚动位置决定，程序不新建页面、
-  Reader 或第二套滚动；复制复用现有的 ClientActions 剪贴板
-  策略；旧帧、旧会话或尚未完成的异步结果不会把成功提示写到新会话；模态框、Work 详情阅读器、
-  Picker 或 Work Hub 打开时，按钮与按键都不会越过它们。未发布、伪造或已失效的来源不画图、
-  不生成 Copy 按钮，也不发送图片数据。
-
-- **原生 Kitty 终端的草稿图片预览与全屏图片查看页现在也能显示 JPEG/WebP 的真实像素。**
-  之前这两处只画 PNG，JPEG/WebP 只能显示 `Preview unavailable`。现在输入框上方的草稿
-  预览卡与全屏图片查看页都会复用 Transcript 缩略图的同一份后台 PNG 派生（WebP 只取
-  第一帧、按 EXIF 方向摆正、最长边不超过 768 像素）：草稿卡一次只派生当前最后一张有
-  权限显示的本地图片，转换中显示 `…`、失败才显示 `Preview unavailable`；查看页保留
-  原始名称、尺寸、格式与字节数，展示的是同一份受限缩略图而非高清原图。草稿提交仍然
-  发送原始 JPEG/WebP 字节；`x` 删除、Undo、PNG/iTerm2/GIF、窄屏与不支持图形的终端行为
-  不变。
-
-- **原生 Kitty 终端的 Transcript 缩略图现在也支持 JPEG/WebP。**
-  之前只有 PNG 能画出像素，JPEG/WebP 只能退化成文字行。现在这两种格式会在后台生成一份
-  受限的 PNG 缩略图再绘制：WebP 只取第一帧、按 EXIF 方向摆正、最长边不超过 768 像素；
-  信息行始终使用原始名称、像素尺寸与字节数，折叠状态不会触发转换，转换中或失败时只显示
-  文字（失败为 `Preview unavailable`），只有真正画出像素的正文才能点击。PNG、iTerm2 原有
-  图片路径、GIF，以及窄屏/不支持图形的终端行为不变。
-
-- **模型现在可以显式声明“这些图是要给用户看的”。** 新增 `present_visual` 工具，与既有的
-  `dsh_pi_tui_chart`、`dsh_pi_tui_svg` 共享同一个 Visual tools 开关（默认 On，一处开关三个
-  工具在同一处开关下一起出现/消失，且收敛后的一致性有保证：成功的开启最终持有三个、
-  关闭后一个都不持有，任一注册失败会回滚本次已注册的定义）。图表/SVG 的成功结果现在还会带上
-  一个模型可见的稳定引用 `visual-ref-v1:sv1_…`（由 session、turn、当前 step 的事件序号与
-  `callId` 共同派生），模型在后续步骤用 1–8 个引用调用 `present_visual` 即可显式发布。
-  发布只认可本会话、当前 turn、**更早的已提交模型步骤**中的成功图表/SVG 结果：同一步的
-  来源即使已先提交也会被拒绝，跨 turn、未知/重复/尚未提交的引用会让整次调用失败，不等待、
-  不部分成功、不暗中重试；策略替换生成结果或发布结果同样会撤销资格。成功回执是“已选定 N 个
-  图”的人类摘要加一条严格的 `visual-published-v1` 机器行，失败回执只有可读原因。发布不新增
-  任何会话事件、持久化发布表或缓存，冷回放从同一份日志得到相同结论；三个工具的人类可读
-  卡片、搜索与 `/transcript` 导出都不会显示这些机器行，而原始会话记录仍然完整保留。已有
-  Tool Card 仍按原样显示，发布过的图现在还会进入最终回答（见下一条）。
-- **已发布的图表/SVG 现在会出现在最终回答里，而且只有一条 Assistant 行。** 严格合法的
-  `[dsh-visual-sv1_…]: <#>` 定义会在其原文位置原位插入对应图形，同一 ref 最多一次；正文里
-  没有 marker 的已发布图按首次发布顺序附在回答末尾、交付文件之前；未发布、伪造、重复或
-  写在代码块/缩进/引用里的形似定义不会插图，也不会吞掉原文字。链接定义仍按原 Markdown
-  语义生效：图前引用、图后定义或反向都能解析到原来的目的地，定义本身只作为显示层上下文，
-  不写回会话、模型消息、搜索原文或 `/transcript` 导出。最终回答仍是一个 transcript 行、
-  一个 bullet、一个组件缓存与同一个 disclosure owner，Full/Compact/Focus、展开/折叠、
-  调整宽度与搜索跳转都不会复制图形或改变归属；原有 Tool/Work 卡片、SVG 描述与源码查看
-  入口保持不变。由 Extension Renderer 接管的 Assistant 卡片保持原插件视图，不叠加 Host
-  图形；回退到 Host 渲染时仍按原位/尾部规则显示。Direct 主会话与可读的 viewed child 已可用；
-  Remote 与 TSP 原生混排不在本次声明范围内。
-- **`/settings → Agent` 现在直接编辑权限、委派与用户 shell 策略五项，`Agent settings…` 过渡行退休。**
-  顺序固定为 `Approval policy (this session)` → `Default permission` → `Subagent allowed models` →
-  `Subagent model selection` → `User shell sandbox policy`，每项只有一个权威：审批策略是**当前会话**
-  的官方 override（工作区打开时捕获一次，切换会话后确认被同步拒绝，需重开工作区，且从不写入文档）；
-  `Default permission` 是 Host 的 preset 默认值，只影响以后新建的会话，当前会话不变，Host 缺少 settings
-  服务时会明确失败而不是假装成功；`Subagent allowed models` 用 `Manage allowed models…` 在同一个
-  Settings 工作区里打开原有的可搜索多选列表，`Esc` 回到 Agent 行而不是退出设置，关掉开关不会清空已存
-  route，空列表时开启不会产生任何写入；`User shell sandbox policy` 存在 TUI 设置文档里，`Value` 是原始
-  存档值、`Runtime` 说明下一次 `!`/`!!` 的真实效果，只有回读一致才 `Verified`。五项在能力不可用时
-  （无会话、Remote 无 approval 通道、Host 无 preset 或官方 subagent section）如实隐藏对应行，不伪造
-  当前值，也不打开旧编辑器。
-- **`/settings` 的 Appearance / Conversation 现在可以直接修改更多配置，不必再进旧编辑器。**
-  Appearance 新增可编辑的 `Icon style`（`emoji` / `symbols` / `minimal`），切换立即
-  改变结构图标并只持久化这一个字段。Conversation 新增可编辑的 `Transcript detail`、
-  `Progress updates` 与 `Response style`，原本只读的 `Thinking detail` 也可编辑。`Transcript detail` 与 `Ctrl+O`、`Thinking detail` 与
-  `Alt+T` 各自共享同一份运行态开关，它们是纯显示状态、不会被持久化，详情里会直接写
-  `not applicable — runtime-only`；`Progress updates` 与 `Response style` 修改的是 Agent 下一次
-  组装提示词时实际读取的同一份状态，并各自持久化，Focus 只是暂时抑制进度叙述而不改变已选
-  节奏。浏览、移动候选、Tab、滚轮、缩放与 Esc 都不会写入；只有显式 Confirm 才提交，
-  结果仍分 `Verified` / `Not saved` / `Commit accepted` / `Outcome unknown`，并分别显示
-  实时值与文档里的持久值。
-
-- **`/settings` 的 Conversation 与 Input & Terminal 现在可以直接修改全部八个历史设置。**
-  Conversation 的固定顺序变为 Transcript display → Transcript detail → Thinking detail →
-  Progress updates → Response style → Submit while busy → Git attribution，原来的
-  `More conversation settings…` 过渡行随之退休（Conversation 已无未迁移项）；Input & Terminal
-  固定为 Home/End keys → Fullscreen → Mouse wheel lines → Notifications →
-  Notification method → Terminal progress → Input & terminal settings…，最后一行只剩
-  `Keyboard shortcuts` 仍需打开原编辑器。八个字段分两类语义：`Submit while busy` 与
-  `Fullscreen` 先写文档、回读一致才 `Verified`（浏览器时代码从不假装即时生效）；其余六项先改真实
-  运行态再持久化，失败不回滚运行态，且 `Persisted` 永远单独显示文档原始值。`Submit while busy`
-  的下一次忙时 Enter 使用新策略，不追溯正在进行的回合；`Git attribution` 改的是同一个
-  `tui:git-attribution` 提示词状态（仍是提示词引导，不生成 Git hook、不自动改 commit，`minimal`
-  persona 依旧不接收该引导）；Home/End 改的是全屏视口实际生效的按键绑定，其他键位不变；
-  Mouse wheel lines 只对**下一次**全屏生效，当前视口保持进入时的步进；Notifications 与
-  Notification method 改同一个完成通知控制器；Terminal progress 只改终端原生状态协议，与
-  Progress updates 的叙述节奏互不影响。Fullscreen 的选择只保存偏好：确认后工作区照常可操作，
-  **正常退出 Settings 后才切屏**；从过渡行跳去旧编辑器、被 Question/Approval 抢占、强制关闭或
-  写入未确认都不会切屏，已保存的偏好仍会在下次 TUI 启动时生效。浏览、Tab、滚轮、缩放与 Esc
-  依旧零写入，只有完整可见候选的显式 Confirm 才提交。
-
-- **在正文任意位置输入 `/image` 或 `/attach`，即可就地把本地图片/文件插成占位符。**
-  不必另起一行、也不必删除已写内容：正文中间（或非首行的行首）输入 `/ima`、`/att` 会
-  出现内联下拉，其中 `Insert local image` 与 `Attach local file or image` 是本地附件操作，
-  与同名 skill 是两行不同候选；选中后原地补成 `/image ` 并继续原有的本地路径补全。
-  选中**目录**只是继续往下选；选中**文件**才读取并暂存，并且只把刚选中的那段
-  `/image <路径>` 换成规范占位符（如 `[image #1 (1920×1080)]`），前后文、其他行与已有
-  附件占位符都不变，光标停在占位符之后，可以继续写。整个过程**不会发送、排队或转向**
-  这条草稿——Tab、Enter、鼠标点击等任何确认手势都只是接受候选，要发送仍需你自己按发送键。
-  确认手势之后只做一次真实可撤销的编辑，一次 Undo 就回到可编辑的 `/image <路径>` 文本。
-  若读取期间你改了草稿、切换了会话或编辑器座位被替换，旧结果不会覆盖新草稿，也不会留下
-  没有出处的占位符。首行行首的 `/image PATH`、`/attach PATH` 命令语义不变；接受补全本身
-  从不自动发送草稿，正文里留下的普通 `/image` 仍是普通草稿文本，只有你主动发送时才会发出。
-  实验性 TSP renderer 不使用这一内联补全下拉，行为不变。
-
-- **Ctrl+V 粘贴与 `/attach`、`/image` 现在都写入当前真实挂载的编辑器。**
-  连续两次 Ctrl+V 会按触发顺序逐个读取并落稿：后一次的剪贴板读取要等前一次读完并写入才
-  真正开始，前一次失败也不会卡住后一次；粘贴文字插在当前光标处，不发送、不覆盖已输入内容，
-  剪贴板里没有图片时保持静默、不报错；图片按原顺序得到规范占位符，超出部署限制时只报一次
-  真实错误、不留无主占位符。若读取期间会话已切换、同一会话换了新的 owner，或编辑器座位被
-  替换，旧结果既不写入新草稿也不弹出旧会话的通知。`/attach` 与 `/image` 使用同一份编辑器
-  座位、同一份草稿存储与同一套 Client cwd/文件限制：图片走图片路径（入稿时读取完整字节），
-  普通文件走 metadata 路径（只探测签名前缀，完整字节在发送时才流式上传）；只有入稿成功并
-  插入占位符之后才有成功提示。没有可用编辑器时命令直接报错，不读文件、不产生成功假象。
-  实验性 TSP renderer 现在也能执行 `/attach` 与 `/image`，结果落在它自己的编辑器里。
-
-- **实验性 TSP renderer 支持 Ctrl+V 粘贴图片，并原生显示草稿与历史图片。**
-  Ctrl+V 直接走既有剪贴板粘贴链路（并发的两次粘贴仍按触发顺序逐个读取），图片得到规范
-  占位符与草稿预览，文字插在当前光标处；括号粘贴的文本仍是一次普通文本编辑，不会被当成
-  粘贴图片。草稿缩略图紧贴输入框上方排成一行：宽度 ≥100 列时最多两张，72–99 列一张，更窄
-  或客户端不支持原生图片时不显示缩略图；窗口过矮时由客户端样式整行隐藏，输入框始终可用，
-  发送不受影响，状态行以 `Draft N` 报出真实草稿数。用户消息、助手消息与工具结果里的
-  图片块都按原始顺序显示身份行与原生图片，同一张图片出现多次仍是多个可见位置、只读取并
-  上传一次。图片点击后的查看与缩放由 Tern 客户端自己提供（相邻图片导航取决于客户端版本与能力），本程序不加页面、
-  命令或弹窗；从队列拉回的草稿图片复用既有读取链路，没有可用授权时只显示身份与原因，绝不
-  发送空图片。默认 PiTui renderer 的图片行为不变。
-
-- **Transcript 图片现在可以放大查看；全屏信息行新增独立的折叠控件。**
-  全屏里每张图片信息行的最右 3 格是 ASCII `[-]` / `[+]`，只折叠/展开这一张图片的正文；
-  信息行其余文字不再可点。点击可见的图片正文会打开只读大图查看器（不重建、不滚动、
-  不改变折叠状态），其中的图片按当前终端可用区域 Fit，并区分 `Loading…`、
-  `Read failed: <原因>` 与 `Preview unavailable`。新增 `/view-image`（无需 Session）：
-  按当前**已挂载** transcript window 的图片列出单选列表，Enter 查看，`Esc back` 返回
-  原列表与原选择，再按一次 Esc 关闭；无图时提示 `No images in the current transcript window`。
-  同一附件在不同消息或同一消息内多次出现仍是各自独立的 occurrence。查看器使用现有的
-  唯一图片加载器与不可变读取 scope，关闭后不会读取新会话的图片。Kitty 终端显示真实像素；
-  iTerm2 在本版本的大图查看器中显示元信息与 `Preview unavailable`（原生像素留待后续
-  renderer/协议工作）。`/image`、`/attach` 与草稿图片预览的行为不变。
-
-- **模型现在可以在回答里画图：新增 `dsh_pi_tui_chart` 与 `dsh_pi_tui_svg` 两个常驻工具。**
-  图表支持 bars/spark（2–12 个带标签的数值与可选单位），SVG 支持自包含的静态图形；结果仍
-  显示在原来的 Tool Card 里，不新增页面、命令或弹窗。Tern 支持时显示原生图表/SVG，普通终端
-  显示完整数值或描述，并在具备可验证原生内存边界的平台上按终端能力显示受限栅格 PNG；精确数值、单位、标题和描述始终是文本，
-  复制、搜索和 Markdown 导出都能读到。SVG 只接受受限的安全子集（拒绝脚本、外部引用、CSS、
-  动画和超预算图形），并且只有最终结果仍带有与调用参数匹配的凭据时才绘制；策略替换结果后
-  不会显示旧图。Direct/Remote 使用同一份 durable 结果。
-
-- **Settings 新增 Tools 分类与 Visual tools 总开关。** 开关默认开启，位于 `/settings → Tools`，
-  对应整个 DSH Host profile 的 `pi-tui-visual-tools.enabled` 配置。关闭后 `dsh_pi_tui_chart`
-  与 `dsh_pi_tui_svg` 会从 Host 全局工具注册表注销，之后的模型请求不再看到它们；重新开启恢复
-  原定义，无需重启。设置跨会话、跨 Agent、跨 TUI 后端生效；已经记录在 transcript 里的图表/SVG
-  结果仍可正常显示、复制、搜索与导出。写入走官方 revision 校验的设置路径，只有 Host 回读一致
-  （Direct 还会核对工具是否真的完成注册/注销）时才显示 Verified；读不到 Host 配置时该行显示
-  Unavailable 并拒绝写入，不会把默认值伪装成已读取的当前值。
-
-- **草稿图片在编辑器上方实时预览。** 粘贴或 `/image` 后，当前草稿**最后一次引用**的
-  图片会以一张有界缩略卡显示在插件 widget 区与编辑器之间：宽屏最大 44×3，分屏最大
-  22×3，身份行同时显示 `#id/总数`、尺寸、大小和其余图片计数；窄屏或可用高度不足四行时
-  退化为一行数量/最新图片身份摘要。全屏可点身份行尾部 ASCII `x` 只删除当前预览对应的
-  那次占位符（仍被引用、发送中或藏在大段粘贴内容里的图片都会保留）；普通模式不提供控件，
-  由用户直接删除编辑器里的规范占位符。预览 `x` 删除本身是一次可撤销的编辑（`Ctrl+-`
-  恢复刚删除的那一处）；成功提交或 `Ctrl+S` steer 会连同 Undo 历史一起清场，`Ctrl+-`
-  不会复活已发送的图片。被删除的图片只要**编辑器的真实 Undo 历史仍能恢复它**就继续保留
-  （bounded undo-retention 预算：8 张 / 32 MiB，与 active 16 张 / 64 MiB 分开计数），所以
-  删掉图片后仍能继续添加新图；预算超出时最老的可退休图片会先从其 Undo 快照中退休，再从
-  Store 释放（同一快照里仍被保留的较新图片仍可 Undo）。是否算 active 由 Store 读取的
-  live expanded draft 决定，Undo 恢复的图片重新算作 active。真正清空 Undo 历史（提交清场）
-  时立刻释放对应保留，不依赖后端 accepted；会话切换不清 Undo，所以仍可 Undo 的图片跨切换
-  保留。提交在清场前先为本次文本引用的图片取得一次性 bridge 保留，同步分发给业务提交后
-  立即释放；业务自己的 submission reservation 在同一调用栈内接管，所以清场不会误删正在
-  发送的图片，本地命令/早期拒绝也不会留下长期保留。在默认 Host Editor 上，Enter、
-  Ctrl+Enter 与插件提交统一走会清 Undo 的提交清场；Replacement Editor 没有可验证的 Undo
-  退休能力时回退为普通清空、不提供 `x` 删除，其历史保留到 dispose，但预览照常显示。
-  Undo（Ctrl+-）恢复的占位符仍解析为真实图片并照常发送，不会退化成普通文字；拒绝提交
-  恢复草稿时也先恢复文本再释放业务保留。预览只是显示投影，不改变发给模型的文本、图片
-  顺序或附件语义。
-- **Settings 默认进入 About 主页，宽/中屏是真正的左右两栏。** 左侧是分类导航
-  （About、Models、Account、Appearance、Display、Tools、Plugins、Other settings），右侧是
-  真实内容：选中 Models 或 Account 会立刻在右栏显示对应页面，无需再按一次
-  Enter；此时键盘仍在左栏，Enter 或 → 才把键盘交给右栏页面，Esc/Backspace/←
-  退回分类栏并保留页面状态。About 显示品牌图案与 TUI、DSH 两个版本号（DSH 版本
-  不可读时显示 Unknown），不创建会话也不写任何配置。窄屏（<76 列）直接显示
-  About 内容，Esc 返回分类列表，再按 Esc 关闭 Settings。
-- **Settings 新增 Models 与 Account 两个原位页面。** Models 列出 Host provider 目录、API key
-  存在性（不是连通性测试）与 DeepSeek Account 入口，支持 provider 详情、遮蔽输入的 API key
-  写入/清除、Add Provider 草稿向导、stored credential 清除确认和 provider-native 登录
-  （URL/提示/取消都在页面内）。Account 是独立页面：显示 Host 登录状态、浏览器授权 URL 与
-  SSH 隧道提示、各自独立的 Profile/充值钱包/赠送钱包，并可取消当前 attempt、刷新和二次确认
-  sign out。`/login` / `/logout` 改为打开对应页面的深链接，最终写入/清除都在页面内明确确认。
-- **DeepSeek Account 浏览器登录接入官方 Host callback。** TUI bundle 现在挂载官方
-  `host-webserver`（`127.0.0.1:0`），由官方 PlatformAccount 在授权期间注册
-  `/oauth/callback`；浏览器授权、PKCE/state 校验、grant 持久化与后台撤销都由 Host 完成，
-  TUI 不接收 token/grant，也不自建 HTTP 服务。`--help` 不会监听端口。
-
-- **`/status` 成为 `/settings` 的真实别名，About 与 Plugin Manager Diagnostics 接替旧状态面。**
-  两个命令打开完全相同的全屏 Settings/About（同一 handler、初始焦点与读取；无 Session 时
-  不创建会话、不读取统计），`/statusline` 仍是 `/footer` 的别名。About 支持按事实复制与精确
-  Copy All；两者复制都经过共享的终端控制字符保护；扩展健康（failed/shadowed 加完整 `lastError`）、registry 计数、真实 capabilities
-  以及未关联 Loader entry 的贡献移到 Plugin Manager 的 `Diagnostics` 页（`/plugins` 或
-  `Settings → Plugins`，按 `d`），Host 包安装状态与安装日志保持独立。旧的独立 `/status`
-  页面已删除。
-- **tmux 中的图片现在会自动显示，无需显式设置环境变量。**
-  在满足 `allow-passthrough=all` 与唯一 Kitty 客户端等严格条件的 tmux 中，图片现在无需显式设置环境变量即可自动显示；`PI_TUI_TMUX_KITTY_IMAGES=0` 或 `PI_IMAGE_PROTOCOL=none` 可关闭。不会自动修改 tmux 配置。
-
-### 修复
-
-- **tmux Control Mode 客户端不再误伤图片准入。** 当一个普通显示终端与一个或多个 tmux
-  Control Mode 客户端（`tmux -CC`）共用同一个 tmux server 时，图片后端此前把这些管理连接
-  也算作显示 client，因“必须恰好一个 client”而拒绝准入。现在准入只统计真实的普通显示 TTY
-  客户端（`client_control_mode=0`）；明确标记的 Control Mode 客户端（`client_control_mode=1`，
-  即使 TTY 为空或终端类型为 `unknown`）可以共存，其加入、退出或变化不会撤销已准入的图片句柄。
-  两个普通显示客户端、缺失或非 `0/1` 的控制模式值、格式错误与任何查询失败仍然拒绝，单向撤销
-  语义不变。
-- **旧扩展句柄重复释放不再移除重新注册的贡献与其诊断。** 主题、自动补全、键盘快捷键、
-  消息/工具渲染器与编辑器这六类 Stable 注册现在一次注册只释放一次：句柄的显式
-  `dispose()`、插件 Fiber 卸载和注册失败的回收共用同一个一次性清理。此前对一个旧句柄
-  重复释放（或在同一插件里注销后用同一个 id 重新注册、HMR 重载后旧句柄迟到释放）会连带
-  删除新注册的注册表记录与健康记录，主题的卸载回调还会对旧主题重复通知；现在新注册及其
-  故障诊断都保留，主题回调只在真正卸载时各通知一次。
-- **切到 Models 页面不再卡住整个 TUI。** provider 目录与凭据的读取改为在页面第一帧
-  画出来之后再进行，并且一次读取只问 Host 要一份目录快照：此前每列一个 provider 都会
-  重读一遍目录与整段 settings，目录一大就会在按键路径上长时间阻塞。凭据列表的打开与
-  R 刷新同样先画帧再读；读取按渲染器真正的绘制边界排队，只在 Loading/Reading 帧写到
-  终端之后才执行，不再用 0ms timer 猜帧（帧被节流时也不会先跑同步扫描）。
-- **凭据写入在权威读取确认前不可操作。** `/login <REF>` 的 API Key 写入等待凭据存储
-  对该引用的读取结果；清除确认在刷新期间会先退回读取状态，不会用上一次的确认直接删除。
-  自定义 provider 如果目录已经提供了同一个 route、但它的 profile 不在标准
-  `llm-pi-ai.providers` 槽位（Add Provider 里显示 `Manual setup only`），创建会被拒绝，
-  不再出现「报告创建成功但 Host 实际读不到」的情况。
-- **热重载不再误退出运行中的 TUI。** DSH 在链接包重新构建后会重新挂载 TUI 的行；重新挂载
-  的启动行此前把「启动器早已就绪」误判为「TUI 没有挂载」，于是以
-  `required TUI surface did not mount` 结束正在运行的进程。现在只有真正经历过那一次
-  启动的行才会做出该判定：冷启动时 TUI 仍然缺失，照旧非零退出并给出可操作的提示。
-
-### 变更
-
-- **`/settings → Tools → Web Search / Fetch` 从旧编辑器迁入同一个 Settings 工作区专页。**
-  `Enter`（或行详情里的 `Configure Web…`）不再是关闭工作区跳旧编辑器，而是在同一个 lease/正文里
-  打开固定六行的 Web 页面：搜索 Provider、Fetch Provider、Search API 结果数（快选 5/10/20/50，
-  Host 里已有的其他整数照原样显示）、`Share Original Question`、API endpoint（沿用原 endpoint
-  编辑器：完整 URL + 明确 Enter 确认 + 凭据/查询外发警告）与只读的 `DeepSeek API Key`。每个值只有
-  明确 Enter 确认才写入；写入经同一个 Web FIFO 后由权威回读判定 `Verified` / `Not saved`（并显示
-  Host 实际保留的值）/ `Outcome unknown`，确认已持有的值不会重复写入。自定义 provider id 原样
-  显示且不提供可确认候选；不可用/Remote 后端只打开只读说明页。密钥仍只显示引用名、是否配置与来源
-  层，`Configure in Models…` / `Clear in Models…` 在同一个 lease 内切到既有 Models `API Key
-  Reference` 页完成写入，Web 页自身从不收集密钥或执行 `/login` 文本命令。旧的完整编辑器保留，其
-  历史 Web 行与新页面共用同一个写入队列与读取权威。
-
-- **Settings 的一级分类改为固定的九类，并按需出现 `Extensions`。** `/settings`（与 `/status`）
-  的分类现在是 `About / Models / Account / Agent / Appearance / Conversation / Input & Terminal /
-  Tools / Plugins`；只有扩展设置注册表里确实存在设置行时才在末尾追加 `Extensions`。注册、卸载或
-  同一 id 重新注册后，尚未重绘的旧帧不会再执行任何点击、滚轮或按键动作，重绘完成前只有 `Esc`
-  还能安全返回；扩展的增删或取值变化不会打断正在进行的设置选择（候选、当前分类/行与滚动位置
-  都会保留），只有选择本身失效时才回到该分类的第一项；`Extensions` 的条目消失时会落在相邻的
-  `Plugins`，不会留下空分类。`Other settings`
-  不再存在：尚未迁移的设置改由所属分类里明确标注 `Existing settings editor` 的过渡行打开原有编辑器
-  并定位到具体一项（Agent 默认权限、Footer、更多会话设置、输入与终端、扩展设置），
-  `Web Search / Fetch` 入口移到 `Tools`。已经在新工作区可写的 Theme、Transcript display 与
-  Visual tools 行为不变。
-
-- **Settings 的复制入口集中到 About 的键盘操作。** `/settings`（与 `/status`）的 About
-  不再给每条事实画 `Copy [C]` 按钮，单条事实改由选中后按 `c` 复制，提示只留在最后一行
-  动作栏；整页仍只有一个 `Copy All [C]`，`C` 也照旧复制完整报告。只有当前真正画在屏幕上的
-  事实可以复制，滚出视口或选中 `Refresh context` 时 `c` 不生效。普通配置行（Appearance /
-  Display / Tools / Other settings）的 `Copy value [C]` 与 `c copy value` 一并移除，浏览、
-  选择、确认与重试都不受影响；Plugin Manager 的 Diagnostics 与 Models / Account 页面
-  自己的复制保持不变。
-
-- **`/plugins` 并入 Settings，成为 `Settings → Plugins` 的深链。** 两者现在使用同一个
-  Settings 全屏 lease 和同一个插件页面，不再有独立的插件全屏界面，也不会新建或切换
-  Session；`Settings` 的 `Plugins` 分类在本分类取得焦点时直接预览真实插件列表，不再需要
-  `Open Plugin Manager` 中转行。顶部身份/元数据/分隔线/面栏与最后一行操作栏由 Settings
-  统一绘制，插件只占业务正文。≥120 列且能留出至少 6 行真实业务正文时同屏显示
-  `类别 | 插件列表 | 详情`；76–119 列的双栏 `列表 | 详情` 同样要求至少 6 行真实业务
-  正文，不足则退化为单栏，不会挤压正文。76–119 列在
-  分类焦点下显示 `类别 | 列表`、在插件焦点下显示 `列表 | 详情`，<76 列单栏；安装、危险
-  确认与 Diagnostics 始终占满整宽。列表 Esc 回到 Settings 分类（同一页面实例、查询/选择/
-  滚动与后台安装请求保持不变），再按一次 Esc 关闭；`/plugins` 首次进入直接落在插件列表。
-  插件页始终以列表开始，按 `i` 才恢复同一个安装请求，不会自动落进安装视图。
-- **Models 首页只列出已配置的 provider，新增页变成可选目录。** 首页按 Host 里的
-  profile 是否存在来分组，已接入的 provider 与 DeepSeek Account 各占一行，Key 是否存在
-  另行独立显示（`Configured` / `Key missing` / `Signed in` / `Not signed in`，读取失败
-  显示 `Outcome unknown`，后端不支持时显示 `Unavailable`）。未配置的 provider 移到
-  `Add Provider` 的可选目录里，浏览不会写入任何东西；自有 provider 仍走原来的完整向导。
-  读取过程有明确状态：Loading / Ready / Refreshing / Stale / Error，读取失败不会显示成
-  「没有 provider」。
-- **审批改为输入框位置的阻塞式操作面板。** 审批请求现在显示在编辑器席位：完整的
-  Reason/Arguments 在一个可滚动正文中阅读（不再只显示前六行参数），`y` 放行一次、
-  `n` 拒绝、`Esc`/`Ctrl+C` 取消，`c` 复制收到的原始参数、`e` 展开阅读区域。全屏模式
-  可以直接点击实际绘制的 Allow once / Reject / Cancel 按钮并滚动正文；普通模式仍只
-  使用键盘。
+## [0.5.4] - 2026-10-29
 
 ### 安装与版本对应
 
-- **已发布的 `0.5.3` 也已在 DeepSeek Harness `0.2.1-rc.3` 上通过官方 preset assembly
-  验证。** 这次验证用的是 npm 上已发布的 `@xmoon76/dsh-pi-tui@0.5.3` 包，配对对象是
-  `@deepseek-ai/dsh@0.2.1-rc.3`；`0.5.3` 的最低 DSH 版本仍是 `0.2.1-rc.2`，包的版本与
-  发布内容都没有变化，也没有发布新的 TUI 版本。
-- **已发布的 `0.5.3` 也已在 DeepSeek Harness `0.2.1-rc.4` 上通过官方 preset assembly
-  验证。** 这次验证用的是 npm 上已发布的 `@xmoon76/dsh-pi-tui@0.5.3` 包，配对对象是
-  `@deepseek-ai/dsh@0.2.1-rc.4`；`0.5.3` 的最低 DSH 版本仍是 `0.2.1-rc.2`，包的版本与
-  发布内容都没有变化，也没有发布新的 TUI 版本。本仓库只更新了 checkout 的精确验证
-  目标及对应声明。
+本版以已发布的 DSH `0.2.1-rc.4` 作为精确验证目标，最低版本仍为 `0.2.1-rc.2`。安装
+DSH 需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.4
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.4
+dsh --profile pi-tui
+```
+
+已发布的 `0.5.3` 仍可与 `0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4` 配对使用。旧版本
+DSH 的配对关系不变：`@deepseek-ai/dsh@0.2.0-rc.2` 使用
+`@xmoon76/dsh-pi-tui@0.5.1` 或 `@xmoon76/dsh-pi-tui@0.5.2-rc.1`；
+`@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
+`@xmoon76/dsh-pi-tui@0.5.0`，`@deepseek-ai/dsh@0.1.7-rc.1` 使用
+`@xmoon76/dsh-pi-tui@0.4.8`。
+
+### 变更
+
+- **Settings 重构为唯一的全屏工作区。** `/settings` 与 `/status` 现在打开同一个
+  工作区，默认落在 About 主页；宽/中屏是分类栏加内容栏，窄屏（<76 列）直接显示
+  About。一级分类固定为 About / Models / Account / Agent / Appearance / Conversation /
+  Input & Terminal / Tools / Plugins，只有扩展设置注册表存在条目时才追加
+  Extensions；`Tab`/`Shift+Tab` 切换区域，`←`/`Esc` 逐层返回。所有页面共用同一
+  标题、状态与底部操作栏，`/plugins`、`/footer`、`/statusline` 和裸 `/keybindings`
+  都是工作区内深链。About 显示版本、后端、当前会话身份、整会话统计、TTFB/吞吐与
+  Context 占用，支持 `c` 复制所选事实、`C` 复制整份报告、`r` 刷新。旧主设置编辑器、
+  独立插件全屏页与旧 `/status` 页面均已移除，配置行不再有逐行复制按钮。
+
+- **tmux 图片改为默认自动尝试准入。** 满足严格条件的 tmux 不再需要显式设置环境
+  变量；`PI_TUI_TMUX_KITTY_IMAGES=0` 或 `PI_IMAGE_PROTOCOL=none/0` 仍可关闭。不会
+  自动修改 tmux 配置。
+
+### 新增
+
+- **Models 与 Account 工作区。** Models 列出 Host provider 目录、API key 是否存在
+  （不是连通性测试）、provider 详情、遮蔽输入、清除确认、Add Provider 向导与
+  provider 原生登录；首页只列已配置 provider，未配置的进入可选目录，目录与凭据在
+  首帧后一次读取，目录大时不阻塞按键。Account 显示登录状态、浏览器授权 URL、SSH
+  隧道提示、独立钱包、取消当前尝试、刷新与二次确认退出登录。DeepSeek Account 登录
+  使用官方 `host-webserver` 的 `127.0.0.1:0` 回环回调，TUI 不接触 token/grant，
+  `--help` 不监听端口；`/login`、`/logout` 直接打开对应页面深链。
+
+- **Settings 现在可直接编辑所有配置。** Appearance 的 Icon style 与 Status line
+  mode；Conversation 的 Transcript detail、Thinking detail、Progress updates、
+  Response style、Submit while busy、Git attribution；Input & Terminal 的 Home/End
+  键、Fullscreen、滚轮行数、通知、Terminal progress、Footer 布局与 Keyboard
+  shortcuts；Agent 的审批策略、默认权限、子代理模型白名单与选择、用户 shell 沙箱；
+  Tools 的 Web Search / Fetch 与 Visual tools；Extensions 按插件分组的动态设置。
+  写入都要显式确认，并按权威回读显示 `Verified`、`Not saved` 或 `Outcome unknown`；
+  `Fullscreen` 偏好保存后在正常退出 Settings 时才切屏。
+
+- **审批改为编辑器席位的阻塞式操作面板。** 完整 Reason/Arguments 在可滚动正文中
+  阅读（不再只显示前六行），`y` 允许一次、`n` 拒绝、`Esc`/`Ctrl+C` 取消、`c`
+  复制原始参数、`e` 展开。全屏可点击实际绘制的 Allow once / Reject / Cancel 并
+  滚轮滚动，普通模式保持键盘；窄窗口显示真实精简内容或 `Resize to inspect more`，
+  不会画出被裁掉的决定。
+
+- **终端图片按真实能力准入。** 直连 Kitty、Ghostty、WezTerm、Warp、Tern 及显式
+  `PI_IMAGE_PROTOCOL=kitty` 的终端共用同一套受管图片生命周期；Zellij 向当前窗格
+  实时查询能力；tmux 在 `allow-passthrough=all`、真实身份与唯一显示客户端检查通过
+  后自动尝试 Unicode placeholder，未知终端需返回匹配的 `e=T,U=1;OK`。无回复、普通
+  `OK`、错误或超时保持纯文字，不退回旧转义路径。tmux Control Mode 客户端不计入显示
+  客户端；`PI_IMAGE_PROTOCOL=none/0` 与 `PI_TUI_TMUX_KITTY_IMAGES=0` 仍可关闭，旧但
+  支持 U1 的终端可设置 `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1`。
+
+- **Kitty 终端支持 JPEG/WebP，草稿与查看器都有预览。** Transcript 缩略图、草稿
+  预览卡和全屏查看器统一使用一份受限 PNG 派生（WebP 取首帧、按 EXIF 摆正、最长边
+  768 像素）；信息行保留原始名称、尺寸、格式与字节数。草稿最后一张图片显示为有界
+  卡片，全屏 `x` 只删除当前占位符、`Ctrl+-` 可撤销；全屏信息行 `[-]`/`[+]` 只折叠
+  该图，点击正文打开只读查看器；新增 `/view-image` 列出当前窗口图片，`Enter` 查看、
+  `Esc back` 返回原列表。
+
+- **Ctrl+V、`/attach`、`/image` 统一到当前编辑器，并支持正文内联补全。** 连续粘贴
+  按触发顺序落稿，文字插在当前光标处、不发送不覆盖，图片得到规范占位符；会话、owner
+  或编辑器座位变化后旧结果不写入新草稿。`/attach`、`/image` 与 Ctrl+V 共用同一编辑器
+  座位、草稿存储和 Client cwd/文件限制，TSP 也可执行。在正文任意位置输入 `/ima`、
+  `/att` 会出现内联下拉，选中文件只替换当前片段，前后文不变，不发送草稿，一次 Undo
+  回到路径文本。
+
+- **交付文件尾部与 `/deliverables` 面板。** 最终回答的 `present` 文件以最多四项、
+  每项两行的紧凑尾部显示（相对当前显示会话工作区的路径 + 描述），超出显示
+  `+N more · /deliverables`；全屏可点击 `Browse all` 与逐文件 `Details`。
+  `/deliverables` 含 Files/Turns/Details，支持 `↑↓`、`Enter`、`/` 过滤、`T` 切换
+  Turn、`C` 复制原始 Host 路径、`Esc` 返回/关闭；Details 读取 Host 文本一页 120 行，
+  二进制/文档后缀不读字节，文件变化从头重启；面板内文字可用鼠标选中复制，面板居中
+  且 resize 保留状态。
+
+- **图表/SVG 工具、Visual tools 开关与发布。** 新增常驻 `dsh_pi_tui_chart`
+  （bars/spark，2–12 个带标签数值与可选单位）与 `dsh_pi_tui_svg`（受限安全子集的
+  静态 SVG）；结果显示在原 Tool Card，Tern 支持时原生绘制，否则显示精确数值/描述或
+  受限栅格 PNG。`Settings → Tools → Visual tools`（默认 On）一处开关同时管理
+  `dsh_pi_tui_chart`、`dsh_pi_tui_svg` 与 `present_visual`。模型可用
+  `visual-ref-v1:sv1_…` 发布本会话更早步骤的 1–8 个成功图表/SVG；发布不新增会话
+  事件，已发布图在最终回答原位插入或按顺序附在末尾，同一 ref 最多一次。PiTUI 提供
+  `Copy Data`、`View`/`Copy SVG`、`Alt+V`/`Alt+C`/`Alt+O` 和全屏 SVG 阅读器；
+  `/copy` 复制显示正文（不含已消费的 marker 行）。
+
+- **实验性 TSP renderer 支持原生工具卡、Work Hub、图片与已发布图。** 工具头按工具
+  声明的 kind 显示 path/pattern，`run_code` 子调用显示为 `Child calls · N` 树，
+  流式参数显示 `Preparing <Tool>…` 行，工具结果图片按块顺序原生显示；`/tasks`、
+  `/subagents` 打开 Work Hub（Needs attention / Subagents / Jobs），`Enter`/
+  `View details` 打开只读 Work Details，`Back` 返回同一选择；Ctrl+V 图片、Dock
+  草稿缩略图与历史图片按原顺序显示，已发布图表/SVG 在最终回答内原位显示并带
+  `Copy` 按钮，`Alt+V`/`Alt+C` 选择与复制。
+
+### 修复
+
+- **热重载不再误退出运行中的 TUI。** 重新挂载的启动行此前会把“启动器早已就绪”误判
+  为“TUI 没有挂载”，以 `required TUI surface did not mount` 结束进程；现在只有真正
+  见证过该次启动的行才做判定，冷启动缺失仍会非零退出并给出提示。
+
+- **Shift+Tab 切换权限预设不再报错。** 之前官方 `/permission` 收到 `undefined`
+  信号，抛 `Cannot read properties of undefined (reading 'aborted')`，预设不会切换；
+  现在使用既有生命周期 AbortSignal，Direct 与 Remote 行为一致。
+
+- **旧扩展句柄重复释放不再删除新注册。** 主题、自动补全、键盘快捷键、消息/工具
+  渲染器与编辑器六类 Stable 注册现在一次注册只释放一次；旧句柄显式 `dispose()`、
+  插件 Fiber 卸载和注册失败回收共用同一个一次性清理，新注册及其健康记录、主题卸载
+  通知都不再被旧句柄影响。
 
 ## [0.5.3] - 2026-10-20
 
@@ -1927,7 +1628,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3
 [0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1
 [0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1

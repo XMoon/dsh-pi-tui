@@ -35,6 +35,7 @@ import { createTerminalNotificationPresentation } from '../../src/tui/notificati
 import { getKeybindings } from '@xmoon76/pi-tui'
 import { KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from '@xmoon76/pi-tui'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import { bundleVersion } from '../../src/client/launcher/version.ts'
 import { TuiApp, type OwnedRunner, type TuiAppEvents } from '../../src/tui-app.ts'
 import { color, currentPalette, setTheme } from '../../src/tui/theme/runtime.ts'
 import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
@@ -1396,7 +1397,7 @@ test('A-10e About c/C accept raw, Kitty and modifyOtherKeys printable events', a
     assert.match(h.view(), /c copy fact/u, `the fact key is advertised:\n${h.view()}`)
     await key(h, encodedKey)
     await settle(h)
-    assert.deepEqual(h.copied, ['0.5.3'], `the encoded fact key copies the selected raw value (${JSON.stringify(encodedKey)})`)
+    assert.deepEqual(h.copied, [bundleVersion()], `the encoded fact key copies the selected raw value (${JSON.stringify(encodedKey)})`)
     h.dispose()
   }
   for (const encodedKey of allKeys) {
@@ -2743,7 +2744,7 @@ test('A-05b the decorative rules yield before readable content on short screens'
   await key(live, '\r') // rail -> About content
   await key(live, 'c') // the selected fact through the real clipboard owner
   await settle(live)
-  assert.deepEqual(live.copied, ['0.5.3'], 'the About fact copy reached the clipboard owner')
+  assert.deepEqual(live.copied, [bundleVersion()], 'the About fact copy reached the clipboard owner')
   assert.ok(live.rowsPlain().some(line => line.includes('Copy sent')), 'the notice is live before the shrink')
   for (const rows of [6, 8]) {
     live.vt.resize(100, rows)
@@ -5736,7 +5737,7 @@ test('an app notice sits after the top rule and before the pane header at every 
   let frame = h.rowsPlain()
   assert.equal(frame.findIndex(line => line.includes('Copy sent')), 3, 'the notice follows the top rule')
   assert.equal(frame.findIndex(line => line.includes('[About]')), 4, 'the pane header follows the notice')
-  assert.ok(frame.slice(5).some(line => /TUI {2}0\.5\.3/u.test(line)),
+  assert.ok(frame.slice(5).some(line => line.includes(`TUI  ${bundleVersion()}`)),
     `a real About fact follows the pane header (the whale art may take the first rows):\n${h.view()}`)
   assert.match(frame.at(-1) ?? '', /Esc back/u)
   assert.equal(frame.filter(line => line.includes('Copy sent')).length, 1, 'exactly one app-level notice')

@@ -7,602 +7,170 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **Images in a tmux pane are no longer limited to Kitty clients.**
-  Kitty/Ghostty clients already known to implement Unicode placeholders keep their existing
-  behavior. Every other terminal (including WezTerm, Tern and unknown hosts), after the live
-  tmux server accepts the passthrough, single-client and session identity checks, sends one
-  real `a=q,i=<id>,e=T,U=1` feature query through tmux DCS passthrough; only a reply with the
-  same id and `e=T,U=1;OK` enables pixels. No reply, a plain `OK`, an error or a timeout stays
-  text-only and never falls back to the legacy image path. `allow-passthrough=all`, the single
-  client, `PI_IMAGE_PROTOCOL=none/0` and `PI_TUI_TMUX_KITTY_IMAGES=0` limits are unchanged.
-  An older but genuinely U1-capable unknown terminal may explicitly set
-  `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1`; this replaces only the U1 capability proof and never
-  bypasses the live tmux identity or revoke checks.
-- **Direct terminals that implement the Kitty graphics protocol no longer need a brand allowlist, and every Zellij host paints images based on its live pane capability.**
-  Kitty, Ghostty, WezTerm, Warp, Tern and any other direct terminal explicitly given
-  `PI_IMAGE_PROTOCOL=kitty` share the same managed image lifecycle for PNG/JPEG/WebP
-  transcript, draft and viewer images. A Zellij pane is no longer prejudged by its host
-  brand: after the real input listener is installed it sends one capability query to the
-  current pane, and only the matching `OK` enables pixels; a failed, timed-out or rejected
-  query stays text-only and never falls back to the legacy escape image path. Tern's normal
-  PiTui path paints images by its Kitty capability, while a connected TSP renderer keeps
-  using the SDK's native image and blob path and never creates a terminal graphics handle
-  at the same time. The fullscreen view follows the actual managed image protocol when it
-  clears images, so removing, moving or repeatedly entering/leaving fullscreen leaves no
-  ghost placement and deletes no other image. `PI_IMAGE_PROTOCOL=none` (or `0`) still
-  closes the capability before any image read, conversion or upload.
-- **Images in a Zellij pane running on a Ghostty host now paint as real pixels too.**
-  When a Zellij pane inside Ghostty confirms its live Kitty graphics capability through one
-  real query, transcript, draft, image-viewer and authorized SVG preview images use the same
-  managed lifecycle as a direct Kitty/Ghostty terminal. Until that query settles, and when it
-  is denied or times out, the pane stays text-only and never falls back to the legacy escape
-  image path; `PI_IMAGE_PROTOCOL=none` (or `0`) closes the capability before any image read,
-  conversion or upload.
-- **Images in a direct Ghostty terminal now use the same managed native image lifecycle as Kitty.**
-  When Ghostty (`TERM_PROGRAM=ghostty`) is attached directly — without tmux, Zellij, screen
-  or another multiplexer — PNG/JPEG/WebP transcript, draft and viewer images paint as real
-  pixels, and authorized SVG previews rasterize and paint wherever the platform supports SVG
-  rasterization. This applies whether its `TERM` is `xterm-ghostty`, `xterm-256color`, a custom
-  value or absent. `PI_IMAGE_PROTOCOL=none` (or `0`) remains the global opt-out: no image is
-  read, converted or uploaded after it is set.
-- **The `/deliverables` Details page now really reads and previews Host text files, and names
-  each way a read can fail.**
-  `Enter Preview` fetches live Host metadata first (a delivery declaration is no longer treated
-  as a snapshot) and then reads ONE 120-line page of UTF-8 text, painted as plain monospace
-  source (Markdown source is preserved rather than partially re-rendered, no source line is
-  dropped, and no raw ANSI/OSC is injected). Known binary/document suffixes show the metadata
-  and `Preview unavailable for this file type` without reading a byte; `↑↓` scrolls the current
-  page, `PgDn`/`PgUp` scroll the viewport first and only request the neighbouring 120-line
-  window at a page edge (`PgDn` only while not at EOF, `PgUp` only while not on the first page),
-  with no prefetch and no whole-file aggregation. A file that changes between pages drops the
-  old page and restarts from metadata + line 1 with `File changed; preview restarted`, never
-  splicing two versions; an empty page at EOF shows `(end of file)`. Deleted files, non-UTF-8
-  content, a path that is no longer a regular file, a page over the Host read cap, an
-  unavailable Session scope and an unavailable Host preview service each paint a fixed,
-  readable sentence while keeping `Shift+C Copy path` and Back; an unclassified cause paints
-  `Unable to preview file` and is reported to diagnostics instead of being faked into success.
-  Switching file/Turn, leaving the page or closing the panel revokes the in-flight read, so a
-  superseded reply never paints. `C` still copies the raw Host path. Direct and the
-  experimental Remote serve the SAME read-only semantic port (Remote over the official
-  generated `workspaceFiles` Remote); there is no Client filesystem fallback, no TUI-specific
-  RPC, and no image/PDF/native open or download capability.
-- **Settings → Extensions is now a real dynamic settings page grouped by extension.**
-  Every setting an extension contributes through `registerSetting` appears as a real entry in
-  `Settings → Extensions`, grouped and paged by its registering owner: one extension's settings
-  are visible at a time, `Tab` / `Shift+Tab` cycle the groups with two or more groups (landing on
-  the target group's first row), and `↑`/`↓`, Home/End, paging and the wheel move only inside the
-  current group; with a single group `Tab` keeps its existing region-focus behavior. The header
-  states `[i/N]` before the group label so a narrow frame preserves the position, and the Rows
-  pane header shows `Rows (m) · label`, degrading to `Rows (m) · i/N` and then `Rows (m)` by
-  width. Entries open the native Detail/Choice: Owner and ID are shown raw, a registration with no
-  selectable values is read-only, and a current value outside the registered choices is reported
-  explicitly. Only an explicit Confirm writes to the running extension; `Verified` requires a
-  matching live readback, a plugin refusal paints `Not saved` and records health only for the
-  INVOKING owner, and a superseded or unloaded registration is reported as such instead of being
-  faked into a refusal. These settings apply to the running extension only and never write the TUI
-  settings document or a Host profile; a same-id HMR re-registration inherits no old confirmation,
-  retry or settlement. The former `Extensions → Configure extension settings…` transition entry is
-  gone, and Settings no longer jumps to the legacy settings editor.
-- **The transcript's delivered-files tail now shows at most four files, and a new
-  `/deliverables` browser lists, filters and copies their paths in one panel.**
-  A final answer's `present` declarations render as a compact tail: each file is
-  at most TWO rows. The first row is the path relative to the CURRENT display
-  subject's workspace (a viewed child's own root while a child is shown; an
-  outside-root path stays absolute), and the second row is the description on its
-  own indented line. Each row is one physical line with both ends preserved;
-  the complete raw path and description remain available in Details and Copy.
-  Beyond four files the tail ends in `+N more · /deliverables`. On a fullscreen
-  AltScreen the tail paints clickable `Browse all` / per-file `Details` verbs in
-  Full, Compact AND Focus alike, with hits only on the cells actually drawn and
-  OSC 8 links/text selection always winning first; a regular split surface paints
-  no dead button and keeps `/deliverables` as its entry. `/deliverables` opens
-  ONE managed overlay over the currently displayed session (including a viewed
-  child): `Files / Turns / Details`, with `↑↓` to select, `Enter` for details,
-  `/` to filter (case-insensitive over basename, full Host path and description),
-  `T` to switch among Turns with deliveries, `C` to copy the raw Host path, and
-  `Esc` to go back or close. The pointer is a shortcut and the whole flow stays
-  keyboard-complete: the action bar paints real `[Filter] · [Turns] · [Close]`,
-  `[Back]` and `[Copy path]` buttons, a painted Turns row opens that Turn, and a
-  regular surface keeps keyboard-only hints instead of paint-less buttons. The
-  overlay is now a centered percentage window — full width on narrow terminals
-  and at most 120×38 on wide ones, never the old near-fullscreen jump — and a
-  page switch never changes its size. A terminal resize keeps the current page,
-  filter, cursor and scroll position while re-deriving the size. Details shows
-  the declared Host path, its
-  description and the existing one-page read-only preview; `Copy path` always
-  sends the raw string, and a declaration is never presented as a file snapshot.
-  Ctrl+O keeps its existing expand/collapse ownership where it is available;
-  where it belongs to another owner the tail stays capped behind the command;
-  with neither owner it fails open and paints no inoperable hint.
-- **The `/deliverables` panel's own text is now selectable and copyable with the
-  mouse.**
-  Dragging over a file row's path or description, the sidebar, the Details
-  header lines or the preview text selects exactly the visible cells inside the
-  panel's content area and copies them on release, with the original spacing and
-  indentation preserved. Double-click selects the word under the pointer (a
-  path such as `report-2026.md` stays one word) and triple-click the visible
-  line, respecting wide CJK characters and emoji. The selection can never leave
-  the panel: it stops at the frame border, a drag taken outside maps back to the
-  nearest content cell, and the transcript behind the panel is never selected or
-  copied. Buttons keep working as buttons — a click on `Details`, `[Filter]`,
-  `[Turns]`, `[Copy path]`, `[Back]` or `[Close]` still runs that action instead
-  of starting a selection, and a single click on a file row still just selects
-  it. The selection is dropped when the panel closes, when the terminal is
-  resized, when another panel covers it or when its own content changes, so a
-  late release can never copy text from a frame that is no longer there. A
-  regular split surface is unchanged: it has no application-owned text
-  selection, and `Copy path` / `Shift+C` remains the way to get the exact raw
-  path. Other panels keep their previous behavior — none of them becomes
-  selectable.
-- **PiTUI final answers now carry real actions for published charts/SVGs and a fullscreen SVG reader.**
-  A chart keeps its exact values and gains `Copy Data` (the final ChartFact as pretty JSON);
-  an SVG keeps its description and admitted thumbnail and gains `View` / `Copy SVG` (the raw
-  source, unmodified). `Alt+V` cycles the current window's published figures, marks the
-  selected one with a textual `[Selected]` device and shows `Selected i/n · <title>` in the
-  status line; `Alt+C` copies the selected payload and `Alt+O` opens a selected SVG. All three
-  are remappable Host actions; with no selection they name the select key instead of guessing,
-  and a chart never opens a viewer. The SVG reader reuses the existing leased fullscreen image
-  workspace (no new page or overlay): Preview is the default and derives its OWN high-resolution
-  variant from the real terminal grant (never upscales the thumbnail); Tab switches to a
-  read-only, terminal-sanitized Source with line/page/Home/End scrolling; `C` and `Copy SVG`
-  send the byte-identical untrimmed source; Esc restores the original transcript position.
-  Without an inline-image protocol (or on a failed derivative) Preview says
-  `Preview unavailable` while Source/Copy stay usable; pointer cells only hit real painted
-  actions or thumbnail pixels. `/copy` now copies the visible display body (without a marker
-  line the renderer consumed), while the durable Session, search and `/transcript` export keep
-  every byte.
-- **The Footer and keyboard shortcut editors now open inside the full-screen Settings workspace instead of a separate 88-column overlay.**
-  `/footer`, its `/statusline` alias and bare `/keybindings` deeplink into the same Settings
-  lease at `Appearance → Configure footer layout` or `Input & Terminal → Keyboard shortcuts`:
-  the one Settings header, status/scope line and single Action Bar stay the only chrome. Footer
-  row/item/style/custom-item editing, the live preview, the dirty-exit confirmation and the
-  persist-first save transaction keep their meaning; keyboard search, action details,
-  direct/leader recording, conflicts, safe mode, the FIFO write and the live keymap are
-  unchanged. `Esc` follows each page's own ladder back to its source row and then the existing
-  Settings navigation, never mounting a second fullscreen screen or editor. `/keybindings
-  conflicts|reload|reset` keep their independent diagnostic semantics. The root state of
-  both pages also accepts `←` as the back verb: the Footer row selector and the Keyboard
-  list with an empty query return to their source Settings row exactly like `Esc`, and the
-  bar says `← Back`; a dirty Footer asks Save/Discard/Keep first, `←` still switches zones
-  inside the row editor, and a non-empty search still keeps `←` for cursor movement. Closing
-  either editor returns straight to the owning row's Rows list (no intermediate Detail panel),
-  so the next back key reaches the category rail. When only the Action Bar fits, a page admits
-  and advertises only the back verbs it really accepts (the root keeps `← Back` and `Esc`; a
-  sub-page keeps only `Esc`) and never hints at a search/save it refuses. While a write is in
-  flight no key leaves the page, and its result is painted before navigation resumes.
-
-
-- **The experimental TSP renderer now mixes published figures into the final answer and offers Copy on each of them.**
-  With `DSH_PI_TUI_RENDERER=tsp`, charts and SVGs published through `present_visual` enter the
-  same Assistant card at their marker positions: a native chart/image is painted when Tern
-  negotiated it, and the full final title, exact values or SVG description stay readable otherwise,
-  never fabricating a drawing. The surrounding Markdown keeps its link definitions, code, lists and
-  footnotes. Each figure carries a real Copy button: a chart copies the final ChartFact as pretty
-  JSON, an SVG copies the raw source; `Alt+V` cycles the selected figure of the current window in
-  paint order, marks it with `Selected · i/n`, and keeps the current figure and its position
-  visible in the dock (`Selected i/n · <title>`); `Alt+C` copies the current selection, and an
-  unselected chord shows a hint. Whether the selected figure is already inside the current viewport
-  remains the Tern client's own transcript scroll position; the program adds no page, Reader or
-  second scroll owner. Copy reuses the existing ClientActions clipboard policy; an old frame, an old
-  session or a still-settling write never posts a success notice onto a newer subject, and a modal,
-  the Work details reader, a Picker or the Work Hub outranks the button and both chords. Unpublished,
-  forged or invalidated sources paint no figure, no Copy button and no image bytes.
-
-- **The composer draft preview and the fullscreen image viewer now paint real JPEG/WebP pixels on a native Kitty terminal.**
-  Both previously painted PNG only, so JPEG/WebP showed `Preview unavailable`. They now reuse
-  the same background PNG derivative as transcript thumbnails (WebP contributes only its first
-  frame, EXIF orientation is applied, and the longest edge is capped at 768 pixels): the draft
-  card derives only the one last visible local image, shows `…` while converting and
-  `Preview unavailable` only on failure; the viewer keeps the original name, dimensions, media
-  type and byte count while showing that same bounded derivative instead of a full-resolution
-  original. Submitting still sends the original JPEG/WebP bytes; the `x` removal, Undo, PNG,
-  iTerm2, GIF, narrow and graphics-unsupported terminals keep their existing behavior.
-
-- **Transcript thumbnails on a native Kitty terminal now support JPEG/WebP.**
-  Previously only PNG could paint pixels, so JPEG/WebP fell back to a text row. These formats
-  are now converted to a bounded PNG thumbnail in the background before painting: WebP only
-  contributes its first frame, EXIF orientation is applied, and the longest edge is capped at
-  768 pixels. The info row always keeps the original name, pixel dimensions and byte count; a
-  collapsed occurrence never starts a conversion; while converting or after a failure only
-  text is shown (a failure reads `Preview unavailable`); and only a body that really painted
-  pixels is clickable. PNG, the existing iTerm2 image path, GIF, and narrow or
-  graphics-unsupported terminals are unchanged.
-
-- **The model can now declare that specific visuals are meant for the user.** A new
-  `present_visual` tool joins the existing `dsh_pi_tui_chart` and `dsh_pi_tui_svg` under the SAME
-  Visual tools switch (On by default): one switch adds or removes all three, and the settled group
-  is all-or-none — a successful On ends up holding all three, a successful Off holds none, and a
-  failed registration rolls back the definitions that transition already added. A successful chart/SVG
-  result now also carries a stable, model-visible reference `visual-ref-v1:sv1_…` derived from the
-  session, turn, current step's event seq and `callId`; in a later step the model passes 1–8 of
-  those references to `present_visual` to publish them explicitly. Publication only accepts
-  successful chart/SVG results from THIS session and turn in an EARLIER committed model step — a
-  same-step source is refused even when it committed first, and an unknown, repeated, cross-turn
-  or not-yet-committed reference fails the whole call. There is no waiting, no partial success
-  and no hidden retry, and a policy replacement of either the generating or the publication
-  result removes the qualification. A successful receipt is a human "selected N visuals" summary
-  plus one strict `visual-published-v1` machine line; a failed result carries only its readable
-  reason. Publication adds no session event, durable publication table or cache — cold replay
-  derives the same facts from the same log — and the human-facing cards, search and `/transcript`
-  export never show these machine lines while the raw session log keeps them intact. The existing
-  Tool Card still renders the visuals, and published ones now also enter the final answer (below).
-- **Published charts/SVGs now appear inside the final answer, still as one Assistant row.** A
-  strict `[dsh-visual-sv1_…]: <#>` definition inserts its figure at that exact source position,
-  at most once per ref. Published figures with no marker are appended to the end of the answer in
-  first-publication order, before delivered files. Unpublished, forged, repeated or merely
-  code-block/indented/quote-shaped definitions draw nothing and never eat source text. Link
-  definitions keep their Markdown semantics: a reference before the figure and a definition after
-  it (or the reverse) resolve to the original destination; the definition context is display-only
-  and never reaches the session, model messages, search corpus or `/transcript` export. The final
-  answer remains one transcript row, one bullet, one component cache entry and one disclosure
-  owner; Full/Compact/Focus, expand/collapse, resizing and search navigation never duplicate the
-  figure or change its ownership. The existing Tool/Work cards and SVG description/source entries
-  stay unchanged. An Assistant card owned by an extension renderer keeps its existing plugin view
-  and is not overlaid with the Host figure; when the Host renderer is selected, the inline/tail
-  rules apply. Direct main sessions and readable viewed children are covered; Remote and native
-  TSP mixing are not claimed here.
-- **`/settings → Agent` now edits permission, delegation and user-shell policy in place, and the
-  `Agent settings…` transition row is retired.** The frozen order is `Approval policy (this
-  session)` → `Default permission` → `Subagent allowed models` → `Subagent model selection` →
-  `User shell sandbox policy`, each with exactly one authority: the approval policy is the CURRENT
-  session's official override (captured once when the workspace opens; after a session switch the
-  Confirm is refused synchronously and reopening Settings is what speaks about the new session, and
-  it never reaches the settings document); `Default permission` is the Host preset default for
-  FUTURE sessions only, never the running one, and a Host without a settings service fails
-  explicitly instead of pretending to succeed; `Subagent allowed models` opens the existing
-  searchable multi-select list through `Manage allowed models…` inside the same Settings workspace,
-  where `Esc` returns to the Agent rows, disabling never clears saved routes, and enabling with an
-  empty list writes nothing; `User shell sandbox policy` lives in the TUI settings document with the
-  raw stored value as its `Value`, the real effect on the next `!`/`!!` as its `Runtime`, and
-  `Verified` only after an agreeing read-back. When an authority is unavailable (no session, no
-  Remote approval channel, no Host presets or no official subagent section) the affected rows are
-  hidden truthfully instead of fabricating a current value or opening the legacy editor.
-
-- **`/settings` Appearance and Conversation now edit more configuration in place, without the
-  existing editor.** Appearance gains an editable `Icon style` (`emoji` / `symbols` / `minimal`)
-  that changes the structural glyphs immediately and persists only that field. Conversation keeps
-  editable `Transcript detail`, `Progress updates` and `Response style`, and makes the
-  previously read-only `Thinking detail` editable.
-  `Transcript detail` shares the `Ctrl+O` switch and `Thinking detail` shares the `Alt+T` switch;
-  both are pure display state, are never persisted, and say `not applicable — runtime-only` in
-  their Detail. `Progress updates` and `Response style` mutate the same state objects the Agent's
-  prompt provider reads on its next assembly and persist independently, while Focus only
-  suppresses progress narration without changing the saved cadence. Browsing, moving a candidate,
-  Tab, the wheel, a resize
-  and Esc write nothing; only an explicit Confirm commits, and the outcome still distinguishes
-  `Verified` / `Not saved` / `Commit accepted` / `Outcome unknown` while showing the live value
-  and the stored document value separately.
-
-- **`/settings` Conversation and Input & Terminal now edit all eight historical settings in place.**
-  Conversation's fixed order becomes Transcript display → Transcript detail → Thinking detail →
-  Progress updates → Response style → Submit while busy → Git attribution, and the old
-  `More conversation settings…` transition row is retired because the category has no unmigrated
-  field left. Input & Terminal becomes Home/End keys → Fullscreen → Mouse wheel lines →
-  Notifications → Notification method → Terminal progress → Input & terminal settings…, where the
-  last row only needs the existing editor for `Keyboard shortcuts`. The eight fields have two
-  writer semantics: `Submit while busy` and `Fullscreen` write the document first and only claim
-  `Verified` after an agreeing read-back (nothing pretends to apply instantly), while the other
-  six apply their real runtime owner first and then persist, never rolling the runtime back on a
-  failed write, with `Persisted` always naming the raw stored value separately. `Submit while
-  busy` changes the NEXT busy Enter, never a running turn; `Git attribution` mutates the same
-  `tui:git-attribution` prompt state (still prompt guidance: no Git hooks, no automatic commit
-  edits, and `minimal` personas keep receiving nothing); Home/End rewrite the bindings the
-  fullscreen viewport really resolves while every other keybinding survives; Mouse wheel lines
-  applies on the **next** fullscreen entry only, so the mounted viewport keeps its constructor
-  step; Notifications and Notification method drive the same completion controller; Terminal
-  progress changes only the terminal-native status protocols and never the Progress updates
-  narration cadence. A Fullscreen choice stores the preference, keeps the workspace usable, and
-  switches the transcript screen only after you leave Settings normally — a Legacy hand-off, a
-  Question/Approval takeover, a forced close or an unverified write never switches, and a stored
-  preference still applies at the next TUI start. Browsing, Tab, the wheel, a resize and Esc still
-  write nothing; only an explicit Confirm on a fully visible candidate commits.
-
-- **Type `/image` or `/attach` anywhere in the body to attach a local image or file in place.**
-  There is no need to start a new line or clear what you already wrote: typing `/ima` or `/att`
-  mid-body (or at the start of a later line) opens the inline dropdown, where
-  `Insert local image` and `Attach local file or image` are the local-attachment actions — a
-  same-named skill is a separate row, never the same choice. Accepting one expands it to
-  `/image ` in place and continues into the existing local path completion. Accepting a
-  **directory** only keeps browsing; accepting a **file** reads and stages it and replaces just
-  the accepted `/image <path>` fragment with the canonical placeholder (for example
-  `[image #1 (1920×1080)]`), leaving the surrounding prose, other lines and existing attachment
-  placeholders untouched, with the cursor right after it so you can keep writing. The draft is
-  **never** submitted, queued or steered by this — every confirm gesture (Tab, Enter, a mouse
-  click) only accepts the candidate, and sending still needs your own send key. The accept adds
-  exactly one real undoable edit, so a single Undo restores the editable `/image <path>` text.
-  If the draft changed, the session switched or the editor seat was replaced while the file was
-  being read, the stale result never overwrites the newer draft and never leaves an unreferenced
-  placeholder. The leading `/image PATH` and `/attach PATH` commands keep their existing
-  semantics on the first line, and accepting a completion never submits the draft by itself — a
-  plain `/image` you leave in the text is ordinary draft text and is sent only when you submit.
-  The experimental TSP renderer does not use this inline dropdown and is unchanged.
-
-- **Ctrl+V pastes and `/attach` / `/image` now commit into the editor that is really mounted.**
-  Two quick Ctrl+V presses are read and committed one after the other, in the order they were
-  triggered: the second clipboard read only starts once the first one has been read AND written,
-  and a failing first paste never blocks the second. Pasted text is inserted at the live caret
-  without submitting and without overwriting what was typed; a clipboard holding no image stays
-  silent instead of reporting an error. Images keep their trigger order and get the canonical
-  placeholder; a deployment limit reports one real error and never leaves an orphan placeholder.
-  If the session switched, the same session id came back under a new owner, or the editor seat was
-  replaced while the read was in flight, the stale result neither writes the new draft nor
-  publishes the old session's notice. `/attach` and `/image` use that same editor seat, the same
-  draft stores and the same Client cwd/file limits: images take the image path (their bytes are read
-  at attach time), other regular files the metadata path (only the signature prefix is inspected;
-  the bytes are streamed when the message is sent), and success is announced only after that intake
-  succeeded and the placeholder was inserted. With no usable editor the command fails immediately
-  instead of reading a file or claiming success. The experimental TSP renderer can now run
-  `/attach` and `/image` too, with the result landing in its own editor.
-
-- **The experimental TSP renderer accepts a Ctrl+V image paste and shows draft and history images natively.**
-  Ctrl+V uses the existing clipboard-paste chain (concurrent pastes are still read one at a time,
-  in trigger order): an image gets its canonical placeholder and a draft preview while pasted text
-  lands at the live caret, and a bracketed text paste stays one ordinary text edit instead of
-  becoming an image paste. Draft thumbnails sit in one row directly above the composer: up to two
-  at ≥100 columns, one between 72 and 99, and none on a narrower pane or a client without native
-  images. On a short window the client stylesheet hides that whole row, the composer stays usable
-  and sending is unaffected, and the status line still reports the real draft count. Image blocks
-  in user messages, assistant messages and
-  tool results are shown in their original order as an identity line plus a native image, and the
-  same image appearing several times stays several visible occurrences while being read and
-  uploaded once. Clicking an image and zooming are the Tern
-  client's own affordances (moving between neighbouring images depends on the client's version
-  and capabilities): this program adds no page, command or dialog. A draft image pulled back
-  from the queue reuses the existing read path and shows its identity plus the reason when no
-  authorization is available, never an empty image. The default PiTui renderer's image behaviour is
-  unchanged.
-
-- **Transcript images can now be viewed at full size; the fullscreen info row gained its own fold control.**
-  The rightmost 3 cells of every fullscreen image info row are an ASCII `[-]` / `[+]` control that
-  folds only that image's body; the rest of the info row is inert. Clicking a visible image body
-  opens a read-only viewer (no transcript rebuild, no scroll, no implicit fold change) that fits the
-  image into the available area and distinguishes `Loading…`, `Read failed: <reason>` and
-  `Preview unavailable`. The new `/view-image` command (no Session required) lists the images of
-  the **currently mounted** transcript window as a single-choice list: Enter views, `Esc back`
-  returns to the same list and selection, a second Esc closes; an empty window reports
-  `No images in the current transcript window`. The same attachment shown in different messages,
-  or twice in one message, remains independent occurrences. The viewer reuses the one existing
-  image loader and immutable read scope, and a closed viewer never reads the replacement
-  session's images. Kitty terminals show real pixels; in this release the large-image viewer on
-  iTerm2 shows metadata plus `Preview unavailable` (native pixels are deferred to later
-  renderer/protocol work). `/image`, `/attach` and the composer draft preview are unchanged.
-
-- **The model can now draw: two resident tools, `dsh_pi_tui_chart` and `dsh_pi_tui_svg`.**
-  Charts support bars/spark (2–12 labelled values with an optional unit); SVG supports
-  self-contained static figures. Results stay inside the existing Tool Card — no new page,
-  command or popup. Tern-capable panes show a native chart/SVG, while ordinary terminals keep
-  the exact values or the description, plus a bounded raster PNG on platforms with a verified
-  native memory bound and inline-image support; macOS/Windows keep the text/source fallback.
-  The exact values, unit, title and description are always text, so copy, search and Markdown
-  export keep reading them. SVG accepts only a bounded safe subset (no
-  scripts, external references, CSS, animation or over-budget geometry), and is drawn only
-  while the final result still carries a credential matching the call arguments; a policy
-  replacement never shows a stale drawing. Direct and Remote read the same durable result.
-
-- **Settings gains a `Tools` category with one profile-wide `Visual tools` switch.** The switch is
-  on by default and maps to the Host profile's `pi-tui-visual-tools.enabled` configuration.
-  Turning it off unregisters `dsh_pi_tui_chart` and `dsh_pi_tui_svg` from the Host's global tool
-  registry, so later model requests no longer see them; turning it back on restores the original
-  definitions without a restart. The setting applies across sessions, agents and TUI backends.
-  Chart/SVG results already recorded in a transcript still render, copy, search and export.
-  The write goes through the official revision-checked settings path; `Verified` appears only
-  after the Host read-back agrees (on Direct, after the actual registration state is also
-  confirmed). An unreadable Host configuration shows `Unavailable` and refuses the write instead
-  of presenting the default as a current value.
-
-- **Draft images now preview live above the editor.** Pasted or `/image`-staged images
-  render as one bounded thumbnail card for the **last referenced occurrence** between the
-  plugin widget zone and the editor: up to 44×3 on wide terminals, 22×3 in a split view,
-  with an identity row showing `#id/total`, dimensions, bytes and the remaining count; a
-  narrow or 1–3-row viewport degrades to a one-line count/latest-identity summary. In
-  fullscreen the ASCII `x` at the identity-row tail removes only the previewed canonical
-  placeholder occurrence (a still-referenced, in-flight or paste-hidden image survives);
-  regular mode has no control — the user deletes the placeholder text in the editor. The
-  `x` removal is itself an undoable edit (Ctrl+- restores exactly the removed occurrence),
-  while a successful submit or Ctrl+S steer retires the draft's undo history, so Undo cannot
-  resurrect a delivered image. A removed image stays staged exactly
-  while the **editor's real undo history can still restore it** (bounded undo-retention
-  budget: 8 images / 32 MiB, counted separately from the active 16 / 64 MiB draft caps), so
-  new images can still be staged after removals. When the budget is exceeded, the oldest
-  evictable image is first retired from the undo snapshots that could restore it and only
-  then released by the store (a newer still-retained image in the same snapshot remains
-  undoable). Whether an image is ACTIVE or retention-only follows the live expanded draft the
-  store reads, so an Undo-restored image is a live attachment again. A real undo-history
-  retirement (a submitted-draft clear) releases that retention immediately — backend
-  acceptance plays no part; a session switch does not retire the history, so undo-referenced
-  images survive it. A submit takes a one-shot bridge reservation of the submitted images
-  BEFORE the clear and releases it right after the synchronous business dispatch; the
-  business owner takes its own submission reservation in the same call stack, so the clear can
-  never drop images that are part of the outgoing message, and local commands/early refusals
-  leave no long-lived reservation. On the default host seat, Enter, Ctrl+Enter and plugin
-  submits share the same undo-retiring clear; a Replacement Editor without a verified
-  undo-retirement seam falls back to a plain clear, offers no `x` removal and keeps its
-  history until dispose, while still showing the preview. The editor's undo (Ctrl+-)
-  therefore restores a live image that the prepared prompt still carries, never a token that
-  is sent as text; a rejected submit restores the draft before its business reservation
-  releases. The preview is display-only and never changes the model-facing text, image order
-  or attachment semantics.
-- **Settings now opens on an About home and uses a real two-column layout on wide and
-  medium terminals.** The left column is the category rail (About, Models, Account,
-  Appearance, Display, Tools, Plugins, Other settings) and the right column is the real content:
-  selecting Models or Account paints its page at once, with no second Enter to open it, and
-  the keyboard stays on the rail until Enter or Right hands it to that page. Esc, Backspace
-  and Left return the keyboard to the rail and keep the page state. About shows the brand
-  mark plus the TUI and DSH versions as two independent facts (an unreadable DSH version
-  reads `Unknown`); it creates no session and writes no configuration. A narrow terminal
-  (< 76 columns) shows the About content directly, and Esc returns to the category list
-  and a second Esc closes Settings.
-- **Settings now has in-place Models and Account pages.** Models lists the Host provider
-  directory, API-key presence (not a connection test) and the DeepSeek Account entry, and
-  exposes provider details, a masked API-key editor, the Add Provider draft wizard, stored
-  credential clear confirmations and provider-native sign-in (URL, prompts and cancel stay in
-  the page). Account is an independent page showing the Host state, the browser authorization
-  URL with SSH tunnel guidance, independent Profile / recharge-wallet / bonus-wallet outcomes,
-  exact-attempt cancellation, refresh and a confirmed sign-out. `/login` and `/logout` are now
-  deep links into those pages; every final write or clear requires an explicit in-page
-  confirmation.
-- **DeepSeek Account browser sign-in uses the official Host callback.** The TUI bundle now
-  mounts the official `host-webserver` (`127.0.0.1:0`); the official PlatformAccount registers
-  `/oauth/callback` while an attempt waits. Browser authorization, PKCE/state validation,
-  grant persistence and background revocation stay on the Host; the TUI never receives a
-  token/grant and never starts its own HTTP server. `--help` opens no listener.
-
-- **`/status` is now a real alias of `/settings`; About and Plugin Manager Diagnostics replace the old status surface.**
-  Both commands open exactly the same fullscreen Settings/About workspace (same
-  handler, initial focus and reads; a sessionless open creates no session and
-  reads no statistics), while `/statusline` remains the `/footer` alias. About
-  supports per-fact copy and exact Copy All; both copies pass the shared
-  terminal-control guard; extension health (failed/shadowed
-  plus the full `lastError`), registry counts, the actual capabilities, and
-  contributions without a proven Loader-entry owner now live in the Plugin
-  Manager's `Diagnostics` page (`/plugins` or `Settings → Plugins`, press `d`),
-  with Host package state and install logs kept separate. The old dedicated
-  `/status` page is removed.
-- **Images in tmux now appear automatically without an explicit environment variable.**
-  Inside tmux that satisfies the strict conditions (`allow-passthrough=all` and a
-  single Kitty client), images now appear automatically without setting an
-  environment variable; `PI_TUI_TMUX_KITTY_IMAGES=0` or `PI_IMAGE_PROTOCOL=none`
-  disables them. tmux configuration is never modified automatically.
-
-### Fixed
-
-- **tmux Control Mode clients no longer block image admission.** When one ordinary display
-  terminal shares a tmux server with one or more tmux Control Mode clients (`tmux -CC`), the
-  image backend used to count those management connections as display clients and refused
-  admission through its "exactly one client" rule. Admission now counts only real ordinary
-  display TTY clients (`client_control_mode=0`); explicit Control Mode clients
-  (`client_control_mode=1`, even with an empty TTY or an `unknown` terminal type) may coexist,
-  and their join, exit or change never revokes an admitted image handle. Two ordinary display
-  clients, a missing or non-`0/1` control-mode value, a malformed record and every query
-  failure still fail closed, and the one-way revoke semantics are unchanged.
-- **Releasing an old extension handle no longer removes a re-registered contribution or
-  its diagnostics.** Each of the six Stable registrations — themes, autocomplete,
-  keybindings, message/tool renderers and editors — is now released at most once: the
-  explicit handle `dispose()`, the plugin fiber unload and the failed-registration
-  rollback share one one-shot cleanup. Releasing an old handle again (after re-registering
-  the same id in one plugin, or a late release from a fiber that already reloaded under
-  HMR) used to remove the replacement's registry record and health record, and it could
-  notify the theme-unload hook twice for the old theme; the replacement and its failure
-  diagnostics now survive, and the theme hook fires once per real unload.
-- **Switching to the Models page no longer freezes the whole TUI.** The provider
-  directory and the credential reads now run after the page has painted its
-  first frame, and one read asks the Host for a single directory snapshot:
-  before, every provider re-read the directory and the whole settings section,
-  so a large directory blocked the keyboard path for a long time. Opening the
-  credential list and its R refresh now paint a frame before reading as well,
-  and every read is queued behind the renderer's actual frame write — never a
-  0 ms timer guess — so a throttled frame cannot let the synchronous scan run
-  first.
-- **Credential writes wait for the authoritative read.** The `/login <REF>`
-  API-key write waits for the credential store's own read of that reference, and
-  a clear confirmation drops back to reading when it is refreshed instead of
-  letting the previous answer dispatch a delete. A custom provider whose route
-  the installed catalog already offers outside the conventional
-  `llm-pi-ai.providers` slot (a `Manual setup only` row) is refused: the page no
-  longer reports a created provider the Host would not read.
-- **Hot reloading no longer exits a running TUI.** After a linked package is
-  rebuilt, DSH re-mounts the TUI's rows; the re-mounted startup row used to read
-  "the launcher was ready long ago" as "the TUI never mounted" and ended the
-  running process with `required TUI surface did not mount`. Only a row that
-  actually witnessed that startup now delivers the verdict: a cold start whose
-  TUI is still missing still exits nonzero with the actionable notice.
-
-### Changed
-
-- **`/settings → Tools → Web Search / Fetch` moved from the legacy editor into a page in the same
-  Settings workspace.** `Enter` (or the row Detail's `Configure Web…`) no longer retires the
-  workspace and opens the old editor: it mounts the frozen six-row Web page in the same lease and
-  body — search provider, fetch provider, Search API result count (5/10/20/50 quick picks; another
-  stored integer is reported exactly), `Share Original Question`, the API endpoint (the existing
-  endpoint editor: a full URL, an explicit Enter confirm and the credential/query external-send
-  warning) and the read-only `DeepSeek API Key`. Each value is written only by its own explicit
-  Enter confirm; the write joins the single Web FIFO and the authoritative read-back then decides
-  `Verified` / `Not saved` (naming the value the Host really keeps) / `Outcome unknown`, and
-  confirming a value the Host already holds performs no redundant write. A custom provider id is
-  reported verbatim and offers no confirmable candidate; an unavailable or Remote backend opens a
-  read-only page with its reason. The key still shows only the reference, whether it is configured
-  and its source layer: `Configure in Models…` / `Clear in Models…` switch to the existing Models
-  `API Key Reference` page in the SAME lease, so the Web page never collects the key and never runs
-  `/login` text. The existing complete editor is retained and its historical Web rows share the
-  same write queue and read authority.
-
-- **Settings now has nine fixed first-level categories plus a conditional `Extensions`.**
-  `/settings` (and `/status`) lists `About / Models / Account / Agent / Appearance /
-  Conversation / Input & Terminal / Tools / Plugins`, and appends `Extensions` only while the
-  extension settings registry really has rows. After a registration, an unload or a same-id
-  replacement, a frame that has not repainted yet runs no click, wheel or key action and only
-  `Esc` still returns safely; a registration, unload or value change never interrupts an edit in
-  progress (the candidate, the selected category/row and the scroll positions are kept), and only
-  a selection that really stopped being valid falls back to the first row of its category; when
-  the `Extensions` entry disappears the selection lands on the neighbouring `Plugins` instead of
-  an empty category. `Other settings` is gone: a setting that
-  has not migrated yet is opened by a transition row in its own category that explicitly says
-  `Existing settings editor` and focuses that exact row (agent defaults, footer, more
-  conversation settings, input & terminal, extension settings), and the Web Search / Fetch
-  entry moved to `Tools`. The already-migrated Theme, Transcript display and Visual tools rows
-  keep their behavior.
-
-- **Settings copy has collapsed onto About's keyboard operation.** `/settings` (and
-  `/status`) no longer paints a `Copy [C]` button after each About fact: the selected
-  fact is copied with `c`, advertised only by the weak last-row Action Bar hint, while
-  the page keeps exactly one `Copy All [C]` affordance and `C` still copies the whole
-  stable report. Only a fact that is really painted in the viewport can be copied — a
-  fact scrolled out of view, or a selected `Refresh context` action, leaves `c` inert.
-  The ordinary configuration rows (Appearance / Display / Tools / Other settings) lose
-  their `Copy value [C]` button and `c copy value` hint; browsing, choosing, confirming
-  and retrying are unchanged. Plugin Manager Diagnostics and the Models / Account pages
-  keep their own copy actions.
-
-- **`/plugins` is now part of Settings, as a deep link into `Settings → Plugins`.**
-  Both take the SAME Settings fullscreen lease and the SAME plugin page — there is
-  no separate plugin screen and no Session create/switch. Selecting the `Plugins`
-  category previews the real plugin list in place, so the intermediate
-  `Open Plugin Manager` row is gone. Settings paints the shared header/metadata/
-  rule/pane header and the single last-row action bar; the plugin page
-  contributes only its business body. At >=120 columns (and only while the
-  frame can grant six real business-body rows) the frame shows
-  `Categories | Plugin List | Details`; a shorter frame degrades to the pair or
-  one column instead of squeezing the body. The 76-119 pair needs those same six
-  rows and otherwise degrades to one column. At 76-119 columns it shows
-  `Categories | List` with the rail focused and `List | Details` with the plugin
-  content focused; below 76 columns it is one column. Install, dangerous
-  confirmations and Diagnostics always take the full width. `Esc` from the List
-  returns to the Settings category (same page instance, query/selection/scroll
-  and background install request preserved) and a second `Esc` closes; `/plugins`
-  lands directly on the plugin list. The page always starts on the list, and `i`
-  reopens the same install request instead of auto-opening the install view.
-- **The Models home lists only the configured providers, and adding one is now a
-  catalog.** The home groups by the Host's own profile-presence fact: the
-  connected providers and the DeepSeek Account each get a row, and the key
-  state is an independent fact (`Configured` / `Key missing` / `Signed in` /
-  `Not signed in`, `Outcome unknown` after a failed read, `Unavailable` when
-  the backend cannot answer). An unconfigured provider moved to the
-  `Add Provider` catalog, where browsing writes nothing; a hand-written
-  provider still uses the existing full wizard. The read has explicit states
-  (Loading / Ready / Refreshing / Stale / Error), and a failed read is never
-  painted as "no providers".
-- **Approvals now use a blocking editor-seat action sheet.** The complete reason
-  and arguments are readable in one scrollable body (no six-line argument
-  preview), with `y` allow once, `n` reject, `Esc`/`Ctrl+C` cancel, `c` copying the
-  received raw arguments and `e` expanding the reading area. Fullscreen can click
-  the actually painted Allow once / Reject / Cancel actions and wheel-scroll the
-  body; regular mode remains keyboard-only.
+## [0.5.4] - 2026-10-29
 
 ### Installation and version pairing
 
-- **The published `0.5.3` is also verified on DeepSeek Harness `0.2.1-rc.3` by the
-  official preset assembly.** This was checked with the `@xmoon76/dsh-pi-tui@0.5.3`
-  package as published on npm, paired with `@deepseek-ai/dsh@0.2.1-rc.3`. The `0.5.3`
-  minimum DSH version stays `0.2.1-rc.2`; the package version and its published
-  contents are unchanged, and no new TUI version was released.
-- **The published `0.5.3` is also verified on DeepSeek Harness `0.2.1-rc.4` by the
-  official preset assembly.** This was checked with the `@xmoon76/dsh-pi-tui@0.5.3`
-  package as published on npm, paired with `@deepseek-ai/dsh@0.2.1-rc.4`. The `0.5.3`
-  minimum DSH version stays `0.2.1-rc.2`; the package version and its published
-  contents are unchanged, and no new TUI version was released. This checkout only
-  updates its exact validation target and the corresponding statements.
+This release validates against the published DSH `0.2.1-rc.4` and keeps the
+minimum at `0.2.1-rc.2`. Installing DSH requires explicitly allowing its native
+install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.4
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.4
+dsh --profile pi-tui
+```
+
+The published `0.5.3` remains compatible with `0.2.1-rc.2`, `0.2.1-rc.3` and
+`0.2.1-rc.4`. Older DSH releases keep their pairings unchanged:
+`@deepseek-ai/dsh@0.2.0-rc.2` uses `@xmoon76/dsh-pi-tui@0.5.1` or
+`@xmoon76/dsh-pi-tui@0.5.2-rc.1`; `@deepseek-ai/dsh@0.2.0-rc.1` (including
+`0.1.7-rc.2`) uses `@xmoon76/dsh-pi-tui@0.5.0`, and
+`@deepseek-ai/dsh@0.1.7-rc.1` uses `@xmoon76/dsh-pi-tui@0.4.8`.
+
+### Changed
+
+- **Settings is now the single full-screen workspace.** `/settings` and
+  `/status` open the same workspace and land on the About home. Wide and medium
+  terminals show a category rail beside the content; narrow terminals (under 76
+  columns) show About directly. The fixed categories are About / Models /
+  Account / Agent / Appearance / Conversation / Input & Terminal / Tools /
+  Plugins, with Extensions appended only while the extension settings registry
+  has rows. `Tab`/`Shift+Tab` move between regions and `←`/`Esc` step back.
+  Every page shares one header, status line and bottom action bar; `/plugins`,
+  `/footer`, `/statusline` and bare `/keybindings` are deep links into the same
+  workspace. About shows versions, backend, the captured session identity,
+  whole-session statistics, TTFB/throughput and Context occupancy, with `c` to
+  copy the selected fact, `C` for the full report and `r` to refresh. The legacy
+  main settings editor, the standalone plugin screen and the old `/status` page
+  are gone, and configuration rows no longer have per-row copy buttons.
+
+- **Images in tmux now attempt admission automatically.** A tmux server that
+  meets the strict conditions no longer needs an explicit environment variable;
+  `PI_TUI_TMUX_KITTY_IMAGES=0` or `PI_IMAGE_PROTOCOL=none/0` still disables the
+  capability. No tmux configuration is modified automatically.
+
+### Added
+
+- **Models and Account workspaces.** Models lists the Host provider catalog,
+  API-key presence (not a connectivity test), provider details, a masked editor,
+  clear confirmations, the Add Provider wizard and provider-native sign-in. The
+  home lists only configured providers; missing ones live in the Add Provider
+  catalog, and the catalog and credentials are read once after the first frame
+  so a large catalog never blocks the keyboard. Account shows sign-in state, the
+  browser authorization URL, SSH tunnel guidance, independent wallets, exact
+  attempt cancellation, refresh and a confirmed sign-out. DeepSeek Account
+  sign-in uses the official `host-webserver` loopback callback on
+  `127.0.0.1:0`; the TUI never receives a token or grant, `--help` opens no
+  port, and `/login` / `/logout` open the matching page deep link.
+
+- **Settings now edits every configuration field in place.** Appearance: Icon
+  style and Status line mode. Conversation: Transcript detail, Thinking detail,
+  Progress updates, Response style, Submit while busy and Git attribution.
+  Input & Terminal: Home/End keys, Fullscreen, wheel lines, notifications,
+  Terminal progress, Footer layout and Keyboard shortcuts. Agent: approval
+  policy, default permission, subagent model allowlist and selection, and user
+  shell sandbox. Tools: Web Search / Fetch and Visual tools. Extensions:
+  dynamic settings grouped by plugin. Every write needs explicit confirmation
+  and reports `Verified`, `Not saved` or `Outcome unknown` from the
+  authoritative read-back; a saved `Fullscreen` preference applies after
+  Settings closes normally.
+
+- **Approvals now use a blocking action sheet in the editor seat.** The full
+  Reason/Arguments body is readable in one scrollable area (no six-line
+  argument preview). `y` allows once, `n` rejects, `Esc`/`Ctrl+C` cancels, `c`
+  copies the raw arguments and `e` expands. Fullscreen can click the actually
+  painted Allow once / Reject / Cancel actions and wheel the body; regular mode
+  stays keyboard-only. Short viewports show the real compact payload or
+  `Resize to inspect more`, never a cropped decision.
+
+- **Terminal images are admitted by real capability.** Direct Kitty, Ghostty,
+  WezTerm, Warp, Tern and terminals explicitly set to `PI_IMAGE_PROTOCOL=kitty`
+  share one managed image lifecycle. A Zellij pane queries its current pane's
+  live capability; tmux automatically attempts Unicode placeholders after
+  `allow-passthrough=all`, the live identity checks and the single display
+  client check pass, and an unknown terminal must return a matching
+  `e=T,U=1;OK`. No reply, a plain `OK`, an error or a timeout stays text-only and
+  never falls back to the legacy escape path. tmux Control Mode clients do not
+  count as display clients. `PI_IMAGE_PROTOCOL=none/0` and
+  `PI_TUI_TMUX_KITTY_IMAGES=0` still disable images; an older terminal that
+  genuinely supports U1 may set `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1`.
+
+- **Kitty terminals support JPEG/WebP with draft and viewer previews.**
+  Transcript thumbnails, the draft preview card and the fullscreen viewer share
+  one bounded PNG derivative (WebP first frame, EXIF orientation, longest side
+  768 pixels); the identity row keeps the original name, dimensions, format and
+  byte count. The last draft image renders as a bounded card, fullscreen `x`
+  deletes only that placeholder and `Ctrl+-` undoes it. The fullscreen info row
+  `[-]`/`[+]` folds only that image, and clicking its body opens the read-only
+  viewer. A new `/view-image` lists the current window's images; `Enter` views
+  one and `Esc back` returns to the same list.
+
+- **Ctrl+V, `/attach` and `/image` target the live editor and support inline
+  completion.** Consecutive pastes commit in trigger order; text is inserted at
+  the caret without sending or overwriting, and images get canonical
+  placeholders. If the session, owner or editor seat changes, the old result
+  never reaches the new draft. `/attach`, `/image` and Ctrl+V share the editor
+  seat, draft store and Client cwd/file limits, and the TSP renderer can run
+  them too. Typing `/ima` or `/att` anywhere in the body opens an inline
+  dropdown; choosing a file replaces only the current fragment, keeps the
+  surrounding text, never sends the draft, and one Undo restores the path text.
+
+- **Delivered-files tail and the `/deliverables` panel.** A final answer's
+  `present` files render as a compact tail of at most four files, two rows each
+  (path relative to the current display subject's workspace plus description);
+  beyond four it ends in `+N more · /deliverables`, and fullscreen can click
+  `Browse all` and per-file `Details`. `/deliverables` has Files/Turns/Details
+  with `↑↓`, `Enter`, `/` filtering, `T` to switch Turn, `C` to copy the raw
+  Host path and `Esc` to go back or close. Details reads one 120-line page of
+  Host text, never reads bytes for binary/document suffixes, and restarts from
+  the beginning when the file changes. Panel text is mouse-selectable, the panel
+  is centered, and a resize keeps its state.
+
+- **Chart/SVG tools, the Visual tools switch and publication.** The resident
+  `dsh_pi_tui_chart` (bars/spark, 2–12 labelled values and an optional unit) and
+  `dsh_pi_tui_svg` (self-contained static SVG from a restricted safe subset)
+  draw inside the existing Tool Card natively on Tern or with exact values,
+  description or a bounded raster PNG elsewhere. `Settings → Tools → Visual
+  tools` (default On) switches `dsh_pi_tui_chart`, `dsh_pi_tui_svg` and
+  `present_visual` together. The model may publish 1–8 successful charts/SVGs
+  from earlier steps of this session with `visual-ref-v1:sv1_…`; publication
+  adds no session event, and figures appear in place or in order before the
+  delivered files, at most once per ref. PiTUI offers `Copy Data`,
+  `View`/`Copy SVG`, `Alt+V`/`Alt+C`/`Alt+O` and a fullscreen SVG reader;
+  `/copy` copies the visible display body without a consumed marker line.
+
+- **The experimental TSP renderer supports native tool cards, Work Hub, images
+  and published figures.** Tool heads use the tool's declared kind
+  (path/pattern), `run_code` children render as a `Child calls · N` tree,
+  streaming arguments show a `Preparing <Tool>…` row, and tool-result images
+  render natively in block order. `/tasks` and `/subagents` open the Work Hub
+  (Needs attention / Subagents / Jobs); `Enter`/`View details` opens the
+  read-only Work Details reader and `Back` returns to the same selection.
+  Ctrl+V images, Dock draft thumbnails and historical images keep their order;
+  published charts/SVGs render in place with a real `Copy` button and
+  `Alt+V`/`Alt+C` select and copy.
+
+### Fixed
+
+- **Hot reload no longer exits a running TUI.** A re-mounted startup row used to
+  mistake "the launcher was already ready" for "the TUI never mounted" and end
+  the process with `required TUI surface did not mount`. Only a row that really
+  witnessed that startup now makes the verdict; a cold start with a missing TUI
+  still exits non-zero with guidance.
+
+- **Shift+Tab no longer fails to switch permission presets.** The official
+  `/permission` command used to receive an `undefined` signal and throw
+  `Cannot read properties of undefined (reading 'aborted')`, leaving the preset
+  unchanged. The existing lifecycle AbortSignal is now used on Direct and
+  Remote alike.
+
+- **Releasing an old extension handle no longer deletes a newer registration.**
+  The six Stable registration slots — theme, autocomplete, keybinding, message
+  renderer, tool renderer and editor — now release exactly once. Explicit
+  `dispose()`, plugin Fiber unload and failed-registration rollback share one
+  one-shot cleanup, so a newer registration, its health record and the theme
+  unload notification are unaffected by an old handle.
 
 ## [0.5.3] - 2026-10-20
 
@@ -2511,7 +2079,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3
 [0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1
 [0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1
