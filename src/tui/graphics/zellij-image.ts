@@ -78,6 +78,8 @@ export class ZellijKittyAdmission {
   private state: ZellijAdmissionState = 'pending'
   private timer: NodeJS.Timeout | undefined
   private disposed = false
+  /** Whether the facade currently has a real input listener installed. */
+  private inputActive = false
 
   constructor(onAllowed?: () => void) {
     this.onAllowed = onAllowed
@@ -86,6 +88,21 @@ export class ZellijKittyAdmission {
   /** Whether this pane's live query was answered with `OK`. */
   get allowed(): boolean {
     return this.state === 'allowed'
+  }
+
+  /** Whether the screen currently has the facade's input listener mounted. */
+  get inputListening(): boolean {
+    return this.inputActive && !this.disposed
+  }
+
+  /** Record a real `Terminal.start()` (main/alt hand-off keeps the admission). */
+  markInputStarted(): void {
+    if (!this.disposed) this.inputActive = true
+  }
+
+  /** Record a real `Terminal.stop()`; the one-way admission itself survives. */
+  markInputStopped(): void {
+    this.inputActive = false
   }
 
   /**
@@ -164,11 +181,17 @@ export class ZellijKittyTerminal extends KittyTerminalFacade {
   }
 
   override start(onInput: (data: string) => void, onResize: () => void): void {
+    this.zellijAdmission.markInputStarted()
     super.start((data) => {
       if (this.zellijAdmission.consume(data)) return
       onInput(data)
     }, onResize)
     this.zellijAdmission.start(() => this.write(ZELLIJ_PROBE_WIRE))
+  }
+
+  override stop(): void {
+    this.zellijAdmission.markInputStopped()
+    super.stop()
   }
 }
 
@@ -189,7 +212,7 @@ export function createZellijKittyGraphics(
   let disposed = false
   const admission = new ZellijKittyAdmission(() => {
     queueMicrotask(() => {
-      if (!disposed && admission.allowed) onAllowed()
+      if (!disposed && admission.allowed && admission.inputListening) onAllowed()
     })
   })
   const facade = new ZellijKittyTerminal(terminal, core, admission)
