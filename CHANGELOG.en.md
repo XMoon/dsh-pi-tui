@@ -18,8 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   query stays text-only and never falls back to the legacy escape image path. Tern's normal
   PiTui path paints images by its Kitty capability, while a connected TSP renderer keeps
   using the SDK's native image and blob path and never creates a terminal graphics handle
-  at the same time. `PI_IMAGE_PROTOCOL=none` (or `0`) still closes the capability before
-  any image read, conversion or upload.
+  at the same time. The fullscreen view follows the actual managed image protocol when it
+  clears images, so removing, moving or repeatedly entering/leaving fullscreen leaves no
+  ghost placement and deletes no other image. `PI_IMAGE_PROTOCOL=none` (or `0`) still
+  closes the capability before any image read, conversion or upload.
 - **Images in a Zellij pane running on a Ghostty host now paint as real pixels too.**
   When a Zellij pane inside Ghostty confirms its live Kitty graphics capability through one
   real query, transcript, draft, image-viewer and authorized SVG preview images use the same

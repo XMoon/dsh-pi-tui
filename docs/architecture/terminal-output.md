@@ -232,10 +232,14 @@ retirement and the resident budget.
   text fallback and can never fall back to legacy `a=T`; an empty `ZELLIJ`
   value is not a session marker. A connected Tern TSP renderer keeps its own
   `image`+`blobs` native node path and never mounts a PiTui graphics handle;
-  the Tern PiTui fallback uses the same Direct capability above. The tmux
-  virtual path is a separate strict automatic admission with its own
-  live-server probe (below). All paths fail closed, and every managed path
-  deletes only its own ids.
+  the Tern PiTui fallback uses the same Direct capability above. Every Alt
+  Screen derives its image clear/redraw/release strategy from the one managed
+  Native handle when that handle exists, even when the static process
+  capability is `null` or `iterm2`; without a managed handle the existing
+  static protocol (including the iTerm2 suppression/restore lifecycle) is
+  unchanged. The tmux virtual path is a separate strict automatic admission
+  with its own live-server probe (below). All paths fail closed, and every
+  managed path deletes only its own ids.
 
 ### tmux virtual backend (strict automatic admission)
 

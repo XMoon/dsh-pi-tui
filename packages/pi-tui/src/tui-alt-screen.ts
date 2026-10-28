@@ -177,6 +177,17 @@ export interface TuiAltScreenOptions {
 	wheelScrollLines?: WheelScrollLines;
 	/** Capture mouse events for viewport scrolling and application-owned text selection. */
 	mouse?: boolean;
+	/**
+	 * Use this image protocol for THIS alternate-screen instance instead of the
+	 * process-wide `getCapabilities().images` snapshot. The host passes `kitty`
+	 * when a managed Native Kitty graphics handle exists, including while a
+	 * Zellij live-pane admission is still pending: whether pixels may actually
+	 * be painted stays the graphics handle's `canPaint()` decision, while the
+	 * screen's clear/redraw/release strategy must already be Kitty. The global
+	 * capability cache is never changed by this option; the existing iTerm2
+	 * suppression/restore lifecycle still applies. (dsh-pi-tui divergence X070.)
+	 */
+	imageProtocolOverride?: ImageProtocol;
 	/** Style a non-current transcript search match. */
 	searchMatchStyle?: (text: string) => string;
 	/** Style the current transcript search match. */
@@ -287,6 +298,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly flashes: AltScreenFlashContainer;
 	private altScreenActive = false;
 	private imageProtocol: ImageProtocol = null;
+	/** Per-instance protocol selection; never mutates the process-wide cache. */
+	private readonly imageProtocolOverride?: ImageProtocol;
 	private savedCapabilities?: TerminalCapabilities;
 	private readonly uploadedKittyImages = new Map<number, CachedKittyImage>();
 	private selectionAnchor?: SelectionPoint;
@@ -373,6 +386,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.flashes = new AltScreenFlashContainer(() => this.requestRender());
 		this.wheelScroll = new WheelScrollAccelerator(options.wheelScrollLines ?? 1);
 		this.mouseEnabled = options.mouse ?? true;
+		this.imageProtocolOverride = options.imageProtocolOverride;
 		this.searchMatchStyle = options.searchMatchStyle ?? ((text) => `\x1b[4m${text}\x1b[24m`);
 		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
 		this.searchNavigationButtonStyle = options.searchNavigationButtonStyle ?? ((text) => text);
@@ -518,7 +532,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.flashes.dispose();
 		this.altScreenActive = true;
 		const capabilities = getCapabilities();
-		this.imageProtocol = capabilities.images;
+		this.imageProtocol = this.imageProtocolOverride ?? capabilities.images;
 		this.uploadedKittyImages.clear();
 		if (capabilities.images === "iterm2") {
 			this.savedCapabilities = capabilities;

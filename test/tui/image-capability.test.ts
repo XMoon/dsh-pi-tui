@@ -162,6 +162,20 @@ test('a Zellij pane stays text-only until the live OK for every fork capability'
       `fork images=${capability}: the one-way live OK admits the same Native handle`)
     graphics.dispose()
   }
+
+  const deniedTerminal = new RecordingTerminal()
+  const denied = createZellijKittyGraphics(deniedTerminal, {}, {
+    TERM: 'xterm-256color',
+    TERM_PROGRAM: 'tern',
+    ZELLIJ: '1',
+  }, () => {})
+  assert.ok(denied, 'a live rejection keeps the candidate handle')
+  denied.terminal.start(() => {}, () => {})
+  const deniedProbeId = /a=q,i=(\d+)/.exec(deniedTerminal.text)?.[1]
+  assert.ok(deniedProbeId)
+  deniedTerminal.sendInput(`\x1b_Gi=${deniedProbeId};ENOTSUPPORTED:disabled\x1b\\`)
+  assert.equal(effectiveImageProtocol(denied), null, 'a denied admission stays text-only')
+  denied.dispose()
 })
 
 test('an empty ZELLIJ marker is not a Zellij session', () => {
