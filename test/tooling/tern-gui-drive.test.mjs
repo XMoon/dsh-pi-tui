@@ -232,10 +232,25 @@ function runDriver(fake, extraEnv = {}, dir) {
   return { dir, out, result }
 }
 
+/**
+ * Register the test's OWN teardown for the helpers THIS fixture recorded.
+ *
+ * The fake daemon/window are long-lived by contract, so a case that fails
+ * before the driver's own teardown must still stop them. The records are read
+ * at cleanup time and carry PID + start time, so only the helper that really
+ * ran is signalled. Registration happens before any spawn or assertion: a
+ * failed assertion must never be the reason a long-lived process survives.
+ */
+function deferHelperCleanup(life, dir) {
+  const pidsFile = joinPath(dir, 'pids.log')
+  life.defer(() => { killStillExecuting(readPidRecords(pidsFile)) })
+}
+
 test('the GUI driver isolates the window from the user\'s real Tern profile', (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-iso-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   const { out, result } = runDriver(fake, {}, dir)
   assert.equal(result.status, 0, result.stdout + result.stderr)
 
@@ -250,6 +265,7 @@ test('the GUI driver never repeats an input and aborts on an unacknowledged one'
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-once-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, `export default async function (h) {
   const snap = h.snapshot()
@@ -278,6 +294,7 @@ test('the GUI driver reports the window\'s minimum size instead of failing on it
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-min-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, `export default async function (h) {
   const size = await h.resize(400, 600)
@@ -298,6 +315,7 @@ test('the GUI driver copies the client\'s PNG into the run directory', (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-shot-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, `export default async function (h) {
   h.capture('a-capture', 'the copy check')
@@ -317,6 +335,7 @@ test('the GUI driver clicks the VISIBLE fragment, never a clipped node\'s centre
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-visible-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   // A node whose own box is y 100..140 but whose sized ancestor clips it at
   // y 100..110: its centre (y=120) is in the clipped-away part.
   const tree = [{
@@ -353,6 +372,7 @@ test('the GUI driver reads shots from THIS run\'s own client directory', (t) => 
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-shots-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, `export default async function (h) {
   h.capture('one-shot', 'the capture under test')
@@ -386,10 +406,11 @@ test('the fake control socket reports ready only after THIS run recorded both he
   const runDir = joinPath(dir, 'out')
   mkdirSync(runDir, { recursive: true })
   const socket = joinPath(runDir, 'gui.sock')
-  const stats = (env = {}) => spawnSync(fake.file, ['ctl', '--control', socket, 'stats'], {
+  const statsAt = (controlSocket, env = {}) => spawnSync(fake.file, ['ctl', '--control', controlSocket, 'stats'], {
     encoding: 'utf8',
     env: { ...process.env, DISPLAY: ':0', ...env },
   })
+  const stats = (env = {}) => statsAt(socket, env)
 
   // No witness at all: an unconditional OK would let the driver run a flow
   // before its helpers started — the startup race this fake must not model.
@@ -398,6 +419,16 @@ test('the fake control socket reports ready only after THIS run recorded both he
   writeFileSync(joinPath(runDir, 'daemon-started'), '')
   assert.notEqual(stats().status, 0, 'a daemon witness alone must not grant readiness')
   assert.notEqual(stats({ FAKE_CTL_FAIL: '1' }).status, 0, 'FAKE_CTL_FAIL still refuses')
+  // A DIFFERENT run directory with both witnesses grants itself readiness, but
+  // its markers must never authorize THIS run: the key is the run directory
+  // named by the control socket, not a shared fixture log.
+  const otherRun = joinPath(dir, 'other-out')
+  mkdirSync(otherRun, { recursive: true })
+  writeFileSync(joinPath(otherRun, 'daemon-started'), '')
+  writeFileSync(joinPath(otherRun, 'window-started'), '')
+  const other = statsAt(joinPath(otherRun, 'gui.sock'))
+  assert.equal(other.status, 0, other.stdout + other.stderr)
+  assert.notEqual(stats().status, 0, 'another run witnesses must not authorize this run')
   writeFileSync(joinPath(runDir, 'window-started'), '')
   // Both THIS run's witnesses: the command answers the shape the driver reads.
   const ready = stats()
@@ -411,6 +442,7 @@ test('two runs whose --out basenames collide still get DIFFERENT private daemons
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-daemons-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, 'export default async function (h) { h.check("the flow ran", true) }\n')
   // Two run directories with the SAME BASENAME (`out`) under different parents —
@@ -448,6 +480,7 @@ test('splitPane refuses to continue when the split moved the focus', (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-focus-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   // The fake reports the focus as pane 1 before the split and pane 2 after it:
   // exactly the state in which a subject would be typed into the WRONG pane.
@@ -479,6 +512,7 @@ test('a capture whose PNG the client never wrote FAILS instead of passing silent
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-nopng-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, `export default async function (h) {
   h.capture('ghost-shot', 'the client acknowledges but writes nothing')
@@ -562,6 +596,7 @@ async function assertFinishedRunTearsDown(t, prefix, { flow, env = {}, expectedS
   const life = testLifecycle(t)
   const dir = life.tempDir(prefix)
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   const flowPath = joinPath(dir, 'flow.mjs')
   writeFileSync(flowPath, flow)
   const out = joinPath(dir, 'out')
@@ -636,6 +671,7 @@ test('a helper that never reaches close is reported and its socket directory is 
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-timeout-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, CHECKED_FLOW)
   const out = joinPath(dir, 'out')
@@ -666,6 +702,7 @@ test('an exit path the driver does not own keeps a socket directory it cannot pr
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-exit-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   // A flow calling process.exit() skips the driver's `finally`: the synchronous
   // exit hook runs with the helpers still alive, so it may only REQUEST their
@@ -678,9 +715,6 @@ test('an exit path the driver does not own keeps a socket directory it cannot pr
   })
   assert.equal(result.status, 7, result.stdout + result.stderr)
   const records = readPidRecords(joinPath(dir, 'pids.log'))
-  // The test's cleanup uses the CAPTURED identity (PID + start time), never a
-  // bare PID: a reused PID must not be signalled. It runs after the assertions.
-  life.defer(() => { killStillExecuting(records) })
   assert.deepEqual(records.map((record) => record.kind).sort(), ['daemon', 'window'],
     `the exit run started BOTH helpers and recorded each identity: ${JSON.stringify(records)}`)
   assert.ok(records.every((record) => Number.isInteger(record.pid) && record.pid > 0),
@@ -742,6 +776,7 @@ test('the GUI driver hovers the VISIBLE fragment, and refuses a fully clipped no
   const life = testLifecycle(t)
   const dir = life.tempDir('tern-gui-hover-')
   const fake = writeFakeTern(dir)
+  deferHelperCleanup(life, dir)
   // Two nodes: `partial` survives y 100..110 of its own 100..140 box; `hidden`
   // is entirely outside its sized ancestor.
   const tree = [{

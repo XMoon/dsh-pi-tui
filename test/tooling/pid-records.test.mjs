@@ -5,8 +5,9 @@
  * These cases pin the contract the tooling owners rely on: records that already
  * exist settle without an event, records written after the wait starts wake
  * it, a fixture that never reaches the count fails at its deadline instead of
- * hanging, and a settled observation releases its timer/watch instead of
- * surviving until the deadline.
+ * hanging, and a settled observation releases its deadline timer instead of
+ * surviving until it fires. The watcher close itself is source-reviewed (a
+ * closed FSWatcher has no event to observe); the child here proves the timer.
  *
  * The narrow "record written between the first read and the watcher
  * registration" window has no deterministic external trigger; it is closed by
@@ -62,7 +63,7 @@ test('a fixture that never reaches the count fails at its deadline with the obse
   )
 })
 
-test('a settled wait releases its deadline and ignores a later file event', async (t) => {
+test('a settled wait releases its deadline instead of waiting it out', async (t) => {
   const dir = tempDir(t)
   const file = join(dir, 'pids.log')
   // A CHILD owns the observation so the release is observable: a surviving
@@ -75,7 +76,7 @@ const pending = waitForPidRecords(file, 1, 60_000)
 appendFileSync(file, 'daemon 401 -\\n')
 const records = await pending
 if (records.length !== 1) process.exit(9)
-// A LATE event after the settlement must not produce a second observation.
+// A LATE write after the settlement must not keep a pending observation alive.
 appendFileSync(file, 'window 402 -\\n')
 process.stdout.write('settled')
 `)
