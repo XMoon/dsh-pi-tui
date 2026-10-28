@@ -11,16 +11,18 @@
  * @module @xmoon76/dsh-pi-tui/tui/components/transcript-leaves
  */
 
-import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from '@xmoon76/pi-tui'
+import { truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { iconLead } from '../icons.ts'
 import type { IconStyle } from '../../domain/display/icons.ts'
 import { longMessageDisclosureWindow } from '../transcript/long-message-disclosure.ts'
 import { latestLine } from '../../domain/transcript/text.ts'
-import { relativizeToCwd } from '../transcript/tool-presentation.ts'
 import { color } from '../theme/runtime.ts'
 import { thinkingPreviewTail } from './transcript/thinking-preview.ts'
-import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { sanitizeDisplaySegment, sanitizeDisplayText } from '../presentation/terminal-text.ts'
+import { fitDeliveredLabels } from '../presentation/labels.ts'
+import { abbreviateName } from '../pickers/name-label.ts'
+import { deliveredDisplayPath } from '../../domain/deliverables/catalog.ts'
 import type { PresentedFilePresentation, TranscriptMessage } from '../../transcript.ts'
 
 /** The assistant delivered-files tail folds after this many files. */
@@ -400,75 +402,260 @@ export class UserBubbleComponent implements Component {
   }
 }
 
-/** Host-owned tail for explicit files delivered by the present tool. Paths
- * are always shown first; the folded view caps entries while an expanded
- * transcript view re-renders the complete declaration list. */
+/** One painted path/description field span of the delivered-files tail, in
+ * THIS component's row coordinates. Consumed by the search source walker. */
+interface DeliveredFilesFieldSpan {
+  readonly index: number
+  readonly pathRow: number
+  readonly pathStart: number
+  readonly pathEnd: number
+  readonly descriptionRows: ReadonlyArray<{ readonly row: number; readonly start: number; readonly end: number }>
+}
+
+/** One complete width-keyed frame: the painted rows AND the hit/span geometry
+ *  that belongs to those exact rows. A cached row array without its geometry
+ *  would leave a stale hit map after an A → B → A resize. */
+interface DeliveredFilesFrame {
+  readonly rows: string[]
+  readonly hits: readonly DeliveredFilesActionHit[]
+  readonly spans: readonly DeliveredFilesFieldSpan[]
+}
+
+/** One painted action cell of the delivered-files tail, in THIS component's
+ * row coordinates. Only a real painted cell may be hit: the host resolves the
+ * tail's row offset and never reconstructs the geometry itself. */
+export interface DeliveredFilesActionHit {
+  readonly row: number
+  /** Half-open visible-column range inside the row. */
+  readonly startCol: number
+  readonly endCol: number
+  /** `browse` opens the Turn's file list; `details` opens one file. */
+  readonly action: 'browse' | 'details'
+  /** Index into the component's FULL `files` array (details only). */
+  readonly fileIndex?: number
+}
+
+/** Width at which the tail paints its pointer actions. At 56 the path label
+ * keeps a 45-cell budget beside `Details` (56 - indent 2 - gap 2 - verb 7),
+ * which is enough for both ends of a relative Host path; below it the verb
+ * would consume the row and the tail keeps the always-available
+ * `/deliverables` text entry instead of a dead affordance. */
+const DELIVERED_ACTION_MIN_WIDTH = 56
+const DELIVERED_DETAILS_VERB = 'Details'
+const DELIVERED_BROWSE_VERB = 'Browse all'
+/** The path line's leading indent, in cells. */
+const DELIVERED_PATH_INDENT = 2
+/** The description line's leading indent, in cells. */
+const DELIVERED_DESCRIPTION_INDENT = 4
+
+/** Host-owned tail for explicit files delivered by the present tool.
+ *
+ * Every file is TWO rows at most: a workspace-relative path (the current
+ * display subject's root; a path outside it, or a surface without a trusted
+ * root, stays the declared path) and — when present — its own description row
+ * indented under it. Neither row wraps: each is fitted to ONE physical line
+ * with both ends preserved, because the complete raw path is always available
+ * in the browser's Details page and Copy action. A per-file/per-list
+ * `Details`/`Browse all` verb is painted ONLY where it is a real pointer target
+ * on this surface and its entire painted cell range fits; the plain
+ * `/deliverables` text entry is what a mouse-less terminal keeps. */
 export class DeliveredFilesComponent implements Component {
   private readonly files: readonly PresentedFilePresentation[]
-  private readonly workspaceRoot: string | undefined
   private readonly expanded: boolean
-  private readonly cached = new Map<number, string[]>()
+  /** The safe projection of each file's display path, in declaration order
+   *  (workspace-relative when the CURRENT display subject's root is trusted). */
+  private readonly labels: readonly string[]
+  /** Whether this surface has a real pointer owner for the tail actions. */
+  private readonly pointerActions: boolean
+  /** Whether the `/deliverables` entry is REALLY executable on this surface.
+   *  A surface without it must not paint a dead command hint. */
+  private readonly commandEntry: boolean
+  private readonly cached = new Map<number, DeliveredFilesFrame>()
+  /** The width the recorded painted rows/hits belong to (stale-geometry
+   * fence for the host's click resolution). */
+  private paintedWidth = 0
+  private paintedHits: readonly DeliveredFilesActionHit[] = []
   /** The visible row/column spans of every rendered path/description field,
    * relative to THIS component's rows (render output, refreshed on every
    * width). Consumed by the search source-geometry walker. */
-  lastFieldSpans: ReadonlyArray<{
-    readonly index: number
-    readonly pathRow: number
-    readonly pathStart: number
-    readonly pathEnd: number
-    readonly descriptionRows: ReadonlyArray<{ readonly row: number; readonly start: number; readonly end: number }>
-  }> = []
+  lastFieldSpans: ReadonlyArray<DeliveredFilesFieldSpan> = []
 
   constructor(
     files: readonly PresentedFilePresentation[],
-    workspaceRoot: string | undefined,
     expanded: boolean,
+    options: {
+      readonly pointerActions?: boolean
+      readonly commandEntry?: boolean
+      /** The CURRENT display subject's workspace root. Absent/empty keeps every
+       *  declared path unchanged — never a guessed cwd. */
+      readonly workspaceRoot?: string
+    } = {},
   ) {
     this.files = files
-    this.workspaceRoot = workspaceRoot
     this.expanded = expanded
+    // ONE safe display projection per file, built from the SAME relativized
+    // text that is painted: two declarations that differ only in removed
+    // control bytes still produce distinct fitted labels in `render`.
+    this.labels = files.map(file =>
+      sanitizeDisplaySegment(deliveredDisplayPath(file.path, options.workspaceRoot)) || '(unnamed)')
+    this.pointerActions = options.pointerActions === true
+    this.commandEntry = options.commandEntry === true
   }
 
   invalidate(): void {
     this.cached.clear()
+    this.paintedWidth = 0
+    this.paintedHits = []
+    this.lastFieldSpans = []
+  }
+
+  /** The painted action cells of the LAST `render(width)` — empty when the
+   * width handed in is not the one actually painted (a resize invalidates the
+   * hit map before the next frame). */
+  paintedFileActionHits(width: number): readonly DeliveredFilesActionHit[] {
+    if (Math.max(1, Math.floor(width)) !== this.paintedWidth) return []
+    return this.paintedHits
   }
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.floor(width))
     const previous = this.cached.get(safeWidth)
-    if (previous !== undefined) return previous
+    if (previous !== undefined) {
+      // Restore the COMPLETE frame, not just its row strings: the host asks for
+      // the hits and field spans of the width it just rendered, and an A → B → A
+      // resize must not leave B's (or an empty) hit map behind.
+      this.paintedWidth = safeWidth
+      this.paintedHits = previous.hits
+      this.lastFieldSpans = previous.spans
+      return previous.rows
+    }
 
     const shown = this.expanded ? this.files : this.files.slice(0, DELIVERED_FILES_FOLDED_LIMIT)
-    const rows = [truncateToWidth(color.textDim(`Delivered files · ${this.files.length}`), safeWidth, '…')]
-    const spans: Array<{
-      index: number
-      pathRow: number
-      pathStart: number
-      pathEnd: number
-      descriptionRows: Array<{ row: number; start: number; end: number }>
-    }> = []
+    const showActions = this.pointerActions && safeWidth >= DELIVERED_ACTION_MIN_WIDTH
+    const rows: string[] = []
+    const hits: DeliveredFilesActionHit[] = []
+    const spans: DeliveredFilesFieldSpan[] = []
+
+    // Header. With a pointer owner the list verb is a painted affordance;
+    // without one the tail row (or, when every file is already visible, the
+    // title itself) carries the always-available slash-command entry.
+    const title = `Delivered files · ${this.files.length}`
+    if (showActions) {
+      const browseWidth = visibleWidth(DELIVERED_BROWSE_VERB)
+      const head = truncateToWidth(title, Math.max(1, safeWidth - browseWidth - 1), '…')
+      const gap = Math.max(1, safeWidth - visibleWidth(head) - browseWidth)
+      rows.push(`${color.textDim(head)}${' '.repeat(gap)}${color.primary(DELIVERED_BROWSE_VERB)}`)
+      hits.push({ row: 0, startCol: safeWidth - browseWidth, endCol: safeWidth, action: 'browse' })
+    } else {
+      // Every file already visible and no pointer owner: the slash-command
+      // entry is the only way in, and only when it really exists.
+      const hinted = this.commandEntry && this.files.length <= shown.length
+        ? `${title} · /deliverables`
+        : title
+      rows.push(truncateToWidth(color.textDim(hinted), safeWidth, '…'))
+    }
+
+    const verbRoom = showActions ? visibleWidth(DELIVERED_DETAILS_VERB) + 2 : 0
+    const bodyWidth = Math.max(1, safeWidth - verbRoom)
+    // The contracted indents are 2/4 cells; a degenerate sub-5-column terminal
+    // keeps one paintable cell instead of overflowing its own row.
+    const pathIndent = Math.min(DELIVERED_PATH_INDENT, Math.max(0, safeWidth - 1))
+    const descriptionIndent = Math.min(DELIVERED_DESCRIPTION_INDENT, Math.max(0, safeWidth - 1))
+    // The WHOLE delivery is fitted ONCE at this width. Labels keep both ends
+    // (design-language §6.4), and a residual clamp collision gains a visible
+    // ordinal, so two different declarations can never paint the same row text.
+    // The path is the RELATIVE display text: the raw path stays the copy/search
+    // authority, and a full path is always available in the browser Details.
+    const fittedLabels = fitDeliveredLabels(
+      shown.map((_file, index) => this.labels[index] ?? '(unnamed)'),
+      Math.max(1, bodyWidth - pathIndent),
+    )
     for (const [index, file] of shown.entries()) {
-      const path = sanitizeDisplayText(relativizeToCwd(file.path, this.workspaceRoot)).replace(/\r\n|\r|\n/g, ' ')
-      const pathRow = rows.length
-      const pathStart = visibleWidth('  ')
-      rows.push(truncateToWidth(color.textDim(`  ${path}`), safeWidth, '…'))
-      const descriptionRows: Array<{ row: number; start: number; end: number }> = []
-      if (file.description !== undefined && file.description !== '') {
-        const descriptionWidth = Math.max(1, safeWidth - 4)
-        for (const line of wrapTextWithAnsi(sanitizeDisplayText(file.description), descriptionWidth)) {
-          const descriptionRow = rows.length
-          const start = visibleWidth('    ')
-          rows.push(truncateToWidth(color.textDim(`    ${line}`), safeWidth, '…'))
-          descriptionRows.push({ row: descriptionRow, start, end: start + visibleWidth(line) })
+      const labelText = fittedLabels[index] ?? '(unnamed)'
+      const labelWidth = visibleWidth(labelText)
+      const row = rows.length
+      const pathStart = pathIndent
+      const pathEnd = pathIndent + labelWidth
+      const paintedPath = `${' '.repeat(pathIndent)}${color.textDim(labelText)}`
+      if (!showActions) {
+        rows.push(paintedPath)
+      } else {
+        // The verb is right-aligned against the FULL row width, and its hit
+        // cells are measured from the ACTUAL painted prefix — never assumed
+        // from the room the label left over (that made the painted and the
+        // clickable columns disagree by the whole verb gap).
+        const verbWidth = visibleWidth(DELIVERED_DETAILS_VERB)
+        const gap = Math.max(1, safeWidth - verbWidth - visibleWidth(paintedPath))
+        const prefix = `${paintedPath}${' '.repeat(gap)}`
+        const startCol = visibleWidth(prefix)
+        rows.push(`${prefix}${color.primary(DELIVERED_DETAILS_VERB)}`)
+        // A row too narrow for both keeps its label and paints no verb, so the
+        // hit map never advertises a clipped control.
+        if (startCol + verbWidth <= safeWidth) {
+          hits.push({ row, startCol, endCol: startCol + verbWidth, action: 'details', fileIndex: index })
         }
       }
-      spans.push({ index, pathRow, pathStart, pathEnd: pathStart + visibleWidth(path), descriptionRows })
+
+      // The description owns its OWN row (four-cell indent) and is never a
+      // file-action target: a click on it cannot open a delivered file. It is
+      // also fitted to one physical row; the complete raw description is not an
+      // identity the tail owes (the browser Details carries the safe full text).
+      const descriptionRows: Array<{ row: number; start: number; end: number }> = []
+      if (file.description !== undefined && file.description !== '') {
+        const description = abbreviateName(
+          sanitizeDisplayText(file.description).replace(/\r\n|\r|\n/g, ' '),
+          Math.max(1, safeWidth - descriptionIndent),
+        )
+        if (description !== '') {
+          const descriptionRow = rows.length
+          const descriptionStart = descriptionIndent
+          const descriptionEnd = descriptionStart + visibleWidth(description)
+          rows.push(`${' '.repeat(descriptionIndent)}${color.textDim(description)}`)
+          descriptionRows.push({ row: descriptionRow, start: descriptionStart, end: descriptionEnd })
+        }
+      }
+      spans.push({
+        index,
+        pathRow: row,
+        pathStart,
+        pathEnd,
+        descriptionRows,
+      })
     }
+
     if (!this.expanded && this.files.length > shown.length) {
-      rows.push(truncateToWidth(color.textDim(`  … +${this.files.length - shown.length}`), safeWidth, '…'))
+      const hidden = this.files.length - shown.length
+      const row = rows.length
+      const morePrefix = `  +${hidden} more · `
+      if (showActions) {
+        const browseWidth = visibleWidth(DELIVERED_BROWSE_VERB)
+        const suffix = ' (/deliverables)'
+        const startCol = visibleWidth(morePrefix)
+        // Paint only a FULLY painted verb as a target: a clipped `Browse all`
+        // must not leave a hit over cells the user cannot read.
+        if (startCol + browseWidth <= safeWidth) {
+          const full = `${morePrefix}${DELIVERED_BROWSE_VERB}${suffix}`
+          const painted = visibleWidth(full) <= safeWidth ? full : `${morePrefix}${DELIVERED_BROWSE_VERB}`
+          rows.push(truncateToWidth(
+            `${color.textDim(morePrefix)}${color.primary(DELIVERED_BROWSE_VERB)}${painted.endsWith(suffix) ? color.textDim(suffix) : ''}`,
+            safeWidth,
+            '…',
+          ))
+          hits.push({ row, startCol, endCol: startCol + browseWidth, action: 'browse' })
+        } else {
+          rows.push(truncateToWidth(color.textDim(`  +${hidden} more`), safeWidth, '…'))
+        }
+      } else if (this.commandEntry) {
+        rows.push(truncateToWidth(color.textDim(`  +${hidden} more · /deliverables`), safeWidth, '…'))
+      } else {
+        rows.push(truncateToWidth(color.textDim(`  +${hidden} more`), safeWidth, '…'))
+      }
     }
+
     this.lastFieldSpans = spans
-    this.cached.set(safeWidth, rows)
+    this.paintedWidth = safeWidth
+    this.paintedHits = hits
+    this.cached.set(safeWidth, { rows, hits, spans })
     return rows
   }
 }

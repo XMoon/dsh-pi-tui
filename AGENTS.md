@@ -13,14 +13,50 @@ before editing. Read subsystem docs only when the task touches that subsystem.
 - **Do not hide contradictions.** Prefer fast failure over silent defaults, broad catches, speculative fallbacks, or validation for states guaranteed by internal contracts. Validate at real system boundaries.
 - **Never push or force-push without explicit user approval.** Local commits are allowed when appropriate; remote changes are not.
 
+## Repository documentation policy (hard gate)
+
+Repository `docs/` contains ONLY durable, cross-version technical facts,
+current load-bearing architecture/behavior contracts, and reusable procedures.
+A contract may change between releases, but it must remain useful without
+being tied to one PR, milestone, run, branch SHA, or candidate version.
+
+NEVER add or retain in `docs/`: implementation plans, milestone roadmaps,
+progress/TODO/debt trackers, PR/review/qualification ledgers, dated
+investigations, version-pinned measurements/screenshots/benchmarks, handoff
+notes, or generated/static copies of facts already owned by source, manifests,
+gates, tests, releases, or GitHub issues/PRs. Do not create `docs/archive`,
+`docs/history`, `docs/plans`, or `docs/evidence` as a workaround.
+
+`docs/README.md` is the canonical documentation policy and index. Each
+long-lived fact has ONE owning document. Source, tests, manifests and
+machine-generated inventories remain the authority for implementation state.
+Update a repository document only when that document's durable contract or
+reusable procedure actually changes. Do not update repo docs merely because
+a PR, milestone or review round progressed. Preserve unique load-bearing
+contracts before deleting or consolidating an existing document.
+
+**MANDATORY STOP / OWNER DECISION:** If ANY accepted plan, PR task, reviewer,
+checklist, or other instruction requires creating/updating a `docs/` artifact
+that violates this policy, STOP THE AFFECTED WORK BEFORE WRITING IT. Do not
+silently skip the required deliverable, rewrite the plan on your own, relocate
+the artifact to a different repository path, or self-approve an exception.
+Report the conflicting requirement, requested path/content, policy violation,
+current owner/source of truth, and one recommended compliant disposition;
+request explicit Owner adjudication. Resume only after the Owner resolves the
+conflict and the accepted plan/contract is amended. This rule applies even if
+the older plan called its documentation update MANDATORY or BLOCKING.
+
+Reviewers must treat violations or an unadjudicated documentation conflict
+as a blocker, not a cosmetic documentation comment.
+
 ## Code review
 
-Before reviewing code changes, read `docs/code-review.md` and pass it plus the
+Before reviewing code changes, read `docs/guides/code-review.md` and pass it plus the
 applicable requirements/contracts to the reviewer. It supplements the generic
 review loop; subsystem contracts remain authoritative. PR acceptance is not
 stage closure or permission to merge.
 
-Before adding a surface or restyling one, read `docs/tui-design-language.md`
+Before adding a surface or restyling one, read `docs/architecture/design-language.md`
 (the canonical TUI visual vocabulary, role→token table and governance) and walk
 its §11.2 checklist for any change that alters what a surface paints.
 
@@ -34,7 +70,7 @@ its §11.2 checklist for any change that alters what a surface paints.
   `README.md` and `CHANGELOG.md` are the intentional Simplified-Chinese exceptions.
 - Keep `README.md` / `README.en.md` and
   `CHANGELOG.md` / `CHANGELOG.en.md` synchronized.
-- Changelog entries describe user-visible outcomes, not review rounds, divergence IDs, CI/tooling work, or implementation mechanics. Follow `docs/releasing.md` for release details.
+- Changelog entries describe user-visible outcomes, not review rounds, divergence IDs, CI/tooling work, or implementation mechanics. Follow `docs/guides/releasing.md` for release details.
 - Before adding a command, check this repository and official dsh for confusing or near-synonym names. This applies to new independent commands; preserve explicit existing aliases such as `/statusline` for `/footer`.
 
 ## Repository boundaries
@@ -73,7 +109,7 @@ generic Context/Services bag.
 
 When placement is ambiguous, stop before creating the file and identify the state owner,
 lifecycle owner, IO authority, primary callers and forbidden dependencies. Read
-`docs/architecture.md` for the complete taxonomy and dependency direction.
+`docs/architecture/overview.md` for the complete taxonomy and dependency direction.
 
 ### Vendored pi-tui
 
@@ -97,16 +133,21 @@ lifecycle owner, IO authority, primary callers and forbidden dependencies. Read
 
 ## Server/client architecture
 
-The current production backend is Direct. The long-term migration is tracked in
-`docs/client-server-migration.md`.
+The current production backend is Direct. The durable Host/Client contract is
+`docs/architecture/host-client.md`; migration stage status lives in GitHub
+issues/PRs, not in repository docs.
 
 - Direct remains the production default until an explicit migration milestone;
   do not silently change `dsh --profile pi-tui`, `--session`, or `--preset`, or
   implement future milestones opportunistically during unrelated work.
 - New Host-owned behavior must not add direct Host coupling outside the approved
-  semantic-port boundary. `scripts/client-boundary-gate.mjs` enforces the
-  existing baseline and no-new-debt rule; baseline changes are deliberate phase
-  relocations only, with migration and coupling docs updated in the same PR.
+  semantic-port boundary. `scripts/client-boundary-gate.mjs` and
+  `scripts/client-boundary-baseline.json` enforce the existing baseline and the
+  no-new-debt rule and remain the authority for allowed sites. Baseline changes
+  are deliberate phase relocations only; update
+  `docs/architecture/host-client.md` only when the durable coupling/authority
+  contract actually changes. Stage status and qualification records belong to
+  GitHub issues/PRs, not repository docs.
 - Every Host-touching feature declares locality (Client-local, Host-owned, or
   split), its narrow semantic-port owner, and its wire story. Never assume
   Client cwd/filesystem equals Host cwd/filesystem. Host workspace semantics —
@@ -124,10 +165,11 @@ The current production backend is Direct. The long-term migration is tracked in
   do not maintain two independent feature semantics. Remote async results must
   re-check generation/identity before mutating visible state. Every migration PR
   leaves the Direct path green.
-- Direct session-safety mechanisms remain authoritative until the migration
-  roadmap explicitly retires them.
+- Direct session-safety mechanisms remain authoritative until an explicit
+  migration milestone retires them; current stage status is tracked in GitHub
+  issues/PRs, never in repository docs.
 
-Read `docs/client-server-migration.md` and `docs/client-server-coupling.md`
+Read `docs/architecture/host-client.md` and `docs/architecture/overview.md`
 before changing Host-owned behavior.
 
 ## Extension boundary
@@ -146,7 +188,7 @@ before changing Host-owned behavior.
 - Do not expand the Extension API merely for future flexibility or to make an
   internal implementation/test easier.
 
-Read `docs/extension-api.md` and `docs/plugin-authoring.md` before changing an
+Read `docs/extensions/stable.md` and `docs/extensions/authoring.md` before changing an
 extension-facing contract.
 
 ## Correctness invariants
@@ -158,10 +200,10 @@ extension-facing contract.
   TUI. The TUI still owns process-local surface correctness:
   `SessionTransitionGate`, `SessionOperationBarrier`, and stale/generation
   fences. Keep the submit hot path free of persistence reads. See
-  `docs/concurrency.md`.
+  `docs/architecture/concurrency.md`.
 - **No bare fire-and-forget promises.** Use the repository's `runDetached` /
   `runOwned` ownership model and preserve its failure semantics. See
-  `docs/failure-model.md`.
+  `docs/architecture/failure-model.md`.
 - **Use semantic key matching.** TUI components use `matchesKey`/the keyboard
   abstraction, never raw terminal escape-sequence equality; terminals may use
   CSI-u / modifyOtherKeys.
@@ -171,14 +213,14 @@ extension-facing contract.
   substitute the Cordis context or silently omit required scope.
 - **Do not recreate catalog probes.** Cold command/skill discovery uses the
   standing scope; do not call `agents.create()` merely to discover a catalog.
-  See `docs/surface-catalog.md`.
+  See `docs/architecture/surface-catalog.md`.
 - **Question flow stays in the editor seat.** Keep one unified, budgeted
   scrollport and preserve its seat/modal ownership. See
   `test/question-flow.test.ts` and `test/rendering.test.ts`.
 - **Managed overlays follow the overlay/focus contract.** Logical intent is
   committed before any fork call that can synchronously run a plugin callback,
   and a callback's newer operation always wins; the host derives the focused
-  seat from the live physical focus. See `docs/overlay-focus-contract.md`.
+  seat from the live physical focus. See `docs/architecture/overlay-focus.md`.
 - **Context presentation does not rewrite model input.** Keep model-facing bytes
   untouched; render parsed skill/system envelopes, never raw XML. See
   `test/rendering.test.ts`.
@@ -186,7 +228,7 @@ extension-facing contract.
   generation/lease, proxy-receiver, attachment and teardown-idempotence changes,
   confirm the real numbers and identities (a targeted probe or test) instead of
   reasoning from the code alone — this repository has had a double
-  `markAttachment()` inflate a generation. See `docs/concurrency.md`.
+  `markAttachment()` inflate a generation. See `docs/architecture/concurrency.md`.
 
 ## Development
 
@@ -201,9 +243,13 @@ pnpm test
 Use the smallest relevant validation for the current change. Prefer targeted
 tests first; do not run expensive compatibility suites mechanically.
 
+Adding or changing a test? Read `docs/guides/testing.md` first: it owns the
+test-tree ownership map, the new-test rules, the lane commands and the
+objective discovery guards.
+
 A stage-final validation must not run the same suite twice. `pnpm verify:prepush`
 is the repository's full pipeline: `typecheck:fork` + `typecheck:bench`,
-`test:fork`, `test:docs`, `test:tooling`, the architecture / boundary /
+`test:fork`, `test:tmux`, `test:tooling`, the architecture / boundary /
 keybinding / naming / session-event / installation-doc / pi-divergence /
 pi-vendor gates, `pnpm audit`, and finally `pnpm pack:release`. `pack:release`
 is NOT packaging-only: its `prepack` runs `clean` + `build` +
@@ -214,7 +260,7 @@ vim, examples, composeAgent). So in one pass never also run `typecheck:bundle`,
 `scripts/compose-agent-compat-smoke.mjs` by hand, and never invoke
 `pnpm pack`/`pack:release` while a build or an artifact-dependent gate is
 running. `pnpm test` already contains `test:fork` + `test:product` +
-`test:tooling` + `test:docs`; prefer it over the individual pieces. What a
+`test:tooling` + `test:tmux`; prefer it over the individual pieces. What a
 stage-final pass still needs ON TOP of `verify:prepush`: the migration contract
 smokes (`smoke:remote-*`), `smoke:boundary`, `smoke:startup-strictness`, the
 published-DSH compatibility checks (`compat:dsh:npm`, `compat:dsh:client-family`
@@ -228,7 +274,7 @@ and run only the remainder — re-running a green lane after an edit that does
 not touch its inputs buys no evidence and costs the whole suite. A delta
 invalidates a lane only when it touches that lane's inputs: `packages/pi-tui/**`
 for the fork lanes, `src/**` + `test/**` + `scripts/**` for the bundle suites,
-`docs/**` and the doc-gate inputs for `test:docs`/the documentation gates.
+`docs/**` and the doc-gate inputs for `test:tmux`/the documentation gates.
 A docs-only or comment-only delta does not invalidate a suite already green on
 the same code. State which lanes were already green (and against which state)
 and which were run for the delta, so the evidence stays auditable. CI runs the
@@ -246,7 +292,7 @@ twice.
 `ci.yml` coverage is what makes a green PR check evidence instead of work to
 reproduce: `Source checks` runs `build:fork`, `typecheck:fork`,
 `typecheck:bench`, `test:fork`, the `smoke:remote-*` parity/closure lanes (five
-of them only when the resolved DSH mode is `source`), `test:docs`,
+of them only when the resolved DSH mode is `source`), `test:tmux`,
 `gate:installation-doc`, `test:tooling`, `gate:pi-surface-compat`,
 `generate:pi-divergences` with a `git diff --exit-code` on `DIVERGENCES.md`,
 `gate:pi-divergence-ledger`, `gate:pi-vendor-diff --strict` and the naming gate;
@@ -275,7 +321,7 @@ Validation mechanics for this toolchain:
 * `scripts/client-boundary-gate.mjs` counts a Host package import even when it is
   TYPE-ONLY (`@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-session`). Prefer a
   local structural type or the owning port's type; see
-  `docs/client-server-coupling.md`.
+  `docs/architecture/host-client.md`.
 * Extending a shared interface (e.g. `TuiCommandRunner`, `TuiSettingsDoc`) also
   reaches its test fakes and literal builders: update them with the change and
   let `pnpm typecheck:bundle` enumerate the remainder.
@@ -331,36 +377,81 @@ worktree before using a profile.
   when explicitly requested; skip it for TUI-only changes when DSH is
   unchanged.
 
-Read `docs/local-development.md` before changing DSH mode, worktree/bootstrap
-behavior, or promoting `main`/`next`. Read `docs/dsh-compatibility.md` for
+Read `docs/guides/development.md` before changing DSH mode, worktree/bootstrap
+behavior, or promoting `main`/`next`. Read `docs/guides/dsh-compatibility.md` for
 distribution compatibility.
 
 ## Release
 
-* Follow `docs/releasing.md`. Publishing is performed by GitHub CI from the
+* Follow `docs/guides/releasing.md`. Publishing is performed by GitHub CI from the
   release tag; never run `npm publish` from a development machine.
 * Release commits/tags also require explicit user approval. Keep bilingual
   changelogs synchronized and user-facing.
 
+## Issue management
+
+GitHub Issues are the single entry point for open work, stage progress and
+verification evidence. `docs/` never carries that state (see the documentation
+policy above).
+
+* **Find before you create.** Search the open issues first. If an issue already
+  owns the work, update it; do not open a second one for the same obligation.
+* **Not every change needs an issue.** An issue is required for a known
+  leftover, a deferred or bounded item, work that spans several PRs, and
+  anything that carries an owner and a re-entry trigger. A small fix that one
+  PR completes end to end may be managed by the PR alone — creating an issue
+  for it is overhead, not governance. When an issue does exist for the work,
+  the PR updates it.
+* **One obligation per issue.** An issue owns one problem, one feature or one
+  qualification check, with its own acceptance criteria. Use an epic (label
+  `epic`) as the parent for a work stream, and sub-issues for the work items.
+* **Parent is not dependency.** A sub-issue expresses a work split; "Blocked by"
+  expresses the dependency. Record real dependencies as "Blocked by" /
+  "Blocking" — an item's startability usually depends on a *different* issue
+  than its parent.
+* **Do not manufacture TODOs.** `NOT_VERIFIED` boundaries, accepted exclusions
+  and deferred scopes are dispositions, not open defects. Keep them on the issue
+  that records them, with their re-entry trigger, instead of spawning a TODO
+  row for each.
+* **Deferred work carries a trigger.** A deferred issue states the condition
+  under which it re-enters work, and who owns it. A closed issue carries its
+  evidence: a PR, a CI run, or a test reference.
+* **PRs update their issue.** When a PR closes or advances an issue, say so in
+  that issue. Do not append to an epic as a substitute for the work item.
+* **Labels.** `epic` for a parent, `area:*` for the work stream, `kind:feature`
+  / `kind:qualification` / `kind:milestone` for the nature of the item,
+  `status:deferred` for an item with a stated re-entry trigger.
+* **Use the issue forms.** `.github/ISSUE_TEMPLATE/` holds the four forms:
+  `bug_report.yml`, `feature_request.yml`, `qualification_task.yml` (evidence
+  as the deliverable) and `work_item.yml` (the standard Context / Scope /
+  Acceptance / Dependencies / Evidence / Status structure). An issue that does
+  not match a form still follows the same structure.
+* **Name a code name before you rely on it.** A short code (`M4`, `S4-D2`,
+  `B13`, `J-02`, …) is a local label from some plan, ledger or gate. Whenever
+  you use one, say which effort it belongs to and what it designates —
+  the stage, the scope and the claim it covers — so the reader never has to
+  guess. A code name is not self-explanatory, it is not stable across efforts,
+  and it does not transfer between efforts that happen to reuse the letters.
+  Its meaning lives with the issue, PR or ledger that owns it, not here.
+* **Do not infer status from a code name or a merge.** A merged PR is not a
+  stage closure, and a stage that is closed on one effort says nothing about
+  another. Read the owning issue or PR for the actual status.
+
+## Pull requests
+
+* Pull requests use `.github/pull_request_template.md`. Keep the description
+  proportional to the change, report only verified evidence, and update an
+  owning Issue when one exists. The template summarizes applicable review
+  evidence; it does not replace `docs/guides/code-review.md`, authorize merge,
+  or imply stage closure.
+
 ## Documentation map
 
-Read these only when the task touches the corresponding area:
+- `docs/README.md` — the documentation policy and the complete index.
+- `docs/architecture/` — ownership/Host-client, session and failure contracts, surface behavior, transcript/terminal output, keybindings, input history and the design language.
+- `docs/extensions/` — the public extension tiers/API and authoring guidance.
+- `docs/tsp/` — the experimental TSP renderer, product boundary and TSP surfaces.
+- `docs/guides/` — development, review, release, testing and compatibility procedures.
 
-* `docs/README.md` — complete documentation index and ownership map.
-* `docs/client-server-migration.md` — Direct → DSH-native client roadmap.
-* `docs/client-server-coupling.md` — current Host-coupling inventory.
-* `docs/concurrency.md` — Direct session ownership and safety.
-* `docs/failure-model.md` — detached async ownership/error handling.
-* `docs/extension-api.md` — public extension compatibility contract.
-* `docs/plugin-authoring.md` — extension tier/authoring guidance.
-* `docs/surface-catalog.md` — command/skill catalog ownership.
-* `docs/local-development.md` — worktrees, Source Mode, branch promotion.
-* `docs/tmux-testing.md` — visual/TTY verification and real-testing traps.
-* `docs/dsh-compatibility.md` — DSH distribution compatibility.
-* `docs/releasing.md` — release/tag/publish procedure.
-* `packages/pi-tui/AGENTS.md` — vendored-fork rules.
-
-When a subsystem already has a dedicated contract document, keep detailed
-implementation history there or in its regression tests rather than growing
-this file. Update behavior decisions and rationale in the owning doc in the
-same PR; keep each fact in one place and link rather than copy it.
+Read only the owning document for the subsystem you touch; `docs/README.md` maps
+every long-lived document. Do not create a second documentation map here.

@@ -29,16 +29,43 @@
  * the CHILD Session's bound face, and a stale component of a replaced presentation
  * must fail closed against ITS OWN (possibly released) binding instead of asking
  * whoever is displayed now.
+ *
+ * PREVIEW DERIVATIVES (Image-6A): a Kitty surface cannot place JPEG/WebP bytes
+ * directly, so each presentation scope ALSO owns a bounded cache and scheduler
+ * for PNG thumbnails derived from an already-READY source read. That derivative
+ * is a read-only projection of the same authorized bytes — it mints no second
+ * attachment authorization, no second source cache and no session-generation
+ * authority. Its jobs, cache, failures and queue entries live in the SAME
+ * `LoaderScope` and are invalidated by the SAME global/per-id epochs as the raw
+ * read, so a stale conversion can never repopulate another presentation.
  * @module @xmoon76/dsh-pi-tui/client/media/image/loader
  */
 
 import { ImageLoadError } from '../../../domain/media/errors.ts'
 import type { ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import { ImageCache } from './cache.ts'
+import {
+  MAX_KITTY_THUMBNAIL_OUTPUT_BYTES,
+  MAX_KITTY_THUMBNAIL_SOURCE_BYTES,
+  KittyThumbnailOutputTooLargeError,
+  convertKittyThumbnail,
+  type KittyThumbnailConverter,
+  type KittyThumbnailPng,
+} from './kitty-thumbnail.ts'
 
 /** Cap on retained failure records (round-2 finding 3): failures are
  * diagnostic, never a growing leak on long transcripts. */
 const MAX_ERROR_ENTRIES = 64
+
+/** Preview cache bounds (plan §4): per presentation scope, LRU. */
+const MAX_THUMBNAIL_ENTRIES = 16
+const MAX_THUMBNAIL_BYTES = 32 * 1024 * 1024
+/** At most this many `sharp` conversions run for ONE loader at a time. */
+const MAX_THUMBNAIL_CONCURRENCY = 2
+/** Bounded FIFO of not-yet-started conversions per loader. */
+const MAX_THUMBNAIL_QUEUE = 32
+/** Cap on retained preview failures, mirroring the raw read failure bound. */
+const MAX_THUMBNAIL_FAILURES = 64
 
 /** One durable ref's load state, as a render component sees it. */
 export type ImageLoadState =
@@ -46,6 +73,27 @@ export type ImageLoadState =
   | { readonly state: 'loading' }
   | { readonly state: 'ready'; readonly bytes: Uint8Array; readonly base64: string }
   | { readonly state: 'error'; readonly error: Error }
+
+/** The bounded reasons a derived Kitty preview can be unavailable. They are
+ *  safe to surface generically; the original native `Error` (when any) stays
+ *  in the preview state for diagnostics only and never reaches the terminal. */
+export type KittyThumbnailFailureReason =
+  | 'input-too-large'
+  | 'busy'
+  | 'decode-failed'
+  | 'output-too-large'
+
+/** One JPEG/WebP attachment's derived-PNG state inside one presentation scope. */
+export type KittyThumbnailState =
+  | { readonly state: 'idle' }
+  | { readonly state: 'loading' }
+  | ({ readonly state: 'ready' } & KittyThumbnailPng)
+  | {
+      readonly state: 'error'
+      readonly reason: KittyThumbnailFailureReason
+      /** The captured native error, for diagnostics only. */
+      readonly error?: Error
+    }
 
 /** The read seam. `context` is the caller's immutable presentation scope; the
  *  composition owner interprets it (it decides which Session face may read). */
@@ -57,6 +105,74 @@ export type ReadImage = (
 /** Structural subset of `ctx.attachments.readImage`. */
 export interface ReadImageLike {
   readImage(ref: ImageAttachmentRefLike, signal?: AbortSignal): Promise<{ ref: unknown; data: Uint8Array }>
+}
+
+/** One queued/running preview conversion. It holds the owning scope, the ref
+ *  (metadata only — never the source bytes) and the capture-time epoch. */
+interface KittyThumbnailJob {
+  readonly scope: LoaderScope
+  readonly ref: ImageAttachmentRefLike
+  readonly epoch: { global: number; local: number }
+}
+
+/** A recorded preview failure: the safe reason plus the untouched native error. */
+interface KittyThumbnailFailure {
+  readonly reason: KittyThumbnailFailureReason
+  readonly error?: Error
+}
+
+/** Per-scope LRU of derived PNG payloads. Only the base64 form is retained:
+ *  that IS the resident memory the pi-tui `Image` consumes (plan §4). */
+class KittyThumbnailCache {
+  private readonly entries = new Map<string, KittyThumbnailPng>()
+  private bytesHeld = 0
+
+  get(attachmentId: string): KittyThumbnailPng | undefined {
+    const entry = this.entries.get(attachmentId)
+    if (entry === undefined) return undefined
+    // LRU refresh: re-insert so the entry moves to the newest slot.
+    this.entries.delete(attachmentId)
+    this.entries.set(attachmentId, entry)
+    return entry
+  }
+
+  set(attachmentId: string, png: KittyThumbnailPng): void {
+    const existing = this.entries.get(attachmentId)
+    if (existing !== undefined) this.bytesHeld -= Buffer.byteLength(existing.base64, 'utf8')
+    this.entries.delete(attachmentId)
+    this.entries.set(attachmentId, png)
+    this.bytesHeld += Buffer.byteLength(png.base64, 'utf8')
+    this.evict()
+  }
+
+  delete(attachmentId: string): void {
+    const entry = this.entries.get(attachmentId)
+    if (entry !== undefined) {
+      this.bytesHeld -= Buffer.byteLength(entry.base64, 'utf8')
+      this.entries.delete(attachmentId)
+    }
+  }
+
+  clear(): void {
+    this.entries.clear()
+    this.bytesHeld = 0
+  }
+
+  size(): number {
+    return this.entries.size
+  }
+
+  bytes(): number {
+    return this.bytesHeld
+  }
+
+  private evict(): void {
+    while (this.entries.size > MAX_THUMBNAIL_ENTRIES || this.bytesHeld > MAX_THUMBNAIL_BYTES) {
+      const oldest = this.entries.keys().next().value as string | undefined
+      if (oldest === undefined) return
+      this.delete(oldest)
+    }
+  }
 }
 
 /**
@@ -71,10 +187,26 @@ interface LoaderScope {
   /** Per-attachment listeners OF THIS SCOPE: another scope's settle never wakes
    *  this presentation's components. */
   readonly listeners: Map<string, Set<() => void>>
+  /** Bounded derived-PNG LRU of THIS presentation scope (never another
+   *  presentation's authorized bytes). */
+  readonly kittyThumbnailReady: KittyThumbnailCache
+  /** Bounded preview failure records (safe reason + captured native error). */
+  readonly kittyThumbnailFailures: Map<string, KittyThumbnailFailure>
+  /** Queued/running conversion per attachment id, for one-conversion dedupe.
+   *  The job identity (not the id alone) guards a slot replaced by invalidation. */
+  readonly kittyThumbnailPending: Map<string, KittyThumbnailJob>
 }
 
 function emptyScope(cache: ImageCache = new ImageCache()): LoaderScope {
-  return { cache, inflight: new Map(), errors: new Map(), listeners: new Map() }
+  return {
+    cache,
+    inflight: new Map(),
+    errors: new Map(),
+    listeners: new Map(),
+    kittyThumbnailReady: new KittyThumbnailCache(),
+    kittyThumbnailFailures: new Map(),
+    kittyThumbnailPending: new Map(),
+  }
 }
 
 /** The async image loader with per-scope dedupe + subscriber notify. */
@@ -107,13 +239,23 @@ export class ImageLoader {
    */
   private globalEpoch = 0
   private readonly perIdEpoch = new Map<string, number>()
+  /** The decoder seam (defaults to the real sharp adapter); the constructor
+   *  accepts an injected converter for deterministic boundary tests. */
+  private readonly convertThumbnail: KittyThumbnailConverter
+  /** Loader-wide FIFO of preview conversions waiting to START (bounded). */
+  private readonly kittyThumbnailQueue: KittyThumbnailJob[] = []
+  /** Retained running conversions: the scheduler never discards a promise it
+   *  owns (no bare `void`), and the size IS the concurrency counter. */
+  private readonly kittyThumbnailActive = new Set<Promise<void>>()
 
   constructor(
     read: ReadImage,
     cache: ImageCache = new ImageCache(),
+    convertThumbnail: KittyThumbnailConverter = convertKittyThumbnail,
   ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.read = read
+    this.convertThumbnail = convertThumbnail
     this.defaultScope = this.registerScope(emptyScope(cache))
   }
 
@@ -243,6 +385,170 @@ export class ImageLoader {
     resolved.inflight.set(id, pending)
   }
 
+  /**
+   * The synchronous preview state of one JPEG/WebP ref inside one presentation
+   * scope (Image-6A). Derived from the SAME immutable scope the raw read used;
+   * it never re-resolves a "current" presentation.
+   */
+  getKittyThumbnail(ref: ImageAttachmentRefLike, scope?: unknown): KittyThumbnailState {
+    const resolved = this.scopeOf(scope)
+    const id = ref.attachmentId
+    const ready = resolved.kittyThumbnailReady.get(id)
+    if (ready !== undefined) return { state: 'ready', ...ready }
+    const failed = resolved.kittyThumbnailFailures.get(id)
+    if (failed !== undefined) {
+      return failed.error === undefined
+        ? { state: 'error', reason: failed.reason }
+        : { state: 'error', reason: failed.reason, error: failed.error }
+    }
+    if (resolved.kittyThumbnailPending.has(id)) return { state: 'loading' }
+    return { state: 'idle' }
+  }
+
+  /**
+   * Schedule ONE async JPEG/WebP → PNG conversion for a READY source read in
+   * the SAME presentation scope. No-op while that attachment is already
+   * ready/loading/failed, or when the source bytes are not present (the
+   * conversion never re-downloads: it is a projection of an existing read).
+   *
+   * The loader-wide FIFO is bounded; an over-capacity request records a
+   * bounded `busy` failure instead of growing a task list. Only
+   * {@link getKittyThumbnail}/{@link loadKittyThumbnail} belong to the
+   * internal consumer interface — the raw read API above is unchanged.
+   */
+  loadKittyThumbnail(ref: ImageAttachmentRefLike, scope?: unknown): void {
+    if (ref.mediaType !== 'image/jpeg' && ref.mediaType !== 'image/webp') return
+    const resolved = this.scopeOf(scope)
+    const id = ref.attachmentId
+    if (
+      resolved.kittyThumbnailReady.get(id) !== undefined
+      || resolved.kittyThumbnailFailures.has(id)
+      || resolved.kittyThumbnailPending.has(id)
+    ) return
+    const source = resolved.cache.get(id)
+    if (source === undefined || source.state !== 'ready') return
+    // The real source length, not the metadata preflight (the thumbnail already
+    // refused `ref.bytes > 20 MiB` before asking for the read).
+    if (source.bytes.byteLength > MAX_KITTY_THUMBNAIL_SOURCE_BYTES) {
+      this.recordKittyThumbnailFailure(resolved, id, 'input-too-large')
+      return
+    }
+    if (this.kittyThumbnailQueue.length >= MAX_THUMBNAIL_QUEUE) {
+      this.recordKittyThumbnailFailure(resolved, id, 'busy')
+      return
+    }
+    const job: KittyThumbnailJob = { scope: resolved, ref, epoch: this.epochOf(id) }
+    resolved.kittyThumbnailPending.set(id, job)
+    this.kittyThumbnailQueue.push(job)
+    this.pumpKittyThumbnailQueue()
+  }
+
+  /** Record one preview failure and wake the EXISTING attachment subscribers.
+   * The wake is deferred one microtask because scheduling failures are recorded
+   * inside `render()`: the thumbnail's own render cache must finish being
+   * written before its subscriber invalidates it. */
+  private recordKittyThumbnailFailure(
+    scope: LoaderScope,
+    id: string,
+    reason: KittyThumbnailFailureReason,
+    error?: Error,
+  ): void {
+    scope.kittyThumbnailFailures.delete(id)
+    scope.kittyThumbnailFailures.set(id, error === undefined ? { reason } : { reason, error })
+    if (scope.kittyThumbnailFailures.size > MAX_THUMBNAIL_FAILURES) {
+      const oldest = scope.kittyThumbnailFailures.keys().next().value as string | undefined
+      if (oldest !== undefined) scope.kittyThumbnailFailures.delete(oldest)
+    }
+    queueMicrotask(() => this.notify(scope, id))
+  }
+
+  /** Start queued conversions up to the loader-wide concurrency cap. */
+  private pumpKittyThumbnailQueue(): void {
+    while (
+      this.kittyThumbnailActive.size < MAX_THUMBNAIL_CONCURRENCY
+      && this.kittyThumbnailQueue.length > 0
+    ) {
+      const job = this.kittyThumbnailQueue.shift()!
+      const task = this.runKittyThumbnail(job).finally(() => {
+        this.kittyThumbnailActive.delete(task)
+        this.pumpKittyThumbnailQueue()
+      })
+      this.kittyThumbnailActive.add(task)
+    }
+  }
+
+  /**
+   * Run ONE conversion: re-read the source bytes at START time (the queue holds
+   * no bytes), commit only while the captured epoch AND this job's pending slot
+   * are current, and drop every stale settle silently. The terminal only hears
+   * the captured {@link KittyThumbnailFailureReason}; the native Error stays in
+   * the per-scope failure record for diagnostics.
+   */
+  private async runKittyThumbnail(job: KittyThumbnailJob): Promise<void> {
+    // Yield before touching the decoder: a render() call may schedule this job,
+    // and `import('sharp')`/libvips loading must NEVER run in the render stack.
+    // The concurrency slot is already claimed by the synchronous pump.
+    await Promise.resolve()
+    const id = job.ref.attachmentId
+    let png: KittyThumbnailPng | undefined
+    let failure: KittyThumbnailFailure | undefined
+    try {
+      // The epoch is re-validated at START, not only at enqueue: invalidation
+      // between queueing and starting drops the job without touching any state.
+      if (!this.epochCurrent(id, job.epoch)) return
+      const source = job.scope.cache.get(id)
+      if (source === undefined || source.state !== 'ready') {
+        // The source read was evicted while this job waited. That is a
+        // TRANSIENT cache state, never a decode failure: recording it would
+        // make `getKittyThumbnail` return a sticky error and
+        // `loadKittyThumbnail` refuse every later request in this scope. The
+        // conversion task itself still never re-reads the attachment; the job
+        // ends without publishing and the notify in `finally` lets the next
+        // VISIBLE render go through the normal raw-read path again.
+        return
+      }
+      if (source.bytes.byteLength > MAX_KITTY_THUMBNAIL_SOURCE_BYTES) {
+        failure = { reason: 'input-too-large' }
+        return
+      }
+      try {
+        const converted = await this.convertThumbnail(
+          source.bytes,
+          job.ref.mediaType as 'image/jpeg' | 'image/webp',
+        )
+        // The cache admission check also covers an injected converter seam
+        // (the real decoder enforces the same bound itself).
+        failure = converted.byteLength > MAX_KITTY_THUMBNAIL_OUTPUT_BYTES
+          ? { reason: 'output-too-large' }
+          : undefined
+        if (failure === undefined) png = converted
+      } catch (error) {
+        failure = {
+          reason: error instanceof KittyThumbnailOutputTooLargeError ? 'output-too-large' : 'decode-failed',
+          error: error instanceof Error ? error : new Error(String(error)),
+        }
+      }
+    } finally {
+      const ownsSlot = job.scope.kittyThumbnailPending.get(id) === job
+      if (ownsSlot) job.scope.kittyThumbnailPending.delete(id)
+      if (ownsSlot && this.epochCurrent(id, job.epoch)) {
+        if (png !== undefined) {
+          job.scope.kittyThumbnailReady.set(id, png)
+          job.scope.kittyThumbnailFailures.delete(id)
+          this.notify(job.scope, id)
+        } else if (failure !== undefined) {
+          this.recordKittyThumbnailFailure(job.scope, id, failure.reason, failure.error)
+        } else {
+          // Dropped because the source was evicted while queued. Release the
+          // slot and wake the occurrence; the normal visible render will read
+          // the attachment again and may request a fresh conversion. No
+          // persistent failure is recorded, so this is recoverable.
+          this.notify(job.scope, id)
+        }
+      }
+    }
+  }
+
   /** Record one load failure, bounding the error map (round-2 finding 3). */
   private recordError(scope: LoaderScope, id: string, error: Error): void {
     scope.errors.set(id, error)
@@ -277,13 +583,24 @@ export class ImageLoader {
   /** Drop one attachment's cached state (transcript trim). In-flight reads
    * for THIS attachment settle into the void (its per-id generation bumps);
    * unrelated in-flight reads keep their generations and settle normally
-   * (review finding 3). A retired presentation scope is unreachable and
-   * collects with its own state. */
+   * (review finding 3). The SAME per-id generation also retires that
+   * attachment's preview cache/error/queued slot: a running conversion may
+   * finish, but it can no longer publish and a fresh request may schedule
+   * again. A retired presentation scope is unreachable and collects with its
+   * own state. */
   invalidate(attachmentId: string): void {
     this.perIdEpoch.set(attachmentId, this.epochOf(attachmentId).local + 1)
     for (const scope of this.liveScopesNow()) {
       scope.cache.delete(attachmentId)
       scope.errors.delete(attachmentId)
+      scope.kittyThumbnailReady.delete(attachmentId)
+      scope.kittyThumbnailFailures.delete(attachmentId)
+      scope.kittyThumbnailPending.delete(attachmentId)
+    }
+    for (let index = this.kittyThumbnailQueue.length - 1; index >= 0; index -= 1) {
+      if (this.kittyThumbnailQueue[index]!.ref.attachmentId === attachmentId) {
+        this.kittyThumbnailQueue.splice(index, 1)
+      }
     }
   }
 
@@ -293,20 +610,37 @@ export class ImageLoader {
    * finding), and the map cannot grow unboundedly. Every reachable
    * subscriber hears the global invalidation and repaints once. Retired
    * object scopes are dropped by the renderer building a new presentation,
-   * not enumerated here. */
+   * not enumerated here. Preview state and queued conversions belong to the
+   * same authority and are cleared by the same global epoch: a queued job is
+   * discarded (it never notifies a retired component) and a running job's
+   * settle is dropped by the generation check. */
   clear(): void {
     this.globalEpoch += 1
     this.perIdEpoch.clear()
     for (const scope of this.liveScopesNow()) {
       scope.cache.clear()
       scope.errors.clear()
+      scope.kittyThumbnailReady.clear()
+      scope.kittyThumbnailFailures.clear()
+      scope.kittyThumbnailPending.clear()
     }
+    this.kittyThumbnailQueue.length = 0
     this.notifyAll()
   }
 
   /** Current cache size of one scope (observability/tests). */
   cacheSize(scope?: unknown): number {
     return this.scopeOf(scope).cache.size()
+  }
+
+  /** Current derived-PNG entry count of one scope (observability/tests). */
+  kittyThumbnailCacheSize(scope?: unknown): number {
+    return this.scopeOf(scope).kittyThumbnailReady.size()
+  }
+
+  /** Current derived-PNG base64 resident bytes of one scope (observability/tests). */
+  kittyThumbnailCacheBytes(scope?: unknown): number {
+    return this.scopeOf(scope).kittyThumbnailReady.bytes()
   }
 
   /** Current subscriber count across every LIVE scope, including the active

@@ -41,9 +41,11 @@ import { TransitionInProgressError } from './app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
 import type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
 import type { Component } from '@xmoon76/pi-tui'
+import type { EmbeddedPluginPage } from './tui/plugin-manager/workspace.ts'
 import type { ComposerSubmitGesture } from './tui-app.ts'
 import { mergeDraft } from './app/submission/steer.ts'
 import type { DisplayPreset, DisplayPresetApplyResult } from './domain/display/preset.ts'
+import type { DeliveredFilesSnapshot } from './domain/deliverables/catalog.ts'
 import type { ProgressUpdatesState, ResponseStyleState } from './domain/communication/policy.ts'
 import type { GitAttributionState } from './domain/communication/git-attribution.ts'
 import type { FooterCustomItemSettings } from './domain/footer/custom-items.ts'
@@ -67,6 +69,7 @@ import type { ConfigPort } from './runtime/config-port.ts'
 import type { HostFilePort } from './runtime/host-file-port.ts'
 import type { CatalogRefreshOutcome, CatalogRefreshSource } from './app/command/catalog-refresh.ts'
 import type { ClientCommandRegistry } from './app/command/client-command-registry.ts'
+import type { SubmissionComposerPort } from './app/submission/composer-port.ts'
 import { commandSummaryOf, type SurfaceCatalogSnapshot, type SurfaceCommandSummary } from './domain/catalog/surface.ts'
 import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } from './domain/catalog/skill.ts'
 import { registerExitCommand, registerHelpCommand } from './tui/commands/utility.ts'
@@ -80,7 +83,6 @@ import { createArtifactsCommands } from './tui/commands/artifacts.ts'
 import { createAuthCommands } from './tui/commands/auth.ts'
 import { createSettingsCommands } from './tui/commands/settings.ts'
 import { createSessionCommands } from './tui/commands/sessions.ts'
-import { registerStatusCommand } from './tui/commands/status.ts'
 
 
 /**
@@ -186,9 +188,6 @@ export type NewSessionId = () => SessionId
  * re-exported here to keep the stable command-surface import path). */
 export { sessionPickerCategories, sessionSearchCategory } from './tui/commands/sessions.ts'
 
-/** The /status extension-health rows (moved to `src/tui/commands/status.ts`,
- * re-exported here to keep the stable command-surface import path). */
-export { extensionHealthRows } from './tui/commands/status.ts'
 /** The shipped-preset display copy (moved to `src/tui/pickers/preset-display.ts`,
  * re-exported here to keep the stable command-surface import path). */
 export { isBuiltInPresetRow, presetDisplayText } from './tui/pickers/preset-display.ts'
@@ -610,8 +609,8 @@ export interface TuiCommandRunner {
    *  is SYNCHRONOUS, so `superseded` always means "nothing ran". */
   setSessionApprovalPolicy(scope: LiveSessionScope, value: 'ask' | 'never'): 'applied' | 'superseded'
   refreshStatus(): void
-  /** PR D2: the /status explicit context force — measures NOW through the
-   * runner's context coordinator (mark dirty + semantic SessionReader),
+  /** PR D2: the explicit About/status context force — measures NOW through
+   * the runner's context coordinator (mark dirty + semantic SessionReader),
    * repaints the footer cheaply, and returns the fresh (or last-good)
    * value for the panel. Panel and footer share ONE cached measurement —
    * a caller SHOULD prefer this over a direct sessionReader read (which
@@ -619,6 +618,29 @@ export interface TuiCommandRunner {
    * Optional: stubs without the coordinator fall back to a direct
    * sessionReader read. */
   forceContextMeasurement?(): number | undefined
+  /**
+   * C3: the explicit force with its OBSERVATION — the SAME coordinator
+   * measurement as {@link forceContextMeasurement}, plus the attempt's own
+   * classification (`fresh` / `last-known` / `unavailable`). REQUIRED: the
+   * About projection must never relabel a cached value as a fresh read.
+   */
+  forceContextMeasurementResult(): import('./domain/status/context-measurement.ts').ContextMeasureResult
+  /**
+   * C3: the selected backend kind (the composition's `CommandSurfaceDeps
+   * .backend.kind`), as a read-only fact of the About/runtime projection.
+   * REQUIRED: the backend is the composition's explicit selection, never a
+   * guessed one from optional fields.
+   */
+  readonly backendKind: 'direct' | 'remote'
+  /**
+   * C3 (owner ruling on RFL-A-017): the ONE session-scope invalidation
+   * trigger — the SessionOwnershipCore's payload-less owner/generation
+   * notification, forwarded unchanged. It fires after every successful
+   * owner publication AND every generation bump, so a scope-identity change
+   * can never be silenced by the StatusStore's content-equality suppression.
+   * REQUIRED and narrow: no alternate observer and no polling.
+   */
+  subscribeSessionScopeInvalidation(listener: () => void): () => void
   /** Shared with prompt assembly; settings changes take effect on the next step. */
   readonly progressUpdatesState: ProgressUpdatesState
   /** Shared with prompt assembly; settings changes take effect on the next step. */
@@ -641,6 +663,12 @@ export interface TuiCommandRunner {
    * 'osc777' | 'bell') to the runtime controller (the /settings panel
    * write; the panel persists the raw string through the config port). */
   setNotificationMethod(method: string): void
+  /** The completion-notification mode the ONE controller currently applies.
+   *  Read-only: the Settings workspace's live fact is a pull of this owner,
+   *  never a second copy of the policy. */
+  currentNotificationMode(): import('./domain/notification/settings.ts').NotificationMode
+  /** The delivery method that controller currently applies. */
+  currentNotificationMethod(): import('./domain/notification/settings.ts').NotificationMethod
   /** Apply the terminal-progress protocol selection ('off' | '9;4' | '7501' |
    * the dual '9;4+7501' default) to the mounted surface (the /settings panel
    * write; the panel persists the raw string through the config port).
@@ -662,17 +690,25 @@ export interface TuiCommandRunner {
    */
   openTasksBrowser(): void
   /**
-   * Open the shared Plugin Manager surface directly (`/plugins`, P1-A). It is
-   * profile-wide and sessionless: it never creates or switches a Session.
+   * Delivered files (PR1 / M2): the on-demand catalog of the CURRENT display
+   * subject's delivered Turns, derived from the selected Folder's full grouped
+   * projection. `undefined` when no display subject is selected or the
+   * projection declares no delivery. `/deliverables` is the only consumer;
+   * this is a read capability, never a Folder/Transcript handle.
    */
-  openPluginManager(): void
+  deliveredFilesSnapshot(): DeliveredFilesSnapshot | undefined
   /**
-   * Build the SAME Plugin Manager page as a lazy `Settings → Plugins` inline
-   * page. The single runner-owned controller owns operation state; `done`
-   * returns to Settings. Opening `/settings` alone never calls this (no eager
-   * inventory read).
+   * Build the ONE embedded Plugin Manager page as a lazy `Settings → Plugins`
+   * child of the Settings workspace lease. The single surface-owned controller
+   * owns operation state; `onYieldNavigation` is the Settings root's navigation
+   * yield (the page never closes itself). Opening `/settings` alone never calls
+   * this, so it never reads the plugin inventory.
+   *
+   * The narrow page contract is TUI-only: the application owner keeps seeing a
+   * plain `Component`, and this composition-only signature is where the
+   * concrete page type is named.
    */
-  createPluginManagerPage(done: () => void): Component | undefined
+  createPluginManagerPage(onYieldNavigation: () => void): EmbeddedPluginPage | undefined
   /**
    * Open the conversation rewind picker (plan: the ONE entry shared by the
    * idle empty-editor double-Esc and `/rewind`). The runner decides what
@@ -838,6 +874,14 @@ export interface TuiCommandPresentation {
    *  this mount (only the card-less TSP path — see
    *  `titleSuccessNoticeVisible`). */
   readonly titleSuccessNoticeVisible: boolean
+  /**
+   * Image UX PR3-B: the LIVE mounted composer (the renderer's draft seat).
+   * The `/attach` `/image` intake reads the current draft and commits its
+   * token through it, so a non-PiTui renderer's own composer — never a PiTui
+   * app masquerading as the TSP one — receives the result. Optional for the
+   * historical direct-test call sites; every production assembly supplies it.
+   */
+  readonly composer?: () => SubmissionComposerPort | undefined
 }
 
 export function registerTuiCommands(
@@ -1155,7 +1199,7 @@ export function registerTuiCommands(
     // OPENED the record is protected by the message guard below (the ledger
     // deduplicates into it, keeping the handler message); one deduplicated
     // INTO a live collision record is not — the documented diagnostic
-    // limitation (docs/surface-decisions.md).
+    // limitation (docs/extensions/stable.md § Command ownership).
     for (const contribution of contributions) {
       const identity = contributionIdentity(contribution)
       if (colliding.has(identity)) continue
@@ -2132,9 +2176,10 @@ export function registerTuiCommands(
 
   registerTasksCommand({ runner, registerTuiCommand })
 
-  // `/plugins` (P1-A): the canonical sessionless entry into the shared
-  // profile-wide Plugin Manager surface (see `src/tui/commands/tasks.ts`).
-  registerPluginsCommand({ runner, registerTuiCommand })
+  // `/plugins` (P1-A / PR2): the canonical sessionless deep link into
+  // `Settings → Plugins` (see `src/tui/commands/tasks.ts`). It takes the SAME
+  // Settings workspace lease; no second Plugin screen exists.
+  registerPluginsCommand({ openPluginsWorkspace: settingsCommands.openPluginsWorkspace, registerTuiCommand })
 
   // `/permission` is NOT registered here: dsh-permission-presets in the
   // base layer already registers it (text form: `/permission` shows the
@@ -2152,23 +2197,56 @@ export function registerTuiCommands(
 
   sessionCommands.registerTitle()
 
-  const artifactCommands = createArtifactsCommands({ runner, app: app as TuiApp, registerOne, registerTuiCommand, detach, notifyOutcome })
+  const artifactCommands = createArtifactsCommands({
+    runner,
+    app,
+    // Image UX PR3-B: the renderer-neutral live composer seam. The historical
+    // PiTui/headless call sites (no presentation object) keep the mounted app
+    // as their composer; a production TSP assembly must supply the real one.
+    composer: presentation?.composer ?? (() => app),
+    registerOne,
+    registerTuiCommand,
+    detach,
+    notifyOutcome,
+  })
   artifactCommands.registerCopy()
 
 
   artifactCommands.registerAttach()
 
+  // The INLINE completion route stages through the SAME intake.
+  // The stager is installed on the mounted app (which owns the editor, the one
+  // undoable in-place edit and the seat fence); a renderer without a PiTui app
+  // has no inline completion plane at all, so nothing is installed.
+  app?.setInlineAttachmentStager(artifactCommands.inlineAttachmentStager())
+
+  // Image UX PR2: `/view-image` is a PiTui-local product surface (it lists the
+  // CURRENTLY MOUNTED transcript window and opens the PiTui Viewer), so it is
+  // registered ONLY where a PiTui `TuiApp` is mounted — the TSP read-only mount
+  // exposes no fake command gallery. Its sessionless/local policy entries make
+  // the static classification agree with this live registration.
+  if (app !== undefined) artifactCommands.registerViewImage()
+
   artifactCommands.registerExport()
 
   artifactCommands.registerTranscript()
+
+  // Delivered files (PR1): a PiTui-local product surface (the mounted app's ONE
+  // managed overlay over the CURRENT display subject's catalog), so it is
+  // registered ONLY where a PiTui `TuiApp` is mounted. Its sessionless/local
+  // policy entries make the static classification agree with this live
+  // registration.
+  if (app !== undefined) artifactCommands.registerDeliverables()
 
   sessionCommands.registerFork()
 
   sessionCommands.registerRewind()
 
-  registerStatusCommand({ runner, registerOne })
-
-  const authCommands = createAuthCommands({ runner, app: app as TuiApp, registerOne, notifyOutcome })
+  const authCommands = createAuthCommands({
+    runner,
+    registerOne,
+    openAuthWorkspace: settingsCommands.openAuthWorkspace,
+  })
   authCommands.registerLogin()
 
   authCommands.registerLogout()

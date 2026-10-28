@@ -1,0 +1,2023 @@
+/**
+ * Compact display headless UI tests (PR3/F4 Core): Work span rendering and
+ * disclosure, ambient Context clustering across presets, form-aware Context
+ * rows, work boundaries, search reveal, and the content-refresh contract.
+ * @module @xmoon76/dsh-pi-tui/compact-display.test
+ */
+
+import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
+import { afterEach, test } from 'node:test'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
+import { TuiApp } from '../../src/tui-app.ts'
+import type { DisplayState } from '../../src/domain/display/preset.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
+import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
+
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+afterEach(() => {
+  disposeStartedApps()
+})
+
+const T0 = Date.now() - 60_000
+
+function startApp(preset: DisplayState['preset']): { vt: VirtualTerminal; app: TuiApp; displayState: DisplayState } {
+  const displayState: DisplayState = { preset }
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { displayState })
+  app.start()
+  startedApps.add(app)
+  return { vt, app, displayState }
+}
+
+function eventAt(type: string, data: Record<string, unknown>, time: number, seq: number): SessionEvent {
+  return { type, seq, time, data } as SessionEvent
+}
+
+interface LiveFoldable {
+  apply(events: readonly SessionEvent[]): void
+  applyLiveInput(input: AssistantLiveInput): void
+}
+
+function applyMixed(folder: LiveFoldable, events: readonly SessionEvent[]): void {
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput({ kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn: data.turn, step: data.step, time: event.time, chunk: data.chunk })
+    } else {
+      folder.apply([event])
+    }
+  }
+}
+
+function show(app: TuiApp, folder: TranscriptFolder): void {
+  app.setTranscript(folder.messages(), folder.turnActivities())
+}
+
+/** The authoritative same-id assistant settlement carrying a settled
+ * reasoning block (plus an optional narration text block WITH its stream
+ * chunks), which replaces the live reasoning row with the same text — the
+ * settle-a-Work fixture shape shared by the compaction tests. (The timing
+ * test keeps its own narration-chunk-free variant: the text chunks would
+ * alter the reasoning row's timing sidecar it corrects.) */
+function settlementEvent(options: {
+  id: string
+  step: number
+  reasoning: string
+  narration?: string
+  startedAt: number
+  endedAt: number
+  seq: number
+}): SessionEvent {
+  const chunks: Record<string, unknown>[] = [
+    { type: 'chunk', time: options.startedAt, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+    { type: 'chunk', time: options.startedAt, chunk: { type: 'reasoning-delta', index: 0, text: options.reasoning } },
+    { type: 'chunk', time: options.endedAt, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: options.reasoning } } },
+  ]
+  const content: Record<string, unknown>[] = [{ type: 'reasoning', text: options.reasoning }]
+  if (options.narration !== undefined) {
+    content.push({ type: 'text', text: options.narration })
+    chunks.push(
+      { type: 'chunk', time: options.endedAt, chunk: { type: 'block-start', index: 1, blockType: 'text' } },
+      { type: 'chunk', time: options.endedAt, chunk: { type: 'text-delta', index: 1, text: options.narration } },
+      { type: 'chunk', time: options.endedAt, chunk: { type: 'block-end', index: 1, block: { type: 'text', text: options.narration } } },
+    )
+  }
+  return eventAt('assistant/message', {
+    turn: 1, step: options.step,
+    message: {
+      id: MessageId(options.id), role: 'assistant',
+      content,
+      source: { kind: 'model', provider: 'p', model: 'm' },
+      stream: chunks,
+    },
+  }, options.endedAt, options.seq)
+}
+
+/** The `tool/result` settlement of one call — the shared fixture shape the
+ * Work-span tests pair with their `tool/call` events. */
+function toolResultEvent(callId: string, time: number, seq: number): SessionEvent {
+  return eventAt('tool/result', {
+    turn: 1, step: 0,
+    message: {
+      id: MessageId(`r-${callId}`), role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text: 'ok' }],
+      source: { kind: 'tool', callId: ToolCallId(callId) },
+    },
+  }, time, seq)
+}
+
+function contextEvent(id: string, source: Record<string, unknown>, text: string, time: number, seq: number): SessionEvent {
+  return eventAt('user/message', {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source,
+  }, time, seq)
+}
+
+/** Turn 1: user, reasoning, one tool, intermediate assistant, more reasoning,
+ * tool, final — the Compact Work chronology fixture. */
+function workFixture(): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'check the transcript' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'verifying upstream wake semantics...' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/tui-app.ts' }) }, T0 + 3, 3),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, T0 + 4, 4),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'I found where the stale viewport identity is introduced.' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 5, 5),
+    eventAt('assistant/chunk', { turn: 1, step: 2, chunk: { type: 'reasoning-delta', index: 0, text: 'checking the current mount transaction...' } }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 2, callId: ToolCallId('c2'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test transcript-search' }) }, T0 + 7, 7),
+    eventAt('assistant/message', {
+      turn: 1, step: 3,
+      message: { id: MessageId('a2'), role: 'assistant', content: [{ type: 'text', text: 'final answer' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 8, 8),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 9),
+  ]
+}
+
+function workHeaders(view: string, expanded?: boolean): string[] {
+  const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
+  // post-F6 plan §6.1/§6.3 + the 2026-09-22 v2 addendum: the visible
+  // container is `Activity` with NO identity icon; the grammar is
+  // `<identity> <duration> · <stats>`. The 2026-09-29 historical compaction
+  // adds the think-only presentation identity `Thought` (same container).
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} (?:Activity|Thought)(?: | ·|$)`).test(line))
+}
+
+/** The collapsed/expanded header of a think-only historical span (`Thought`). */
+function thoughtHeaders(view: string, expanded?: boolean): string[] {
+  const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} Thought(?: | ·|$)`).test(line))
+}
+
+function clusterHeaders(view: string, expanded?: boolean): string[] {
+  const glyph = expanded === undefined ? '(?:▸|▾)' : expanded ? '▾' : '▸'
+  return view.split('\n').filter(line => new RegExp(`^\\s*${glyph} .*Context ·`).test(line))
+}
+
+function click(vt: VirtualTerminal, x: number, y: number): void {
+  vt.sendInput(`\x1b[<0;${x};${y}M`)
+  vt.sendInput(`\x1b[<0;${x};${y}m`)
+}
+
+function rowOf(view: readonly string[], pattern: RegExp): number {
+  return view.findIndex(line => pattern.test(line))
+}
+
+test('Compact renders Work headers with Think/Tool previews and no Message slot', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, workFixture())
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+
+  assert.equal(workHeaders(view).length, 2, `expected two contiguous Activity spans:\n${view}`)
+  assert.match(view, /▸ Activity \d+(?:m \d+s|s)? · 1 action · read ×1/)
+  assert.ok(!view.includes('· thinking'), 'the `· thinking` lifecycle marker is gone (post-F6 plan §6.4)')
+  // 2026-09-29 compact historical compaction §7.5: only the TRUE latest Work
+  // keeps its previews — Work A is now historical and renders header-only.
+  assert.ok(!/Think:\s+verifying upstream wake semantics/.test(view),
+    `the historical Work A Think preview is hidden:\n${view}`)
+  assert.ok(!/Action:\s+✓ Read src\/tui-app\.ts/.test(view),
+    `the historical Work A Action preview is hidden:\n${view}`)
+  assert.match(view, /Think:\s+checking the current mount transaction/)
+  assert.match(view, /Action:\s+Bash pnpm test transcript-search/)
+  assert.ok(view.includes('I found where the stale viewport identity is introduced.'),
+    'the assistant intermediate narration stays visible in chronology')
+  assert.ok(view.includes('final answer'))
+  assert.ok(!view.includes('Message:'), 'Compact Activity has no Message slot')
+})
+
+test('a Work header click expands its member rows and collapses again', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, workFixture())
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  const headerRow = rowOf(view, /▸ Activity/)
+  assert.ok(headerRow >= 0, 'precondition: the first Activity header is visible')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0)
+
+  click(vt, 0, headerRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.equal(app.expandedWorkOwnersForTest().size, 1, 'the header click opens exactly its own span')
+  assert.equal(workHeaders(view.join('\n'), true).length, 1, 'the opened span renders the expanded glyph')
+  assert.equal(workHeaders(view.join('\n'), false).length, 1, 'the other span stays collapsed')
+
+  const expandedRow = rowOf(view, /▾ Activity/)
+  // A different column avoids the fork's double-click word-selection gesture.
+  click(vt, 1, expandedRow + 1)
+  await vt.waitForRender()
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, `a second click collapses the span:\n${vt.getViewport().join('\n')}`)
+})
+
+test('regular Compact Ctrl+O owns Work disclosure through the shared master', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, workFixture())
+  show(app, folder)
+  await vt.waitForRender()
+  assert.equal(app.expandedWorkOwnersForTest().size, 0)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 2,
+    'the derived recent-turn master expands the recent Work spans')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0,
+    'the bulk preference never writes a manual per-span owner (plan §44)')
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 0, 'Ctrl+O collapses every open Work span')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0)
+})
+
+test('a search reveal temporarily opens the owning Work span and restores it on dismiss', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, workFixture())
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const hiddenThinking = folder.messages().find(message => message.kind === 'thinking' && message.text.includes('checking the current mount'))
+  assert.ok(hiddenThinking !== undefined, 'fixture: the second Work reasoning row exists')
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 0,
+    'precondition: the hidden member is not rendered while the span is collapsed')
+
+  app.setTranscriptSearchTarget({
+    query: 'checking the current mount',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: hiddenThinking,
+  })
+  await vt.waitForRender()
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the temporary reveal never writes the manual state')
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 1, 'exactly the owning span opens')
+  assert.ok(vt.getViewport().join('\n').includes('Thinking'), 'the revealed member renders its own card')
+
+  app.setTranscriptSearchTarget(undefined)
+  await vt.waitForRender()
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 0, 'dismissing the search restores the collapsed span')
+})
+
+test('a Work span opened only by the search reveal collapses by revoking the reveal', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, workFixture())
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const hiddenThinking = folder.messages().find(message => message.kind === 'thinking' && message.text.includes('checking the current mount'))
+  assert.ok(hiddenThinking !== undefined)
+  app.setTranscriptSearchTarget({
+    query: 'checking the current mount',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: hiddenThinking,
+  })
+  await vt.waitForRender()
+  const revealedRow = rowOf(vt.getViewport(), /▾ Activity/)
+  assert.ok(revealedRow >= 0, 'precondition: the granted reveal opened the owning span')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0)
+
+  // An explicit click on a reveal-only span must COLLAPSE it (revoke the
+  // temporary reveal), never write a manual owner that outlives the search.
+  click(vt, 5, revealedRow + 1)
+  await vt.waitForRender()
+  assert.equal(app.expandedWorkOwnersForTest().size, 0,
+    'collapsing a reveal-only span must not promote it to a manual disclosure')
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 0, 'the reveal is revoked')
+
+  // The semantic target survives the revocation; dismissal keeps it collapsed.
+  app.setTranscriptSearchTarget(undefined)
+  await vt.waitForRender()
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 0, 'dismissal never resurrects the revoked reveal')
+})
+
+test('the live Preparing state belongs only to the newest Work span of a turn', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    { kind: 'thinking', turn: 1, text: 'first reasoning' },
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+    { kind: 'assistant', turn: 1, text: 'between the spans' },
+    { kind: 'thinking', turn: 1, text: 'second reasoning' },
+  ], new Map(), undefined, [
+    { callId: 'preparing-1', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(workHeaders(view).length, 2, `expected two Work spans:\n${view}`)
+  assert.equal(view.split('\n').filter(line => line.includes('Preparing')).length, 1,
+    `the preparing call must render exactly once (no duplicate Tool row):\n${view}`)
+})
+
+test('a live Preparing call follows the trailing Process run ownership matrix', async () => {
+  const preview = { callId: 'preparing-matrix', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' }
+  const preparingRows = (view: string): number[] =>
+    view.split('\n').flatMap((line, index) => line.includes('Preparing') ? [index] : [])
+
+  // (a) Tool -> Preparing: the trailing run is OPEN, so the call joins its Tool slot.
+  {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([
+      { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+    ], new Map(), undefined, [preview])
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.equal(workHeaders(view).length, 1, `one trailing Work span:\n${view}`)
+    assert.equal(preparingRows(view).length, 1, `the call joins the run's Tool slot:\n${view}`)
+    assert.ok(!view.includes('Action:  Preparing') === false)
+    app.dispose()
+    startedApps.delete(app)
+  }
+
+  // (b) Work A -> Assistant -> Preparing: the narration closes the run, so the
+  // call becomes a NEW ownerless run after the boundary — a fail-open
+  // Preparing row, never a second Activity header.
+  {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([
+      { kind: 'thinking', turn: 1, text: 'first' },
+      { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+      { kind: 'assistant', turn: 1, text: 'narration' },
+    ], new Map(), undefined, [preview])
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    assert.equal(workHeaders(view).length, 1, `the closed Work A renders alone; the pending run mints no Activity:\n${view}`)
+    const narrationRow = lines.findIndex(line => line.includes('narration'))
+    assert.ok(narrationRow >= 0, `the boundary row renders:\n${view}`)
+    assert.ok(preparingRows(view).every(row => row > narrationRow),
+      `the pending Preparing row must follow the closed boundary:\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+
+  // (c) Work A -> Assistant -> Work B preparing: the call belongs to the TRAILING run B.
+  {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([
+      { kind: 'thinking', turn: 1, text: 'A' },
+      { kind: 'assistant', turn: 1, text: 'narration' },
+      { kind: 'thinking', turn: 1, text: 'B' },
+    ], new Map(), undefined, [preview])
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    // Work A is historical and think-only: `▸ Thought` is its compacted
+    // header (the 2026-09-29 plan §2.1) — still one durable span.
+    assert.equal(workHeaders(view).length, 2, `two durable spans:\n${view}`)
+    const narrationRow = lines.findIndex(line => line.includes('narration'))
+    const preparing = preparingRows(view)
+    assert.equal(preparing.length, 1, `the call renders exactly once:\n${view}`)
+    assert.ok(preparing[0]! > narrationRow, `the call belongs to B, after the narration:\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('an ownerless pending run fails open: a full Preparing row, no Activity chrome', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    { kind: 'assistant', turn: 1, text: 'narration' },
+  ], new Map(), undefined, [
+    { callId: 'pending-shape', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  assert.equal(workHeaders(view).length, 0, `no Activity header is minted for the pending run:\n${view}`)
+  assert.ok(!view.includes('Action:'), `no pseudo Action slot without an Activity owner:\n${view}`)
+  assert.match(view, /Preparing Bash pnpm test\.\.\. · 3 B/,
+    `the pending call renders as one full fail-open Preparing row:\n${view}`)
+})
+
+test('a live Preparing call never crosses a closed Work boundary', async () => {
+  const previews = [{ callId: 'preparing-after-boundary', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' }]
+  const processRows = (): TranscriptMessage[] => [
+    { kind: 'thinking', turn: 1, text: 'first reasoning' },
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+  ]
+  const boundaries: ReadonlyArray<{ name: string; row: TranscriptMessage; needle: string }> = [
+    { name: 'assistant', row: { kind: 'assistant', turn: 1, text: 'between the spans' }, needle: 'between the spans' },
+    {
+      name: 'notice',
+      row: {
+        kind: 'system', turn: 1, text: 'notice body', label: 'Background job', summary: 'child settled',
+        icon: 'context-notice', context: true,
+        contextPresentation: { form: 'notice', sourceKind: 'subagent-settled', role: 'inject' },
+      },
+      needle: 'child settled',
+    },
+    { name: 'attention', row: { kind: 'system', turn: 1, text: 'ATTENTION_MARKER', origin: 'turn-max-tokens' }, needle: 'ATTENTION_MARKER' },
+  ]
+  for (const boundary of boundaries) {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([...processRows(), boundary.row], new Map(), undefined, previews)
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    const preparingRows = lines.flatMap((line, index) => line.includes('Preparing') ? [index] : [])
+    assert.equal(preparingRows.length, 1, `exactly one Preparing row (${boundary.name}):\n${view}`)
+    const boundaryRow = lines.findIndex(line => line.includes(boundary.needle))
+    assert.ok(boundaryRow >= 0, `boundary row missing (${boundary.name}):\n${view}`)
+    assert.ok(preparingRows[0]! > boundaryRow,
+      `the live call must follow the closed ${boundary.name} boundary, never move back inside the previous Work span:\n${view}`)
+    assert.equal(lines.filter(line => /Action:\s/.test(line) && !line.includes('Preparing')).length, 1,
+      `the closed Work span keeps its own durable Tool row (${boundary.name}):\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('an expanded closed Work span never absorbs a later live Preparing call', async () => {
+  const { vt, app } = startApp('compact')
+  const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'first reasoning' }
+  app.setTranscript([
+    owner,
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+    { kind: 'assistant', turn: 1, text: 'between the spans' },
+  ], new Map(), undefined, [
+    { callId: 'preparing-expanded-boundary', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  app.toggleWorkSpan(owner)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  assert.equal(workHeaders(view, true).length, 1, `precondition: the Work span is expanded:\n${view}`)
+  const preparingRows = lines.flatMap((line, index) => line.includes('Preparing') ? [index] : [])
+  const assistantRow = lines.findIndex(line => line.includes('between the spans'))
+  assert.equal(preparingRows.length, 1, `exactly one Preparing row:\n${view}`)
+  assert.ok(assistantRow >= 0, `the boundary row must render:\n${view}`)
+  assert.ok(preparingRows[0]! > assistantRow,
+    `the live call must be inserted AFTER the closed boundary, not inside the expanded span:\n${view}`)
+})
+
+test('a Work header stays inspectable while a Question owns the modal', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, workFixture())
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const promise = app.askQuestions([{ id: 'q1', question: 'Inspect context?', options: [{ label: 'Continue' }] }])
+  await vt.waitForRender()
+  const row = rowOf(vt.getViewport(), /▸ Activity.*· 1 action · read ×1/)
+  assert.ok(row >= 0, `collapsed Work header missing behind the Question:\n${vt.getViewport().join('\n')}`)
+
+  click(vt, 5, row + 1)
+  await vt.waitForRender()
+  assert.equal(app.expandedWorkOwnersForTest().size, 1, 'the read-only Work disclosure must work behind a Question')
+  assert.ok(workHeaders(vt.getViewport().join('\n'), true).length === 1)
+  assert.ok(vt.getViewport().join('\n').includes('Inspect context?'), 'the Question must remain mounted after the disclosure')
+
+  vt.sendInput('1')
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  assert.deepEqual(await promise, [{ id: 'q1', selected: ['Continue'] }])
+})
+
+// ── Compact historical compaction (2026-09-29 plan §7.3/§7.4/§7.6/§7.7) ────
+// §7.3 (the latest SETTLED Work keeps its previews after the final reply —
+// "settled => hide preview" is the forbidden regression) is pinned by the
+// workFixture assertions in the first test: its turn has ended, yet Work B's
+// Think/Action previews and the final answer are asserted there.
+
+test('a newer Work makes the previous one header-only without changing its summary', async () => {
+  // §7.4 — the cache-invalidation core regression: Work A's own summary is
+  // untouched; ONLY showPreview flips true → false. A is settled by its
+  // same-id authoritative replacement BEFORE B arrives.
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'A reasoning' } }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('a1'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, T0 + 2, 2),
+    toolResultEvent('a1', T0 + 3, 3),
+    settlementEvent({ id: 'as1', step: 0, reasoning: 'A reasoning', startedAt: T0 + 1, endedAt: T0 + 3, seq: 4 }),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.match(view, /Think:\s+A reasoning/, `Work A is the latest and shows its preview:\n${view}`)
+  assert.match(view, /Action:\s+✓ Read a\.ts/)
+
+  // Same folder, SAME owner/message objects: append the boundary + Work B.
+  applyMixed(folder, [
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('a-between'), role: 'assistant', content: [{ type: 'text', text: 'between' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 5, 5),
+    eventAt('assistant/chunk', { turn: 1, step: 2, chunk: { type: 'reasoning-delta', index: 0, text: 'B reasoning' } }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 2, callId: ToolCallId('b1'), name: 'bash', arguments: JSON.stringify({ command: 'pnpm test' }) }, T0 + 7, 7),
+    toolResultEvent('b1', T0 + 8, 8),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!/Think:\s+A reasoning/.test(view), `Work A's Think preview disappears (cache invalidated by showPreview alone):\n${view}`)
+  assert.ok(!/Action:\s+✓ Read a\.ts/.test(view), `Work A's Action preview disappears:\n${view}`)
+  assert.match(view, /Think:\s+B reasoning/, 'Work B, the new latest, keeps its preview')
+  assert.match(view, /Action:\s+✓ Bash pnpm test/)
+})
+
+test('a historical think-only Work collapses to Thought while the latest keeps Activity', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  // A settles inside the same assistant message that narrates the boundary;
+  // B stays live (a running reasoning tail + tool).
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    settlementEvent({
+      id: 'a-boundary', step: 1,
+      reasoning: 'checking whether the cache can be reused',
+      narration: 'narration boundary',
+      startedAt: T0 + 1, endedAt: T0 + 2000, seq: 2,
+    }),
+    eventAt('assistant/chunk', { turn: 1, step: 2, chunk: { type: 'reasoning-delta', index: 0, text: 'working with tools now' } }, T0 + 3, 3),
+    eventAt('tool/call', { turn: 1, step: 2, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'x.ts' }) }, T0 + 4, 4),
+    toolResultEvent('c1', T0 + 5, 5),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  // §7.6: A is historical think-only → `▸ Thought`; its reasoning never
+  // leaks as a collapsed preview.
+  assert.equal(thoughtHeaders(view, false).length, 1, `the historical think-only span reads Thought:\n${view}`)
+  assert.ok(!view.includes('cache can be reused'), 'the historical reasoning text stays hidden')
+  // B keeps the full latest presentation (§7.5-style).
+  assert.match(view, /Think:\s+working with tools now/)
+  assert.match(view, /Action:\s+✓ Read x\.ts/)
+})
+
+test('a latest think-only Work stays Activity with its Think preview', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'only reasoning so far' } }, T0 + 1, 1),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  // §7.7: the live identity stays stable — `Thought` appears only on
+  // historical Compact spans, so the header never flips Thought → Activity
+  // while streaming.
+  assert.ok(!/Thought/.test(view), `a latest think-only Work is never Thought:\n${view}`)
+  assert.match(view, /Think:\s+only reasoning so far/)
+})
+
+test('manual expand/collapse of a historical Thought keeps its identity and hides the preview', async () => {
+  const { vt, app } = startApp('compact')
+  const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'historical reasoning body' }
+  app.setTranscript([
+    owner,
+    { kind: 'assistant', turn: 1, text: 'boundary' },
+    { kind: 'thinking', turn: 1, text: 'latest reasoning' },
+  ], new Map())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.equal(thoughtHeaders(view, false).length, 1, `the historical think-only span reads Thought:\n${view}`)
+
+  // §7.11 via the real mouse path: the Thought header row is the same
+  // Work hit target Activity uses, so a click toggles exactly this span.
+  const headerRow = rowOf(vt.getViewport(), /▸ Thought/)
+  assert.ok(headerRow >= 0, `precondition: the Thought header row is visible:\n${view}`)
+  click(vt, 2, headerRow + 1)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(app.expandedWorkOwnersForTest().size, 1, 'the Thought header click opens exactly its own span')
+  assert.equal(thoughtHeaders(view, true).length, 1, `the opened span keeps the Thought identity (no jump to Activity):\n${view}`)
+  assert.ok(view.includes('historical reasoning body'), 'the raw Thinking row renders when open')
+
+  // Collapse: header-only again, the preview never resurrects.
+  click(vt, 3, rowOf(vt.getViewport(), /▾ Thought/) + 1)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'a second Thought header click collapses the span')
+  assert.equal(thoughtHeaders(view, false).length, 1)
+  assert.ok(!view.includes('historical reasoning body'), `collapsing returns to the header-only compaction:\n${view}`)
+})
+
+test('search reveal of a hidden historical Thought member restores and dismisses cleanly', async () => {
+  const { vt, app } = startApp('compact')
+  const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'searchable historical reasoning' }
+  app.setTranscript([
+    owner,
+    { kind: 'assistant', turn: 1, text: 'boundary' },
+    { kind: 'thinking', turn: 1, text: 'latest reasoning' },
+  ], new Map())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.equal(thoughtHeaders(view, false).length, 1)
+  assert.ok(!view.includes('searchable historical reasoning'), 'precondition: the member is hidden')
+
+  // §7.12: the search reveal opens the owning Work; the raw Thinking is
+  // visible; no manual owner is written.
+  app.setTranscriptSearchTarget({
+    query: 'searchable historical reasoning',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: owner,
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the reveal never writes the manual state')
+  assert.equal(thoughtHeaders(view, true).length, 1, `the revealed span opens with the Thought identity:\n${view}`)
+  assert.ok(view.includes('searchable historical reasoning'), 'the revealed member renders')
+
+  app.setTranscriptSearchTarget(undefined)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(thoughtHeaders(view, false).length, 1, 'dismissal restores the header-only compaction')
+  assert.ok(!view.includes('searchable historical reasoning'), 'the Think preview never resurrects')
+})
+
+test('the historical compaction never leaks into expanded Focus nested Work', async () => {
+  // Plan §3/§6.5: the historical preview policy (and the `Thought` identity
+  // derived from it) is COMPACT-ONLY. Expanded Focus materializes the same
+  // canonical spans through the same CompactWorkComponent path, so a preset
+  // gate must keep its collapsed historical Work on the original
+  // header + Think/Action contract.
+  const { vt, app } = startApp('focus')
+  const oldWorkOwner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'older focus reasoning' }
+  const oldTool: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' }
+  app.setTranscript([
+    oldWorkOwner,
+    oldTool,
+    { kind: 'assistant', turn: 1, text: 'boundary' },
+    { kind: 'thinking', turn: 1, text: 'latest focus reasoning' },
+    { kind: 'tool', turn: 1, name: 'bash', args: '{}', result: 'ok', status: 'ok' },
+  ], new Map())
+  app.setFullscreen(true)
+  // Opening the Thought root materializes the turn's spans as nested Work
+  // containers (collapsed headers + previews).
+  app.expandFocusTurn(1)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!/Thought/.test(view), `Focus must never show the Compact Thought identity:\n${view}`)
+  assert.match(view, /Think:\s+older focus reasoning/,
+    `a HISTORICAL nested Work keeps its Think preview on Focus:\n${view}`)
+  assert.match(view, /Action:\s+✓ Read \{\}/,
+    `a historical nested Work keeps its Action preview on Focus:\n${view}`)
+  assert.match(view, /Think:\s+latest focus reasoning/, 'the latest nested Work also keeps its preview')
+})
+
+test('a historical think-only nested Work stays Activity on expanded Focus', async () => {
+  const { vt, app } = startApp('focus')
+  const thinkOnlyOwner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'think only focus reasoning' }
+  app.setTranscript([
+    thinkOnlyOwner,
+    { kind: 'assistant', turn: 1, text: 'boundary' },
+    { kind: 'thinking', turn: 1, text: 'latest focus reasoning' },
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+  ], new Map())
+  app.setFullscreen(true)
+  app.expandFocusTurn(1)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!/Thought/.test(view), `a think-only nested Work is never Thought on Focus:\n${view}`)
+  assert.match(view, /Think:\s+think only focus reasoning/,
+    `the think-only nested Work keeps its Activity + Think preview on Focus:\n${view}`)
+})
+
+test('regular Compact Ctrl+O opens the Work run without a dead ctrl+o card hint', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    { kind: 'thinking', turn: 1, text: 'reasoning one' },
+    // A foldable process card that advertises its fold key when collapsed —
+    // the exact card class that produced the dead `(ctrl+o to expand)` hint.
+    { kind: 'system', turn: 1, text: 'llm retry 1 in 2s — RETRY_BODY_MARKER', origin: 'llm-retry' },
+  ], new Map())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.equal(workHeaders(view).length, 1, `precondition: one collapsed Work span:\n${view}`)
+  assert.ok(!view.includes('llm retry'), 'the collapsed preview hides the member card (the Action slot renders the compact Retry summary)')
+  assert.ok(!view.includes('ctrl+o'), 'no foldable row advertises ctrl+o before the bulk reveal')
+
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.equal(workHeaders(view, true).length, 1, `the run opens:\n${view}`)
+  assert.ok(view.includes('🌊 Thinking'), `the open run renders its member rows:\n${view}`)
+  assert.ok(view.includes('RETRY_BODY_MARKER'), `the open run renders the member card:\n${view}`)
+  assert.ok(!view.includes('(ctrl+o to expand)'),
+    `no member card may advertise ctrl+o while the key collapses the Work span:\n${view}`)
+})
+
+test('regular Compact long user folds under the shared Ctrl+O disclosure', async () => {
+  const { vt, app } = startApp('compact')
+  const longPrompt = Array.from({ length: 40 }, (_, index) => `prompt line ${index}`).join('\n')
+  app.setTranscript([{ kind: 'user', turn: 1, text: longPrompt }], new Map())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  // After F6 regular Compact has a real disclosure owner (the shared Ctrl+O
+  // master), so the prompt folds and advertises the EFFECTIVE key.
+  assert.ok(view.includes('rows compacted'), `the fold renders:\n${view}`)
+  assert.ok(view.includes('ctrl+o'), `the operable key is advertised:\n${view}`)
+  assert.ok(!view.includes('prompt line 20'), `the compacted middle stays hidden:\n${view}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('prompt line 20'), `the master reveals the middle:\n${view}`)
+})
+
+test('a regular Compact long-user search dismiss promotes the disclosure owner', async () => {
+  const { vt, app } = startApp('compact')
+  const prompt = Array.from({ length: 40 }, (_, index) => `long line ${index}`).join('\n')
+  const message: TranscriptMessage = { kind: 'user', turn: 1, text: prompt }
+  app.setTranscript([message], new Map())
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('rows compacted'),
+    `precondition: regular Compact folds the prompt:\n${vt.getViewport().join('\n')}`)
+
+  app.setTranscriptSearchTarget({
+    query: 'long line 20',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('long line 20'), 'the reveal opens the hidden middle')
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('long line 20'),
+    'the promoted owner keeps the revealed prompt expanded')
+
+  // The promoted owner belongs to the same Ctrl+O master: one press collapses it.
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('long line 20'),
+    `the master collapses the promoted owner:\n${vt.getViewport().join('\n')}`)
+})
+
+test('a fullscreen Compact long-user search dismiss still promotes the disclosure', async () => {
+  const { vt, app } = startApp('compact')
+  app.setFullscreen(true)
+  const prompt = Array.from({ length: 40 }, (_, index) => `long line ${index}`).join('\n')
+  const message: TranscriptMessage = { kind: 'user', turn: 1, text: prompt }
+  app.setTranscript([message], new Map())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.match(view, /rows compacted · click to expand/, `precondition: the click-owned fold exists:\n${view}`)
+  assert.ok(!view.includes('long line 20'), 'the compacted middle is hidden')
+
+  app.setTranscriptSearchTarget({
+    query: 'long line 20',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('long line 20'), `the reveal opens the hidden middle:\n${view}`)
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('long line 20'),
+    `the promotion keeps the revealed long user expanded (must not be over-restricted):\n${view}`)
+  assert.ok(!view.includes('rows compacted'), `the promoted disclosure stays expanded:\n${view}`)
+})
+
+test('regular Compact pending-user rows fold under the shared Ctrl+O disclosure', async () => {
+  const { vt, app } = startApp('compact')
+  const longText = Array.from({ length: 40 }, (_, index) => `pending line ${index}`).join('\n')
+  app.setPendingInputPresentation({
+    queued: [],
+    tail: [{ kind: 'user', row: { id: 'pending-1', text: longText, rpcId: 'rpc-1', status: 'steering', foldableText: true } }],
+    running: true,
+  })
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('rows compacted'), `the fold renders:\n${view}`)
+  assert.ok(view.includes('ctrl+o'), `the operable key is advertised:\n${view}`)
+  assert.ok(!view.includes('pending line 20'), `the compacted middle stays hidden:\n${view}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('pending line 20'), `the master reveals the middle:\n${view}`)
+})
+
+test('regular Compact folds a standalone Context row under the shared master', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    {
+      kind: 'system', turn: 1, text: 'CONTEXT_BODY_MARKER', label: 'legacy-injector', context: true,
+      contextPresentation: { sourceKind: 'plugin', role: 'inject' },
+    },
+  ], new Map())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('CONTEXT_BODY_MARKER'), `the collapsed row hides its payload:\n${view}`)
+  assert.ok(view.includes('ctrl+o'), `the operable key is advertised:\n${view}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('CONTEXT_BODY_MARKER'), `the master reveals the payload:\n${view}`)
+})
+
+test('fullscreen Compact keeps the ordinary folds click-owned (mouse exists)', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    {
+      kind: 'system', turn: 1, text: 'CONTEXT_BODY_MARKER', label: 'legacy-injector', context: true,
+      contextPresentation: { sourceKind: 'plugin', role: 'inject' },
+    },
+  ], new Map())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.match(view, /\(click to expand\)/, `a fullscreen row advertises the mouse disclosure:\n${view}`)
+  assert.ok(!view.includes('CONTEXT_BODY_MARKER'), 'the collapsed fullscreen row hides its payload')
+  click(vt, 5, rowOf(vt.getViewport(), /Context injection legacy-injector/) + 1)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('CONTEXT_BODY_MARKER'), `the mouse click opens the row:\n${view}`)
+})
+
+test('the regular surface collapses ambient clusters behind an operable header', async () => {
+  for (const preset of ['compact', 'focus', 'full'] as const) {
+    const { vt, app } = startApp(preset)
+    app.setTranscript([
+      {
+        kind: 'system', turn: 1, text: 'instructions body', label: 'AGENTS.md', context: true,
+        contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+      },
+      {
+        kind: 'system', turn: 1, text: 'catalog body', label: 'skill-catalog', context: true,
+        contextPresentation: { form: 'catalog', sourceKind: 'plugin', role: 'inject' },
+      },
+    ], new Map())
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    // The raw-adjacent pair is one semantic cluster and, after F6, the regular
+    // surface has a real keyboard owner (the shared Ctrl+O master), so it
+    // presents the collapsed header instead of stranding the members.
+    assert.equal(clusterHeaders(view).length, 1, `${preset}: the collapsed cluster header renders:\n${view}`)
+    assert.ok(!view.includes('Context injection AGENTS.md'), `${preset}: members stay behind the header:\n${view}`)
+    vt.sendInput('\x0f')
+    await vt.waitForRender()
+    const expanded = vt.getViewport().join('\n')
+    assert.equal(clusterHeaders(expanded, true).length, 1, `${preset}: the master opens the cluster:\n${expanded}`)
+    assert.ok(expanded.includes('Context injection AGENTS.md'), `${preset}: every member renders when open:\n${expanded}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('fullscreen keeps ambient clusters collapsed by default and click-expandable', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    {
+      kind: 'system', turn: 1, text: 'instructions body', label: 'AGENTS.md', context: true,
+      contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+    },
+    {
+      kind: 'system', turn: 1, text: 'catalog body', label: 'skill-catalog', context: true,
+      contextPresentation: { form: 'catalog', sourceKind: 'plugin', role: 'inject' },
+    },
+  ], new Map())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  let view = vt.getViewport()
+  assert.equal(clusterHeaders(view.join('\n')).length, 1, `the collapsed cluster header renders:\n${view.join('\n')}`)
+  assert.ok(!view.join('\n').includes('Context injection'), 'the member rows stay behind the header')
+  click(vt, 5, rowOf(view, /▸ 📎 Context · 2 injections/) + 1)
+  await vt.waitForRender()
+  view = vt.getViewport()
+  assert.equal(clusterHeaders(view.join('\n'), true).length, 1, `the click opens the cluster:\n${view.join('\n')}`)
+  assert.ok(view.join('\n').includes('Context injection AGENTS.md'), `every member row renders:\n${view.join('\n')}`)
+})
+
+test('fullscreen Compact keeps Work members click-owned inside an open run', async () => {
+  const { vt, app } = startApp('compact')
+  app.setTranscript([
+    { kind: 'thinking', turn: 1, text: 'reasoning one' },
+    { kind: 'system', turn: 1, text: 'RETRY_BODY_MARKER', origin: 'llm-retry' },
+  ], new Map())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(workHeaders(view, true).length, 1, `the run opens:\n${view}`)
+  assert.ok(view.includes('(click to expand)'), `mouse-owned member cards must advertise click:\n${view}`)
+  assert.ok(!view.includes('ctrl+o'), `fullscreen members must not advertise the Work-bulk key:\n${view}`)
+})
+
+test('dismissing a search that revealed a hidden Work member promotes the span owner', async () => {
+  const { vt, app } = startApp('compact')
+  const owner: TranscriptMessage = { kind: 'thinking', turn: 1, text: 'hidden reasoning' }
+  const hidden: TranscriptMessage = { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'HIDDEN_RESULT', status: 'ok' }
+  app.setTranscript([owner, hidden], new Map())
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget({
+    query: 'HIDDEN_RESULT',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: hidden,
+  })
+  await vt.waitForRender()
+  assert.equal(app.expandedWorkOwnersForTest().size, 0, 'the reveal stays presentation-only while searching')
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 1, 'the reveal opens the owning span')
+
+  // The dismissal transaction captures the viewport anchor from the revealed
+  // member row; promotion must keep that row resolvable.
+  const anchor = app.captureTranscriptViewportAnchor()
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await vt.waitForRender()
+  const owners = app.expandedWorkOwnersForTest()
+  assert.equal(owners.size, 1, 'the revealed span becomes a manual owner on dismiss')
+  assert.equal(owners.has(owner), true, 'the promoted owner is the span owner')
+  assert.equal(workHeaders(vt.getViewport().join('\n'), true).length, 1,
+    `the promoted span stays open after dismissal:\n${vt.getViewport().join('\n')}`)
+  assert.equal(app.restoreTranscriptViewportAnchor(anchor!, 'top'), true,
+    'a Work-member anchor captured before dismissal must still resolve')
+})
+
+test('search-dismiss promotes a regular cluster owner', async () => {
+  const { vt, app } = startApp('compact')
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'instructions body', label: 'AGENTS.md', context: true,
+    contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+  }
+  const second: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'CLUSTER_MEMBER_MARKER', label: 'skill-catalog', context: true,
+    contextPresentation: { form: 'catalog', sourceKind: 'plugin', role: 'inject' },
+  }
+  app.setTranscript([first, second], new Map())
+  await vt.waitForRender()
+  assert.equal(clusterHeaders(vt.getViewport().join('\n')).length, 1,
+    'precondition: the regular surface collapses the cluster header')
+
+  app.setTranscriptSearchTarget({
+    query: 'CLUSTER_MEMBER_MARKER',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: second,
+  })
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('CLUSTER_MEMBER_MARKER'), 'the reveal opens the hidden member')
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await vt.waitForRender()
+  const owners = app.expandedContextClusterOwnersForTest()
+  assert.equal(owners.size, 1, 'the revealed cluster becomes a manual owner on dismiss')
+  assert.equal(owners.has(first), true, 'the promoted owner is the cluster owner')
+  const view = vt.getViewport().join('\n')
+  assert.equal(clusterHeaders(view, true).length, 1, `the promoted cluster stays open:\n${view}`)
+  assert.ok(view.includes('Context injection AGENTS.md'), `its member rows stay visible:\n${view}`)
+})
+
+test('search-dismiss presentation: a revealed cluster member promotes the cluster owner', async () => {
+  const { vt, app } = startApp('compact')
+  // Fullscreen is where the cluster is disclosed COLLAPSED; the reveal and its
+  // dismissal promotion are what make the member reachable there.
+  app.setFullscreen(true)
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'instructions body', label: 'AGENTS.md', context: true,
+    contextPresentation: { form: 'instructions', sourceKind: 'agent-instructions', role: 'inject' },
+  }
+  const second: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'CLUSTER_MEMBER_MARKER', label: 'skill-catalog', context: true,
+    contextPresentation: { form: 'catalog', sourceKind: 'plugin', role: 'inject' },
+  }
+  app.setTranscript([first, second], new Map())
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget({
+    query: 'CLUSTER_MEMBER_MARKER',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: second,
+  })
+  await vt.waitForRender()
+  assert.equal(clusterHeaders(vt.getViewport().join('\n'), true).length, 1, 'the reveal opens the owning cluster')
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await vt.waitForRender()
+  const owners = app.expandedContextClusterOwnersForTest()
+  assert.equal(owners.size, 1, 'the revealed cluster becomes a manual owner on dismiss')
+  assert.equal(owners.has(first), true, 'the promoted owner is the cluster owner')
+  const view = vt.getViewport().join('\n')
+  assert.equal(clusterHeaders(view, true).length, 1, `the promoted cluster stays open after dismissal:\n${view}`)
+  assert.ok(view.includes('Context injection AGENTS.md'), `its member rows stay visible:\n${view}`)
+})
+
+test('a Work row is a semantic viewport anchor and survives its own toggle', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'only reasoning' } }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, T0 + 2, 2),
+  ])
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  app.scrollToTop()
+  await vt.waitForRender()
+  const anchor = app.captureTranscriptViewportAnchor()
+  assert.equal(anchor?.top?.rowKind, 'work',
+    `the first visible transcript row is the Work span and must be a semantic anchor:\n${vt.getViewport().join('\n')}`)
+  const owner = anchor?.top?.workOwner
+  assert.ok(owner !== undefined, 'the Work anchor carries its stable owner identity')
+
+  app.toggleWorkSpan(owner)
+  await vt.waitForRender()
+  assert.equal(app.restoreTranscriptViewportAnchor(anchor!, 'top'), true,
+    'the anchored Work row must still resolve after its own disclosure toggle')
+})
+
+test('a live reasoning tail inside a Work span uses a content refresh, not a structural rebuild', async () => {
+  const { app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, workFixture().slice(0, 3))
+  show(app, folder)
+  app.resetTranscriptPresentationDiagnosticsForTest()
+  const before = app.transcriptPresentationDiagnosticsForTest()
+  // A live reasoning delta mutates the SAME thinking object in place: the
+  // Work topology is unchanged, so the commit must be content-only.
+  folder.applyLiveInput({ kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn: 1, step: 0, time: T0 + 100, chunk: { type: 'reasoning-delta', index: 0, text: ' tail' } })
+  show(app, folder)
+  const after = app.transcriptPresentationDiagnosticsForTest()
+  assert.equal(after.structuralCommits - before.structuralCommits, 0,
+    'a live reasoning tail must not rebuild the whole transcript structurally')
+  assert.equal(after.contentCommits - before.contentCommits, 1)
+})
+
+test('raw-adjacent ambient Context clusters in Compact, Focus, and Full', async () => {
+  for (const preset of ['compact', 'focus', 'full'] as const) {
+    const { vt, app } = startApp(preset)
+    const folder = new TranscriptFolder()
+    applyMixed(folder, [
+      eventAt('turn/start', { turn: 1 }, T0, 0),
+      eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }, T0 + 1, 1),
+      contextEvent('ctx-a', { kind: 'plugin', form: 'instructions', plugin: 'agent-instructions', changes: [{ path: 'AGENTS.md' }] }, 'instructions body', T0 + 2, 2),
+      contextEvent('ctx-b', { kind: 'plugin', form: 'catalog', plugin: 'skill-catalog' }, 'catalog body', T0 + 3, 3),
+      eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 4, 4),
+      eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, T0 + 5, 5),
+    ])
+    app.setFullscreen(true)
+    show(app, folder)
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.equal(clusterHeaders(view).length, 1, `${preset}: the ambient pair must cluster once:\n${view}`)
+    assert.match(view, /Context · 2 injections/)
+    assert.match(view, /agent-instructions · skill-catalog/)
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('hidden Process rows never merge two Context rows into a false cluster', async () => {
+  const { vt, app } = startApp('focus')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }, T0 + 1, 1),
+    contextEvent('ctx-a', { kind: 'plugin', form: 'instructions', plugin: 'agent-instructions' }, 'instructions A', T0 + 2, 2),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'hidden reasoning' } }, T0 + 3, 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, T0 + 4, 4),
+    contextEvent('ctx-b', { kind: 'plugin', form: 'catalog', plugin: 'skill-catalog' }, 'catalog B', T0 + 5, 5),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(clusterHeaders(view).length, 0, 'a Process row between the rows forbids grouping')
+  assert.ok(view.includes('Context injection agent-instructions'))
+  assert.ok(view.includes('Context injection skill-catalog'))
+})
+
+test('an ambient cluster expands into every member row and collapses again', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    contextEvent('ctx-a', { kind: 'plugin', form: 'instructions', plugin: 'agent-instructions', changes: [{ path: 'AGENTS.md' }] }, 'instructions body', T0 + 1, 1),
+    contextEvent('ctx-b', { kind: 'plugin', form: 'catalog', plugin: 'skill-catalog' }, 'catalog body', T0 + 2, 2),
+  ])
+  show(app, folder)
+  app.setFullscreen(true)
+  await vt.waitForRender()
+  const headerRow = rowOf(vt.getViewport(), /▸ 📎 Context · 2 injections/)
+  assert.ok(headerRow >= 0, 'precondition: the cluster header is visible')
+  click(vt, 3, headerRow + 1)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(app.expandedContextClusterOwnersForTest().size, 1)
+  assert.equal(clusterHeaders(view, true).length, 1)
+  assert.ok(view.includes('Context injection agent-instructions'), 'every member row renders when open')
+  assert.ok(view.includes('Context injection skill-catalog'))
+})
+
+test('expanded Focus restores the opening ambient burst above the Thought and the mid-turn burst in place', async () => {
+  const { vt, app } = startApp('focus')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }, T0 + 1, 1),
+    contextEvent('ctx-a', { kind: 'plugin', form: 'instructions', plugin: 'agent-instructions' }, 'A', T0 + 2, 2),
+    contextEvent('ctx-b', { kind: 'plugin', form: 'catalog', plugin: 'skill-catalog' }, 'B', T0 + 3, 3),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 4, 4),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, T0 + 5, 5),
+    contextEvent('ctx-c', { kind: 'plugin', form: 'instructions', plugin: 'agent-instructions' }, 'C', T0 + 6, 6),
+    contextEvent('ctx-d', { kind: 'plugin', form: 'snapshot', plugin: 'runtime-context' }, 'D', T0 + 7, 7),
+    eventAt('assistant/message', { turn: 1, step: 1, message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } } }, T0 + 8, 8),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9, 9),
+  ])
+  app.setFullscreen(true)
+  show(app, folder)
+  await vt.waitForRender()
+  assert.equal(clusterHeaders(vt.getViewport().join('\n')).length, 2, 'collapsed Focus surfaces both clusters')
+
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const joined = view.join('\n')
+  assert.equal(clusterHeaders(joined).length, 2, 'both clusters survive the expansion')
+  const thoughtRow = rowOf(view, /Working|Turn complete|▾ 🐳|🐳/)
+  const firstCluster = rowOf(view, /Context · 2 injections/)
+  const toolRow = rowOf(view, /Tool\|Read|Read\b/)
+  assert.ok(firstCluster >= 0 && thoughtRow >= 0, `expected a Thought and an opening cluster:\n${joined}`)
+  // The opening burst stays above the Thought; the mid-turn burst follows the process.
+  const clusterRows = view.flatMap((line, index) => /Context · 2 injections/.test(line) ? [index] : [])
+  assert.equal(clusterRows.length, 2)
+  assert.ok(clusterRows[0]! < thoughtRow, 'the opening ambient burst stays above the Thought')
+  assert.ok(clusterRows[1]! > (toolRow >= 0 ? toolRow : thoughtRow), 'the mid-turn burst keeps its chronological position')
+})
+
+test('the regular surface keeps both ambient cluster bursts in raw chronology', async () => {
+  const { vt, app } = startApp('focus')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }, T0 + 1, 1),
+    contextEvent('ctx-a', { kind: 'plugin', form: 'instructions', plugin: 'agent-instructions' }, 'A', T0 + 2, 2),
+    contextEvent('ctx-b', { kind: 'plugin', form: 'catalog', plugin: 'skill-catalog' }, 'B', T0 + 3, 3),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 4, 4),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, T0 + 5, 5),
+    contextEvent('ctx-c', { kind: 'plugin', form: 'instructions', plugin: 'agent-instructions' }, 'C', T0 + 6, 6),
+    contextEvent('ctx-d', { kind: 'plugin', form: 'snapshot', plugin: 'runtime-context' }, 'D', T0 + 7, 7),
+    eventAt('assistant/message', { turn: 1, step: 1, message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } } }, T0 + 8, 8),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9, 9),
+  ])
+  show(app, folder)
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  const view = vt.getViewport()
+  const joined = view.join('\n')
+  assert.equal(clusterHeaders(joined).length, 2, `both clusters render as collapsed headers:\n${joined}`)
+  const thoughtRow = rowOf(view, /Working|Turn complete|▾ 🐳|🐳/)
+  const toolRow = rowOf(view, /Tool\|Read|Read\b/)
+  const clusterRows = view.flatMap((line, index) => /Context · 2 injections/.test(line) ? [index] : [])
+  assert.equal(clusterRows.length, 2)
+  assert.ok(thoughtRow >= 0, `expected a Thought:\n${joined}`)
+  // The two ambient bursts keep their raw chronology around the Thought.
+  assert.ok(clusterRows[0]! < thoughtRow, 'the opening ambient burst stays above the Thought')
+  assert.ok(clusterRows[1]! > (toolRow >= 0 ? toolRow : thoughtRow), 'the mid-turn burst keeps its chronological position')
+})
+
+test('notice, relay, and recall are standalone Context rows and never enter Work or a cluster', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning one' } }, T0 + 1, 1),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, T0 + 2, 2),
+    contextEvent('notice', { kind: 'subagent-settled', form: 'notice', summary: 'child completed with two findings', senderSessionId: 'child-9' }, 'notice payload', T0 + 3, 3),
+    contextEvent('relay', { kind: 'agent-message', form: 'relay', senderSessionId: 'child-2' }, 'There are two need-fix issues in the search restoration path.', T0 + 4, 4),
+    contextEvent('recall', { kind: 'session-reference', form: 'recall', references: [{ label: 'prior work' }] }, 'recalled payload', T0 + 5, 5),
+    eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning two' } }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('c2'), name: 'bash', arguments: '{}' }, T0 + 7, 7),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.equal(clusterHeaders(view).length, 0, 'notice/relay/recall never cluster')
+  assert.equal(workHeaders(view).length, 2, 'each standalone Context row is a Work boundary')
+  assert.ok(view.includes('child completed with two findings'), 'the notice summary is visible while collapsed')
+  assert.ok(view.includes('Agent message · child-2'), 'the relay names its sender')
+  assert.ok(view.includes('There are two need-fix issues in the search restoration path.'), 'the relay body is visible by default')
+  assert.ok(view.includes('Session recall · prior work'), 'the recall names its labels')
+  assert.ok(!view.includes('Context injection subagent-settled'), 'a known notice is never generic Context copy')
+  assert.ok(!view.includes('Context injection agent-message'), 'a known relay is never generic Context copy')
+})
+
+// ── Snapshot Context follows Work (2026-10-19 Owner decision) ─────────────
+
+/** One durable `time-context` Snapshot injection in its official source shape. */
+function snapshotEvent(id: string, text: string, time: number, seq: number): SessionEvent {
+  return contextEvent(id, { kind: 'time-context', form: 'snapshot' }, text, time, seq)
+}
+
+test('real time-context snapshots fold into ONE Compact Activity and expand in raw order', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('snap-u1'), role: 'user',
+      content: [{ type: 'text', text: 'fix it' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first reasoning' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('snap-c1'), name: 'read', arguments: '{}' }, T0 + 3, 3),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('snap-r1'), role: 'tool', toolCallId: ToolCallId('snap-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('snap-c1') },
+      },
+    }, T0 + 4, 4),
+    snapshotEvent('snap-a', 'SNAPSHOT_ALPHA time reading', T0 + 5, 5),
+    eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'second reasoning' } }, T0 + 6, 6),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('snap-c2'), name: 'bash', arguments: '{}' }, T0 + 7, 7),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('snap-r2'), role: 'tool', toolCallId: ToolCallId('snap-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('snap-c2') },
+      },
+    }, T0 + 8, 8),
+    snapshotEvent('snap-b', 'SNAPSHOT_BETA time reading', T0 + 9, 9),
+    eventAt('tool/call', { turn: 1, step: 2, callId: ToolCallId('snap-c3'), name: 'edit', arguments: '{}' }, T0 + 10, 10),
+    eventAt('tool/result', {
+      turn: 1, step: 2,
+      message: {
+        id: MessageId('snap-r3'), role: 'tool', toolCallId: ToolCallId('snap-c3'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('snap-c3') },
+      },
+    }, T0 + 11, 11),
+    eventAt('assistant/message', {
+      turn: 1, step: 3,
+      message: { id: MessageId('snap-final'), role: 'assistant', content: [{ type: 'text', text: 'fixed' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 12, 12),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 13),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(workHeaders(collapsed).length, 1, `exactly ONE Activity for the whole turn:\n${collapsed}`)
+  assert.match(collapsed, /3 actions/u, `read + bash + edit are counted without snapshots:\n${collapsed}`)
+  assert.equal(clusterHeaders(collapsed).length, 0, 'the two isolated snapshots are not a Context cluster')
+  assert.ok(!collapsed.includes('SNAPSHOT_ALPHA') && !collapsed.includes('SNAPSHOT_BETA'),
+    `the snapshots must not surface outside the collapsed Activity:\n${collapsed}`)
+  assert.equal(folder.turnActivity(1)?.toolCalls, 3, 'Snapshot Context never changes the turn tool count')
+
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const expanded = vt.getViewport()
+  const joined = expanded.join('\n')
+  assert.equal(workHeaders(joined, true).length, 1, `the same Activity opens in place:\n${joined}`)
+  const alpha = rowOf(expanded, /SNAPSHOT_ALPHA/)
+  const beta = rowOf(expanded, /SNAPSHOT_BETA/)
+  assert.ok(alpha >= 0 && beta >= 0, `both expanded snapshots render exactly once:\n${joined}`)
+  assert.ok(alpha < beta, 'the expanded snapshots keep their raw order')
+  assert.equal(joined.split('SNAPSHOT_ALPHA').length - 1, 1, 'no duplicated Snapshot row')
+  assert.equal(joined.split('SNAPSHOT_BETA').length - 1, 1, 'no duplicated Snapshot row')
+})
+
+test('an opening time-context snapshot joins the first Compact Activity', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('opening-u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    snapshotEvent('opening-snap', 'OPENING_SNAPSHOT reading', T0 + 2, 2),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 3, 3),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('opening-c1'), name: 'read', arguments: '{}' }, T0 + 4, 4),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('opening-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 5, 5),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 6),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(workHeaders(collapsed).length, 1, `one Activity starts at the opening snapshot:\n${collapsed}`)
+  assert.ok(!collapsed.includes('OPENING_SNAPSHOT'), `the opening snapshot is inside the Activity:\n${collapsed}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const expanded = vt.getViewport()
+  const joined = expanded.join('\n')
+  const snapshotRow = rowOf(expanded, /OPENING_SNAPSHOT/)
+  const readRow = rowOf(expanded, /Read\b/)
+  assert.ok(snapshotRow >= 0, `expanding restores the opening snapshot:\n${joined}`)
+  assert.ok(readRow < 0 || snapshotRow < readRow, 'the snapshot keeps its position before the durable Process rows')
+})
+
+test('a mixed instructions/catalog/snapshot cluster stays one visible boundary in Compact', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('mixed-u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    contextEvent('mixed-instructions', { kind: 'agent-instructions', form: 'instructions', changes: [{ path: 'AGENTS.md' }] }, 'instructions body', T0 + 2, 2),
+    contextEvent('mixed-catalog', { kind: 'skill-invocation', form: 'catalog', name: 'skill-catalog' }, 'catalog body', T0 + 3, 3),
+    snapshotEvent('mixed-snapshot', 'MIXED_SNAPSHOT reading', T0 + 4, 4),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, T0 + 5, 5),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('mixed-c1'), name: 'read', arguments: '{}' }, T0 + 6, 6),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('mixed-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 7, 7),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 8),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(clusterHeaders(collapsed).length, 1, `the mixed cluster keeps one header:\n${collapsed}`)
+  assert.match(collapsed, /Context · 3 injections/u)
+  assert.equal(workHeaders(collapsed).length, 1, 'the cluster remains a Work boundary')
+  assert.ok(!collapsed.includes('MIXED_SNAPSHOT'), 'the cluster members stay behind their own header')
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const expanded = vt.getViewport().join('\n')
+  assert.equal(clusterHeaders(expanded, true).length, 1, `the master expands the cluster:\n${expanded}`)
+  assert.ok(expanded.includes('MIXED_SNAPSHOT'), 'the snapshot member is reachable through the cluster disclosure')
+})
+
+test('Context rows never occupy the Focus slots or counts', async () => {
+  const { vt, app } = startApp('focus')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', { id: MessageId('u1'), role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'the real reasoning' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: JSON.stringify({ path: 'src/index.ts' }) }, T0 + 3, 3),
+    contextEvent('notice', { kind: 'subagent-settled', form: 'notice', summary: 'child settled summary', senderSessionId: 'child-9' }, 'notice payload', T0 + 4, 4),
+    contextEvent('relay', { kind: 'agent-message', form: 'relay', senderSessionId: 'child-2' }, 'relay body text', T0 + 5, 5),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  assert.equal(folder.turnActivity(1)?.toolCalls, 1, 'Context rows never count as tools')
+  assert.equal(folder.turnActivity(1)?.think?.text, 'the real reasoning', 'Context never owns the Think slot')
+  const view = vt.getViewport().join('\n')
+  assert.match(view, /1 action · read ×1/, 'the header count describes the real action only')
+  assert.match(view, /Think:\s+the real reasoning/)
+  // The mid-turn notice is visible process feedback rendered AFTER the
+  // Thought (never inside its slots/counts), while the mid-turn relay stays
+  // surfaced (external input).
+  assert.ok(view.includes('child settled summary'), 'a mid-turn notice renders as a post-Thought row')
+  assert.ok(view.indexOf('child settled summary') > view.indexOf('Think:'),
+    'the notice renders after the Thought')
+  assert.ok(view.includes('Agent message · child-2'), 'a mid-turn relay remains surfaced')
+  app.toggleFocusTurn(1)
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('child settled summary'),
+    'expanded Focus restores the notice in raw chronology')
+})
+
+test('fullscreen: a long relay keeps its head and tail collapsed and reveals the hidden middle on search', async () => {
+  const { vt, app } = startApp('compact')
+  app.setFullscreen(true)
+  const lines = Array.from({ length: 40 }, (_, index) => `relay line ${index}`)
+  const relay: TranscriptMessage = {
+    kind: 'system', turn: 1, text: lines.join('\n'), label: 'agent-message', context: true,
+    contextPresentation: { form: 'relay', sourceKind: 'agent-message', senderSessionId: 'child-2', role: 'inject' },
+  }
+  app.setTranscript([relay], new Map())
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Agent message · child-2'), `the sender is named:\n${view}`)
+  assert.ok(view.includes('relay line 0'), 'the head is visible while collapsed')
+  assert.ok(view.includes('relay line 39'), 'the TAIL is visible while collapsed (long-user geometry)')
+  assert.ok(!view.includes('relay line 20'), 'the middle is hidden while collapsed')
+
+  app.setTranscriptSearchTarget({
+    query: 'relay line 20',
+    match: { id: 0, turn: 1, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: relay,
+  })
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('relay line 20'), `the hidden relay content must be reachable by search:\n${view}`)
+
+  app.setTranscriptSearchTarget(undefined)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('relay line 20'), `disabling the reveal restores the collapsed relay:\n${view}`)
+})
+
+test('form-aware Context rows are render-time width-aware, not width-baked', async () => {
+  const { app } = startApp('full')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    contextEvent('notice', { kind: 'subagent-settled', form: 'notice', summary: 'a summary', senderSessionId: 'child-9' }, 'notice payload', T0 + 1, 1),
+    contextEvent('relay', { kind: 'agent-message', form: 'relay', senderSessionId: 'child-2' }, 'a relay body', T0 + 2, 2),
+    contextEvent('legacy', { kind: 'plugin', plugin: 'legacy-injector' }, 'generic body', T0 + 3, 3),
+  ])
+  show(app, folder)
+  const messages = folder.messages()
+  const notice = messages.find(message => message.kind === 'system' && message.contextPresentation?.form === 'notice')
+  const relay = messages.find(message => message.kind === 'system' && message.contextPresentation?.form === 'relay')
+  const legacy = messages.find(message => message.kind === 'system' && message.contextPresentation?.form === undefined)
+  assert.ok(notice !== undefined && relay !== undefined && legacy !== undefined)
+  // The collapsed fold boundary: nothing is auto-expanded.
+  const collapsedBoundary = Number.POSITIVE_INFINITY
+  assert.equal(app.messageCacheEntryForTest(notice, collapsedBoundary)?.builtWidth, undefined, 'the notice summary re-wraps at render time')
+  assert.equal(app.messageCacheEntryForTest(relay, collapsedBoundary)?.builtWidth, undefined, 'the relay body re-wraps at render time')
+  assert.notEqual(app.messageCacheEntryForTest(legacy, collapsedBoundary)?.builtWidth, undefined, 'a generic folded Context row still bakes its one-line width')
+})
+
+test('a same-step timing replacement refreshes the mounted Activity duration', async () => {
+  // §12.6/§25: a durable replacement that corrects the Thinking timing
+  // while keeping the SAME text and topology must still refresh the
+  // mounted card — the span timing is part of the content signature (the
+  // stale component kept rendering the old duration). This settlement is
+  // deliberately NOT the shared `settlementEvent` helper: it carries a
+  // narration content block WITHOUT its stream chunks, which keeps the
+  // reasoning row's timing sidecar the test corrects.
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  const settlement = (reasoningStart: number, reasoningEnd: number, seq: number): SessionEvent =>
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [
+          { type: 'reasoning', text: 'steady reasoning' },
+          { type: 'text', text: 'final' },
+        ],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [
+        { type: 'chunk', time: reasoningStart, chunk: { type: 'block-start', index: 0, blockType: 'reasoning' } },
+        { type: 'chunk', time: reasoningStart, chunk: { type: 'reasoning-delta', index: 0, text: 'steady reasoning' } },
+        { type: 'chunk', time: reasoningEnd, chunk: { type: 'block-end', index: 0, block: { type: 'reasoning', text: 'steady reasoning' } } },
+      ],
+    }, reasoningEnd + 1_000, seq)
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('c1'), name: 'read', arguments: '{}' }, T0 + 3_000, 1),
+    toolResultEvent('c1', T0 + 9_000, 2),
+    settlement(T0 + 2_000, T0 + 2_500, 3),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const strip = (view: string): string => view.replace(/\x1b\[[0-9;]*m/g, '')
+  const first = strip(vt.getViewport().join('\n'))
+  // Wall span: reasoning 2s → tool result 9s = 7s.
+  assert.match(first, /▸ Activity 7s · 1 action · read ×1/, `the initial span:\n${first}`)
+
+  // The authoritative replacement corrects ONLY the timing (same text,
+  // same topology): the reasoning start moves 1s earlier, so the mounted
+  // header must refresh to 8s.
+  applyMixed(folder, [settlement(T0 + 1_000, T0 + 2_500, 4)])
+  show(app, folder)
+  await vt.waitForRender()
+  const corrected = strip(vt.getViewport().join('\n'))
+  assert.match(corrected, /▸ Activity 8s · 1 action · read ×1/, `the corrected timing must refresh the mounted card:\n${corrected}`)
+})
+
+// ── Compact Activity in-place Action repaint (addendum v2 §40) ────────────
+
+test('a Compact Activity repaints in place when its ActionStats change without a topology change', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('r1'), name: 'read', arguments: JSON.stringify({ path: 'a.ts' }) }, T0 + 1, 1),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('rr1'), role: 'tool',
+        toolCallId: ToolCallId('r1'),
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'tool', callId: ToolCallId('r1') },
+      },
+    }, T0 + 2, 2),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.match(view, /1 action · read ×1/, `the initial span stat:\n${view}`)
+
+  // A second read MERGES INTO THE SAME group card in place: the span member
+  // identities are unchanged, only `callCount`/args move — so only the
+  // bounded ActionStats signature can invalidate the mounted component.
+  folder.apply([
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('r2'), name: 'read', arguments: JSON.stringify({ path: 'b.ts' }) }, T0 + 3, 3),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('rr2'), role: 'tool',
+        toolCallId: ToolCallId('r2'),
+        content: [{ type: 'text', text: 'ok' }],
+        source: { kind: 'tool', callId: ToolCallId('r2') },
+      },
+    }, T0 + 4, 4),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  view = vt.getViewport().join('\n')
+  assert.match(view, /2 actions · read ×2/, `the in-place stat change must repaint the collapsed card:\n${view}`)
+  app.stop()
+})
+
+// ── Internal hierarchy stays indented (addendum v2 §56) ───────────────────
+
+/** The leading-space count of one stripped terminal row. */
+function indentOf(rows: readonly string[], needle: string): number | undefined {
+  const row = rows.find(candidate => candidate.includes(needle))
+  return row === undefined ? undefined : row.length - row.trimStart().length
+}
+
+test('internal card hierarchy keeps its indent while the outer chrome stays flat (v2 §56)', async () => {
+  const { vt, app } = startApp('full')
+  app.setFullscreen(true)
+  app.setTranscript([
+    { kind: 'thinking', turn: 0, text: 'reasoning body line' },
+    {
+      kind: 'tool', turn: 0, name: 'run_code',
+      args: '{"code":"print(1)","description":"Inspect project"}',
+      result: 'program output', status: 'ok',
+      subCalls: [{
+        kind: 'tool', turn: 0, name: 'bash', args: '{"command":"npm test","description":"Run tests"}',
+        result: '1 failed\n2 failed', status: 'ok',
+        subCallId: 'code-1:code:1', parentCallId: 'code-1', rootCallId: 'code-1',
+      }],
+    },
+  ])
+  await vt.waitForRender()
+  const strip = (row: string): string => row.replace(/\u001b\[[0-9;]*m/g, '').trimEnd()
+  let rows = vt.getViewport().map(strip)
+  // Outer rows: the Thinking header and the tool card header sit at column 0.
+  assert.equal(indentOf(rows, 'Thinking'), 0, `the Thinking header must not be indented:\n${rows.join('\n')}`)
+  assert.equal(indentOf(rows, 'Code'), 0, `the tool card header must not be indented:\n${rows.join('\n')}`)
+  // Internal hierarchy: the Thinking body is subordinate to its header and
+  // the PTC child header is deeper than the root.
+  const thinkingBody = indentOf(rows, 'reasoning body line')
+  assert.ok(thinkingBody !== undefined && thinkingBody > 0, `the Thinking body keeps its internal indent:\n${rows.join('\n')}`)
+  const childHeader = indentOf(rows, 'Bash')
+  assert.ok(childHeader !== undefined && childHeader > 0, `the PTC child header stays indented under the root:\n${rows.join('\n')}`)
+  // Expand the child (a click on its header) so its body rows are visible:
+  // they must stay deeper than the child header, never flattened.
+  const childRow = rows.findIndex(row => row.includes('Bash'))
+  click(vt, 11, childRow + 1)
+  await vt.waitForRender()
+  rows = vt.getViewport().map(strip)
+  const childBody = indentOf(rows, '1 failed')
+  assert.ok(childBody !== undefined && childBody > childHeader, `the PTC child body stays deeper than its header:\n${rows.join('\n')}`)
+  app.stop()
+})
+
+// ── TOOL_NOT_STARTED standalone diagnostic (DSH 0.1.7-rc.2 compat) ────────
+
+/** A turn whose only process-plane evidence is a not-started recovery
+ * diagnostic: the assistant requested `bash` (durable tool-call block),
+ * no `tool/call` ever landed, and the official recovery closer settled it
+ * with error.code=TOOL_NOT_STARTED. */
+function notStartedFixture(): SessionEvent[] {
+  return [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('u1'), role: 'user',
+      content: [{ type: 'text', text: 'run the checks' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'), role: 'assistant',
+        content: [{ type: 'tool-call', id: ToolCallId('c1'), name: 'bash', arguments: '{"command":"ls"}' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, T0 + 2, 2),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'The tool call was interrupted before the Harness recorded it as started. Retry it if it is still needed.' }],
+        isError: true,
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+      error: { name: 'ToolNotStartedError', code: 'TOOL_NOT_STARTED' },
+    }, T0 + 3, 3),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'interrupted' } }, T0 + 4, 4),
+  ]
+}
+
+test('Compact keeps a TOOL_NOT_STARTED diagnostic standalone with no Activity Action', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, notStartedFixture())
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+
+  assert.ok(view.includes('Tool request not started · Bash'),
+    `the explicit not-started diagnostic is visible:\n${view}`)
+  assert.equal(workHeaders(view).length, 0,
+    `a not-started-only turn creates no Activity span:\n${view}`)
+  assert.ok(!view.includes('Action:'),
+    `the diagnostic never owns a collapsed Action slot:\n${view}`)
+  assert.ok(!/\d+ actions?/.test(view),
+    `the diagnostic contributes zero action statistics:\n${view}`)
+  assert.ok(!view.includes('[ok]') && !view.includes('[running]'),
+    `no executed-tool lifecycle pill is fabricated:\n${view}`)
+  assert.ok(!view.includes('$ {"command":"ls"}') && !view.includes('$ ls'),
+    `no shell-command execution preview is fabricated:\n${view}`)
+
+  // The expanded body is the authoritative upstream recovery guidance.
+  app.setTranscriptDetailExpanded(true)
+  await vt.waitForRender()
+  const expanded = vt.getViewport().join('\n')
+  assert.ok(expanded.includes('interrupted before the Harness recorded it as started'),
+    `the expanded diagnostic keeps the DSH recovery guidance:\n${expanded}`)
+})
+
+// ── Snapshot Context and live Preparing ownership (A9) ────────────────────
+
+test('a snapshot-tail Work stays the live Preparing owner; a process-free snapshot mints no Activity', async () => {
+  const snapshotRow = (label: string): TranscriptMessage => ({
+    kind: 'system', turn: 1, text: `${label} body`, label, context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  })
+  const preview = {
+    callId: 'snap-preparing', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test',
+  }
+  const preparingRows = (view: string): number[] =>
+    view.split('\n').flatMap((line, index) => line.includes('Preparing') ? [index] : [])
+
+  // Process -> snapshot: the trailing snapshot is a carried Work part, so the
+  // live call stays in the SAME Activity instead of minting a new run.
+  {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([
+      { kind: 'thinking', turn: 1, text: 'working' },
+      { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+      snapshotRow('time-context'),
+    ], new Map(), undefined, [preview])
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.equal(workHeaders(view).length, 1, `the trailing snapshot does not split the Activity:\n${view}`)
+    assert.equal(preparingRows(view).length, 1, `the call renders exactly once in the Tool slot:\n${view}`)
+    assert.ok(!view.includes('Action:  Preparing') || view.includes('Action:'),
+      'the call is the Activity Tool slot, never a duplicate fail-open row')
+    app.dispose()
+    startedApps.delete(app)
+  }
+
+  // snapshot -> (no durable Process yet): no zero-action Activity is invented;
+  // the live call fails open exactly like any ownerless pending run.
+  {
+    const { vt, app } = startApp('compact')
+    app.setTranscript([snapshotRow('time-context')], new Map(), undefined, [preview])
+    await vt.waitForRender()
+    const view = vt.getViewport().join('\n')
+    assert.equal(workHeaders(view).length, 0, `no Activity without a real Process member:\n${view}`)
+    assert.equal(preparingRows(view).length, 1, `the pending call still renders once:\n${view}`)
+    assert.ok(!view.includes('Action:'), `no pseudo Action slot without an owner:\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+test('an open Work with a nested snapshot cluster keeps the Preparing row after every part', async () => {
+  const { vt, app } = startApp('compact')
+  const first: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'SNAPSHOT_PART_A', label: 'time A', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  const second: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'SNAPSHOT_PART_B', label: 'time B', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  app.setTranscript([
+    first,
+    second,
+    { kind: 'thinking', turn: 1, text: 'working' },
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+  ], new Map(), undefined, [
+    { callId: 'nested-preparing', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  await vt.waitForRender()
+  app.toggleWorkSpan(first)
+  app.toggleContextCluster(first)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const joined = lines.join('\n')
+  assert.equal(workHeaders(joined, true).length, 1, `the Work is open:\n${joined}`)
+  assert.ok(joined.includes('SNAPSHOT_PART_A') && joined.includes('SNAPSHOT_PART_B'),
+    `the nested cluster is open:\n${joined}`)
+  const preparing = lines.findIndex(line => line.includes('Preparing Bash'))
+  assert.ok(preparing >= 0, `the live call renders:\n${joined}`)
+  const lastPart = lines.reduce((last, line, index) =>
+    line.includes('SNAPSHOT_PART_A') || line.includes('SNAPSHOT_PART_B') || /Read\b/.test(line) ? index : last, -1)
+  assert.ok(preparing > lastPart, `the live call follows every durable part (cluster header/members and Tool):\n${joined}`)
+})
+
+test('a turnless command after a snapshot-tail Work starts a new pending run', async () => {
+  const { vt, app } = startApp('compact')
+  const snapshot: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'time reading', label: 'time-context', context: true,
+    contextPresentation: { form: 'snapshot', sourceKind: 'time-context', role: 'inject' },
+  }
+  const command = {
+    kind: 'command', commandId: 'cmd-status', seq: 1, time: T0,
+    name: 'status', args: '', outcome: null,
+  } as unknown as TranscriptMessage
+  app.setTranscript([
+    { kind: 'thinking', turn: 1, text: 'working' },
+    snapshot,
+    command,
+  ], new Map(), undefined, [
+    { callId: 'cmd-preparing', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  const commandRow = lines.findIndex(line => line.includes('/status'))
+  const preparingRow = lines.findIndex(line => line.includes('Preparing Bash'))
+  assert.ok(commandRow >= 0, `the command boundary renders:\n${view}`)
+  assert.ok(preparingRow >= 0, `the new pending run renders:\n${view}`)
+  assert.ok(preparingRow > commandRow, `the new run starts AFTER the command boundary:\n${view}`)
+  assert.equal(workHeaders(view).length, 1, `the closed Work renders as its own Activity:\n${view}`)
+  assert.ok(!lines.some(line => /Action:\s+Preparing/.test(line)),
+    `the closed Activity must not own the new run in its Action slot:\n${view}`)
+})
+
+// ── Working tool-jobs Notice (v2 plan §11) ────────────────────────────────
+
+function workingToolJobsEvents(id: string, text: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven Working tool-jobs notice folds into ONE Compact Activity and expands in place', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 1 }, T0, 0),
+    eventAt('user/message', {
+      id: MessageId('working-u1'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, T0 + 1, 1),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, T0 + 2, 2),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('working-c1'), name: 'read', arguments: '{}' }, T0 + 3, 3),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('working-r1'), role: 'tool', toolCallId: ToolCallId('working-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('working-c1') },
+      },
+    }, T0 + 4, 4),
+    ...workingToolJobsEvents('working-notice', 'WORKING_NOTICE body', T0 + 5, 5),
+    eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'second' } }, T0 + 8, 8),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('working-c2'), name: 'bash', arguments: '{}' }, T0 + 9, 9),
+    eventAt('tool/result', {
+      turn: 1, step: 1,
+      message: {
+        id: MessageId('working-r2'), role: 'tool', toolCallId: ToolCallId('working-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('working-c2') },
+      },
+    }, T0 + 10, 10),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('working-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 11, 11),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 12),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const collapsed = vt.getViewport().join('\n')
+  assert.equal(workHeaders(collapsed).length, 1, `one Activity for the Working turn:\n${collapsed}`)
+  assert.match(collapsed, /2 actions/u, `read + bash are the only actions:\n${collapsed}`)
+  assert.ok(!collapsed.includes('WORKING_NOTICE'), `the Working notice stays inside the Activity:\n${collapsed}`)
+  vt.sendInput('\x0f')
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const expanded = lines.join('\n')
+  assert.equal(expanded.split('WORKING_NOTICE').length - 1, 1, `the notice is restored exactly once:\n${expanded}`)
+  const noticeRow = lines.findIndex(line => line.includes('WORKING_NOTICE'))
+  const readRow = lines.findIndex(line => /Read\b/.test(line))
+  const bashRow = lines.findIndex(line => /Bash\b/.test(line))
+  assert.ok(readRow < noticeRow && noticeRow < bashRow, `the notice keeps its raw position:\n${expanded}`)
+})
+
+test('a next-turn wakeup tool-jobs notice stays visible outside the Compact Activity', async () => {
+  const { vt, app } = startApp('compact')
+  const folder = new TranscriptFolder()
+  const wakeMessage = {
+    id: MessageId('wake-notice'), role: 'user',
+    content: [{ type: 'text', text: 'WAKEUP_NOTICE body' }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'job completed' },
+  }
+  applyMixed(folder, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeMessage] }, T0, 0),
+    eventAt('turn/start', { turn: 1 }, T0 + 1, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, T0 + 2, 2),
+    eventAt('user/message', wakeMessage, T0 + 3, 3),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'woken' } }, T0 + 4, 4),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('wake-c1'), name: 'read', arguments: '{}' }, T0 + 5, 5),
+    eventAt('assistant/message', {
+      turn: 1, step: 1,
+      message: { id: MessageId('wake-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 6, 6),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 7),
+  ])
+  show(app, folder)
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  const wakeRow = lines.findIndex(line => line.includes('job completed'))
+  const activityRow = lines.findIndex(line => /^\s*[▸▾] Activity(?: | ·|$)/.test(line))
+  assert.ok(wakeRow >= 0, `the wakeup notice summary remains visible:\n${view}`)
+  assert.ok(activityRow >= 0 && wakeRow < activityRow, `the wakeup notice precedes the Work:\n${view}`)
+  assert.equal(workHeaders(view).length, 1, `the wakeup notice is not absorbed into the Activity:\n${view}`)
+})
+
+test('a live Preparing call joins a Work whose trailing row is a Working tool-jobs notice', async () => {
+  const { vt, app } = startApp('compact')
+  const notice: TranscriptMessage = {
+    kind: 'system', turn: 1, text: 'WORKING_TAIL_NOTICE', label: 'Background job', context: true,
+    contextPresentation: { form: 'notice', sourceKind: 'tool-jobs', role: 'inject', sameTurnNextStep: true },
+  }
+  app.setTranscript([
+    { kind: 'thinking', turn: 1, text: 'working' },
+    { kind: 'tool', turn: 1, name: 'read', args: '{}', result: 'ok', status: 'ok' },
+    notice,
+  ], new Map(), undefined, [
+    { callId: 'working-preparing', argumentBytes: 3, turn: 1, step: 0, index: 0, name: 'bash', summary: 'pnpm test' },
+  ])
+  await vt.waitForRender()
+  const lines = vt.getViewport()
+  const view = lines.join('\n')
+  assert.equal(workHeaders(view).length, 1, `the notice tail keeps ONE Activity:\n${view}`)
+  assert.equal(lines.filter(line => line.includes('Preparing Bash')).length, 1,
+    `the live call renders once in the Activity Tool slot:\n${view}`)
+  assert.ok(!lines.some(line => /Action:\s+Preparing/.test(line)) === false ||
+    lines.some(line => /Action:\s+Preparing/.test(line)), 'fixture sanity')
+})
+
+test('a userless wakeup turn keeps its trigger and folds internal Context in Compact and Full', async () => {
+  const folder = new TranscriptFolder()
+  const wakeNotice = {
+    id: MessageId('userless-compact-wake'), role: 'user',
+    content: [{ type: 'text', text: 'WAKE_COMPACT body' }],
+    source: { kind: 'tool-jobs', form: 'notice', summary: 'wakeup cause' },
+  }
+  applyMixed(folder, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeNotice] }, T0, 0),
+    eventAt('turn/start', { turn: 1 }, T0 + 1, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, T0 + 2, 2),
+    eventAt('user/message', wakeNotice, T0 + 3, 3),
+    contextEvent('userless-compact-snap', { kind: 'time-context', form: 'snapshot' }, 'USERLESS_COMPACT_SNAPSHOT', T0 + 4, 4),
+    eventAt('assistant/chunk', { turn: 1, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, T0 + 5, 5),
+    eventAt('tool/call', { turn: 1, step: 0, callId: ToolCallId('userless-compact-c1'), name: 'read', arguments: '{}' }, T0 + 6, 6),
+    eventAt('tool/result', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('userless-compact-r1'), role: 'tool', toolCallId: ToolCallId('userless-compact-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('userless-compact-c1') },
+      },
+    }, T0 + 7, 7),
+    ...workingToolJobsEvents('userless-compact-working', 'USERLESS_COMPACT_NOTICE', T0 + 8, 8),
+    eventAt('assistant/chunk', { turn: 1, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'second' } }, T0 + 11, 11),
+    eventAt('tool/call', { turn: 1, step: 1, callId: ToolCallId('userless-compact-c2'), name: 'bash', arguments: '{}' }, T0 + 12, 12),
+    eventAt('assistant/message', {
+      turn: 1, step: 2,
+      message: { id: MessageId('userless-compact-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, T0 + 13, 13),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, T0 + 9000, 14),
+  ])
+
+  {
+    const { vt, app } = startApp('compact')
+    show(app, folder)
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const collapsed = lines.join('\n')
+    assert.equal(workHeaders(collapsed).length, 1, `one Activity for the working turn:\n${collapsed}`)
+    assert.ok(collapsed.includes('wakeup cause'), `the wakeup cause stays outside the Activity:\n${collapsed}`)
+    assert.ok(!collapsed.includes('USERLESS_COMPACT_SNAPSHOT') && !collapsed.includes('USERLESS_COMPACT_NOTICE'),
+      `internal Context stays inside the Activity:\n${collapsed}`)
+    vt.sendInput('\x0f')
+    await vt.waitForRender()
+    const expandedLines = vt.getViewport()
+    const expanded = expandedLines.join('\n')
+    assert.equal(expanded.split('USERLESS_COMPACT_SNAPSHOT').length - 1, 1)
+    assert.equal(expanded.split('USERLESS_COMPACT_NOTICE').length - 1, 1)
+    const wakeRow = expandedLines.findIndex(line => line.includes('wakeup cause'))
+    const snapshotRow = expandedLines.findIndex(line => line.includes('USERLESS_COMPACT_SNAPSHOT'))
+    const wakeNoticeRow = expandedLines.findIndex(line => line.includes('USERLESS_COMPACT_NOTICE'))
+    const readRow = expandedLines.findIndex(line => /Read\b/.test(line))
+    const bashRow = expandedLines.findIndex(line => /Bash\b/.test(line))
+    assert.ok(wakeRow < snapshotRow && snapshotRow < readRow && readRow < wakeNoticeRow && wakeNoticeRow < bashRow,
+      `expanded order keeps the wake trigger, Snapshot, read, working notice, bash:\n${expanded}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+
+  {
+    const { vt, app } = startApp('full')
+    show(app, folder)
+    await vt.waitForRender()
+    const lines = vt.getViewport()
+    const view = lines.join('\n')
+    assert.equal(workHeaders(view).length, 0, `Full keeps Work flat:\n${view}`)
+    assert.ok(view.includes('wakeup cause'), `the wakeup card stays visible:\n${view}`)
+    assert.ok(view.includes('Context injection time-context'), `the Snapshot card stays visible:\n${view}`)
+    assert.ok(view.includes('job completed'), `the Working notice card stays visible:\n${view}`)
+    const wakeRow = lines.findIndex(line => line.includes('wakeup cause'))
+    const snapshotRow = lines.findIndex(line => line.includes('Context injection time-context'))
+    const workingRow = lines.findIndex(line => line.includes('job completed'))
+    assert.ok(wakeRow < snapshotRow && snapshotRow < workingRow,
+      `Full keeps the raw Context card order:\n${view}`)
+    app.dispose()
+    startedApps.delete(app)
+  }
+})
+
+
+// ── published visuals are display-only, never a Compact projection change ──
+
+function compactChartPublication(ref: string): PublishedVisual {
+  return {
+    ref, turn: 0, step: 1, stepStartSeq: 5, callSeq: 6, resultSeq: 7, callId: 'present-compact',
+    source: {
+      ref, type: 'chart', title: 'Compact latency', turn: 0, step: 0, stepStartSeq: 1, callSeq: 2, resultSeq: 3, callId: 'chart-compact',
+      chart: { version: 1, type: 'chart', kind: 'bars', title: 'Compact latency', unit: 'ms', series: [{ label: 'p50', value: 42 }] },
+      svg: undefined, svgSource: undefined, svgAdmissionWidth: undefined,
+    },
+  }
+}
+
+test('Compact renders a published visual inline while the raw marker stays search-visible', async () => {
+  const ref = `sv1_${'e'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const text = `Before compact.\n\n${marker}\n\nAfter compact.`
+  const folder = new TranscriptFolder()
+  folder.apply([
+    eventAt('turn/start', { turn: 0 }, T0, 0),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('compact-visual'), role: 'assistant',
+        content: [{ type: 'text', text }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, T0 + 1, 1),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, T0 + 2, 2),
+  ])
+  const assistant = folder.messages().find(message => message.kind === 'assistant')
+  assert.ok(assistant !== undefined && assistant.kind === 'assistant')
+  setAssistantVisualPresentation(assistant, {
+    subjectKind: 'main', subjectId: 'compact', sourceIdentity: {}, session: {}, sessionId: 'compact', seq: 3,
+    turn: 0, step: 0, text: assistant.text, content: undefined, assistantRevision: 0,
+  }, [compactChartPublication(ref)])
+  const { vt, app } = startApp('compact')
+  show(app, folder)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  const before = view.indexOf('Before compact.')
+  const chart = view.indexOf('Compact latency', before)
+  const after = view.indexOf('After compact.')
+  assert.ok(before >= 0 && chart > before && after > chart, `Compact keeps the inline order:\n${view}`)
+  assert.ok(!view.includes('[dsh-visual-'), 'the marker definition is never painted')
+  assert.ok(folder.search('dsh-visual').length > 0, 'the raw search authority still sees the marker')
+  assert.ok(folder.search('After compact').length > 0, 'the visible answer remains searchable')
+  app.stop()
+})

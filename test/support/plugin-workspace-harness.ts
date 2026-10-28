@@ -1,16 +1,24 @@
 /**
- * Shared real-TuiApp harness for the fullscreen Plugin Manager workspace
- * (S4-D1 L6): a REAL TuiAltScreen lease, the production controller and the
- * workspace panel over a fixture semantic port.
+ * Shared real-TuiApp harness for the EMBEDDED Plugin Manager page (PR2 L6):
+ * a REAL Settings workspace lease (the ONE alt screen), the production
+ * controller and the production page over a fixture semantic port. The page is
+ * created by the real `Settings → Plugins` composition path (the Settings root
+ * factory), so every suite drives the actual root layout, focus transition,
+ * mouse translation and local viewport grant — never a second TuiApp or a
+ * hand-built screen owner.
  * @module @xmoon76/dsh-pi-tui/test/support/plugin-workspace-harness
  */
 
+import assert from 'node:assert/strict'
 import { TuiApp } from '../../src/tui-app.ts'
 import { PluginManagerController } from '../../src/app/plugin-manager/controller.ts'
 import { PluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { SELF_BUNDLE } from '../../src/app/plugin-manager/classify.ts'
-import type { TuiExtensionObservation } from '../../src/app/plugin-manager/extension-inventory.ts'
+import type {
+  TuiExtensionDiagnostics,
+  TuiExtensionObservation,
+} from '../../src/app/plugin-manager/extension-inventory.ts'
 import type {
   PluginBundleFact,
   PluginChangeFact,
@@ -20,7 +28,7 @@ import type {
   PluginRowFact,
   PluginSpecInspectionFact,
 } from '../../src/runtime/plugin-manager-port.ts'
-import { VirtualTerminal } from '../virtual-terminal.ts'
+import { VirtualTerminal } from './virtual-terminal.ts'
 
 export function plain(lines: readonly string[]): string {
   return lines.map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
@@ -75,6 +83,8 @@ export interface WorkspaceHarnessOptions {
   readonly bundles?: readonly PluginBundleFact[]
   readonly plugins?: readonly PluginRowFact[]
   readonly observations?: readonly TuiExtensionObservation[]
+  /** The diagnostics read the page consumes (default: no extension service). */
+  readonly diagnostics?: () => TuiExtensionDiagnostics | undefined
   /** The exact-version exemption reader warnings the fixture reports. */
   readonly exemptionWarnings?: readonly string[]
   /** Replaces the fixture install behavior when provided. */
@@ -82,27 +92,50 @@ export interface WorkspaceHarnessOptions {
   readonly waitImpl?: (requestId: string) => Promise<PluginChangeFact | null>
   readonly cancelImpl?: (requestId: string) => Promise<{ status: 'cancelled' | 'too-late' | 'not-running' }>
   readonly inspectImpl?: (spec: string) => Promise<PluginSpecInspectionFact>
-  /** The entry host the controller reports (Esc wording only). */
-  readonly entryHost?: 'direct-command' | 'settings-entry'
   /** A REAL Host-backed port (an L6 source->sink test supplies it); the
    *  default fake catalog below is never used in that case. */
   readonly port?: PluginManagerPort
+  /** Where the Settings lease opens. `'rail'` starts on the About home with the
+   *  keyboard on the Categories rail, so the Plugins category is only SELECTED
+   *  and the plugin page is not mounted until the content takes the focus. */
+  readonly startOn?: 'plugins' | 'rail'
 }
 
 export interface WorkspaceHarness {
   readonly vt: VirtualTerminal
   readonly app: TuiApp
+  /** The live Settings workspace handle (the ONE screen lease). */
+  readonly settings: { close(): void }
   readonly controller: PluginManagerController
+  /** The mounted page; throws when the lazy policy has not mounted it yet. */
   readonly panel: PluginManagerWorkspacePanel
+  /** The page instance, or `undefined` while the lazy policy keeps it unmounted. */
+  readonly panelInstance: () => PluginManagerWorkspacePanel | undefined
   readonly copied: string[]
+  /** How many official inventory snapshots the controller requested. */
+  readonly snapshotCalls: () => number
   readonly installCalls: Array<{ requestId: string; spec: string; approvedBuilds?: readonly string[] }>
   readonly setBundle: Array<{ name: string; enabled: boolean }>
   readonly setPlugin: Array<{ entryId: string; enabled: boolean }>
   readonly removeBundle: string[]
+  /** Every Host `cancelInstall` call (empty proves no cancel was dispatched). */
+  readonly cancelInstallCalls: string[]
   readonly invalidate: () => void
   readonly emit: (event: PluginInstallEvent) => void
   close(): void
-  settle(rounds?: number): Promise<void>
+  /** Re-open a Settings lease on the SAME app. The previous owner must have
+   *  been released; a phantom claim makes the production factory return
+   *  `undefined` and this throws instead of faking a success. */
+  reopen(options?: { readonly startOn?: 'plugins' | 'rail' }): Promise<void>
+  /** Drain a bounded number of microtask turns, then let the renderer settle via
+   *  `VirtualTerminal.waitForRender()` (which itself yields a short timer before
+   *  flushing the terminal write). This is NOT a frame-identity signal — it is a
+   *  bounded wait for the render pipeline to settle after a redraw was already
+   *  requested; use it only after driving such a request.
+   *  (Named `waitForFrame`, not `settle`: a same-named fixed-wait helper in
+   *  `test/support` would make the New Test Policy guard read every call as a
+   *  blind sleep.) */
+  waitForFrame(rounds?: number): Promise<void>
   view(): string
   viewport(): readonly string[]
 }
@@ -142,11 +175,14 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
   const installListeners = new Set<(event: PluginInstallEvent) => void>()
   const invalidateListeners = new Set<() => void>()
   const installCalls: Array<{ requestId: string; spec: string; approvedBuilds?: readonly string[] }> = []
+  let snapshotCalls = 0
   const setBundle: Array<{ name: string; enabled: boolean }> = []
   const setPlugin: Array<{ entryId: string; enabled: boolean }> = []
   const removeBundle: string[] = []
+  /** Host `cancelInstall` calls (a WRITE-side operation on the port). */
+  const cancelCalls: string[] = []
   const fixturePort: PluginManagerPort = {
-    snapshot: async () => snapshot,
+    snapshot: async () => { snapshotCalls += 1; return snapshot },
     inspect: options.inspectImpl ?? (async (spec: string) => ({
       status: 'accepted',
       kind: 'registry',
@@ -173,51 +209,100 @@ export async function openWorkspace(options: WorkspaceHarnessOptions = {}): Prom
       return { changed: true, application: 'applied', stage: 'install', target: request.spec, version: '0.2.1-rc.2' }
     },
     waitForInstall: async (requestId) => options.waitImpl === undefined ? null : options.waitImpl(requestId),
-    cancelInstall: async (requestId) => options.cancelImpl === undefined
-      ? { status: 'not-running' }
-      : options.cancelImpl(requestId),
+    cancelInstall: async (requestId) => {
+      cancelCalls.push(String(requestId))
+      return options.cancelImpl === undefined
+        ? { status: 'not-running' }
+        : options.cancelImpl(requestId)
+    },
     subscribeInstall: (listener) => { installListeners.add(listener); return () => installListeners.delete(listener) },
     subscribeInvalidation: (listener) => { invalidateListeners.add(listener); return () => invalidateListeners.delete(listener) },
   }
   const port = options.port ?? fixturePort
-  let closeSurface: () => void = () => {}
   const copied: string[] = []
   const controller = new PluginManagerController(port, {
     requestRender: () => app.requestRender(),
-    requestClose: () => closeSurface(),
     notify: () => {},
     isOpen: () => true,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
   }, { observations: () => options.observations ?? [] })
-  const panel = new PluginManagerWorkspacePanel(controller, {
-    rows: () => vt.rows,
-    columns: () => vt.columns,
-    requestRender: () => app.requestRender(),
-    notice: () => undefined,
-    onCopy: (text) => { copied.push(text) },
-  }, { onDispose: () => {} })
-  closeSurface = app.openPluginManagerWorkspace(panel, () => {})
-  controller.open(options.entryHost ?? 'direct-command')
+  // The page is created by the REAL Settings → Plugins factory on the first
+  // visible paint of the plugin content column; the harness never builds a
+  // second screen or a second owner.
+  let panel: PluginManagerWorkspacePanel | undefined
+  let settings: { close(): void } | undefined
+  /** Open ONE Settings lease on this app. The page factory is the SAME one the
+   *  first lease used, so a re-open exercises the production owner release. */
+  const openLease = (startOn: 'plugins' | 'rail'): { close(): void } => app.openSettingsWorkspace(
+    {
+      readSnapshot: () => ({
+        configReadiness: 'ready',
+        rows: [],
+        capturedAt: Date.now(),
+      }),
+    },
+    {
+      aboutVersionFacts: { tui: 'test-bundle', dsh: undefined },
+      onClose: () => {},
+      initialCategory: startOn === 'rail' ? 'about' : 'plugins',
+      onOpenPlugins: (onYieldNavigation) => {
+        panel = new PluginManagerWorkspacePanel(controller, {
+          requestRender: () => app.requestRender(),
+          onCopy: (text) => { copied.push(text) },
+          ...(options.diagnostics === undefined ? {} : { diagnostics: options.diagnostics }),
+          onYieldNavigation,
+        }, { onDispose: () => {} })
+        // PRODUCTION SEMANTICS: `PluginManagerRuntime.page()` opens the
+        // controller on EVERY successful page creation, so a re-mount after a
+        // dispose starts a NEW inventory read (and advances the read
+        // generation). The harness must not smooth that over with a "first
+        // mount only" flag, or a reopen would prove a path production never
+        // takes.
+        controller.open()
+        return panel
+      },
+    },
+  )
+  settings = openLease(options.startOn === 'rail' ? 'rail' : 'plugins')
 
-  const settle = async (rounds = 8): Promise<void> => {
+  const waitForFrame = async (rounds = 8): Promise<void> => {
     for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
     await vt.waitForRender()
   }
-  await settle()
+  await waitForFrame()
+  if (options.startOn !== 'rail') {
+    assert.ok(panel !== undefined, 'the Settings root must mount the Plugin page on its first visible paint')
+  } else {
+    assert.equal(panel, undefined, 'a narrow rail that merely selects Plugins mounts nothing')
+  }
   return {
     vt,
     app,
+    get settings(): { close(): void } {
+      assert.ok(settings !== undefined, 'no Settings lease is open')
+      return settings
+    },
     controller,
-    panel,
+    get panel(): PluginManagerWorkspacePanel {
+      assert.ok(panel !== undefined, 'the Plugin page is not mounted in this scenario')
+      return panel
+    },
+    panelInstance: () => panel,
     copied,
+    snapshotCalls: () => snapshotCalls,
     installCalls,
     setBundle,
     setPlugin,
     removeBundle,
+    cancelInstallCalls: cancelCalls,
     invalidate: () => { for (const listener of [...invalidateListeners]) listener() },
     emit: event => { for (const listener of [...installListeners]) listener(event) },
-    close: () => closeSurface(),
-    settle,
+    close: () => settings!.close(),
+    reopen: async (reopenOptions = {}) => {
+      settings = openLease(reopenOptions.startOn === 'rail' ? 'rail' : 'plugins')
+      await waitForFrame()
+    },
+    waitForFrame,
     view: () => plain(vt.getViewport()),
     viewport: () => vt.getViewport(),
   }

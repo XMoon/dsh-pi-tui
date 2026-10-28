@@ -129,8 +129,8 @@ export class ThemeSubmenu implements RowBudgetAware, Focusable {
         // from another source cannot steal it). §4.5/§12.2: the state chip
         // is `textMuted` and is NEVER recoloured by the row's selection,
         // while `settingsListTheme().value` paints `selected ? primary :
-        // textDim` — so the chip is PRE-PAINTED here (the `status.ts:110`
-        // precedent) and handed to the renderer as a WHOLE part (X061): the
+        // textDim` — so the chip is PRE-PAINTED here (the same pattern as
+        // `src/tui/plugin-manager/workspace.ts`) and handed to the renderer as a WHOLE part (X061): the
         // slot drops it entirely rather than ever painting `[curre`, and the
         // row's own `currentValue` keeps the fork's values/update semantics
         // untouched (it is unused for these rows).

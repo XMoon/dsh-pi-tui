@@ -250,10 +250,10 @@ export function formatTurnsSteps(turns: number, steps: number, format = 'both'):
  * from the STRUCTURED usage facts: `↑34k ↓8.1k R520k CH93.9% | TTFB 2.6s ·
  * 51 tok/s`. The performance tail carries the RECENT metrics only — the
  * lifetime `LLM` wall left the footer so a composite never mixes lifetime
- * and recent windows. This is a SEPARATE presentation contract from
- * `formatStatsFacts` (`src/tui/commands/status.ts`, the /status detail line,
- * which keeps the labeled lifetime `LLM ...` term beside the recent metrics)
- * — footer chrome vs detail surface, never forced into string equality. */
+ * and recent windows. This is a SEPARATE presentation contract from the
+ * About report rows (`domain/status/about.ts`, which keep the labeled lifetime
+ * `LLM ...` term beside the recent metrics) — footer chrome vs Settings/About
+ * detail surface, never forced into string equality. */
 export function formatStatsLine(usage: UsageStatus): string {
   const tokens = usage.tokens
   // No owned token facts (an unavailable projection on the Remote branch):

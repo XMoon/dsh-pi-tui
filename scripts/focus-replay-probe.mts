@@ -1,6 +1,6 @@
 /**
  * Fullscreen Focus replay harness (investigation tooling, NOT production code).
- * See `docs/focus-replay-harness.md` for the full contract: valid-run
+ * See `docs/guides/tmux-testing.md` for the full contract: valid-run
  * preconditions, every switch, the recorded evidence, the known false positives
  * and the acceptance procedure.
  *
@@ -37,7 +37,7 @@ import { TuiApp } from '../src/tui-app.ts'
 import { TranscriptFolder } from '../src/transcript.ts'
 import { TranscriptWindowController } from '../src/domain/transcript/window.ts'
 import type { AssistantLiveInput } from '../src/runtime/assistant-stream-port.ts'
-import { VirtualTerminal } from '../test/virtual-terminal.ts'
+import { VirtualTerminal } from '../test/support/virtual-terminal.ts'
 
 const XtermTerminal = xterm.Terminal
 

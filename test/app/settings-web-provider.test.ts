@@ -1,0 +1,1817 @@
+/**
+ * S2/PR-B §3.3/§3.4 — the `/settings` Web Search / Fetch surface (L6).
+ *
+ * The user-visible chain: `/settings` → the `Tools` category → `Web Search /
+ * Fetch` → the EXISTING legacy editor focused on the Web section → a selector
+ * commits through the ConfigPort → the row is reconciled from the authoritative
+ * read-back → closing and reopening shows the committed value.
+ *
+ * FIXTURE (real): the production `/settings` command registration, the real
+ * `TuiApp`/Settings workspace/legacy editor, the real key routing and the real
+ * `VirtualTerminal` frames. STAND-IN: the Host config service behind the
+ * ConfigPort sub-domain (records the exact semantic calls and owns the store the
+ * read-back returns) — the real official settings plane is qualified by
+ * `web-provider-rc2-integration.test.ts`. ABSENT: a real Session, a real model,
+ * the network.
+ *
+ * @module @xmoon76/dsh-pi-tui/settings-web-provider.test
+ */
+
+import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
+import test, { afterEach } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
+import { visibleWidth } from '@xmoon76/pi-tui'
+import type { TuiCommandRunner } from '../../src/commands.ts'
+import { TuiApp } from '../../src/tui-app.ts'
+import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
+import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import type { TuiSettingsDoc, WebProviderSettings } from '../../src/runtime/config-port.ts'
+import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { settingsDirectPageConfig } from '../support/settings-direct-page-stubs.ts'
+import { selectSettingsCategory } from '../support/settings-rail.ts'
+import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
+import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
+
+process.env.NO_COLOR = ''
+process.env.FORCE_COLOR = ''
+
+const DOWN = '\x1b[B'
+const HOME = '\x1b[H'
+const UP = '\x1b[A'
+const ENTER = '\r'
+const ESC = '\x1b'
+
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+afterEach(() => {
+  disposeStartedApps()
+})
+
+const DEFAULT_DOC: TuiSettingsDoc = {
+  theme: 'dark',
+  iconStyle: 'unicode',
+  footer: 'default',
+  fullscreen: 'off',
+  busyEnter: 'queue',
+  localShellSandbox: 'bypass',
+  homeEndKeys: 'app',
+  notificationMode: 'off',
+  notificationMethod: 'auto',
+  terminalProgress: 'off',
+  wheelScrollLines: '3',
+}
+
+interface Harness {
+  readonly vt: VirtualTerminal
+  /** Every semantic Web write, in order. */
+  readonly writes: readonly string[]
+  /** Every `/login` | `/logout` line the section delegated. */
+  readonly delegated: readonly string[]
+  /** The live (fake) Host store the read-back answers from. */
+  readonly store: {
+    web: WebProviderSettings
+    available: boolean
+    failNext: string | undefined
+    readThrows: boolean
+    /** The message a throwing read reports (may carry hostile control text). */
+    readErrorMessage: string
+    /** A mounted section whose facts do not validate (read() answers undefined). */
+    readUndefined: boolean
+    /** Artificial delay for one Host write (the FIFO order proof). */
+    writeDelayMs: number
+    /** The value the Host actually KEEPS after a successful endpoint write (the
+     *  official store's canonical form of the submitted base); undefined = the
+     *  submitted URL verbatim. */
+    endpointStoredValue: string | undefined
+    /** The provider id the Host actually KEEPS after a successful mutation (a
+     *  competing external writer / the official store's own answer); undefined =
+     *  the submitted id verbatim. */
+    keptProviderValue: string | undefined
+  }
+  /** How many authority reads were ISSUED (the newest-read witnesses). */
+  readonly readCount: () => number
+  /** How many authority reads SETTLED (returned or threw). Together with
+   *  {@link readCount} this witnesses a read reaching its own settlement — the
+   *  fact a wall-clock wait cannot prove. */
+  readonly settledReadCount: () => number
+  /** Every Host write that SETTLED (committed or rejected), in order: the
+   *  authoritative settlement of the write itself, distinct from the UI's
+   *  read-back verdict. */
+  readonly settledWrites: () => readonly string[]
+  /** How many Web writes overlapped (must never exceed 1: ONE owner FIFO). */
+  readonly maxConcurrentWrites: () => number
+  /** The write labels in COMMIT order. */
+  readonly log: readonly string[]
+  /** Hold the NEXT authority read until the returned release is called. */
+  readonly holdRead: () => () => void
+  /** Hold EVERY authority read issued until the returned release is called
+   *  (a page entry starts its own fresh read; a one-shot gate would miss it). */
+  readonly holdAllReads: () => () => void
+  /** Move the LIVE backend readiness (the page must gate on it). */
+  readonly setReadiness: (next: 'ready' | 'stale' | 'unavailable') => void
+  readonly view: () => string
+  readonly invoke: (name?: string) => unknown
+  readonly dispose: () => void
+}
+
+function setup(options: {
+  readonly columns?: number
+  readonly rows?: number
+  readonly available?: boolean
+  readonly searchProvider?: string
+  /** The stored `web-deepseek-api.count` (a value outside the presets stays). */
+  readonly count?: number
+  /** Whether the official credential reference reads as configured. */
+  readonly configured?: boolean
+  /** Whether the official credential STORE is mounted (`credentials.available`). */
+  readonly credentialStore?: boolean
+}
+= {}): Harness {
+  const columns = options.columns ?? 140
+  const vt = new VirtualTerminal(columns, options.rows ?? 40)
+  const writes: string[] = []
+  const delegated: string[] = []
+  let activeWrites = 0
+  let maxActiveWrites = 0
+  const log: string[] = []
+  const settledWrites: string[] = []
+  let readGate: { readonly promise: Promise<void>; readonly release: () => void } | undefined
+  let readHoldAll: { readonly promise: Promise<void>; readonly release: () => void } | undefined
+  let readsIssued = 0
+  let readsSettled = 0
+  let readiness: 'ready' | 'stale' | 'unavailable' = 'ready'
+  const store = {
+    available: options.available ?? true,
+    failNext: undefined as string | undefined,
+    readThrows: false,
+    readUndefined: false,
+    /** The message a throwing read reports (may carry hostile control text). */
+    readErrorMessage: 'settings descriptor unreadable',
+    writeDelayMs: 0,
+    endpointStoredValue: undefined as string | undefined,
+    keptProviderValue: undefined as string | undefined,
+    web: {
+      searchProvider: options.searchProvider ?? 'deepseek-official',
+      fetchProvider: 'http',
+      api: { baseURL: 'https://api.deepseek.com/v1/tools', count: options.count ?? 10, sendOriginalQuestion: true },
+      credential: options.configured === false ? { configured: false } : { configured: true, source: 'file' },
+    } as WebProviderSettings,
+  }
+  const doc: TuiSettingsDoc = { ...DEFAULT_DOC }
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const defs: { name: string; handler?: unknown }[] = []
+  const commands = {
+    register: (definition: { name: string; handler?: unknown }) => { defs.push(definition); return () => {} },
+    list: () => [],
+    find: () => undefined,
+    execute: async () => undefined,
+  }
+  const clientCommands = createClientCommandRegistry(parseCommand)
+  const originalExecute = clientCommands.execute.bind(clientCommands)
+  clientCommands.execute = async request => {
+    delegated.push(request.line)
+    return originalExecute(request)
+  }
+  const ctx = new Context()
+  ctx.provide('commands', commands as never)
+  const write = async (label: string, apply: () => void, delayMs = 0): Promise<void> => {
+    activeWrites += 1
+    maxActiveWrites = Math.max(maxActiveWrites, activeWrites)
+    log.push(`begin:${label}`)
+    try {
+      if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs))
+      if (store.failNext !== undefined) {
+        const reason = store.failNext
+        store.failNext = undefined
+        settledWrites.push(`failed:${label}`)
+        throw new Error(reason)
+      }
+      writes.push(label)
+      log.push(label)
+      apply()
+      settledWrites.push(label)
+    } finally {
+      activeWrites -= 1
+    }
+  }
+  const base: Record<string, unknown> = {
+    ctx,
+    app,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    cwd: '/ws',
+    sessionCwd: () => '/ws',
+    signal: new AbortController().signal,
+    commandRegistry: commands,
+    clientCommands,
+    recordExtensionError: () => {},
+    clearExtensionError: () => {},
+    captureExtensionHealthRef: () => () => {},
+    currentSessionId: undefined,
+    captureLiveSessionScope: () => undefined,
+    // C3 About seams: this fixture composes no StatusRuntime, so the
+    // sessionless capture is the only reachable state (no scoped read can
+    // start). The subscription STILL must return a real disposer: opening
+    // `/settings` builds the About controller, its close calls `dispose()`,
+    // and a non-function return would abort the TuiApp teardown and leak the
+    // process slot into every later test.
+    isSessionScopeCurrent: () => false,
+    currentSessionStats: async () => undefined,
+    sessionReader: { measureContext: () => undefined, sessionStatus: () => undefined },
+    forceContextMeasurementResult: () => ({ value: undefined, observation: 'unavailable' as const }),
+    backendKind: 'direct' as const,
+    subscribeSessionScopeInvalidation: () => () => {},
+    listScopedCommands: () => [],
+    displayPreset: () => app.displayPreset(),
+    focusEnabled: () => false,
+    setDisplayPreset: () => ({ kind: 'unchanged' }),
+    refreshStatus: () => {},
+    tuiSettings: { get: () => doc, replace: (next: TuiSettingsDoc) => { Object.assign(doc, next) } },
+    config: settingsDirectPageConfig({
+      // The Models reference view this file's Web->Models case opens needs a
+      // mounted provider directory (the real one is the Models suite's job).
+      providers: {
+        available: () => true,
+        listCredentialOptions: () => [],
+        readCatalog: () => ({ options: [], profiles: [] }),
+        readProfile: (route: string) => ({ route, configured: false, displayName: route, models: [] }),
+        configGuide: () => ({ profilePatchPath: '/home/u/.dsh/profiles/pi-tui/cordis.patch.yml' }),
+        writeProfile: async () => {},
+        writeKeylessProfile: async () => ({ kind: 'written' as const }),
+      },
+      configReadiness: () => readiness,
+      footerCustomItems: { rawForPersistence: () => ({ kind: 'available', value: undefined }) },
+      permissions: { presetNames: () => [], defaultPreset: () => undefined, approvalOverrideOf: () => undefined, approvalOverrideAvailable: () => false },
+      subagentModelSelection: { available: () => false },
+      credentials: {
+        available: () => options.credentialStore !== false,
+        describeReference: async () => ({ configured: true, source: 'file' }),
+      },
+      web: {
+        available: () => store.available,
+        read: async () => {
+          readsIssued += 1
+          const gate = readGate
+          readGate = undefined
+          const held = readHoldAll
+          // A held read stays the snapshot of the moment it was ISSUED: a real
+          // Host read cannot observe a write that happens while it is pending.
+          const captured = { ...store.web, api: { ...store.web.api } }
+          const throws = store.readThrows
+          const unreadable = !store.available || store.readUndefined
+          try {
+            if (gate !== undefined) await gate.promise
+            if (held !== undefined) await held.promise
+            if (throws) throw new Error(store.readErrorMessage)
+            if (unreadable) return undefined
+            return captured
+          } finally {
+            // The read's OWN settlement (returned or threw): the witness that a
+            // superseded/newest read really reached its end, which a wall-clock
+            // wait cannot prove.
+            readsSettled += 1
+          }
+        },
+        setSearchProvider: async (id: string) => { await write(`search:${id}`, () => { store.web.searchProvider = store.keptProviderValue ?? id }, store.writeDelayMs) },
+        setFetchProvider: async (id: string) => { await write(`fetch:${id}`, () => { store.web.fetchProvider = id }) },
+        setSearchApiCount: async (count: number) => { await write(`count:${count}`, () => { store.web.api.count = count }) },
+        setSendOriginalQuestion: async (enabled: boolean) => { await write(`ori:${String(enabled)}`, () => { store.web.api.sendOriginalQuestion = enabled }) },
+        setSearchApiBaseURL: async (url: string) => { await write(`endpoint:${url}`, () => { store.web.api.baseURL = store.endpointStoredValue ?? url }) },
+      },
+    }),
+    catalog: { models: { available: () => false } },
+    // The minimal REAL extension registries: this suite drives the same-lease
+    // Web Settings page, never the retired legacy editor.
+    extensions: { themes: new ThemeRegistry(), settings: new SettingsRegistry() } as never,
+    createPluginManagerPage: () => undefined,
+    progressUpdatesState: { mode: 'milestones' },
+    responseStyleState: { style: 'default' },
+    gitAttributionState: { mode: 'off' },
+    setFocusMode: () => {},
+    setNotificationMethod: () => {},
+    setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
+    setTerminalProgressMode: () => {},
+    setSessionApprovalPolicy: () => 'applied',
+    currentApprovalOverride: () => undefined,
+    applyFooterSettings: () => {},
+  }
+  const runner = new Proxy(base, {
+    get: (target, property) => property in target ? target[property as string] : () => undefined,
+  }) as unknown as TuiCommandRunner
+  registerTuiCommandsWithDirectSeams(runner)
+  const invoke = (name = 'settings'): unknown => {
+    const definition = defs.find(candidate => candidate.name === name)
+    assert.ok(definition?.handler !== undefined, `/${name} must be registered`)
+    return (definition.handler as (invocation: { rawInput: string }) => unknown)({ rawInput: '' })
+  }
+  const view = (): string => vt.getViewport().map(line => line.replace(/\u001b\[[0-9;]*m/gu, '')).join('\n')
+  return {
+    vt,
+    writes,
+    delegated,
+    store,
+    readCount: () => readsIssued,
+    settledReadCount: () => readsSettled,
+    settledWrites: () => settledWrites,
+    maxConcurrentWrites: () => maxActiveWrites,
+    log,
+    holdRead: () => {
+      let release = (): void => {}
+      const promise = new Promise<void>(resolve => { release = () => resolve() })
+      readGate = { promise, release }
+      return release
+    },
+    setReadiness: (next) => { readiness = next },
+    holdAllReads: () => {
+      let release = (): void => {}
+      const promise = new Promise<void>(resolve => { release = () => resolve() })
+      const record = {
+        promise,
+        release: () => {
+          if (readHoldAll === record) readHoldAll = undefined
+          release()
+        },
+      }
+      readHoldAll = record
+      return record.release
+    },
+    view,
+    invoke,
+    dispose: () => {
+      startedApps.delete(app)
+      if (!app.isDisposed()) app.dispose()
+    },
+  }
+}
+
+/** One key press, rendered to quiescence (the workspace routes input through
+ *  its own render loop, so a burst without renders races the projection). */
+async function key(h: Harness, data: string): Promise<void> {
+  h.vt.sendInput(data)
+  await h.vt.waitForRender()
+}
+
+/** Wait until the PAINTED frame satisfies `predicate`, with the read/write
+ *  settlement witnesses in the failure message.
+ *
+ *  The wait is real rendered frames (`waitForFrame`), so success is the fact
+ *  the surface shows, not a timer guess; the bound is the helper's frame
+ *  budget plus the authoritative Host-side counters, so a failure says whether
+ *  the Host read/write even started and whether it SETTLED. */
+async function settlePainted(
+  h: Harness,
+  label: string,
+  predicate: (frame: string) => boolean,
+): Promise<string> {
+  try {
+    await waitForFrame(() => h.view(), predicate, () => h.vt.waitForRender(), label)
+  } catch (error) {
+    throw new Error(`${(error as Error).message}\n`
+      + `the Host reads: issued ${h.readCount()}, settled ${h.settledReadCount()}; `
+      + `writes: ${JSON.stringify(h.writes)}; settled: ${JSON.stringify(h.settledWrites())}`)
+  }
+  return h.view()
+}
+
+/** Wait until at least `expected` authority reads have SETTLED on the Host side
+ *  and the surface painted the frame after that settlement.
+ *
+ *  This is the currentness cases' witness: `release()` only OPENS the gate, it
+ *  does not prove the read finished, so a wall-clock wait could assert absence
+ *  while the read was still pending — the exact false-negative these cases
+ *  exist to rule out. The counter is the Host fake's own settlement, and the
+ *  extra painted frame covers the UI continuation scheduled by it. */
+async function awaitReadSettlement(h: Harness, expected: number, label: string): Promise<string> {
+  try {
+    await waitForFrame(
+      () => h.view(),
+      () => h.settledReadCount() >= expected,
+      () => h.vt.waitForRender(),
+      label,
+    )
+  } catch (error) {
+    throw new Error(`${(error as Error).message}\n`
+      + `the Host reads: issued ${h.readCount()}, settled ${h.settledReadCount()} (expected >= ${expected})`)
+  }
+  // One more painted frame: the settlement's UI continuation runs on the
+  // microtask queue, so observing the settled counter from a later task proves
+  // it already ran; this repaint makes its effect observable in the frame.
+  await h.vt.waitForRender()
+  return h.view()
+}
+
+/** The write labels that have SETTLED so far (the ordering witness).
+ *
+ *  A test that will write the SAME label twice takes this snapshot BEFORE the
+ *  action and waits for the entry after it: `settledWrites` is cumulative
+ *  history, so "the label appears somewhere" would be satisfied by the earlier
+ *  write and the second one could still be in flight. */
+function settledWritesMark(h: Harness): number {
+  return h.settledWrites().length
+}
+
+/** Wait for the write dispatched AFTER `mark` to settle (committed or rejected).
+ *
+ *  `mark` is {@link settledWritesMark} taken immediately before the gesture, so
+ *  a repeated label cannot satisfy the wait with an older record. `label` is
+ *  asserted on the NEW entry, which also proves the wait observed THIS write. */
+async function awaitWriteSettlement(h: Harness, label: string, mark: number): Promise<string> {
+  const matches = (): boolean => {
+    const settled = h.settledWrites()
+    return settled.length > mark
+      && settled.slice(mark).some(entry => entry.endsWith(`:${label}`) || entry === label)
+  }
+  try {
+    await waitForFrame(
+      () => h.view(),
+      matches,
+      () => h.vt.waitForRender(),
+      `the Host write ${label} to settle after mark ${mark}`,
+    )
+  } catch (error) {
+    throw new Error(`${(error as Error).message}\nsettled writes: ${JSON.stringify(h.settledWrites())} (mark ${mark})`)
+  }
+  await h.vt.waitForRender()
+  return h.view()
+}
+
+/** Move the page LIST cursor to `index` (0-based, the frozen order) from the
+ *  list's own Home position. Selection only: nothing opens, nothing writes. */
+async function pageListSelect(h: Harness, index: number): Promise<void> {
+  await key(h, HOME)
+  for (let step = 0; step < index; step += 1) await key(h, DOWN)
+}
+
+/**
+ * Settle the queued authority read(s) using MICROTASK yields only. The app's
+ * render is scheduled through a timer, so the command state advances while the
+ * painted frame still shows the previous facts — the exact window a user's
+ * Enter can arrive in.
+ */
+async function settleReadsWithoutRender(h: Harness, expected: number, label: string): Promise<void> {
+  for (let attempt = 0; attempt < 20_000; attempt += 1) {
+    if (h.settledReadCount() >= expected) return
+    await Promise.resolve()
+  }
+  assert.fail(`${label}: the read never settled on the microtask queue (issued ${h.readCount()}, settled ${h.settledReadCount()})`)
+}
+
+/**
+ * Dispatch ONE write whose queue-head PRE-read stays READABLE while the write's
+ * own verification readback R1 is UNREADABLE and held.
+ *
+ * The pre-read is issued first and captured as readable; the Host flips to
+ * unreadable before R1 is issued, then R1 is held by a fresh gate. The caller
+ * releases the returned R1 when its superseded/unreadable settlement is what
+ * the case is about.
+ */
+async function dispatchWithHeldUnreadableReadback(
+  h: Harness,
+  dispatch: () => Promise<void>,
+): Promise<() => void> {
+  const releasePre = h.holdRead()
+  const readsBefore = h.readCount()
+  await dispatch()
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 1,
+    () => h.vt.waitForRender(), 'the queue-head fresh pre-read to be issued')
+  h.store.readUndefined = true
+  const releaseR1 = h.holdRead()
+  releasePre()
+  // R1 must be ISSUED (and held) before the caller arms any broader gate: a
+  // later all-reads hold must not be the thing that keeps R1 pending.
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
+    () => h.vt.waitForRender(), 'the write readback R1 to be issued')
+  return releaseR1
+}
+
+/** Open the Web page's row Detail for `index` from the LIST. */
+async function openWebRow(h: Harness, index: number): Promise<void> {
+  await pageListSelect(h, index)
+  await key(h, ENTER)
+}
+
+/** Return from a row Detail to the page LIST at its first row. Esc from a
+ *  Detail only steps back (never writes); the caller must not be at the list
+ *  already, where Esc would close the page. */
+async function webListTop(h: Harness): Promise<void> {
+  await key(h, ESC)
+  await key(h, HOME)
+}
+
+/** Highlight one candidate of the open choice (Home = first candidate, then
+ *  Down). Moving the highlight never writes. */
+async function chooseCandidate(h: Harness, index: number): Promise<void> {
+  await key(h, HOME)
+  for (let step = 0; step < index; step += 1) await key(h, DOWN)
+}
+
+/** Open `/settings` and reach the `Tools` rows level (the Web launcher's own
+ *  category; Visual tools is the first row). */
+async function openOtherRows(h: Harness): Promise<void> {
+  h.invoke('settings')
+  for (let attempt = 0; attempt < 20 && !h.view().includes('Settings ·'); attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 5))
+    await h.vt.waitForRender()
+  }
+  await selectSettingsCategory(h.vt, 'Tools')
+  await key(h, ENTER)
+}
+
+/** Wait for the page's SETTLED facts (the mount triggers a fresh Host read). */
+async function settleWebPage(h: Harness): Promise<string> {
+  return settlePainted(h, 'the Web page to paint its settled facts', frame =>
+    frame.includes('Web Search Provider') && !frame.includes('Loading…'))
+}
+
+/** Drive `/settings` → Tools → Web Search / Fetch into the Web page and wait
+ *  for its settled authority facts. */
+async function openWebPage(h: Harness): Promise<string> {
+  await openOtherRows(h)
+  await key(h, DOWN)
+  await key(h, ENTER)
+  return settleWebPage(h)
+}
+
+/** Leave the Settings surface through its real Esc ladder (the page may own a
+ *  Detail/List level; the workspace itself needs the last Esc). */
+async function closeWorkspace(h: Harness): Promise<void> {
+  for (let attempt = 0; attempt < 8 && h.view().includes('Settings ·'); attempt += 1) await key(h, ESC)
+  assert.doesNotMatch(h.view(), /Settings ·/u, 'the workspace really closed')
+}
+
+/** Append to the endpoint editor's seeded draft. The editor opens on the
+ *  authoritative value; a REAL write needs a different draft (an unchanged
+ *  draft is a zero-write `verified`). */
+async function editEndpointDraft(h: Harness, suffix: string): Promise<void> {
+  for (const character of suffix) await key(h, character)
+}
+
+/** The endpoint editor's settle: its own verdict is PAINTED (a verified save
+ *  closes it; Not saved/Outcome unknown stays with its message). */
+async function settleEndpointPanel(h: Harness): Promise<string> {
+  const submitted = `endpoint:${h.store.web.api.baseURL}`
+  return await settlePainted(h, `the endpoint write's painted verdict (${submitted})`, frame =>
+    !frame.includes('Saving…')
+    && (!frame.includes('Enter confirm · Esc cancel')
+      || /Not saved|Outcome unknown/u.test(frame)))
+}
+
+test('the workspace row reports the configured providers and opens the Web page focused', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.invoke('settings')
+  await h.vt.waitForRender()
+  await selectSettingsCategory(h.vt, 'Tools')
+  await key(h, ENTER)
+  assert.match(h.view(), /Web Search \/ Fetch/u)
+  // The launcher's own Detail carries the authoritative summary plus the
+  // billing/credential/entry facts (the narrow row column only shows a prefix).
+  await key(h, DOWN)
+  const rowView = h.view()
+  const compactRow = (): string => rowView.replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
+  assert.match(rowView, /Search: Messages · Fetch: HTTP/u, 'the launcher shows the authoritative provider summary')
+  assert.match(rowView, /Configure Web…/u, 'the row Detail paints the ONE page entry')
+  assert.match(compactRow(), /billed separately/u)
+  assert.match(compactRow(), /not an Optional.*?Bundle/u)
+  assert.match(compactRow(), /Share Original Question is on by default/u)
+  assert.match(compactRow(), /up to 128 characters/u)
+  assert.match(compactRow(), /authoritative read-back agree/u)
+  assert.match(compactRow(), /credential reference/u)
+  assert.match(compactRow(), /Enter opens the Web/u)
+
+  // Enter mounts the SAME-lease Web page and triggers a FRESH Host read.
+  await key(h, ENTER)
+  const page = await settleWebPage(h)
+  assert.match(page, /Settings · Tools · Web Search \/ Fetch/u, 'the page is the Tools row sub-view')
+  // The six frozen rows, in order, on one frame (120x40 paints the whole list).
+  let previous = -1
+  for (const label of ['Web Search Provider', 'Web Fetch Provider', 'Search API Result Count',
+    'Share Original Question', 'Search / Fetch API Endpoint', 'DeepSeek API Key']) {
+    const at = page.indexOf(label)
+    assert.ok(at > previous, `the frozen row order holds (${label}):\n${page}`)
+    previous = at
+  }
+  assert.match(page, /Current: Messages/u, 'the selected row states the real Host value')
+  assert.match(page, /› Messages · built-in default \[current\]/u,
+    'the current candidate carries the [current] chip')
+  assert.equal(h.readCount() >= 1, true, 'opening the page really read the Host')
+
+  // Enter opens the Detail, the highlight moves, Enter confirms EXACTLY once.
+  await key(h, ENTER)
+  await chooseCandidate(h, 1) // Messages -> DeepSeek Search API
+  assert.equal(h.writes.length, 0, 'choosing a candidate never writes')
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
+  await settlePainted(h, 'the verified provider Detail', frame =>
+    frame.includes('Current: DeepSeek Search API') && frame.includes('Verified'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+  assert.match(h.view(), /Verified/u, 'the write is verified by the read-back')
+  assert.match(h.view(), /› DeepSeek Search API .*\[current\]/u,
+    'the [current] chip follows the verified read-back')
+  assert.doesNotMatch(h.view(), /› Messages .*\[current\]/u, 'the old candidate loses the chip')
+})
+
+test('a failed write is reported as Not saved and never claims a save', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  h.store.failNext = 'settings mutate rejected'
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  await key(h, ENTER)
+  const refused = await settlePainted(h, 'the failed write reported as Not saved', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host store keeps the previous value')
+  assert.match(refused, /Not saved · settings mutate rejected/u, `the failure is reported as Not saved:\n${refused}`)
+  assert.doesNotMatch(refused, /Verified/u, 'a rejected write is never Verified')
+  assert.match(refused, /Current: Messages/u, 'the Detail states the value the Host still holds')
+})
+
+test('two confirmed intents commit in FIFO order and never overlap', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.writeDelayMs = 150
+  await openWebPage(h)
+  // Intent A (search provider): dispatched, deliberately slow.
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  await key(h, ENTER)
+  // Intent B (count 10 -> 20) while A is still in flight: it joins the SAME
+  // single FIFO, so it can only START after A settled.
+  await webListTop(h)
+  await openWebRow(h, 2)
+  await chooseCandidate(h, 2) // 5,10,20,50 -> 20
+  const markB = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'count:20', markB)
+  assert.deepEqual(h.log, [
+    'begin:search:deepseek-search-api',
+    'search:deepseek-search-api',
+    'begin:count:20',
+    'count:20',
+  ], 'the second intent does not even START until the first settled')
+  assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+  assert.equal(h.store.web.api.count, 20)
+})
+
+test('a resolved provider mutation the Host does not commit is Not saved, never a save', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  h.store.keptProviderValue = 'deepseek-official'
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  await key(h, ENTER)
+  const refused = await settlePainted(h, 'the refused mutation to paint Not saved', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'], 'the mutation really ran')
+  assert.equal(h.store.web.searchProvider, 'deepseek-official', 'the Host kept its own value')
+  assert.match(refused, /the Host keeps "Messages" instead of the submitted value/u,
+    `the verdict names the value the Host keeps:\n${refused}`)
+  assert.match(refused, /Current: Messages/u, 'the Detail reports the Host value, never the request')
+  assert.doesNotMatch(refused, /Verified/u)
+
+  // The highlight returns to the value the Host HOLDS: confirming again submits
+  // the OTHER candidate (deepseek-search-api), never the rejected intent twice.
+  await webListTop(h)
+  await openWebRow(h, 0)
+  const markSecond = settledWritesMark(h)
+  await chooseCandidate(h, 1)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markSecond)
+  assert.deepEqual(h.writes, ['search:deepseek-search-api', 'search:deepseek-search-api'],
+    'the selector sits on the Host value, not on the rejected intent')
+})
+
+test('two confirmed selections end on the Host value when the second is not committed', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+
+  // First: Messages -> DeepSeek Search API (verified).
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  const markFirst = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markFirst)
+  await settlePainted(h, 'the first selection to paint Verified', frame =>
+    frame.includes('Verified') && frame.includes('Current: DeepSeek Search API'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+
+  // Second: back to Messages, but the Host keeps the first selection.
+  await webListTop(h)
+  await openWebRow(h, 0)
+  h.store.keptProviderValue = 'deepseek-search-api'
+  await chooseCandidate(h, 0)
+  const markSecond = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-official', markSecond)
+  const refused = await settlePainted(h, 'the refused second intent', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api', 'the Host keeps the first selection')
+  assert.match(refused, /the Host keeps "DeepSeek Search API"/u, `the verdict names the kept value:\n${refused}`)
+
+  // The highlight follows the Host value (index 1), so the next confirm submits
+  // the OTHER candidate — never the rejected intent again.
+  await webListTop(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 0)
+  const markThird = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-official', markThird)
+  assert.deepEqual(
+    h.writes,
+    ['search:deepseek-search-api', 'search:deepseek-official', 'search:deepseek-official'],
+    'the selector sits on the value the Host kept',
+  )
+})
+
+test('the page deeplink is reachable and Esc cancels without a write', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 1) // Web Fetch Provider
+  assert.match(h.view(), /Current: HTTP/u)
+  await chooseCandidate(h, 1) // HTTP -> DeepSeek Fetch API
+  assert.equal(h.writes.length, 0, 'moving the highlight writes nothing')
+  await key(h, ESC) // Detail -> list, still no write
+  assert.deepEqual(h.writes, [])
+  assert.match(h.view(), /Enter open/u, 'Esc from the Detail returned to the page list')
+  await key(h, ESC) // list -> Tools rows
+  // The root keeps the row's Detail focus, exactly like the allowlist picker
+  // return: the Tools rows are painted again with the Web row selected.
+  assert.match(h.view(), /Rows \(2\)/u, 'Esc from the list returns to the Tools rows')
+  assert.match(h.view(), /Configure Web…/u, 'the Web row owns the frame again')
+  assert.deepEqual(h.writes, [], 'the whole cancel path wrote nothing')
+})
+
+test('closing and reopening the page shows the committed values', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', 0)
+  await settlePainted(h, 'the verified write', frame => frame.includes('Verified'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+  // Detail -> list -> Tools rows -> categories -> close.
+  await webListTop(h)
+  await closeWorkspace(h)
+  await openWebPage(h)
+  assert.match(h.view(), /Current: DeepSeek Search API/u, 'the reopened page shows the committed value')
+})
+
+test('an unavailable section offers no write and no candidates', async t => {
+  const h = setup({ available: false })
+  t.after(h.dispose)
+  const page = await openWebPage(h)
+  assert.match(page, /Unavailable/u, 'the rows state the unreadable authority')
+  assert.match(page, /the Host Web provider settings are not available on this backend/u, 'the Detail names the real reason')
+  // Enter opens the read-only Detail; Enter there must not write.
+  await openWebRow(h, 0)
+  assert.doesNotMatch(h.view(), /Enter confirm/u, 'no confirm affordance exists without an authority')
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'an unreadable configuration never accepts a write')
+})
+
+test('the credential row shows the reference and hands the Models deeplink to the root', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 5)
+  const detail = h.view()
+  assert.match(detail, /Reference: DEEPSEEK_API_KEY/u, 'the official credential reference is named')
+  assert.match(detail, /State: Configured · source: file/u, 'presence/source come from the store')
+  assert.match(detail, /› Configure in Models…/u, 'Configure is the active action')
+  assert.match(detail, /Clear in Models…/u, 'Clear is offered for a configured reference')
+  assert.doesNotMatch(detail, /secret|sk-/u, 'no secret value is ever painted')
+
+  // Enter mounts the EXISTING Models page in the SAME lease — never `/login`.
+  await key(h, ENTER)
+  await settlePainted(h, 'the Models page on the DEEPSEEK_API_KEY reference', frame =>
+    frame.includes('Settings · Models') && frame.includes('DEEPSEEK_API_KEY'))
+  assert.match(h.view(), /Settings · Models/u, 'the root switched to the Models category')
+  assert.deepEqual(h.delegated, [], 'no /login command line was executed by the Web page')
+})
+
+test('a configured custom provider id stays visible and offers no candidate', async t => {
+  const h = setup({ searchProvider: 'acme-search' })
+  t.after(h.dispose)
+  const page = await openWebPage(h)
+  assert.match(page, /acme-search/u, 'the custom route is reported as-is')
+  await openWebRow(h, 0)
+  const detail = h.view()
+  assert.match(detail, /Current: acme-search/u)
+  assert.match(detail, /CUSTOM route/u, 'the Detail states that it is not selectable here')
+  assert.doesNotMatch(detail, /› /u, 'no selectable candidate is painted')
+  assert.doesNotMatch(detail, /Enter confirm/u, 'no Confirm affordance exists for a custom route')
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'a custom route is never silently replaced')
+})
+
+test('the endpoint editor joins the SAME FIFO: no Web write overlaps another', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.writeDelayMs = 150
+  await openWebPage(h)
+  // Queue the (slow) provider write first.
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  await key(h, ENTER)
+  // Then open the endpoint editor and confirm its draft: with ONE owner FIFO the
+  // endpoint write starts only after the provider write settled.
+  await webListTop(h)
+  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
+  await editEndpointDraft(h, '/v2')
+  const markEndpoint = settledWritesMark(h)
+  await key(h, ENTER) // confirm the endpoint draft
+  await awaitWriteSettlement(h, 'endpoint:https://api.deepseek.com/v1/tools/v2', markEndpoint)
+  assert.deepEqual(h.log, [
+    'begin:search:deepseek-search-api',
+    'search:deepseek-search-api',
+    'begin:endpoint:https://api.deepseek.com/v1/tools/v2',
+    'endpoint:https://api.deepseek.com/v1/tools/v2',
+  ], 'the endpoint write does not even START until the pending selection settled')
+  assert.equal(h.maxConcurrentWrites(), 1, 'never two Web writes in flight at once')
+  assert.equal(h.store.web.searchProvider, 'deepseek-search-api')
+})
+
+test('an unreadable authority after a successful read drops to Unavailable, never a stale current', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  assert.match(h.view(), /\[current\]/u, 'the first read paints the verified state')
+  await closeWorkspace(h)
+  h.store.readThrows = true
+  await openOtherRows(h)
+  assert.match(h.view(), /Unavailable/u, 'the launcher states the failure')
+  assert.doesNotMatch(h.view(), /Search: Messages/u, 'the old summary never survives as current')
+  await key(h, DOWN)
+  await key(h, ENTER)
+  const page = await settlePainted(h, 'the page to paint the failed read', frame =>
+    frame.includes('Web Search Provider') && !frame.includes('Loading…'))
+  assert.match(page, /Unavailable/u)
+  assert.match(page, /settings descriptor unreadable/u, 'the reason is the real read failure')
+  assert.doesNotMatch(page, /\[current\]/u, 'no row claims a current value it cannot read')
+  assert.deepEqual(h.writes, [])
+})
+
+test('a mounted but MALFORMED Web section reads as unavailable and accepts no write', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.readUndefined = true
+  const page = await openWebPage(h)
+  assert.match(page, /Unavailable/u, 'an unreadable section is stated, never shown as current')
+  assert.doesNotMatch(page, /\[current\]/u)
+  await openWebRow(h, 0)
+  await key(h, ENTER)
+  await new Promise(resolve => setTimeout(resolve, 10))
+  await h.vt.waitForRender()
+  assert.deepEqual(h.writes, [], 'a malformed section never accepts a write')
+})
+
+test('a workspace opened while the authority is pending paints Loading…, never the previous state', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  assert.match(h.view(), /\[current\]/u, 'the settled read paints the verified state')
+  await closeWorkspace(h)
+
+  const release = h.holdAllReads()
+  t.after(release)
+  h.invoke('settings')
+  await h.vt.waitForRender()
+  await selectSettingsCategory(h.vt, 'Tools')
+  await key(h, ENTER)
+  const firstFrame = h.view()
+  assert.match(firstFrame, /Loading…/u, `the reopened workspace is pending:\n${firstFrame}`)
+  assert.doesNotMatch(firstFrame, /Search: Messages/u,
+    'the previous summary is never presented as the current state')
+
+  // Entering the page starts its OWN fresh read, which is held too: the page's
+  // first frames state Loading… instead of a last-known value.
+  await key(h, DOWN)
+  await key(h, ENTER)
+  const pendingPage = h.view()
+  assert.match(pendingPage, /Web Search Provider/u)
+  assert.match(pendingPage, /Loading…/u, `the page starts pending:\n${pendingPage}`)
+  assert.doesNotMatch(pendingPage, /\[current\]/u)
+
+  release()
+  const settled = await settlePainted(h, 'the held reads to settle the page', frame =>
+    frame.includes('Current: Messages') && !frame.includes('Loading…'))
+  assert.match(settled, /\[current\]/u)
+})
+
+test('a new read clears the previous read ERROR: pending, not a stale Unavailable', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.readThrows = true
+  await openWebPage(h)
+  assert.match(h.view(), /Unavailable/u, 'the failed read is stated')
+  await closeWorkspace(h)
+
+  h.store.readThrows = false
+  const release = h.holdAllReads()
+  t.after(release)
+  h.invoke('settings')
+  await h.vt.waitForRender()
+  await selectSettingsCategory(h.vt, 'Tools')
+  await key(h, ENTER)
+  const firstFrame = h.view()
+  assert.match(firstFrame, /Loading…/u, `the reopened workspace is pending again:\n${firstFrame}`)
+  assert.doesNotMatch(firstFrame, /Unavailable/u, 'the previous error state does not survive into the new read')
+  release()
+  await settlePainted(h, 'the new read to paint the facts', frame =>
+    frame.includes('Search: Messages') && !frame.includes('Loading…'))
+})
+
+test('the workspace `r` refresh re-enters pending instead of repainting the cached summary', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await key(h, ESC) // list -> Tools rows (the Web row stays selected)
+  assert.match(h.view(), /Settings · Tools/u, 'Esc restored the Workspace rows level')
+  assert.match(h.view(), /Search: Messages/u, 'the settled summary is visible on the rows level')
+
+  const release = h.holdAllReads()
+  t.after(release)
+  await key(h, 'r')
+  const pending = h.view()
+  assert.match(pending, /Loading…/u, `the refresh enters the pending state:\n${pending}`)
+  assert.doesNotMatch(pending, /Search: Messages/u, 'the cached summary is not repainted while the read is pending')
+  release()
+  await settlePainted(h, 'the refreshed read to paint the facts', frame =>
+    frame.includes('Search: Messages') && !frame.includes('Loading…'))
+})
+
+test('entering the Web page paints Loading…, never the last-known value', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  assert.match(h.view(), /\[current\]/u, 'the settled page paints the verified state')
+  await key(h, ESC)
+  assert.match(h.view(), /Settings · Tools/u)
+
+  // The page's own mount read is held: its first frame states Loading….
+  const release = h.holdAllReads()
+  t.after(release)
+  await key(h, ENTER)
+  const pending = h.view()
+  assert.match(pending, /Loading…/u, `the page starts pending:\n${pending}`)
+  assert.doesNotMatch(pending, /\[current\]/u,
+    'no row claims a current value while the read is in flight')
+  release()
+  const settled = await settlePainted(h, 'the mounted read to repaint the verified state', frame =>
+    /\[current\]/u.test(frame) && frame.includes('Current: Messages'))
+  assert.doesNotMatch(settled, /Loading…/u)
+})
+
+test('a page reopened after a FAILED read states Loading…, not the stale error', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.readThrows = true
+  await openWebPage(h)
+  assert.match(h.view(), /Unavailable/u, 'the failure is stated')
+  await key(h, ESC)
+
+  h.store.readThrows = false
+  const release = h.holdAllReads()
+  t.after(release)
+  await key(h, ENTER)
+  const pending = h.view()
+  assert.match(pending, /Loading…/u, `the reopened page is pending:\n${pending}`)
+  assert.doesNotMatch(pending, /Current: Unavailable/u, 'the previous read error does not survive into the new read')
+  release()
+  await settlePainted(h, 'the reopened page to repaint the settled facts', frame =>
+    frame.includes('Current: Messages') && !frame.includes('Loading…'))
+})
+
+test('an OLD read settling after a write never repaints the page with the pre-write state', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  assert.match(h.view(), /Current: Messages/u)
+  await key(h, ESC) // list -> Tools rows
+
+  // R1 observes the pre-write Host and is held; the page's own entry read (R2)
+  // supersedes it before any write.
+  const releaseR1 = h.holdRead()
+  t.after(releaseR1)
+  await key(h, 'r')
+  assert.match(h.view(), /Loading…/u, 'R1 is pending on the rows level')
+  await key(h, ENTER)
+  const settledPage = await settlePainted(h, 'the page entry read R2 to settle', frame =>
+    frame.includes('Current: Messages') && !frame.includes('Loading…'))
+
+  // A real write, then the held R1 settles: its pre-write snapshot must not
+  // overwrite the committed facts.
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  const markWrite = settledWritesMark(h)
+  await key(h, ENTER)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markWrite)
+  await settlePainted(h, 'the verified write', frame => frame.includes('Verified'))
+
+  const settledBeforeRelease = h.settledReadCount()
+  releaseR1()
+  await awaitReadSettlement(h, settledBeforeRelease + 1, 'the stale pre-write read to settle')
+  const after = h.view()
+  assert.match(after, /Current: DeepSeek Search API/u, `the committed facts survive the stale settlement:\n${after}`)
+  assert.doesNotMatch(after, /Current: Messages/u, 'the pre-write value never comes back')
+})
+
+test('a SUPERSEDED write readback never decides the verdict', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+
+  // The queue-head pre-read stays readable; the write's readback R1 observes
+  // an UNREADABLE Host and is held while a NEWER read R2 (the page's `r`)
+  // observes the post-write facts.
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  const markMutation = settledWritesMark(h)
+  const releaseR1 = await dispatchWithHeldUnreadableReadback(h, () => key(h, ENTER))
+  t.after(releaseR1)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markMutation)
+  assert.match(h.view(), /Saving…/u, 'the write really issued its verification read (R1 is pending)')
+
+  h.store.readUndefined = false
+  await key(h, 'r')
+  const newer = await settlePainted(h, 'the newer read R2 to commit the post-write facts', frame =>
+    frame.includes('Current: DeepSeek Search API') && !frame.includes('Loading…'))
+  assert.doesNotMatch(newer, /Not saved|Outcome unknown/u, 'R2 committed the post-write facts')
+
+  // R1 settles now (unreadable, superseded): it must not turn the committed
+  // result into a stale verdict.
+  const settledBeforeRelease = h.settledReadCount()
+  releaseR1()
+  await awaitReadSettlement(h, settledBeforeRelease + 1, 'the superseded readback to settle')
+  const after = h.view()
+  assert.doesNotMatch(after, /Not saved|Outcome unknown/u,
+    `no stale verdict leaks into the surface:\n${after}`)
+  assert.match(after, /Current: DeepSeek Search API/u, 'the newest facts survive')
+})
+
+test('a superseded readback settling while the newer read is STILL pending never judges', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  const markR1Write = settledWritesMark(h)
+  const releaseR1 = await dispatchWithHeldUnreadableReadback(h, () => key(h, ENTER))
+  t.after(releaseR1)
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', markR1Write)
+  assert.match(h.view(), /Saving…/u, 'R1 is pending')
+
+  // R2 is ALSO held, so it is pending when R1 settles.
+  h.store.readUndefined = false
+  const releaseR2 = h.holdAllReads()
+  t.after(releaseR2)
+  await key(h, 'r')
+  assert.match(h.view(), /Loading…/u, 'the newer read R2 is still pending')
+
+  const settledBeforeR1 = h.settledReadCount()
+  releaseR1()
+  const settledAfterR1 = await awaitReadSettlement(h, settledBeforeR1 + 1, 'the superseded readback R1 to settle')
+  assert.doesNotMatch(settledAfterR1, /Not saved|Outcome unknown/u,
+    `a superseded readback must not judge while the newer read is pending:\n${settledAfterR1}`)
+
+  // R2 settles: the newest facts decide.
+  const settledBeforeR2 = h.settledReadCount()
+  releaseR2()
+  await awaitReadSettlement(h, settledBeforeR2 + 1, 'the newest read R2 to settle')
+  const settled = await settlePainted(h, 'the newest read to paint its facts', frame =>
+    frame.includes('Current: DeepSeek Search API') && !frame.includes('Loading…'))
+  assert.doesNotMatch(settled, /Not saved|Outcome unknown/u, `the newest facts win:\n${settled}`)
+})
+
+test('a verified endpoint save closes the editor on the Host value', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
+  assert.match(h.view(), /Enter confirm · Esc cancel/u)
+  await editEndpointDraft(h, '/v2')
+  await key(h, ENTER) // confirm the edited draft value
+  await settleEndpointPanel(h)
+  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v2'], 'the mutation committed')
+  assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'the verified save closed the editor')
+  assert.ok(h.view().includes('Current: https://api.deepseek.com/v1/tools'),
+    `the row states the verified endpoint:\n${h.view()}`)
+})
+
+test('the endpoint editor reports Not saved with the value the Host actually kept', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  h.store.endpointStoredValue = 'https://other.example/v1'
+  await openWebRow(h, 4)
+  await editEndpointDraft(h, '/v2')
+  await key(h, ENTER)
+  await settleEndpointPanel(h)
+  const frame = h.view()
+  assert.match(frame, /Not saved/u, `the editor states the Host's own answer:\n${frame}`)
+  assert.ok(frame.includes('the Host keeps "https://other.example/v1"'),
+    `the editor reports the value the Host kept:\n${frame}`)
+  assert.ok(frame.includes('Enter confirm · Esc cancel'), 'the draft stays in the editor for correction')
+})
+
+test('the endpoint editor reports Outcome unknown when the read-back is unreadable', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4)
+  await editEndpointDraft(h, '/v2')
+  // The pre-read is readable; the write's verification readback is unreadable.
+  const releasePre = h.holdRead()
+  const readsBefore = h.readCount()
+  await key(h, ENTER)
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 1,
+    () => h.vt.waitForRender(), 'the queue-head fresh pre-read to be issued')
+  h.store.readUndefined = true
+  releasePre()
+  await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
+    () => h.vt.waitForRender(), 'the write readback R1 to be issued')
+  await settleEndpointPanel(h)
+  const frame = h.view()
+  assert.match(frame, /Outcome unknown/u, `an unobservable result is never a save:\n${frame}`)
+  assert.ok(frame.includes('the Host write could not be verified'),
+    `the editor states what could not be observed:\n${frame}`)
+  assert.doesNotMatch(frame, /Not saved/u, 'an unreadable read-back is never reported as not-saved')
+})
+
+/** One SUPERSEDED endpoint-readback scenario over the frozen sizes: R1 (the
+ *  write's verification read) observes an UNREADABLE Host and is held; R2 (the
+ *  page's `r`) observes the NEWEST facts and is also held. R1 settles while R2
+ *  is pending, then R2 decides. A verdict from the superseded R1 would be wrong
+ *  in every scenario. */
+function supersededEndpointCase(
+  name: string,
+  arrangeNewest: (h: Harness) => void,
+  assertVerdict: (frame: string, h: Harness) => Promise<void> | void,
+): void {
+  for (const [columns, rows] of SUPERSEDED_SIZES) {
+    test(`a superseded endpoint readback is judged by the NEWEST read at ${columns}x${rows}: ${name}`, async t => {
+      const h = setup({ columns, rows })
+      t.after(h.dispose)
+      await openWebPage(h)
+      await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
+      await editEndpointDraft(h, '/v2')
+      // Readable pre-read; the write's readback R1 is unreadable and held.
+      const releasePre = h.holdRead()
+      const readsBefore = h.readCount()
+      await key(h, ENTER) // dispatch the endpoint write
+      await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 1,
+        () => h.vt.waitForRender(), 'the queue-head fresh pre-read to be issued')
+      h.store.readUndefined = true
+      const releaseR1 = h.holdRead()
+      t.after(releaseR1)
+      releasePre()
+      await waitForFrame(() => h.view(), () => h.readCount() >= readsBefore + 2,
+        () => h.vt.waitForRender(), 'the write readback R1 to be issued')
+      await settlePainted(h, 'the endpoint editor to state Saving…', frame => frame.includes('Saving…'))
+
+      h.store.readUndefined = false
+      arrangeNewest(h)
+      const releaseR2 = h.holdAllReads()
+      t.after(releaseR2)
+      // Leave the editor (zero write): the dispatced write keeps settling in the
+      // command owner, and the page's own `r` then starts the NEWER read R2.
+      await key(h, ESC)
+      await key(h, 'r')
+      assert.match(h.view(), /Loading…/u, 'the newer read R2 is pending')
+
+      const settledBeforeR1 = h.settledReadCount()
+      releaseR1()
+      await awaitReadSettlement(h, settledBeforeR1 + 1, 'the superseded readback R1 to settle')
+      assert.doesNotMatch(h.view(), /Not saved|Outcome unknown/u,
+        `a superseded readback must not judge while the newer read is pending:\n${h.view()}`)
+
+      const settledBeforeR2 = h.settledReadCount()
+      releaseR2()
+      await awaitReadSettlement(h, settledBeforeR2 + 1, 'the newest read R2 to settle')
+      await settlePainted(h, 'the newest read to paint its verdict', frame =>
+        !frame.includes('Loading…') && !frame.includes('Saving…'))
+      await assertVerdict(h.view(), h)
+    })
+  }
+}
+
+/** The frozen sizes for the changed verdict sink. */
+const SUPERSEDED_SIZES = [[120, 40], [80, 10], [44, 20]] as const
+
+supersededEndpointCase(
+  'the newest read observed the submitted endpoint',
+  () => {},
+  async (frame, h) => {
+    assert.doesNotMatch(frame, /Not saved|Outcome unknown/u, `a verified write leaves no verdict:\n${frame}`)
+    // The endpoint editor always opens on the authoritative value: seeing it
+    // there proves the newest read decided (the row's own slot truncates).
+    await openWebRow(h, 4)
+    assert.ok(h.view().includes('https://api.deepseek.com/v1/tools'),
+      `the editor opens on the verified endpoint:\n${h.view()}`)
+    await key(h, ESC)
+  },
+)
+
+supersededEndpointCase(
+  'the Host kept another value',
+  h => { h.store.web.api.baseURL = 'https://other.example/v1' },
+  async (frame, h) => {
+    // R1 was UNREADABLE: an `Outcome unknown` here would be the superseded
+    // snapshot's answer, so `Not saved` proves the NEWEST facts decided.
+    assert.match(frame, /Not saved/u, `a kept value is reported as Not saved:\n${frame}`)
+    assert.doesNotMatch(frame, /Outcome unknown/u, `the superseded snapshot never decides:\n${frame}`)
+    if (!frame.includes('the Host keeps "https://other.example/v1"')) {
+      // The narrow page paints only the list, so the kept value is read from
+      // the endpoint editor, which always opens on the authoritative value.
+      await openWebRow(h, 4)
+      assert.ok(h.view().includes('https://other.example/v1'),
+        `the editor opens on the value the Host keeps:\n${h.view()}`)
+      await key(h, ESC)
+    }
+  },
+)
+
+supersededEndpointCase(
+  'the newest read could not read the Host',
+  h => { h.store.readUndefined = true },
+  (frame) => {
+    assert.match(frame, /Outcome unknown/u, `an unobservable result is Outcome unknown:\n${frame}`)
+    assert.doesNotMatch(frame, /Not saved/u)
+  },
+)
+
+test('a stored count outside the presets stays readable and navigation never rewrites it', async t => {
+  const h = setup({ count: 7 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 2)
+  const frame = h.view()
+  assert.match(frame, /Current: 7/u, `the raw Host integer is reported exactly:\n${frame}`)
+  // The four presets are offered, but NONE claims to be current (the stored 7
+  // is not one of them).
+  for (const preset of ['5', '10', '20', '50']) assert.match(frame, new RegExp(`[› ] ${preset}`, 'u'))
+  const countLine = frame.split('\n').find(line => line.includes('› 5')) ?? ''
+  assert.doesNotMatch(countLine, /\[current\]/u, 'no preset claims the stored 7 as current')
+  await key(h, ENTER) // open the Detail
+  assert.match(h.view(), /Current: 7/u)
+  assert.deepEqual(h.writes, [], 'browsing a non-preset count writes nothing')
+})
+
+test('Clear in Models… is painted as a disabled fact and is never focusable', async t => {
+  const h = setup({ configured: false })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER)
+  const detail = h.view()
+  assert.match(detail, /State: Not configured/u)
+  assert.match(detail, /Clear in Models… \(unavailable\)/u, `the disabled action is named:\n${detail}`)
+  // The CURSOR only visits enabled actions (the disabled Clear is a fact, not a
+  // target): Down cannot move the highlight onto it and the bar still describes
+  // the ONE action Enter would really run (Configure).
+  assert.doesNotMatch(detail, /› Clear in Models…/u, 'the disabled Clear never owns the cursor')
+  await key(h, DOWN)
+  assert.match(h.view(), /› Configure in Models…/u, 'the cursor stays on the ONE enabled action')
+  assert.match(h.view(), /Enter open in Models/u, 'the bar describes the enabled action the cursor owns')
+  assert.doesNotMatch(h.view(), /› Clear in Models…\(unavailable\)/u)
+  assert.deepEqual(h.writes, [])
+})
+
+test('no credential action is offered when the store is unavailable, and the bar says so', async t => {
+  const h = setup({ credentialStore: false })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER)
+  const detail = h.view()
+  assert.match(detail, /The official credential store is unavailable/u)
+  assert.doesNotMatch(detail, /Enter open in Models/u, 'no false Enter affordance without an action')
+  assert.match(detail, /Esc back/u)
+  await key(h, ENTER)
+  assert.doesNotMatch(h.view(), /Settings · Models/u)
+  assert.deepEqual(h.writes, [])
+})
+
+test('a stale backend keeps the readable facts but offers no candidate and dispatches nothing', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  h.setReadiness('stale')
+  await key(h, 'r') // the read is still readable; the backend is not current
+  await settlePainted(h, 'the stale refusal', frame => frame.includes('reconnecting'))
+  await pageListSelect(h, 0)
+  await key(h, ENTER)
+  const detail = h.view()
+  assert.match(detail, /Current: Messages/u, 'the readable fact is still painted')
+  assert.match(detail, /read-only until it reconnects/u, `the refusal names the reason:\n${detail}`)
+  assert.doesNotMatch(detail, /Enter confirm/u, 'no Confirm affordance exists on a non-current backend')
+  await key(h, ENTER)
+  assert.deepEqual(h.writes, [], 'a stale backend dispatches nothing')
+  // Recovery: a ready backend + a fresh read restore the candidates.
+  h.setReadiness('ready')
+  await key(h, 'r')
+  await settlePainted(h, 'the recovered candidates', frame => frame.includes('Enter confirm'))
+  await chooseCandidate(h, 1) // Messages (the current value) -> DeepSeek Search API
+  await key(h, ENTER)
+  await settlePainted(h, 'the recovered verified write', frame => frame.includes('Verified'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+})
+
+test('an external clear while the cursor sits on Clear clamps it to the still-enabled action', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER) // credential Detail
+  await key(h, DOWN) // Configure -> Clear (both enabled)
+  assert.match(h.view(), /› Clear in Models…/u)
+  // The reference is cleared OUTSIDE this surface: the fresh read removes Clear
+  // from the selectable set under the cursor.
+  h.store.web.credential = { configured: false }
+  await key(h, 'r')
+  await settlePainted(h, 'the fresh Not-configured facts', frame => frame.includes('State: Not configured'))
+  assert.match(h.view(), /› Configure in Models…/u, `the cursor is clamped onto the enabled action:\n${h.view()}`)
+  assert.doesNotMatch(h.view(), /› Clear in Models…/u)
+  assert.match(h.view(), /Clear in Models… \(unavailable\)/u)
+  assert.match(h.view(), /Enter open in Models/u, 'the bar describes the action Enter really runs')
+  // Enter really runs the clamped Configure (never a silent no-op).
+  await key(h, ENTER)
+  await settlePainted(h, 'the clamped Configure deeplink', frame =>
+    frame.includes('Settings · Models') && frame.includes('API Key Reference'))
+  assert.match(h.view(), /DEEPSEEK_API_KEY/u)
+})
+
+test('a stale backend closes an open endpoint draft with zero writes and recovers after reconnect', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // Enter on the endpoint row mounts its editor
+  assert.match(h.view(), /Enter confirm · Esc cancel/u)
+  h.setReadiness('stale')
+  // The key that discovers the non-current backend must NOT reach the draft.
+  await key(h, 'x')
+  const closed = h.view()
+  assert.doesNotMatch(closed, /Enter confirm · Esc cancel/u, `the draft closed without a Confirm:\n${closed}`)
+  assert.match(closed, /read-only until it reconnects/u, `the reason is painted:\n${closed}`)
+  // The endpoint DETAIL must not advertise the editor either: the backend is
+  // non-current, so the editor would refuse the next Confirm.
+  assert.doesNotMatch(closed, /Enter edit endpoint/u, `the stale Detail advertises no editor:\n${closed}`)
+  assert.match(closed, /r refresh · Esc back/u, 'the bar offers only the read refresh')
+  assert.deepEqual(h.writes, [], 'closing the draft writes nothing')
+  await key(h, ENTER)
+  assert.doesNotMatch(h.view(), /Enter confirm · Esc cancel/u, 'Enter on the stale Detail never opens the editor')
+  assert.deepEqual(h.writes, [], 'Enter on the read-only Detail dispatches nothing')
+  // Recovery: a current backend + a fresh read restore the explicit editor path.
+  h.setReadiness('ready')
+  await key(h, 'r')
+  await settlePainted(h, 'the recovered endpoint row', frame => frame.includes('Enter edit endpoint'))
+  await key(h, ENTER)
+  assert.match(h.view(), /Enter confirm · Esc cancel/u)
+  await editEndpointDraft(h, '/v3')
+  await key(h, ENTER)
+  await settleEndpointPanel(h)
+  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v3'])
+})
+
+test('a resize that clips the credential actions removes the Enter affordance and the hit target', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER) // credential Detail
+  await key(h, DOWN) // Configure -> Clear
+  assert.match(h.view(), /Enter open in Models/u)
+  // Tall -> very short: this frame grants ONE Detail row (the reference line),
+  // so the actions are cropped out of the CURRENT frame.
+  h.vt.resize(120, 4)
+  await h.vt.waitForRender()
+  const clipped = h.view()
+  assert.doesNotMatch(clipped, /Enter open in Models/u, `the clipped frame must not advertise Enter:\n${clipped}`)
+  assert.match(clipped, /r refresh · Esc back/u, 'only the read refresh is offered')
+  // No hit target either: Enter cannot navigate.
+  await key(h, ENTER)
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'Enter on a cropped action never navigates')
+  // Tall again: the action is really painted and advertised once more.
+  h.vt.resize(120, 40)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /› Clear in Models…/u, 'the restored frame paints the action cursor')
+  assert.match(h.view(), /Enter open in Models/u, 'the restored frame advertises the Enter')
+})
+
+test('an endpoint grant too short for the trust disclosure refuses the confirm', async t => {
+  const h = setup({ columns: 44, rows: 3 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // the endpoint row opens its editor with a 1-line body
+  const tiny = h.view()
+  assert.doesNotMatch(tiny, /Enter confirm/u, `a cropped disclosure offers no Confirm:\n${tiny}`)
+  assert.match(tiny, /enlarge for the warning/u, 'the bar states how to reveal the disclosure')
+  await key(h, ENTER)
+  assert.deepEqual(h.writes, [], 'a blind Confirm dispatches nothing')
+  // Revealing the disclosure re-enables the explicit confirm path.
+  h.vt.resize(44, 8)
+  await h.vt.waitForRender()
+  const revealed = await settlePainted(h, 'the revealed disclosure', frame => frame.includes('Enter confirm · Esc cancel'))
+  const disclosure = revealed.replace(/\s+/gu, ' ')
+  assert.match(disclosure, /it receives the API key and the query/u)
+  assert.match(disclosure, /The URL shape is not a trust check/u)
+  await editEndpointDraft(h, '/v4')
+  await key(h, ENTER)
+  await settleEndpointPanel(h)
+  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v4'])
+})
+
+test('a dispatched write keeps its live state visible on a grant too short for the disclosure', async t => {
+  const h = setup({ columns: 44, rows: 8 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4) // editor with the complete disclosure
+  h.store.failNext = 'mutate rejected'
+  const release = h.holdRead() // the refused write's reread stays pending => Saving…
+  t.after(release)
+  await editEndpointDraft(h, '/v5')
+  await key(h, ENTER) // dispatch the write
+  // Shrink below the disclosure: the live state must stay visible and the bar
+  // must not imply the dispatched mutation can be cancelled.
+  h.vt.resize(44, 3)
+  await h.vt.waitForRender()
+  const tinySaving = h.view()
+  assert.match(tinySaving, /Saving…/u, `the in-flight state survives the resize:\n${tinySaving}`)
+  assert.doesNotMatch(tinySaving, /Esc cancel/u,
+    `a dispatched write is never described as cancellable:\n${tinySaving}`)
+  release()
+  // The refusal settles while the grant is still tiny: its verdict stays visible.
+  const tinyRefused = await settlePainted(h, 'the refused verdict on the tiny grant', frame =>
+    frame.includes('Not saved'))
+  assert.match(tinyRefused, /Not saved/u)
+  assert.doesNotMatch(tinyRefused, /Esc cancel/u, 'a refused write is not a cancelled draft')
+  assert.deepEqual(h.writes, [], 'the failed setter dispatched no Host write')
+  // Enlarging reveals the full reason and restores the explicit confirm path;
+  // the draft survives, and a corrected confirm really writes.
+  h.vt.resize(44, 8)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Not saved · mutate rejected/u, `the full verdict is revealed:\n${h.view()}`)
+  await key(h, ENTER)
+  await settleEndpointPanel(h)
+  assert.deepEqual(h.writes, ['endpoint:https://api.deepseek.com/v1/tools/v5'])
+})
+
+test('an EXTERNAL provider change after the page read is never overwritten by a stale base', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  // The page's Detail was built from the official read...
+  await openWebRow(h, 0)
+  assert.match(h.view(), /Current: Messages/u)
+  // ...another Host writer then installs a CUSTOM route while the page is open.
+  h.store.web.searchProvider = 'acme-search'
+  // Confirm without refreshing the page: the queue head must re-read the Host
+  // and refuse with ZERO writes instead of overwriting the external value.
+  await chooseCandidate(h, 1)
+  await key(h, ENTER)
+  const refused = await settlePainted(h, 'the external custom route refusal', frame =>
+    frame.includes('Not saved') && !frame.includes('Saving…'))
+  assert.deepEqual(h.writes, [], 'the stale base never dispatches a Host write')
+  assert.equal(h.store.web.searchProvider, 'acme-search', 'the external custom route is preserved')
+  assert.match(refused, /custom route \(acme-search\)/u, `the refusal names the external route:\n${refused}`)
+  assert.match(refused, /Current: acme-search/u, 'the fresh authority facts replace the stale snapshot')
+})
+
+test('a HOST error reason with ANSI/OSC/CR/LF is sanitized at the display boundary', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  h.store.readThrows = true
+  h.store.readErrorMessage = 'bad \u001b[31mhost\u001b[0m \u001b]0;pwn\u0007 line\nbreak\rcr'
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  const frame = h.view()
+  assert.match(frame, /bad host/u, `the readable part of the reason survives:\n${frame}`)
+  assert.doesNotMatch(frame, /\u001b/u, `no escape byte reaches the frame:\n${JSON.stringify(frame)}`)
+  assert.doesNotMatch(frame, /pwn/u, 'an OSC payload is never painted')
+  assert.match(frame, /line break/u, 'CR/LF are collapsed instead of escaping the row budget')
+  await key(h, ENTER)
+  assert.deepEqual(h.writes, [])
+})
+
+test('a HOST failure reason with control text is sanitized inside the endpoint editor', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 4)
+  h.store.failNext = 'rejected \u001b[31mred\u001b[0m \u001b]0;title\u0007'
+  await editEndpointDraft(h, '/v9')
+  await key(h, ENTER)
+  const frame = await settlePainted(h, 'the sanitized endpoint error', frame => frame.includes('Not saved'))
+  assert.match(frame, /rejected red/u, `the readable reason survives:\n${frame}`)
+  assert.doesNotMatch(frame, /\u001b/u, 'no escape byte reaches the editor frame')
+  assert.doesNotMatch(frame, /title/u, 'the OSC payload is never painted')
+})
+
+test('the wheel scrolls a cropped list by moving the visible selection (44 and 80 columns)', async t => {
+  // 44×8: a 4-row list viewport.
+  const narrow = setup({ columns: 44, rows: 8 })
+  try {
+    await openWebPage(narrow)
+    const contentTop = 3 // header + metadata + rule
+    narrow.vt.sendInput(`\x1b[<65;5;${contentTop + 1}M`)
+    await narrow.vt.waitForRender()
+    assert.match(narrow.view(), /> Web Fetch Provider/u, `the wheel moved the selection:\n${narrow.view()}`)
+    for (let step = 0; step < 3; step += 1) {
+      narrow.vt.sendInput(`\x1b[<65;5;${contentTop + 1}M`)
+      await narrow.vt.waitForRender()
+    }
+    const scrolled = narrow.view()
+    assert.match(scrolled, /> Search \/ Fetch API Endpoint/u, `the list really scrolled to the later row:\n${scrolled}`)
+    assert.match(scrolled, /Search \/ Fetch API Endpoint/u)
+  } finally {
+    narrow.dispose()
+  }
+  // 80×10: the stacked medium layout with a 2-row list viewport.
+  const stacked = setup({ columns: 80, rows: 10 })
+  try {
+    await openWebPage(stacked)
+    const contentTop = 4 // header + metadata + rule + pane header
+    for (let step = 0; step < 3; step += 1) {
+      stacked.vt.sendInput(`\x1b[<65;5;${contentTop + 1}M`)
+      await stacked.vt.waitForRender()
+    }
+    const scrolled = stacked.view()
+    assert.match(scrolled, /> Share Original Question/u, `the stacked list scrolled to row 3:\n${scrolled}`)
+    assert.match(scrolled, /Search API Result Count/u, 'the scrolled window really moved')
+  } finally {
+    stacked.dispose()
+  }
+})
+
+test('a resize that crops the highlighted candidate removes the Enter confirm affordance', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 2) // count Detail
+  await key(h, DOWN) // 10 -> 20
+  assert.match(h.view(), /Enter confirm/u)
+  h.vt.resize(120, 3)
+  await h.vt.waitForRender()
+  const cropped = h.view()
+  assert.doesNotMatch(cropped, /Enter confirm/u, `a cropped candidate offers no Confirm:\n${cropped}`)
+  await key(h, ENTER)
+  assert.deepEqual(h.writes, [], 'Enter on an invisible candidate dispatches nothing')
+  h.vt.resize(120, 40)
+  await h.vt.waitForRender()
+  assert.match(h.view(), /Enter confirm · Esc back/u, 'the restored frame advertises the Confirm again')
+  await key(h, ENTER)
+  await settlePainted(h, 'the confirmed count write', frame => frame.includes('Verified'))
+  assert.deepEqual(h.writes, ['count:20'])
+})
+
+test('a list wheel re-anchors the Detail on the NEW row authoritative candidates', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0) // provider Detail keeps the keyboard
+  await chooseCandidate(h, 1) // DeepSeek Search API highlighted, not confirmed
+  assert.match(h.view(), /› DeepSeek Search API/u)
+  const listY = 5 // header + metadata + rule + pane header + row 0 (1-based SGR cell)
+  // The wheel moves the list SELECTION while the Detail keeps the keyboard.
+  h.vt.sendInput(`\x1b[<65;5;${listY}M`)
+  await h.vt.waitForRender()
+  const after = h.view()
+  assert.match(after, /Current: HTTP/u, 'the Detail followed the scrolled row')
+  assert.match(after, /› HTTP · anonymous default/u,
+    `the NEW row's current candidate is highlighted, never the stale index:\n${after}`)
+  assert.doesNotMatch(after, /› DeepSeek Fetch API/u)
+  // Enter confirms the NEW row's CURRENT value (already-current → zero writes).
+  await key(h, ENTER)
+  await settlePainted(h, 'the already-current confirmation to settle', frame => !frame.includes('Saving…'))
+  assert.deepEqual(h.writes, [], 'the wheel-selected row never confirms the previous row candidate')
+
+  // The credential row's action cursor converges the same way.
+  await key(h, ESC) // Detail -> list
+  await pageListSelect(h, 5)
+  await key(h, ENTER) // credential Detail
+  await key(h, DOWN) // Configure -> Clear
+  assert.match(h.view(), /› Clear in Models…/u)
+  h.vt.sendInput(`\x1b[<64;5;${listY}M`) // wheel up -> endpoint row
+  await h.vt.waitForRender()
+  h.vt.sendInput(`\x1b[<65;5;${listY}M`) // wheel down -> credential row again
+  await h.vt.waitForRender()
+  const credential = h.view()
+  assert.match(credential, /› Configure in Models…/u,
+    `the credential cursor re-anchors on the first selectable action:\n${credential}`)
+  assert.doesNotMatch(credential, /› Clear in Models…/u)
+})
+
+test('a dispatched choice write never advertises Enter confirm while it is saving', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  h.store.writeDelayMs = 300
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  await chooseCandidate(h, 1)
+  const mark = settledWritesMark(h)
+  await key(h, ENTER)
+  const saving = h.view()
+  assert.match(saving, /Saving…/u, `the in-flight state is painted:\n${saving}`)
+  assert.doesNotMatch(saving, /Enter confirm/u, `no Confirm is advertised while saving:\n${saving}`)
+  await key(h, ENTER) // must not dispatch a second intent
+  await awaitWriteSettlement(h, 'search:deepseek-search-api', mark)
+  assert.equal(h.writes.length, 1, 'Enter while saving dispatched nothing')
+  assert.match(h.view(), /Verified/u)
+  await settlePainted(h, 'the settled bar', frame => frame.includes('Enter confirm'))
+  assert.deepEqual(h.writes, ['search:deepseek-search-api'])
+})
+
+test('an Enter on a credential action invalidated by a fresh read is refused and repaints first', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER) // credential Detail
+  await key(h, DOWN) // Configure -> Clear
+  assert.match(h.view(), /› Clear in Models…/u)
+  // An EXTERNAL clear lands; the read settles, but the render timer has not
+  // painted a new frame yet (the exact stale-paint window).
+  h.store.web.credential = { configured: false }
+  const settledBefore = h.settledReadCount()
+  h.vt.sendInput('r') // start the authoritative read WITHOUT waiting for a paint
+  await settleReadsWithoutRender(h, settledBefore + 1, 'the fresh credential read')
+  assert.match(h.view(), /› Clear in Models…/u, 'the painted frame still shows the old action')
+  // Enter targets the STALE painted Clear: it must NOT silently run Configure.
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'the stale action never routes')
+  assert.match(h.view(), /State: Not configured/u, 'the refused gesture repaints the fresh facts')
+  assert.match(h.view(), /› Configure in Models…/u, 'the reconciled action is selected for the NEXT gesture')
+  // The next Enter acts on what is now really painted.
+  await key(h, ENTER)
+  await settlePainted(h, 'the Models route after the repaint', frame => frame.includes('Settings · Models'))
+  assert.match(h.view(), /DEEPSEEK_API_KEY/u)
+})
+
+test('a Detail scroll projection cannot advance the painted action before the frame', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER)
+  await key(h, DOWN) // cursor on Clear, painted
+  h.store.web.credential = { configured: false }
+  const settledBefore = h.settledReadCount()
+  h.vt.sendInput('r')
+  await settleReadsWithoutRender(h, settledBefore + 1, 'the fresh credential read')
+  assert.match(h.view(), /› Clear in Models…/u, 'the frame still paints Clear')
+  // A Detail scroll runs detailProjection()/credentialDetail() BEFORE any paint;
+  // that input-path projection must not advance the painted action identity.
+  h.vt.sendInput('\x1b[6~')
+  h.vt.sendInput('\r')
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u,
+    'a projection-only reconcile never lets Enter route to a different action')
+  assert.match(h.view(), /› Configure in Models…/u, 'the repaint shows the reconciled action')
+  await key(h, ENTER)
+  await settlePainted(h, 'the Models route after the repaint', frame => frame.includes('Settings · Models'))
+})
+
+test('a list frame cannot retain the credential action a previous Detail painted', async t => {
+  const h = setup({ columns: 44, rows: 20 }) // narrow: the list frame paints no Detail at all
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER) // credential Detail, Configure painted
+  assert.match(h.view(), /› Configure in Models…/u)
+  await key(h, ESC) // back to the list; this frame paints NO credential action
+  assert.doesNotMatch(h.view(), /Configure in Models…/u)
+  // Re-open the Detail and press Enter BEFORE its first frame: the marker from
+  // the earlier Detail must not survive the list frame it was replaced by.
+  h.vt.sendInput('\r') // reopen the Detail (openSelectedRow; no paint yet)
+  h.vt.sendInput('\r') // Enter before the newly opened Detail is painted
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'an unpainted Detail action is never activated')
+  assert.match(h.view(), /› Configure in Models…/u, 'the Detail paints its own cursor before any activation')
+  await key(h, ENTER)
+  await settlePainted(h, 'the Models route after the Detail painted', frame => frame.includes('Settings · Models'))
+  assert.match(h.view(), /DEEPSEEK_API_KEY/u)
+})
+
+test('a mouse click on a credential action invalidated by a fresh read is refused', async t => {
+  const h = setup({ columns: 120, rows: 40 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await pageListSelect(h, 5)
+  await key(h, ENTER)
+  await key(h, DOWN) // cursor on Clear
+  const line = h.view().split('\n').findIndex(text => text.includes('Clear in Models…'))
+  assert.ok(line >= 0)
+  const column = 40
+  h.store.web.credential = { configured: false }
+  const settledBefore = h.settledReadCount()
+  h.vt.sendInput('r')
+  await settleReadsWithoutRender(h, settledBefore + 1, 'the fresh credential read')
+  // Press AND release on the PAINTED Clear target BEFORE any render: the click
+  // must not redirect onto the reconciled Configure.
+  h.vt.sendInput(`\x1b[<0;${column + 1};${line + 1}M`)
+  h.vt.sendInput(`\x1b[<0;${column + 1};${line + 1}m`)
+  await h.vt.waitForRender()
+  assert.doesNotMatch(h.view(), /Settings · Models/u, 'the stale mouse target never routes')
+  assert.match(h.view(), /› Configure in Models…/u, 'the repaint shows the reconciled cursor')
+})
+
+test('a long custom provider id is wholly readable in the scrollable Detail', async t => {
+  const longId = `acme-${'x'.repeat(220)}-TAIL-ID`
+  const h = setup({ columns: 44, rows: 8, searchProvider: longId })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0) // the provider Detail (narrow, 4 body rows)
+  const first = h.view()
+  assert.doesNotMatch(first, /TAIL-ID/u, `the tail is below the first viewport:\n${first}`)
+  // Scroll the Detail: the whole Host id is reachable, never dropped by fit().
+  let scrolled = first
+  for (let step = 0; step < 8 && !scrolled.includes('TAIL-ID'); step += 1) {
+    await key(h, '\x1b[6~')
+    scrolled = h.view()
+  }
+  assert.match(scrolled, /TAIL-ID/u, `the whole custom id is readable after scrolling:\n${scrolled}`)
+  for (const line of h.view().split('\n')) assert.ok(visibleWidth(line) <= 44)
+})
+
+test('a long CJK custom provider id wraps cell-safely and stays wholly readable', async t => {
+  const longId = `搜索-${'提供方'.repeat(40)}-尾部标记`
+  const h = setup({ columns: 44, rows: 20, searchProvider: longId })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  let frame = h.view()
+  for (let step = 0; step < 4 && !frame.includes('尾部标记'); step += 1) {
+    await key(h, '\x1b[6~')
+    frame = h.view()
+  }
+  assert.match(frame, /尾部标记/u, `the CJK id tail is reachable:\n${frame}`)
+  for (const line of h.view().split('\n')) assert.ok(visibleWidth(line) <= 44)
+})
+
+test('a long Host failure reason is wholly readable in the Detail', async t => {
+  const longReason = `mutate rejected ${'r'.repeat(600)} REASON-TAIL`
+  const h = setup({ columns: 80, rows: 24 })
+  t.after(h.dispose)
+  await openWebPage(h)
+  await openWebRow(h, 0)
+  h.store.failNext = longReason
+  await chooseCandidate(h, 1)
+  await key(h, ENTER)
+  await settlePainted(h, 'the long refused verdict', frame => frame.includes('Not saved'))
+  let frame = h.view()
+  for (let step = 0; step < 6 && !frame.includes('REASON-TAIL'); step += 1) {
+    await key(h, '\x1b[6~')
+    frame = h.view()
+  }
+  assert.match(frame, /REASON-TAIL/u, `the whole failure reason is reachable:\n${frame}`)
+  assert.match(frame, /Not saved/u)
+})
+
+// ── D3-2: the page states the real rc.2 facts ──────────────────────────────
+
+test('the page states defaults, billing, the ori_question boundary and the endpoint trust warning', async t => {
+  const h = setup()
+  t.after(h.dispose)
+  await openWebPage(h)
+  const compact = (): string => h.view().replace(/[\u2500-\u257f│]/gu, ' ').replace(/\s+/gu, ' ')
+  assert.match(compact(), /Messages is the official default and does not call the billed Search API/u)
+  assert.match(compact(), /DeepSeek Search API is opt-in and separately billed/u)
+  assert.match(compact(), /a Messages plan does not guarantee coverage/u)
+  assert.match(compact(), /No write happens without an explicit Enter/u)
+  // The Share Original Question row states the packed ON default and the exact
+  // payload boundary (not the full history/system prompt).
+  await pageListSelect(h, 3)
+  assert.match(compact(), /Current: on/u)
+  assert.match(compact(), /packed default for the DeepSeek Search API/u)
+  assert.match(compact(), /up to 128 characters of the triggering human question as ori_question/u)
+  assert.match(compact(), /never the full history or the system prompt/u)
+  // The endpoint row is base-owned Web configuration, not a Bundle, and states
+  // the trusted-HTTPS/credential boundary.
+  await pageListSelect(h, 4)
+  assert.match(compact(), /Enter opens the endpoint editor/u)
+  assert.match(compact(), /Changing it sends the/u)
+  assert.match(compact(), /DeepSeek API credential and the query to that target/u)
+  assert.match(compact(), /confirm only a trusted HTTPS base/u)
+  assert.match(compact(), /the URL shape/u)
+  assert.match(compact(), /is checked, not the host's trust/u)
+  assert.match(compact(), /Official base: https:\/\/api\.deepseek\.com\/v1\/tools/u)
+})

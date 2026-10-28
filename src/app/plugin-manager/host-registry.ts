@@ -1,58 +1,48 @@
 /**
- * Token-owned active-surface registry for the Plugin Manager (P1-A).
+ * Token-owned active-page registry for the Plugin Manager (P1-A / PR2).
  *
- * ONE manager surface owns the manager at a time across its two entries
- * (`/plugins` and `/settings → Plugins`). The token distinguishes a NORMAL
- * user close (the Close action, or Esc at the root) from an EXTERNAL teardown
- * (the Settings parent being hidden/disposed, which disposes the hosted Plugin
- * page WITHOUT invoking its `done()`): an external teardown must release
- * the owner but never fake a user close — otherwise a later `/plugins` would
- * wrongly believe the manager is still open and refuse to open.
+ * The Plugin Manager is hosted by exactly ONE place: the `Settings → Plugins`
+ * embedded page inside the Settings workspace lease. This registry fences that
+ * single ownership: the Settings root claims the controller when it mounts the
+ * page and releases the claim in the page's `onDispose` — never on a focus
+ * yield back to the Categories rail (the page keeps its query/selection/scroll
+ * and the controller keeps its install request id).
+ *
+ * The token makes a late release inert: an old page can never release the
+ * claim of a newer one. A second claim while a page is still alive is a
+ * programming error (the Settings root itself never builds a second page), so
+ * it throws synchronously instead of nesting owners.
  *
  * @module @xmoon76/dsh-pi-tui/app/plugin-manager/host-registry
  */
 
-/** The active-surface claim for one host. */
+/** The single active-page claim. */
 export interface PluginManagerHostClaim {
-  readonly token: object
-  /** Release the owner and run the user close path. */
-  closeNormally(): void
-  /** Release the owner only: the surface was torn down externally. */
-  releaseExternally(): void
+  /** Release the owner. Idempotent; a stale token never releases a newer claim. */
+  release(): void
 }
 
-/** Token-owned active-host registry (see the module header). */
+/** Token-owned single-owner registry (see the module header). */
 export class PluginManagerHostRegistry {
-  private active: { readonly token: object; readonly close: () => void } | undefined
+  private active: object | undefined
 
-  /** Whether any Plugin Manager surface currently owns the manager. */
+  /** Whether the embedded Plugin page currently owns the controller. */
   isOpen(): boolean {
     return this.active !== undefined
   }
 
-  /** Invoke the ACTIVE surface's user close path (no-op when closed). */
-  closeActive(): void {
-    this.active?.close()
-  }
-
   /**
-   * Claim the manager for one surface. `close` is the surface's user close
-   * path (what {@link closeActive} calls); `onNormalClose` runs ONLY for a
-   * normal close. A later claim nests over — and restores — the previous owner.
+   * Claim the controller for the ONE embedded page. Throws synchronously when
+   * a page already owns it: the product allows exactly one owner.
    */
-  claim(close: () => void, onNormalClose: () => void = () => {}): PluginManagerHostClaim {
+  claim(): PluginManagerHostClaim {
+    if (this.active !== undefined) throw new Error('the Plugin Manager already has an owning page')
     const token = {}
-    const previous = this.active
-    this.active = { token, close }
-    const restore = (): boolean => {
-      if (this.active?.token !== token) return false
-      this.active = previous
-      return true
-    }
+    this.active = token
     return {
-      token,
-      closeNormally: () => { if (restore()) onNormalClose() },
-      releaseExternally: () => { restore() },
+      release: () => {
+        if (this.active === token) this.active = undefined
+      },
     }
   }
 }

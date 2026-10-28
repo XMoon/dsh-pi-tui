@@ -39,7 +39,7 @@ interface CaptureRecord {
   disposed: boolean
 }
 
-/** The registry's observable snapshot (diagnostics + /status). */
+/** The registry's observable snapshot (Plugin Manager diagnostics). */
 export interface AdvancedInputRegistrySnapshot {
   readonly captures: readonly {
     readonly id: string
@@ -145,7 +145,7 @@ export class AdvancedInputRegistry {
     }
   }
 
-  /** Whether any capture is live (health /status). */
+  /** Whether any capture is live (Plugin Manager diagnostics). */
   hasAny(): boolean {
     for (const record of this.records.values()) {
       if (!record.disposed) return true
@@ -153,7 +153,7 @@ export class AdvancedInputRegistry {
     return false
   }
 
-  /** An immutable snapshot (diagnostics + /status). */
+  /** An immutable snapshot (Plugin Manager diagnostics). */
   snapshot(): AdvancedInputRegistrySnapshot {
     const captures = [...this.records.values()]
       .filter(record => !record.disposed)
@@ -223,7 +223,7 @@ export class AdvancedInputRegistry {
       return false
     } catch (error) {
       // Fail-open: a throwing handler never consumes; the event continues
-      // down the Host ladder. Recorded for /status diagnostics.
+      // down the Host ladder. Recorded for Plugin Manager diagnostics.
       this.health?.recordError(record.id, record.owner, safeMessage(error))
       return false
     }

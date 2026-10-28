@@ -8,6 +8,7 @@
  * @module @xmoon76/dsh-pi-tui/test/support/tsp-picker-wire
  */
 import assert from 'node:assert/strict'
+import type { Op } from '@stencil-hq/tern'
 import type { TspPane } from './tsp-terminal-fixture.ts'
 
 export interface WireNode {
@@ -20,6 +21,71 @@ export interface WireNode {
 /** Fold the pane's frame ops into the live node set (a retired receiver is
  *  gone, so it can never satisfy an assertion). */
 export function wireNodes(pane: TspPane): WireNode[] {
+  return foldWireNodes(pane.frames())
+}
+
+/**
+ * The pane's frames addressed at ONE surface, in order. A renderer may own more
+ * than one surface at a time (the resident inline base plus a temporary
+ * `mode:'screen'` page) whose node ids both derive from `main`/`dock`/`layer`,
+ * so evidence about one surface must be read from ITS own frames.
+ */
+export function surfaceFrames(pane: TspPane, sf: string): Array<{ readonly sf: string; readonly s: number; readonly ops: readonly Op[] }> {
+  return pane.frames().filter(frame => frame.sf === sf)
+}
+
+/** The live node set of ONE surface. */
+export function surfaceNodes(pane: TspPane, sf: string): WireNode[] {
+  return foldWireNodes(surfaceFrames(pane, sf))
+}
+
+/** Every live text value of ONE surface (plain text and spans), in node order. */
+export function surfaceTexts(pane: TspPane, sf: string): string[] {
+  const out: string[] = []
+  for (const node of surfaceNodes(pane, sf)) {
+    if (typeof node.p.text === 'string' && node.p.text !== '') {
+      out.push(node.p.text)
+      continue
+    }
+    const spans = node.p.spans
+    if (!Array.isArray(spans)) continue
+    const text = spans.map(entry => {
+      if (typeof entry === 'string') return entry
+      if (entry !== null && typeof entry === 'object') {
+        const value = (entry as { readonly t?: unknown }).t
+        if (typeof value === 'string') return value
+      }
+      return ''
+    }).join('')
+    if (text !== '') out.push(text)
+  }
+  return out
+}
+
+/** The `scroll` ops ONE surface received, in order. */
+export function surfaceScrollOps(pane: TspPane, sf: string): Array<{ readonly id: string; readonly to: string }> {
+  const out: Array<{ readonly id: string; readonly to: string }> = []
+  for (const frame of surfaceFrames(pane, sf)) {
+    for (const op of frame.ops) {
+      if (op[0] === 'scroll') out.push({ id: String(op[1]), to: String(op[2]) })
+    }
+  }
+  return out
+}
+
+/** The `focus` ops ONE surface received, in order. */
+export function surfaceFocusOps(pane: TspPane, sf: string): Array<string | null> {
+  const out: Array<string | null> = []
+  for (const frame of surfaceFrames(pane, sf)) {
+    for (const op of frame.ops) {
+      if (op[0] === 'focus') out.push(op[1] === null ? null : String(op[1]))
+    }
+  }
+  return out
+}
+
+/** Fold a frame sequence into the live node set. */
+function foldWireNodes(frames: ReadonlyArray<{ readonly ops: readonly Op[] }>): WireNode[] {
   const live = new Map<string, WireNode>()
   const parents = new Map<string, string>()
   const remove = (id: string): void => {
@@ -33,7 +99,7 @@ export function wireNodes(pane: TspPane): WireNode[] {
     parents.set(node.id, parent)
     for (const child of node.c ?? []) add(child, node.id)
   }
-  for (const frame of pane.frames())
+  for (const frame of frames)
     for (const op of frame.ops) {
       if (op[0] === 'add') add(op[4] as unknown as WireNode, String(op[2]))
       if (op[0] === 'del') remove(String(op[1]))
@@ -55,6 +121,32 @@ export function wireNodes(pane: TspPane): WireNode[] {
       }
     }
   return [...live.values()]
+}
+
+/**
+ * The live text of EVERY frame the pane committed, in order.
+ *
+ * The FINAL live set answers "what is on the screen now"; it cannot answer
+ * "was a wrong row ever painted", because a row that was painted and later
+ * removed is gone from it. A negative guarantee ("this row never appears")
+ * needs every intermediate state, and that is what this returns: one entry
+ * per frame, each the live text after that frame.
+ *
+ * The text of each entry comes from the live nodes' OWN `p.text` — the
+ * nested `c` arrays are the snapshots the node was added with, and a `del`
+ * does not prune them, so a recursive walk would report a DELETED row.
+ */
+export function wireTextPerFrame(pane: TspPane): string[][] {
+  const frames = pane.frames()
+  const states: string[][] = []
+  for (let index = 0; index < frames.length; index += 1) {
+    states.push(
+      foldWireNodes(frames.slice(0, index + 1))
+        .map(node => node.p.text)
+        .filter((text): text is string => typeof text === 'string' && text !== ''),
+    )
+  }
+  return states
 }
 
 /** The `/model` layer's key prefix (the default of every helper below). */
@@ -80,12 +172,6 @@ export function pickerProps(pane: TspPane, prefix = MODEL_LAYER_PREFIX): Record<
   return pickerNode(pane, prefix)?.p ?? {}
 }
 
-/** A picker the caller has ALREADY waited for (a hard assertion, not a poll). */
-export function requiredProps(pane: TspPane): Record<string, unknown> {
-  assert.ok(pickerNode(pane), 'the native model picker must be mounted')
-  return pickerProps(pane)
-}
-
 /** Every visible text of the committed layer, plain and span text alike. */
 export function sheetText(pane: TspPane, prefix = MODEL_LAYER_PREFIX): string {
   const out: string[] = []
@@ -104,12 +190,6 @@ export function sheetText(pane: TspPane, prefix = MODEL_LAYER_PREFIX): string {
     }
   }
   return out.join(' | ')
-}
-
-/** Whether the mounted layer renders the inline Reasoning Effort card (the card's
- *  head is a PROP, so it never appears in the visible text). */
-export function hasEffortCard(pane: TspPane): boolean {
-  return layerNodes(pane).some((node) => node.k === 'card' && node.p.head === 'Reasoning Effort')
 }
 
 /** One named action of the picker's action bar. */
@@ -143,22 +223,6 @@ export function clickLayerNode(pane: TspPane, fragment: string, prefix = MODEL_L
   const node = layerNodes(pane, prefix).find((entry) => entry.id.includes(fragment))
   assert.ok(node, `no node matching ${fragment} in ${layerNodes(pane, prefix).map((n) => n.id).join(', ')}`)
   clickNodeById(pane, node.id)
-}
-
-/** A Row the SDK dispatches `onClick` on (an effort radio row). */
-export function rowNode(pane: TspPane, fragment: string, prefix = MODEL_LAYER_PREFIX): WireNode {
-  const node = layerNodes(pane, prefix).find((entry) => entry.k === 'row' && entry.id.includes(fragment))
-  assert.ok(node, `no row matching ${fragment} in ${layerNodes(pane, prefix).map((n) => n.id).join(', ')}`)
-  return node
-}
-
-/** A Card the SDK dispatches its own `onClick` on (the wide details card). The
- *  card is found by a fragment of its key; its `head` is a PROP, so a test can
- *  assert the affordance text without reaching into renderer state. */
-export function cardNode(pane: TspPane, fragment: string, prefix = MODEL_LAYER_PREFIX): WireNode {
-  const node = layerNodes(pane, prefix).find((entry) => entry.k === 'card' && entry.id.includes(fragment))
-  assert.ok(node, `no card matching ${fragment} in ${layerNodes(pane, prefix).map((n) => n.id).join(', ')}`)
-  return node
 }
 
 /** Wait until the model picker is mounted and in one exact state. */

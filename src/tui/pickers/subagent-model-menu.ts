@@ -58,9 +58,30 @@ export interface AllowlistCatalogServices {
   loadDirectory(signal?: AbortSignal): Promise<ModelDirectoryDto>
 }
 
+/**
+ * The precise permission edit one toggle performs. The picker's own working copy
+ * is a VIEW of a section it read earlier, so replaying its whole list would drop
+ * whatever another surface committed in between; the queue applies THIS diff to
+ * the section it really holds at write time instead.
+ */
+export interface SubagentRouteIntentWriter {
+  add(route: SubagentAllowedModelRoute): Promise<void>
+  remove(route: SubagentAllowedModelRoute): Promise<void>
+}
+
 export interface SubagentAllowlistPickerDeps {
-  /** The official settings sub-domain (read + whole-section writes). */
+  /** The official settings sub-domain (read + whole-section writes).
+   *  `available()` answers "may a route be written RIGHT NOW": it is checked
+   *  before every toggle, so a stale/unavailable authority refuses instead of
+   *  painting an optimistic marker that can never commit. */
   selection: SubagentModelSelectionConfig
+  /**
+   * The route-diff write seam. When composed, a toggle submits exactly the
+   * `(provider, model)` pair it changed instead of replaying the picker's whole
+   * list, so two picker instances cannot erase each other's grants. Absent (the
+   * picker's own unit tests) keeps the whole-section `selection.set` path.
+   */
+  routeIntent?: SubagentRouteIntentWriter
   /** The provider/model discovery catalog for the picker rows. */
   catalog: AllowlistCatalogServices
   /** Surface notice for refused toggles (never a bare console write). */
@@ -76,7 +97,13 @@ export interface SubagentAllowlistPickerDeps {
    * row's displayed summary through this narrow seam instead — it never
    * re-opens the submenu or moves the cursor.
    */
-  summarize(value: string): void
+  /** @param summary the committed allowlist summary (display only — the outer
+   *  surface re-reads its own authority; it never trusts this string as fact). */
+  summarize(summary: string): void
+  /** The owner's diagnostics channel. A write that fails AFTER the picker
+   *  closed keeps its no-late-toast UX, but the failure must stay diagnosable
+   *  (the repository's failure model: never swallow an error). */
+  diag?: { warn(message: string, fields?: Record<string, unknown>): void }
   /** The owned-task entry (runOwned shape): async loads route through it
    *  instead of a bare `void promise` (AGENTS.md hard rule). */
   runOwned<T>(
@@ -220,7 +247,18 @@ export function projectSubagentAllowlist(input: {
  * overlay); Esc returns to `/settings` in one step.
  */
 export class SubagentModelAllowlistPicker implements Component, Focusable, RowBudgetAware {
+  /** The pane-header / breadcrumb name the Settings workspace root paints for
+   *  this embedded specialist page (C2-R3). */
+  readonly title = 'Subagent allowed models'
+  /** The breadcrumb segment after the owning row (`Settings · Agent ·
+   *  Subagent allowed models · Allowed models`). */
+  readonly breadcrumbSuffix = 'Allowed models'
   private readonly deps: SubagentAllowlistPickerDeps
+  /** Whether this picker has ever read a REAL section (see the constructor). */
+  private sectionReadable = false
+  /** The last list a REAL section read produced. A rejected write that cannot
+   *  re-read the authority rolls back to THIS, never to the optimistic marker. */
+  private committedAllowed: readonly SubagentAllowedModelRoute[] = []
   private readonly enabled: boolean
   private allowed: readonly SubagentAllowedModelRoute[]
   /** The catalog authority state: `loading` until the one official read
@@ -261,9 +299,25 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
 
   constructor(deps: SubagentAllowlistPickerDeps) {
     this.deps = deps
-    const current = deps.selection.get()
-    this.allowed = current.allowedModels.map(route => ({ ...route }))
-    this.enabled = current.enabled
+    // An UNREADABLE section must not crash the surface that hosts the picker.
+    // The picker then starts EMPTY and every write is refused by the queue's
+    // own unreadable guard, so nothing can be written from this state; the
+    // first successful settle re-derives the real section.
+    let current: { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } | undefined
+    try {
+      // An UNAVAILABLE section answers with the shipped default instead of
+      // throwing; that default is not a readable state either.
+      current = deps.selection.available() ? deps.selection.get() : undefined
+    } catch {
+      current = undefined
+    }
+    /** Whether this picker ever read a real section. While false, nothing may be
+     *  displayed as the committed allowlist: an optimistic marker on an unknown
+     *  section could otherwise be reported as a summary the Host never stored. */
+    this.sectionReadable = current !== undefined
+    this.allowed = current === undefined ? [] : current.allowedModels.map(route => ({ ...route }))
+    this.committedAllowed = this.allowed.map(route => ({ ...route }))
+    this.enabled = current?.enabled === true
     this.picker = new SearchablePicker([], 8, selectListTheme, {}, {
       enableSearch: true,
       showHint: true,
@@ -389,16 +443,22 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
 
   private toggle(route: SubagentAllowedModelRoute): void {
     if (this.disposed) return
+    // The section must be WRITABLE right now: a stale/unavailable backend keeps
+    // readable last-known values, so an optimistic toggle there could never
+    // commit and would silently roll back. Refuse BEFORE the optimistic marker
+    // instead of pretending the route changed.
+    if (!this.deps.selection.available()) {
+      this.deps.notify('the official subagent settings are not current; the allowlist was not changed', 'error')
+      return
+    }
     const present = this.allowed.some(existing =>
       existing.provider === route.provider && existing.model === route.model)
     if (present) {
-      // Removing the LAST route while enabled would leave the official
-      // section invalid; the Host would reject the write, so the toggle is
-      // refused before it — the panel's markers stay truthful.
-      if (lastRouteWhileEnabled(this.enabled, this.allowed, route)) {
-        this.deps.notify('disable subagent model selection before removing the last route', 'error')
-        return
-      }
+      // NO local last-route pre-check here: this working copy is a VIEW of a
+      // section read earlier, and other intents may already be queued ahead of
+      // this one (a disable, an enable, another grant). The queue's FRESH guard
+      // owns that decision, in FIFO order — deciding it locally would refuse an
+      // operation that is legal by the time it runs.
       this.allowed = this.allowed.filter(existing =>
         !(existing.provider === route.provider && existing.model === route.model))
     } else {
@@ -413,42 +473,120 @@ export class SubagentModelAllowlistPicker implements Component, Focusable, RowBu
     this.deps.requestRender()
     const payload = this.allowed.map(existing => ({ ...existing }))
     this.mutationChain = this.mutationChain
-      .then(() => this.deps.selection.set({ enabled: this.enabled, allowedModels: payload }))
+      .then(() => this.writeIntent(route, present, payload))
       .then(
         () => { this.syncFromSection() },
         (error: unknown) => {
-          this.syncFromSection()
-          // A failure settling AFTER the picker closed is silent: the outer
-          // row already converged to the committed summary, and a late toast
-          // would only describe a panel the user left.
-          if (!this.disposed) {
-            this.deps.notify(`allowlist write failed: ${error instanceof Error ? error.message : String(error)}`, 'error')
+          if (!this.syncFromSection()) this.rollbackToCommitted()
+          const reason = error instanceof Error ? error.message : String(error)
+          // A failure settling AFTER the picker closed is silent to the USER (a
+          // late toast would only describe a panel they left) — but it is NOT
+          // silent to the OWNER: the dispatched write failed and that must stay
+          // diagnosable.
+          if (this.disposed) {
+            this.deps.diag?.warn('subagent allowlist write settled after close', {
+              operation: 'subagent-allowlist-write',
+              outcome: 'failed',
+              reason,
+            })
+            return
           }
+          this.deps.notify(`allowlist write failed: ${reason}`, 'error')
         },
       )
   }
 
-  /** Re-read the committed section and re-derive the working copy plus every
-   *  visible marker. When the picker is already CLOSED, the outer /settings
-   *  row must still converge to the COMMITTED summary — the fork rejects a
-   *  `done` from a closed submenu, so the post-close convergence goes through
-   *  `summarize` (a row-display update, never navigation), and the late
-   *  failure keeps its no-toast contract. */
-  private syncFromSection(): void {
-    const committed = this.deps.selection.get().allowedModels
+  /**
+   * Submit ONE route change. With the composed `routeIntent` seam the write is
+   * the exact `(provider, model)` add/remove; without it (the picker's own unit
+   * composition) the whole-section `set` keeps its historical contract.
+   */
+  private writeIntent(
+    route: SubagentAllowedModelRoute,
+    removed: boolean,
+    payload: readonly SubagentAllowedModelRoute[],
+  ): Promise<void> {
+    const intent = this.deps.routeIntent
+    // With the composed seam the QUEUE decides legality from the fresh section
+    // (in FIFO order), so a locally-decided refusal would be wrong.
+    if (intent !== undefined) return removed ? intent.remove(route) : intent.add(route)
+    // The whole-section fallback (this picker's own unit composition and any
+    // caller that does not compose the seam) must still honour the official
+    // rule: an enabled section can never be written with zero routes.
+    if (lastRouteWhileEnabled(this.enabled, payload, route) || (this.enabled && payload.length === 0)) {
+      return Promise.reject(new Error('enabled subagent model selection requires at least one allowed model'))
+    }
+    return Promise.resolve(this.deps.selection.set({ enabled: this.enabled, allowedModels: [...payload] }))
+  }
+
+  /**
+   * Re-read the committed section and re-derive the working copy plus every
+   * visible marker. A settle after CLOSE still converges the outer row's
+   * summary (the fork rejects a `done` from a closed submenu), and the late
+   * failure keeps its no-toast contract.
+   *
+   * An UNREADABLE section is not a value: the working copy is left untouched
+   * and no summary is invented, so the display never claims a state the
+   * authority could not confirm.
+   */
+  private syncFromSection(): boolean {
+    let committed: readonly SubagentAllowedModelRoute[]
+    try {
+      // An UNAVAILABLE section answers with the shipped default; that is not a
+      // committed value, so it may not overwrite the working copy.
+      if (!this.deps.selection.available()) return false
+      committed = this.deps.selection.get().allowedModels
+    } catch {
+      return false
+    }
+    this.sectionReadable = true
     this.allowed = committed.map(existing => ({ ...existing }))
+    this.committedAllowed = this.allowed.map(route => ({ ...route }))
     if (this.disposed) {
-      this.deps.summarize(allowlistSummary(this.allowed))
+      const summary = this.summaryOrNone()
+      if (summary !== undefined) this.deps.summarize(summary)
+      return true
+    }
+    this.rebuild()
+    this.deps.requestRender()
+    return true
+  }
+
+  /**
+   * A rejected write that could not re-read the authority must not leave the
+   * optimistic marker on screen: the section never accepted it, so the picker
+   * rolls back to the last list a REAL read produced (and reports no summary if
+   * it never read one).
+   */
+  private rollbackToCommitted(): void {
+    this.allowed = this.committedAllowed.map(route => ({ ...route }))
+    if (this.disposed) {
+      // The picker is closed: its own frame is gone, but the OUTER row may still
+      // be showing the summary this picker reported on close. Correct it to the
+      // committed list instead of leaving an uncommitted route counted there.
+      const summary = this.summaryOrNone()
+      if (summary !== undefined) this.deps.summarize(summary)
       return
     }
     this.rebuild()
     this.deps.requestRender()
   }
 
+  /**
+   * The summary this picker may report to the outer legacy row. It describes the
+   * last list a REAL read produced — never the working copy, which may still
+   * carry an optimistic marker for a write that has not settled (or was
+   * refused). A picker that never read a real section reports nothing at all,
+   * so the outer row keeps its own authoritative value.
+   */
+  private summaryOrNone(): string | undefined {
+    return this.sectionReadable ? allowlistSummary(this.committedAllowed) : undefined
+  }
+
   private close(): void {
     if (this.disposed) return
     this.disposed = true
-    this.deps.done(allowlistSummary(this.allowed))
+    this.deps.done(this.summaryOrNone())
   }
 
   /** Latch the picker as closed from OUTSIDE (the /settings overlay teardown

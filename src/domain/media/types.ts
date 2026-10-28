@@ -47,3 +47,46 @@ export interface ImageLimitsLike {
   readonly maxImageDimension: number
   readonly mediaTypes: readonly ImageMediaType[]
 }
+
+/** The graphics protocol a surface currently reports, as the terminal
+ * capability source describes it. `null` means no inline graphics at all. */
+export type InlineImageProtocol = 'kitty' | 'iterm2' | null
+
+/**
+ * Whether a surface with `protocol` paints REAL PIXELS for `mediaType`.
+ *
+ * This answers ONE question: may this surface paint `mediaType` as pixels? It
+ * does not absorb a surface's own extra admission rules, and it does not decide
+ * a surface's protocol SCOPE.
+ *
+ * Current consumers compose it with their own constraints instead of repeating
+ * the protocol/MIME table: the transcript thumbnail and `ImageViewerPanel` both
+ * call it (the panel additionally restricts the workspace to Kitty, which is a
+ * scope decision, not a MIME one).
+ *
+ * KNOWN EXCEPTION, not implied to be unified here: `DraftImagePreview` keeps its
+ * own copy of the protocol/MIME check inside `canRenderPixels()` alongside its
+ * byte budget. That duplication predates this helper and is deliberately out of
+ * this change's scope; a future cleanup should have it compose this answer with
+ * its budget.
+ *
+ * The table this answers:
+ *
+ * - `null` (no inline graphics) — never.
+ * - Kitty accepts PNG only. This bundle installs no transcoder, so another
+ *   raster format renders as the fork's `imageFallback` TEXT row, which must
+ *   never be treated as a clickable pixel body.
+ * - iTerm2 carries the original MIME capability, so every accepted raster type
+ *   is a real pixel render.
+ *
+ * A caller that paints a fallback TEXT row must therefore report no pixel body
+ * for it (see `ImageThumbnail.paintedImageBody`).
+ */
+export function imagePixelsSupported(
+  protocol: InlineImageProtocol,
+  mediaType: ImageMediaType,
+): boolean {
+  if (protocol === null) return false
+  if (protocol === 'kitty') return mediaType === 'image/png'
+  return true
+}

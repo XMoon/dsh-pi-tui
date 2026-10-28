@@ -1,0 +1,250 @@
+/**
+ * Vocabulary tests for the runtime backend (M1.1/M1.2): the capability list
+ * is the migration's domain vocabulary, and the Direct backend is the
+ * current production surface. These pin the vocabulary so a later
+ * milestone cannot silently drop or rename a capability the ports depend
+ * on.
+ * @module @xmoon76/dsh-pi-tui/runtime-backend.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { CAPABILITIES, DIRECT_IMPLEMENTED_CAPABILITIES } from '../../src/runtime/capability.ts'
+import { createDirectBackend } from '../../src/runtime/backend.ts'
+import type { SubagentPort } from '../../src/runtime/subagent-port.ts'
+import type { PendingInputReader } from '../../src/runtime/pending-input-reader-port.ts'
+
+test('the capability vocabulary covers the migration domains', () => {
+  assert.deepEqual(CAPABILITIES, [
+    'session-read',
+    'session-write',
+    'session-lifecycle',
+    'subagent',
+    'interaction',
+    'catalog',
+    'config',
+    'host-file',
+    'session-archive',
+    'host-command',
+    'plugin-manager',
+    'job-observation',
+  ])
+})
+
+test('the Direct backend is the current production surface and serves EXACTLY the implemented capabilities', () => {
+  const subagent: SubagentPort = {
+    prompt: async () => ({ kind: 'rejected', reason: { kind: 'unavailable' } }),
+    interrupt: async () => ({ kind: 'committed' }),
+  }
+  const sessionReader = {
+    list: async () => [],
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
+  }
+  const pendingInputReader: PendingInputReader = {
+    snapshot: () => ({ running: false, items: [] }),
+  }
+  const sessionWriter = {
+    prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+    updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+    cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+    rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
+    refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
+  }
+  const sessionLifecycle = {
+    create: async () => ({}) as never,
+    open: async () => ({}) as never,
+    fork: async () => ({}) as never,
+  }
+  const interaction = {
+    questions: {
+      onRequest: () => true,
+      subscribe: () => undefined,
+      snapshot: () => undefined,
+      claimTimedWait: async () => undefined,
+      answerContinued: async () => 'not-continued' as const,
+    },
+    onApprovalRequest: () => {},
+    setApprovalPolicy: () => true,
+  }
+  const catalog = {
+    models: {
+      available: () => true,
+      loadDirectory: async () => ({ default: { provider: '', model: '' }, routableProviders: [], groups: [], failures: [] }),
+      listProviders: () => [],
+      listModels: async () => [],
+      defaultSelection: () => undefined,
+      saveDefaultSelection: async () => ({ kind: 'committed' as const, value: undefined }),
+      sessionSelection: () => undefined,
+      selectSessionModel: async () => ({ ownership: 'current' as const, outcome: { kind: 'committed' as const, value: { provider: '', model: '' } } }),
+      discoverModels: async () => [],
+      listConfigurableProviders: () => [],
+    },
+    presets: {
+      available: () => false,
+      roster: async () => ({ presets: [] }),
+      resolve: async () => ({}),
+      defaultId: () => undefined,
+      selectSessionPreset: async () => ({ ownership: 'current' as const, outcome: { kind: 'committed' as const, value: { preset: '' } } }),
+    },
+    skills: {
+      standing: async () => ({ catalog: { skills: [], complete: true } }),
+      listHumanSkills: async () => undefined,
+      resolveSkill: async () => ({ kind: 'unavailable' as const }),
+      hostLoadsSkillBody: () => false,
+      onSkillsChange: () => {},
+    },
+  }
+  const config = {
+    configReadiness: () => 'ready' as const,
+    tuiSettings: undefined,
+    footerCommandTrust: {
+      userFooterMode: undefined,
+      command: undefined,
+      userCommandItemActivationIds: new Set<string>(),
+      userCommandItemFallbackActivationIds: new Set<string>(),
+    },
+    footerCustomItems: {
+      get: () => ({ items: [], invalidCount: 0 }),
+      rawForPersistence: () => ({ kind: 'available' as const, value: undefined }),
+    },
+    providers: {
+      available: () => true,
+      listCredentialOptions: () => [],
+      readCatalog: () => ({ options: [], profiles: [] }),
+      readProfile: (route: string) => ({ route, configured: false, models: [] }),
+      configGuide: () => ({}),
+      writeProfile: async () => {},
+      writeKeylessProfile: async () => ({ kind: 'written' as const }),
+    },
+    account: {
+      available: () => false,
+      getState: async () => { throw new Error('account unavailable') },
+      getProfile: async () => null,
+      getBalance: async () => null,
+      watch: async function* () {},
+      getCallbackOrigin: () => undefined,
+      startSignIn: async () => { throw new Error('account unavailable') },
+      cancelSignIn: async () => { throw new Error('account unavailable') },
+      signOut: async () => { throw new Error('account unavailable') },
+      hasRunningAccountTasks: () => false,
+    },
+    credentials: {
+      recordsSupported: () => true,
+      available: () => true,
+      setReference: async () => {},
+      unsetReference: async () => {},
+      deleteRecord: async () => {},
+      describeReference: async () => ({ configured: false }),
+      listRecords: async () => [],
+      onChanged: () => () => {},
+    },
+    authorization: {
+      available: () => false,
+      listTargets: () => [],
+      begin: async () => ({ kind: 'unavailable' as const }),
+      onEvent: () => () => {},
+      respond: async () => {},
+      cancel: async () => {},
+    },
+    permissions: {
+      approvalOverrideAvailable: () => true,
+      presetNames: () => [],
+      defaultPreset: () => undefined,
+      setDefaultPreset: async () => {},
+      approvalOverrideOf: () => undefined,
+      applyPermissionPreset: async () => ({ kind: 'applied' as const }),
+    },
+    subagentModelSelection: {
+      available: () => false,
+      get: () => ({ enabled: false, allowedModels: [] }),
+      set: async () => {},
+    },
+    presetDefault: {
+      available: () => true,
+      get: () => undefined,
+      set: async () => {},
+    },
+    web: {
+      available: () => false,
+      read: async () => undefined,
+      setSearchProvider: async () => {},
+      setFetchProvider: async () => {},
+      setSearchApiCount: async () => {},
+      setSendOriginalQuestion: async () => {},
+      setSearchApiBaseURL: async () => {},
+    },
+    visualTools: {
+      read: () => undefined,
+      setEnabled: async (_enabled: boolean, _revision: number) => {},
+    },
+  }
+  const hostFile = {
+    listReferences: async () => ({ kind: 'ok' as const, items: [] }),
+    resolveReference: async () => ({ kind: 'missing' as const }),
+    canonicalizeMentions: async (_scope: unknown, text: string) => text,
+  }
+  const sessionArchive = {
+    open: async () => ({ kind: 'unavailable' as const }),
+  }
+  const hostCommand = {
+    execute: async () => ({ kind: 'committed' as const, matched: false as const }),
+  }
+  const pluginManager = {
+    snapshot: async () => ({
+      bundles: [],
+      plugins: [],
+      registries: { registry: null, fallbackRegistries: [], resolved: null },
+      exemptions: [],
+      exemptionWarnings: [],
+    }),
+    inspect: async () => ({ status: 'refused' as const, problem: 'unknown', reason: 'test' }),
+    setBundleEnabled: async () => ({ changed: false, application: 'applied' as const, stage: 'enable' as const, target: '' }),
+    setPluginEnabled: async () => ({ changed: false, application: 'applied' as const, stage: 'enable' as const, target: '' }),
+    removeBundle: async () => ({ changed: false, application: 'applied' as const, stage: 'remove' as const, target: '' }),
+    startInstall: async () => ({ changed: false, application: 'applied' as const, stage: 'install' as const, target: '' }),
+    waitForInstall: async () => null,
+    cancelInstall: async () => ({ status: 'not-running' as const }),
+    subscribeInstall: () => () => {},
+    subscribeInvalidation: () => () => {},
+  }
+  const jobObservation = {
+    open: () => () => {},
+    stop: async () => ({ kind: 'requested' as const }),
+  }
+  const hostUserShell: import('../../src/runtime/host-user-shell-port.ts').HostUserShellPort = {
+    availability: { supported: true, policies: ['bypass'] },
+    execute: async () => ({ kind: 'unavailable', reason: { reason: 'policy-unavailable', message: 'stub' } }),
+  }
+  const deliveredFileRead: import('../../src/runtime/deliverables-port.ts').DeliveredFileReadPort = {
+    stat: async () => ({ version: 'v1' }),
+    read: async () => ({ stat: { version: 'v1' }, offset: 1, limit: 1, text: '', lines: 0, eof: true }),
+  }
+  const backend = createDirectBackend(subagent, sessionReader, pendingInputReader, sessionWriter, sessionLifecycle, interaction, catalog, config, hostFile, sessionArchive, hostCommand, pluginManager, jobObservation, hostUserShell, deliveredFileRead)
+  assert.equal(backend.kind, 'direct')
+  assert.equal(backend.subagent, subagent)
+  assert.equal(backend.sessionReader, sessionReader)
+  assert.equal(backend.pendingInputReader, pendingInputReader)
+  assert.equal(backend.sessionWriter, sessionWriter)
+  assert.equal(backend.sessionLifecycle, sessionLifecycle)
+  assert.equal(backend.interaction, interaction)
+  assert.equal(backend.catalog, catalog)
+  assert.equal(backend.config, config)
+  assert.equal(backend.hostFile, hostFile)
+  assert.equal(backend.sessionArchive, sessionArchive)
+  assert.equal(backend.hostCommand, hostCommand)
+  assert.equal(backend.pluginManager, pluginManager)
+  assert.equal(backend.jobObservation, jobObservation)
+  // Truthful advertisement: the backend serves EXACTLY the implemented
+  // ports — nothing is advertised without a port.
+  for (const capability of DIRECT_IMPLEMENTED_CAPABILITIES) {
+    assert.ok(backend.capabilities.has(capability), `direct serves ${capability}`)
+  }
+  for (const capability of CAPABILITIES) {
+    if (DIRECT_IMPLEMENTED_CAPABILITIES.includes(capability)) continue
+    assert.ok(!backend.capabilities.has(capability), `direct does NOT advertise ${capability} (no port yet)`)
+  }
+})

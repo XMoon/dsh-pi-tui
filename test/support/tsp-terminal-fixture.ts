@@ -49,7 +49,6 @@ class FakeInput extends EventEmitter implements TermInput {
     this.emit('data', ENCODER.encode(text))
   }
 }
-
 class FakeOutput extends EventEmitter implements TermOutput {
   readonly isTTY = true
   readonly columns = 100
@@ -102,6 +101,18 @@ export interface TspPane {
   /** Successfully RECORDED `x {"id":…,"keep":false}` surface frames (not a
    *  count of Session.close() calls: a failed `x` write is not recorded here). */
   closeFrames(): number
+  /**
+   * B3-A2: every recorded surface OPEN message (`o`), in order. A renderer that
+   * may own more than one surface needs the wire's own open facts — the id, the
+   * `mode` and the title — instead of inferring them from frames.
+   */
+  openSurfaces(): readonly { readonly id: string; readonly mode?: string; readonly title?: string; readonly listen?: boolean }[]
+  /** B3-A2: the surface ids whose recorded close frame (`x`) asked `keep:false`. */
+  closedSurfaceIds(): readonly string[]
+  /** Blob ids sent by the official SDK, in order. */
+  blobIds(): readonly string[]
+  /** Ordered wire events for each write containing a blob (`b`) or frame (`f`). */
+  wireEvents(): readonly { readonly kind: 'blob' | 'frame'; readonly id?: string; readonly frame?: TspWireFrame }[]
   /** Frame ops sent, per surface, in order. */
   frameCount(): number
   /**
@@ -136,6 +147,23 @@ export function installTspPane(options: {
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
+  /**
+   * Advertise the temporary Work Details Reader's negotiated surface: the
+   * `row`/`text` kinds its document emits (`col` is already in the base
+   * vocabulary) and the official `scroll` feature its reading keys address.
+   * The Reader is a SECOND SDK surface, so a pane without these cannot present
+   * it — exactly like the real client.
+   */
+  readonly workDetails?: boolean
+  /**
+   * Advertise the NATIVE IMAGE capability: the `image` kind and the `blobs`
+   * feature. A pane without them can never carry a tool-result image, so the
+   * capability belongs to the pane's own advertised set (exactly like the
+   * real client).
+   */
+  readonly nativeImages?: boolean
+  /** Advertise the NATIVE CHART kind (the PR-D chart projection). */
+  readonly nativeChart?: boolean
   readonly kinds?: readonly string[]
   readonly features?: readonly string[]
 } = {}): TspPane {
@@ -149,7 +177,10 @@ export function installTspPane(options: {
   let closeFailure: { readonly value: unknown } | undefined
   let heldReply: (() => void) | undefined
   const closeBodies: string[] = []
+  const openBodies: Array<{ readonly id: string; readonly mode?: string; readonly title?: string; readonly listen?: boolean }> = []
   const frameList: TspWireFrame[] = []
+  const blobList: string[] = []
+  const orderedWireEvents: Array<{ readonly kind: 'blob' | 'frame'; readonly id?: string; readonly frame?: TspWireFrame }> = []
   const unacked: TspWireFrame[] = []
   let acksHeld = false
   let frames = 0
@@ -161,8 +192,14 @@ export function installTspPane(options: {
     ...(options.modelPicker === true ? ['picker', 'row', 'overlay', 'text'] : []),
     ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md'] : []),
     ...(options.sessionBrowser === true ? ['picker', 'row', 'overlay', 'text'] : []),
+    ...(options.workDetails === true ? ['row', 'text'] : []),
+    ...(options.nativeImages === true ? ['image'] : []),
+    ...(options.nativeChart === true ? ['chart'] : []),
   ]))
-  const nativeFeatures = options.presetPicker === true || options.sessionBrowser === true ? ['scroll'] : []
+  const nativeFeatures = [
+    ...(options.presetPicker === true || options.sessionBrowser === true || options.workDetails === true ? ['scroll'] : []),
+    ...(options.nativeImages === true ? ['blobs'] : []),
+  ]
   const hello = options.kinds !== undefined || options.features !== undefined
     ? {
         ...HELLO,
@@ -204,10 +241,19 @@ export function installTspPane(options: {
       throw value
     }
     for (const match of text.matchAll(/\u001b_tsp;x;([\s\S]*?)\u001b\\/g)) closeBodies.push(match[1]!)
+    for (const match of text.matchAll(/\u001b_tsp;o;([\s\S]*?)\u001b\\/g)) {
+      openBodies.push(JSON.parse(match[1]!) as { readonly id: string; readonly mode?: string; readonly title?: string; readonly listen?: boolean })
+    }
+    for (const match of text.matchAll(/\u001b_tsp;b;id=([0-9a-f]*);/g)) {
+      const id = match[1]!
+      blobList.push(id)
+      orderedWireEvents.push({ kind: 'blob', id })
+    }
     for (const match of text.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
       frames += 1
       const frame = JSON.parse(match[1]!) as WireFrame
       frameList.push(frame)
+      orderedWireEvents.push({ kind: 'frame', frame })
       // A real pane acks every frame it drew (credit flow control) — unless the
       // test is deliberately holding the acks to stall the credit.
       const ack = (): void => {
@@ -242,7 +288,14 @@ export function installTspPane(options: {
     failCloseWrite: (value: unknown) => { closeFailure = { value } },
     probed: () => probed,
     closeFrames: () => closeBodies.length,
+    openSurfaces: () => [...openBodies],
+    closedSurfaceIds: () => closeBodies
+      .map(body => JSON.parse(body) as { readonly id?: string; readonly keep?: boolean })
+      .filter(body => body.keep === false && typeof body.id === 'string')
+      .map(body => body.id as string),
     frameCount: () => frames,
+    blobIds: () => blobList,
+    wireEvents: () => orderedWireEvents,
     frames: () => frameList,
     key: sequence => { input.type(sequence) },
     event: value => { input.type(`\u001b_tsp;e;${JSON.stringify(value)}\u001b\\`) },

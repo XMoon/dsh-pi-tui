@@ -24,6 +24,21 @@
  * bootstrap process (other shells keep using it), so it must never run
  * under a root that dies with this runner.
  *
+ * SIGNALS: on POSIX the child leads its OWN process group, so a forwarded
+ * SIGINT/SIGTERM/SIGHUP reaches the processes it started (a shell's command,
+ * pnpm's script processes), and the root is removed only once the whole group
+ * is provably gone — a bounded grace, then ONE SIGKILL escalation. The direct
+ * child's `close` alone is not the group's end, on a NORMAL exit either: a
+ * command that left a descendant running keeps (and reports) its root instead
+ * of deleting a directory that process still uses. On Windows there is no
+ * group id to address, so the signal is forwarded to the direct child only.
+ *
+ * EXIT STATUS: a clean run passes the child's status through, but an
+ * INTERRUPTED run reports the first received SIGINT/SIGTERM/SIGHUP
+ * (128+signo), even when the child handles the signal and exits 0. A cleanup
+ * that cannot be proven is NON-ZERO as well: a command's success does not
+ * excuse a temp root (or a process group) left behind.
+ *
  * Set DSH_TEST_KEEP_TMP=1 to keep (and print) the run root for debugging.
  */
 import { spawn } from 'node:child_process'
@@ -31,6 +46,7 @@ import { existsSync, globSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { groupStillAlive, stopOwnedGroup } from './lib/owned-process-group.mjs'
 
 const usage = 'usage: node scripts/run-with-temp-root.mjs <command> [args...]'
 
@@ -102,26 +118,25 @@ function main() {
 
   const root = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-test-run-'))
   const keep = process.env.DSH_TEST_KEEP_TMP === '1'
+  // POSIX only: the direct child leads its own process group, which is what a
+  // forwarded signal can address as a TREE. Windows has no group id, so it
+  // keeps the previous direct-child forwarding.
+  const ownsGroup = process.platform !== 'win32'
 
   const plan = buildSpawnPlan(command.flatMap(expandGlob))
   const child = spawn(plan.command, plan.args, {
     stdio: 'inherit',
     shell: plan.shell,
+    detached: ownsGroup,
     env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
   })
 
-  const forwardSignal = (signal) => {
-    if (!child.killed) {
-      try {
-        child.kill(signal)
-      } catch {
-        // The child may have settled between the check and the kill.
-      }
-    }
-  }
-  process.on('SIGINT', () => forwardSignal('SIGINT'))
-  process.on('SIGTERM', () => forwardSignal('SIGTERM'))
-  process.on('SIGHUP', () => forwardSignal('SIGHUP'))
+  let childResult
+  let resolveClosed
+  /** Resolves on the direct child's `close`, never on a group fact. */
+  const closed = new Promise((resolve) => { resolveClosed = resolve })
+  let finished = false
+  let teardownStarted = false
 
   function disposeRoot() {
     if (keep) {
@@ -131,22 +146,96 @@ function main() {
     rmSync(root, { recursive: true, force: true })
   }
 
+  /**
+   * The ONE place this runner finishes: whatever combination of child close,
+   * spawn failure and signal teardown reaches it first, the temp root is
+   * removed at most once and the exit code is set at most once.
+   */
+  const SIGNAL_EXIT = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6, SIGKILL: 9, SIGTERM: 15 }
+  // The first interruption signal this runner received, if any. It owns the
+  // runner's exit status: a child that "handles" SIGTERM and exits 0 must not
+  // turn an interrupted run into a success.
+  let receivedSignal
+  /** The runner's OWN status; the child's result is diagnostic. */
+  const exitCodeOf = () => {
+    if (receivedSignal !== undefined) return 128 + (SIGNAL_EXIT[receivedSignal] ?? 0)
+    if (childResult === undefined) return 1
+    if (childResult.code !== null) return childResult.code
+    // Mirror death-by-signal with the conventional 128+signo exit code.
+    const signo = SIGNAL_EXIT[childResult.signal] ?? 0
+    return signo > 0 ? 128 + signo : 1
+  }
+  const describeChild = () => (childResult === undefined
+    ? 'the direct child did not finish'
+    : childResult.code !== null ? `the direct child exited ${childResult.code}` : `the direct child was terminated by ${childResult.signal}`)
+  function finish(settled, detail) {
+    if (finished) return
+    finished = true
+    if (settled) {
+      disposeRoot()
+    } else {
+      // The root IS the child's TMPDIR. Removing it while a descendant still
+      // runs would delete the very directory that process is using, so an
+      // unproven group keeps the root and says so instead of claiming a
+      // cleanup it cannot prove.
+      process.stderr.write(`[run-with-temp-root] cleanup unproven: keeping ${root}: ${detail} (${describeChild()})\n`)
+    }
+    // A cleanup that cannot be proven is NOT a pass: the run gets a non-zero
+    // status and the child's own result stays diagnostic. The interruption
+    // signal already makes the status non-zero on its own path.
+    process.exitCode = settled || receivedSignal !== undefined ? exitCodeOf() : 1
+  }
+
   child.on('error', (error) => {
+    // A child that never spawned has no group and no status: the spawn failure
+    // wins and is reported as such.
+    if (finished) return
+    finished = true
     disposeRoot()
     console.error(`[run-with-temp-root] failed to spawn ${plan.command}: ${error.message}`)
-    process.exit(1)
+    process.exitCode = 1
   })
 
   child.on('close', (code, signal) => {
-    disposeRoot()
-    if (code !== null) {
-      process.exitCode = code
+    childResult = { code, signal }
+    resolveClosed()
+    if (teardownStarted) return
+    // A normal close is only the DIRECT child's end. A descendant it started
+    // can still be using the root, and the root must not be deleted
+    // underneath it — the same rule the signal path follows.
+    if (ownsGroup && groupStillAlive(child)) {
+      finish(false, `process group ${child.pid} still has live members after the direct child exited`)
       return
     }
-    // Mirror death-by-signal with the conventional 128+signo exit code.
-    const signo = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGABRT: 6, SIGKILL: 9, SIGTERM: 15 }[signal] ?? 0
-    process.exitCode = signo > 0 ? 128 + signo : 1
+    finish(true)
   })
+
+  const onSignal = (signal) => {
+    if (teardownStarted || finished) return
+    teardownStarted = true
+    receivedSignal = signal
+    void (async () => {
+      let settled = true
+      if (ownsGroup) {
+        settled = await stopOwnedGroup(child, signal)
+      } else {
+        try {
+          child.kill(signal)
+        } catch {
+          // The child may have settled between the check and the kill.
+        }
+      }
+      if (!settled) {
+        finish(false, `process group ${child.pid} still has live members after SIGKILL`)
+        return
+      }
+      await closed
+      finish(true)
+    })()
+  }
+  process.on('SIGINT', () => onSignal('SIGINT'))
+  process.on('SIGTERM', () => onSignal('SIGTERM'))
+  process.on('SIGHUP', () => onSignal('SIGHUP'))
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === SCRIPT_PATH) {

@@ -172,6 +172,12 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // label lives in the key-label authority and the renderer imports it, which
   // is why this row is owned by the keybindings tree.
   { file: 'src/tui/keybindings/hints.ts', line: "export const TSP_CONTINUED_INSPECTION_LABEL = 'Alt+Q'" },
+  // (8b) The TSP renderer's FIXED published-visual chord TABLE (PR3): the same
+  // category as (8) — the TSP surface owns no keymap action, the chords are
+  // dispatched from the raw SDK key stream, and this table is the ONE machine
+  // definition the handler and the derived labels consume.
+  { file: 'src/tui/keybindings/hints.ts', line: "select: 'alt+v'," },
+  { file: 'src/tui/keybindings/hints.ts', line: "copy: 'alt+c'," },
   // (9) The History editor-seat tenant's FIXED labels (B3-A, same category as
   // (8)): the seat is a per-surface component contract, so its panel may not
   // hard-code the chords and they cannot come from `keyHint` — no keymap action
@@ -187,6 +193,12 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   { file: 'src/tui/keybindings/hints.ts', line: "preview: { keys: ['alt+up', 'alt+down', 'alt+pageUp', 'alt+pageDown', 'alt+home', 'alt+end'], label: HISTORY_PREVIEW_SCROLL_LABEL }," },
   { file: 'src/tui/keybindings/hints.ts', line: "copy: { keys: ['alt+c'], label: HISTORY_COPY_LABEL }," },
   { file: 'src/tui/keybindings/hints.ts', line: "cancel: { keys: ['escape', 'ctrl+c'], label: 'Esc' }," },
+  // (11) The Delivered files browser's ONE fixed-chord table (Delivered files
+  // PR1): the same category as (10) — a per-surface COMPONENT contract with no
+  // Host keymap action and no remap, so this table is its key authority and both
+  // the panel's handler and its painted hints import it.
+  { file: 'src/tui/keybindings/hints.ts', line: "turns: { keys: ['shift+t'], label: 'Shift+T' }," },
+  { file: 'src/tui/keybindings/hints.ts', line: "copyPath: { keys: ['shift+c'], label: 'Shift+C' }," },
 ]
 
 /** One detected violation (a host chord or a hard-coded label). */
@@ -229,7 +241,7 @@ export function findStringLabelViolations(file: string, source: string): Keybind
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!
     // Skip comment-only lines (comments are covered by the convention in
-    // docs/keybinding-architecture.md, not by this mechanical check).
+    // docs/architecture/keybindings.md, not by this mechanical check).
     const trimmed = line.trim()
     if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('/*')) continue
     // The keybinding table's `defaultKeys` arrays are the machine-readable
@@ -306,7 +318,7 @@ function main(): void {
     }
   }
   if (violations.length > 0) {
-    console.error(`check-host-keybindings: ${violations.length} violation(s) found (see docs/keybinding-architecture.md)`)
+    console.error(`check-host-keybindings: ${violations.length} violation(s) found (see docs/architecture/keybindings.md)`)
     process.exit(1)
   }
   console.log('check-host-keybindings: ok')

@@ -1,0 +1,438 @@
+/**
+ * PR A §18 — the Direct `tui-app` settings facade contract: the plugin's
+ * volatile Config references are the runtime authority (get reflects
+ * reference commits), whole-document replaces become path-scoped
+ * SettingsForms mutations that never promote inherited values into the
+ * USER profile override, and every write carries the descriptor revision
+ * so conflicts surface instead of silently losing updates.
+ * @module @xmoon76/dsh-pi-tui/tui-settings-direct.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { DirectTuiSettings, type SettingsFormsLike, type TuiConfigRefs, type TuiSettingsDescriptorLike, type TuiSettingsPathOp } from '../../src/runtime/direct/tui-settings-direct.ts'
+import type { TuiSettingsDoc } from '../../src/runtime/config-port.ts'
+
+/** A mutable volatile reference — the same surface the Loader commits into. */
+function ref<T>(initial: T): { get(): T; set(value: T): void } {
+  let value = initial
+  return { get: () => value, set: (next: T) => { value = next } }
+}
+
+/** Build a full refs object over mutable references (schema defaults;
+ * override values are wrapped as references automatically). `snapshot()`
+ * reads the current plain values (undefined keys dropped) so a SettingsForms
+ * fake can serve the matching effective projection. */
+function refsOf(overrides: Partial<Record<keyof TuiConfigRefs, unknown>> = {}): TuiConfigRefs & { write(field: keyof TuiConfigRefs, value: unknown): void; snapshot(): Record<string, unknown> } {
+  const base: Record<string, { get(): unknown; set(value: unknown): void }> = {
+    theme: ref('auto'),
+    iconStyle: ref('emoji'),
+    footer: ref('full'),
+    footerFallbackMode: ref('default'),
+    footerLayout: ref(undefined),
+    footerCustomItems: ref(undefined),
+    footerCommand: ref(undefined),
+    fullscreen: ref('on'),
+    busyEnter: ref('queue'),
+    localShellSandbox: ref('bypass'),
+    homeEndKeys: ref('input'),
+    displayPreset: ref('full'),
+    progressUpdates: ref('milestones'),
+    responseStyle: ref('default'),
+    gitAttribution: ref('off'),
+    notificationMode: ref('unfocused'),
+    notificationMethod: ref('auto'),
+    terminalProgress: ref('9;4+7501'),
+    wheelScrollLines: ref('1'),
+    keybindings: ref(undefined),
+    legacySettingsMigrationVersion: ref(0),
+  }
+  for (const [field, value] of Object.entries(overrides)) base[field] = ref(value)
+  const refs = base as unknown as TuiConfigRefs & Record<keyof TuiConfigRefs, { get(): unknown; set(value: unknown): void }>
+  return {
+    ...refs,
+    write: (field, value) => { base[field as string]!.set(value) },
+    snapshot: () => Object.fromEntries(
+      Object.entries(base).map(([field, ref]) => [field, ref.get()])
+        .filter(([, value]) => value !== undefined),
+    ),
+  }
+}
+
+/** A SettingsForms fake with a scripted descriptor: the effective value
+ * (the merged view the real projection serves), the USER section and the
+ * revision come from ONE describe snapshot, exactly like production.
+ *
+ * `value` may be a provider so a committed mutation is visible on the NEXT
+ * describe, and `apply` lets a test simulate the Loader committing the
+ * mutation into the live volatile references (the authoritative round-trip). */
+function formsOf(
+  user: Record<string, unknown> = {},
+  revision = 2,
+  value?: Record<string, unknown> | (() => Record<string, unknown>),
+  apply?: (ops: readonly TuiSettingsPathOp[]) => void,
+) {
+  const calls: Array<{ ns: string; ops: readonly TuiSettingsPathOp[]; revision?: number }> = []
+  let conflict = false
+  const effective = (): Record<string, unknown> =>
+    typeof value === 'function' ? value() : (value ?? { ...user })
+  const forms: SettingsFormsLike = {
+    describe: () => [{
+      ns: 'tui-app',
+      value: effective(),
+      user,
+      revision,
+    }] satisfies TuiSettingsDescriptorLike[],
+    mutate: async (ns, ops, expectedRevision) => {
+      if (conflict) {
+        throw Object.assign(new Error('settings namespace "tui-app" changed since it was read'), { code: 'SETTINGS_CONFLICT' })
+      }
+      calls.push({ ns, ops, revision: expectedRevision })
+      apply?.(ops)
+    },
+  }
+  return {
+    forms,
+    calls,
+    get conflict() { return conflict },
+    set conflict(value: boolean) { conflict = value },
+  }
+}
+
+/** The default document a fresh deployment reads (absent whole-value
+ * fields carry explicit undefined keys on the snapshot). */
+function defaults(): TuiSettingsDoc {
+  return {
+    theme: 'auto',
+    iconStyle: 'emoji',
+    footer: 'full',
+    footerFallbackMode: 'default',
+    footerLayout: undefined,
+    footerCustomItems: undefined,
+    footerCommand: undefined,
+    fullscreen: 'on',
+    busyEnter: 'queue',
+    localShellSandbox: 'bypass',
+    homeEndKeys: 'input',
+    displayPreset: 'full',
+    progressUpdates: 'milestones',
+    responseStyle: 'default',
+    gitAttribution: 'off',
+    notificationMode: 'unfocused',
+    notificationMethod: 'auto',
+    terminalProgress: '9;4+7501',
+    wheelScrollLines: '1',
+    keybindings: undefined,
+  }
+}
+
+test('get reads the live references at operation time — a reference commit is visible immediately', () => {
+  const refs = refsOf()
+  const settings = new DirectTuiSettings(refs, formsOf().forms)
+  assert.equal(settings.get().theme, 'auto')
+  // §18.1: a profile write commits new reference values; the NEXT operation
+  // sees them (never a boot-time snapshot).
+  refs.write('theme', 'dark')
+  refs.write('keybindings', { 'app.input.steer': 'ctrl+x' })
+  const doc = settings.get()
+  assert.equal(doc.theme, 'dark')
+  assert.deepEqual(doc.keybindings, { 'app.input.steer': 'ctrl+x' })
+})
+
+test('a whole-document replace writes ONLY the changed fields as path-scoped sets', async () => {
+  const refs = refsOf()
+  const forms = formsOf({}, 2, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  await settings.replace({ ...settings.get(), theme: 'dark', displayPreset: 'focus' } as TuiSettingsDoc)
+  assert.deepEqual(forms.calls, [{
+    ns: 'tui-app',
+    ops: [
+      { op: 'set', path: ['theme'], value: 'dark' },
+      { op: 'set', path: ['displayPreset'], value: 'focus' },
+    ],
+    revision: 2,
+  }], 'only the two changed fields cross; unchanged fields never pin the profile')
+})
+
+test('a gitAttribution change crosses the DIFF_FIELDS mapping as its own path-scoped set', async () => {
+  // The /settings row's persistence depends on this mapping: without the
+  // field in DIFF_FIELDS the whole-document write would silently DROP the
+  // new mode, while the fake-settings row test would still pass. Assert the
+  // ACTUAL adapter path (refs -> replace -> SettingsForms.mutate).
+  const refs = refsOf()
+  const forms = formsOf({}, 2, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  assert.equal(settings.get().gitAttribution, 'off')
+  await settings.replace({ ...settings.get(), gitAttribution: 'product-model' } as TuiSettingsDoc)
+  assert.deepEqual(forms.calls, [{
+    ns: 'tui-app',
+    ops: [{ op: 'set', path: ['gitAttribution'], value: 'product-model' }],
+    revision: 2,
+  }], 'the attribution mode change crosses as exactly one path-scoped set')
+
+  // Writing the inherited value over a USER override resets it (unset), the
+  // same contract every other preference field obeys.
+  const refs2 = refsOf({ gitAttribution: 'off' })
+  const forms2 = formsOf({ gitAttribution: 'product-model' }, 2, refs2.snapshot())
+  const settings2 = new DirectTuiSettings(refs2, forms2.forms)
+  await settings2.replace({ ...settings2.get(), gitAttribution: 'off' } as TuiSettingsDoc)
+  assert.deepEqual(forms2.calls[0]?.ops, [{ op: 'unset', path: ['gitAttribution'] }],
+    'a reset-to-inherited unsets the override instead of pinning it')
+})
+
+test('a terminalProgress change crosses the DIFF_FIELDS mapping as its own path-scoped set', async () => {
+  // The /settings row's persistence depends on this mapping: without the
+  // field in DIFF_FIELDS the whole-document write would silently DROP the new
+  // mode, while the fake-settings row test would still pass.
+  const refs = refsOf()
+  const forms = formsOf({}, 2, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  assert.equal(settings.get().terminalProgress, '9;4+7501', 'fresh defaults select both protocols')
+  // get() reads the live reference (never a boot-time snapshot), including the
+  // retired `on` value a USER profile may still carry: the four new modes AND
+  // the old value all read back verbatim through the Config volatile.
+  for (const mode of ['9;4', '7501', '9;4+7501', 'off', 'on']) {
+    refs.write('terminalProgress', mode)
+    assert.equal(settings.get().terminalProgress, mode, `the persisted ${mode} value reads back verbatim`)
+  }
+  refs.write('terminalProgress', '9;4+7501')
+  await settings.replace({ ...settings.get(), terminalProgress: '7501' } as TuiSettingsDoc)
+  assert.deepEqual(forms.calls, [{
+    ns: 'tui-app',
+    ops: [{ op: 'set', path: ['terminalProgress'], value: '7501' }],
+    revision: 2,
+  }], 'the mode change crosses as exactly one path-scoped set')
+
+  // An UNRELATED write preserves terminalProgress (no spurious op).
+  const refs3 = refsOf({ terminalProgress: '7501' })
+  const forms3 = formsOf({}, 2, refs3.snapshot())
+  const settings3 = new DirectTuiSettings(refs3, forms3.forms)
+  await settings3.replace({ ...settings3.get(), theme: 'dark' } as TuiSettingsDoc)
+  assert.deepEqual(forms3.calls[0]?.ops, [{ op: 'set', path: ['theme'], value: 'dark' }],
+    'an unrelated write never touches terminalProgress')
+
+  // Writing the inherited default over a USER override resets it (unset).
+  const refs2 = refsOf({ terminalProgress: '9;4+7501' })
+  const forms2 = formsOf({ terminalProgress: 'off' }, 2, refs2.snapshot())
+  const settings2 = new DirectTuiSettings(refs2, forms2.forms)
+  await settings2.replace({ ...settings2.get(), terminalProgress: '9;4+7501' } as TuiSettingsDoc)
+  assert.deepEqual(forms2.calls[0]?.ops, [{ op: 'unset', path: ['terminalProgress'] }],
+    'a reset-to-inherited unsets the override instead of pinning it')
+})
+
+test('every terminalProgress mode round-trips through the live Config authority', async () => {
+  // The authoritative write path: `replace` derives a path-scoped op, the
+  // mutation commits into the LIVE volatile references (the Loader), and the
+  // NEXT `get()` reads the committed value back. A fake that only RECORDS the
+  // mutation cannot prove that round-trip.
+  const refs = refsOf({ terminalProgress: '9;4+7501' })
+  const forms = formsOf({}, 2, () => refs.snapshot(), (ops) => {
+    for (const op of ops) {
+      if (op.path.length !== 1 || op.path[0] !== 'terminalProgress') continue
+      refs.write('terminalProgress', op.op === 'set' ? op.value : '9;4+7501')
+    }
+  })
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  for (const mode of ['9;4', '7501', 'off', '9;4+7501'] as const) {
+    await settings.replace({ ...settings.get(), terminalProgress: mode } as TuiSettingsDoc)
+    assert.equal(settings.get().terminalProgress, mode,
+      `the ${mode} write must be visible through the live Config authority`)
+  }
+  assert.deepEqual(forms.calls.map(call => call.ops), [
+    [{ op: 'set', path: ['terminalProgress'], value: '9;4' }],
+    [{ op: 'set', path: ['terminalProgress'], value: '7501' }],
+    [{ op: 'set', path: ['terminalProgress'], value: 'off' }],
+    [{ op: 'set', path: ['terminalProgress'], value: '9;4+7501' }],
+  ], 'each mode change crosses as exactly ONE path-scoped op and nothing else')
+})
+
+test('no effective→user promotion: a base-supplied theme stays out of the USER override', async () => {
+  // The base/project layer supplies theme: dark; the user changes ONLY
+  // displayPreset. The descriptor snapshot carries the inherited effective
+  // view with no USER overrides.
+  const refs = refsOf({ theme: 'dark', displayPreset: 'compact' })
+  const forms = formsOf({}, 2, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  await settings.replace({ ...settings.get(), displayPreset: 'full' } as TuiSettingsDoc)
+  assert.deepEqual(forms.calls[0]?.ops, [
+    { op: 'set', path: ['displayPreset'], value: 'full' },
+  ], 'the inherited theme: dark is NOT copied into the user override')
+  // The same holds for the whole-value object fields.
+  const refs2 = refsOf({ footerLayout: { schemaVersion: 1, rows: [] }, keybindings: { a: 'b' } })
+  const forms2 = formsOf({}, 2, refs2.snapshot())
+  const settings2 = new DirectTuiSettings(refs2, forms2.forms)
+  await settings2.replace({ ...settings2.get(), footer: 'custom' } as TuiSettingsDoc)
+  assert.deepEqual(forms2.calls[0]?.ops, [
+    { op: 'set', path: ['footer'], value: 'custom' },
+  ], 'inherited footerLayout/keybindings values are not promoted')
+})
+
+test('an unrelated write never drops a USER-owned object field whose effective value is a merged superset', async () => {
+  // Upstream mergeLayers merges nested plain objects recursively: with a
+  // project/home layer contributing extra keys, the EFFECTIVE value is a
+  // SUPERSET of the raw USER override. Production writers spread get() (the
+  // merged view), so the restated object must be a NO-OP — an unset would
+  // destroy the USER's partial override (and disarm a trusted footerCommand);
+  // a set would pin the merged superset into the USER layer.
+  const userKeybindings = { 'app.input.steer': 'ctrl+x' }
+  const effectiveKeybindings = { 'app.input.steer': 'ctrl+x', 'app.display.focus': 'ctrl+g' }
+  const userCommand = { schemaVersion: 1, command: 'status.sh', timeoutMs: 3000, refreshIntervalMs: 10000, maxRows: 2 }
+  const effectiveCommand = { ...userCommand, env: { PROJECT: '1' } }
+  const refs = refsOf({ keybindings: effectiveKeybindings, footerCommand: effectiveCommand })
+  const forms = formsOf(
+    { keybindings: userKeybindings, footerCommand: userCommand },
+    2,
+    refs.snapshot(),
+  )
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  await settings.replace({ ...settings.get(), theme: 'dark' } as TuiSettingsDoc)
+  assert.deepEqual(forms.calls[0]?.ops, [
+    { op: 'set', path: ['theme'], value: 'dark' },
+  ], 'the merged-superset keybindings/footerCommand restates emit NO ops — only the changed scalar crosses')
+
+  // The same protection holds when the whole-value object is genuinely
+  // CHANGED (requested differs from both owned and effective): a set.
+  const refs2 = refsOf({ keybindings: effectiveKeybindings })
+  const forms2 = formsOf({ keybindings: userKeybindings }, 2, refs2.snapshot())
+  const settings2 = new DirectTuiSettings(refs2, forms2.forms)
+  await settings2.replace({ ...settings2.get(), keybindings: { 'app.input.steer': 'alt+s' } } as TuiSettingsDoc)
+  assert.deepEqual(forms2.calls[0]?.ops, [
+    { op: 'set', path: ['keybindings'], value: { 'app.input.steer': 'alt+s' } },
+  ])
+})
+
+test('writing the inherited value over a USER override resets it (unset, not pin)', async () => {
+  // The USER layer owns theme: dark while the effective reference serves the
+  // inherited light: the caller writes light back — the override must be
+  // REMOVED (unset), never kept as a pinned value and never dropped silently.
+  const refs = refsOf({ theme: 'light' })
+  const forms = formsOf({ theme: 'dark' }, 2, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  await settings.replace({ ...settings.get(), theme: 'light' } as TuiSettingsDoc)
+  assert.deepEqual(forms.calls[0]?.ops, [
+    { op: 'unset', path: ['theme'] },
+  ], 'a reset-to-inherited is an unset; the USER override stops shadowing')
+  // A different new value over the same override is an ordinary set.
+  const refs2 = refsOf({ theme: 'light' })
+  const forms2 = formsOf({ theme: 'dark' }, 2, refs2.snapshot())
+  const settings2 = new DirectTuiSettings(refs2, forms2.forms)
+  await settings2.replace({ ...settings2.get(), theme: 'blue' } as TuiSettingsDoc)
+  assert.deepEqual(forms2.calls[0]?.ops, [
+    { op: 'set', path: ['theme'], value: 'blue' },
+  ])
+})
+
+test('a restated USER-owned raw value emits no op (no self-pinning)', async () => {
+  const userRaw = [{ id: 'user-item', kind: 'text', text: 'keep me' }]
+  const refs = refsOf({ footerCustomItems: [{ id: 'project-item' }] })
+  const forms = formsOf({ footerCustomItems: userRaw }, 2, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  // withUserFooterCustomItems-style doc: the USER raw is restated over a
+  // project-layer effective value.
+  await settings.replace({ ...settings.get(), footerCustomItems: userRaw } as TuiSettingsDoc)
+  assert.equal(forms.calls.length, 0, 'the user layer already stores the value — no write, no pin')
+})
+
+test('a dropped field the USER layer owns unsets; an inherited one stays inherited', async () => {
+  const refs = refsOf({ keybindings: { 'app.input.steer': 'ctrl+x' }, footerCustomItems: [{ id: 'x' }] })
+  const forms = formsOf({ keybindings: { 'app.input.steer': 'ctrl+x' } }, 2, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  const doc = { ...settings.get() } as Record<string, unknown>
+  delete doc.keybindings
+  delete doc.footerCustomItems
+  await settings.replace(doc as unknown as TuiSettingsDoc)
+  assert.deepEqual(forms.calls[0]?.ops, [
+    { op: 'unset', path: ['keybindings'] },
+  ], 'the user-owned keybinding override is removed; the project-layer custom items stay untouched')
+})
+
+test('an unchanged document emits no mutation at all', async () => {
+  const refs = refsOf({ theme: 'dark' })
+  const forms = formsOf({}, 2, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  await settings.replace({ ...settings.get() } as TuiSettingsDoc)
+  assert.equal(forms.calls.length, 0)
+})
+
+test('the write carries the descriptor revision and surfaces conflicts', async () => {
+  const refs = refsOf()
+  const forms = formsOf({}, 11, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  await settings.replace({ ...settings.get(), theme: 'dark' } as TuiSettingsDoc)
+  assert.equal(forms.calls[0]?.revision, 11)
+  forms.conflict = true
+  await assert.rejects(
+    settings.replace({ ...settings.get(), theme: 'light' } as TuiSettingsDoc),
+    (error: unknown) => (error as { code?: unknown }).code === 'SETTINGS_CONFLICT',
+    'a stale revision surfaces as the official conflict, never a silent last-write-wins',
+  )
+})
+
+test('unknown keys in a replacement document are ignored (the schema is the authority)', async () => {
+  const refs = refsOf()
+  const forms = formsOf({}, 2, refs.snapshot())
+  const settings = new DirectTuiSettings(refs, forms.forms)
+  const doc = { ...settings.get(), focusMode: 'on', history: { '/ws': ['x'] } } as unknown as TuiSettingsDoc
+  await settings.replace(doc)
+  assert.equal(forms.calls.length, 0, 'retired/unknown keys never reach the profile')
+})
+
+test('a replace without the Settings surface fails explicitly', async () => {
+  const settings = new DirectTuiSettings(refsOf(), undefined)
+  await assert.rejects(settings.replace({ ...settings.get(), theme: 'dark' } as TuiSettingsDoc), /settings service unavailable/u)
+})
+
+test('the production schema defaults mount fullscreen ON (§5.5)', () => {
+  // The test harness intentionally mounts suites with fullscreen 'off' (the
+  // historical degraded baseline); the PRODUCTION default itself is pinned
+  // here through the exported schema — the same resolution a Loader-mounted
+  // row performs.
+  const resolved = TuiConfigSchema({} as never) as unknown as TuiConfigRefs
+  assert.equal(resolved.fullscreen.get(), 'on', 'a fresh profile mounts fullscreen on')
+  assert.equal(resolved.displayPreset.get(), 'full')
+  assert.equal(resolved.busyEnter.get(), 'queue')
+  assert.equal(resolved.notificationMode.get(), 'unfocused')
+  assert.equal(resolved.terminalProgress.get(), '9;4+7501', 'a fresh profile reports both protocols')
+  assert.equal(resolved.legacySettingsMigrationVersion.get(), 0)
+})
+
+test('ops derivation and the revision fence come from ONE descriptor snapshot', async () => {
+  // The race the atomic snapshot closes: describe #1 (user={}, revision=4)
+  // decides the ops; a concurrent USER edit lands (user={theme:'light'},
+  // revision=5) BEFORE the mutate. The write must still carry revision 4 —
+  // the fence of the snapshot the decision came from — so the concurrent
+  // edit surfaces as a conflict instead of being committed over.
+  let describeCalls = 0
+  const calls: Array<{ ns: string; ops: readonly TuiSettingsPathOp[]; revision?: number }> = []
+  const forms: SettingsFormsLike = {
+    describe: () => {
+      describeCalls += 1
+      return [{
+        ns: 'tui-app',
+        // First describe (the replace's decision read): no overrides, rev 4.
+        // Later describes (the conflict check's re-read): the user edit, rev 5.
+        ...(describeCalls === 1
+          ? { value: {}, user: {}, revision: 4 }
+          : { value: { theme: 'light' }, user: { theme: 'light' }, revision: 5 }),
+      }] satisfies TuiSettingsDescriptorLike[]
+    },
+    mutate: async (_ns, ops, expectedRevision) => {
+      calls.push({ ns: _ns, ops, revision: expectedRevision })
+      throw Object.assign(new Error('settings namespace "tui-app" changed since it was read'), { code: 'SETTINGS_CONFLICT' })
+    },
+  }
+  const settings = new DirectTuiSettings(refsOf(), forms)
+  await assert.rejects(
+    settings.replace({ ...settings.get(), theme: 'dark' } as TuiSettingsDoc),
+    (error: unknown) => (error as { code?: unknown }).code === 'SETTINGS_CONFLICT',
+    'the stale snapshot write surfaces as the official conflict',
+  )
+  assert.equal(calls[0]?.revision, 4,
+    'the mutate carries the DECISION snapshot revision (4), never a re-read fence (5)')
+})
+
+test('a fresh deployment document carries the product defaults', () => {
+  const settings = new DirectTuiSettings(refsOf(), formsOf().forms)
+  assert.deepEqual(settings.get(), defaults())
+})

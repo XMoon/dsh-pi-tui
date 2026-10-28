@@ -751,21 +751,27 @@ export default async function (h) {
     // A KNOWN state. Fixture 5 keeps the previous selection (beta), so clicking Alpha's row is
     // a plain `select`; clicking an ALREADY highlighted row would ACTIVATE and open the Reader
     // instead, which is exactly the confusion this check must not have.
-    const alphaRow = modelRows(h, h.snapshot()).find((node) => h.descendantsText(node).includes('Alpha Model'))
-    const alphaClicked = alphaRow === undefined ? false : await h.click(h.snapshot().chains, alphaRow)
+    // The node and its chains come from ONE snapshot: the geometry oracle
+    // indexes by node identity, so chains from another snapshot contain no
+    // entry for this node and every clip would read as "visible".
+    const alphaSnap = h.snapshot()
+    const alphaRow = modelRows(h, alphaSnap).find((node) => h.descendantsText(node).includes('Alpha Model'))
+    const alphaClicked = alphaRow === undefined ? false : await h.click(alphaSnap.chains, alphaRow)
     await h.sleep(400)
     h.check('the twin catalogue is drivable: a real click highlights Alpha as a plain SELECT',
       alphaClicked && lastFrame(h)?.page === 'models' && lastFrame(h)?.selected === JSON.stringify(['alpha', 'm-alpha']),
       `clicked=${alphaClicked} page=${JSON.stringify(lastFrame(h)?.page)} selected=${JSON.stringify(lastFrame(h)?.selected)}`)
-    const chip = chipWithText(h, h.snapshot(), 'High')
-    const chipClicked = chip === undefined ? false : await h.click(h.snapshot().chains, chip)
+    const chipSnap = h.snapshot()
+    const chip = chipWithText(h, chipSnap, 'High')
+    const chipClicked = chip === undefined ? false : await h.click(chipSnap.chains, chip)
     await h.sleep(400)
     h.check('clicking a candidate puts the keyboard on the STRIP',
       chipClicked && lastFrame(h)?.focus === 'strip' && lastFrame(h)?.page === 'models',
       `clicked=${chipClicked} focus=${JSON.stringify(lastFrame(h)?.focus)} subtitle=${JSON.stringify(lastFrame(h)?.subtitle)}`)
     // Beta is NOT the highlighted model now, so this real click is a `select` too.
-    const betaRow = modelRows(h, h.snapshot()).find((node) => h.descendantsText(node).includes('Beta Model'))
-    const rowClicked = betaRow === undefined ? false : await h.click(h.snapshot().chains, betaRow)
+    const betaSnap = h.snapshot()
+    const betaRow = modelRows(h, betaSnap).find((node) => h.descendantsText(node).includes('Beta Model'))
+    const rowClicked = betaRow === undefined ? false : await h.click(betaSnap.chains, betaRow)
     await h.sleep(400)
     h.check('a MOUSE click on another EFFORT-bearing model hands the keys back to the list',
       rowClicked && lastFrame(h)?.page === 'models' && lastFrame(h)?.selected === JSON.stringify(['beta', 'm-beta'])

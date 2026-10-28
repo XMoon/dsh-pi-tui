@@ -49,6 +49,25 @@ function isPasteMarker(segment: string): boolean {
 const MAX_PASTE_STORED_CHARS = 256 * 1024;
 
 /**
+ * The canonical draft-image placeholder grammar
+ * (`[image #<id> (<width>×<height>)]`). The Editor never resolves these
+ * tokens — the host owns the draft store — but its narrow Undo
+ * image-reference observation must only report CANONICAL tokens, never
+ * arbitrary user text that happens to mention an image.
+ * (dsh-pi-tui divergence X064.)
+ */
+const DRAFT_IMAGE_PLACEHOLDER_REGEX = /\[image #\d+ \(\d+×\d+\)\]/g;
+
+/**
+ * Upper bound for the paste-body image-reference cache. The cache exists only
+ * to avoid rescanning a stored paste body during undo-snapshot pushes; it must
+ * never become a second long-lived owner of historical paste bodies. Only
+ * bodies that actually contain a canonical image placeholder are cached, and
+ * the few most recently used ones are kept (X064).
+ */
+const MAX_PASTE_IMAGE_CACHE_ENTRIES = 8;
+
+/**
  * A segmenter that wraps Intl.Segmenter and merges graphemes that fall
  * within paste markers into single atomic segments.  This makes cursor
  * movement, deletion, word-wrap, etc. treat paste markers as single units.
@@ -413,8 +432,30 @@ export class Editor implements Component, Focusable {
 
 	// Undo support
 	private undoStack = new UndoStack<EditorSnapshot>();
+	/** How many current Undo snapshots reference each canonical draft-image
+	 *  placeholder (raw document lines AND stored paste bodies). Maintained
+	 *  incrementally on push/pop/clear/trim so the host can reconcile its
+	 *  undo-retention leases without re-scanning paste bodies per keystroke
+	 *  (X064). */
+	private readonly undoImageRefCounts = new Map<string, number>();
+	/** Canonical placeholders contained in one stored paste body, cached by
+	 *  (paste id, body identity): paste bodies are immutable strings, so an
+	 *  unchanged body never needs another scan (X064). */
+	private readonly pasteImagePlaceholders = new Map<number, { body: string; placeholders: readonly string[] }>();
 
 	public onSubmit?: (text: string) => void;
+	/** Called with the submitted text immediately BEFORE the draft/undo clear.
+	 *  The host reserves submission-time resources first and returns a ONE-SHOT
+	 *  release: it runs in a finally after the synchronous clear + onSubmit
+	 *  dispatch (on success and on throw), so the business owner can take over
+	 *  in the same call stack. A throw aborts the submit BEFORE any clear.
+	 *  (X064.) */
+	public onBeforeSubmitClear?: (text: string) => (() => void) | undefined;
+	/** The draft/undo clear RETIRED this editor's Undo history: no snapshot can
+	 *  restore an earlier draft any more. Fired after `undoStack.clear()` and
+	 *  before `onChange("")`, so the host releases its undo-retention leases
+	 *  while the clear is still synchronous. (X064.) */
+	public onUndoHistoryRetired?: () => void;
 	public onChange?: (text: string) => void;
 	/** The Down-admission's editor-owned facts MAY have changed (dsh-pi-tui
 	 * divergence X063 — the admission is a visual-line + transient-mode
@@ -1520,7 +1561,37 @@ export class Editor implements Component, Focusable {
 	 * (dsh-pi-tui divergence X023.)
 	 */
 	setTextAndCursor(text: string, cursor: { line: number; col: number }): void {
+		this.installTextAndCursor(this.normalizeText(text), cursor);
+	}
+
+	/**
+	 * Replace the WHOLE document and cursor as ONE real, undoable edit:
+	 * cancel autocomplete/history browsing, push the pre-edit snapshot
+	 * (document + paste registry), install the replacement (pruning paste
+	 * entries whose markers vanished), and fire onChange. The host uses this
+	 * for the composer preview image removal: unlike setTextAndCursor(), a
+	 * following Undo restores exactly the removed text. (dsh-pi-tui
+	 * divergence X064.)
+	 */
+	replaceTextUndoable(text: string, cursor: { line: number; col: number }): void {
 		const normalized = this.normalizeText(text);
+		if (normalized === this.getText()) {
+			// Nothing to record: still place the cursor like a programmatic edit.
+			this.installTextAndCursor(normalized, cursor);
+			return;
+		}
+		this.cancelAutocomplete();
+		this.lastAction = null;
+		this.exitHistoryBrowsing();
+		this.pushUndoSnapshot();
+		this.installTextAndCursor(normalized, cursor);
+		if (this.onChange) this.onChange(this.getText());
+	}
+
+	/** Install a normalized document + cursor and prune orphaned paste
+	 *  entries. Deliberately does not push undo or fire onChange; the
+	 *  callers own those semantics. */
+	private installTextAndCursor(normalized: string, cursor: { line: number; col: number }): void {
 		this.state.lines = normalized.split("\n");
 		const requestedLine = Number.isFinite(cursor.line) ? Math.floor(cursor.line) : 0;
 		const line = Math.max(0, Math.min(requestedLine, this.state.lines.length - 1));
@@ -1801,19 +1872,169 @@ export class Editor implements Component, Focusable {
 	}
 
 	private submitValue(): void {
-		this.cancelAutocomplete();
 		const result = this.expandPasteMarkersSinglePass(this.state.lines.join("\n")).text.trim();
+		// Host hook: reserve the submitted text's resources BEFORE the clear can
+		// retire the undo history. The returned release is the BRIDGE: it must
+		// outlive the synchronous clear + onSubmit dispatch (the business owner
+		// takes its own reservation there) and must never outlive this call
+		// stack. A throwing hook aborts the submit before any clear.
+		const release = this.onBeforeSubmitClear?.(result);
+		try {
+			this.clearDraftAfterSubmit();
+			if (this.onSubmit) this.onSubmit(result);
+		} finally {
+			release?.();
+		}
+	}
 
+	/**
+	 * Clear the submitted draft and its Undo history WITHOUT firing onSubmit.
+	 * Extracted from submitValue() so host-owned accelerated/plugin submission
+	 * paths clear exactly like a normal Enter submit (dsh-pi-tui divergence
+	 * X064): this retires the undoStack, while setText("") pushes another
+	 * snapshot. The caller owns the submit event.
+	 */
+	clearDraftAfterSubmit(): void {
+		this.cancelAutocomplete();
 		this.state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.pastes.clear();
 		this.pasteCounter = 0;
 		this.exitHistoryBrowsing();
 		this.scrollOffset = 0;
 		this.undoStack.clear();
+		this.undoImageRefCounts.clear();
+		this.pasteImagePlaceholders.clear();
 		this.lastAction = null;
-
+		// The Undo history is DEAD: the host releases its undo-retention leases
+		// for this editor before any change observer can react to the empty
+		// draft (X064).
+		this.onUndoHistoryRetired?.();
 		if (this.onChange) this.onChange("");
-		if (this.onSubmit) this.onSubmit(result);
+	}
+
+	/**
+	 * Every canonical draft-image placeholder still referenced by SOME Undo
+	 * snapshot (raw document lines or stored paste bodies). This is the narrow
+	 * observation seam the host bases its undo-retention leases on; it reports
+	 * only canonical tokens and is O(1) — the per-snapshot reference counts are
+	 * maintained incrementally, so normal editing never rescans paste bodies.
+	 * (dsh-pi-tui divergence X064.)
+	 */
+	undoImagePlaceholders(): ReadonlySet<string> {
+		return new Set(this.undoImageRefCounts.keys());
+	}
+
+	/**
+	 * Retire one draft-image placeholder from the Undo snapshots after its
+	 * retained bytes were evicted by the bounded undo-retention budget (X064).
+	 * The occurrence is TRIMMED from every snapshot that contains it (raw text
+	 * or stored paste body) instead of dropping the whole snapshot: the rest of
+	 * that snapshot — including a newer still-retained image — stays undoable,
+	 * while the evicted image can never be restored. Deliberately narrow: no
+	 * generic UndoStack API is exposed, and the caller must have verified the
+	 * placeholder is not in the live draft and has no in-flight submission pin.
+	 */
+	retireDraftImageFromUndo(placeholder: string): void {
+		if (!placeholder.startsWith("[image #")) return;
+		this.undoStack.transformSnapshots((snapshot) => {
+			let changed = false;
+			const lines = snapshot.state.lines.map((line) => {
+				if (!line.includes(placeholder)) return line;
+				changed = true;
+				return line.replaceAll(placeholder, "");
+			});
+			let pastes = snapshot.pastes;
+			for (const [id, body] of snapshot.pastes) {
+				if (!body.includes(placeholder)) continue;
+				if (!changed) {
+					pastes = new Map(snapshot.pastes);
+					changed = true;
+				}
+				pastes.set(id, body.replaceAll(placeholder, ""));
+			}
+			if (!changed) return snapshot;
+			const cursorLine = snapshot.state.cursorLine;
+			const cursorCol = Math.min(
+				snapshot.state.cursorCol,
+				lines[cursorLine]?.length ?? 0,
+			);
+			return {
+				state: { ...snapshot.state, lines, cursorCol },
+				pastes,
+				pasteCounter: snapshot.pasteCounter,
+			};
+		});
+		this.undoImageRefCounts.delete(placeholder);
+	}
+
+	/** Canonical placeholders inside one text slice (cheap substring precheck). */
+	private static imagePlaceholdersIn(text: string): string[] {
+		if (!text.includes("[image #")) return [];
+		return text.match(DRAFT_IMAGE_PLACEHOLDER_REGEX) ?? [];
+	}
+
+	/** Union of the canonical placeholders one document references. */
+	private documentImagePlaceholders(lines: readonly string[]): string[] {
+		const found = new Set<string>();
+		for (const line of lines) {
+			for (const placeholder of Editor.imagePlaceholdersIn(line)) found.add(placeholder);
+		}
+		return [...found];
+	}
+
+	/** Union of the canonical placeholders a paste registry references. Only
+	 *  bodies that CONTAIN a canonical token are cached, and the cache is
+	 *  bounded and most-recently-used ordered, so ordinary large pastes and
+	 *  retired paste bodies cannot accumulate here (X064). */
+	private pasteRegistryImagePlaceholders(pastes: ReadonlyMap<number, string>): string[] {
+		const found = new Set<string>();
+		for (const [id, body] of pastes) {
+			let placeholders: readonly string[];
+			const cached = this.pasteImagePlaceholders.get(id);
+			if (cached !== undefined && cached.body === body) {
+				placeholders = cached.placeholders;
+				// Move to the most-recently-used end.
+				this.pasteImagePlaceholders.delete(id);
+				this.pasteImagePlaceholders.set(id, cached);
+			} else {
+				placeholders = Editor.imagePlaceholdersIn(body);
+				if (placeholders.length === 0) {
+					this.pasteImagePlaceholders.delete(id);
+				} else {
+					this.pasteImagePlaceholders.set(id, { body, placeholders });
+					while (this.pasteImagePlaceholders.size > MAX_PASTE_IMAGE_CACHE_ENTRIES) {
+						const oldest = this.pasteImagePlaceholders.keys().next().value;
+						if (oldest === undefined) break;
+						this.pasteImagePlaceholders.delete(oldest);
+					}
+				}
+			}
+			for (const placeholder of placeholders) found.add(placeholder);
+		}
+		return [...found];
+	}
+
+	/** The image placeholders the CURRENT document + paste registry reference. */
+	private liveImagePlaceholders(): string[] {
+		return [
+			...this.documentImagePlaceholders(this.state.lines),
+			...this.pasteRegistryImagePlaceholders(this.pastes),
+		];
+	}
+
+	private addUndoImageRefs(placeholders: readonly string[]): void {
+		for (const placeholder of placeholders) {
+			this.undoImageRefCounts.set(placeholder, (this.undoImageRefCounts.get(placeholder) ?? 0) + 1);
+		}
+	}
+
+	private removeUndoImageRefs(placeholders: readonly string[]): void {
+		for (const placeholder of placeholders) {
+			const count = this.undoImageRefCounts.get(placeholder);
+			if (count === undefined) continue;
+			if (count <= 1) this.undoImageRefCounts.delete(placeholder);
+			else this.undoImageRefCounts.set(placeholder, count - 1);
+		}
 	}
 
 	private handleBackspace(): void {
@@ -2568,6 +2789,11 @@ export class Editor implements Component, Focusable {
 		// churn per edit, exploding with multi-MB pastes. UndoStack.push
 		// stores the snapshot as-is (no re-clone). (dsh-pi-tui divergence
 		// X004B.)
+		// The snapshot's image references are the CURRENT ones (the snapshot
+		// just captured exactly this state); recorded incrementally so the
+		// host observation stays O(1) and normal editing never rescans paste
+		// bodies (X064).
+		const placeholders = this.liveImagePlaceholders();
 		this.undoStack.push({
 			state: {
 				lines: [...this.state.lines],
@@ -2577,12 +2803,17 @@ export class Editor implements Component, Focusable {
 			pastes: new Map(this.pastes),
 			pasteCounter: this.pasteCounter,
 		});
+		this.addUndoImageRefs(placeholders);
 	}
 
 	private undo(): void {
 		this.exitHistoryBrowsing();
 		const snapshot = this.undoStack.pop();
 		if (!snapshot) return;
+		this.removeUndoImageRefs([
+			...this.documentImagePlaceholders(snapshot.state.lines),
+			...this.pasteRegistryImagePlaceholders(snapshot.pastes),
+		]);
 		Object.assign(this.state, snapshot.state);
 		// Re-copy the containers so the popped snapshot stays detached: the
 		// live state mutates its lines array in place (splices), which must

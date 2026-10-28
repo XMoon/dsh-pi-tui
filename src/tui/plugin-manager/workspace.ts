@@ -1,19 +1,22 @@
 /**
- * The fullscreen Plugin Manager workspace (S4-D1): a PURE PiTui renderer and
- * input owner for the profile-wide official inventory. It paints the four
- * frozen sections (`TUI & Extensions → Official DSH → Third-party →
- * Experimental`), the package Detail, the official install view and the
- * removal confirmation.
+ * The embedded Plugin Manager page (S4-D1 / PR2): a PURE PiTui renderer and
+ * input owner for the profile-wide official inventory. It paints the frozen
+ * sections (`TUI & Extensions → Official DSH → Third-party → Experimental`),
+ * the package Detail, the official install view, the removal confirmation and
+ * the extension diagnostics page.
  *
  * It owns NO Host read, NO install request id and NO package execution: the
  * ONE `PluginManagerController` owns the official port and the install
  * lifecycle; this component only paints its facts and forwards explicit user
  * intents. Selection, search/filter, focus, scroll offsets, the painted hit
- * map and its revision are per-open state of THIS page (plan §3).
+ * map and its revision are per-page state of THIS page.
  *
- * It is the layout root of the SAME `TuiAltScreen` lease the Settings workspace
- * uses (both in-place Settings embedding and the direct `/plugins` root), so it
- * never creates a second screen/focus owner.
+ * The page is a CHILD of the Settings workspace panel: it paints only inside
+ * the local viewport the root grants it (`setViewport`), never the shared
+ * Settings Header/Metadata/Rules/Action Bar, and it derives its own local
+ * Chrome (Search/Filters, Host notice, business body, one semantic bar) from
+ * that grant. Esc/Left/Shift+Tab at the list root report a navigation YIELD to
+ * the root — they never close the page or release the Host claim.
  *
  * @module @xmoon76/dsh-pi-tui/tui/plugin-manager/workspace
  */
@@ -35,6 +38,14 @@ import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 import type { PluginInstallView, PluginManagerController } from '../../app/plugin-manager/controller.ts'
 import {
+  formatTuiContributionDiagnostic,
+  formatTuiExtensionCapabilities,
+  formatTuiExtensionRegistryCounts,
+  serializeTuiExtensionDiagnostics,
+  type TuiContributionDiagnostic,
+  type TuiExtensionDiagnostics,
+} from '../../app/plugin-manager/extension-inventory.ts'
+import {
   AUTO_REVIEW_BUNDLE,
   AUTO_REVIEW_DISABLE_WARNING,
   PLUGIN_ACTION,
@@ -50,12 +61,10 @@ import {
   type PluginDetailView,
 } from '../../app/plugin-manager/model.ts'
 
-/** The frozen width breakpoint: `>=96` two columns, `<96` one column. */
-export const PLUGIN_WORKSPACE_WIDE_MIN_COLUMNS = 96
+/** The minimum local content width of the adjacent List|Details pair. */
+const DUAL_MIN_COLUMNS = 76
 /** The 2-cell gutter between the two columns (design language §6.3). */
 const COLUMN_GAP = 2
-/** The right pane keeps at least this many cells in the wide projection. */
-const MIN_DETAIL_WIDTH = 24
 /** The bounded log tail kept by the controller; the view only windows it. */
 const LOG_TAIL_LINES = 40
 
@@ -70,12 +79,14 @@ const FILTER_LABELS: Record<PluginListFilter, string> = {
   available: 'Available',
 }
 
-/** Surface-local keys (the handler and the Action Bar read the same table). */
+/** Surface-local keys (the handler the Action Bar names). */
 const WORKSPACE_KEYS = {
   search: '/',
   install: 'i',
   refresh: 'r',
   copy: 'c',
+  copyAll: 'C',
+  diagnostics: 'd',
   logs: 'l',
   stop: 's',
 } as const
@@ -98,12 +109,84 @@ const CONFIRM_ACTION = {
   cancel: 'confirm:cancel',
 } as const
 
+const DIAGNOSTICS_ACTION = {
+  copyAll: 'diagnostics:copy-all',
+  back: 'diagnostics:back',
+} as const
+
 /** Which page-local view is showing. */
-type PluginWorkspaceView = 'list' | 'details' | 'install' | 'confirm'
+export type PluginWorkspaceView = 'list' | 'details' | 'install' | 'confirm' | 'diagnostics'
+
+/**
+ * The local viewport the Settings root grants the embedded page for ONE frame.
+ * It is the ONLY size authority the page plans against: `width` are the real
+ * local cells (excluding any Categories rail), `rows` the real local rows
+ * INCLUDING the single semantic bar row, and `allowDual` states whether the
+ * root's projection has room for the adjacent `List | Details` pair.
+ */
+export interface PluginContentViewport {
+  readonly width: number
+  readonly rows: number
+  readonly allowDual: boolean
+}
+
+/**
+ * The narrow page contract the Settings root consumes. It is TUI-only: the
+ * application layer keeps seeing a plain `Component`.
+ */
+export interface EmbeddedPluginPage extends Component {
+  focused: boolean
+  /** Release this page and the Host claim it owns, exactly once. */
+  dispose(): void
+  setViewport(viewport: PluginContentViewport): void
+  currentView(): PluginWorkspaceView
+  canYieldFocusToNavigation(): boolean
+  pendingMutation(): boolean
+  /**
+   * The page's monotonic gesture revision. It bumps on EVERY local state change
+   * that can move a painted target or its meaning (view, filter, query,
+   * selected card, install phase, scroll, painted action set), so the Settings
+   * root can fence a rail press it recorded before forwarding a key to this
+   * page: the same view and yield status can still hide a changed list.
+   */
+  gestureRevision(): number
+  /** The monotonic SEMANTIC generation: advances on every real state change and
+   *  NEVER on a paint catch-up, so a change-and-revert is still visible. */
+  semanticGeneration(): number
+  /**
+   * The page's LIVE currentness identity: the local painted revision, the local
+   * viewport grant and every Controller fact `frameIsCurrent()` compares
+   * (model + Host read generation, install phase, notice, status).
+   *
+   * It is a comparable VALUE, not a boolean: a boolean cannot tell two different
+   * stale states apart, so a gesture held across a SECOND Host invalidation (both
+   * "stale") would look unchanged, while a repaint that simply catches up with
+   * facts that were ALREADY live before the press would look like a change. The
+   * root stores this string at press time and requires the same value at release.
+   */
+  liveIdentity(): string
+  /**
+   * Whether a changed viewport grant is still awaiting the paint that installs
+   * it (§4.2). While true ONLY the real Esc may act, and the Settings root must
+   * apply the same rule to keys it intercepts itself (Shift+Tab).
+   */
+  grantAwaitingPaint(): boolean
+  cancelPointer(): void
+  handleInput(data: string): void
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined
+  onCellPress(x: number, y: number): void
+  onCellClick(x: number, y: number): void
+  /**
+   * The List|Details split of the LAST local plan. The Settings root paints the
+   * shared pane-header labels with these EXACT widths, so the header can never
+   * drift from the columns the page really painted.
+   */
+  contentLayout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number }
+}
 
 /** One painted hit target of the LAST frame (never a screen-index authority). */
 interface HitTarget {
-  readonly kind: 'card' | 'action' | 'filter' | 'pane' | 'search'
+  readonly kind: 'card' | 'action' | 'filter' | 'pane' | 'search' | 'diagnostic-fact' | 'diagnostic-action'
   readonly value: string
   readonly row: number
   readonly startCol: number
@@ -115,8 +198,14 @@ interface PressedGesture {
   readonly revision: number
   readonly view: PluginWorkspaceView
   readonly selectedValue: string | undefined
-  readonly columns: number
+  /** The LOCAL viewport triple of the frame the press was admitted against. */
+  readonly width: number
   readonly rows: number
+  readonly allowDual: boolean
+  /** The Controller's monotonic transition count at press time. `phase` alone
+   *  cannot see a round trip that returns to the same value (installing ->
+   *  applying -> installing), and the page's own release gate must refuse it. */
+  readonly transitions: number
 }
 
 /** One line of the list projection. */
@@ -127,17 +216,20 @@ interface ListEntry {
   readonly card?: PluginCardView
 }
 
-/** The per-frame chrome budget (design language §8). */
+/**
+ * The per-frame LOCAL chrome budget of the embedded page (design language §8):
+ * one optional Search/Filters row, one optional Host-notice row, the business
+ * body and the single semantic bar. The shared Settings Header/Metadata/Rules
+ * belong to the ROOT and are never planned here.
+ */
 interface ChromePlan {
   readonly width: number
   readonly rows: number
-  readonly wide: boolean
-  readonly headerRows: number
-  readonly metaRows: number
-  readonly ruleRows: number
-  readonly noticeRows: number
-  readonly actionRows: number
+  readonly searchRows: 0 | 1
+  readonly noticeRows: 0 | 1
+  readonly actionRows: 1
   readonly bodyRows: number
+  readonly dual: boolean
   readonly leftWidth: number
   readonly rightWidth: number
 }
@@ -146,6 +238,41 @@ interface ChromePlan {
 interface PaintedActionLine {
   readonly value: string
   readonly line: number
+}
+
+/** One selectable diagnostics fact (a summary fact or one contribution). */
+interface DiagnosticsFact {
+  readonly id: string
+  readonly copy: string
+  readonly label?: string
+  readonly contribution?: TuiContributionDiagnostic
+}
+
+/** One line span of one painted diagnostics fact (viewport source rows). */
+interface DiagnosticSpan {
+  readonly start: number
+  readonly count: number
+  /** The fact's leading identity/state rows (kept sticky while paging). */
+  readonly headRows: number
+}
+
+interface DiagnosticsLayout {
+  readonly lines: string[]
+  readonly spans: ReadonlyMap<string, DiagnosticSpan>
+  readonly targets: readonly {
+    readonly kind: 'diagnostic-fact' | 'diagnostic-action'
+    readonly value: string
+    readonly line: number
+    readonly startCol: number
+    readonly endCol: number
+  }[]
+}
+
+function diagnosticsFactId(
+  group: 'associated' | 'unassociated',
+  entry: TuiContributionDiagnostic,
+): string {
+  return `diagnostics:${group}:${entry.owner}:${entry.extensionPoint}:${entry.id}`
 }
 
 /** The pure renderer/input owner of the Plugin Manager page. */
@@ -169,6 +296,23 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private confirmOffset = 0
   private paintedConfirmScrollMax = 0
   private installSelection = 0
+  /** The diagnostics page's own immutable read (captured on entry/refresh)
+   *  and its fact selection/scroll state. */
+  private diagnosticsSnapshot: TuiExtensionDiagnostics | undefined
+  /** The last painted diagnostics CONTENT key (a same-content reread keeps
+   *  the painted revision stable). */
+  private lastDiagnosticsKey: string | undefined
+  private diagnosticsSelection = 0
+  private diagnosticsOffset = 0
+  private diagnosticsReveal = false
+  /** Whether the CURRENT diagnostics content is taller than its body. */
+  private diagnosticsScrollable = false
+  /** The painted fact spans and viewport of the LAST diagnostics frame. */
+  private diagnosticsSpans: ReadonlyMap<string, DiagnosticSpan> = new Map()
+  private diagnosticsViewport = 0
+  private diagnosticsLineCount = 0
+  /** Whether the selected fact's FIRST row is inside the painted body. */
+  private diagnosticsSelectionVisible = false
   private readonly searchInput = new Input({ prompt: '' })
   private readonly specInput = new Input({ prompt: '' })
   private readonly registryInput = new Input({ prompt: '' })
@@ -180,6 +324,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private _focused = false
   private disposed = false
   private revision = 0
+  /** Monotonic count of REAL semantic changes (see {@link bumpSemantic}). */
+  private semanticGenerationValue = 0
   private paintedTargets: readonly HitTarget[] = []
   private paintedRevision = -1
   private paintedChrome: ChromePlan | undefined
@@ -196,13 +342,20 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
    *  (risk not fully visible) cannot leave Enter pointing at it. */
   private paintedConfirmActionValues: readonly string[] = []
   private pressedGesture: PressedGesture | undefined
+  /** The LOCAL viewport granted by the Settings root. The page never reads the
+   *  physical terminal: its layout (and dual admission) lives entirely here. */
+  private viewport: PluginContentViewport = { width: 0, rows: 0, allowDual: false }
+  /** Armed by `setViewport` when the grant really changed; cleared only by the
+   *  paint that installs the new grant. §4.2: until that paint, only the real Esc
+   *  may act — the previous frame does not describe what the user now sees. */
+  private grantAwaitingPaintArmed = false
   private lastRenderWidth = -1
   private lastRenderRows = -1
+  private lastRenderAllowDual: boolean | undefined
   private lastModelKey: string | undefined
   private lastView: PluginWorkspaceView | undefined
   private lastPhase: string | undefined
   private lastNotice: string | undefined
-  private lastAppNotice: string | undefined
   private lastStatusState: 'loading' | 'ready' | 'error' | undefined
   private lastSelectedValue: string | undefined
   private lastFocus: 'list' | 'details' | undefined
@@ -219,9 +372,9 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.controller = controller
     this.intents = intents
     this.onDispose = options.onDispose
-    // A dispatched/failed/unknown/done attempt reopens on the SAME request
-    // id/controller; only the explicit New-install action may replace it.
-    if (controller.hasResumableInstall()) this.view = 'install'
+    // Every page starts on the Plugin List. A previous attempt (running or
+    // terminal) is NOT auto-opened: the Controller keeps its request id/log and
+    // the explicit `i` reopens the SAME attempt from the list.
   }
 
   get focused(): boolean {
@@ -231,6 +384,69 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   set focused(value: boolean) {
     this._focused = value
     this.syncInputFocus()
+  }
+
+  /**
+   * Install the local viewport the Settings root grants this frame. An
+   * identical grant keeps every selection/filter/scroll offset AND the painted
+   * action grants; ANY change (width, rows or dual admission) revokes the old
+   * painted actions/confirm/scroll authority and marks the frame stale until
+   * the next paint. It never reads the Host and never re-plans business state.
+   */
+  setViewport(viewport: PluginContentViewport): void {
+    if (this.disposed) return
+    const width = Math.max(1, Math.floor(viewport.width))
+    const rows = Math.max(1, Math.floor(viewport.rows))
+    const allowDual = viewport.allowDual === true
+    if (width === this.viewport.width && rows === this.viewport.rows && allowDual === this.viewport.allowDual) return
+    this.viewport = { width, rows, allowDual }
+    // A viewport change revokes the GRANTS of the previous frame, but it is not
+    // a zero-body frame: the selected install/confirm index survives so a
+    // resize round trip restores the SAME action the user was on.
+    this.revokePaintedGrants()
+    this.pressedGesture = undefined
+    this.grantAwaitingPaintArmed = true
+    this.bumpRevision(); this.bumpSemantic()
+  }
+
+  /**
+   * Whether the page may hand the keyboard back to the Settings Categories
+   * rail. Pure query: only the untouched List root qualifies — never an edit,
+   * never a pending mutation, and never a background install (Esc hiding an
+   * install must be able to leave the page).
+   */
+  canYieldFocusToNavigation(): boolean {
+    return this.view === 'list' && !this.searchEditing && this.controller.busy() === undefined
+  }
+
+  /**
+   * Whether a User navigation may not abandon this page right now. The
+   * Controller's own mutation guard is the authority; a dispatched Host install
+   * is deliberately NOT included (Esc hide leaves it running).
+   */
+  pendingMutation(): boolean {
+    return this.controller.busy() !== undefined
+  }
+
+  /** See {@link EmbeddedPluginPage.gestureRevision}. */
+  gestureRevision(): number {
+    return this.revision
+  }
+
+  semanticGeneration(): number {
+    return this.semanticGenerationValue
+  }
+
+  /** Revoke one in-flight press (never a Host operation). */
+  cancelPointer(): void {
+    this.pressedGesture = undefined
+  }
+
+  /** The List|Details split of the last local plan (see the interface). */
+  contentLayout(): { readonly dual: boolean; readonly leftWidth: number; readonly rightWidth: number } {
+    const plan = this.paintedChrome
+    if (plan === undefined) return { dual: false, leftWidth: this.viewport.width, rightWidth: this.viewport.width }
+    return { dual: plan.dual, leftWidth: plan.leftWidth, rightWidth: plan.rightWidth }
   }
 
   invalidate(): void {
@@ -269,6 +485,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.handleEscape()
       return
     }
+    // §4.2: below the body floor the frame paints ONLY its real Esc
+    // destination, so every other key (body action, copy, filter, search edit)
+    // is a hidden action and must not run. The floor is read from the CURRENT
+    // grant: `setViewport` may have shrunk it after the last paint.
+    if (this.bodyFloor() <= 0) return
+    // §4.2: `setViewport` revokes the previous frame's grants; until the frame that
+    // installs the new grant paints, every body action/copy/edit is refused. A
+    // page that has never painted has no stale frame to protect.
+    if (this.grantAwaitingPaint()) return
     if (this.searchEditing) {
       this.handleSearchInput(data)
       return
@@ -281,6 +506,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.handleConfirmInput(data)
       return
     }
+    if (this.view === 'diagnostics') {
+      this.handleDiagnosticsInput(data)
+      return
+    }
     if (this.view === 'details') {
       this.handleDetailsInput(data)
       return
@@ -288,8 +517,8 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.handleListInput(data)
   }
 
-  /** The panel is the layout root: wheel events route to the pane under the
-   * pointer; press/click arrive through the alt screen's cell path. */
+  /** The embedded page: the wheel routes to the pane under the LOCAL pointer;
+   *  the Settings root translates press/click into this page's coordinates. */
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     if (this.disposed) return undefined
     if (event.type !== 'wheel') return undefined
@@ -304,32 +533,87 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const bodyTop = this.bodyTop(plan)
     const inBody = event.y >= bodyTop && event.y < bodyTop + plan.bodyRows
     if (!inBody) return undefined
-    if (this.view === 'details' || this.view === 'confirm' || this.view === 'install') {
-      if (this.view === 'install') {
-        this.scrollInstall(delta, plan)
-        this.bumpRevision()
-        this.intents.requestRender()
-        return { handled: true }
+    if (this.view === 'diagnostics') {
+      this.scrollDiagnostics(delta > 0 ? 1 : -1, Math.abs(delta))
+      return { handled: true }
+    }
+    if (this.view === 'install') {
+      if (this.scrollInstall(delta, plan)) {
+        this.bumpRevision(); this.bumpSemantic()
       }
-      if (this.view === 'confirm') {
-        this.scrollConfirm(delta > 0 ? 1 : -1)
-        return { handled: true }
-      }
-      this.detailOffset = Math.max(0, this.detailOffset + delta)
-      this.bumpRevision()
       this.intents.requestRender()
       return { handled: true }
     }
-    if (plan.wide && event.x >= plan.leftWidth + COLUMN_GAP) {
-      this.detailOffset = Math.max(0, this.detailOffset + delta)
-      this.bumpRevision()
-      this.intents.requestRender()
+    if (this.view === 'confirm') {
+      this.scrollConfirm(delta > 0 ? 1 : -1)
       return { handled: true }
     }
-    this.listOffset = Math.max(0, this.listOffset + delta)
-    this.bumpRevision()
-    this.intents.requestRender()
+    // The List|Details pair routes by the column the pointer is REALLY over:
+    // the List column scrolls the list, the Details column scrolls the details,
+    // and the 2-cell pair gutter belongs to neither pane (§3.4: inert). A
+    // single-column frame scrolls the ONE view it paints.
+    if (!plan.dual) {
+      if (this.view === 'details') this.scrollDetail(delta)
+      else this.scrollList(delta)
+      return { handled: true }
+    }
+    if (event.x >= plan.leftWidth && event.x < plan.leftWidth + COLUMN_GAP) return { handled: true }
+    if (event.x >= plan.leftWidth + COLUMN_GAP) this.scrollDetail(delta)
+    else this.scrollList(delta)
     return { handled: true }
+  }
+
+  /** The painted window height of the List, used to bound a wheel the same way
+   *  the paint will (otherwise a wheel past the end bumps a revision the next
+   *  frame clamps away, revoking a press the user still holds). */
+  private listWindowRows(): number {
+    return Math.max(1, this.paintedChrome?.bodyRows ?? 1)
+  }
+
+  /** The Detail pane's total painted line count, produced by the SAME painter
+   *  the frame uses (title/wrapped name/Official row/groups/actions included), so
+   *  the wheel bound can never drift from what is really painted. */
+  private detailLineCount(): number {
+    const card = this.selectedCard()
+    if (card === undefined) return 0
+    const plan = this.paintedChrome
+    const width = plan === undefined
+      ? this.viewport.width
+      : plan.dual ? plan.rightWidth : plan.width
+    if (width <= 0) return 0
+    // The line count must be INDEPENDENT of the scroll position and of which
+    // action is focused (both only restyle lines that always exist), otherwise
+    // the bound would move as the user scrolls.
+    return detailLines(this.detailView(card), width, false, 0).lines.length
+  }
+
+  /** The same bound for the Detail pane (its painted window height). */
+  private detailWindowRows(): number {
+    return Math.max(1, this.paintedChrome?.bodyRows ?? 1)
+  }
+
+  /** A wheel that cannot move the painted window is NOT a gesture boundary: a
+   *  no-op bump would revoke a legitimate press the user still holds (the
+   *  Settings root fences its rail presses by this page's revision). */
+  private scrollList(delta: number): void {
+    const entries = this.listEntries(this.controller.model())
+    const max = Math.max(0, entries.length - this.listWindowRows())
+    const next = Math.min(Math.max(0, this.listOffset + delta), max)
+    if (next !== this.listOffset) {
+      this.listOffset = next
+      this.bumpRevision(); this.bumpSemantic()
+    }
+    this.intents.requestRender()
+  }
+
+  private scrollDetail(delta: number): void {
+    const max = Math.max(0, this.detailLineCount() - this.detailWindowRows())
+    const next = Math.min(Math.max(0, this.detailOffset + delta), max)
+    if (next !== this.detailOffset) {
+      this.detailOffset = next
+      this.bumpRevision(); this.bumpSemantic()
+    }
+    this.intents.requestRender()
   }
 
   onCellPress(x: number, y: number): void {
@@ -338,7 +622,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // repaint has not run must not record a target from the stale hit map.
     if (!this.frameIsCurrent()) {
       this.pressedGesture = undefined
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -350,8 +634,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         revision: this.revision,
         view: this.view,
         selectedValue: this.selectedValue,
-        columns: this.intents.columns(),
-        rows: this.intents.rows(),
+        width: this.viewport.width,
+        rows: this.viewport.rows,
+        allowDual: this.viewport.allowDual,
+        transitions: this.controller.semanticTransitionsCount(),
       }
   }
 
@@ -360,21 +646,25 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const pressed = this.pressedGesture
     this.pressedGesture = undefined
     if (!this.frameIsCurrent()) {
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
     const target = this.targetAt(x, y)
     if (pressed === undefined || target === undefined) return
     // The gesture must still resolve to the SAME painted target AND the same
-    // revision/view/selection/geometry: a refresh, filter/search change, page
-    // switch OR a resize (even before its repaint) refuses the click.
+    // revision/view/selection/LOCAL viewport/Controller transition count: a
+    // refresh, filter/search change, page switch, local viewport change or an
+    // asynchronous Controller transition (even one that returns to the same
+    // phase value, and even before its repaint) refuses the click.
     if (
       this.revision !== pressed.revision
       || this.view !== pressed.view
       || this.selectedValue !== pressed.selectedValue
-      || this.intents.columns() !== pressed.columns
-      || this.intents.rows() !== pressed.rows
+      || this.viewport.width !== pressed.width
+      || this.viewport.rows !== pressed.rows
+      || this.viewport.allowDual !== pressed.allowDual
+      || this.controller.semanticTransitionsCount() !== pressed.transitions
       || target.kind !== pressed.target.kind
       || target.value !== pressed.target.value
       || target.row !== pressed.target.row
@@ -389,6 +679,13 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   // ── list navigation ──────────────────────────────────────────────────────
 
   private handleListInput(data: string): void {
+    // Left at the List root is the plugin page's OWN "back to Categories"
+    // verb (the Settings root only commits the focus change). It never closes
+    // Settings and never runs while an edit or a mutation owns the page.
+    if (matchesKey(data, 'left')) {
+      if (this.canYieldFocusToNavigation()) this.intents.onYieldNavigation()
+      return
+    }
     if (matchesKey(data, 'up') || matchesKey(data, 'ctrl+p')) {
       this.moveSelection(-1)
       return
@@ -429,9 +726,82 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.openInstallView()
       return
     }
+    if (data === WORKSPACE_KEYS.diagnostics) {
+      this.openDiagnostics()
+      return
+    }
     if (data === WORKSPACE_KEYS.refresh || data === WORKSPACE_KEYS.refresh.toUpperCase()) {
       this.controller.refresh()
       this.intents.requestRender()
+    }
+  }
+
+  /** `d`: open the read-only extension diagnostics page over the same
+   *  controller/lease. One explicit read per entry; `r` rereads there. */
+  private openDiagnostics(): void {
+    if (!this.frameIsCurrent()) return
+    this.diagnosticsSelection = 0
+    this.diagnosticsOffset = 0
+    this.diagnosticsReveal = false
+    this.view = 'diagnostics'
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  private leaveDiagnostics(): void {
+    this.view = 'list'
+    this.focus = 'list'
+    this.diagnosticsReveal = false
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  /** Reread the live extension diagnostics on explicit request. The official
+   *  package inventory is NOT refreshed by this key. */
+  private reloadDiagnostics(): void {
+    // The next paint performs exactly ONE new read (see syncFrameState).
+    const count = this.diagnosticsFacts().length
+    this.diagnosticsSelection = Math.min(this.diagnosticsSelection, Math.max(0, count - 1))
+    this.diagnosticsReveal = true
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  private handleDiagnosticsInput(data: string): void {
+    if (matchesKey(data, 'up') || matchesKey(data, 'ctrl+p')) {
+      this.moveDiagnosticsSelection(-1)
+      return
+    }
+    if (matchesKey(data, 'down') || matchesKey(data, 'ctrl+n')) {
+      this.moveDiagnosticsSelection(1)
+      return
+    }
+    if (matchesKey(data, 'pageUp')) {
+      this.scrollDiagnostics(-1)
+      return
+    }
+    if (matchesKey(data, 'pageDown')) {
+      this.scrollDiagnostics(1)
+      return
+    }
+    if (matchesKey(data, 'home')) {
+      this.selectDiagnosticsFirst()
+      return
+    }
+    if (matchesKey(data, 'end')) {
+      this.selectDiagnosticsLast()
+      return
+    }
+    if (data === WORKSPACE_KEYS.copy) {
+      this.copyDiagnosticsSelection()
+      return
+    }
+    if (data === WORKSPACE_KEYS.copyAll) {
+      this.copyAllDiagnostics()
+      return
+    }
+    if (data === WORKSPACE_KEYS.refresh || data === WORKSPACE_KEYS.refresh.toUpperCase()) {
+      this.reloadDiagnostics()
     }
   }
 
@@ -451,7 +821,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       // the controller's exact spec/registry instead of a blank form.
       this.seedInstallInputs(install)
     }
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -462,7 +832,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.view = 'install'
     this.installFocus = 'spec'
     this.resetInstallInputs()
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -511,21 +881,15 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'pageUp')) {
-      this.detailOffset = Math.max(0, this.detailOffset - this.detailPageStep())
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.scrollDetail(-this.detailPageStep())
       return
     }
     if (matchesKey(data, 'pageDown')) {
-      this.detailOffset += this.detailPageStep()
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.scrollDetail(this.detailPageStep())
       return
     }
     if (matchesKey(data, 'home')) {
-      this.detailOffset = 0
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.setDetailOffset(0)
       return
     }
     if (matchesKey(data, 'enter')) {
@@ -556,7 +920,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (matchesKey(data, 'enter')) {
       this.searchEditing = false
       this.syncInputFocus()
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -567,7 +931,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (next !== this.query) {
       this.query = next
       this.renarrowSelection()
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
     }
   }
@@ -582,20 +946,27 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'up') || matchesKey(data, 'left')) {
-      this.confirmSelection = Math.max(0, this.confirmSelection - 1)
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.moveConfirmSelection(-1)
       return
     }
     if (matchesKey(data, 'down') || matchesKey(data, 'right') || matchesKey(data, 'tab')) {
-      this.confirmSelection = Math.min(this.confirmSelection + 1, Math.max(0, this.paintedConfirmActionValues.length - 1))
-      this.bumpRevision()
-      this.intents.requestRender()
+      this.moveConfirmSelection(1)
       return
     }
     if (matchesKey(data, 'enter')) {
       this.activateConfirmSelection()
     }
+  }
+
+  /** Move the pinned choice. A key at either end is a no-op and must NOT bump:
+   *  a bump there would revoke a held pointer action for no visible change. */
+  private moveConfirmSelection(delta: number): void {
+    const last = Math.max(0, this.paintedConfirmActionValues.length - 1)
+    const next = Math.min(Math.max(0, this.confirmSelection + delta), last)
+    if (next === this.confirmSelection) return
+    this.confirmSelection = next
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
   }
 
   /** Scroll only the confirmation content; the two choices stay pinned. */
@@ -605,7 +976,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const next = Math.min(Math.max(0, this.confirmOffset + direction * step), this.paintedConfirmScrollMax)
     if (next === this.confirmOffset) return
     this.confirmOffset = next
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -613,7 +984,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const install = this.controller.installView()
     if (install === undefined) {
       this.view = 'list'
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -621,7 +992,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       if (matchesKey(data, 'tab')) {
         this.installFocus = this.installFocus === 'spec' ? 'registry' : 'spec'
         this.syncInputFocus()
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
         this.intents.requestRender()
         return
       }
@@ -631,8 +1002,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           this.submitInspect()
           return
         }
+        const beforeSpec = this.specInput.getValue()
         this.specInput.handleInput(data)
         this.sanitizeSpecInput()
+        // A REAL edit is a semantic change: it must revoke the page's own
+        // pressed actions (Inspect would otherwise fire with a different spec).
+        if (this.specInput.getValue() !== beforeSpec) {
+          this.bumpRevision(); this.bumpSemantic()
+        }
         this.intents.requestRender()
         return
       }
@@ -641,8 +1018,12 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           this.submitInspect()
           return
         }
+        const beforeRegistry = this.registryInput.getValue()
         this.registryInput.handleInput(data)
         this.sanitizeRegistryInput()
+        if (this.registryInput.getValue() !== beforeRegistry) {
+          this.bumpRevision(); this.bumpSemantic()
+        }
         this.intents.requestRender()
         return
       }
@@ -680,7 +1061,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       if (data === WORKSPACE_KEYS.logs || data === WORKSPACE_KEYS.logs.toUpperCase()) {
         this.logsExpanded = !this.logsExpanded
         this.logOffset = 0
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
         this.intents.requestRender()
         return
       }
@@ -721,7 +1102,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (data === WORKSPACE_KEYS.logs || data === WORKSPACE_KEYS.logs.toUpperCase()) {
       this.logsExpanded = !this.logsExpanded
       this.logOffset = 0
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -737,7 +1118,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.searchEditing = false
       this.syncInputFocus()
       this.renarrowSelection()
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -755,11 +1136,17 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       this.closeConfirmation()
       return
     }
+    if (this.view === 'diagnostics') {
+      this.leaveDiagnostics()
+      return
+    }
     if (this.view === 'details') {
       this.leaveDetails()
       return
     }
-    this.controller.requestClose()
+    // The untouched List root yields the keyboard back to the Settings
+    // Categories rail: it never closes the page or releases the Host claim.
+    if (this.canYieldFocusToNavigation()) this.intents.onYieldNavigation()
   }
 
   // ── view transitions ─────────────────────────────────────────────────────
@@ -778,7 +1165,19 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.detailOffset = 0
     this.detailSelection = 0
     this.detailReveal = false
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  /** Move the Detail window to an ABSOLUTE offset, clamped to the painted bound;
+   *  a no-op never bumps (see {@link scrollDetail}). */
+  private setDetailOffset(offset: number): void {
+    const max = Math.max(0, this.detailLineCount() - this.detailWindowRows())
+    const next = Math.min(Math.max(0, offset), max)
+    if (next !== this.detailOffset) {
+      this.detailOffset = next
+      this.bumpRevision(); this.bumpSemantic()
+    }
     this.intents.requestRender()
   }
 
@@ -786,7 +1185,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.view = 'list'
     this.focus = 'list'
     this.detailReveal = false
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -795,7 +1194,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.view = 'confirm'
     this.confirmSelection = 1
     this.confirmOffset = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -803,7 +1202,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private closeConfirmation(): void {
     this.confirmOffset = 0
     this.view = 'details'
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -814,7 +1213,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.view = 'list'
     this.focus = 'list'
     this.searchEditing = false
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -822,7 +1221,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.searchEditing = true
     this.searchInput.setValue(this.query)
     this.syncInputFocus()
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -837,7 +1236,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.selectedValue = cards[Math.min(previousIndex, Math.max(0, cards.length - 1))]?.value
     this.detailSelection = 0
     this.detailOffset = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -851,7 +1250,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.selectedValue = card.value
     this.detailOffset = 0
     this.detailSelection = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -862,7 +1261,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.selectedValue = first.value
     this.detailOffset = 0
     this.detailSelection = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -873,7 +1272,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.selectedValue = last.value
     this.detailOffset = 0
     this.detailSelection = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -886,7 +1285,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (next === this.detailSelection) return
     this.detailSelection = next
     this.detailReveal = true
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -896,8 +1295,402 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const next = Math.min(Math.max(0, this.installSelection + delta), actions.length - 1)
     if (next === this.installSelection) return
     this.installSelection = next
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
+  }
+
+  // ── diagnostics page ─────────────────────────────────────────────────────
+
+  /** The selectable facts of the CURRENT diagnostics snapshot: the three
+   *  summary facts followed by every contribution (associated, then the
+   *  unassociated group). Headings are never selectable. */
+  private diagnosticsFacts(): readonly DiagnosticsFact[] {
+    const view = this.diagnosticsSnapshot
+    if (view === undefined) return []
+    const facts: DiagnosticsFact[] = [
+      { id: 'diagnostics:health', label: 'Health', copy: view.healthSummary },
+      { id: 'diagnostics:registries', label: 'Registries', copy: formatTuiExtensionRegistryCounts(view.registryCounts) },
+      { id: 'diagnostics:capabilities', label: 'Capabilities', copy: formatTuiExtensionCapabilities(view.capabilities) },
+    ]
+    for (const entry of view.entries) facts.push(this.diagnosticsEntryFact(entry, 'associated'))
+    for (const entry of view.unmappedEntries) facts.push(this.diagnosticsEntryFact(entry, 'unassociated'))
+    return facts
+  }
+
+  private diagnosticsEntryFact(entry: TuiContributionDiagnostic, group: 'associated' | 'unassociated'): DiagnosticsFact {
+    return {
+      id: diagnosticsFactId(group, entry),
+      copy: formatTuiContributionDiagnostic(entry),
+      contribution: entry,
+    }
+  }
+
+  private ensureDiagnosticsSelection(count: number): void {
+    if (this.view !== 'diagnostics') return
+    if (count === 0) {
+      this.diagnosticsSelection = 0
+      return
+    }
+    if (this.diagnosticsSelection >= count) {
+      this.diagnosticsSelection = count - 1
+      this.bumpRevision(); this.bumpSemantic()
+    }
+  }
+
+  private moveDiagnosticsSelection(delta: number): void {
+    const count = this.diagnosticsFacts().length
+    if (count === 0) return
+    const next = Math.min(Math.max(0, this.diagnosticsSelection + delta), count - 1)
+    if (next === this.diagnosticsSelection) return
+    this.diagnosticsSelection = next
+    this.diagnosticsReveal = true
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  private selectDiagnosticsFirst(): void {
+    // Always re-reveal: Home must bring a wheel-scrolled selection back even
+    // when its index is already first.
+    this.diagnosticsSelection = 0
+    this.diagnosticsReveal = true
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  private selectDiagnosticsLast(): void {
+    const count = this.diagnosticsFacts().length
+    if (count === 0) return
+    this.diagnosticsSelection = count - 1
+    this.diagnosticsReveal = true
+    this.bumpRevision(); this.bumpSemantic()
+    this.intents.requestRender()
+  }
+
+  /**
+   * The number of CONTINUATION rows the next page can carry. The sticky
+   * identity/state rows consume part of the body, so the offset step must
+   * shrink by the same amount: otherwise PgDn would skip the rows that are
+   * not painted (the 30x8 case has body 3, sticky 2, capacity 1).
+   */
+  private diagnosticsScrollCapacity(): number {
+    const viewport = this.diagnosticsViewport
+    if (viewport <= 0) return 1
+    const base = Math.max(1, viewport - 1)
+    const fact = this.diagnosticsFacts()[this.diagnosticsSelection]
+    const span = fact === undefined ? undefined : this.diagnosticsSpans.get(fact.id)
+    const sticky = span !== undefined
+      && span.start < this.diagnosticsOffset + base
+      && span.start + span.count > this.diagnosticsOffset
+    const stickyRows = sticky ? Math.min(span!.headRows, Math.max(0, viewport - 1)) : 0
+    return Math.max(1, viewport - stickyRows)
+  }
+
+  /** PgUp/PgDn (or a wheel click) move the content by at most the visible
+   *  continuation capacity. A wheel may request fewer lines; it is clamped
+   *  to the same capacity so it cannot skip a row. */
+  private scrollDiagnostics(direction: -1 | 1, requestedLines?: number): void {
+    const capacity = this.diagnosticsScrollCapacity()
+    const step = Math.min(Math.max(1, requestedLines ?? capacity), capacity)
+    const viewport = this.diagnosticsViewport
+    const fact = this.diagnosticsFacts()[this.diagnosticsSelection]
+    const span = fact === undefined ? undefined : this.diagnosticsSpans.get(fact.id)
+    const stickyRowsFor = (offset: number): number => span !== undefined
+      && span.start < offset
+      && span.start + span.count > offset
+      ? Math.min(span.headRows, Math.max(0, viewport - 1))
+      : 0
+    // The sticky identity rows reserve body space, exactly like the paint; the
+    // scroll bound must therefore leave the final continuation row reachable.
+    const max = (() => {
+      const probe = Math.max(0, this.diagnosticsOffset + direction * step)
+      return Math.max(0, this.diagnosticsLineCount - Math.max(1, viewport - stickyRowsFor(probe)))
+    })()
+    const next = Math.min(Math.max(0, this.diagnosticsOffset + direction * step), max)
+    // Capture the pre-scroll presentation so a scroll that changes NOTHING (a
+    // page press at either end with the selection already visible) does not bump
+    // the gesture revision — a no-op must not revoke a held pointer action.
+    const beforeOffset = this.diagnosticsOffset
+    const beforeSelection = this.diagnosticsSelection
+    const beforeReveal = this.diagnosticsReveal
+    this.diagnosticsOffset = next
+    // Keep the SELECTED fact visible: if the current selection no longer
+    // intersects the new page, select the first fact that does. This is the
+    // About page's page-scroll model, so `c` never copies an offscreen fact
+    // after paging.
+    if (viewport > 0) {
+      const facts = this.diagnosticsFacts()
+      const current = facts[this.diagnosticsSelection]
+      const currentSpan = current === undefined ? undefined : this.diagnosticsSpans.get(current.id)
+      const currentVisible = currentSpan !== undefined
+        && currentSpan.start + currentSpan.count > next
+        && currentSpan.start < next + viewport
+      if (!currentVisible) {
+        const index = facts.findIndex(fact => {
+          const span = this.diagnosticsSpans.get(fact.id)
+          return span !== undefined && span.start + span.count > next && span.start < next + viewport
+        })
+        if (index >= 0) this.diagnosticsSelection = index
+      }
+    }
+    this.diagnosticsReveal = false
+    if (next !== beforeOffset || this.diagnosticsSelection !== beforeSelection || this.diagnosticsReveal !== beforeReveal) {
+      this.bumpRevision(); this.bumpSemantic()
+    }
+    this.intents.requestRender()
+  }
+
+  /** `c`: copy the SELECTED fact's exact payload (a summary value or the
+   *  full contribution block, including the whole lastError). Copy is
+   *  admitted only when the selected fact's FIRST row is on screen: paging
+   *  inside a too-tall block must never copy an identity the user cannot
+   *  see. */
+  private copyDiagnosticsSelection(): void {
+    if (!this.diagnosticsSelectionVisible) return
+    const fact = this.diagnosticsFacts()[this.diagnosticsSelection]
+    if (fact === undefined) return
+    this.intents.onCopy(fact.copy)
+  }
+
+  /** `C`: Copy All of the SAME immutable snapshot the page painted. */
+  private copyAllDiagnostics(): void {
+    const view = this.diagnosticsSnapshot
+    if (view === undefined) return
+    this.intents.onCopy(serializeTuiExtensionDiagnostics(view))
+  }
+
+  /** Build the diagnostics body from ONE captured snapshot. Every displayed
+   *  value, the header counts and every copy payload come from this snapshot;
+   *  facts are wrapped (never ellipsized) and the per-fact Copy/action
+   *  targets are derived from the REAL painted cells. */
+  private buildDiagnosticsLayout(width: number, selectedId: string | undefined): DiagnosticsLayout {
+    const view = this.diagnosticsSnapshot
+    if (view === undefined) {
+      return {
+        lines: [
+          color.warning('Extension diagnostics unavailable — the extension service is not attached.'),
+        ],
+        spans: new Map(),
+        targets: [],
+      }
+    }
+    const lines: string[] = []
+    const spans = new Map<string, DiagnosticSpan>()
+    const targets: {
+      kind: 'diagnostic-fact' | 'diagnostic-action'
+      value: string
+      line: number
+      startCol: number
+      endCol: number
+    }[] = []
+    const markerWidth = 2
+    const contentWidth = Math.max(1, width - markerWidth)
+    const copyLabel = ` Copy [${WORKSPACE_KEYS.copy.toUpperCase()}]`
+    const copyWidth = visibleWidth(copyLabel)
+    const facts = this.diagnosticsFacts()
+    const factById = new Map(facts.map(fact => [fact.id, fact]))
+    const plainMarker = '  '
+    const selectedMarker = color.primary('> ')
+    const markerFor = (selected: boolean): string => selected ? selectedMarker : plainMarker
+    const appendCopyTarget = (factId: string): void => {
+      const last = lines.length - 1
+      if (last < 0) return
+      const startCol = visibleWidth(stripAnsi(lines[last]!))
+      const endCol = startCol + copyWidth
+      if (endCol > width) return
+      lines[last] += color.primary(copyLabel)
+      targets.push({ kind: 'diagnostic-fact', value: factId, line: last, startCol, endCol })
+    }
+    const pushHeading = (text: string): void => {
+      lines.push(color.textDim(truncateToWidth(sanitizedPhysicalLine(text), width, '…')))
+    }
+    const pushSummary = (fact: DiagnosticsFact): void => {
+      const label = fact.label ?? ''
+      const head = `${label}  `
+      const headWidth = visibleWidth(head)
+      const valueWidth = Math.max(1, contentWidth - headWidth)
+      const wrapped = wrapTextWithAnsi(sanitizedPhysicalLine(fact.copy), valueWidth)
+      const parts = wrapped.length === 0 ? [''] : wrapped
+      const selected = fact.id === selectedId
+      const ink = selected ? color.textStrong : color.text
+      const start = lines.length
+      parts.forEach((part, index) => {
+        if (index === 0) lines.push(`${markerFor(selected)}${color.textDim(head)}${ink(part)}`)
+        else lines.push(`${' '.repeat(markerWidth + headWidth)}${ink(part)}`)
+      })
+      spans.set(fact.id, { start, count: lines.length - start, headRows: 1 })
+      appendCopyTarget(fact.id)
+    }
+    const pushContribution = (fact: DiagnosticsFact): void => {
+      const entry = fact.contribution!
+      const selected = fact.id === selectedId
+      const marker = markerFor(selected)
+      const ink = selected ? color.textStrong : color.text
+      const chip = `[${entry.state}]`
+      const chipWidth = visibleWidth(chip)
+      const chipTone = entry.state === 'active'
+        ? 'muted'
+        : entry.state === 'failed' || entry.state === 'shadowed' ? 'warning' : 'dim'
+      const header = sanitizedPhysicalLine(`${entry.extensionPoint}:${entry.id}`)
+      const start = lines.length
+      let headerRows = 1
+      if (contentWidth < chipWidth + 2) {
+        // An absurdly narrow frame cannot carry the whole chip beside the
+        // label: keep BOTH, the chip on its own full line.
+        const parts = wrapTextWithAnsi(header, contentWidth)
+        ;(parts.length === 0 ? [''] : parts).forEach((part, index) => {
+          lines.push(`${index === 0 ? marker : plainMarker}${ink(part)}`)
+        })
+        lines.push(`${plainMarker}${paintTone(chip, chipTone)}`)
+        headerRows = lines.length - start
+      } else {
+        // The identity (`extensionPoint:id`) wraps as ONE uninterrupted
+        // string; the state chip follows on the LAST wrapped line (or its own
+        // line when it cannot fit there) so it never splits the identity.
+        const parts = wrapTextWithAnsi(header, contentWidth)
+        const normalized = parts.length === 0 ? [''] : parts
+        normalized.forEach((part, index) => {
+          const lineMarker = index === 0 ? marker : plainMarker
+          if (index === normalized.length - 1) {
+            const gap = contentWidth - visibleWidth(part) - chipWidth
+            if (gap >= 1) {
+              lines.push(`${lineMarker}${ink(part)}${' '.repeat(gap)}${paintTone(chip, chipTone)}`)
+            } else {
+              lines.push(`${lineMarker}${ink(part)}`)
+              lines.push(`${plainMarker}${paintTone(chip, chipTone)}`)
+            }
+          } else {
+            lines.push(`${lineMarker}${ink(part)}`)
+          }
+        })
+        headerRows = lines.length - start
+      }
+      if (entry.lastError !== undefined) {
+        const errorHead = 'error  '
+        const errorHeadWidth = visibleWidth(errorHead)
+        const errorWidth = Math.max(1, contentWidth - errorHeadWidth)
+        const parts = wrapTextWithAnsi(sanitizedPhysicalLine(entry.lastError), errorWidth)
+        ;(parts.length === 0 ? [''] : parts).forEach((part, index) => {
+          // The selection cursor belongs to the fact's FIRST line only; the
+          // error block is a continuation, never a second selected row.
+          if (index === 0) lines.push(`${plainMarker}${color.textDim(errorHead)}${color.error(part)}`)
+          else lines.push(`${' '.repeat(markerWidth + errorHeadWidth)}${color.error(part)}`)
+        })
+      }
+      spans.set(fact.id, { start, count: lines.length - start, headRows: headerRows })
+      appendCopyTarget(fact.id)
+    }
+    for (const fact of facts) {
+      if (fact.label !== undefined) pushSummary(fact)
+    }
+    if (view.entries.length > 0) {
+      if (lines.length > 0) lines.push('')
+      pushHeading('Contributions')
+      let owner: string | undefined
+      for (const entry of view.entries) {
+        if (entry.owner !== owner) {
+          owner = entry.owner
+          pushHeading(`Owner: ${entry.owner}${entry.entryId === undefined ? '' : ` (entry: ${entry.entryId})`}`)
+        }
+        const fact = factById.get(diagnosticsFactId('associated', entry))
+        if (fact !== undefined) pushContribution(fact)
+      }
+    }
+    if (view.unmappedEntries.length > 0) {
+      if (lines.length > 0) lines.push('')
+      pushHeading('Unassociated extension contributions')
+      let owner: string | undefined
+      for (const entry of view.unmappedEntries) {
+        if (entry.owner !== owner) {
+          owner = entry.owner
+          pushHeading(`Owner: ${entry.owner}`)
+        }
+        const fact = factById.get(diagnosticsFactId('unassociated', entry))
+        if (fact !== undefined) pushContribution(fact)
+      }
+    }
+    if (lines.length > 0) lines.push('')
+    const actionLine = lines.length
+    let column = 0
+    let painted = ''
+    // Whole-segment degradation: Copy All first, then Back. At the narrow
+    // floor both fit; a segment never paints a partial affordance.
+    for (const segment of [
+      { id: DIAGNOSTICS_ACTION.copyAll, text: `Copy All [${WORKSPACE_KEYS.copy.toUpperCase()}]` },
+      { id: DIAGNOSTICS_ACTION.back, text: 'Back' },
+    ]) {
+      const separator = painted === '' ? '' : '   '
+      const segmentWidth = visibleWidth(segment.text)
+      if (column + visibleWidth(separator) + segmentWidth > width) break
+      painted += `${separator}${color.primary(segment.text)}`
+      const startCol = column + visibleWidth(separator)
+      targets.push({
+        kind: 'diagnostic-action',
+        value: segment.id,
+        line: actionLine,
+        startCol,
+        endCol: startCol + segmentWidth,
+      })
+      column = startCol + segmentWidth
+    }
+    lines.push(painted)
+    return { lines, spans, targets }
+  }
+
+  private renderDiagnosticsBody(plan: ChromePlan, bodyTop: number, targets: HitTarget[]): string[] {
+    const facts = this.diagnosticsFacts()
+    this.ensureDiagnosticsSelection(facts.length)
+    const selectedId = facts[this.diagnosticsSelection]?.id
+    const built = this.buildDiagnosticsLayout(plan.width, selectedId)
+    const viewport = plan.bodyRows
+    this.diagnosticsSpans = built.spans
+    this.diagnosticsViewport = viewport
+    this.diagnosticsLineCount = built.lines.length
+    const span = selectedId === undefined ? undefined : built.spans.get(selectedId)
+    this.diagnosticsScrollable = built.lines.length > viewport
+    if (span !== undefined && this.diagnosticsReveal) {
+      // A fact taller than the viewport is revealed from its FIRST line, so
+      // the cursor, identity and state chip are always on screen; PgUp/PgDn
+      // then pages the remaining rows. A shorter fact aligns fully.
+      if (span.count > viewport) this.diagnosticsOffset = span.start
+      else if (span.start < this.diagnosticsOffset) this.diagnosticsOffset = span.start
+      else if (span.start + span.count > this.diagnosticsOffset + viewport) {
+        this.diagnosticsOffset = span.start + span.count - viewport
+      }
+    }
+    const stickyRowsFor = (offset: number): number => span !== undefined
+      && span.start < offset
+      && span.start + span.count > offset
+      ? Math.min(span.headRows, Math.max(0, viewport - 1))
+      : 0
+    // The sticky identity rows consume part of the body, so the offset window
+    // is not `viewport` rows tall at the end: clamping with the plain
+    // `count - viewport` bound would leave the last continuation rows
+    // unreachable. The clamp therefore keeps room for the real painted rows.
+    const maxOffset = Math.max(0, built.lines.length - Math.max(1, viewport - stickyRowsFor(this.diagnosticsOffset)))
+    this.diagnosticsOffset = Math.min(Math.max(0, this.diagnosticsOffset), maxOffset)
+    const stickyRows = stickyRowsFor(this.diagnosticsOffset)
+    this.diagnosticsSelectionVisible = span !== undefined
+      && (stickyRows > 0
+        || (span.start >= this.diagnosticsOffset && span.start < this.diagnosticsOffset + viewport))
+    this.diagnosticsReveal = false
+    for (const target of built.targets) {
+      const y = target.line - this.diagnosticsOffset + (target.line >= this.diagnosticsOffset ? stickyRows : 0)
+      if (y < 0 || y >= viewport) continue
+      targets.push({
+        kind: target.kind,
+        value: target.value,
+        row: bodyTop + y,
+        startCol: target.startCol,
+        endCol: target.endCol,
+      })
+    }
+    const visible = stickyRows === 0
+      ? built.lines.slice(this.diagnosticsOffset, this.diagnosticsOffset + viewport)
+      : [
+          ...built.lines.slice(span!.start, span!.start + stickyRows),
+          ...built.lines.slice(this.diagnosticsOffset, this.diagnosticsOffset + viewport - stickyRows),
+        ]
+    return padBody(visible, viewport, plan.width)
   }
 
   // ── activation (keyboard and mouse share this one admission path) ────────
@@ -915,14 +1708,14 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         this.filter = next
         const cards = this.filteredCards(this.controller.model())
         this.selectedValue = cards[Math.min(previousIndex, Math.max(0, cards.length - 1))]?.value
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
         this.intents.requestRender()
         return
       }
       case 'pane':
         this.focus = target.value === 'details' ? 'details' : 'list'
         this.view = target.value === 'details' ? 'details' : 'list'
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
         this.intents.requestRender()
         return
       case 'card':
@@ -930,7 +1723,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
           this.selectedValue = target.value
           this.detailOffset = 0
           this.detailSelection = 0
-          this.bumpRevision()
+          this.bumpRevision(); this.bumpSemantic()
           this.intents.requestRender()
           return
         }
@@ -938,6 +1731,16 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         return
       case 'action':
         this.dispatchAction(target.value)
+        return
+      case 'diagnostic-fact': {
+        const fact = this.diagnosticsFacts().find(candidate => candidate.id === target.value)
+        if (fact === undefined) return
+        this.intents.onCopy(fact.copy)
+        return
+      }
+      case 'diagnostic-action':
+        if (target.value === DIAGNOSTICS_ACTION.copyAll) this.copyAllDiagnostics()
+        else if (target.value === DIAGNOSTICS_ACTION.back) this.leaveDiagnostics()
     }
   }
 
@@ -969,7 +1772,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         if (this.controller.beginOfficialInstall(card.value)) {
           this.view = 'install'
           this.installFocus = 'spec'
-          this.bumpRevision()
+          this.bumpRevision(); this.bumpSemantic()
           this.intents.requestRender()
         }
         return
@@ -1024,7 +1827,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     // painted it: a resize/scroll that left it offscreen reveals it first.
     if (!this.frameIsCurrent() || !this.paintedDetailSelectionVisible) {
       this.detailReveal = true
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
       this.intents.requestRender()
       return
     }
@@ -1074,7 +1877,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.registryIndex = ((this.registryIndex + delta) % total + total) % total
     this.customRegistry = this.registryIndex === options.length
     this.syncInputFocus()
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
     this.intents.requestRender()
   }
 
@@ -1196,7 +1999,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     if (cards.length === 0) {
       if (this.selectedValue !== undefined) {
         this.selectedValue = undefined
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
       }
       if (this.view === 'details') {
         this.view = 'list'
@@ -1204,7 +2007,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         this.detailSelection = 0
         this.detailOffset = 0
         this.detailReveal = false
-        this.bumpRevision()
+        this.bumpRevision(); this.bumpSemantic()
       }
       return
     }
@@ -1222,7 +2025,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.selectedValue = cards[0]!.value
     this.detailSelection = 0
     this.detailOffset = 0
-    this.bumpRevision()
+    this.bumpRevision(); this.bumpSemantic()
   }
 
   private listEntries(model: ReturnType<PluginManagerController['model']>): ListEntry[] {
@@ -1318,18 +2121,24 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return actions
   }
 
-  private scrollInstall(delta: number, plan: ChromePlan | undefined): void {
+  /** Returns whether the window really moved: a no-op wheel is not a gesture
+   *  boundary (see {@link scrollList}). */
+  private scrollInstall(delta: number, plan: ChromePlan | undefined): boolean {
     const install = this.controller.installView()
-    if (install === undefined) return
+    if (install === undefined) return false
     if (install.phase === 'starting' || install.phase === 'installing' || install.phase === 'applying' || install.phase === 'cancelling') {
       const visible = this.visibleLogLines(plan)
-      if (this.logsExpanded) {
-        const max = Math.max(0, install.log.length - visible)
-        this.logOffset = Math.min(Math.max(0, this.logOffset + delta), max)
-      }
-      return
+      if (!this.logsExpanded) return false
+      const max = Math.max(0, install.log.length - visible)
+      const next = Math.min(Math.max(0, this.logOffset + delta), max)
+      if (next === this.logOffset) return false
+      this.logOffset = next
+      return true
     }
-    this.installOffset = Math.max(0, this.installOffset + delta)
+    const next = Math.max(0, this.installOffset + delta)
+    if (next === this.installOffset) return false
+    this.installOffset = next
+    return true
   }
 
   private visibleLogLines(plan: ChromePlan | undefined): number {
@@ -1343,23 +2152,25 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
 
   render(width: number): string[] {
     if (this.disposed) return []
-    const safeWidth = Math.max(1, width)
-    const liveRows = Math.max(1, Math.floor(this.intents.rows()))
+    if (width !== this.viewport.width) {
+      throw new Error(
+        `the embedded Plugin Manager page must be rendered at its granted viewport width (${this.viewport.width}), not ${width}`,
+      )
+    }
     this.syncInputFocus()
-    this.syncFrameState(safeWidth, liveRows)
+    this.syncFrameState()
     this.ensureSelection()
     this.ensureDetailSelection()
-    const noticeLive = this.controller.notice() !== undefined
-      || this.controller.status().state === 'error'
-      || this.controller.model().exemptionWarnings.length > 0
-      || this.intents.notice?.() !== undefined
-    const plan = planChrome(safeWidth, liveRows, noticeLive)
+    this.ensureDiagnosticsSelection(this.diagnosticsFacts().length)
+    // Diagnostics paints extension health only: a Host inventory notice must
+    // not dominate a freshly read extension projection, and the shared App
+    // notice is painted ONCE by the Settings root (never here).
+    const plan = this.livePlan()
     this.paintedChrome = plan
     const lines: string[] = []
     const targets: HitTarget[] = []
-    if (plan.headerRows === 1) lines.push(this.renderHeader(plan))
-    if (plan.metaRows === 1) lines.push(...this.renderMeta(plan, plan.headerRows, targets))
-    if (plan.ruleRows >= 1) lines.push(color.border('─'.repeat(plan.width)))
+    if (plan.searchRows === 1) lines.push(this.renderSearchRow(plan, 0, targets))
+    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
     const bodyTop = this.bodyTop(plan)
     if (plan.bodyRows > 0) {
       lines.push(...this.renderBody(plan, bodyTop, targets))
@@ -1368,34 +2179,52 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       // this frame. Revoke every painted permission and force a fresh visible
       // selection when the body returns; `frameIsCurrent()` alone must not
       // resurrect an old Approve/Disable/Remove from the previous frame.
-      this.paintedDetailSelectionVisible = false
-      this.paintedInstallActions = new Set()
-      this.paintedConfirmActions = new Set()
-      this.paintedConfirmActionValues = []
-      this.paintedConfirmScrollMax = 0
-      this.installSelection = Number.MAX_SAFE_INTEGER
+      this.revokePaintedActions()
     }
-    if (plan.ruleRows >= 2) lines.push(color.border('─'.repeat(plan.width)))
-    if (plan.noticeRows === 1) lines.push(this.renderNotice(plan))
-    if (plan.actionRows === 1) lines.push(this.renderActionBar(plan))
+    // The semantic bar is ALWAYS the local last row: the Settings root moves it
+    // to the frame's physical last row unless the Categories rail owns the keys.
+    lines.push(this.renderActionBar(plan))
     this.paintedTargets = targets
     this.paintedRevision = this.revision
-    this.lastRenderWidth = safeWidth
-    this.lastRenderRows = liveRows
+    this.grantAwaitingPaintArmed = false
+    this.lastRenderWidth = this.viewport.width
+    this.lastRenderRows = this.viewport.rows
+    this.lastRenderAllowDual = this.viewport.allowDual
     return lines.slice(0, plan.rows)
   }
 
+  /** Revoke every body-derived permission a previous frame granted. */
+  private revokePaintedGrants(): void {
+    this.paintedDetailSelectionVisible = false
+    this.paintedInstallActions = new Set()
+    this.paintedConfirmActions = new Set()
+    this.paintedConfirmActionValues = []
+    this.paintedConfirmScrollMax = 0
+    this.diagnosticsScrollable = false
+    this.diagnosticsSelectionVisible = false
+  }
+
+  /** A ZERO-BODY frame additionally forces a fresh visible selection when the
+   *  body returns: a stale index could otherwise point at a dangerous action
+   *  that the short frame never painted. */
+  private revokePaintedActions(): void {
+    this.revokePaintedGrants()
+    this.installSelection = Number.MAX_SAFE_INTEGER
+  }
+
   /** Bump the gesture revision whenever the NEXT frame could move a painted
-   * target: model identity, view, install phase, notice, selection/focus,
-   * filter/query or terminal geometry. */
-  private syncFrameState(width: number, rows: number): void {
+   * target: model identity, view, install phase, Host notice, selection/focus,
+   * filter/query or the LOCAL viewport grant. */
+  private syncFrameState(): void {
     const modelKey = this.modelStateKey()
     const install = this.controller.installView()
     const notice = this.controller.notice()
-    const appNoticeKey = this.appNoticeKey()
     const statusState = this.controller.status().state
     let changed = false
-    if (this.lastRenderWidth >= 0 && (this.lastRenderWidth !== width || this.lastRenderRows !== rows)) changed = true
+    if (this.lastRenderWidth >= 0
+      && (this.lastRenderWidth !== this.viewport.width
+        || this.lastRenderRows !== this.viewport.rows
+        || this.lastRenderAllowDual !== this.viewport.allowDual)) changed = true
     if (this.lastModelKey !== modelKey) { this.lastModelKey = modelKey; changed = true }
     if (this.lastView !== this.view) { this.lastView = this.view; changed = true }
     if (this.lastPhase !== install?.phase) {
@@ -1408,12 +2237,22 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       changed = true
     }
     if (this.lastNotice !== notice) { this.lastNotice = notice; changed = true }
-    if (this.lastAppNotice !== appNoticeKey) { this.lastAppNotice = appNoticeKey; changed = true }
     if (this.lastStatusState !== statusState) { this.lastStatusState = statusState; changed = true }
     if (this.lastSelectedValue !== this.selectedValue) { this.lastSelectedValue = this.selectedValue; changed = true }
     if (this.lastFocus !== this.focus) { this.lastFocus = this.focus; changed = true }
     if (this.lastFilter !== this.filter) { this.lastFilter = this.filter; changed = true }
     if (this.lastQuery !== this.query) { this.lastQuery = this.query; changed = true }
+    if (this.view === 'diagnostics') {
+      // ONE immutable read per diagnostics paint: host invalidation (a
+      // ledger failure/recovery) repaints and therefore derives current
+      // facts, while copy still uses exactly the painted snapshot.
+      const next = this.intents.diagnostics?.()
+      const key = next === undefined ? 'unavailable' : serializeTuiExtensionDiagnostics(next)
+      this.diagnosticsSnapshot = next
+      if (this.lastDiagnosticsKey !== key) { this.lastDiagnosticsKey = key; changed = true }
+    }
+    // PAINT catch-up only: it may re-derive the frame from facts that were
+    // already live, so it must never advance the semantic generation.
     if (changed) this.bumpRevision()
   }
 
@@ -1428,77 +2267,64 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }
     if (this.detailSelection >= detail.actions.length) {
       this.detailSelection = detail.actions.length - 1
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
     }
   }
 
+  /** The first local row of the business body: the admitted chrome above it. */
   private bodyTop(plan: ChromePlan): number {
-    return plan.headerRows + plan.metaRows + (plan.ruleRows >= 1 ? 1 : 0)
+    return plan.searchRows + plan.noticeRows
   }
 
-  private renderHeader(plan: ChromePlan): string {
-    const card = this.selectedCard()
-    const trail = this.view === 'list'
-      ? FILTER_LABELS[this.filter]
-      : this.view === 'details'
-        ? (card?.title ?? card?.name ?? 'Details')
-        : this.view === 'install'
-          ? 'Install'
-          : this.controller.confirmationKind() === 'remove' ? 'Remove' : 'Auto Review'
-    const lead = `${color.textStrong('Plugins')}${color.textDim(` · ${sanitizedPhysicalLine(trail)}`)}`
-    const model = this.controller.model()
-    const enabled = model.cards.filter(entry => entry.enabled).length
-    const counts = plan.wide
-      ? `${model.cards.length} plugins · ${enabled} enabled`
-      : `${enabled}/${model.cards.length} enabled`
-    // A failed refresh keeps the last good list visible but must not look
-    // current: the header carries the Stale word (the notice carries the error).
-    const stale = this.controller.status().state === 'error' ? `${color.warning('Stale')} · ` : ''
-    return composeEdge(lead, `${stale}${color.textMuted(counts)}`, plan.width)
+  /** The local chrome plan the CURRENT grant implies: the same pure function
+   *  {@link render} paints, evaluated from the live grant and controller facts.
+   *  Input admission must agree with the frame the bar describes. */
+  private livePlan(): ChromePlan {
+    const hostNoticeLive = this.controller.notice() !== undefined
+      || this.controller.status().state === 'error'
+      || this.controller.model().exemptionWarnings.length > 0
+    // Diagnostics paints extension health only: the shared App notice belongs
+    // to the Settings root and a Host inventory notice never dominates it.
+    return planChrome(this.viewport, this.view, this.view !== 'diagnostics' && hostNoticeLive)
   }
 
-  private renderMeta(plan: ChromePlan, metaRow: number, targets: HitTarget[]): string[] {
-    if (this.view !== 'list' && this.view !== 'details') {
-      const context = this.view === 'install'
-        ? 'Official install — inspect, confirm, then observe the Host result'
-        : this.controller.confirmationKind() === 'remove'
-          ? 'Removal confirmation — the exact package and consequence are shown below'
-          : 'Auto Review safety confirmation — no Host change happens before the explicit choice'
-      return [fit(color.textDim(context), plan.width)]
-    }
+  /** The business-body floor of the CURRENT grant (never the last paint's):
+   *  `setViewport` may shrink it before the repaint that installs it. */
+  private bodyFloor(): number {
+    return this.livePlan().bodyRows
+  }
+
+  /** The ONE admitted Search/Filters row of the list and details views. */
+  private renderSearchRow(plan: ChromePlan, row: number, targets: HitTarget[]): string {
     const filterWidth = FILTERS.reduce((sum, filter) => sum + visibleWidth(FILTER_LABELS[filter]) + 3, 0)
     const searchWidth = Math.max(1, plan.width - filterWidth - 2)
-    const lines: string[] = []
     if (this.searchEditing) {
       const input = this.searchInput.render(Math.max(1, searchWidth))
-      lines.push(`${color.textDim('Search: ')}${input[0] ?? ''}`)
-      targets.push({ kind: 'search', value: 'search', row: metaRow, startCol: 0, endCol: plan.width })
-    } else {
-      const query = this.query === '' ? '/' : sanitizedPhysicalLine(this.query)
-      lines.push(composeEdge(
-        `${color.textDim('Search: ')}${color.text(query)}`,
-        this.filterChips(),
-        plan.width,
-      ))
-      const text = this.query === '' ? 'Search: /' : `Search: ${query}`
-      targets.push({ kind: 'search', value: 'search', row: metaRow, startCol: 0, endCol: visibleWidth(text) })
+      targets.push({ kind: 'search', value: 'search', row, startCol: 0, endCol: plan.width })
+      return `${color.textDim('Search: ')}${input[0] ?? ''}`
     }
+    const query = this.query === '' ? '/' : sanitizedPhysicalLine(this.query)
+    const painted = composeEdge(
+      `${color.textDim('Search: ')}${color.text(query)}`,
+      this.filterChips(),
+      plan.width,
+    )
+    const text = this.query === '' ? 'Search: /' : `Search: ${query}`
+    targets.push({ kind: 'search', value: 'search', row, startCol: 0, endCol: visibleWidth(text) })
     // The chips are painted only when the whole row fits beside the search
     // field; their hit targets are computed from the REAL painted columns.
-    if (!this.searchEditing) {
-      const rendered = this.filterChips()
-      const start = plan.width - visibleWidth(rendered)
-      if (start >= visibleWidth(this.query === '' ? 'Search: /' : `Search: ${this.query}`) + 1) {
-        let column = start
-        for (const filter of FILTERS) {
-          const label = FILTER_LABELS[filter]
-          const width = visibleWidth(label)
-          targets.push({ kind: 'filter', value: filter, row: metaRow, startCol: column, endCol: column + width })
-          column += width + 3
-        }
+    const rendered = this.filterChips()
+    const start = plan.width - visibleWidth(rendered)
+    if (start >= visibleWidth(text) + 1) {
+      let column = start
+      for (const filter of FILTERS) {
+        const label = FILTER_LABELS[filter]
+        const width = visibleWidth(label)
+        targets.push({ kind: 'filter', value: filter, row, startCol: column, endCol: column + width })
+        column += width + 3
       }
     }
-    return lines
+    return painted
   }
 
   private filterChips(): string {
@@ -1509,8 +2335,10 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     }).join(color.textMuted(' · '))
   }
 
+  /** The page's OWN Host notice row: a settled/refused operation message, a
+   *  failed inventory read or a version-exemption warning. The shared App
+   *  notice is NOT a second source here — the Settings root paints it once. */
   private renderNotice(plan: ChromePlan): string {
-    const appNotice = this.intents.notice?.()
     const model = this.controller.model()
     const exemptionWarning = model.exemptionWarnings.length === 0
       ? undefined
@@ -1518,38 +2346,38 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     const message = this.controller.notice()
       ?? (this.controller.status().state === 'error' ? this.controller.status().error : undefined)
       ?? exemptionWarning
-      ?? appNotice?.text
     if (message === undefined) return fit('', plan.width)
-    const kind = this.controller.status().state === 'error'
-      || appNotice?.kind === 'error'
-      || /failed|unknown|refused|cannot|error/i.test(message)
-      ? 'error'
-      : 'info'
+    const failed = this.controller.status().state === 'error'
+    const kind = failed || /failed|unknown|refused|cannot|error/i.test(message) ? 'error' : 'info'
     const text = sanitizedPhysicalLine(message)
+    // A failed inventory read keeps the last good data visible but must not
+    // look current: the page's OWN notice row states the Stale fact (the
+    // retired fullscreen header used to carry it).
+    const stale = failed ? color.warning('Stale · ') : ''
     const prefix = kind === 'error' ? color.error('✗ ') : color.textMuted('ℹ ')
-    return fit(prefix + (kind === 'error' ? color.error(text) : color.textMuted(text)), plan.width)
+    return fit(`${stale}${prefix}${kind === 'error' ? color.error(text) : color.textMuted(text)}`, plan.width)
   }
 
   private renderActionBar(plan: ChromePlan): string {
-    const segments = this.actionBarSegments()
+    const segments = this.actionBarSegments(plan)
     return color.textMuted(renderActionBarRow(segments, plan.width))
   }
 
-  private actionBarSegments(): ActionBarSegment[] {
+  private actionBarSegments(plan: ChromePlan): ActionBarSegment[] {
     const segments = this.frameActionBarSegments()
-    // A zero-row body paints no body-derived action/choice. Advertising Enter
-    // would promise an activation the CURRENT frame cannot perform (the D2
-    // revoke path already makes it a no-op); keep the real Esc destination and
-    // drop only the fake Enter invitation.
-    // Search editing is the exception: its Enter apply remains executable
-    // even when the input's body cell is not painted, so its hint stays true.
-    return (this.paintedChrome?.bodyRows ?? 0) <= 0 && !this.searchEditing
-      ? segments.filter(segment => !segment.text.startsWith('Enter'))
+    // §4.2: a zero-body frame paints no body-derived action, choice, copy or
+    // edit. Only the REAL Esc destination stays advertised — exactly the key
+    // the input gate admits — so the bar can never promise an invisible action
+    // (a hidden Enter/search/filter/refresh must not look executable).
+    return plan.bodyRows <= 0
+      ? segments.filter(segment => segment.text.startsWith('Esc '))
       : segments
   }
 
   private frameActionBarSegments(): ActionBarSegment[] {
-    const back = this.controller.host() === 'settings-entry' ? 'Esc back' : 'Esc close'
+    // The page is ALWAYS embedded in the Settings lease: Esc at the list root
+    // yields to the Categories rail and never closes the screen.
+    const back = 'Esc back'
     if (this.searchEditing) {
       return [
         { text: 'Enter apply', priority: 80 },
@@ -1600,6 +2428,22 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
         { text: 'Esc cancel', priority: 100 },
       ]
     }
+    if (this.view === 'diagnostics') {
+      if (this.diagnosticsSnapshot === undefined) {
+        return [
+          { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 60 },
+          { text: 'Esc back', priority: 100 },
+        ]
+      }
+      return [
+        { text: 'Up/Down fact', priority: 40 },
+        ...(this.diagnosticsScrollable ? [{ text: 'PgUp/PgDn scroll', priority: 35 }] : []),
+        ...(this.diagnosticsSelectionVisible ? [{ text: `${WORKSPACE_KEYS.copy} copy`, priority: 70 }] : []),
+        { text: `${WORKSPACE_KEYS.copyAll} copy all`, priority: 65 },
+        { text: `${WORKSPACE_KEYS.refresh} reread`, priority: 60 },
+        { text: 'Esc back', priority: 100 },
+      ]
+    }
     // `i` never replaces a terminal attempt; name what it will actually open.
     const installHint = this.controller.installView() === undefined ? 'i install' : 'i install result'
     if (this.view === 'details') {
@@ -1617,6 +2461,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       { text: '/ search', priority: 70 },
       { text: installHint, priority: 60 },
       { text: 'Tab filter', priority: 50 },
+      { text: `${WORKSPACE_KEYS.diagnostics} diagnostics`, priority: 45 },
       { text: 'r refresh', priority: 40 },
       { text: back, priority: 100 },
     ]
@@ -1625,7 +2470,11 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
   private renderBody(plan: ChromePlan, bodyTop: number, targets: HitTarget[]): string[] {
     if (this.view === 'install') return this.renderInstallBody(plan, bodyTop, targets)
     if (this.view === 'confirm') return this.renderConfirmBody(plan, bodyTop, targets)
-    if (!plan.wide) {
+    if (this.view === 'diagnostics') return this.renderDiagnosticsBody(plan, bodyTop, targets)
+    if (!plan.dual) {
+      // The single column paints the CURRENTLY visible view: Details while the
+      // keyboard is in Details, the List everywhere else (a narrow or
+      // risk-starved frame never fabricates a hidden second column).
       if (this.view === 'details') {
         const card = this.selectedCard()
         if (card === undefined) return padBody([color.textDim('Select a plugin first')], plan.bodyRows, plan.width)
@@ -1633,26 +2482,17 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
       }
       return this.renderListPane(plan.width, plan.bodyRows, bodyTop, 0, targets, true)
     }
-    // Wide: left list always, right Detail preview/actions.
-    const showPaneHeader = plan.bodyRows >= 2
-    const headerRows = showPaneHeader ? 1 : 0
-    const contentTop = bodyTop + headerRows
-    const viewport = Math.max(0, plan.bodyRows - headerRows)
-    const left = this.renderListPane(plan.leftWidth, viewport, contentTop, 0, targets, true)
+    // The adjacent List|Details pair. Its identity labels belong to the
+    // Settings root's ONE shared pane header, never to this page.
+    const left = this.renderListPane(plan.leftWidth, plan.bodyRows, bodyTop, 0, targets, true)
     const rightX = plan.leftWidth + COLUMN_GAP
     const card = this.selectedCard()
     const right = card === undefined
-      ? padBody([color.textDim('No plugin selected')], viewport, plan.rightWidth)
-      : this.renderDetailPane(card, plan.rightWidth, viewport, this.focus === 'details', contentTop, rightX, targets, true)
-    for (let i = 0; i < viewport; i += 1) {
-      targets.push({ kind: 'pane', value: 'list', row: contentTop + i, startCol: 0, endCol: plan.leftWidth })
-      targets.push({ kind: 'pane', value: 'details', row: contentTop + i, startCol: rightX, endCol: plan.width })
-    }
-    if (showPaneHeader) {
-      const leftLabel = this.focus === 'list' ? color.textStrong('[Plugins]', 'primary') : color.textDim('Plugins')
-      const rightLabel = this.focus === 'details' ? color.textStrong('[Details]', 'primary') : color.textDim('Details')
-      const header = `${fit(leftLabel, plan.leftWidth)}${' '.repeat(COLUMN_GAP)}${fit(rightLabel, plan.rightWidth)}`
-      return [header, ...joinPanes(left, right, plan.leftWidth, plan.rightWidth)]
+      ? padBody([color.textDim('No plugin selected')], plan.bodyRows, plan.rightWidth)
+      : this.renderDetailPane(card, plan.rightWidth, plan.bodyRows, this.focus === 'details', bodyTop, rightX, targets, true)
+    for (let i = 0; i < plan.bodyRows; i += 1) {
+      targets.push({ kind: 'pane', value: 'list', row: bodyTop + i, startCol: 0, endCol: plan.leftWidth })
+      targets.push({ kind: 'pane', value: 'details', row: bodyTop + i, startCol: rightX, endCol: plan.width })
     }
     return joinPanes(left, right, plan.leftWidth, plan.rightWidth)
   }
@@ -1802,7 +2642,7 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     this.currentInstallActions = actions
     if (actions.length > 0 && this.installSelection >= actions.length) {
       this.installSelection = actions.length - 1
-      this.bumpRevision()
+      this.bumpRevision(); this.bumpSemantic()
     }
     const out = padBody(body.visible, body.contentViewport, plan.width)
     for (const line of body.actionBlock) out.push(fit(line, plan.width))
@@ -2108,53 +2948,106 @@ export class PluginManagerWorkspacePanel implements Component, Focusable {
     return undefined
   }
 
-  /** True only while the live terminal geometry and state version still match
-   * the frame whose hit map is installed in `paintedTargets`. */
-  /** The semantic presentation key of the inventory. A same-truth reread
-   * creates a new model object but the SAME key, so an invalidation that
-   * returns identical facts cannot invalidate an already-painted action; any
-   * fact that could change a pixel or an action changes the key. */
+  /** The semantic presentation key of the inventory: the Host read generation
+   *  plus the classified model. ANY new read (an explicit refresh or a Host
+   *  invalidation) invalidates an already-painted action even when it returns
+   *  byte-identical facts — §3.4 lists `Press -> Host invalidate` among the
+   *  releases that must be refused — and any fact that could change a pixel or
+   *  an action changes the key as well. */
   private modelStateKey(): string {
-    return JSON.stringify(this.controller.model())
+    return JSON.stringify([this.controller.readGeneration(), this.controller.model()])
   }
 
-  private appNoticeKey(): string | undefined {
-    const notice = this.intents.notice?.()
-    return notice === undefined ? undefined : `${notice.kind}:${notice.text}`
+  /** True only while the live semantic facts AND the LOCAL viewport grant still
+   * match the frame whose hit map is installed in `paintedTargets`. Comparing
+   * only the panel revision would miss an async controller model/phase/notice
+   * update whose queued repaint has not run yet. */
+  /** See {@link EmbeddedPluginPage.liveIdentity}. Pure: reads local state and
+   *  the Controller's CURRENT facts; never starts a read or a mutation. */
+  grantAwaitingPaint(): boolean {
+    // A page that has never painted has no stale frame to protect.
+    return this.grantAwaitingPaintArmed && this.lastRenderWidth >= 0
   }
 
-  /** True only while the live semantic facts AND terminal geometry still match
-   * the frame whose hit map is installed in `paintedTargets`. Comparing only
-   * the panel revision would miss an async controller model/phase/notice update
-   * whose queued repaint has not run yet. */
+  liveIdentity(): string {
+    // SEMANTIC facts only. The paint-time revision is deliberately excluded: a
+    // catch-up repaint that merely reflects state the page already had before the
+    // press must keep the identity comparable, while any real state change
+    // (view/filter/query/selection/scroll/install/notice/model+read generation/
+    // grant) is represented by the terms below.
+    return JSON.stringify([
+      this.semanticGenerationValue,
+      // The install editor's field values: Inspect dispatches with them, so a
+      // press taken before an edit must not fire on the newer text.
+      this.specInput.getValue(),
+      this.registryInput.getValue(),
+      this.installFocus,
+      this.customRegistry,
+      // The Controller's monotonic transition count: an asynchronous phase that
+      // returns to the same value (installing -> applying -> installing) must
+      // still fence a held gesture, and the value term alone cannot see it.
+      this.controller.semanticTransitionsCount(),
+      this.view,
+      this.focus,
+      this.searchEditing,
+      this.query,
+      this.filter,
+      this.selectedValue,
+      this.listOffset,
+      this.detailOffset,
+      this.installOffset,
+      this.installSelection,
+      this.confirmSelection,
+      this.confirmOffset,
+      this.diagnosticsSelection,
+      this.diagnosticsOffset,
+      this.diagnosticsReveal,
+      this.viewport.width,
+      this.viewport.rows,
+      this.viewport.allowDual,
+      this.modelStateKey(),
+      this.controller.installView()?.phase,
+      this.controller.notice(),
+      this.controller.status().state,
+    ])
+  }
+
   private frameIsCurrent(): boolean {
     return this.paintedRevision === this.revision
-      && this.lastRenderWidth === this.intents.columns()
-      && this.lastRenderRows === this.intents.rows()
+      && this.lastRenderWidth === this.viewport.width
+      && this.lastRenderRows === this.viewport.rows
+      && this.lastRenderAllowDual === this.viewport.allowDual
       && this.modelStateKey() === this.lastModelKey
       && this.controller.installView()?.phase === this.lastPhase
       && this.controller.notice() === this.lastNotice
-      && this.appNoticeKey() === this.lastAppNotice
       && this.controller.status().state === this.lastStatusState
   }
 
   private bumpRevision(): void {
     this.revision += 1
   }
+
+  /** Advance the monotonic SEMANTIC generation. Every real state change calls
+   *  this; a repaint that only catches up with existing state does NOT. The root
+   *  fence compares it so a change-and-revert (Down then Up, Details then back)
+   *  is still a boundary, which a value snapshot alone cannot see. */
+  private bumpSemantic(): void {
+    this.semanticGenerationValue += 1
+  }
 }
 
-/** The intents the app composition wires into the workspace page. */
+/** The intents the app composition wires into the embedded page. */
 export interface PluginManagerWorkspacePanelIntents {
-  /** The live terminal row budget. */
-  readonly rows: () => number
-  /** The live terminal column budget. */
-  readonly columns: () => number
   /** Repaint the hosting screen. */
   readonly requestRender: () => void
-  /** The ONE app-owned notice (never a second notice store). */
-  readonly notice?: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined
   /** Copy exact text through the app's Client-local clipboard owner. */
   readonly onCopy: (text: string) => void
+  /** The current extension diagnostics read. Absent = no extension service
+   *  (the page states Unavailable and never paints an empty healthy report). */
+  readonly diagnostics?: () => TuiExtensionDiagnostics | undefined
+  /** The Settings root's navigation yield (Esc/Left/Shift+Tab at the list
+   * root). The page only reports the intent; the ROOT commits the focus. */
+  readonly onYieldNavigation: () => void
 }
 
 /**
@@ -2173,66 +3066,46 @@ export function createPluginManagerWorkspacePanel(
 
 // ── pure rendering helpers ─────────────────────────────────────────────────
 
-function planChrome(width: number, rows: number, noticeLive: boolean): ChromePlan {
-  const safeRows = Math.max(1, Math.floor(rows))
-  const headerRows = safeRows >= 2 ? 1 : 0
+/**
+ * The ONE local chrome plan of the embedded page (§3.2 priority order): the
+ * semantic bar is always the last row, the business body keeps at least one
+ * real row, then the Host notice (only with two free rows) and the
+ * Search/Filters row (list/details only, with two free rows) may claim one.
+ * The adjacent List|Details pair additionally requires a dual-allowing root
+ * grant, 76 local columns AND six real business body rows.
+ */
+function planChrome(viewport: PluginContentViewport, view: PluginWorkspaceView, noticeLive: boolean): ChromePlan {
+  const width = Math.max(1, Math.floor(viewport.width))
+  const rows = Math.max(1, Math.floor(viewport.rows))
   const actionRows = 1
-  const base = Math.max(0, safeRows - headerRows - actionRows)
-  const metaRows = safeRows >= 7 && base - 1 >= 3 ? 1 : 0
-  const noticeRows = safeRows >= 6 && noticeLive && base - metaRows - 1 >= 2 ? 1 : 0
-  const bodyWithoutRules = Math.max(0, base - metaRows - noticeRows)
-  const ruleRows = bodyWithoutRules >= 5 ? 2 : 0
-  const bodyRows = Math.max(0, bodyWithoutRules - ruleRows)
-  const wide = width >= PLUGIN_WORKSPACE_WIDE_MIN_COLUMNS
-  let leftWidth = width
-  let rightWidth = width
-  if (wide) {
-    leftWidth = Math.min(42, Math.max(30, Math.floor((width - COLUMN_GAP) * 0.42)))
-    rightWidth = Math.max(MIN_DETAIL_WIDTH, width - leftWidth - COLUMN_GAP)
-    // Keep the sum exact; a terminal width that cannot carry the minimum right
-    // pane falls back to the one-column projection.
-    if (leftWidth + COLUMN_GAP + rightWidth > width) {
-      return planSingleColumn(width, safeRows)
-    }
-  }
+  let free = Math.max(0, rows - actionRows)
+  const noticeRows: 0 | 1 = free >= 2 && noticeLive ? 1 : 0
+  if (noticeRows === 1) free -= 1
+  const searchRows: 0 | 1 = free >= 2 && (view === 'list' || view === 'details') ? 1 : 0
+  if (searchRows === 1) free -= 1
+  const bodyRows = free
+  const dual = viewport.allowDual
+    && (view === 'list' || view === 'details')
+    && width >= DUAL_MIN_COLUMNS
+    && bodyRows >= 6
+  // The fixed split (§3.2): 42% of the pair, clamped to 30..42 columns. The
+  // 76-column floor above keeps the right pane at >= 24 columns by
+  // construction, so no second admission test is needed.
+  const leftWidth = dual ? Math.min(42, Math.max(30, Math.floor((width - COLUMN_GAP) * 0.42))) : width
+  const rightWidth = dual ? width - leftWidth - COLUMN_GAP : width
   return {
     width,
-    rows: safeRows,
-    wide,
-    headerRows,
-    metaRows,
-    ruleRows,
+    rows,
+    searchRows,
     noticeRows,
     actionRows,
     bodyRows,
+    dual,
     leftWidth,
     rightWidth,
   }
 }
 
-function planSingleColumn(width: number, safeRows: number): ChromePlan {
-  const headerRows = safeRows >= 2 ? 1 : 0
-  const actionRows = 1
-  const base = Math.max(0, safeRows - headerRows - actionRows)
-  const metaRows = safeRows >= 7 && base - 1 >= 3 ? 1 : 0
-  const noticeRows = 0
-  const bodyWithoutRules = Math.max(0, base - metaRows)
-  const ruleRows = bodyWithoutRules >= 5 ? 2 : 0
-  const bodyRows = Math.max(0, bodyWithoutRules - ruleRows)
-  return {
-    width,
-    rows: safeRows,
-    wide: false,
-    headerRows,
-    metaRows,
-    ruleRows,
-    noticeRows,
-    actionRows,
-    bodyRows,
-    leftWidth: width,
-    rightWidth: width,
-  }
-}
 
 function composeEdge(left: string, right: string, width: number): string {
   if (right === '') return fit(left, width)

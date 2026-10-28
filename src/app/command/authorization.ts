@@ -125,6 +125,14 @@ export interface AuthorizationSurface {
     refresh: () => string
     onClose?: () => void
   }): () => void
+  /** Structured notice presentation (the Settings Models page renders the
+   *  message/URL/code inline). When present, this REPLACES the output viewer;
+   *  the returned closer retires the notice, exactly like `openOutputViewer`. */
+  showNotice?(notice: AuthorizationNoticeEvent): () => void
+  /** Replace the body of an ALREADY OPEN structured notice. The flow emits a
+   *  sequence of notices for one attempt (initializing → browser URL/code); a
+   *  one-shot `showNotice` would freeze the first body. */
+  updateNotice?(notice: AuthorizationNoticeEvent): void
   askQuestions(
     questions: readonly {
       id: string
@@ -210,22 +218,32 @@ export function createAuthorizationFlow(
   })
   const showNotice = (notice: AuthorizationNoticeEvent): void => {
     noticeBody = formatAuthorizationNotice(notice)
-    if (noticeHandle === undefined) {
+    if (noticeHandle !== undefined) {
+      // The notice is already on screen: update its body instead of dropping
+      // the later notice. A surface without an update seam keeps the legacy
+      // refresh-through-openOutputViewer behavior.
+      app.updateNotice?.(notice)
+      return
+    }
+    {
       // Attempt-scoped identity for THIS notice: the closer and the onClose
       // are bound to the same token, so only the notice that actually opened
       // may clear the slot.
       const token = {}
       noticeToken = token
-      const closer = app.openOutputViewer({
-        title: 'Sign in',
-        initial: noticeBody,
-        refresh: () => noticeBody,
-        onClose: () => {
-          if (noticeToken !== token) return
-          noticeToken = undefined
-          noticeHandle = undefined
-        },
-      })
+      const rawCloser = app.showNotice !== undefined
+        ? app.showNotice(notice)
+        : app.openOutputViewer({
+            title: 'Sign in',
+            initial: noticeBody,
+            refresh: () => noticeBody,
+            onClose: () => {
+              if (noticeToken !== token) return
+              noticeToken = undefined
+              noticeHandle = undefined
+            },
+          })
+      const closer = (): void => rawCloser()
       if (noticeToken === token) noticeHandle = closer
       // A synchronously finalized attempt (the surface was already gone):
       // close ONLY that stale view, never the newer notice's.

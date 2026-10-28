@@ -1,0 +1,1189 @@
+/**
+ * Adapter contract tests for the Direct config port
+ * (runtime/direct/config-direct.ts, migration M1.9): the port is the
+ * semantic boundary — consumers depend on `ConfigPort`, the Direct
+ * adapter owns the `ctx` access AND the Host schema knowledge (the
+ * `llm-pi-ai` / `permission` / `agent-presets` settings namespaces), and
+ * a Remote adapter must satisfy the SAME contract in a later milestone.
+ * These tests pin the contract with a fake Host context: no generic
+ * settings god API leaks, secrets appear only as write parameters, and
+ * missing services degrade without crashing.
+ * @module @xmoon76/dsh-pi-tui/config-port.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import { DirectConfigPort, type HostContextLike } from '../../src/runtime/direct/config-direct.ts'
+import { CredentialWorkflow, resolveLoginDestination, resolveLogoutDestination } from '../../src/app/command/credential-workflow.ts'
+import type { ProviderProfileConfig } from '../../src/runtime/config-port.ts'
+
+function host(services: Record<string, unknown>): HostContextLike {
+  return { get: (name) => services[name], on: () => {} }
+}
+
+/** The 0.1.7 SettingsForms surface over an in-memory form document:
+ * `describe()` projects each section as a descriptor (value + user +
+ * revision) and `mutate()` records the path ops. */
+function settings(doc: Record<string, unknown>, writes: Array<{ ns: string; ops: unknown }> = []) {
+  return {
+    describe: () => Object.entries(doc).map(([ns, value]) => ({ ns, value, user: value, revision: 3 })),
+    mutate: async (ns: string, ops: unknown) => { writes.push({ ns, ops }) },
+  }
+}
+
+function port(services: Record<string, unknown>): DirectConfigPort {
+  return new DirectConfigPort(host(services), undefined, (sessionId) =>
+    sessionId === 'session-live' ? { session: { id: 'session-live' } } : undefined)
+}
+
+/** The create decision over the REAL Direct provider adapter: the other
+ *  workflow seams are inert, because these tests exercise the catalog
+ *  classification and the mutation sink only. */
+function workflowOver(providers: ProviderProfileConfig): CredentialWorkflow {
+  return new CredentialWorkflow({
+    providers,
+    credentials: {
+      available: () => true,
+      setReference: async () => {},
+      unsetReference: async () => {},
+      recordsSupported: () => true,
+      deleteRecord: async () => {},
+      describeReference: async () => ({ configured: false }),
+      listRecords: async () => [],
+      onChanged: () => () => {},
+    },
+    authorization: { available: () => false, listTargets: () => [], begin: async () => ({ kind: 'unavailable' as const }), onEvent: () => () => {}, respond: async () => {}, cancel: async () => {} },
+    account: {
+      available: () => false,
+      getState: async () => { throw new Error('unused') },
+      getProfile: async () => null,
+      getBalance: async () => null,
+      watch: async function* () {},
+      getCallbackOrigin: () => undefined,
+      startSignIn: async () => { throw new Error('unused') },
+      cancelSignIn: async () => { throw new Error('unused') },
+      signOut: async () => { throw new Error('unused') },
+      hasRunningAccountTasks: () => false,
+    },
+    catalog: { models: { available: () => false, discoverModels: async () => [] } },
+    signal: new AbortController().signal,
+    diag: { error: () => {}, warn: () => {} },
+  })
+}
+
+// ── provider profiles ─────────────────────────────────────────────────────
+
+test('providers listCredentialOptions merges the directory over PER-ENTRY sections', () => {
+  const providers = port({
+    settings: settings({
+      'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } },
+      'llm-deepseek': { deepseek: { apiKeyEnv: 'DEEPSEEK_LEGACY' } },
+    }),
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'Acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+        // A NON-llm-pi-ai entry: its profile lives in its OWN section.
+        { provider: 'deepseek', displayName: 'DeepSeek legacy', settingsNs: 'llm-deepseek', settingsPath: ['deepseek'] },
+      ],
+    },
+  }).providers
+  const options = providers.listCredentialOptions()
+  const acme = options.find(option => option.route === 'acme')
+  assert.ok(acme !== undefined)
+  assert.equal(acme.ref, 'ACME_KEY', 'the apiKeyEnv from the llm-pi-ai section wins')
+  assert.equal(acme.configured, true)
+  // The conventional llm-pi-ai providers.<route> slot is keyless-writable.
+  assert.equal(acme.canProvisionProfile, true)
+  const legacy = options.find(option => option.route === 'deepseek')
+  assert.ok(legacy !== undefined, 'the llm-deepseek entry is read from ITS OWN section')
+  assert.equal(legacy.ref, 'DEEPSEEK_LEGACY')
+  assert.equal(legacy.configured, true)
+  // A route whose profile lives in its OWN section has no keyless-writable
+  // slot (the adapter refuses writes outside llm-pi-ai providers.<route>).
+  assert.equal(legacy.canProvisionProfile, false)
+  const official = options.find(option => option.route === 'deepseek-official')
+  assert.ok(official !== undefined)
+  assert.equal(official.canProvisionProfile, false, 'the builtin has no provider-profile slot')
+  // The client DTO carries SEMANTIC flags only — no Host schema fact
+  // (settings namespace/path) ever crosses the port.
+  for (const option of options) {
+    assert.equal('settingsNs' in option, false, 'no settings namespace on the client DTO')
+    assert.equal('settingsPath' in option, false, 'no settings path on the client DTO')
+  }
+})
+
+test('the provider snapshot reads the directory and the settings ONCE, whatever the provider count', () => {
+  let describes = 0
+  let enumerations = 0
+  const entries = Array.from({ length: 200 }, (_, index) => ({
+    provider: `p${index}`,
+    displayName: `P${index}`,
+    settingsNs: 'llm-pi-ai',
+    settingsPath: ['providers', `p${index}`],
+  }))
+  const section = {
+    providers: Object.fromEntries(entries.map(entry => [entry.provider, { apiKeyEnv: `${entry.provider.toUpperCase()}_KEY` }])),
+  }
+  const providers = port({
+    settings: {
+      describe: () => { describes += 1; return [{ ns: 'llm-pi-ai', value: section, user: section, revision: 1 }] },
+      mutate: async () => {},
+    },
+    llm: {
+      listConfigurableProviders: () => { enumerations += 1; return entries },
+    },
+  }).providers
+  const catalog = providers.readCatalog()
+  assert.equal(catalog.failure, undefined)
+  assert.equal(catalog.options.length, 201, 'the builtin plus every directory route')
+  assert.equal(describes, 1, 'ONE settings describe per snapshot')
+  assert.equal(enumerations, 1, 'ONE directory enumeration per snapshot')
+  // Every route keeps its own profile facts, and a shared reference never
+  // drops a provider.
+  assert.equal(catalog.profiles.length, 201)
+  assert.equal(catalog.profiles.find(profile => profile.route === 'p7')?.configured, true)
+  // The option list is the same single-pass read.
+  assert.equal(providers.listCredentialOptions().length, 201)
+})
+
+test('a failed settings read is reported as a failed catalog, never as an empty catalog', () => {
+  const providers = port({
+    settings: {
+      describe: () => { throw new Error('settings projection failed') },
+      mutate: async () => {},
+    },
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  const catalog = providers.readCatalog()
+  assert.ok(catalog.failure !== undefined, 'the failed read must be reported')
+  assert.equal(catalog.options.length, 0)
+})
+
+test('a throwing directory read is reported as a failed catalog', () => {
+  const providers = port({
+    settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }),
+    llm: {
+      listConfigurableProviders: () => { throw new Error('directory read failed') },
+    },
+  }).providers
+  const catalog = providers.readCatalog()
+  assert.ok(catalog.failure !== undefined)
+  // The /login parser keeps its fail-soft fallback.
+  assert.deepEqual(providers.listCredentialOptions().map(option => option.route), ['deepseek-official', 'acme'])
+})
+
+test('the settings-only fallback reads the section ONCE and keeps every configured profile', () => {
+  let describes = 0
+  const section = { providers: { acme: { apiKeyEnv: 'ACME_KEY' }, keyless: {} } }
+  const providers = port({
+    settings: {
+      describe: () => { describes += 1; return [{ ns: 'llm-pi-ai', value: section, user: section, revision: 1 }] },
+      mutate: async () => {},
+    },
+    // NO llm service: the settings-only fallback.
+  }).providers
+  const catalog = providers.readCatalog()
+  assert.equal(describes, 1, 'ONE settings read per snapshot')
+  const acme = catalog.options.find(option => option.route === 'acme')
+  assert.ok(acme !== undefined)
+  assert.equal(acme.ref, 'ACME_KEY')
+  assert.equal(acme.configured, true)
+  // A CONFIGURED keyless profile is a provider: the presence of a key is
+  // not the membership authority.
+  const keyless = catalog.options.find(option => option.route === 'keyless')
+  assert.ok(keyless !== undefined, 'a configured keyless profile stays a provider')
+  assert.equal(keyless.configured, true)
+  assert.equal(keyless.namesCredential, false)
+  assert.equal(keyless.ref, 'KEYLESS_API_KEY')
+  assert.equal(catalog.profiles.find(profile => profile.route === 'keyless')?.configured, true)
+  // The builtin is always addressable, with or without a profile.
+  assert.equal(catalog.profiles.find(profile => profile.route === 'deepseek-official')?.configured, true)
+  // The /login list is the same route set: a visible route stays reachable.
+  const options = providers.listCredentialOptions()
+  assert.ok(options.some(option => option.route === 'keyless'))
+})
+
+test('a failed settings read keeps the builtin target addressable for /login and /logout', () => {
+  const providers = port({
+    settings: {
+      describe: () => { throw new Error('settings projection failed') },
+      mutate: async () => {},
+    },
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'Acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  // The Models page reports the failed read (readCatalog), but the command
+  // resolver stays fail-soft: the builtin target must survive.
+  assert.ok(providers.readCatalog().failure !== undefined)
+  const options = providers.listCredentialOptions()
+  const official = options.find(option => option.route === 'deepseek-official')
+  assert.ok(official !== undefined, 'the builtin target must stay addressable')
+  assert.equal(official.ref, 'DEEPSEEK_API_KEY')
+  assert.equal(official.canProvisionProfile, false)
+  // The directory's route does NOT stay addressable: its credential
+  // reference lives in the profile, and a failed read cannot know it (a
+  // derived reference would point at another provider's key).
+  assert.equal(options.some(option => option.route === 'acme'), false)
+  assert.equal(options.some(option => option.ref === 'ACME_API_KEY'), false)
+  // BOTH resolver paths still address the builtin: /login and /logout.
+  assert.deepEqual(resolveLoginDestination('deepseek-official', options, []), {
+    kind: 'models',
+    view: 'reference',
+    ref: 'DEEPSEEK_API_KEY',
+    label: 'deepseek official',
+  })
+  assert.deepEqual(resolveLogoutDestination('deepseek-official', options, []), {
+    kind: 'models',
+    view: 'logout',
+    target: { kind: 'reference', ref: 'DEEPSEEK_API_KEY', label: 'deepseek official', route: 'deepseek-official' },
+  })
+})
+
+test('a failed settings read never offers a DERIVED provider reference to the resolver', () => {
+  // The real profile names SHARED_API_KEY; the derived reference would be
+  // ACME_API_KEY — another provider's key. A failed read must not present
+  // that guess as acme's reference.
+  const providers = port({
+    settings: {
+      describe: () => { throw new Error('settings projection failed') },
+      mutate: async () => {},
+    },
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'Acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  const options = providers.listCredentialOptions()
+  assert.equal(options.some(option => option.route === 'acme'), false, 'a route with an unknown reference must not be offered')
+  assert.equal(options.some(option => option.ref === 'ACME_API_KEY'), false, 'the derived reference must not be offered')
+  // The /logout chain must not resolve acme to the derived reference.
+  const logout = resolveLogoutDestination('acme', options, [])
+  const clearedRef = logout.kind === 'models' && logout.view === 'logout' && logout.target.kind === 'reference'
+    ? logout.target.ref
+    : undefined
+  assert.notEqual(clearedRef, 'ACME_API_KEY', 'the derived reference must never become a clear target')
+})
+
+test('the keyless profile write refuses to overwrite an existing profile', async () => {
+  const writes: Array<{ ns: string; ops: unknown; revision: number | undefined }> = []
+  const section = { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }
+  const providers = port({
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', value: section, user: section, revision: 5 }],
+      mutate: async (ns: string, ops: unknown, revision: number | undefined) => { writes.push({ ns, ops, revision }) },
+    },
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'Acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  // The route already has a profile: the keyless write must be SKIPPED, not
+  // overwrite it.
+  assert.deepEqual(await providers.writeKeylessProfile('acme'), {
+    kind: 'skipped',
+    reason: 'provider route "acme" already has a profile',
+  })
+  // NOT `assert.deepEqual(writes, [])`: its assertion signature would narrow
+  // the array to never[] and the later push would not compile.
+  assert.equal(writes.length, 0, 'nothing may be written')
+  // A route without a profile is written, with the revision the decision was
+  // read at.
+  const fresh = port({
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', value: { providers: {} }, user: { providers: {} }, revision: 9 }],
+      mutate: async (ns: string, ops: unknown, revision: number | undefined) => { writes.push({ ns, ops, revision }) },
+    },
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'new-route', displayName: 'New', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'new-route'] },
+      ],
+    },
+  }).providers
+  assert.deepEqual(await fresh.writeKeylessProfile('new-route'), { kind: 'written' })
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0]?.revision, 9, 'the write carries the decision read revision')
+})
+
+test('the settings-only fallback reports a failed settings read', () => {
+  const providers = port({
+    settings: {
+      describe: () => { throw new Error('settings projection failed') },
+      mutate: async () => {},
+    },
+    // NO llm service: the settings-only fallback.
+  }).providers
+  // The Models page must be able to tell "no other provider" from "the
+  // settings read failed".
+  const catalog = providers.readCatalog()
+  assert.ok(catalog.failure !== undefined, 'a failed settings read must be reported')
+  assert.match(catalog.failure, /settings projection failed/u)
+  // The /login resolver stays fail-soft: the builtin target survives.
+  assert.deepEqual(providers.listCredentialOptions().map(option => option.route), ['deepseek-official'])
+})
+
+test('providers listCredentialOptions falls back to the settings-only reader without the llm service', () => {
+  const providers = port({
+    settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }),
+  }).providers
+  const options = providers.listCredentialOptions()
+  assert.equal(options.length, 2, 'deepseek official + the acme route')
+  assert.equal(options[0]!.route, 'deepseek-official')
+  assert.equal(options[0]!.canProvisionProfile, false, 'the builtin has no keyless-writable slot')
+  assert.equal(options[1]!.ref, 'ACME_KEY')
+  assert.equal(options[1]!.canProvisionProfile, true, 'the settings-only fallback slot is keyless-writable')
+  assert.equal(port({}).providers.available(), false)
+  assert.deepEqual(port({}).providers.listCredentialOptions().map(option => option.route), ['deepseek-official'])
+})
+
+test('providers degrade when the settings projection throws', () => {
+  const providers = port({
+    settings: {
+      describe: () => { throw new Error('settings projection failed') },
+      mutate: async () => {},
+    },
+  }).providers
+  // The settings-only fallback sees no section: only the official target.
+  assert.deepEqual(providers.listCredentialOptions().map(option => option.route), ['deepseek-official'])
+})
+
+test('providers writeProfile owns the llm-pi-ai schema (the wizard never names a namespace)', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({ settings: settings({}, writes) }).providers
+  await providers.writeProfile('acme', { api: 'openai-completions', baseURL: 'http://x' })
+  assert.deepEqual(writes, [
+    { ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'acme'], value: { api: 'openai-completions', baseURL: 'http://x' } }] },
+  ])
+})
+
+test('the provider create is conditional: an existing route is refused, a new one is revision-checked', async () => {
+  const writes: Array<{ ns: string; ops: unknown; revision: number | undefined }> = []
+  const section = { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } }
+  const providers = port({
+    settings: {
+      describe: () => [{ ns: 'llm-pi-ai', value: section, user: section, revision: 7 }],
+      mutate: async (ns: string, ops: unknown, revision: number | undefined) => { writes.push({ ns, ops, revision }) },
+    },
+  }).providers
+  // An EXISTING route: the create must refuse it, never overwrite it.
+  await assert.rejects(
+    () => providers.writeProfile('acme', { api: 'openai-completions', baseURL: 'https://acme.example/v1' }),
+    /already exists/u,
+  )
+  assert.equal(writes.length, 0, 'a refused create must not write')
+  // A NEW route: the write is checked against the revision the decision was
+  // read at, so a profile configured in between is refused by the Host.
+  await providers.writeProfile('new-route', { api: 'openai-completions', baseURL: 'https://new.example/v1' })
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0]?.revision, 7, 'the write carries the decision read revision')
+})
+
+test('providers writeKeylessProfile writes an EMPTY profile at the adapter-resolved location', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({
+    settings: settings({}, writes),
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  assert.deepEqual(await providers.writeKeylessProfile('acme'), { kind: 'written' })
+  assert.deepEqual(writes, [{ ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'acme'], value: {} }] }])
+  // The conventional fallback slot when the llm directory is absent.
+  const writes2: Array<{ ns: string; ops: unknown }> = []
+  assert.deepEqual(await port({ settings: settings({}, writes2) }).providers.writeKeylessProfile('acme'), { kind: 'written' })
+  assert.deepEqual(writes2, [{ ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'acme'], value: {} }] }])
+})
+
+test('providers reject malformed routes before writing a settings path', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({ settings: settings({}, writes) }).providers
+  await assert.rejects(() => providers.writeKeylessProfile('../escape'), /invalid provider route/)
+  await assert.rejects(() => providers.writeProfile('acme/escape', {}), /invalid provider route/)
+  assert.deepEqual(writes, [])
+})
+
+test('providers refuse a keyless write for the deepseek official BUILTIN (no profile slot, even in the settings-only fallback)', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({ settings: settings({}, writes) }).providers
+  // Without the llm service the conventional slot would otherwise accept
+  // ANY route — the builtin must be refused explicitly so the write
+  // outcome always agrees with the option DTO's canProvisionProfile.
+  assert.deepEqual(await providers.writeKeylessProfile('deepseek-official'), {
+    kind: 'skipped',
+    reason: 'the deepseek official builtin has no provider-profile slot',
+  })
+  assert.deepEqual(writes, [], 'the builtin never reaches a settings mutate')
+  // A real route keeps the conventional fallback write.
+  const writes2: Array<{ ns: string; ops: unknown }> = []
+  assert.deepEqual(await port({ settings: settings({}, writes2) }).providers.writeKeylessProfile('acme'), { kind: 'written' })
+  assert.deepEqual(writes2, [{ ns: 'llm-pi-ai', ops: [{ op: 'set', path: ['providers', 'acme'], value: {} }] }])
+})
+
+test('providers never advertise a keyless slot for an INVALID route (the flag agrees with the write refusal)', async () => {
+  // A hostile directory entry with a route that fails the provider-route
+  // pattern: the write would refuse it, so the DTO must not advertise a
+  // writable slot (one shared rule drives both).
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({
+    settings: settings({}, writes),
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: '../escape', displayName: 'Esc', settingsNs: 'llm-pi-ai', settingsPath: ['providers', '../escape'] },
+      ],
+    },
+  }).providers
+  assert.equal(providers.listCredentialOptions().find(option => option.route === '../escape')?.canProvisionProfile, false)
+  await assert.rejects(() => providers.writeKeylessProfile('../escape'), /invalid provider route/)
+  assert.deepEqual(writes, [])
+  // The settings-only fallback too: a hostile providers dict key fails the
+  // same rule — never advertised as writable.
+  const writes2: Array<{ ns: string; ops: unknown }> = []
+  const fallback = port({
+    settings: settings({ 'llm-pi-ai': { providers: { '../escape': { apiKeyEnv: 'X' } } } }, writes2),
+  }).providers
+  assert.equal(fallback.listCredentialOptions().find(option => option.route === '../escape')?.canProvisionProfile, false)
+})
+
+test('providers writeKeylessProfile refuses when the settings service is absent (never a silent no-op)', async () => {
+  await assert.rejects(() => port({}).providers.writeKeylessProfile('acme'), /settings service unavailable/)
+})
+
+test('providers writeKeylessProfile refuses a hostile directory entry (namespace/path redirect)', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({
+    settings: settings({}, writes),
+    llm: {
+      listConfigurableProviders: () => [
+        // A malformed/hostile directory entry redirecting the write
+        // outside the adapter-owned provider-config schema.
+        { provider: 'acme', displayName: 'acme', settingsNs: 'any-namespace', settingsPath: ['evil', 'path'] },
+      ],
+    },
+  }).providers
+  assert.deepEqual(await providers.writeKeylessProfile('acme'), { kind: 'skipped', reason: 'hostile or malformed directory entry for acme' })
+  assert.deepEqual(writes, [], 'hostile directory metadata can never reach a mutate')
+  // The option DTO says the SAME thing: a route whose directory entry is
+  // not a conventional llm-pi-ai providers.<route> slot is not
+  // keyless-writable (one shared rule drives the flag and the write).
+  assert.equal(providers.listCredentialOptions().find(option => option.route === 'acme')?.canProvisionProfile, false)
+  const writes2: Array<{ ns: string; ops: unknown }> = []
+  const providers2 = port({
+    settings: settings({}, writes2),
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'acme', displayName: 'acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'OTHER-ROUTE'] },
+      ],
+    },
+  }).providers
+  assert.deepEqual(await providers2.writeKeylessProfile('acme'), { kind: 'skipped', reason: 'hostile or malformed directory entry for acme' })
+  assert.deepEqual(writes2, [], 'a path whose leaf is NOT the route is refused')
+})
+
+test('a catalog route whose profile lives outside the conventional slot cannot be created there (P1)', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({
+    // `legacy` exists in the directory but has NO profile yet, and its
+    // profile location is its own section — exactly the manual-only catalog
+    // row. A genuinely new hand-declared route is not in the directory at
+    // all; it is the case the custom wizard exists for.
+    settings: settings({ 'llm-pi-ai': { providers: {} } }, writes),
+    llm: {
+      listConfigurableProviders: () => [
+        { provider: 'legacy', displayName: 'Legacy', settingsNs: 'llm-deepseek', settingsPath: ['legacy'] },
+        { provider: 'acme', displayName: 'Acme', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'acme'] },
+      ],
+    },
+  }).providers
+  const catalog = providers.readCatalog()
+  const legacy = catalog.options.find(option => option.route === 'legacy')
+  assert.ok(legacy !== undefined)
+  assert.equal(legacy.configured, false, 'no profile exists yet')
+  assert.equal(legacy.canProvisionProfile, false, 'the route is not writable in the conventional slot')
+  const workflow = workflowOver(providers)
+  const draft = {
+    route: 'legacy',
+    api: 'openai-completions',
+    baseURL: 'https://legacy.example/v1',
+    displayName: '',
+    models: ['legacy-1'],
+    apiKey: '',
+  }
+  // `configured === false` alone must NOT admit the create: writing the
+  // conventional slot would leave the catalog reading an empty own section,
+  // while the page reported a created provider.
+  const rejected = await workflow.createProvider(draft)
+  assert.equal(rejected.kind, 'rejected')
+  assert.match(rejected.text, /own settings section/u)
+  assert.equal(writes.length, 0, 'the refused create never reaches a settings mutate')
+  // Positive control: the route the catalog DOES offer in the conventional
+  // slot is created there.
+  const adopted = await workflow.createProvider({
+    ...draft,
+    route: 'acme',
+    baseURL: 'https://acme.example/v1',
+    models: ['acme-1'],
+  })
+  assert.equal(adopted.kind, 'created')
+  assert.equal(writes.length, 1)
+  assert.deepEqual(writes[0], {
+    ns: 'llm-pi-ai',
+    ops: [{ op: 'set', path: ['providers', 'acme'], value: { api: 'openai-completions', baseURL: 'https://acme.example/v1', models: [{ id: 'acme-1' }] } }],
+  })
+  // A genuinely NEW hand-declared route still creates in the conventional
+  // slot.
+  const created = await workflow.createProvider({ ...draft, route: 'brand-new' })
+  assert.equal(created.kind, 'created')
+  assert.equal(writes.length, 2)
+  assert.equal(writes[1]!.ns, 'llm-pi-ai')
+})
+
+test('providers writeKeylessProfile writes NOTHING when the route vanished from the directory', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const providers = port({
+    settings: settings({}, writes),
+    llm: { listConfigurableProviders: () => [] },
+  }).providers
+  assert.deepEqual(await providers.writeKeylessProfile('acme'), { kind: 'skipped', reason: 'no configurable-provider entry for acme' })
+  assert.deepEqual(writes, [], 'a directory race must never fall back to a guessed slot')
+})
+
+test('config DTOs are DETACHED — mutating a returned value never aliases Host data', async () => {
+  const records = [{ key: 'llm-pi-ai/openai', kind: 'oauth' }]
+  const flows = [
+    { key: 'llm-pi-ai/openai', label: 'openai', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: false },
+  ]
+  const config = port({
+    credentials: {
+      set: async () => {},
+      unset: async () => {},
+      deleteRecord: async () => {},
+      describe: async () => ({ configured: true, source: 'env' }),
+      listRecords: async () => records,
+    },
+    authorization: {
+      list: () => flows,
+      begin: async () => ({ status: 'authorized' }),
+    },
+    permissionPresets: { get names() { return ['workspace-write'] } },
+    settings: settings({ 'llm-pi-ai': { providers: { acme: { apiKeyEnv: 'ACME_KEY' } } } }),
+  })
+  const recordsOut = await config.credentials.listRecords()
+  ;(recordsOut as Array<{ key: string }>)[0]!.key = 'MUTATED'
+  assert.equal(records[0]!.key, 'llm-pi-ai/openai', 'the credential records are never aliased')
+  const targets = config.authorization.listTargets()
+  ;(targets[0]!.methods as unknown as Array<{ id: string }>)[0]!.id = 'MUTATED'
+  assert.equal(flows[0]!.methods[0]!.id, 'oauth', 'the flow methods are never aliased')
+  const names = config.permissions.presetNames()
+  ;(names as string[])[0] = 'MUTATED'
+  assert.deepEqual(flows.length > 0 ? [] : [], [])
+  const options = config.providers.listCredentialOptions()
+  const acme = options.find(option => option.route === 'acme')
+  assert.ok(acme !== undefined)
+  // The client DTO never carries a Host schema fact (namespace/path).
+  assert.equal('settingsNs' in acme, false)
+  assert.equal('settingsPath' in acme, false)
+  // The DTO is detached: mutating the returned option never reaches the
+  // Host section (the settings fake holds the live document).
+  ;(acme as { ref: string }).ref = 'MUTATED'
+  const again = config.providers.listCredentialOptions()
+  assert.equal(again.find(option => option.route === 'acme')!.ref, 'ACME_KEY', 'the merged options are never aliased')
+})
+
+// ── credentials ───────────────────────────────────────────────────────────
+
+test('credentials forward set/unset/delete/describe/list and never echo secrets in reads', async () => {
+  const calls: string[] = []
+  const credentials = port({
+    credentials: {
+      set: async (ref: string) => { calls.push(`set:${ref}`) },
+      unset: async (ref: string) => { calls.push(`unset:${ref}`) },
+      deleteRecord: async (key: string) => { calls.push(`delete:${key}`) },
+      describe: async (ref: string) => ({ configured: ref === 'DEEPSEEK_API_KEY', source: 'env' }),
+      listRecords: async () => [{ key: 'llm-pi-ai/openai', kind: 'oauth' }],
+    },
+  }).credentials
+  assert.equal(credentials.available(), true)
+  await credentials.setReference('DEEPSEEK_API_KEY', 'sk-secret')
+  await credentials.unsetReference('DEEPSEEK_API_KEY')
+  await credentials.deleteRecord('llm-pi-ai/openai')
+  assert.deepEqual(calls, ['set:DEEPSEEK_API_KEY', 'unset:DEEPSEEK_API_KEY', 'delete:llm-pi-ai/openai'])
+  assert.deepEqual(await credentials.describeReference('DEEPSEEK_API_KEY'), { configured: true, source: 'env' })
+  assert.deepEqual(await credentials.listRecords(), [{ key: 'llm-pi-ai/openai', kind: 'oauth' }])
+})
+
+test('credentials degrade when the service is absent', async () => {
+  const credentials = port({}).credentials
+  assert.equal(credentials.available(), false)
+  assert.deepEqual(await credentials.describeReference('X'), { configured: false })
+  assert.deepEqual(await credentials.listRecords(), [])
+  await assert.rejects(() => credentials.setReference('X', 'secret'), /unavailable/)
+})
+
+// ── authorization ─────────────────────────────────────────────────────────
+
+test('authorization listTargets maps the seam entries to detached targets', () => {
+  const authorization = port({
+    authorization: {
+      list: () => [
+        { key: 'llm-pi-ai/openai', label: 'openai', methods: [{ id: 'oauth', label: 'OAuth' }], inFlight: true },
+        { key: 'other/key', label: 'other', methods: [{ id: 'm', label: 'M' }], inFlight: false },
+      ],
+      begin: async () => ({ status: 'authorized' }),
+    },
+  }).authorization
+  assert.equal(authorization.available(), true)
+  const targets = authorization.listTargets()
+  assert.equal(targets.length, 2)
+  assert.equal(targets[0]!.route, 'openai', 'llm-pi-ai scope maps to the route')
+  assert.equal(targets[0]!.inFlight, true)
+  assert.equal(targets[1]!.route, undefined, 'foreign scopes carry no route')
+})
+
+test('authorization begins one flow as an EVENT surface and degrades when absent', async () => {
+  const begins: string[] = []
+  const events: import('../../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
+  const authorization = port({
+    authorization: {
+      list: () => [],
+      begin: async (request: {
+        key: string
+        interaction: {
+          notify: (n: unknown) => void
+          prompt: (prompt: { kind: string; message: string; signal?: AbortSignal }) => Promise<string>
+        }
+      }) => {
+        begins.push(request.key)
+        // The adapter bridges the upstream interaction into detached
+        // events: a notice, then a prompt awaiting the human's answer.
+        request.interaction.notify({ message: 'progress' })
+        const answer = await request.interaction.prompt({ kind: 'text', message: 'enter' })
+        return { status: answer === 'typed' ? 'authorized' as const : 'cancelled' as const }
+      },
+    },
+  }).authorization
+  const off = authorization.onEvent((event) => { events.push(event) })
+  const started = await authorization.begin({ key: 'llm-pi-ai/openai' })
+  assert.equal(started.kind, 'started')
+  assert.equal(begins.length, 1)
+  await settle()
+  // Answer the bridged prompt with the REAL attempt/prompt ids the
+  // adapter emitted (the upstream flow awaits the answer).
+  const promptEvent = events.find(event => event.kind === 'prompt')
+  assert.ok(promptEvent !== undefined && promptEvent.kind === 'prompt')
+  const attemptId = promptEvent.attemptId
+  const promptId = promptEvent.promptId
+  await authorization.respond(attemptId, promptId, 'typed')
+  await settle()
+  off()
+  assert.ok(events.some(event => event.kind === 'notice' && event.notice.message === 'progress'), 'the notice flows as an event')
+  assert.ok(events.some(event => event.kind === 'prompt' && event.prompt.kind === 'text'), 'the prompt flows as an event')
+  assert.ok(events.some(event => event.kind === 'settled' && event.status === 'authorized'), 'the settlement flows as an event')
+  assert.equal(port({}).authorization.available(), false)
+  assert.deepEqual(port({}).authorization.listTargets(), [])
+  assert.deepEqual(await port({}).authorization.begin({ key: 'x' }), { kind: 'unavailable' })
+  assert.deepEqual(await authorization.cancel('attempt-1'), undefined)
+})
+
+test('authorization bridges an ALREADY-ABORTED prompt signal as a non-decline withdrawal', async () => {
+  // The flow may withdraw a prompt before the bridge even registers (its
+  // signal already aborted): the bridge must reject its pending promise
+  // and surface prompt-withdrawn IMMEDIATELY — never leave the promise
+  // unresolved until some later abort event (which never comes).
+  const controller = new AbortController()
+  controller.abort(new Error('losing race'))
+  const events: import('../../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
+  const authorization = port({
+    authorization: {
+      list: () => [],
+      begin: async (request: {
+        key: string
+        interaction: {
+          notify: (n: unknown) => void
+          prompt: (prompt: { kind: string; message: string; signal?: AbortSignal }) => Promise<string>
+        }
+      }) => {
+        try {
+          await request.interaction.prompt({ kind: 'text', message: 'enter', signal: controller.signal })
+          return { status: 'authorized' as const }
+        } catch (error) {
+          // The bridge rejection is a NON-decline cancellation.
+          assert.notEqual((error as { name?: string }).name, 'AuthorizationDeclinedError')
+          return { status: 'cancelled' as const }
+        }
+      },
+    },
+  }).authorization
+  const off = authorization.onEvent((event) => { events.push(event) })
+  const started = await authorization.begin({ key: 'llm-pi-ai/openai' })
+  assert.equal(started.kind, 'started')
+  await settle()
+  off()
+  const withdrawn = events.find(event => event.kind === 'prompt-withdrawn')
+  assert.ok(withdrawn !== undefined, 'the already-aborted prompt surfaces prompt-withdrawn')
+  assert.ok(events.some(event => event.kind === 'settled' && event.status === 'cancelled'), 'the withdrawal settles the attempt')
+})
+
+test('authorization cancel() leaves the prompt answerable and rejects no bridge before the Host settles', async () => {
+  // A provider may legitimately overlap prompt() and commit(); hiding the
+  // prompt or injecting a rejection could corrupt the authoritative outcome.
+  const events: import('../../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
+  let promptSettled = false
+  const authorization = port({
+    authorization: {
+      list: () => [],
+      begin: async (request: {
+        key: string
+        interaction: {
+          notify: (n: unknown) => void
+          prompt: (prompt: { kind: string; message: string; signal?: AbortSignal }) => Promise<string>
+        }
+      }) => {
+        // The upstream flow awaits the prompt forever (it never honors
+        // its signal); only the bridge rejection releases it.
+        try {
+          await request.interaction.prompt({ kind: 'text', message: 'enter' })
+          promptSettled = true
+          return { status: 'authorized' as const }
+        } catch {
+          promptSettled = true
+          return { status: 'cancelled' as const }
+        }
+      },
+    },
+  }).authorization
+  const off = authorization.onEvent((event) => { events.push(event) })
+  const started = await authorization.begin({ key: 'llm-pi-ai/openai' })
+  assert.equal(started.kind, 'started')
+  await settle()
+  const promptEvent = events.find(event => event.kind === 'prompt')
+  assert.ok(promptEvent !== undefined && promptEvent.kind === 'prompt')
+  await authorization.cancel(promptEvent.attemptId)
+  await settle()
+  off()
+  assert.equal(promptSettled, false, 'the bridge is NOT rejected before the Host outcome')
+  assert.equal(events.some(event => event.kind === 'prompt-withdrawn'), false, 'the prompt stays answerable')
+  assert.equal(events.some(event => event.kind === 'settled'), false, 'no terminal outcome is forged')
+})
+
+test('authorization cancel() does not forge a close or terminal for a wedged provider', async () => {
+  // The Host still owns settlement. A never-settling provider must not be
+  // papered over with a fake prompt-withdrawn or a fake cancelled outcome; the
+  // UI keeps the prompt answerable until the Host actually settles.
+  const events: import('../../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
+  let promptSettled = false
+  const authorization = port({
+    authorization: {
+      list: () => [],
+      begin: async (request: {
+        key: string
+        interaction: {
+          notify: (n: unknown) => void
+          prompt: (prompt: { kind: string; message: string; signal?: AbortSignal }) => Promise<string>
+        }
+      }) => {
+        // The upstream flow NEVER settles (a wedged/ignored abort); only
+        // the bridge rejection releases the prompt await, and even then
+        // no `settled` event is emitted.
+        try {
+          await request.interaction.prompt({ kind: 'text', message: 'enter' })
+          promptSettled = true
+        } catch {
+          promptSettled = true
+        }
+        return await new Promise<{ status: 'authorized' }>(() => {}) // never settles
+      },
+    },
+  }).authorization
+  const off = authorization.onEvent((event) => { events.push(event) })
+  const started = await authorization.begin({ key: 'llm-pi-ai/openai' })
+  assert.equal(started.kind, 'started')
+  await settle()
+  const promptEvent = events.find(event => event.kind === 'prompt')
+  assert.ok(promptEvent !== undefined && promptEvent.kind === 'prompt')
+  await authorization.cancel(promptEvent.attemptId)
+  await settle()
+  off()
+  assert.equal(promptSettled, false, 'cancel does not inject a rejection into the flow')
+  assert.equal(events.some(event => event.kind === 'prompt-withdrawn'), false, 'the prompt remains owned by the Host attempt')
+  assert.equal(events.some(event => event.kind === 'settled'), false, 'no terminal outcome is forged')
+})
+
+test('a forced caller abort releases prompt bridges but leaves the terminal to the Host', async () => {
+  // The provider drives a prompt and then IGNORES its signal forever. The
+  // caller-signal abort must route through the SAME idempotent
+  // finalization as cancel(): reject the pending bridge, emit
+  // prompt-withdrawn, dispose the caller-abort listener and remove the
+  // attempt — a provider that never settles cannot retain the attempt,
+  // the controller or the listener (repeated aborted logins leave
+  // nothing behind).
+  const events: import('../../src/runtime/config-port.ts').AuthorizationFlowEvent[] = []
+  let promptSettled = false
+  const controller = new AbortController()
+  let adds = 0
+  let removes = 0
+  const signal = controller.signal
+  const originalAdd = signal.addEventListener.bind(signal)
+  const originalRemove = signal.removeEventListener.bind(signal)
+  signal.addEventListener = ((type: string, listener: unknown, options?: unknown) => {
+    if (type === 'abort') adds += 1
+    return originalAdd(type as 'abort', listener as () => void, options as boolean | EventListenerOptions | undefined)
+  }) as typeof signal.addEventListener
+  signal.removeEventListener = ((type: string, listener: unknown, options?: unknown) => {
+    if (type === 'abort') removes += 1
+    return originalRemove(type as 'abort', listener as () => void, options as boolean | EventListenerOptions | undefined)
+  }) as typeof signal.removeEventListener
+  const authorization = port({
+    authorization: {
+      list: () => [],
+      begin: async (request: {
+        key: string
+        interaction: {
+          notify: (n: unknown) => void
+          prompt: (prompt: { kind: string; message: string; signal?: AbortSignal }) => Promise<string>
+        }
+      }) => {
+        // The upstream flow NEVER settles, even when its signal aborts.
+        try {
+          await request.interaction.prompt({ kind: 'text', message: 'enter' })
+          promptSettled = true
+        } catch {
+          promptSettled = true
+        }
+        return await new Promise<{ status: 'authorized' }>(() => {}) // never settles
+      },
+    },
+  }).authorization
+  const off = authorization.onEvent((event) => { events.push(event) })
+  const started = await authorization.begin({ key: 'llm-pi-ai/openai', signal })
+  assert.equal(started.kind, 'started')
+  await settle()
+  const promptEvent = events.find(event => event.kind === 'prompt')
+  assert.ok(promptEvent !== undefined && promptEvent.kind === 'prompt')
+  controller.abort() // runner teardown: the provider never settles
+  await settle()
+  off()
+  assert.equal(promptSettled, true, 'forced teardown releases a flow that may await the lost prompt')
+  assert.ok(events.some(event => event.kind === 'prompt-withdrawn'), 'the destroyed prompt UI is cleaned up')
+  assert.equal(events.some(event => event.kind === 'settled'), false, 'no terminal outcome is forged')
+  assert.equal(adds, 1, 'one caller-abort listener registered')
+  assert.equal(removes, 1, 'the caller listener was disposed — no leak on the long-lived signal')
+})
+
+/** Flush the microtask queue (the event bridge is promise-based). */
+async function settle(): Promise<void> {
+  await new Promise<void>((resolve) => { resolve() })
+  await new Promise<void>((resolve) => { resolve() })
+}
+
+// ── permissions ───────────────────────────────────────────────────────────
+
+test('permissions read names and the effective default, and persist the default', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const permissions = port({
+    permissionPresets: { get names() { return ['workspace-write', 'danger-full-access'] }, get defaultPreset() { return 'workspace-write' } },
+    settings: settings({}, writes),
+  }).permissions
+  assert.deepEqual(permissions.presetNames(), ['workspace-write', 'danger-full-access'])
+  // The 0.1.7 read authority is the owning service's effective value.
+  assert.equal(permissions.defaultPreset(), 'workspace-write')
+  await permissions.setDefaultPreset('danger-full-access')
+  assert.deepEqual(writes, [{ ns: 'permission', ops: [{ op: 'set', path: ['defaultPreset'], value: 'danger-full-access' }] }])
+  assert.equal(port({}).permissions.defaultPreset(), undefined, 'no service -> no default')
+})
+
+test('permissions setDefaultPreset WITHOUT a settings service rejects instead of silently succeeding', async () => {
+  // C2-R3: a missing settings service used to be a silent no-op, which let the
+  // Settings workspace report a Verified write that never reached the Host.
+  const permissions = port({ permissionPresets: { get names() { return ['workspace-write'] } } }).permissions
+  await assert.rejects(() => permissions.setDefaultPreset('workspace-write'), /settings service unavailable/u)
+})
+
+test('applyPermissionPreset runs the OFFICIAL command line through the resolved agent with the caller signal', async () => {
+  const executed: Array<{ line: string; signal: AbortSignal }> = []
+  const permissions = port({
+    permissionPresets: { get names() { return ['workspace-write', 'danger-full-access'] } },
+    commands: {
+      execute: async (_agent: unknown, line: string, _args: readonly unknown[], signal: AbortSignal) => {
+        assert.ok(signal instanceof AbortSignal, 'the official command receives a REAL AbortSignal')
+        executed.push({ line, signal })
+        return { ok: true }
+      },
+    },
+  }).permissions
+  const signal = new AbortController().signal
+  assert.deepEqual(await permissions.applyPermissionPreset('session-live', 'danger-full-access', signal), { kind: 'applied' })
+  assert.deepEqual(executed.map(entry => entry.line), ['/permission danger-full-access'])
+  assert.equal(executed[0]?.signal, signal,
+    'the caller signal reaches the official command by IDENTICAL reference (never replaced by a fake)')
+  assert.deepEqual(await permissions.applyPermissionPreset('session-other', 'danger-full-access', signal), { kind: 'unavailable', cause: 'permission' })
+  assert.deepEqual(await port({}).permissions.applyPermissionPreset('session-live', 'danger-full-access', signal), { kind: 'unavailable', cause: 'commands' })
+  assert.equal(executed.length, 1, 'exactly ONE official execution — only the resolvable valid preset dispatches')
+})
+
+test('applyPermissionPreset refuses a preset id the composed table does not offer', async () => {
+  let executed = 0
+  const permissions = port({
+    permissionPresets: { get names() { return ['workspace-write'] } },
+    commands: {
+      execute: async () => { executed += 1; return { ok: true } },
+    },
+  }).permissions
+  assert.deepEqual(
+    await permissions.applyPermissionPreset('session-live', 'danger-full-access; rm -rf /', new AbortController().signal),
+    { kind: 'unavailable', cause: 'permission' },
+    'a hostile id never reaches the command line',
+  )
+  assert.equal(executed, 0)
+})
+
+// ── preset default ────────────────────────────────────────────────────────
+
+test('presetDefault reads the registry policy and writes the selectedDefault user preference', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const presetDefault = port({
+    settings: settings({}, writes),
+    agentPresets: { get defaultId() { return 'code' } },
+  }).presetDefault
+  assert.equal(presetDefault.available(), true)
+  // The registry's own merged policy (deployment default + selectedDefault
+  // + mode selection) is the read authority — a `code` id is ordinary.
+  assert.equal(presetDefault.get(), 'code')
+  await presetDefault.set('code')
+  assert.deepEqual(writes, [{ ns: 'agent-preset-registry', ops: [{ op: 'set', path: ['selectedDefault'], value: 'code' }] }])
+  await presetDefault.set('ptc')
+  assert.deepEqual(writes, [
+    { ns: 'agent-preset-registry', ops: [{ op: 'set', path: ['selectedDefault'], value: 'code' }] },
+    { ns: 'agent-preset-registry', ops: [{ op: 'set', path: ['selectedDefault'], value: 'ptc' }] },
+  ])
+})
+
+test('presetDefault degrades without the registry or the settings surface', () => {
+  const presetDefault = port({
+    settings: settings({}),
+    agentPresets: { get defaultId() { return 'standard' } },
+  }).presetDefault
+  assert.equal(presetDefault.get(), 'standard')
+  assert.equal(port({}).presetDefault.available(), false)
+  assert.equal(port({}).presetDefault.get(), undefined)
+})
+
+// ── event wiring ──────────────────────────────────────────────────────────
+
+test('credential onChanged subscribes both reference- and record-updated', async () => {
+  const ctx = new Context()
+  const refreshes: string[] = []
+  new DirectConfigPort(ctx as never, undefined, () => undefined)
+    .credentials.onChanged(() => { refreshes.push('refresh') })
+  ctx.emit('credentials/reference-updated', 'DEEPSEEK_API_KEY' as never)
+  ctx.emit('credentials/record-updated', 'llm-pi-ai/openai' as never)
+  await Promise.resolve()
+  assert.deepEqual(refreshes, ['refresh', 'refresh'])
+})
+
+test('credential onChanged returns a disposer (a remount never accumulates listeners)', async () => {
+  const ctx = new Context()
+  const refreshes: string[] = []
+  const dispose = new DirectConfigPort(ctx as never, undefined, () => undefined)
+    .credentials.onChanged(() => { refreshes.push('refresh') })
+  ctx.emit('credentials/reference-updated', 'OPENAI_API_KEY' as never)
+  await Promise.resolve()
+  assert.equal(refreshes.length, 1)
+  dispose()
+  ctx.emit('credentials/reference-updated', 'OPENAI_API_KEY' as never)
+  ctx.emit('credentials/record-updated', 'llm-pi-ai/openai' as never)
+  await Promise.resolve()
+  assert.deepEqual(refreshes, ['refresh'], 'after dispose no credential event reaches the listener')
+})
+
+// ── approval override (alpha.4 session-oriented read) ─────────────────────
+
+test('permissions approvalOverrideOf resolves the session id to its live Agent and reads the official override', () => {
+  const overrides = new Map<string, 'ask' | 'never'>([['session-live', 'never']])
+  const config = port({
+    approval: { overrideOf: (session: { id?: string }) => overrides.get(session?.id ?? '') },
+  }).permissions
+  assert.equal(config.approvalOverrideOf('session-live'), 'never')
+  assert.equal(config.approvalOverrideOf('session-ghost'), undefined, 'no live Agent for the session stays undefined')
+  const without = port({}).permissions
+  assert.equal(without.approvalOverrideOf('session-live'), undefined, 'a missing approval service degrades')
+  const throwing = port({ approval: { overrideOf: () => { throw new Error('boom') } } }).permissions
+  assert.equal(throwing.approvalOverrideOf('session-live'), undefined, 'a throwing service degrades to undefined')
+})
+
+// ── subagent model selection (the official settings section) ──────────────
+
+test('subagentModelSelection reads the official service and degrades to the shipped default', () => {
+  const config = port({
+    subagentModelSelection: { current: () => ({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }] }) },
+    settings: settings({}),
+  }).subagentModelSelection
+  assert.equal(config.available(), true)
+  const current = config.get()
+  assert.equal(current.enabled, true)
+  assert.deepEqual(current.allowedModels, [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }])
+
+  // A THROWING official read is UNREADABLE, never the shipped default: a writer
+  // handed `{enabled:false, []}` would erase routes the Host still stores.
+  const throwing = port({ subagentModelSelection: { current: () => { throw new Error('official read failed') } }, settings: settings({}) }).subagentModelSelection
+  assert.throws(() => throwing.get(), /official read failed/u,
+    'an unreadable official section must fail loud, not fabricate the default')
+
+  const missing = port({ subagentModelSelection: { current: () => ({ enabled: false, allowedModels: [] }) }, settings: settings({}) }).subagentModelSelection
+  assert.deepEqual(missing.get(), { enabled: false, allowedModels: [] }, 'the service reads its own shipped default')
+  const noService = port({}).subagentModelSelection
+  assert.equal(noService.available(), false)
+  assert.deepEqual(noService.get(), { enabled: false, allowedModels: [] })
+  // A generic settings service WITHOUT the official subagentModelSelection
+  // service is NOT the capability: the /settings rows must not appear.
+  const settingsOnly = port({ settings: settings({}) }).subagentModelSelection
+  assert.equal(settingsOnly.available(), false, 'settings alone must not advertise the official section')
+})
+
+test('subagentModelSelection writes the whole official section through the settings service', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const config = port({ settings: settings({}, writes) }).subagentModelSelection
+  await config.set({ enabled: true, allowedModels: [{ provider: 'p', model: 'm1' }] })
+  assert.equal(writes.length, 1)
+  assert.equal(writes[0]!.ns, 'subagent-model-selection-settings')
+  assert.deepEqual(writes[0]!.ops, [
+    { op: 'set', path: ['enabled'], value: true },
+    { op: 'set', path: ['allowedModels'], value: [{ provider: 'p', model: 'm1' }] },
+  ])
+})
+
+test('subagentModelSelection enforces the official validation rules client-side', async () => {
+  const writes: Array<{ ns: string; ops: unknown }> = []
+  const config = port({ settings: settings({}, writes) }).subagentModelSelection
+  await assert.rejects(
+    config.set({ enabled: true, allowedModels: [] }),
+    /requires at least one allowed model/u,
+    'enabling with an empty allowlist is refused before the Host write',
+  )
+  await assert.rejects(
+    config.set({ enabled: false, allowedModels: [{ provider: 'p', model: 'm' }, { provider: 'p', model: 'm' }] }),
+    /repeats route/u,
+    'duplicate provider+model routes are refused',
+  )
+  await assert.rejects(
+    config.set({ enabled: false, allowedModels: [{ provider: '', model: 'm' }] }),
+    /non-empty provider and model/u,
+  )
+  assert.deepEqual(writes, [], 'a rejected write never reaches the settings service')
+})
+
+// ── the profile-wide visual tools switch ──────────────────────────────────
+
+test('visualTools reads the effective value, its USER provenance and the Host row status', () => {
+  const config = port({
+    settings: {
+      describe: () => [{
+        ns: 'pi-tui-visual-tools',
+        value: { enabled: false },
+        user: {},
+        revision: 7,
+      }],
+      mutate: async () => {},
+    },
+    piTuiVisualToolsStatus: { applied: () => false },
+  }).visualTools
+  assert.deepEqual(config.read(), { enabled: false, revision: 7, userOverridden: false, applied: false })
+
+  const overridden = port({
+    settings: {
+      describe: () => [{
+        ns: 'pi-tui-visual-tools',
+        value: { enabled: true },
+        user: { enabled: true },
+        revision: 3,
+      }],
+      mutate: async () => {},
+    },
+    piTuiVisualToolsStatus: { applied: () => true },
+  }).visualTools
+  assert.deepEqual(overridden.read(), { enabled: true, revision: 3, userOverridden: true, applied: true })
+})
+
+test('visualTools reports an unreadable section instead of the schema default', () => {
+  const missing = port({ settings: settings({}) }).visualTools
+  assert.equal(missing.read(), undefined, 'a missing namespace is unavailable, never On')
+  const malformed = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: 'yes' }, revision: 1 }],
+      mutate: async () => {},
+    },
+  }).visualTools
+  assert.equal(malformed.read(), undefined, 'a non-boolean effective value is unreadable')
+  const noService = port({}).visualTools
+  assert.equal(noService.read(), undefined, 'no settings service at all is unreadable')
+})
+
+test('visualTools keeps the runtime fact unobservable when the Host row status is absent', () => {
+  const config = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 1 }],
+      mutate: async () => {},
+    },
+  }).visualTools
+  assert.deepEqual(config.read(), { enabled: true, revision: 1, userOverridden: false, applied: undefined })
+})
+
+test('visualTools.setEnabled writes the exact namespace path with the descriptor revision', async () => {
+  const writes: Array<{ ns: string; ops: unknown; revision?: number }> = []
+  const config = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision: 11 }],
+      mutate: async (ns: string, ops: unknown, revision?: number) => {
+        writes.push({ ns, ops, revision })
+      },
+    },
+  }).visualTools
+  await config.setEnabled(false, 11)
+  assert.deepEqual(writes, [{
+    ns: 'pi-tui-visual-tools',
+    ops: [{ op: 'set', path: ['enabled'], value: false }],
+    revision: 11,
+  }])
+
+  const unavailable = port({ settings: settings({}) }).visualTools
+  await assert.rejects(unavailable.setEnabled(true, 1), /not mounted/u, 'an absent section is an explicit refusal')
+  const noSettings = port({}).visualTools
+  await assert.rejects(noSettings.setEnabled(true, 1), /settings service is unavailable/u)
+})
+
+test('visualTools.setEnabled submits the decision revision, so an external edit is a conflict', async () => {
+  let revision = 21
+  const writes: Array<{ revision?: number }> = []
+  const config = port({
+    settings: {
+      describe: () => [{ ns: 'pi-tui-visual-tools', value: { enabled: true }, revision }],
+      mutate: async (_ns: string, _ops: unknown, expectedRevision?: number) => {
+        writes.push({ revision: expectedRevision })
+        if (expectedRevision !== revision) {
+          throw Object.assign(new Error(`expected revision ${String(expectedRevision)}, actual ${revision}`), {
+            code: 'SETTINGS_CONFLICT',
+          })
+        }
+        revision += 1
+      },
+    },
+  }).visualTools
+  const decision = config.read()
+  assert.equal(decision?.revision, 21)
+  // An external writer lands between the UI read and the Confirm.
+  revision = 22
+  await assert.rejects(config.setEnabled(false, decision.revision), /expected revision 21, actual 22/u,
+    'the stale decision is refused instead of overwriting the external edit')
+  assert.deepEqual(writes, [{ revision: 21 }], 'the ORIGINAL read revision is the fence')
+  assert.equal(config.read()?.revision, 22, 'the authoritative read re-establishes the newer revision')
+})

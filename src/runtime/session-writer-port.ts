@@ -9,7 +9,7 @@
  * settlement vocabulary now so a future wire adapter never has to claim that
  * an ambiguous transport failure was committed.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/session-writer-port
  */
 

@@ -15,8 +15,8 @@
  * remains the production/default backend and there is still no public Remote
  * selector, so no normal startup reaches this adapter.
  *
- * Full contract: docs/client-server-migration.md §P1 capability ledger and
- * docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md (Host authority and
+ * currentness) and docs/architecture/surface-behavior.md (controller/workspace).
  * @module @xmoon76/dsh-pi-tui/runtime/remote/plugin-manager-remote
  */
 

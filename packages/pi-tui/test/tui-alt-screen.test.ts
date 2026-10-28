@@ -7,7 +7,7 @@ import {
 } from "../src/alt-screen-search.ts";
 import { AltScreenSearchIndex as RootAltScreenSearchIndex } from "../src/index.ts";
 import { Box } from "../src/components/box.ts";
-import { Container } from "../src/tui.ts";
+import { Container, type OverlayHandle } from "../src/tui.ts";
 import { Input } from "../src/components/input.ts";
 import { HStack } from "../src/components/h-stack.ts";
 import { Image } from "../src/components/image.ts";
@@ -20,6 +20,7 @@ import { VStack } from "../src/components/v-stack.ts";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "../src/keybindings.ts";
 import {
 	encodeKitty,
+	getCapabilities,
 	hyperlink,
 	registerKittyImageMetadata,
 	resetCapabilitiesCache,
@@ -3782,4 +3783,676 @@ describe("resetTextSelection (upstream #9311 absorption)", () => {
 		assert.strictEqual(lastClickOf(tui), undefined, "resetTextSelection must drop the multi-click history");
 		tui.stop();
 	});
+
+	it("keeps the multi-click window for a host repaint that does not replace the corpus (X068)", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("alpha\nbeta\ngamma\ndelta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+
+		terminal.sendInput("\x1b[<0;2;1M");
+		terminal.sendInput("\x1b[<0;2;1m");
+		await terminal.waitForRender();
+		assert.notStrictEqual(lastClickOf(tui), undefined, "a real click records the multi-click history");
+
+		tui.resetTextSelection({ preserveClickHistory: true });
+		assert.notStrictEqual(
+			lastClickOf(tui),
+			undefined,
+			"an overlay repaint must not restart the double-click counting",
+		);
+		tui.stop();
+	});
+
+describe("TuiAltScreen overlay text selection (X068)", () => {
+	/** A modal whose content is `lines`, framed exactly like the host's
+	 * ResponsiveOverlayFrame when `framed` is set: one border row above and
+	 * below, two chrome columns on each side. `insets` matches that chrome. */
+	class FramedOverlay implements Component {
+		readonly lines: string[];
+		readonly insets: { top: number; right: number; bottom: number; left: number };
+		mouse: string[] = [];
+		framed: boolean;
+
+		constructor(lines: string[], framed = true) {
+			this.lines = lines;
+			this.framed = framed;
+			this.insets = { top: 1, right: 2, bottom: 1, left: 2 };
+		}
+
+		render(width: number): string[] {
+			if (!this.framed) return this.lines;
+			const inner = Math.max(1, width - 4);
+			const out = [`╭${"─".repeat(Math.max(0, width - 2))}╮`];
+			// Exactly the host frame's row shape: one border cell, one padding
+			// cell, the content padded to the inner width, one padding cell, one
+			// border cell.
+			for (const line of this.lines) {
+				const pad = Math.max(0, inner - visibleWidth(line));
+				out.push(`│ ${line}${" ".repeat(pad)} │`);
+			}
+			out.push(`╰${"─".repeat(Math.max(0, width - 2))}╯`);
+			return out;
+		}
+
+		invalidate(): void {}
+	}
+
+	/** The overlay's LAST PAINTED placement (the frame's own authoritative
+	 * rectangle — never a re-measured live state). */
+	function paintedBounds(handle: OverlayHandle): { row: number; col: number; width: number; height: number } {
+		const bounds = handle.getBounds();
+		assert.ok(bounds !== undefined, "the overlay must be painted");
+		return bounds;
+	}
+
+	function framed(lines: string[], width = 24): FramedOverlay {
+		const overlay = new FramedOverlay(lines);
+		// render(width) paints exactly `width` cells; call it once so the test
+		// can assert chrome positions before the real paint.
+		overlay.render(width);
+		return overlay;
+	}
+
+	it("selects only the visible overlay text and copies it with the content spaces preserved", async () => {
+		const terminal = new RecordingTerminal(40, 12);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("background alpha\nbackground beta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const overlay = framed(["Host: /ws/report.md", "  indented line", "third"]);
+		const handle = tui.showOverlay(overlay, { width: 24, textSelectionInsets: overlay.insets });
+		await terminal.waitForRender();
+
+		const painted = paintedBounds(handle);
+		// Row 1 of the frame is the top border, so content row 0 is painted.row+1.
+		const contentRow = painted.row + 1;
+		const contentCol = painted.col + 2;
+		// Drag from the FIRST content cell to the LAST content cell of row two.
+		const lastContentCol = contentCol + (painted.width - 4) - 1;
+		terminal.sendInput(`\x1b[<0;${contentCol + 1};${contentRow + 1}M`);
+		terminal.sendInput(`\x1b[<32;${lastContentCol + 1};${contentRow + 2}M`);
+		terminal.sendInput(`\x1b[<0;${lastContentCol + 1};${contentRow + 2}m`);
+		await terminal.waitForRender();
+
+		// The frame pads every content row to its inner width, and an overlay
+		// selection copies the PAINTED cells: the indent survives verbatim and
+		// no transcript trimEnd/indent rule touches the text.
+		assert.deepStrictEqual(copied, [
+			"Host: /ws/report.md \n  indented line     ",
+		]);
+		tui.stop();
+	});
+
+	it("keeps drag and copy inside the content rectangle when the pointer leaves the overlay", async () => {
+		const terminal = new RecordingTerminal(40, 14);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("background alpha\nbackground beta\nbackground gamma", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const overlay = framed(["first line", "second line", "third line"]);
+		const handle = tui.showOverlay(overlay, { width: 24, textSelectionInsets: overlay.insets });
+		await terminal.waitForRender();
+
+		const painted = paintedBounds(handle);
+		const firstRow = painted.row + 1;
+		const lastRow = painted.row + painted.height - 2;
+		const contentCol = painted.col + 2;
+		// Press on the first content row, drag onto the BOTTOM-RIGHT cell of the
+		// terminal (far outside the frame) and release: every point is clipped
+		// into the content rectangle.
+		terminal.sendInput(`\x1b[<0;${contentCol + 1};${firstRow + 1}M`);
+		terminal.sendInput(`\x1b[<32;${terminal.columns};${terminal.rows}M`);
+		terminal.sendInput(`\x1b[<0;${terminal.columns};${terminal.rows}m`);
+		await terminal.waitForRender();
+
+		// Every visible content row of the frame, and nothing below it.
+		assert.deepStrictEqual(copied, [
+			"first line          \nsecond line         \nthird line          ",
+		]);
+		assert.ok(
+			terminal.getViewport().every((line) => !line.includes("background") || !line.includes("\x1b[7m")),
+			"the background transcript must never join an overlay selection",
+		);
+		// The frame border cells were never part of the copied text.
+		assert.ok(!copied.join("\n").includes("╭"), "the frame chrome must not be copied");
+		void lastRow;
+		tui.stop();
+	});
+
+	it("does not start a text selection for an overlay that did not opt in", async () => {
+		const terminal = new RecordingTerminal(40, 12);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("background alpha\nbackground beta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const overlay = framed(["Host: /ws/report.md", "third"]);
+		const handle = tui.showOverlay(overlay, { width: 24 });
+		await terminal.waitForRender();
+
+		const painted = paintedBounds(handle);
+		const row = painted.row + 1;
+		const col = painted.col + 2;
+		terminal.sendInput(`\x1b[<0;${col + 1};${row + 1}M`);
+		terminal.sendInput(`\x1b[<32;${col + 8};${row + 1}M`);
+		terminal.sendInput(`\x1b[<0;${col + 8};${row + 1}m`);
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copied, [], "an ordinary overlay keeps the opaque modal block");
+		assert.strictEqual(tui.hasActiveSelection(), false);
+		tui.stop();
+	});
+
+	it("lets a component keep the press and its click, so no selection starts on a button", async () => {
+		const terminal = new RecordingTerminal(40, 12);
+		const copied: string[] = [];
+		const clicks: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("background alpha", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const button = {
+			render: () => ["[Copy path]"],
+			invalidate: () => {},
+			handleMouse: (event: TuiMouseEvent) => {
+				if (event.type === "press") return { handled: true };
+				if (event.type === "click") {
+					clicks.push("copy");
+					return { handled: true, render: true };
+				}
+				return undefined;
+			},
+		};
+		const handle = tui.showOverlay(button, { width: 24, textSelectionInsets: { top: 0, right: 0, bottom: 0, left: 0 } });
+		await terminal.waitForRender();
+
+		const painted = paintedBounds(handle);
+		terminal.sendInput(`\x1b[<0;${painted.col + 1};${painted.row + 1}M`);
+		terminal.sendInput(`\x1b[<0;${painted.col + 1};${painted.row + 1}m`);
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(clicks, ["copy"], "a consuming component keeps its press and click");
+		assert.deepStrictEqual(copied, [], "a button press must not copy text");
+		tui.stop();
+	});
+
+	it("selects a word on double-click and the visible content row on triple-click", async () => {
+		const terminal = new RecordingTerminal(40, 12);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("background alpha", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const overlay = framed(["see a/b-c.ts now", "second row"]);
+		const handle = tui.showOverlay(overlay, { width: 24, textSelectionInsets: overlay.insets });
+		await terminal.waitForRender();
+
+		const painted = paintedBounds(handle);
+		const row = painted.row + 1;
+		const col = painted.col + 2;
+		// One complete press+release = ONE click; a second complete click on the
+		// same cell within the multi-click window is the double-click that
+		// selects the word (the fork's own segmenter keeps `/` and `-`).
+		const clickAt = (column: number) => {
+			terminal.sendInput(`\x1b[<0;${column + 1};${row + 1}M`);
+			terminal.sendInput(`\x1b[<0;${column + 1};${row + 1}m`);
+		};
+		// "a/b-c.ts" starts at column 4 of the content row.
+		clickAt(col + 5);
+		clickAt(col + 5);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(copied, ["a/b-c.ts"], "the double-click word keeps the fork's path joiners");
+
+		// A third complete click on the SAME word cell is the triple-click: the
+		// whole VISIBLE content row, clipped to the frame's inner rectangle.
+		clickAt(col + 5);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(copied, ["a/b-c.ts", "see a/b-c.ts now    "]);
+		// The triple-click row is the LAST one: no phantom row may follow it.
+		assert.ok(!copied[1]!.startsWith("\n"), "the row selection starts at the visible row head");
+		tui.stop();
+	});
+
+	it("never copies the frame chrome or the background on a row that is wider than the content", async () => {
+		const terminal = new RecordingTerminal(60, 12);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("X".repeat(59) + "\nY".repeat(59), 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const overlay = framed(["short"], 30);
+		const handle = tui.showOverlay(overlay, { width: 30, textSelectionInsets: overlay.insets });
+		await terminal.waitForRender();
+
+		const painted = paintedBounds(handle);
+		const row = painted.row + 1;
+		// Drag from the first content cell past the overlay's RIGHT border and
+		// onto the covered background: the range is clipped to the content box.
+		terminal.sendInput(`\x1b[<0;${painted.col + 3};${row + 1}M`);
+		terminal.sendInput(`\x1b[<32;${terminal.columns};${row + 1}M`);
+		terminal.sendInput(`\x1b[<0;${terminal.columns};${row + 1}m`);
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copied, ["short                     "]);
+		assert.ok(!copied[0]!.includes("X"), "the covered background must never be copied");
+		assert.ok(!copied[0]!.includes("│"), "the frame border must never be copied");
+		tui.stop();
+	});
+
+	it("drops a live overlay selection when a newer overlay covers it", async () => {
+		const terminal = new RecordingTerminal(40, 14);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("background alpha", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const overlay = framed(["first line", "second line"]);
+		const handle = tui.showOverlay(overlay, { width: 24, textSelectionInsets: overlay.insets });
+		await terminal.waitForRender();
+
+		const painted = paintedBounds(handle);
+		terminal.sendInput(`\x1b[<0;${painted.col + 3};${painted.row + 2}M`);
+		await terminal.waitForRender();
+		// A newer modal covers the region: the in-flight selection dies.
+		const newer = new FramedOverlay(["modal"], false);
+		tui.showOverlay(newer);
+		await terminal.waitForRender();
+		terminal.sendInput(`\x1b[<32;${painted.col + 8};${painted.row + 3}M`);
+		terminal.sendInput(`\x1b[<0;${painted.col + 8};${painted.row + 3}m`);
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copied, [], "a covered overlay selection must not copy");
+		assert.strictEqual(tui.hasActiveSelection(), false);
+		tui.stop();
+	});
+
+	it("refuses a release that arrives BEFORE the frame that covered the region is painted", async () => {
+		const terminal = new RecordingTerminal(40, 14);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("background alpha", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const overlay = framed(["first line", "second line"]);
+		const handle = tui.showOverlay(overlay, { width: 24, textSelectionInsets: overlay.insets });
+		await terminal.waitForRender();
+
+		const painted = paintedBounds(handle);
+		const column = painted.col + 3;
+		const row = painted.row + 2;
+		terminal.sendInput(`\x1b[<0;${column + 1};${row + 1}M`);
+		terminal.sendInput(`\x1b[<32;${column + 6};${row + 1}M`);
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasActiveSelection(), true, "fixture: the drag armed a selection");
+
+		// A newer modal is mounted and the pointer is released IMMEDIATELY — no
+		// frame is painted in between, so only the gesture path itself can notice
+		// that the captured region is no longer the frontmost paint.
+		tui.showOverlay(new FramedOverlay(["covering modal"], false));
+		terminal.sendInput(`\x1b[<0;${column + 6};${row + 1}m`);
+		await terminal.waitForRender();
+
+		assert.deepStrictEqual(copied, [], "a covered region must never be copied");
+		tui.stop();
+	});
+
+	it("retires a COMPLETED overlay selection on focus-out, stop and hide before the next paint", async () => {
+		// The gesture is fully RELEASED first, so `selectionPressActive` is false:
+		// this is the case the in-flight-only clearing missed. Every assertion
+		// reads through the public sink (`getActiveSelectionText` via
+		// `hasActiveSelection` / `copyActiveSelectionToClipboard`), because a
+		// release-time check cannot cover a direct read.
+		const armCompletedSelection = async (
+			terminal: RecordingTerminal,
+			tui: TuiAltScreen,
+		): Promise<import("../src/tui.js").OverlayHandle> => {
+			const overlay = framed(["first line", "second line"]);
+			const handle = tui.showOverlay(overlay, { width: 24, textSelectionInsets: overlay.insets });
+			await terminal.waitForRender();
+			const painted = paintedBounds(handle);
+			terminal.sendInput(`\x1b[<0;${painted.col + 3};${painted.row + 2}M`);
+			terminal.sendInput(`\x1b[<32;${painted.col + 8};${painted.row + 2}M`);
+			terminal.sendInput(`\x1b[<0;${painted.col + 8};${painted.row + 2}m`);
+			await terminal.waitForRender();
+			assert.strictEqual(tui.hasActiveSelection(), true, "fixture: the completed drag left a selection");
+			return handle;
+		};
+
+		// (a) FOCUS-OUT after the release.
+		{
+			const terminal = new RecordingTerminal(40, 14);
+			const tui = new TuiAltScreen(terminal, undefined, undefined, {
+				copySelection: async () => true,
+			});
+			tui.addChild(new Text("background alpha", 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			await armCompletedSelection(terminal, tui);
+			terminal.sendInput("\x1b[O");
+			await terminal.waitForRender();
+			assert.strictEqual(tui.hasActiveSelection(), false, "focus-out retires a completed overlay selection");
+			assert.strictEqual(
+				await tui.copyActiveSelectionToClipboard(),
+				false,
+				"a retired overlay selection cannot be copied after focus-out",
+			);
+			tui.stop();
+		}
+
+		// (b) STOP after the release.
+		{
+			const terminal = new RecordingTerminal(40, 14);
+			const tui = new TuiAltScreen(terminal, undefined, undefined, {
+				copySelection: async () => true,
+			});
+			tui.addChild(new Text("background alpha", 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			await armCompletedSelection(terminal, tui);
+			tui.stop({ preserveScreen: true });
+			assert.strictEqual(tui.hasActiveSelection(), false, "stop retires a completed overlay selection");
+			assert.strictEqual(
+				await tui.copyActiveSelectionToClipboard(),
+				false,
+				"a retired overlay selection cannot be copied after stop",
+			);
+		}
+
+		// (c) HIDE, read BEFORE the next frame paints.
+		{
+			const terminal = new RecordingTerminal(40, 14);
+			const tui = new TuiAltScreen(terminal, undefined, undefined, {
+				copySelection: async () => true,
+			});
+			tui.addChild(new Text("background alpha", 0, 0));
+			tui.start();
+			await terminal.waitForRender();
+			const handle = await armCompletedSelection(terminal, tui);
+			handle.hide();
+			// No await: the region is dead the instant the entry is hidden.
+			assert.strictEqual(tui.hasActiveSelection(), false, "a hidden overlay's selection is not readable before the next paint");
+			assert.strictEqual(
+				await tui.copyActiveSelectionToClipboard(),
+				false,
+				"a hidden overlay's selection cannot be copied before the next paint",
+			);
+			tui.stop();
+		}
+	});
+
+	it("keeps a COMPLETED BACKGROUND selection across focus-out (upstream #9311 semantics)", async () => {
+		// Negative control for the fix above: the overlay-origin retirement must
+		// not start clearing ordinary transcript selections.
+		const terminal = new RecordingTerminal(40, 14);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("background alpha", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		terminal.sendInput("\x1b[<0;1;2M");
+		terminal.sendInput("\x1b[<32;12;2M");
+		terminal.sendInput("\x1b[<0;12;2m");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasActiveSelection(), true, "fixture: the background drag left a selection");
+		terminal.sendInput("\x1b[O");
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasActiveSelection(), true, "a completed background selection survives focus-out");
+		assert.strictEqual(await tui.copyActiveSelectionToClipboard(), true, "and it is still copyable");
+		assert.strictEqual(copied.length >= 1, true, "the background text really reached the clipboard");
+		tui.stop();
+	});
+
+	it("drops the overlay selection when the overlay moves or the screen resizes", async () => {
+		const terminal = new RecordingTerminal(40, 14);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("background alpha", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const overlay = framed(["first line", "second line"]);
+		const handle = tui.showOverlay(overlay, { width: 24, textSelectionInsets: overlay.insets });
+		await terminal.waitForRender();
+
+		const painted = paintedBounds(handle);
+		terminal.sendInput(`\x1b[<0;${painted.col + 3};${painted.row + 2}M`);
+		terminal.sendInput(`\x1b[<32;${painted.col + 9};${painted.row + 2}M`);
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasActiveSelection(), true, "fixture: a visible drag arm a selection");
+
+		// The overlay grows, so its painted placement moves.
+		overlay.lines.push("third line", "fourth line", "fifth line");
+		tui.requestRender();
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasActiveSelection(), false, "a moved overlay retires the captured region");
+
+		terminal.sendInput(`\x1b[<0;${painted.col + 9};${painted.row + 2}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(copied, [], "a release after the region retired must not copy");
+		tui.stop();
+	});
+
+	it("clears the overlay selection through resetTextSelection", async () => {
+		const terminal = new RecordingTerminal(40, 14);
+		const copied: string[] = [];
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copyOnSelect: false,
+			copySelection: async (text) => {
+				copied.push(text);
+				return true;
+			},
+		});
+		tui.addChild(new Text("background alpha", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const overlay = framed(["first line", "second line"]);
+		const handle = tui.showOverlay(overlay, { width: 24, textSelectionInsets: overlay.insets });
+		await terminal.waitForRender();
+
+		const painted = paintedBounds(handle);
+		terminal.sendInput(`\x1b[<0;${painted.col + 3};${painted.row + 2}M`);
+		terminal.sendInput(`\x1b[<32;${painted.col + 9};${painted.row + 2}M`);
+		await terminal.waitForRender();
+		assert.strictEqual(tui.hasActiveSelection(), true);
+
+		tui.resetTextSelection();
+		assert.strictEqual(tui.hasActiveSelection(), false, "resetTextSelection drops the overlay range");
+		assert.strictEqual(await tui.copyActiveSelectionToClipboard(), false);
+		assert.deepStrictEqual(copied, []);
+		// The next release cannot resurrect the retired gesture.
+		terminal.sendInput(`\x1b[<0;${painted.col + 9};${painted.row + 2}m`);
+		await terminal.waitForRender();
+		assert.deepStrictEqual(copied, []);
+		tui.stop();
+	});
+
+	it("paints the highlight only inside the overlay content rectangle", async () => {
+		const terminal = new RecordingTerminal(40, 12);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text("background alpha\nbackground beta", 0, 0));
+		tui.start();
+		await terminal.waitForRender();
+		const overlay = framed(["first line", "second line"], 20);
+		const handle = tui.showOverlay(overlay, { width: 20, textSelectionInsets: overlay.insets });
+		await terminal.waitForRender();
+
+		const painted = paintedBounds(handle);
+		const row = painted.row + 1;
+		terminal.sendInput(`\x1b[<0;${painted.col + 3};${row + 1}M`);
+		terminal.sendInput(`\x1b[<32;${painted.col + 16};${row + 1}M`);
+		await terminal.waitForRender();
+
+		const highlightWrites = terminal.events.filter(
+			(event) => event.type === "write" && event.data.includes("\x1b[7m"),
+		);
+		assert.ok(highlightWrites.length > 0, "the drag must paint an inverse highlight");
+		// The inverse run must never include the frame's border glyph.
+		for (const write of highlightWrites) {
+			if (write.type !== "write") continue;
+			assert.ok(
+				!/\x1b\[7m[^\x1b]*[│╭╮╰╯]/.test(write.data),
+				"the frame chrome must never be painted inverse",
+			);
+		}
+		const background = terminal.events
+			.filter((event) => event.type === "write")
+			.map((event) => (event.type === "write" ? event.data : ""))
+			.join("");
+		assert.ok(
+			!/\x1b\[7m[^\x1b]*background/.test(background),
+			"the transcript behind the modal must never join the highlight",
+		);
+		tui.stop();
+	});
+
+	describe("image protocol override (X070)", () => {
+		class KittyAnchor {
+			show = true;
+			private readonly imageId: number;
+			constructor(imageId = 777) {
+				this.imageId = imageId;
+			}
+			render(): string[] {
+				return this.show
+					? [`\x1b_Ga=p,i=${this.imageId},p=1,c=2,r=2,q=2;\x1b\\`, "", "tail"]
+					: ["text", "", "tail"];
+			}
+			invalidate(): void {}
+		}
+
+		function writes(terminal: RecordingTerminal): string {
+			return terminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => (event.type === "write" ? event.data : ""))
+				.join("");
+		}
+
+		it("uses the instance Kitty protocol while preserving iTerm2 suppression and restore", async () => {
+			setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
+			registerKittyImageMetadata({ imageId: 777, columns: 2, rows: 2, widthPx: 10, heightPx: 10 });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const anchor = new KittyAnchor();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, { imageProtocolOverride: "kitty" });
+				tui.addChild(anchor);
+				tui.start();
+				await terminal.waitForRender();
+				assert.strictEqual(getCapabilities().images, null, "the existing iTerm2 global suppression still runs");
+
+				terminal.events.length = 0;
+				anchor.show = false;
+				tui.renderNow();
+				const wire = writes(terminal);
+				assert.ok(wire.includes("\x1b_Ga=d,d=a,q=2\x1b\\"), "Kitty placement cleanup is emitted");
+				assert.ok(!wire.includes("\x1b[2J"), "the iTerm2 whole-screen branch is not used");
+
+				tui.stop();
+				assert.strictEqual(getCapabilities().images, "iterm2", "the existing iTerm2 restore lifecycle still runs");
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("keeps the static capability behavior when no override is passed", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			registerKittyImageMetadata({ imageId: 778, columns: 2, rows: 2, widthPx: 10, heightPx: 10 });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const anchor = new KittyAnchor(778);
+				const tui = new TuiAltScreen(terminal);
+				tui.addChild(anchor);
+				tui.start();
+				await terminal.waitForRender();
+
+				terminal.events.length = 0;
+				anchor.show = false;
+				tui.renderNow();
+				const wire = writes(terminal);
+				assert.ok(!wire.includes("\x1b_Ga=d,d=a,q=2\x1b\\"), "no Kitty cleanup without the override");
+				assert.ok(!wire.includes("\x1b[2J"), "no iTerm2 clear without an iTerm2 capability");
+				tui.stop();
+				assert.strictEqual(getCapabilities().images, null, "the process capability is untouched");
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("honors an explicit null override instead of falling back to the static capability", async () => {
+			setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false });
+			registerKittyImageMetadata({ imageId: 779, columns: 2, rows: 2, widthPx: 10, heightPx: 10 });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const anchor = new KittyAnchor(779);
+				const tui = new TuiAltScreen(terminal, undefined, undefined, { imageProtocolOverride: null });
+				tui.addChild(anchor);
+				tui.start();
+				await terminal.waitForRender();
+
+				terminal.events.length = 0;
+				anchor.show = false;
+				tui.renderNow();
+				const wire = writes(terminal);
+				assert.ok(!wire.includes("\x1b_Ga=d,d=a,q=2\x1b\\"), "explicit null suppresses the Kitty cleanup");
+				assert.ok(!wire.includes("\x1b[2J"), "explicit null keeps the text-only branch");
+				tui.stop();
+				assert.strictEqual(getCapabilities().images, "kitty", "the process capability is untouched");
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+	});
+});
 });

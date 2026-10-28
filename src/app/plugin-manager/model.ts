@@ -79,7 +79,7 @@ interface ExperimentalBundleSupport {
  * evidence for the exact package identities, NOT Host capability state: it
  * never reads enablement/fiber/availability and never claims a live Host PASS.
  * It is deliberately module-private — no runtime qualification store is built
- * from it (the live ledger stays in `docs/client-server-migration.md`).
+ * from it (the live ledger stays in `docs/architecture/host-client.md`).
  */
 const EXPERIMENTAL_BUNDLE_SUPPORT: Readonly<Record<string, ExperimentalBundleSupport>> = Object.freeze({
   '@deepseek-ai/dsh-experimental-agent-team-profile': {

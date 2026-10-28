@@ -121,12 +121,26 @@ import type { QuestionAttentionRow } from './question-controller.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { AssistantLiveInput } from '../../runtime/assistant-stream-port.ts'
 import { ImageLoader } from '../../client/media/image/loader.ts'
+import { selectDraftImageOccurrences } from '../../client/media/image/placeholder.ts'
+import type { DraftImage } from '../../client/media/image/types.ts'
+import { SvgRasterLoader } from '../../client/media/svg/raster-loader.ts'
+import { isolatedSvgRasterSupported, rasterizeSvg } from '../../client/media/svg/rasterize.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { StatusStore } from '../../domain/status/store.ts'
 import type { StatusPatch } from '../../domain/status/types.ts'
 import { initialStatusSnapshot } from '../../domain/status/snapshot.ts'
-import type { TranscriptFolder } from '../../domain/transcript/folder.ts'
-import type { TranscriptMessage } from '../../domain/transcript/types.ts'
+import { assistantPresentationRevision, assistantStepOf, type TranscriptFolder } from '../../domain/transcript/folder.ts'
+import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
+import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
+import { deliveredTurnsOf, type DeliveredFilesCapability, type DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
+import type { DeliveredFilePreviewCapability } from '../../runtime/deliverables-port.ts'
+import { collectPublishedVisuals, type PublishedVisual } from '../../domain/visual/publication.ts'
+import {
+  clearAssistantVisualPresentation,
+  setAssistantVisualPresentation,
+  type VisualEventSnapshot,
+  type VisualPresentationKey,
+} from '../../domain/visual/presentation.ts'
 import type { TranscriptSearchMatch } from '../../domain/transcript/search.ts'
 import type { TranscriptWindowController } from '../../domain/transcript/window.ts'
 import { streamingToolPreviewSnapshot, type StreamingToolPreview } from './streaming-tool-preparing.ts'
@@ -141,6 +155,7 @@ import type { Diag } from '../../runtime/process/diagnostics.ts'
 // constructed exactly once here; none of them imports this aggregate's value
 // implementation (only its cross-owner facade types).
 import { createNotificationRuntime, type AgentLifecycleStatus, type TerminalNotificationPresentation } from './notification-runtime.ts'
+import type { NotificationMethod, NotificationMode } from '../../domain/notification/settings.ts'
 import {
   createExtensionRuntime,
   type OptionCapability,
@@ -163,6 +178,8 @@ import {
 } from './event-routing.ts'
 import type { SurfaceDisplaySeam } from './display-seam.ts'
 import { pituiDisplaySeam } from './display-seam-pitui.ts'
+import { pituiTaskCenterPresentation } from './task-presentation-pitui.ts'
+import type { TaskCenterPresentationPort } from './task-presentation-port.ts'
 
 // The moved public/internal surface types stay importable from this exact path
 // (the aggregate remains the stable entry for its consumers).
@@ -210,6 +227,13 @@ export interface SurfaceInputBinding {
   submit(text: string, request: ComposerSubmitRequest): void
   /** The draft-steer entry (B2): `ApplicationEvents.events.onSteer`. */
   steer(text: string): void
+  /**
+   * PR4: the paste-media intent — `ApplicationEvents.events.onClipboardPaste`,
+   * the ONE application entry that owns the OS clipboard FIFO, the image
+   * limits and the draft write. A TSP Ctrl+V forwards here exactly once; the
+   * renderer never probes the clipboard itself.
+   */
+  pasteMedia(): void
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
   /**
@@ -229,6 +253,91 @@ export interface SurfaceInputBinding {
 }
 
 /**
+ * PR-C: the ONE Client-local image binding a mounted renderer receives.
+ *
+ * It is a PRESENTATION assembly contract, never a Host capability: the two
+ * facts a renderer needs to present a durable image attachment are the loader
+ * (the single read authority and the single cache) and the scope sampler (the
+ * immutable display-subject identity the read is authorized under). The PiTui
+ * branch consumes the SAME loader instance, so a mount has exactly ONE loader
+ * and no application-wide image state.
+ */
+export interface SurfaceImageBinding {
+  /** The ONE image loader of this mount. */
+  readonly imageLoader: ImageLoader
+  /**
+   * The presentation-scope sampler. A renderer samples it ONCE per display
+   * subject and keeps the returned identity object immutably: an async settle
+   * must never re-resolve the subject, or a retired presentation could read
+   * under a successor's authorization.
+   */
+  readonly imageScope: () => unknown
+  /**
+   * PR4: the READ-ONLY live draft projection the dock presents. It is a
+   * DIFFERENT capability from the durable `imageLoader`/`imageScope` pair — a
+   * staged draft is Client-local editor state, not a durable attachment — and
+   * it exposes no mutation (`add`/`remove`/`clear`/`submit`/path read): the
+   * draft lifecycle stays with the ONE `DraftImageStore` the application owner
+   * writes. Each call re-reads the LIVE composer text, so the projection can
+   * never serve a stale occurrence list.
+   */
+  readonly draftImages: SurfaceDraftImageProjection
+}
+
+/** One ordered staged-image occurrence of the LIVE composer draft. */
+export interface SurfaceDraftImageOccurrence {
+  /** The staged draft entry (its own bytes, media type and identity). */
+  readonly image: DraftImage
+  /** The occurrence's 0-based rank among ALL canonical occurrences. */
+  readonly ordinal: number
+  /** The exact `[image #N (W×H)]` token text this occurrence matched. */
+  readonly placeholder: string
+}
+
+/**
+ * PR4: the narrow read-only draft projection a mounted renderer receives.
+ *
+ * It answers exactly one question — "which staged images does the CURRENT
+ * composer draft reference, in text order?" — through the ONE canonical
+ * parser (`selectDraftImageOccurrences`), so the dock's preview and the
+ * submission expansion can never disagree about WHICH images a draft holds.
+ * It reads live state on every call and owns no cache, no list and no
+ * subscription.
+ */
+export interface SurfaceDraftImageProjection {
+  occurrences(): readonly SurfaceDraftImageOccurrence[]
+}
+
+/**
+ * PR4: the ONE construction of the read-only draft projection the dock
+ * consumes. It reads the LIVE composer text and the ONE preview source on
+ * every call, through the canonical `selectDraftImageOccurrences` parser — so
+ * the dock's previews and the submission expansion can never disagree about
+ * which staged images a draft references, and no caller has to re-implement
+ * that scan.
+ *
+ * An absent composer (before the mount returns) or an absent preview source
+ * answers `[]`: the truthful "no live composer yet" state, never a fabricated
+ * occurrence.
+ */
+export function createSurfaceDraftImageProjection(
+  composer: () => SubmissionComposerPort | undefined,
+  preview: import('../../client/media/image/types.ts').DraftImagePreviewSource | undefined,
+): SurfaceDraftImageProjection {
+  return {
+    occurrences: () => {
+      const live = composer()
+      if (live === undefined || preview === undefined) return []
+      return selectDraftImageOccurrences(live.getDraft(), preview).map(occurrence => ({
+        image: occurrence.image,
+        ordinal: occurrence.ordinal,
+        placeholder: occurrence.image.placeholder,
+      }))
+    },
+  }
+}
+
+/**
  * PR3-A: one already-connected renderer mount the composition root hands to
  * {@link SurfaceRuntime.start} instead of the default PiTui process mount.
  * The mount owns its own terminal (the TSP SDK session); the surface never
@@ -239,10 +348,22 @@ export interface SurfaceRendererMount {
   /**
    * Mount the renderer. Runs at the exact original `startProcessTui` position;
    * a throw is the runner's fatal path (never a silent PiTui fallback).
+   *
+   * PR-C: the mount receives the ONE image binding of this surface BEFORE the
+   * renderer's first projection, so the renderer can present a durable image
+   * attachment through the SAME loader and scope authority the PiTui branch
+   * uses. A renderer that ignores the binding has no image capability.
    */
-  mount(): {
+  mount(binding: SurfaceImageBinding): {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
+    /**
+     * B3-A1: the renderer's Task Center presentation sink. The ONE Task
+     * Runtime keeps every business fact; this port only carries the rows and
+     * chrome it already decided. A renderer without a Task Center still
+     * supplies the port (its capability flag is the reachability truth).
+     */
+    readonly taskPresentation: TaskCenterPresentationPort
     /**
      * PR3-B §3.1: the renderer's composer projection (B1: the TSP
      * renderer's ONE program-owned composer; the PiTui branch is the live
@@ -344,10 +465,41 @@ export interface SurfaceMountDeps {
   readonly onTerminalResize: OptionCapability<'onTerminalResize'>
   /** Fullscreen drag-selection copy (the runner owns the clipboard policy). */
   readonly copySelection: OptionCapability<'copySelection'>
+  /**
+   * Delivered files (PR1): the narrow read capability the transcript tail and
+   * the browser consume. The composition root binds it to THIS surface's own
+   * display-subject decision ({@link SurfaceRuntime.deliveredFilesSnapshot}),
+   * so the mounted renderer can never re-derive "the current session" itself.
+   */
+  readonly deliveredFiles: DeliveredFilesCapability
+  /**
+   * Delivered files PR2: the Host READ capability resolver, called once per
+   * browser open. It returns a capability already BOUND to the snapshot's
+   * display subject, or `undefined` when this assembly has no Host read.
+   */
+  readonly deliveredFilePreview?: (
+    snapshot: DeliveredFilesSnapshot,
+  ) => DeliveredFilePreviewCapability | undefined
+  /** Report one UNCLASSIFIED preview failure to the runner diagnostics. */
+  readonly reportDeliveredFileFailure?: (message: string, error: unknown) => void
   /** Headless-test seam (M3-4 PR3 image L6): the runner's live image draft
    * store, forwarded to TuiAppOptions.draftImageStoreForTest. Production
    * paths never read it. */
   readonly draftImageStoreForTest?: import('../../client/media/image/draft-store.ts').DraftImageStore
+  /** The READ-ONLY composer preview projection (image UX PR1): the live
+   *  draft store's staged values. The TUI never stages or reorders through
+   *  it; absent means no preview band. */
+  readonly draftImagePreviewSource?: import('../../client/media/image/types.ts').DraftImagePreviewSource
+  /** Register the LIVE composer draft reader (expanded text) so the store can
+   *  tell an active attachment from an undo-retention-only entry. */
+  readonly draftImagePreviewLiveDraft?: (read: () => string) => void
+  /** Reserve the submitted text's images for the SCOPED synchronous submit
+   *  bridge (acquired before the draft clear, released after the synchronous
+   *  dispatch). */
+  readonly draftImagePreviewReserve?: (text: string) => (() => void) | undefined
+  /** The Client-local undo-lease capability: the Store owns the bytes and the
+   *  bounded retention budget, the host Editor owns the real Undo history. */
+  readonly draftImagePreviewUndo?: import('../../client/media/image/draft-store.ts').DraftImageUndoLeasePort
   /** OSC 8 link activation (the runner owns the platform opener). */
   readonly openExternalUrl: OptionCapability<'openExternalUrl'>
   /** Right-click clipboard read (the runner owns the platform policy). */
@@ -402,6 +554,21 @@ export interface SurfaceRuntimeOptions {
    * keeps its exact behaviour and no TSP code enters the product build graph.
    */
   readonly onTranscriptProjected?: (frame: TranscriptProjectionFrame) => void
+  /**
+   * The ONE read-only visual-event supply the transcript projection consults.
+   *
+   * The composition root implements it from the exact live Direct Session
+   * (`agentNow()` / the mounted viewed child's Agent): it returns the complete
+   * committed log plus the exact Session instance and its current `seq`, or
+   * `undefined` when no trustworthy same-Session read exists (Remote, no
+   * session, a stale subject). This surface neither creates a Host service nor
+   * keeps a second publication index: every changed identity re-runs PR1's
+   * `collectPublishedVisuals` over the official events.
+   */
+  readonly visualEventSnapshotFor?: (subject: {
+    readonly subjectKind: 'main' | 'viewed-child'
+    readonly subjectId: string | undefined
+  }) => VisualEventSnapshot | undefined
 }
 
 /**
@@ -548,9 +715,32 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
     legacyFacts: Partial<StatusData>,
     presentation: DisplaySubjectPresentation | undefined,
   ): void
+  /**
+   * Delivered files (Delivered files PR1 / M2): derive the CURRENT display
+   * subject's delivered Turns from its selected Folder's FULL grouped
+   * projection.
+   *
+   * This is the business owner of "which session, which Fold" — the caller
+   * never guesses a current session id or re-projects a bounded display
+   * window. The derivation runs on demand (one explicit open of the browsing
+   * surface), never per repaint. Returns `undefined` when no display subject is
+   * selected, the surface is torn down, or the projection carries no delivery.
+   */
+  deliveredFilesSnapshot(): DeliveredFilesSnapshot | undefined
+  /**
+   * Whether a snapshot captured earlier still describes the CURRENT display
+   * subject: the same subject kind/id AND the same projection source
+   * (`sourceIdentity`), so a replaced Folder under the same session id is
+   * stale. Never compares session ids alone.
+   */
+  isDeliveredFilesSnapshotCurrent(snapshot: DeliveredFilesSnapshot): boolean
   /** The notification settings write path (`/notify`, `agent/status` policy). */
   setNotificationMode(mode: string): void
   setNotificationMethod(method: string): void
+  /** The mode the ONE completion controller currently applies (read-only). */
+  currentNotificationMode(): NotificationMode
+  /** The delivery method the ONE completion controller currently applies. */
+  currentNotificationMethod(): NotificationMethod
   /** The native-terminal-progress preference write path (`/settings` row):
    *  parse the raw mode through the shared parser and gate the mounted app's
    *  physical OSC 9;4 projection. Never a persistence authority. */
@@ -758,6 +948,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   const openingJournal = createOpeningJournal<Event>()
   let app: TuiApp | undefined
   /**
+   * PR-C: the ONE image loader of this mount, retained only for the PiTui
+   * teardown hook (Image-6A owner decision). It is the SAME loader object the
+   * mount injected; this is a lifecycle reference, never a second loader or
+   * state authority. The TSP branch keeps its existing loader/renderer release
+   * semantics and is not cleared here.
+   */
+  let mountedImageLoader: ImageLoader | undefined
+  /** PR-D: the PiTui branch's Client-local SVG raster cache (created in `start()`). */
+  let svgRasterLoader: SvgRasterLoader | undefined
+  /**
    * PR3-A: the renderer-facing display seam. On the PiTui path this is the
    * pitui adapter over the mounted app (assigned in `start()`); a non-PiTui
    * renderer mount injects its own seam implementation instead of a TuiApp.
@@ -765,6 +965,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    * PiTui-only surface.
    */
   let display: SurfaceDisplaySeam | undefined
+  /**
+   * B3-A1: the mounted renderer's Task Center presentation sink. Late-bound
+   * exactly like {@link display}: the Task Runtime is constructed before the
+   * renderer mounts and reads this through a closure. A read before the mount
+   * is an internal wiring failure — there is no no-op fallback port.
+   */
+  let taskPresentation: TaskCenterPresentationPort | undefined
   /**
    * PR3-B §3.1: the live composer projection. PiTui assigns the mounted app
    * (structurally a `SubmissionComposerPort`); a renderer mount injects its
@@ -945,6 +1152,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   const task = createTaskRuntime({
     mounted: () => mounted(),
     display: () => displaySeam(),
+    // B3-A1: the Task Center presentation sink is read LATE because this owner
+    // is constructed before the renderer mount transfers the terminal. The
+    // normal product always presents through a mounted sink; a read before
+    // the mount is a wiring failure, not a silent no-op.
+    presentation: () => {
+      if (taskPresentation === undefined) throw new Error('task presentation not mounted')
+      return taskPresentation
+    },
     isCleanedUp: () => isCleanedUp(),
     attention: {
       rows: () => interaction.attentionRows(),
@@ -1076,6 +1291,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     }
   }
 
+  /** Whether two captured projection targets are the SAME live selection in
+   * all four identity parts (source instances + subject identity). */
+  const sameProjectionTarget = (left: ProjectionTarget, right: ProjectionTarget): boolean =>
+    left.folder === right.folder
+    && left.controller === right.controller
+    && left.subjectKind === right.subjectKind
+    && left.subjectId === right.subjectId
+
   /**
    * PR2: publish ONE already-computed projection to the optional read-only
    * observer. It never re-windows, re-folds or re-reads the log: it hands over
@@ -1098,6 +1321,173 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       sourceIdentity: projectionTokenFor(target.folder),
       messages,
     })
+  }
+
+  /**
+   * Delivered files (Delivered files PR1 / M2): the ONE read-only derivation
+   * of the selected display subject's delivered Turns.
+   *
+   * It reuses the SAME active-target decision the repaint uses (the selected
+   * Folder + subject identity), so it can never disagree with the transcript
+   * on screen. `folder.messages()` is deliberately called WITHOUT a
+   * `maxTurns`: the bounded display window is NOT the history, and a delivery
+   * from an older Turn stays reachable. The call is on-demand only (an explicit
+   * open of the browsing surface), never from a repaint or scroll path.
+   */
+  const deliveredFilesSnapshot = (): DeliveredFilesSnapshot | undefined => {
+    if (disposed || isCleanedUp() || routingSource === undefined) return undefined
+    const viewedChildId = routing().viewedChildId()
+    const sessionId = viewedChildId ?? routing().currentSessionId()
+    // No selected display subject: an empty overlay would lie about "this
+    // session" and a parent fallback would show another subject's files.
+    if (sessionId === undefined) return undefined
+    const folder = viewedChildId === undefined ? routing().mainFolder() : routing().viewedChildFolder()
+    const turns = deliveredTurnsOf(folder.messages())
+    if (turns.length === 0) return undefined
+    return {
+      subjectKind: viewedChildId === undefined ? 'main' : 'viewed-child',
+      sessionId,
+      sourceIdentity: projectionTokenFor(folder),
+      turns,
+    }
+  }
+
+  /**
+   * Delivered files currentness: the captured snapshot must still describe the
+   * CURRENT display subject. The opaque projection token is part of the
+   * comparison, so a Folder replaced under the same session id (cold rehydrate,
+   * session commit, viewer switch) makes an older snapshot stale instead of
+   * silently re-labelling its Turns.
+   */
+  const isDeliveredFilesSnapshotCurrent = (snapshot: DeliveredFilesSnapshot): boolean => {
+    if (disposed || isCleanedUp() || routingSource === undefined) return false
+    const current = captureProjectionTarget(activeFolder(), activeWindow())
+    return current.subjectKind === snapshot.subjectKind
+      && current.subjectId === snapshot.sessionId
+      && projectionTokenFor(current.folder) === snapshot.sourceIdentity
+  }
+
+  /**
+   * The ONE derived-publication memo: a performance cache only. The authority
+   * is always the complete official log re-read through
+   * {@link collectPublishedVisuals}; the memo invalidates on the exact Session
+   * instance or its committed `seq`, so a resume, a cold rehydrate or a
+   * viewer switch can never reuse a previous subject's facts.
+   */
+  /** One immutable publication index per exact Session revision. `byTurn` is
+   * the display-only turn lookup so one repaint never scans the whole history
+   * of published visuals or the whole historical activity map. */
+  interface VisualPublicationIndex {
+    readonly publications: readonly PublishedVisual[]
+    readonly byTurn: ReadonlyMap<number, readonly PublishedVisual[]>
+  }
+  let visualSnapshotMemo: {
+    readonly session: object
+    readonly sessionId: string
+    readonly seq: number
+    readonly originRevision: number
+    readonly index: VisualPublicationIndex
+  } | undefined
+  /** One-shot guard for the post-commit successor repaint. A re-entrant
+   * setTranscript handover is not allowed to recurse without bound; the next
+   * application repaint owns any further switch. */
+  let visualSuccessorRepaint = false
+  const publicationsOf = (snapshot: VisualEventSnapshot): VisualPublicationIndex => {
+    const memo = visualSnapshotMemo
+    // The origin revision is part of the identity: an async fork-lineage proof
+    // settles for the SAME Session seq, so without it the stale index would
+    // mask the newly proven inherited publications forever.
+    if (memo !== undefined
+      && memo.session === snapshot.session
+      && memo.sessionId === snapshot.sessionId
+      && memo.seq === snapshot.seq
+      && memo.originRevision === snapshot.originRevision) return memo.index
+    const publications = collectPublishedVisuals(snapshot.sessionId, snapshot.events, snapshot.verifiedOriginSpans)
+    const byTurn = new Map<number, PublishedVisual[]>()
+    for (const publication of publications) {
+      const existing = byTurn.get(publication.turn)
+      if (existing === undefined) byTurn.set(publication.turn, [publication])
+      else existing.push(publication)
+    }
+    const index: VisualPublicationIndex = { publications, byTurn }
+    visualSnapshotMemo = {
+      session: snapshot.session,
+      sessionId: snapshot.sessionId,
+      seq: snapshot.seq,
+      originRevision: snapshot.originRevision,
+      index,
+    }
+    return index
+  }
+
+  /**
+   * PR2: attach the proven visual projection to the EXACT eligible final
+   * Assistant objects of the window being committed. The derivation uses the
+   * captured target's exact subject and source token. Rows that are not the
+   * qualified final have their old sidecar cleared explicitly. The selected
+   * rows are returned so the caller can discard them if the synchronous
+   * `setTranscript` handover changed the live target.
+   */
+  const applyVisualPresentations = (
+    target: ProjectionTarget,
+    messages: readonly TranscriptMessage[],
+    activities: ReadonlyMap<number, TurnActivity>,
+  ): readonly Extract<TranscriptMessage, { kind: 'assistant' }>[] => {
+    const assistantRows = messages.filter(
+      (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
+    )
+    const supply = options.visualEventSnapshotFor
+    if (supply === undefined) {
+      for (const message of assistantRows) clearAssistantVisualPresentation(message)
+      return []
+    }
+    const snapshot = supply({ subjectKind: target.subjectKind, subjectId: target.subjectId })
+    if (snapshot === undefined
+      || (target.subjectId !== undefined && snapshot.sessionId !== target.subjectId)) {
+      for (const message of assistantRows) clearAssistantVisualPresentation(message)
+      return []
+    }
+    const publicationIndex = publicationsOf(snapshot)
+    const sourceIdentity = projectionTokenFor(target.folder)
+    // Only the CURRENT WINDOW's turns participate. The folder activity map is
+    // the whole Session history; iterating it (or filtering the window once
+    // per historical turn) made repaint cost grow with session age.
+    const groupsByTurn = new Map<number, TranscriptMessage[]>()
+    for (const message of messages) {
+      if (!('turn' in message)) continue
+      const group = groupsByTurn.get(message.turn)
+      if (group === undefined) groupsByTurn.set(message.turn, [message])
+      else group.push(message)
+    }
+    const selected = new Set<Extract<TranscriptMessage, { kind: 'assistant' }>>()
+    for (const [turn, group] of groupsByTurn) {
+      const activity = activities.get(turn)
+      if (activity === undefined) continue
+      const final = eligibleFinalAssistant(activity, group)
+      if (final === undefined) continue
+      const turnPublications = publicationIndex.byTurn.get(turn) ?? []
+      if (turnPublications.length === 0) continue
+      const message = final.message
+      const key: VisualPresentationKey = {
+        subjectKind: target.subjectKind,
+        subjectId: target.subjectId,
+        sourceIdentity,
+        session: snapshot.session,
+        sessionId: snapshot.sessionId,
+        seq: snapshot.seq,
+        turn: message.turn,
+        step: assistantStepOf(message),
+        text: message.text,
+        content: message.content,
+        assistantRevision: assistantPresentationRevision(message),
+      }
+      setAssistantVisualPresentation(message, key, turnPublications)
+      selected.add(message)
+    }
+    for (const message of assistantRows) {
+      if (!selected.has(message)) clearAssistantVisualPresentation(message)
+    }
+    return [...selected]
   }
 
   // Coalesced repaint: streaming events fold into the folder immediately
@@ -1127,15 +1517,43 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     })
     onProjected?.()
     // Capture the subject identity and its source at ONE instant BEFORE the
-    // commit; the frame publishes only if all four are still live afterwards.
-    const target = projectionObserver === undefined ? undefined : captureProjectionTarget(folder, controller)
-    displaySeam().setTranscript(projection.messages, folder.turnActivities(), {
+    // commit; both the visual sidecars and the read-only observer are scoped to
+    // this exact selection.
+    const needsTarget = projectionObserver !== undefined || options.visualEventSnapshotFor !== undefined
+    const target = needsTarget ? captureProjectionTarget(folder, controller) : undefined
+    const activities = folder.turnActivities()
+    const visualRows = target === undefined
+      ? []
+      : applyVisualPresentations(target, projection.messages, activities)
+    displaySeam().setTranscript(projection.messages, activities, {
       ...controller.state(),
       firstTurn: projection.firstTurn,
       lastTurn: projection.lastTurn,
       hasNewer: projection.hasNewer,
     }, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.(), projectionTokenFor(folder))
-    if (target !== undefined) publishProjected(target, projection.messages)
+    if (target === undefined) return
+    // setTranscript can SYNCHRONOUSLY run plugin/modal callbacks that hand the
+    // session to another owner. The pre-commit derivation is then stale: clear
+    // the exact rows it selected and commit the successor target NOW, so the
+    // old visual cannot remain painted until some later frame.
+    if (!isCleanedUp()) {
+      const current = captureProjectionTarget(activeFolder(), activeWindow())
+      if (!sameProjectionTarget(target, current)) {
+        for (const message of visualRows) clearAssistantVisualPresentation(message)
+        if (visualRows.length > 0 && !visualSuccessorRepaint) {
+          visualSuccessorRepaint = true
+          try {
+            repaintActive(searchPresentation, onProjected)
+          } finally {
+            visualSuccessorRepaint = false
+          }
+          return
+        }
+      }
+    } else {
+      for (const message of visualRows) clearAssistantVisualPresentation(message)
+    }
+    publishProjected(target, projection.messages)
   }
   /** Repaint the ACTIVE target (main or the mounted viewed child). */
   const repaintActive = (
@@ -1651,7 +2069,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     resetSearchPresentation({ rebuild: false })
   }
 
-  const buildOptions = (deps: SurfaceMountDeps): TuiAppOptions => ({
+  const buildOptions = (deps: SurfaceMountDeps, imageLoader: ImageLoader, svgRasterLoader: SvgRasterLoader | undefined): TuiAppOptions => ({
     // Ctrl+R input-history search: the runner owns the IO (the file-backed
     // source + the known-cwd identity map), the surface owns the panel
     // lifecycle (plan §27 — TuiApp never touches the filesystem).
@@ -1662,8 +2080,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // stores the pair and never re-derives a session identity.
     captureHistoryScope: deps.captureHistoryScope,
     // The transcript image surface (plan M8/M9): the durable loader plus the
-    // dim fallback coloring.
-    imageLoader: new ImageLoader((ref, context) => deps.readImage(ref, context)),
+    // dim fallback coloring. PR-C: the loader is the ONE instance of THIS
+    // mount (constructed in `start()`), so the PiTui branch and the renderer
+    // branch share one cache and one read authority.
+    imageLoader,
+    ...(svgRasterLoader === undefined ? {} : { svgRasterLoader }),
     imageScope: deps.imageScope,
     imageTheme: { fallbackColor: deps.imageFallbackColor },
     present: deps.present,
@@ -1683,7 +2104,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // Issue #7: the fullscreen drag selection and /copy are the SAME user copy
     // intent and share ONE clipboard policy owned by the runner.
     copySelection: deps.copySelection,
+    deliveredFiles: deps.deliveredFiles,
+    deliveredFilePreview: deps.deliveredFilePreview,
+    onDeliveredFileDiagnostic: deps.reportDeliveredFileFailure,
     draftImageStoreForTest: deps.draftImageStoreForTest,
+    draftImagePreviewSource: deps.draftImagePreviewSource,
+    draftImagePreviewLiveDraft: deps.draftImagePreviewLiveDraft,
+    draftImagePreviewReserve: deps.draftImagePreviewReserve,
+    draftImagePreviewUndo: deps.draftImagePreviewUndo,
     // Fullscreen OSC 8 link clicks + the Windows right-click paste.
     openExternalUrl: deps.openExternalUrl,
     readClipboardText: deps.readClipboardText,
@@ -1780,6 +2208,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       notification.setCompletionOwner(undefined)
       retireMainAgentProgress()
     },
+    // Delivered files (PR1 / M2): the on-demand catalog of the CURRENT display
+    // subject and the identity fence an already-open panel re-checks.
+    deliveredFilesSnapshot,
+    isDeliveredFilesSnapshotCurrent,
     commitStatus(patch, legacyFacts, presentation) {
       // A4-4 (plan §13.1): the semantic derivation stays with the runner; the
       // commit coordination is surface-owned. The three parts are ONE atomic
@@ -1801,6 +2233,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     setNotificationMethod(method) {
       notification.setMethod(method)
+    },
+    currentNotificationMode() {
+      return notification.currentMode()
+    },
+    currentNotificationMethod() {
+      return notification.currentMethod()
     },
     setTerminalProgressMode(mode) {
       app?.setTerminalProgressMode(parseTerminalProgressMode(mode))
@@ -1904,13 +2342,33 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // its original delegation semantics. This is read by the interaction owner,
       // which is attached AFTER this call.
       rendererOwnedPresentation = deps.renderer !== undefined
+      // PR-C: the ONE image loader of this mount. It is created HERE (the
+      // single acquire point) and handed to the renderer branch as the mount
+      // binding, so there is never a second loader, a second cache or a
+      // second read authority in the application process.
+      const imageLoader = new ImageLoader((ref, context) => deps.readImage(ref, context))
+      mountedImageLoader = imageLoader
+      // PR-D: the Client-local SVG raster cache of THIS mount. It is created
+      // at the same single acquire point; TSP has its own native-SVG blob
+      // path and never uses this PiTui-only derivative.
+      const rasterLoader = isolatedSvgRasterSupported() ? new SvgRasterLoader(rasterizeSvg) : undefined
+      svgRasterLoader = rasterLoader
       // PR3-A: the composition root already connected a non-PiTui renderer
       // (the experimental TSP mount). Mount it at the SAME position; no
       // TuiApp exists on this branch, so every PiTui-only owner below simply
       // never receives a mounted app (their entries are input-gated).
       if (deps.renderer !== undefined) {
-        const mounted = deps.renderer.mount()
+        // PR4: the dock's draft projection. It reads the LIVE composer text and
+        // the ONE preview source on every call — `composerPort` is assigned
+        // from the mount result just below, so a read during the mount itself
+        // answers `[]`, the truthful "no live composer yet" state. This closure
+        // never stages, removes or uploads anything, and it names no second
+        // store: the draft lifecycle stays with the application owner.
+        const preview = deps.draftImagePreviewSource
+        const draftImages = createSurfaceDraftImageProjection(() => composerPort, preview)
+        const mounted = deps.renderer.mount({ imageLoader, imageScope: deps.imageScope, draftImages })
         display = mounted.display
+        taskPresentation = mounted.taskPresentation
         composerPort = mounted.composer
         modelPresentation = mounted.modelPresentation
         presetPresentation = mounted.presetPresentation
@@ -1932,6 +2390,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           // guarded at construction): an absent one leaves the gesture a
           // committed no-op rather than a fabricated submission.
           steer: (text) => deps.events.onSteer?.(text),
+          // PR4: the Ctrl+V media intent forwards to the ONE application
+          // clipboard entry (`onClipboardPaste` is optional on the events
+          // table, so an events object without it leaves the gesture a
+          // committed no-op). The renderer never probes the OS clipboard.
+          pasteMedia: () => deps.events.onClipboardPaste?.(),
           noteUserInput: () => deps.events.onUserInput?.(),
           // PR3-B B3 (§3.8): the Alt+Q continued-Question read/reopen cross
           // through the SAME interaction owner. They are bound here but can
@@ -1970,11 +2433,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // acquisition already asserts the final state, instead of writing idle
       // and being corrected one write later (an idle -> working flash).
       app = startProcessTui(events, {
-        ...buildOptions(deps),
+        ...buildOptions(deps, imageLoader, rasterLoader),
         initialTerminalProgress: interval.snapshot().active,
         terminalProgressMode: parseTerminalProgressMode(options.terminalProgress),
       })
       display = pituiDisplaySeam(app)
+      // B3-A1: the PiTui Task Center presentation sink is the ONE live app
+      // itself, wrapped by the pure delegation adapter. It is installed
+      // BEFORE the post-mount attention republish below, so that republish
+      // reaches the real Quick window.
+      taskPresentation = pituiTaskCenterPresentation(app)
       // PR3-B §3.1/§3.2: the PiTui branch's projections are the ONE live app
       // itself (structural compatibility is the contract). The modal presenter
       // is the narrow DELEGATING adapter over it (PR3-B B3): the app has no
@@ -2048,6 +2516,18 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // user cancellation.
         () => interaction.dispose(),
         () => app?.dispose(),
+        // PR-C/Image-6A (Owner-approved minimal scope extension): retire the
+        // PiTui mount's ONE image loader. `clear()` bumps the global epoch and
+        // drops raw/derived caches, recorded failures and every QUEUED preview
+        // conversion, so a disposed surface can never START another native
+        // decode; a running conversion's late settle is discarded by the same
+        // epoch. This is a SEPARATE non-truncating step after `app.dispose()`:
+        // a throwing app cleanup still reaches it. The condition keeps the TSP
+        // branch's loader/renderer release semantics untouched.
+        () => { if (app !== undefined) mountedImageLoader?.clear() },
+        // PR-D: abort in-flight SVG raster children and drop the display
+        // derivative cache after the app has stopped painting.
+        () => svgRasterLoader?.dispose(),
         // PR3-B B3 (§3.3.3): the renderer/SDK release STARTS here — after the
         // interaction owner's synchronous logical cancellation (every queued and
         // active modal promise is settled) and after the PiTui app's own

@@ -1,0 +1,1346 @@
+/**
+ * Transcript search-index tests (PR D1): the incremental full-history search
+ * projection must be SEMANTICALLY IDENTICAL to the legacy full search
+ * (`folder.messages()` + filter + per-message lowercase) on the whole corpus
+ * — same count, same order, same turn, same resolved visible card — while
+ * the query path never materializes the grouped transcript and never
+ * re-lowercases history per query.
+ *
+ * The parity oracle (`legacySearchForTest`) exists ONLY in this test file —
+ * production keeps the single indexed implementation.
+ * @module @xmoon76/dsh-pi-tui/transcript-search-index.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { TranscriptFolder, transcriptSearchText, transcriptSearchMatchKey, transcriptSearchSourceKey, workflowReadablePhase, type TranscriptMessage, type TranscriptSearchMatch } from '../../src/transcript.ts'
+import { refreshedSearchState, steppedSearchOverlayState } from '../../src/app/surface/search-overlay.ts'
+import type { AssistantLiveChunk, AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
+
+/** Build a minimal event envelope for tests. The type parameter is widened
+ * to any string so legacy v1 `assistant/chunk` events (absent from master's
+ * SessionEventMap) can be constructed and fed through the live-seam bridge;
+ * known types keep their typed data surface, widened with
+ * `Record<string, unknown>` so Session v2 fields the installed dsh-session
+ * may lag (e.g. `assistant/message.stream`) can be supplied. */
+function event<K extends string>(
+  type: K,
+  data: (K extends SessionEvent['type'] ? SessionEvent<K>['data'] : Record<string, unknown>) & Record<string, unknown>,
+  seq: number,
+): SessionEvent {
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
+}
+
+/** One Session v2 live chunk input (the transient plane replaces durable
+ * `assistant/chunk` events). */
+function liveChunk(
+  turn: number,
+  step: number,
+  chunk: AssistantLiveChunk,
+  time = 1_700_000_000_000,
+): AssistantLiveInput {
+  return { kind: 'chunk', sessionId: 'test', attemptId: 'attempt-1', turn, step, time, chunk }
+}
+
+/** Apply a mixed event list: durable events through `apply()`, legacy
+ * `assistant/chunk` events through the live input seam (Session v2). The
+ * legacy type is read STRUCTURALLY (master's event union no longer
+ * contains it). */
+function applyLive(folder: TranscriptFolder, events: readonly SessionEvent[]): void {
+  for (const event of events) {
+    const kind = event.type as string
+    if (kind === 'assistant/chunk') {
+      const data = event.data as { turn: number; step: number; chunk: AssistantLiveChunk }
+      folder.applyLiveInput(liveChunk(data.turn, data.step, data.chunk, event.time))
+    } else {
+      folder.apply([event])
+    }
+  }
+}
+
+/** Build a surface event carrying its surface metadata marker. */
+function surfaceEvent<K extends SessionEvent['type']>(
+  type: K,
+  data: SessionEvent<K>['data'],
+  seq: number,
+  surfaceOp: 'append' | { op: 'replace'; start: number; end: number },
+): SessionEvent {
+  return { type, seq, time: 1_700_000_000_000 + seq, data, surfaceOp } as SessionEvent
+}
+
+function userMessage(seq: number, text: string, turn = 0): SessionEvent {
+  return event('user/message', {
+    id: MessageId(`msg-${seq}`),
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'user' },
+  }, seq)
+}
+
+function assistantChunks(seq: number, turn: number, step: number, chunks: string[]): SessionEvent[] {
+  return chunks.map((text, index) => event('assistant/chunk', {
+    turn, step, chunk: { type: 'text-delta', index, text },
+  }, seq + index))
+}
+
+function assistantMessage(seq: number, turn: number, step: number, text: string): SessionEvent {
+  return event('assistant/message', {
+    turn, step,
+    message: { id: MessageId(`am-${seq}`), role: 'assistant', content: [{ type: 'text', text }], source: { kind: 'model', provider: 'test', model: 'test' } },
+    stream: [],
+  }, seq)
+}
+
+function turnStart(seq: number, turn: number): SessionEvent {
+  return event('turn/start', { turn }, seq)
+}
+
+function turnEnd(seq: number, turn: number, reason: SessionEvent<'turn/end'>['data']['reason'] = { kind: 'completed' }): SessionEvent {
+  return event('turn/end', { turn, reason }, seq)
+}
+
+/** One append-origin tool result for `callId`. */
+function toolResult(seq: number, callId: string, text: string, name = 'bash', turn = 0): SessionEvent {
+  return surfaceEvent('tool/result', {
+    turn, step: 0,
+    message: {
+      id: MessageId(`msg-${seq}`),
+      role: 'tool',
+      toolCallId: ToolCallId(callId),
+      content: [{ type: 'text', text }],
+      source: { kind: 'tool', callId: ToolCallId(callId) },
+    },
+  }, seq, 'append')
+}
+
+function toolCall(seq: number, callId: string, name: string, args: unknown, turn = 0): SessionEvent {
+  return event('tool/call', {
+    turn, step: 0, callId: ToolCallId(callId), name,
+    arguments: typeof args === 'string' ? args : JSON.stringify(args),
+  }, seq)
+}
+
+function readToolCall(seq: number, callId: string, file: string, turn = 0): SessionEvent {
+  return toolCall(seq, callId, 'read', { file }, turn)
+}
+
+/** Build an event with loosely-typed data (plugin/extension event kinds). */
+function rawEvent(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
+  return { type, seq: SessionSeq(seq), time: 1_700_000_000_000 + seq, data } as SessionEvent
+}
+
+function compactionEvent(type: 'compaction/start' | 'compaction/summary' | 'compaction/end', data: Record<string, unknown>, seq: number): SessionEvent {
+  return rawEvent(type, data, seq)
+}
+
+function cardText(message: TranscriptMessage | undefined): string {
+  if (message === undefined) return ''
+  if (message.kind === 'tool') return `${message.name} ${message.args} ${message.result}`
+  if (message.kind === 'command') return commandCorpus(message)
+  if (message.kind === 'workflow') return workflowCorpus(message)
+  return message.text ?? ''
+}
+
+/** The PR2 workflow search corpus (plan §13): kind + run name + run status +
+ * every phase's readable label + every member's label/status. Machine
+ * identities (childId/runId) are never indexed. */
+function workflowCorpus(message: Extract<TranscriptMessage, { kind: 'workflow' }>): string {
+  const phases = new Set<string>()
+  const members: string[] = []
+  for (const member of message.members) {
+    phases.add(workflowReadablePhase(member.phase))
+    members.push(`${member.label} ${member.status}`)
+  }
+  return `workflow ${message.name} ${message.status} ${[...phases].join(' ')} ${members.join(' ')}`
+}
+
+/**
+ * The legacy full-history search semantics — the PARITY ORACLE. This is the
+ * exact pre-D1 production path: every query materialized the grouped
+ * transcript and re-lowercased every message. Test-only; never production.
+ */
+function legacySearchForTest(folder: TranscriptFolder, query: string): TranscriptMessage[] {
+  const needle = query.trim().toLowerCase()
+  if (needle === '') return []
+  return folder.messages().filter(message => cardSearchCorpus(message).toLowerCase().includes(needle))
+}
+
+/** The raw searchable text of one legacy card (the pre-D1 corpus). */
+function cardSearchCorpus(message: TranscriptMessage): string {
+  if (message.kind === 'tool') return `${message.name} ${message.args} ${message.result}`
+  if (message.kind === 'command') return commandCorpus(message)
+  if (message.kind === 'workflow') return workflowCorpus(message)
+  return message.text ?? ''
+}
+
+/** The command corpus mirrors the production chunk builder: the
+ * slash-prefixed name, the verbatim args and the settled outcome text. */
+function commandCorpus(message: Extract<TranscriptMessage, { kind: 'command' }>): string {
+  return `${message.name === null ? '' : `/${message.name}`} ${message.args ?? ''} ${message.outcome?.text ?? ''}`
+}
+
+/** Count NON-OVERLAPPING occurrences of the normalized needle in one text. */
+function occurrenceCount(text: string, needle: string): number {
+  let count = 0
+  let start = 0
+  while (true) {
+    const index = text.indexOf(needle, start)
+    if (index < 0) break
+    count += 1
+    start = index + Math.max(1, needle.length)
+  }
+  return count
+}
+
+/**
+ * The occurrence-level legacy oracle: every card in order, expanded to one
+ * entry per non-overlapping occurrence (the post-fix result contract).
+ */
+function legacyOccurrenceSearchForTest(
+  folder: TranscriptFolder,
+  query: string,
+): Array<{ message: TranscriptMessage; occurrence: number }> {
+  const needle = query.trim().toLowerCase()
+  if (needle === '') return []
+  const result: Array<{ message: TranscriptMessage; occurrence: number }> = []
+  for (const message of folder.messages()) {
+    const count = occurrenceCount(cardSearchCorpus(message).toLowerCase(), needle)
+    for (let occurrence = 0; occurrence < count; occurrence += 1) result.push({ message, occurrence })
+  }
+  return result
+}
+
+/**
+ * Semantic parity: same occurrence order, same resolved visible card, same
+ * occurrence ordinal and turn as the occurrence-level legacy oracle.
+ */
+function assertSearchParity(folder: TranscriptFolder, query: string, label = ''): void {
+  const legacy = legacyOccurrenceSearchForTest(folder, query)
+  const indexed = folder.search(query)
+  assert.equal(indexed.length, legacy.length, `${label} count for ${JSON.stringify(query)} (indexed ${indexed.length} vs legacy ${legacy.length})`)
+  for (let i = 0; i < legacy.length; i += 1) {
+    const expected = legacy[i]!
+    const resolved = folder.resolveSearchMatch(indexed[i]!)
+    assert.equal(resolved, expected.message, `${label} match ${i} for ${JSON.stringify(query)} must resolve to the legacy card`)
+    assert.equal(indexed[i]!.occurrence, expected.occurrence, `${label} match ${i} occurrence for ${JSON.stringify(query)}`)
+    // A turn-less row (a real `kind: 'command'` node) has no legacy turn to
+    // mirror: the indexed match carries the PRESENTATION navigation anchor
+    // instead, pinned by command-transcript.test.ts (A08/A09).
+    if ('turn' in expected.message) {
+      assert.equal(indexed[i]!.turn, expected.message.turn, `${label} match ${i} turn for ${JSON.stringify(query)}`)
+    }
+  }
+}
+
+/** Search corpus parity across a folder for a battery of queries. */
+function assertCorpusParity(folder: TranscriptFolder, queries: string[], label = ''): void {
+  for (const query of queries) assertSearchParity(folder, query, label)
+}
+
+test('parity: a plain user + assistant session (case-insensitive, empty query)', () => {
+  const folder = new TranscriptFolder()
+  applyLive(folder, [
+    turnStart(0, 0),
+    userMessage(1, 'Hello Searchable World'),
+    ...assistantChunks(2, 0, 0, ['The ', 'quick brown ', 'fox.']),
+    assistantMessage(5, 0, 0, 'The quick brown fox.'),
+    turnEnd(6, 0),
+  ])
+  assertCorpusParity(folder, ['', 'hello', 'HELLO', 'searchable', 'brown', 'fox', 'missing', '   hello   '])
+  assert.deepEqual(folder.search(''), [], 'empty query yields no matches')
+  const first = folder.search('hello')
+  assert.equal(first.length, 1)
+  assert.equal(first[0]!.turn, 0)
+  const resolved = folder.resolveSearchMatch(first[0]!)
+  assert.equal(resolved?.kind, 'user')
+})
+
+test('parity: streaming text is searchable as it accumulates (running -> settled)', () => {
+  const folder = new TranscriptFolder()
+  applyLive(folder, [
+    turnStart(0, 0),
+    ...assistantChunks(1, 0, 0, ['running ', 'needle', '-in-stream']),
+  ])
+  // Partial streamed text is searchable (legacy searched message.text too).
+  assertCorpusParity(folder, ['needle', 'running'])
+  folder.apply([assistantMessage(4, 0, 0, 'settled final answer')])
+  assertCorpusParity(folder, ['needle', 'settled', 'final'])
+})
+
+test('parity: tool cards search name + args + result; running args first', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'c1', 'bash', { command: 'ls unusual-dir' }, 0),
+    toolResult(2, 'c1', 'file listing result content'),
+    turnEnd(3, 0),
+  ])
+  assertCorpusParity(folder, ['ls unusual-dir', 'file listing', 'result', 'bash', 'unusual-dir'])
+  // A still-running tool's ARGS are searchable before the result lands.
+  const runningFolder = new TranscriptFolder()
+  runningFolder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'c2', 'bash', { command: 'grep live-needle' }, 0),
+  ])
+  assertCorpusParity(runningFolder, ['live-needle', 'grep'])
+  runningFolder.apply([toolResult(2, 'c2', 'the settled payload')])
+  assertCorpusParity(runningFolder, ['live-needle', 'settled payload', 'grep'])
+})
+
+test('parity: system cards, compaction summary and the image marker in user text', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    userMessage(1, 'Look at this 🖼️ screenshot.png content'),
+    rawEvent('llm/retry', { retry: 1, delayMs: 2000, failure: { code: 'E_RATE', message: 'too many requests' } }, 2),
+    compactionEvent('compaction/start', { compactionId: 'k1' }, 3),
+    compactionEvent('compaction/summary', { compactionId: 'k1', summary: [{ type: 'text', text: 'compressed earlier discussion about token budgets' }] }, 4),
+    compactionEvent('compaction/end', { compactionId: 'k1' }, 5),
+    turnEnd(6, 0),
+  ])
+  assertCorpusParity(folder, ['screenshot.png', '🖼️', 'E_RATE', 'too many requests', 'token budgets', 'compressed'])
+})
+
+test('case-insensitivity: Unicode lowercases exactly like the legacy path', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    userMessage(1, 'Ünïcödé Ärchiv Överflow'),
+  ])
+  assertCorpusParity(folder, ['ünïcödé', 'ÜNÏCÖDÉ', 'ärchiv', 'overflow'])
+})
+
+test('same-turn adjacent reads merge into ONE representative card, parity kept', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/a.ts', 0),
+    toolResult(2, 'r1', 'content of shared-keyword file A'),
+    readToolCall(3, 'r2', 'src/b.ts', 0),
+    toolResult(4, 'r2', 'content of shared-keyword file B'),
+    readToolCall(5, 'r3', 'src/c.ts', 0),
+    toolResult(6, 'r3', 'content of shared-keyword file C'),
+    turnEnd(7, 0),
+  ])
+  const messages = folder.messages()
+  const grouped = messages.filter(message => message.kind === 'tool' && message.name === 'read')
+  assert.equal(grouped.length, 1, 'the three reads merge into one card')
+  assertCorpusParity(folder, ['shared-keyword', 'file A', 'file B', 'file C', 'read'])
+  const matches = folder.search('shared-keyword')
+  assert.equal(matches.length, 3, 'one logical card -> one occurrence per member result')
+  assert.ok(matches.every(match => match.turn === 0))
+  assert.equal(new Set(matches.map(match => match.id)).size, 1, 'every occurrence belongs to the one representative card')
+  // The legacy merged card searches "read N files <results>" — no member paths.
+  assert.equal(legacySearchForTest(folder, 'src/b.ts').length, 0)
+  assert.equal(folder.search('src/b.ts').length, 0, 'member paths are NOT searchable: strict legacy parity')
+})
+
+test('read grouping never crosses a turn boundary; each turn owns its card', () => {
+  // Post-F6 PR B (§10.2/§12.11): a group never crosses turns, so every
+  // Activity span's own facts stay attributable to the turn that renders
+  // the card. The reads stay per-turn cards with per-turn search corpora.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/a.ts', 0),
+    toolResult(2, 'r1', 'cross-turn keyword part one'),
+    turnEnd(3, 0),
+    turnStart(4, 1),
+    readToolCall(5, 'r2', 'src/b.ts', 1),
+    toolResult(6, 'r2', 'cross-turn keyword part two'),
+    turnEnd(7, 1),
+  ])
+  const grouped = folder.messages().filter((message): message is Extract<TranscriptMessage, { turn: number }> => message.kind === 'tool' && message.name === 'read')
+  assert.equal(grouped.length, 2, 'the cross-turn reads stay per-turn cards')
+  assert.deepEqual(grouped.map(message => message.turn), [0, 1], 'each card stays on its own turn')
+  assertCorpusParity(folder, ['cross-turn', 'keyword', 'part one', 'part two'])
+  const matches = folder.search('cross-turn')
+  assert.equal(matches.length, 2, 'one occurrence per member result')
+  assert.deepEqual([...new Set(matches.map(match => match.turn))].sort(), [0, 1], 'each match reports its own turn')
+})
+
+test('a late non-tail result reflows the run; search text updates, no duplicate', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/a.ts', 0),
+    toolResult(2, 'r1', 'first file content'),
+    turnEnd(3, 0),
+    turnStart(4, 1),
+    userMessage(5, 'unrelated later turn'),
+    // The late result of an earlier call lands AFTER later items: the
+    // defensive reflow path must merge the run and refresh the projection.
+    toolResult(6, 'r1-again', 'late-second-file content'),
+    turnEnd(7, 1),
+  ])
+  // The orphan result appends a new read card AFTER the user message: no
+  // adjacency, so it stays a singleton — parity with the grouped output.
+  assertCorpusParity(folder, ['first file', 'late-second-file', 'unrelated'])
+  const before = folder.search('first file')
+  assert.equal(before.length, 1)
+  // A live late settle of an ADJACENT pending read (running -> settled in
+  // the middle of a run) must reflow and refresh.
+  const live = new TranscriptFolder()
+  live.hydrate([
+    turnStart(0, 0),
+    readToolCall(1, 'a', 'src/a.ts', 0),
+    toolResult(2, 'a', 'alpha payload'),
+    readToolCall(3, 'b', 'src/b.ts', 0),
+    readToolCall(4, 'c', 'src/c.ts', 0),
+    toolResult(5, 'c', 'gamma payload'),
+  ])
+  // b is still RUNNING: a and c are separate singletons; b searchable by args.
+  assertCorpusParity(live, ['alpha payload', 'gamma payload', 'src/b.ts'])
+  live.apply([toolResult(6, 'b', 'beta payload')])
+  // Now a+b+c merge into ONE card: one occurrence per member payload.
+  const matches = live.search('payload')
+  assert.equal(matches.length, 3, 'late settlement merges the run into one visible card with three occurrences')
+  assert.equal(new Set(matches.map(match => match.id)).size, 1)
+  assertCorpusParity(live, ['alpha payload', 'beta payload', 'gamma payload', 'payload', 'src/b.ts'])
+})
+
+test('running -> settled read args searchable, then merged group text', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/alpha.ts', 0),
+    readToolCall(2, 'r2', 'src/beta.ts', 0),
+  ])
+  assertCorpusParity(folder, ['src/alpha.ts', 'src/beta.ts', 'read'])
+  folder.apply([toolResult(3, 'r1', 'alpha-result needle')])
+  // r1 settled; r2 still running: r1 alone is not groupable (needs a run).
+  assertCorpusParity(folder, ['alpha-result needle', 'src/beta.ts'])
+  folder.apply([toolResult(4, 'r2', 'beta-result needle')])
+  assertCorpusParity(folder, ['needle'])
+  const matches = folder.search('needle')
+  assert.equal(matches.length, 2, 'the merged read card holds one occurrence per result')
+  assert.equal(new Set(matches.map(match => match.id)).size, 1)
+})
+
+test('error results and synthetic error cards keep legacy semantics', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'e1', 'read', { file: 'src/missing.ts' }, 0),
+    surfaceEvent('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('msg-e1'), role: 'tool',
+        toolCallId: ToolCallId('e1'),
+        content: [{ type: 'text', text: 'ENOENT: no such file' }],
+        isError: true,
+        source: { kind: 'tool', callId: ToolCallId('e1') },
+      },
+    }, 2, 'append'),
+    turnEnd(3, 0, { kind: 'error', error: { code: 'E_TURN', message: 'the turn failed loudly' } }),
+  ])
+  // The failed read stays a singleton (error results never group) and the
+  // synthetic error card is searchable exactly like legacy.
+  assertCorpusParity(folder, ['ENOENT', 'missing.ts', 'E_TURN', 'failed loudly'])
+  const errorCards = folder.search('E_TURN')
+  assert.equal(errorCards.length, 1)
+  assert.equal(folder.resolveSearchMatch(errorCards[0]!)?.kind, 'tool')
+})
+
+test('system reminder rows search their text (skill/context injection)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('user/message', {
+      id: 'ctx-1', role: 'user',
+      content: [{ type: 'text', text: '<system-reminder>follow the injected skill guidance</system-reminder>' }],
+      source: { kind: 'instruction', ref: 'skill-catalog' },
+    }, 1),
+    turnEnd(2, 0),
+  ])
+  assertCorpusParity(folder, ['injected skill', 'system-reminder'])
+})
+
+test('order: matches follow the logical transcript order across turns', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    userMessage(1, 'first needle'),
+    turnEnd(2, 0),
+    turnStart(3, 1),
+    userMessage(4, 'middle needle'),
+    turnEnd(5, 1),
+    turnStart(6, 2),
+    userMessage(7, 'last needle'),
+    turnEnd(8, 2),
+  ])
+  const matches = folder.search('needle')
+  assert.deepEqual(matches.map(match => match.turn), [0, 1, 2])
+  const resolved = matches.map(match => cardText(folder.resolveSearchMatch(match)))
+  assert.deepEqual(resolved, ['first needle', 'middle needle', 'last needle'])
+})
+
+test('stable ids survive settlement and group reflow (never object identity)', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/a.ts', 0),
+    toolResult(2, 'r1', 'result one'),
+    readToolCall(3, 'r2', 'src/b.ts', 0),
+    toolResult(4, 'r2', 'result two'),
+    turnEnd(5, 0),
+  ])
+  const matches = folder.search('result')
+  assert.equal(matches.length, 2, 'merged group -> one occurrence per member result')
+  const id = matches[0]!.id
+  // A later live append must not change the id namespace of earlier matches.
+  folder.apply([
+    turnStart(6, 1),
+    userMessage(7, 'result three in a new turn'),
+    turnEnd(8, 1),
+  ])
+  const afterAppend = folder.search('result')
+  assert.equal(afterAppend[0]!.id, id, 'the id stays stable across live appends')
+  const resolved = folder.resolveSearchMatch({ id, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 })
+  assert.equal(resolved?.kind, 'tool', 'the id still resolves to the merged card')
+  assert.ok(resolved!.result.includes('result one') && resolved!.result.includes('result two'))
+})
+
+test('query refinement: prefix typing narrows candidates only when the revision is unchanged', () => {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 0; turn < 50; turn += 1) {
+    events.push(turnStart(seq++, turn))
+    events.push(userMessage(seq++, `needle candidate ${turn}`, turn))
+    events.push(userMessage(seq++, `other filler ${turn}`, turn))
+    events.push(turnEnd(seq++, turn))
+  }
+  folder.hydrate(events)
+  const diagnosticsBefore = folder.searchDiagnosticsForTest()
+
+  let matches: TranscriptSearchMatch[] = folder.search('n')
+  let revision = folder.searchRevision()
+  assert.equal(matches.length, 100, 'two occurrences (needle + candidate) per turn')
+  assert.equal(folder.searchDiagnosticsForTest().fullScans, diagnosticsBefore.fullScans + 1)
+  const scansAtStart = folder.searchDiagnosticsForTest()
+
+  // Refined typing: n -> ne -> nee -> need -> needle.
+  for (const partial of ['ne', 'nee', 'need', 'needle']) {
+    matches = folder.search(partial, { previousQuery: partial.slice(0, -1), previousMatches: matches, revision })
+    revision = folder.searchRevision()
+  }
+  const diagnostics = folder.searchDiagnosticsForTest()
+  assert.equal(matches.length, 50)
+  assert.equal(diagnostics.fullScans, scansAtStart.fullScans, 'no full scan while refining')
+  assert.equal(diagnostics.refinedScans, scansAtStart.refinedScans + 4)
+  assert.deepEqual(matches.map(match => match.turn), Array.from({ length: 50 }, (_, index) => index), 'order preserved under refinement')
+
+  // A projection mutation between queries (live append) invalidates the
+  // refinement: the next query must full-scan.
+  folder.apply([userMessage(100, 'needle appended later', 50)])
+  const afterAppend = folder.search('needle', { previousQuery: 'needl', previousMatches: matches, revision })
+  assert.equal(afterAppend.length, 51, 'the new message is visible')
+  assert.equal(folder.searchDiagnosticsForTest().fullScans, scansAtStart.fullScans + 1, 'revision change forces a full lightweight scan')
+})
+
+test('live mutation while matches are held: no stale object, no crash, next query sees new content', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    turnStart(0, 0),
+    userMessage(1, 'needle here'),
+    turnEnd(2, 0),
+  ])
+  const held = folder.search('needle')
+  assert.equal(held.length, 1)
+  // Stream a new message containing the needle while the old matches live.
+  applyLive(folder, [
+    turnStart(3, 1),
+    ...assistantChunks(4, 1, 0, ['a brand new ', 'needle message']),
+  ])
+  const resolved = folder.resolveSearchMatch(held[0]!)
+  assert.equal(cardText(resolved), 'needle here', 'old match still resolves to its own card')
+  assert.equal(folder.search('needle').length, 2, 'a new query sees the streamed needle')
+})
+
+test('structural gate: search never materializes the transcript nor re-lowercases on query', () => {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 0; turn < 1000; turn += 1) {
+    events.push(turnStart(seq++, turn))
+    events.push(userMessage(seq++, `user prompt ${turn} with needle occasionally`, turn))
+    events.push(assistantMessage(seq++, turn, 0, `assistant answer ${turn}`))
+    events.push(toolCall(seq++, `t${turn}`, 'bash', { command: `echo needle ${turn}` }, turn))
+    events.push(toolResult(seq++, `t${turn}`, `output of tool ${turn}`))
+    events.push(turnEnd(seq++, turn))
+  }
+  folder.hydrate(events)
+  const diagnosticsAfterHydrate = folder.searchDiagnosticsForTest()
+  assert.equal(diagnosticsAfterHydrate.entries, folder.messages().length, 'one entry per visible logical card')
+
+  // Spy on messages(): the indexed query path must NEVER call it.
+  let messagesCalls = 0
+  const originalMessages = folder.messages.bind(folder)
+  Object.defineProperty(folder, 'messages', {
+    configurable: true,
+    value: (...args: unknown[]) => {
+      messagesCalls += 1
+      return (originalMessages as (...a: unknown[]) => TranscriptMessage[])(...args)
+    },
+  })
+  const miss = folder.search('unlikely-needle-not-present')
+  assert.equal(miss.length, 0)
+  const hits = folder.search('needle')
+  assert.ok(hits.length >= 1000, `every turn hits: ${hits.length}`)
+  assert.equal(messagesCalls, 0, 'the indexed query path never calls messages()')
+  const afterQueries = folder.searchDiagnosticsForTest()
+  assert.equal(afterQueries.normalizedRefreshes, diagnosticsAfterHydrate.normalizedRefreshes, 'queries never re-lowercase search text')
+  assert.equal(afterQueries.groupingRebuilds, diagnosticsAfterHydrate.groupingRebuilds, 'queries never rebuild grouping')
+})
+
+test('10k-turn structural complexity gate: lightweight scan + refinement, no projection', () => {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 0; turn < 10_000; turn += 1) {
+    events.push(turnStart(seq++, turn))
+    events.push(userMessage(seq++, `prompt ${turn}`, turn))
+    events.push(assistantMessage(seq++, turn, 0, `answer ${turn} with filler text`))
+    events.push(turnEnd(seq++, turn))
+  }
+  folder.hydrate(events)
+  const afterHydrate = folder.searchDiagnosticsForTest()
+  let messagesCalls = 0
+  const originalMessages = folder.messages.bind(folder)
+  Object.defineProperty(folder, 'messages', {
+    configurable: true,
+    value: (...args: unknown[]) => {
+      messagesCalls += 1
+      return (originalMessages as (...a: unknown[]) => TranscriptMessage[])(...args)
+    },
+  })
+  const matches = folder.search('answer')
+  assert.equal(matches.length, 10_000)
+  assert.equal(messagesCalls, 0, 'full history is never materialized on the query path')
+  assert.equal(folder.searchDiagnosticsForTest().normalizedRefreshes, afterHydrate.normalizedRefreshes, 'no re-lowercase on query')
+  // 'answer 999' hits turn 999 and every 999x turn (9990..9999).
+  const before: TranscriptSearchMatch[] = folder.search('answer 999')
+  assert.equal(before.length, 11)
+  const fullScans = folder.searchDiagnosticsForTest().fullScans
+  const after = folder.search('answer 9999', { previousQuery: 'answer 999', previousMatches: before, revision: folder.searchRevision() })
+  assert.equal(after.length, 1, 'refinement narrows candidates to the exact turn')
+  assert.equal(folder.searchDiagnosticsForTest().fullScans, fullScans, 'refinement avoids the full scan')
+  assert.equal(folder.searchDiagnosticsForTest().refinedScans, 1)
+})
+
+test('session/folder isolation: each folder owns its projection and matches', () => {
+  const folderA = new TranscriptFolder()
+  folderA.hydrate([turnStart(0, 0), userMessage(1, 'needle in session A'), turnEnd(2, 0)])
+  const folderB = new TranscriptFolder()
+  folderB.hydrate([turnStart(3, 0), userMessage(4, 'needle in session B'), turnEnd(5, 0)])
+  const a = folderA.search('needle')
+  const b = folderB.search('needle')
+  assert.equal(a.length, 1)
+  assert.equal(b.length, 1)
+  assert.equal(cardText(folderA.resolveSearchMatch(a[0]!)), 'needle in session A')
+  assert.equal(cardText(folderB.resolveSearchMatch(b[0]!)), 'needle in session B')
+  // Ids are namespace-local: identical ids resolve to different sessions.
+  assert.equal(a[0]!.id, b[0]!.id)
+})
+
+test('failed-read singleton never merges; its search text keeps the path', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    readToolCall(1, 'ok1', 'src/ok.ts', 0),
+    toolResult(2, 'ok1', 'ok result'),
+    readToolCall(3, 'bad1', 'src/missing.ts', 0),
+    surfaceEvent('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('bad'), role: 'tool',
+        toolCallId: ToolCallId('bad1'),
+        content: [{ type: 'text', text: 'read failed' }],
+        isError: true,
+        source: { kind: 'tool', callId: ToolCallId('bad1') },
+      },
+    }, 4, 'append'),
+    turnEnd(5, 0),
+  ])
+  assertCorpusParity(folder, ['src/ok.ts', 'ok result', 'src/missing.ts', 'read failed'])
+  const reads = folder.messages().filter(message => message.kind === 'tool' && message.name === 'read')
+  assert.equal(reads.length, 2, 'ok run and failed singleton stay separate cards')
+})
+
+test('command/done and workflow cards are searchable exactly like legacy', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('command/run', { commandId: 'cmd1', name: 'theme', args: '' }, 1),
+    rawEvent('command/done', { commandId: 'cmd1', kind: 'success', text: 'theme set to dark' }, 2),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 3),
+    rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 4),
+    turnEnd(5, 0),
+  ])
+  assertCorpusParity(folder, ['theme set to dark', '/theme', 'audit', 'completed'])
+  const workflow = folder.search('audit')
+  assert.equal(workflow.length, 1)
+  assert.equal(folder.resolveSearchMatch(workflow[0]!)?.kind, 'workflow')
+})
+
+test('workflow search text follows the live run status (plan §8.12)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+  ])
+  assertCorpusParity(folder, ['workflow', 'audit', 'running'])
+  assert.equal(folder.search('completed').length, 0, 'a running run must not match the terminal status')
+  folder.apply([rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 2)])
+  assertCorpusParity(folder, ['workflow', 'audit', 'completed'])
+  assert.equal(folder.search('running').length, 0, 'the settled run must not keep the start-time status in the corpus')
+})
+
+test('workflow search keeps an open run indexed as running across step/turn close (W6)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('step/start', { turn: 0, step: 0 }, 1),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'checker', childId: 'session-x' }, 3),
+    rawEvent('step/end', { turn: 0, step: 0 }, 4),
+    rawEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+  ])
+  // The open record is indexed under its real status; Step/Turn closure must
+  // never inject a fabricated `interrupted` corpus entry.
+  const running = folder.search('running')
+  assert.ok(running.some(match => transcriptSearchSourceKey(match.source) === 'workflow-run.status'),
+    'the open run status must be indexed')
+  assert.equal(folder.search('interrupted').length, 0, 'no fabricated interrupted status enters the corpus')
+  folder.apply([
+    rawEvent('tool-workflow/agent-end', { runId: 'run1', seq: 1, outcome: 'completed' }, 6),
+    rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 7),
+  ])
+  assert.equal(folder.search('running').length, 0, 'the settled run must drop its old status')
+  const completed = folder.search('completed')
+  const statusHit = completed.find(match => transcriptSearchSourceKey(match.source) === 'workflow-run.status')
+  assert.ok(statusHit !== undefined, 'the settled status must be indexed')
+  assert.equal(folder.resolveSearchMatch(statusHit)?.kind, 'workflow', 'the hit must open the Workflow card')
+})
+
+test('workflow search indexes phase labels and member labels/statuses (PR2 plan §13)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'dependency-scan', phase: 'Research', childId: 'session-x' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 2, label: 'schema-check', phase: '', childId: 'session-y' }, 3),
+    // The official event omits `phase` for the absent case (the event type
+    // only permits a present string); the folder projects that to null.
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 3, label: 'orphan', childId: 'session-z' }, 4),
+  ])
+  assertCorpusParity(folder, ['audit', 'Research', 'dependency-scan', 'running'])
+  // The readable phase labels are indexed: Unassigned (absent) and Empty ('')
+  // are distinct searchable words.
+  assert.equal(folder.search('unassigned').length, 1, 'the absent phase readable label must be searchable')
+  assert.equal(folder.search('empty').length, 1, 'the empty phase readable label must be searchable')
+  assert.equal(folder.search('schema-check').length, 1, 'a member label must be searchable')
+  // Machine identities are never indexed.
+  assert.equal(folder.search('session-x').length, 0, 'childId must never be indexed')
+  assert.equal(folder.search('run1').length, 0, 'runId must never be indexed')
+  // Member status words are indexed.
+  folder.apply([rawEvent('tool-workflow/agent-end', { runId: 'run1', seq: 1, outcome: 'failed' }, 5)])
+  assertCorpusParity(folder, ['failed'])
+  assert.equal(folder.search('failed').length, 1, 'a member status must be searchable')
+})
+
+test('a member hidden inside a large phase summary still hits its Workflow card (PR2 plan §13.1)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+    // 6 members: the phase renders as a summary; member 5 is never inline.
+    ...Array.from({ length: 6 }, (_, i) =>
+      rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: i + 1, label: `shard-${i}`, phase: 'Migration', childId: `session-${i}` }, 2 + i)),
+  ])
+  const matches = folder.search('shard-5')
+  assert.equal(matches.length, 1, 'the hidden member must still hit the card')
+  assert.equal(folder.resolveSearchMatch(matches[0]!)?.kind, 'workflow', 'the hit must locate the Workflow card')
+  assertCorpusParity(folder, ['shard-5', 'Migration'])
+})
+
+test('a settled assistant message created WITHOUT chunks stays searchable after replacement', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    turnStart(0, 0),
+    assistantMessage(1, 0, 0, 'original settled text'),
+  ])
+  assertCorpusParity(folder, ['original settled'])
+  // A replay replacement (different authoritative text) mutates the entry
+  // in place: the search projection must follow (review finding — the
+  // entry created without a preceding streaming chunk used to miss its
+  // search-index registration).
+  folder.apply([assistantMessage(2, 0, 0, 'replaced authoritative text')])
+  assertCorpusParity(folder, ['replaced authoritative'])
+  assert.equal(folder.search('original settled').length, 0, 'the old text is gone from the corpus')
+  // A late text delta after the replacement also lands in the projection.
+  applyLive(folder, [
+    ...assistantChunks(3, 0, 0, ['with a streamed tail']),
+  ])
+  assertCorpusParity(folder, ['replaced authoritative', 'streamed tail'])
+})
+
+test('interleaved reasoning and text deltas search their OWN entries (namespaced projection)', () => {
+  const folder = new TranscriptFolder()
+  applyLive(folder, [
+    turnStart(0, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: 'reasoning-corpse marker' } }, 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'assistant-corpse marker' } }, 2),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 1, text: ' more reasoning deltas' } }, 3),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: ' more text deltas' } }, 4),
+  ])
+  assertCorpusParity(folder, ['reasoning-corpse', 'assistant-corpse', 'more reasoning', 'more text'])
+  // Parity catches the contamination vector: a reasoning-only needle must
+  // match ONLY the thinking card, never the assistant card (the shared
+  // step key used to route reasoning deltas into the assistant entry).
+  const reasoningMatches = folder.search('reasoning-corpse')
+  assert.equal(reasoningMatches.length, 1)
+  assert.equal(folder.resolveSearchMatch(reasoningMatches[0]!)?.kind, 'thinking')
+  const textMatches = folder.search('assistant-corpse')
+  assert.equal(textMatches.length, 1)
+  assert.equal(folder.resolveSearchMatch(textMatches[0]!)?.kind, 'assistant')
+  assert.equal(folder.search('marker').length, 2, 'both entries hit the shared word, each once')
+})
+
+test('live cross-turn append refreshes the WHOLE group (turn + shared text)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/a.ts', 0),
+    toolResult(2, 'r1', 'alpha content'),
+    turnEnd(3, 0),
+    turnStart(4, 1),
+    readToolCall(5, 'r2', 'src/b.ts', 1),
+    toolResult(6, 'r2', 'beta content'),
+    turnEnd(7, 1),
+  ])
+  // a+b merged into one cross-turn card (turn = 1).
+  assert.equal(folder.search('alpha').length, 1)
+  // Live append: a turn-2 read joins the group; the group turn moves to 2.
+  folder.apply([
+    turnStart(8, 2),
+    readToolCall(9, 'r3', 'src/c.ts', 2),
+    toolResult(10, 'r3', 'gamma-only-needle content'),
+    turnEnd(11, 2),
+  ])
+  // The match for text present ONLY in the newest member must carry the
+  // NEW group turn (max), never the stale first-member turn (round-4
+  // finding: the tail-append refresh used to cover only the last two
+  // entries, leaving the earlier members' turn and text stale).
+  const matches = folder.search('gamma-only-needle')
+  assert.equal(matches.length, 1)
+  assert.equal(matches[0]!.turn, 2, 'the match must carry the NEW group turn')
+  // The shared text is refreshed for ALL members: the merged args count is
+  // searchable, and the superseded count is gone (strict legacy parity).
+  assertCorpusParity(folder, ['gamma-only-needle', 'alpha content', 'beta content', '3 files', '2 files'])
+})
+
+test('stale search overlay: Next/Prev refreshes matches when the transcript changed underneath (P1)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/a.ts', 0),
+    toolResult(2, 'r1', 'alpha payload'),
+    readToolCall(3, 'r2', 'src/b.ts', 0),
+    toolResult(4, 'r2', 'beta payload'),
+  ])
+  // The overlay queried the SAME-turn merged card (turn 0).
+  const initial = folder.search('payload')
+  assert.equal(initial.length, 2, 'one occurrence per member result')
+  assert.equal(initial[0]!.turn, 0)
+  const state = { matches: initial, current: 0, query: 'payload', revision: folder.searchRevision(), folder }
+
+  // The agent keeps running: a turn-1 read's result joins the candidate
+  // list and the projection revision changed. Next/Prev with the query
+  // untouched must refresh before jumping.
+  folder.apply([
+    turnStart(5, 1),
+    readToolCall(6, 'r3', 'src/c.ts', 1),
+    toolResult(7, 'r3', 'c-gamma payload'),
+    turnEnd(8, 1),
+  ])
+  const refreshed = refreshedSearchState(state, folder)
+  assert.equal(refreshed.changed, true, 'a moved revision must mark the overlay state stale')
+  assert.equal(refreshed.matches.length, 3)
+  assert.equal(refreshed.matches[0]!.turn, 0, 'the merged card stays on its own turn')
+  assert.equal(refreshed.matches[0]!.id, initial[0]!.id, 'the same logical card is recovered by stable id')
+  assert.equal(refreshed.current, 0)
+  assert.equal(refreshed.revision, folder.searchRevision(), 'the runner commits the new revision')
+
+  // Live NEW matches are visible to Next/Prev without a query change.
+  folder.apply([
+    turnStart(9, 2),
+    userMessage(10, 'three payload mentions', 2),
+    turnEnd(11, 2),
+  ])
+  const withNew = refreshedSearchState({ matches: refreshed.matches, current: refreshed.current, query: 'payload', revision: refreshed.revision, folder }, folder)
+  assert.equal(withNew.matches.length, 4, 'a live new occurrence enters the candidate list')
+  assert.equal(withNew.current, 0, 'the previous current occurrence stays current by key')
+
+  // An UNCHANGED revision is a no-op (query retyping path: onSearchQuery
+  // already committed the fresh revision).
+  const unchanged = refreshedSearchState({ matches: withNew.matches, current: 0, query: 'payload', revision: withNew.revision, folder }, folder)
+  assert.equal(unchanged.changed, false)
+
+  // A stale id that no longer matches clamps instead of crashing.
+  const clamped = refreshedSearchState({ matches: [{ id: 999, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 }], current: 0, query: 'payload', revision: 0, folder }, folder)
+  assert.equal(clamped.changed, true)
+  assert.ok(clamped.matches.length > 0 && clamped.current >= 0, 'the index clamps into the refreshed list')
+
+  // An empty-query overlay refreshes to nothing without searching.
+  const cleared = refreshedSearchState({ matches: initial, current: 0, query: '', revision: 0, folder }, folder)
+  assert.equal(cleared.matches.length, 0)
+  assert.equal(cleared.current, -1)
+})
+
+test('streaming lowercasing is whole-string — Greek sigma across chunk boundaries (P2)', () => {
+  const folder = new TranscriptFolder()
+  applyLive(folder, [
+    turnStart(0, 0),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 0, text: 'Ο' } }, 1),
+    event('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'text-delta', index: 1, text: 'Σ' } }, 2),
+  ])
+  // Whole-string lowercase: 'ΟΣ' -> 'ος'. The chunk-split concatenation
+  // ('οσ') must NEVER be searchable, and 'ος' must match — legacy searched
+  // the final whole string.
+  assert.equal('ΟΣ'.toLowerCase(), 'ος', 'fixture sanity: sigma final-form lowercasing')
+  assertCorpusParity(folder, ['ος'])
+  assert.equal(folder.search('οσ').length, 0, 'the chunk-split lowercase must not leak into the corpus')
+  // The settled replacement restores the authoritative text either way.
+  folder.apply([assistantMessage(3, 0, 0, 'ΟΣ settled')])
+  assertCorpusParity(folder, ['ος settled', 'settled'])
+  assert.equal(folder.search('οσ').length, 0)
+})
+
+test('stale overlay edge: Next/Prev discover a match that arrived AFTER an empty search (P1)', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'alpha only'), turnEnd(2, 0)])
+  // The overlay searched with zero matches...
+  const empty = folder.search('needle-new')
+  assert.equal(empty.length, 0)
+  const state = { matches: empty, current: -1, query: 'needle-new', revision: folder.searchRevision(), folder }
+  // ...and a matching message arrives while it stays open.
+  folder.apply([turnStart(3, 1), userMessage(4, 'a needle-new live message', 1), turnEnd(5, 1)])
+  // The RUNNER's handler path (the production seam onSearchNext/Prev call):
+  // the empty candidate list must be refreshed BEFORE the emptiness check,
+  // or the live match is never discoverable.
+  const next = steppedSearchOverlayState(state, folder, 1)
+  assert.equal(next.matches.length, 1, 'Next must find the live new match')
+  assert.equal(next.current, 0, 'Next steps onto the newly arrived match')
+  const prev = steppedSearchOverlayState(state, folder, -1)
+  assert.equal(prev.matches.length, 1, 'Prev must find the live new match too')
+  assert.equal(prev.current, 0)
+})
+
+test('stale overlay edge: an EMPTIED result set clamps to -1 (the 0/0 counter) (P2)', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    turnStart(0, 0),
+    assistantMessage(1, 0, 0, 'needle alpha'),
+  ])
+  const initial = folder.search('needle')
+  assert.equal(initial.length, 1)
+  const state = { matches: initial, current: 0, query: 'needle', revision: folder.searchRevision(), folder }
+  // The same step's authoritative text is REPLACED without the needle
+  // (replay semantics: the transcript entry mutates in place, the search
+  // projection follows) — every match disappears.
+  folder.apply([assistantMessage(2, 0, 0, 'no match here')])
+  const refreshed = refreshedSearchState(state, folder)
+  assert.equal(refreshed.changed, true)
+  assert.equal(refreshed.matches.length, 0)
+  assert.equal(refreshed.current, -1, 'an emptied result set must clamp to -1, never 0 (0/0 counter)')
+  // The runner's Next/Prev seam steps an emptied list to -1 as well.
+  const next = steppedSearchOverlayState(state, folder, 1)
+  assert.equal(next.current, -1)
+  assert.equal(next.matches.length, 0)
+})
+
+test('stale overlay edge: Next enters the fresh list at the FIRST match, Prev at the LAST (P2)', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'alpha only'), turnEnd(2, 0)])
+  const empty = folder.search('needle-new')
+  assert.equal(empty.length, 0)
+  const state = { matches: empty, current: -1, query: 'needle-new', revision: folder.searchRevision(), folder }
+  // TWO matching messages arrive while the overlay stays open.
+  folder.apply([
+    turnStart(3, 1), userMessage(4, 'one needle-new live message', 1), turnEnd(5, 1),
+    turnStart(6, 2), userMessage(7, 'two needle-new live messages', 2), turnEnd(8, 2),
+  ])
+  const next = steppedSearchOverlayState(state, folder, 1)
+  assert.equal(next.matches.length, 2)
+  assert.equal(next.current, 0, 'Next must enter the fresh list at the FIRST match, never skip it (round-12 finding)')
+  const prev = steppedSearchOverlayState(state, folder, -1)
+  assert.equal(prev.matches.length, 2)
+  assert.equal(prev.current, 1, 'Prev enters the fresh list at the LAST match')
+})
+
+test('lazy normalization scans ONLY the dirty entries, never the history (P2)', () => {
+  const folder = new TranscriptFolder()
+  const events: SessionEvent[] = []
+  let seq = 0
+  for (let turn = 0; turn < 1000; turn += 1) {
+    events.push(turnStart(seq++, turn))
+    events.push(userMessage(seq++, `prompt ${turn}`, turn))
+    events.push(assistantMessage(seq++, turn, 0, `answer ${turn}`))
+    events.push(turnEnd(seq++, turn))
+  }
+  folder.hydrate(events)
+  // A query with NO mutations normalizes nothing and never scans history.
+  folder.search('answer')
+  assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 0, 'no dirty entries -> zero normalization work')
+  // One streaming chunk marks ONE entry: the next query normalizes exactly it.
+  applyLive(folder, [...assistantChunks(seq++, 1000, 0, [' tail-one'])])
+  folder.search('tail-one')
+  assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 1)
+  // Ten more chunks on the SAME entry: the Set dedupes — still one scan.
+  applyLive(folder, [...assistantChunks(seq++, 1000, 0, [' tail-two', ' tail-three', ' tail-four', ' tail-five', ' tail-six', ' tail-seven', ' tail-eight', ' tail-nine', ' tail-ten', ' tail-eleven'])])
+  folder.search('tail-eleven')
+  assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 2, 'repeated marks on one entry dedupe to one scan')
+  // Five DISTINCT entries: five more scans.
+  applyLive(folder, [
+    ...assistantChunks(seq++, 1001, 0, [' x1']),
+    ...assistantChunks(seq++, 1002, 0, [' x2']),
+    ...assistantChunks(seq++, 1003, 0, [' x3']),
+    ...assistantChunks(seq++, 1004, 0, [' x4']),
+    ...assistantChunks(seq++, 1005, 0, [' x5']),
+  ])
+  folder.search('x5')
+  assert.equal(folder.searchDiagnosticsForTest().dirtyScans, 7, 'five distinct entries -> five more scans')
+})
+
+test('transcriptSearchText is the single corpus source (tool = name args result)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'c1', 'bash', { command: 'echo hi' }, 0),
+  ])
+  const running = folder.messages()[0]!
+  assert.equal(transcriptSearchText(running), 'bash {"command":"echo hi"} ')
+  assert.ok(transcriptSearchText(running).toLowerCase().includes('echo hi'))
+})
+
+test('transcriptSearchText recursively includes PTC sub-call descendants', () => {
+  // A PTC root card's corpus must include its nested sub-calls so `/search`
+  // still finds nested output and locates the root Code card.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'code-1', 'run_code', { code: 'print(1)' }, 0),
+    event('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'run tests' },
+    }, 2),
+    event('tool/ptc-dispatch', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { cmd: 'run tests' },
+      isError: false,
+      content: [{ type: 'text', text: '128 passed' }],
+    }, 3),
+  ])
+  const root = folder.messages()[0]!
+  const corpus = transcriptSearchText(root)
+  assert.ok(corpus.includes('run_code'), 'the root name stays in the corpus')
+  assert.ok(corpus.includes('bash'), 'the nested child name is searchable')
+  assert.ok(corpus.includes('128 passed'), 'the nested child result is searchable')
+})
+
+test('PTC child settle marks the root search entry dirty immediately', () => {
+  // The incremental search index must see nested child content as soon as
+  // the child settles — not only after the outer run_code result lands.
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'code-1', 'run_code', { code: 'print(1)', description: 'Inspect project and run tests' }, 0),
+    event('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('code-1:code:1'),
+      name: 'bash',
+      arguments: { command: 'run tests', description: 'Run tests' },
+    }, 2),
+  ])
+  assert.equal(folder.search('128 passed').length, 0, 'nothing to find before the child settles')
+  folder.apply([event('tool/ptc-dispatch', {
+    rootCallId: ToolCallId('code-1'),
+    parentCallId: ToolCallId('code-1'),
+    subCallId: ToolCallId('code-1:code:1'),
+    name: 'bash',
+    arguments: { command: 'run tests', description: 'Run tests' },
+    isError: false,
+    content: [{ type: 'text', text: '128 passed' }],
+  }, 3)])
+  const matches = folder.search('128 passed')
+  assert.equal(matches.length, 1, 'the settled child content must be searchable immediately')
+  assert.equal(matches[0]!.id, 0, 'the match locates the root Code card')
+})
+
+// ── Occurrence-level search (plan §4) ─────────────────────────────────────
+
+test('occurrence: one card yields one match per occurrence with ordinals', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'foo bar foo baz foo'), turnEnd(2, 0)])
+  const matches = folder.search('foo')
+  assert.equal(matches.length, 3, 'three non-overlapping occurrences in one card')
+  assert.deepEqual(matches.map(match => match.occurrence), [0, 1, 2])
+  assert.deepEqual(matches.map(match => match.sourceOccurrence), [0, 1, 2])
+  assert.ok(matches.every(match => transcriptSearchSourceKey(match.source) === 'message'))
+  assert.equal(new Set(matches.map(transcriptSearchMatchKey)).size, 3, 'every occurrence has a distinct key')
+  assert.ok(matches.every(match => folder.resolveSearchMatch(match)?.kind === 'user'))
+})
+
+test('occurrence: case-insensitive enumeration keeps every occurrence', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'Foo fOO foo FOO'), turnEnd(2, 0)])
+  assert.equal(folder.search('foo').length, 4)
+})
+
+test('occurrence: a tool card maps name/args/result occurrences to semantic sources', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'c1', 'bash', { command: 'needle in args' }, 0),
+    toolResult(2, 'c1', 'needle in result'),
+    turnEnd(3, 0),
+  ])
+  const name = folder.search('bash')
+  assert.equal(name.length, 1)
+  assert.equal(transcriptSearchSourceKey(name[0]!.source), 'tool.name')
+  const needle = folder.search('needle')
+  assert.equal(needle.length, 2, 'args + result occurrences')
+  assert.deepEqual(needle.map(match => transcriptSearchSourceKey(match.source)), ['tool.args', 'tool.result'])
+  assert.deepEqual(needle.map(match => match.sourceOccurrence), [0, 0], 'each source owns its own ordinal')
+  assert.deepEqual(needle.map(match => match.occurrence), [0, 1])
+})
+
+test('occurrence: a merged read group enumerates every member occurrence', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    readToolCall(1, 'r1', 'src/a.ts', 0),
+    toolResult(2, 'r1', 'shared token A'),
+    readToolCall(3, 'r2', 'src/b.ts', 0),
+    toolResult(4, 'r2', 'shared token B'),
+    turnEnd(5, 0),
+  ])
+  const matches = folder.search('shared')
+  assert.equal(matches.length, 2, 'the representative group card holds both occurrences')
+  assert.ok(matches.every(match => transcriptSearchSourceKey(match.source) === 'tool.result'))
+  assert.deepEqual(matches.map(match => match.sourceOccurrence), [0, 1])
+  assert.equal(new Set(matches.map(match => match.id)).size, 1, 'both occurrences belong to the one representative id')
+})
+
+test('occurrence: Workflow phase/member/run occurrences carry their semantic source', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit', }, 1),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 1, label: 'dependency-scan', phase: 'Research', childId: 'session-x' }, 2),
+    rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: 2, label: 'schema-scan', phase: 'Research', childId: 'session-y' }, 3),
+  ])
+  const run = folder.search('audit')
+  assert.equal(run.length, 1)
+  assert.equal(transcriptSearchSourceKey(run[0]!.source), 'workflow-run.name')
+  const phase = folder.search('research')
+  assert.equal(phase.length, 1)
+  assert.deepEqual(phase[0]!.source, { kind: 'workflow-phase', phaseKey: 'value:8:Research' })
+  const member = folder.search('dependency-scan')
+  assert.equal(member.length, 1)
+  assert.deepEqual(member[0]!.source, { kind: 'workflow-member', phaseKey: 'value:8:Research', seq: 1, field: 'label' })
+  const status = folder.search('running')
+  assert.equal(status.length, 3, 'the run status plus both member status words')
+  assert.equal(transcriptSearchSourceKey(status[0]!.source), 'workflow-run.status')
+  const memberStatuses = status.slice(1)
+  assert.ok(memberStatuses.every(match => match.source.kind === 'workflow-member' && match.source.field === 'status'))
+  assert.deepEqual(memberStatuses.map(match => match.sourceOccurrence), [0, 0], 'the member seq makes each status its own source')
+})
+
+test('occurrence: a nested PTC hit carries its full ancestor subCallId path', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    toolCall(1, 'code-1', 'run_code', { code: 'print(1)' }, 0),
+    event('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('child-1'),
+      name: 'bash',
+      arguments: { cmd: 'child args marker' },
+    }, 2),
+    event('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-1'),
+      parentCallId: ToolCallId('child-1'),
+      subCallId: ToolCallId('grand-1'),
+      name: 'bash',
+      arguments: { cmd: 'grandchild-needle' },
+    }, 3),
+  ])
+  const matches = folder.search('grandchild-needle')
+  assert.equal(matches.length, 1)
+  assert.deepEqual(matches[0]!.source, {
+    kind: 'subcall-field',
+    subCallIds: ['child-1', 'grand-1'],
+    field: 'args',
+  })
+  assert.equal(matches[0]!.id, 0, 'the hit still locates the root Code card')
+})
+
+test('occurrence: prefix refinement rescans each candidate card once', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    turnStart(0, 0),
+    userMessage(1, 'needle needle needle'),
+    turnEnd(2, 0),
+    turnStart(3, 1),
+    userMessage(4, 'needle filler'),
+    turnEnd(5, 1),
+  ])
+  let matches = folder.search('n')
+  assert.equal(matches.length, 4, 'three occurrences in card one plus one in card two')
+  let revision = folder.searchRevision()
+  const fullScansBefore = folder.searchDiagnosticsForTest().fullScans
+  for (const partial of ['ne', 'nee', 'need', 'needle']) {
+    matches = folder.search(partial, { previousQuery: partial.slice(0, -1), previousMatches: matches, revision })
+    revision = folder.searchRevision()
+  }
+  assert.equal(matches.length, 4, 'refinement must not lose duplicate-id occurrences')
+  assert.deepEqual(matches.map(match => match.occurrence), [0, 1, 2, 0])
+  assert.equal(folder.searchDiagnosticsForTest().fullScans, fullScansBefore, 'refinement never full-scans')
+})
+
+test('refinement: a high-occurrence card eliminated by the next character is scanned once', () => {
+  const folder = new TranscriptFolder()
+  // One card with 20k `a` occurrences that the NEXT character eliminates, plus
+  // a second card that keeps matching. Refinement must rescan CARDS, not
+  // occurrences (the old per-match loop re-ran the same failing `includes()`
+  // 20k times and stalled Ctrl+F on large tool output).
+  folder.hydrate([
+    turnStart(0, 0),
+    userMessage(1, 'a'.repeat(20_000)),
+    turnEnd(2, 0),
+    turnStart(3, 1),
+    userMessage(4, 'ab'),
+    turnEnd(5, 1),
+  ])
+  const previous = folder.search('a')
+  assert.equal(previous.length, 20_001, '20k occurrences in card one plus one in card two')
+  const candidatesBefore = folder.searchDiagnosticsForTest().refinedCandidates
+  const after = folder.search('ab', { previousQuery: 'a', previousMatches: previous, revision: folder.searchRevision() })
+  assert.equal(after.length, 1, 'only the second card still matches')
+  assert.equal(
+    folder.searchDiagnosticsForTest().refinedCandidates - candidatesBefore,
+    2,
+    'one rescan per candidate CARD, never per previous occurrence',
+  )
+})
+
+test('occurrence: live append refreshes the occurrence count', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'live needle'), turnEnd(2, 0)])
+  assert.equal(folder.search('needle').length, 1)
+  folder.apply([turnStart(3, 1), userMessage(4, 'another needle and a needle again', 1), turnEnd(5, 1)])
+  assert.equal(folder.search('needle').length, 3)
+})
+
+// ── Occurrence-aware overlay recovery (plan §5) ───────────────────────────
+
+test('overlay occurrence: the exact current occurrence survives an unrelated revision', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'foo foo foo'), turnEnd(2, 0)])
+  const initial = folder.search('foo')
+  assert.equal(initial.length, 3)
+  const state = { matches: initial, current: 2, query: 'foo', revision: folder.searchRevision(), folder }
+  // An unrelated turn arrives: the revision moves but the exact occurrence key
+  // still exists.
+  folder.apply([turnStart(3, 1), userMessage(4, 'unrelated text', 1), turnEnd(5, 1)])
+  const refreshed = refreshedSearchState(state, folder)
+  assert.equal(refreshed.changed, true)
+  assert.equal(refreshed.current, 2, 'the same occurrence stays current')
+  assert.equal(transcriptSearchMatchKey(refreshed.matches[refreshed.current]!), transcriptSearchMatchKey(initial[2]!))
+})
+
+test('overlay occurrence: an append AFTER the current occurrence keeps it current', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'foo foo'), turnEnd(2, 0)])
+  const initial = folder.search('foo')
+  const state = { matches: initial, current: 0, query: 'foo', revision: folder.searchRevision(), folder }
+  // A new matching occurrence arrives LATER in the transcript.
+  folder.apply([turnStart(3, 1), userMessage(4, 'foo again', 1), turnEnd(5, 1)])
+  const refreshed = refreshedSearchState(state, folder)
+  assert.equal(refreshed.current, 0, 'the previous source occurrence must not jump to the new occurrence')
+  assert.equal(refreshed.matches[refreshed.current]!.sourceOccurrence, 0)
+})
+
+test('overlay occurrence: a vanished source occurrence clamps into the surviving card', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'foo foo'), turnEnd(2, 0)])
+  const initial = folder.search('foo')
+  const state = { matches: initial, current: 1, query: 'foo', revision: folder.searchRevision(), folder }
+  // The same card loses one occurrence (authoritative replacement).
+  folder.apply([assistantMessage(3, 0, 0, 'foo only')])
+  const refreshed = refreshedSearchState(state, folder)
+  assert.ok(refreshed.current >= 0)
+  assert.equal(refreshed.matches[refreshed.current]!.id, initial[1]!.id, 'the surviving occurrence of the same card is chosen')
+})
+
+test('overlay occurrence: Next/Prev step through a single card occurrences then wrap', () => {
+  const folder = new TranscriptFolder()
+  folder.hydrate([turnStart(0, 0), userMessage(1, 'foo foo foo'), turnEnd(2, 0)])
+  const initial = folder.search('foo')
+  let state = { matches: initial, current: 0, query: 'foo', revision: folder.searchRevision(), folder }
+  const seen: number[] = [state.current]
+  for (let step = 0; step < 4; step += 1) {
+    const stepped = steppedSearchOverlayState(state, folder, 1)
+    state = { matches: stepped.matches, current: stepped.current, query: 'foo', revision: stepped.revision, folder }
+    seen.push(state.current)
+  }
+  assert.deepEqual(seen, [0, 1, 2, 0, 1], 'Next walks occurrences inside the card and wraps')
+  const prev = steppedSearchOverlayState(state, folder, -1)
+  assert.equal(prev.current, 0)
+})
+
+// ── Corpus compatibility + cross-span source ownership (round-1 findings) ──
+
+test('compat: transcriptSearchText keeps the legacy Workflow raw text (empty members)', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+    rawEvent('tool-workflow/run-end', { runId: 'run1', stopReason: 'completed' }, 2),
+  ])
+  const card = folder.messages()[0]!
+  // The legacy template always emitted both group separators (two trailing
+  // spaces for an empty run); the source-aware corpus must preserve it.
+  assert.equal(transcriptSearchText(card), 'workflow audit completed  ')
+})
+
+test('cross-span: a workflow member label+status query keeps the member source', () => {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    turnStart(0, 0),
+    rawEvent('tool-workflow/run-start', { runId: 'run1', name: 'audit' }, 1),
+    ...Array.from({ length: 6 }, (_, i) =>
+      rawEvent('tool-workflow/agent-start', { runId: 'run1', seq: i + 1, label: `shard-${i}`, phase: 'Migration', childId: `session-${i}` }, 2 + i)),
+  ])
+  const matches = folder.search('shard-5 running')
+  assert.equal(matches.length, 1, 'the cross-span occurrence is preserved')
+  assert.deepEqual(matches[0]!.source, {
+    kind: 'workflow-member',
+    phaseKey: 'value:9:Migration',
+    seq: 6,
+    field: 'label',
+  }, 'the occurrence keeps the FIRST chunk owner so reveal/context-row still trigger')
+})

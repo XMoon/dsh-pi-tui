@@ -7,6 +7,130 @@
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-29
+
+### 安装与版本对应
+
+本版以已发布的 DSH `0.2.1-rc.4` 作为精确验证目标，最低版本仍为 `0.2.1-rc.2`。安装
+DSH 需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.4
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.4
+dsh --profile pi-tui
+```
+
+已发布的 `0.5.3` 仍可与 `0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4` 配对使用。旧版本
+DSH 的配对关系不变：`@deepseek-ai/dsh@0.2.0-rc.2` 使用
+`@xmoon76/dsh-pi-tui@0.5.1` 或 `@xmoon76/dsh-pi-tui@0.5.2-rc.1`；
+`@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
+`@xmoon76/dsh-pi-tui@0.5.0`，`@deepseek-ai/dsh@0.1.7-rc.1` 使用
+`@xmoon76/dsh-pi-tui@0.4.8`。
+
+### 变更
+
+- **Settings 重构为唯一的全屏工作区。** `/settings` 与 `/status` 现在打开同一个
+  工作区，默认落在 About 主页；宽/中屏是分类栏加内容栏，窄屏（<76 列）直接显示
+  About。一级分类固定为 About / Models / Account / Agent / Appearance / Conversation /
+  Input & Terminal / Tools / Plugins，只有扩展设置注册表存在条目时才追加
+  Extensions；`Tab`/`Shift+Tab` 切换区域，`←`/`Esc` 逐层返回。所有页面共用同一
+  标题、状态与底部操作栏，`/plugins`、`/footer`、`/statusline` 和裸 `/keybindings`
+  都是工作区内深链。About 显示版本、后端、当前会话身份、整会话统计、TTFB/吞吐与
+  Context 占用，支持 `c` 复制所选事实、`C` 复制整份报告、`r` 刷新。旧主设置编辑器、
+  独立插件全屏页与旧 `/status` 页面均已移除，配置行不再有逐行复制按钮。
+
+- **tmux 图片改为默认自动尝试准入。** 满足严格条件的 tmux 不再需要显式设置环境
+  变量；`PI_TUI_TMUX_KITTY_IMAGES=0` 或 `PI_IMAGE_PROTOCOL=none/0` 仍可关闭。不会
+  自动修改 tmux 配置。
+
+### 新增
+
+- **Models 与 Account 工作区。** Models 列出 Host provider 目录、API key 是否存在
+  （不是连通性测试）、provider 详情、遮蔽输入、清除确认、Add Provider 向导与
+  provider 原生登录；首页只列已配置 provider，未配置的进入可选目录，目录与凭据在
+  首帧后一次读取，目录大时不阻塞按键。Account 显示登录状态、浏览器授权 URL、SSH
+  隧道提示、独立钱包、取消当前尝试、刷新与二次确认退出登录。DeepSeek Account 登录
+  使用官方 `host-webserver` 的 `127.0.0.1:0` 回环回调，TUI 不接触 token/grant，
+  `--help` 不监听端口；`/login`、`/logout` 直接打开对应页面深链。
+
+- **Settings 现在可直接编辑所有配置。** Appearance 的 Icon style 与 Status line
+  mode；Conversation 的 Transcript detail、Thinking detail、Progress updates、
+  Response style、Submit while busy、Git attribution；Input & Terminal 的 Home/End
+  键、Fullscreen、滚轮行数、通知、Terminal progress、Footer 布局与 Keyboard
+  shortcuts；Agent 的审批策略、默认权限、子代理模型白名单与选择、用户 shell 沙箱；
+  Tools 的 Web Search / Fetch 与 Visual tools；Extensions 按插件分组的动态设置。
+  写入都要显式确认，并按权威回读显示 `Verified`、`Not saved` 或 `Outcome unknown`；
+  `Fullscreen` 偏好保存后在正常退出 Settings 时才切屏。
+
+- **审批改为编辑器席位的阻塞式操作面板。** 完整 Reason/Arguments 在可滚动正文中
+  阅读（不再只显示前六行），`y` 允许一次、`n` 拒绝、`Esc`/`Ctrl+C` 取消、`c`
+  复制原始参数、`e` 展开。全屏可点击实际绘制的 Allow once / Reject / Cancel 并
+  滚轮滚动，普通模式保持键盘；窄窗口显示真实精简内容或 `Resize to inspect more`，
+  不会画出被裁掉的决定。
+
+- **终端图片按真实能力准入。** 直连 Kitty、Ghostty、WezTerm、Warp、Tern 及显式
+  `PI_IMAGE_PROTOCOL=kitty` 的终端共用同一套受管图片生命周期；Zellij 向当前窗格
+  实时查询能力；tmux 在 `allow-passthrough=all`、真实身份与唯一显示客户端检查通过
+  后自动尝试 Unicode placeholder，未知终端需返回匹配的 `e=T,U=1;OK`。无回复、普通
+  `OK`、错误或超时保持纯文字，不退回旧转义路径。tmux Control Mode 客户端不计入显示
+  客户端；`PI_IMAGE_PROTOCOL=none/0` 与 `PI_TUI_TMUX_KITTY_IMAGES=0` 仍可关闭，旧但
+  支持 U1 的终端可设置 `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1`。
+
+- **Kitty 终端支持 JPEG/WebP，草稿与查看器都有预览。** Transcript 缩略图、草稿
+  预览卡和全屏查看器统一使用一份受限 PNG 派生（WebP 取首帧、按 EXIF 摆正、最长边
+  768 像素）；信息行保留原始名称、尺寸、格式与字节数。草稿最后一张图片显示为有界
+  卡片，全屏 `x` 只删除当前占位符、`Ctrl+-` 可撤销；全屏信息行 `[-]`/`[+]` 只折叠
+  该图，点击正文打开只读查看器；新增 `/view-image` 列出当前窗口图片，`Enter` 查看、
+  `Esc back` 返回原列表。
+
+- **Ctrl+V、`/attach`、`/image` 统一到当前编辑器，并支持正文内联补全。** 连续粘贴
+  按触发顺序落稿，文字插在当前光标处、不发送不覆盖，图片得到规范占位符；会话、owner
+  或编辑器座位变化后旧结果不写入新草稿。`/attach`、`/image` 与 Ctrl+V 共用同一编辑器
+  座位、草稿存储和 Client cwd/文件限制，TSP 也可执行。在正文任意位置输入 `/ima`、
+  `/att` 会出现内联下拉，选中文件只替换当前片段，前后文不变，不发送草稿，一次 Undo
+  回到路径文本。
+
+- **交付文件尾部与 `/deliverables` 面板。** 最终回答的 `present` 文件以最多四项、
+  每项两行的紧凑尾部显示（相对当前显示会话工作区的路径 + 描述），超出显示
+  `+N more · /deliverables`；全屏可点击 `Browse all` 与逐文件 `Details`。
+  `/deliverables` 含 Files/Turns/Details，支持 `↑↓`、`Enter`、`/` 过滤、`T` 切换
+  Turn、`C` 复制原始 Host 路径、`Esc` 返回/关闭；Details 读取 Host 文本一页 120 行，
+  二进制/文档后缀不读字节，文件变化从头重启；面板内文字可用鼠标选中复制，面板居中
+  且 resize 保留状态。
+
+- **图表/SVG 工具、Visual tools 开关与发布。** 新增常驻 `dsh_pi_tui_chart`
+  （bars/spark，2–12 个带标签数值与可选单位）与 `dsh_pi_tui_svg`（受限安全子集的
+  静态 SVG）；结果显示在原 Tool Card，Tern 支持时原生绘制，否则显示精确数值/描述或
+  受限栅格 PNG。`Settings → Tools → Visual tools`（默认 On）一处开关同时管理
+  `dsh_pi_tui_chart`、`dsh_pi_tui_svg` 与 `present_visual`。模型可用
+  `visual-ref-v1:sv1_…` 发布本会话更早步骤的 1–8 个成功图表/SVG；发布不新增会话
+  事件，已发布图在最终回答原位插入或按顺序附在末尾，同一 ref 最多一次。PiTUI 提供
+  `Copy Data`、`View`/`Copy SVG`、`Alt+V`/`Alt+C`/`Alt+O` 和全屏 SVG 阅读器；
+  `/copy` 复制显示正文（不含已消费的 marker 行）。
+
+- **实验性 TSP renderer 支持原生工具卡、Work Hub、图片与已发布图。** 工具头按工具
+  声明的 kind 显示 path/pattern，`run_code` 子调用显示为 `Child calls · N` 树，
+  流式参数显示 `Preparing <Tool>…` 行，工具结果图片按块顺序原生显示；`/tasks`、
+  `/subagents` 打开 Work Hub（Needs attention / Subagents / Jobs），`Enter`/
+  `View details` 打开只读 Work Details，`Back` 返回同一选择；Ctrl+V 图片、Dock
+  草稿缩略图与历史图片按原顺序显示，已发布图表/SVG 在最终回答内原位显示并带
+  `Copy` 按钮，`Alt+V`/`Alt+C` 选择与复制。
+
+### 修复
+
+- **热重载不再误退出运行中的 TUI。** 重新挂载的启动行此前会把“启动器早已就绪”误判
+  为“TUI 没有挂载”，以 `required TUI surface did not mount` 结束进程；现在只有真正
+  见证过该次启动的行才做判定，冷启动缺失仍会非零退出并给出提示。
+
+- **Shift+Tab 切换权限预设不再报错。** 之前官方 `/permission` 收到 `undefined`
+  信号，抛 `Cannot read properties of undefined (reading 'aborted')`，预设不会切换；
+  现在使用既有生命周期 AbortSignal，Direct 与 Remote 行为一致。
+
+- **旧扩展句柄重复释放不再删除新注册。** 主题、自动补全、键盘快捷键、消息/工具
+  渲染器与编辑器六类 Stable 注册现在一次注册只释放一次；旧句柄显式 `dispose()`、
+  插件 Fiber 卸载和注册失败回收共用同一个一次性清理，新注册及其健康记录、主题卸载
+  通知都不再被旧句柄影响。
+
 ## [0.5.3] - 2026-10-20
 
 ### 安装与版本对应
@@ -1504,7 +1628,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3
 [0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1
 [0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1

@@ -191,6 +191,33 @@ export async function waitFor(label: string, predicate: () => boolean, timeoutMs
 }
 
 /**
+ * Wait until the TTY input is DELIVERABLE.
+ *
+ * The scripted pane is an `EventEmitter`: a `data` event with no listener is
+ * DROPPED. The shipped Tern SDK attaches its stdin listener only inside
+ * `session.handshake()` — i.e. AFTER the hello reply — so a key typed before
+ * that point is LOST, not merely unhandled.
+ *
+ * This is therefore the AUTHORITARY input-delivery boundary, and it is
+ * observable without mutating anything: the SDK's own listener registration is
+ * the fact.
+ *
+ * It is NOT a readiness proof for the whole application: the ONE input bind
+ * (`surface.bindRendererInput()`) runs later, and the renderer HOLDS the keys
+ * that arrive between the attach and the bind, replaying them in arrival
+ * order at the bind. So a key delivered after this wait is safe even if the
+ * bind has not committed yet.
+ */
+export async function waitForInputDelivery(pane: TspPane, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (pane.input.listenerCount('data') > 0) return
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
+  throw new Error('timed out waiting for the tty input to become deliverable')
+}
+
+/**
  * Mount the official Direct Host composition and TUI runner. The default uses
  * a scripted TSP pane; `externalTern: true` keeps the real Tern-owned stdio.
  */
@@ -228,6 +255,15 @@ export interface DirectTspFixtureOptions {
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
+  /**
+   * Advertise the NATIVE IMAGE capability on the scripted pane (the `image`
+   * kind + the `blobs` feature): a pane that does not advertise them can
+   * never carry a tool-result image, so the qualification of that path needs
+   * a pane that does.
+   */
+  readonly nativeImages?: boolean
+  /** Advertise the NATIVE CHART kind on the scripted pane (PR-D). */
+  readonly nativeChart?: boolean
   /** Reuse isolated persisted session files across a clean runner remount. */
   readonly workRoot?: string
   /** Replace the historical default stand-in with the official isolated
@@ -281,6 +317,14 @@ export interface DirectTspFixtureOptions {
     readonly permissionPresets?: boolean
     /** `dsh-authorization` (the provider sign-in flow targets). */
     readonly authorization?: boolean
+    /**
+     * B3-A3: mount the official `@deepseek-ai/dsh-subagent` runtime (the SAME
+     * plugin row the shipped base layer mounts). The Direct Task read composes
+     * `subagents.listDescendants`, so without this runtime the Task Center has
+     * NO descendant half at all — the production bundle always mounts it, and a
+     * suite that proves the real `/tasks` roster must reproduce that row.
+     */
+    readonly subagentRuntime?: boolean
   }
   /**
    * Negative composition: mount no credentials provider at all, so the
@@ -294,13 +338,26 @@ export interface DirectTspFixtureOptions {
    * own switch, so a Session's EFFECTIVE directory is a real Host fact.
    */
   readonly workingDirectory?: boolean
+  /**
+   * The renderer the runner boots under. The default `'tsp'` installs the
+   * scripted Tern pane. `'pi-tui'` installs NO pane and leaves the process tty
+   * to the test, which must install its `VirtualTerminal` through
+   * `runner-harness.installVirtualProcessTerminal` BEFORE calling this factory
+   * (the same physical-terminal stand-in every PiTui runner suite uses).
+   */
+  readonly renderer?: 'tsp' | 'pi-tui'
 }
 
 export interface DirectTspExternalFixture extends Omit<DirectTspFixture, 'pane'> {}
 
+type DirectTspPiTuiOptions = DirectTspFixtureOptions & { readonly renderer: 'pi-tui' }
 type DirectTspExternalOptions = DirectTspFixtureOptions & { readonly externalTern: true }
-type DirectTspScriptedOptions = DirectTspFixtureOptions & { readonly externalTern?: false }
+type DirectTspScriptedOptions = DirectTspFixtureOptions & { readonly externalTern?: false; readonly renderer?: 'tsp' }
 
+export function createDirectTspFixture(
+  life: import('./temp-lifecycle.ts').TestLifecycle,
+  options: DirectTspPiTuiOptions,
+): Promise<DirectTspExternalFixture>
 export function createDirectTspFixture(
   life: import('./temp-lifecycle.ts').TestLifecycle,
   options: DirectTspExternalOptions,
@@ -316,17 +373,20 @@ export async function createDirectTspFixture(
   const workRoot = options.workRoot ?? life.tempDir('dsh-b2-direct-')
   const anchorDir = join(workRoot, 'anchor')
   mkdirSync(anchorDir, { recursive: true })
-  const pane = options.externalTern === true
+  const pane = options.externalTern === true || options.renderer === 'pi-tui'
     ? undefined
     : installTspPane({
         modelPicker: options.modelPicker,
         presetPicker: options.presetPicker,
         sessionBrowser: options.sessionBrowser,
+        nativeImages: options.nativeImages,
+        nativeChart: options.nativeChart,
       })
   // OWNERSHIP, not success-contingency: scripted mode replaces the PROCESS tty
-  // and clears five env vars; external-Tern mode must leave the Tern-owned tty
-  // and its injected environment untouched. In either mode, setup failures must
-  // restore the resources this fixture itself acquired.
+  // and clears five env vars; external-Tern and PiTui modes must leave the
+  // tty (Tern-owned / test VirtualTerminal) and its injected environment
+  // untouched. In every mode, setup failures must restore the resources this
+  // fixture itself acquired.
   const cleanup: Array<() => Promise<void> | void> = []
   /** Ownership cleanups run LAST, LIFO, EXACTLY ONCE (success or reject). */
   const runSetupCleanup = async (): Promise<void> => {
@@ -444,7 +504,7 @@ export async function createDirectTspFixture(
     new TypertGatewayService(gatewayCtx, { websocketHeartbeatIntervalMs: 50 })
   })
 
-  process.env.DSH_PI_TUI_RENDERER = 'tsp'
+  process.env.DSH_PI_TUI_RENDERER = options.renderer === 'pi-tui' ? 'pi-tui' : 'tsp'
   process.env.DSH_PI_TUI_LOG = join(workRoot, 'diag.log')
   // Isolate the DSH home for this fixture: the input-history and session
   // stores must land under the work root, never in the developer's real
@@ -569,6 +629,14 @@ export async function createDirectTspFixture(
     // through (`flowForRoute`), and whose keyless login stores a RECORD.
     const { default: AuthorizationService } = await import('@deepseek-ai/dsh-authorization')
     await ctx.plugin(AuthorizationService as never, undefined as never)
+  }
+  if (officialServices.subagentRuntime === true) {
+    // B3-A3: the official subagent runtime row the shipped base layer mounts. It
+    // must precede the runner, because the composition root reads `ctx.get(
+    // 'subagents')` when it builds the Direct Task source. Its `inject` names
+    // `workingDirectory`, so a composition opting in must mount that row too.
+    const { default: SubagentRuntime } = await import('@deepseek-ai/dsh-subagent')
+    await ctx.plugin(SubagentRuntime as never, { maxDepth: 3 } as never)
   }
   const runnerFiber = await ctx.plugin(pluginCtx => applyRunner(
     pluginCtx,

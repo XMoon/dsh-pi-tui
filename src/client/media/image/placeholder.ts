@@ -23,6 +23,63 @@ export type DraftSegment =
   | { readonly type: 'image'; readonly image: DraftImage }
 
 /**
+ * One canonical placeholder occurrence in the draft text. `ordinal` is the
+ * 0-based rank among ALL canonical occurrences (a repeated token is a
+ * distinct occurrence), matching the editor's visual order. The offsets are
+ * UTF-16 string offsets into the exact text passed in.
+ */
+export interface DraftImageOccurrence {
+  readonly image: DraftImage
+  readonly startOffset: number
+  readonly endOffset: number
+  readonly ordinal: number
+}
+
+/**
+ * Scan the draft text for live canonical placeholder occurrences. This is
+ * the ONE parser behind both submission expansion and the read-only
+ * preview/removal projection: it uses the exact same strict lookup (the
+ * current staged placeholder), earliest-occurrence ordering and insertion
+ * order tie-break, so the preview can never disagree with what would be
+ * submitted.
+ * @param text - the editor draft.
+ * @param store - the live draft store (structural; only `values()` is read).
+ * @returns every occurrence in text order; a repeated token yields one entry
+ *   per appearance.
+ */
+export function selectDraftImageOccurrences(
+  text: string,
+  store: DraftImageStoreLike,
+): readonly DraftImageOccurrence[] {
+  const candidates = store.values()
+  if (candidates.length === 0 || text === '') return []
+  const occurrences: DraftImageOccurrence[] = []
+  let cursor = 0
+  while (cursor < text.length) {
+    // Earliest placeholder occurrence from the current cursor wins; ties are
+    // broken by insertion order (values() is the store's iteration order).
+    let bestIndex = -1
+    let best: DraftImage | undefined
+    for (const image of candidates) {
+      const index = text.indexOf(image.placeholder, cursor)
+      if (index !== -1 && (best === undefined || index < bestIndex)) {
+        bestIndex = index
+        best = image
+      }
+    }
+    if (best === undefined) break
+    occurrences.push({
+      image: best,
+      startOffset: bestIndex,
+      endOffset: bestIndex + best.placeholder.length,
+      ordinal: occurrences.length,
+    })
+    cursor = bestIndex + best.placeholder.length
+  }
+  return occurrences
+}
+
+/**
  * Expand the draft text into ordered segments: every canonical placeholder
  * whose draft is still staged becomes an image segment, everything else
  * stays text. Adjacent text segments are merged and empty text segments are
@@ -36,30 +93,18 @@ export function expandImagePlaceholders(
   text: string,
   store: DraftImageStoreLike,
 ): readonly DraftSegment[] {
-  const candidates = store.values().map(image => ({ image, placeholder: image.placeholder }))
-  if (candidates.length === 0) {
+  const occurrences = selectDraftImageOccurrences(text, store)
+  if (occurrences.length === 0) {
     return text === '' ? [] : [{ type: 'text', text }]
   }
   const segments: DraftSegment[] = []
   let cursor = 0
-  while (cursor < text.length) {
-    // Earliest placeholder occurrence from the current cursor wins; ties are
-    // broken by insertion order (values() is the store's iteration order).
-    let bestIndex = -1
-    let best: DraftImage | undefined
-    for (const candidate of candidates) {
-      const index = text.indexOf(candidate.placeholder, cursor)
-      if (index !== -1 && (best === undefined || index < bestIndex)) {
-        bestIndex = index
-        best = candidate.image
-      }
+  for (const occurrence of occurrences) {
+    if (occurrence.startOffset > cursor) {
+      segments.push({ type: 'text', text: text.slice(cursor, occurrence.startOffset) })
     }
-    if (best === undefined) break
-    if (bestIndex > cursor) {
-      segments.push({ type: 'text', text: text.slice(cursor, bestIndex) })
-    }
-    segments.push({ type: 'image', image: best })
-    cursor = bestIndex + best.placeholder.length
+    segments.push({ type: 'image', image: occurrence.image })
+    cursor = occurrence.endOffset
   }
   if (cursor < text.length) {
     segments.push({ type: 'text', text: text.slice(cursor) })

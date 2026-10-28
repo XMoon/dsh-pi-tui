@@ -95,8 +95,12 @@ export default async function (h) {
   const allIds = frameItems(frame).map((item) => item.id)
   const projected = await waitFrame(h, (value) => frameItems(value).some((item) => item.id === 'session:session-long'
     && String(item.label).startsWith('Needle long session title')), 'projected title appears')
-  const longRow = cardRows(h.snapshot()).find((node) => h.descendantsText(node).startsWith('Needle long session title'))
-  const pointerSelected = longRow === undefined ? false : await h.click(h.snapshot().chains, longRow)
+  // One snapshot supplies BOTH the node and the chains the oracle reads: the
+  // oracle indexes by node identity, so chains from another snapshot would
+  // silently drop every clipping ancestor.
+  const longRowSnap = h.snapshot()
+  const longRow = cardRows(longRowSnap).find((node) => h.descendantsText(node).startsWith('Needle long session title'))
+  const pointerSelected = longRow === undefined ? false : await h.click(longRowSnap.chains, longRow)
   const pointerApplied = await waitFrame(h, (value) => value?.selected === 'session:session-long', 'real pointer selects long row')
   h.check('the real client click on an unselected row changes selection only',
     projected && pointerSelected && pointerApplied && lastFrame(h)?.current?.[0] === 'session:session-current'
@@ -154,8 +158,9 @@ export default async function (h) {
   }))
   h.capture('session-browser-footer-current-disabled-400x600', 'Current Resume is disabled; reason is action metadata, not visible in capture')
 
-  const resumeRow = cardRows(h.snapshot()).find((node) => h.descendantsText(node).startsWith('Needle long session title'))
-  const resumeRowClicked = resumeRow !== undefined && await h.click(h.snapshot().chains, resumeRow)
+  const resumeRowSnap = h.snapshot()
+  const resumeRow = cardRows(resumeRowSnap).find((node) => h.descendantsText(node).startsWith('Needle long session title'))
+  const resumeRowClicked = resumeRow !== undefined && await h.click(resumeRowSnap.chains, resumeRow)
   const resumeRowSelected = await waitFrame(h, (value) => value?.selected === 'session:session-long', 'select non-current Resume target')
   h.check('pointer selection of a listed non-current row does not dispatch Resume',
     resumeRowClicked && resumeRowSelected && lastFrame(h)?.current?.[0] === 'session:session-current'
@@ -165,8 +170,9 @@ export default async function (h) {
   await h.key('Tab', 400)
   frame = lastFrame(h)
   const enabledResumeAction = frame?.actions?.find((action) => String(action.label).startsWith('Resume'))
-  const enabledResumeButton = nodesWith(h.snapshot(), 'pk-btn').find((node) => h.descendantsText(node).replace(' [Enter]', '') === 'Resume')
-  const resumeButtonContained = enabledResumeButton !== undefined && containedXY(h.snapshot().chains, enabledResumeButton)
+  const resumeBtnSnap = h.snapshot()
+  const enabledResumeButton = nodesWith(resumeBtnSnap, 'pk-btn').find((node) => h.descendantsText(node).replace(' [Enter]', '') === 'Resume')
+  const resumeButtonContained = enabledResumeButton !== undefined && containedXY(resumeBtnSnap.chains, enabledResumeButton)
   h.check('a listed non-current row enables the primary Resume footer inside the Picker',
     frame?.selected === 'session:session-long'
     && enabledResumeAction?.disabled === undefined
@@ -180,7 +186,7 @@ export default async function (h) {
   }))
   h.capture('session-browser-footer-resume-enabled-400x600', 'non-current Resume is enabled and primary')
   const footerResumeClicked = enabledResumeButton !== undefined
-    && await h.click(h.snapshot().chains, enabledResumeButton)
+    && await h.click(resumeBtnSnap.chains, enabledResumeButton)
   const footerIntentSeen = await waitFrame(h, () => records(h).some((entry) => entry.resumeIntent?.source === 'footer'), 'real footer Resume click')
   const footerPending = await waitFrame(h, (value) => value?.actions?.some((action) =>
     String(action.label).startsWith('Resume') && action.disabled === 'Switching sessions…') === true, 'Resume pending state')
@@ -211,9 +217,10 @@ export default async function (h) {
     && String(contentCard?.detail).includes('Truncated Host excerpt')
     && !String(contentCard?.detail).toLowerCase().includes('needle'),
     JSON.stringify({ longCard, contentCard }))
-  const clientContentRow = cardRows(h.snapshot()).find((node) => h.descendantsText(node).includes('A title without the search term'))
+  const contentRowSnap = h.snapshot()
+  const clientContentRow = cardRows(contentRowSnap).find((node) => h.descendantsText(node).includes('A title without the search term'))
   h.check('the real Tern client paints the content-only card whose snippet omits the literal query',
-    clientContentRow !== undefined && containedXY(h.snapshot().chains, clientContentRow),
+    clientContentRow !== undefined && containedXY(contentRowSnap.chains, clientContentRow),
     clientContentRow === undefined ? 'content-only card absent from client tree' : h.descendantsText(clientContentRow))
   h.capture('session-browser-cards-400x600', 'global Cards include a Host-authoritative content-only hit')
 

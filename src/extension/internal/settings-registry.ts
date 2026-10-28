@@ -33,6 +33,12 @@ interface SettingRecord {
   readonly values: readonly string[]
   readonly order: number
   readonly owner: string
+  /** C2-R6: the REGISTRATION identity of this record within this registry
+   *  instance. Every `register()` allocates a new one, so a same-id
+   *  re-registration (or a same-owner HMR reload) is a DIFFERENT setting.
+   *  It is internal — `snapshot()` never exposes it and no Stable API type
+   *  carries it — and is only ever compared, never ordered or displayed. */
+  readonly registrationToken: number
   currentValue: string
   /** P2-01: the latest APPLY epoch for this row — a slow earlier change
    * must never overwrite a newer completed one (last-completion-wins
@@ -50,6 +56,8 @@ interface SettingRecord {
 export class SettingsRegistry {
   private readonly records = new Map<string, SettingRecord>()
   private revision = 0
+  /** The per-registration token source (see {@link SettingRecord.registrationToken}). */
+  private nextRegistrationToken = 0
   private readonly onInvalidate: () => void
 
   constructor(onInvalidate: () => void = () => {}) {
@@ -67,26 +75,34 @@ export class SettingsRegistry {
       throw new Error(`duplicate settings row id "${contribution.id}"`)
     }
     if (contribution.label === '') throw new Error('settings row label must not be empty')
-    this.records.set(contribution.id, {
+    this.nextRegistrationToken += 1
+    const record: SettingRecord = {
       id: contribution.id,
       label: contribution.label,
       description: contribution.description,
       values: contribution.values ?? [],
       order: contribution.order ?? 0,
       owner,
+      registrationToken: this.nextRegistrationToken,
       currentValue: contribution.currentValue,
       applyEpoch: 0,
       onChange: contribution.onChange,
       disposed: false,
-    })
+    }
+    this.records.set(contribution.id, record)
     this.revision += 1
     this.onInvalidate()
-    const handle: TuiSettingHandle = {
+    // The handle is bound to the RECORD it registered, never to the bare id:
+    // a late handle of an unloaded fiber must stay inert even when a NEW
+    // registration reused the same id (the C2-R6 HMR fence).
+    return {
       id: contribution.id,
-      setValue: (value: string) => this.setValue(contribution.id, value),
-      dispose: () => this.dispose(contribution.id),
+      setValue: (value: string) => {
+        if (this.records.get(contribution.id) !== record) return
+        this.setValue(contribution.id, value)
+      },
+      dispose: () => this.disposeRecord(record),
     }
-    return handle
   }
 
   /** Update one row's current value (live panel refresh). */
@@ -101,18 +117,25 @@ export class SettingsRegistry {
   /** Remove one row by id (idempotent). */
   dispose(id: string): void {
     const record = this.records.get(id)
-    if (record === undefined || record.disposed) return
-    record.disposed = true
-    this.records.delete(id)
-    this.revision += 1
-    this.onInvalidate()
+    if (record !== undefined) this.disposeRecord(record)
   }
 
   /** Dispose every row owned by one fiber (owner unload). */
   disposeOwner(owner: string): void {
-    for (const [id, record] of [...this.records]) {
-      if (record.owner === owner) this.dispose(id)
+    for (const record of [...this.records.values()]) {
+      if (record.owner === owner) this.disposeRecord(record)
     }
+  }
+
+  /** Remove ONE record by its captured identity: a disposed record or an id
+   *  now owned by a NEWER registration is inert (a late fiber teardown must
+   *  never unload the replacement). */
+  private disposeRecord(record: SettingRecord): void {
+    if (record.disposed || this.records.get(record.id) !== record) return
+    record.disposed = true
+    this.records.delete(record.id)
+    this.revision += 1
+    this.onInvalidate()
   }
 
   /** The owning fiber of one setting id (the health bridge resolves
@@ -132,8 +155,20 @@ export class SettingsRegistry {
    * plugin REJECTION (a real failure: record health, revert, notify) from
    * a STALE or GONE result (a newer apply superseded this one, or the row
    * was disposed mid-apply: the plugin never refused — recording a
-   * failure would be a false alarm; the review's P2). */
-  applyDetailed(id: string, value: string): Promise<SettingApplyOutcome> {
+   * failure would be a false alarm; the review's P2).
+   *
+   * C2-R6: `expectedRegistrationToken` (used ONLY by this concrete registry's
+   * protected settings consumer) fences a confirmation to the registration it
+   * was made for. A mismatched token is `gone` BEFORE any callback runs, so a
+   * same-id replacement never receives an old choice; the original two-argument
+   * call sites keep their semantics unchanged. */
+  applyDetailed(id: string, value: string, expectedRegistrationToken?: number): Promise<SettingApplyOutcome> {
+    if (expectedRegistrationToken !== undefined) {
+      const record = this.records.get(id)
+      if (record === undefined || record.disposed || record.registrationToken !== expectedRegistrationToken) {
+        return Promise.resolve('gone')
+      }
+    }
     return this.applyInternal(id, value)
   }
 
@@ -181,7 +216,7 @@ export class SettingsRegistry {
     return 'accepted'
   }
 
-  /** Whether any row is live (health /status). */
+  /** Whether any row is live (Plugin Manager diagnostics). */
   hasAny(): boolean {
     for (const record of this.records.values()) {
       if (!record.disposed) return true
@@ -189,7 +224,7 @@ export class SettingsRegistry {
     return false
   }
 
-  /** An immutable snapshot (diagnostics + /status). */
+  /** An immutable snapshot (Plugin Manager diagnostics). */
   snapshot(): TuiSettingsRegistrySnapshot {
     const rows = this.rows().map(record => ({
       id: record.id,

@@ -7,7 +7,7 @@
  * production source, and no divergence status is implied by its numbers.
  *
  * The durable record of the measured verdicts lives in
- * `docs/perf-baseline.md` ("DIV cache A/B evidence: X039 / X014 / X035");
+ * `docs/guides/development.md` (benchmark/profiler procedure);
  * per-round raw data is an untracked investigation artifact under `temp/perf/`.
  *
  * Variants are built from the SAME commit in throwaway worktrees, each
@@ -785,7 +785,7 @@ async function runOrchestrator(raw: Record<string, string>): Promise<void> {
 	})
 	if (variants.length === 0) throw new Error('--variants LABEL=PATH,... is required in orchestrator mode')
 	const rounds = ranged(Number(raw.rounds ?? '7'), 1, MAX_ROUNDS, 'rounds')
-	// Untracked investigation artifact by convention (see docs/perf-baseline.md):
+	// Untracked investigation artifact by convention (see docs/guides/development.md):
 	// the durable verdicts live in the doc, the raw rounds stay out of git.
 	const outDir = resolve(raw.out ?? join(REPO_ROOT, 'temp', 'perf', 'div-cache-ab'))
 	mkdirSync(outDir, { recursive: true })

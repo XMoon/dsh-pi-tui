@@ -1,12 +1,12 @@
 {
   "issue": 26,
   "consumer": "pi2dsh",
-  "pi2dshVersion": "0.24.0",
-  "dshVersion": "0.1.2-alpha.4",
+  "pi2dshVersion": "0.27.0",
+  "dshVersion": "0.2.1-rc.2",
   "contracts": [
     "root.LOCAL_COMMANDS",
     "extensions/unstable.UNSTABLE_API_LEVEL=1",
-    "apiVersion=1",
+    "apiVersion=2",
     "capability:unstable.surface.handle",
     "chrome.footer.status",
     "surface.mountComponent",

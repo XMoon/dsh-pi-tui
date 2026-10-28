@@ -115,10 +115,10 @@ export class CommandBridge {
     }
     // The removed `execution` ownership metadata must never be SILENTLY
     // reinterpreted: a stale plugin still declaring it is rejected loudly
-    // (breaking API, explicit migration — see docs/extension-api.md).
+    // (breaking API, explicit migration — see docs/extensions/stable.md).
     if ('execution' in spec) {
       throw new Error(
-        `command contribution "${spec.name}" declares the removed 'execution' ownership metadata — a contribution is a client-owned command now; drop 'execution' and declare 'handler' (see docs/extension-api.md)`,
+        `command contribution "${spec.name}" declares the removed 'execution' ownership metadata — a contribution is a client-owned command now; drop 'execution' and declare 'handler' (see docs/extensions/stable.md)`,
       )
     }
     // P1-04: the host-owned catalog is authoritative — an EXACT collision

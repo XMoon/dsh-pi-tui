@@ -4,7 +4,7 @@
  * semantic contract as `src/runtime/direct/config-direct.ts`; no Remote-only
  * Config semantics and no Direct fallback exist.
  *
- * Published mapping (see docs/client-server-migration.md):
+ * Published mapping (see docs/architecture/host-client.md):
  *
  * ```text
  * TUI settings / footer trust / custom items / providers / permissions /
@@ -42,7 +42,7 @@
  * @module @xmoon76/dsh-pi-tui/runtime/remote/config-remote
  */
 
-import { credentialOptionsFor, providerOptionsFor, type ProviderCatalogEntry, type ProviderOption } from '../../domain/catalog/provider.ts'
+import { getPath, providerOptionsFor, providerProfileProjectionOf, type ProviderCatalogEntry, type ProviderOption } from '../../domain/catalog/provider.ts'
 import {
   resolveTrustedFooterCommand,
   resolveUserCommandItemActivationIds,
@@ -51,6 +51,11 @@ import {
 } from '../../domain/footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
 import type {
+  AccountBalanceOutcome,
+  AccountClientMetadata,
+  AccountConfig,
+  AccountProfileOutcome,
+  AccountView,
   AuthorizationConfig,
   AuthorizationFlowEvent,
   AuthorizationFlowTarget,
@@ -62,7 +67,10 @@ import type {
   FooterCustomItemsRaw,
   PermissionConfig,
   PresetDefaultConfig,
+  ProviderConfigGuide,
+  ProviderCatalogSnapshot,
   ProviderProfileConfig,
+  ProviderProfileFacts,
   SubagentAllowedModelRoute,
   SubagentModelSelectionConfig,
   WebProviderConfig,
@@ -70,6 +78,8 @@ import type {
   TuiSettingsConfig,
   TuiSettingsDoc,
   ConfigReadiness,
+  VisualToolsConfig,
+  VisualToolsState,
 } from '../config-port.ts'
 import { SupersededReadError } from '../read-error.ts'
 import type { RemoteCommandsSource } from './host-command-remote.ts'
@@ -203,6 +213,7 @@ const PROVIDER_SETTINGS_NS = 'llm-pi-ai'
 const PERMISSION_SETTINGS_NS = 'permission'
 const PRESET_REGISTRY_NS = 'agent-preset-registry'
 const SUBAGENT_SETTINGS_NS = 'subagent-model-selection-settings'
+const VISUAL_TOOLS_NS = 'pi-tui-visual-tools'
 
 /** The provider route grammar the adapter-owned profile-slot rule enforces
  *  (same rule the Direct adapter applies). */
@@ -253,23 +264,6 @@ function detachedValue(value: unknown): unknown {
   }
 }
 
-/** Read the `llm-pi-ai` section's `providers` dict detached (the settings-only
- *  fallback the Direct adapter applies when the directory is unavailable). */
-function piAiProvidersOf(section: unknown): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
-  const record = plainRecord(section)
-  if (record === undefined) return undefined
-  const providers = plainRecord(record.providers)
-  if (providers === undefined) return undefined
-  const out: Record<string, { apiKeyEnv?: string } | undefined> = {}
-  for (const [route, profile] of Object.entries(providers)) {
-    const entry = plainRecord(profile)
-    out[route] = entry === undefined
-      ? (profile as { apiKeyEnv?: string } | undefined)
-      : { ...typeof entry.apiKeyEnv === 'string' ? { apiKeyEnv: entry.apiKeyEnv } : {} }
-  }
-  return out
-}
-
 /**
  * The forwarded-event seat MUST stay method-bound to its service: the Client
  * `$on` reads its own service state (`this.events`), so a detached reference
@@ -300,6 +294,14 @@ interface RemoteConfigSnapshot {
    *  failure keeps the LAST-KNOWN namespaces readable but non-current. */
   readonly settingsFailure: unknown
   readonly providers: readonly ProviderCatalogEntry[] | undefined
+  /**
+   * The provider-directory read failure, if the last directory read failed.
+   * `providers: undefined` alone cannot say WHY: the directory may be
+   * absent, or the read may have failed. A failed read keeps the LAST KNOWN
+   * directory readable and records the reason here, so a consumer can
+   * refuse to present a failed read as an authoritative catalog.
+   */
+  readonly providersFailure: string | undefined
   readonly permissionPresetNames: readonly string[]
   readonly permissionDefaultPreset: string | undefined
   readonly presetRosterDefault: string | undefined
@@ -468,6 +470,12 @@ class RemoteConfigMirror {
     return this.snapshot?.providers
   }
 
+  /** The provider-directory read failure of the last committed snapshot, if
+   *  the directory read failed. */
+  providersFailure(): string | undefined {
+    return this.snapshot?.providersFailure
+  }
+
   permissionPresetNames(): readonly string[] {
     return this.snapshot?.permissionPresetNames ?? []
   }
@@ -589,7 +597,13 @@ class RemoteConfigMirror {
         settingsFailure,
         providers: providersResult.ok && Array.isArray(providersResult.value)
           ? providersResult.value.map(copyProviderEntry)
-          : undefined,
+          // A failed directory read keeps the LAST KNOWN directory (like the
+          // settings slice) and records the reason: it is not an empty
+          // directory.
+          : this.snapshot?.providers,
+        providersFailure: providersResult.ok
+          ? undefined
+          : remoteFailureMessage(providersResult.error),
         permissionPresetNames: catalogResult.ok && Array.isArray(catalogResult.value?.options)
           ? catalogResult.value.options.flatMap(option => typeof option?.value === 'string' ? [option.value] : [])
           : [],
@@ -1016,26 +1030,128 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
    *  over its per-entry sections when present, the settings-only fallback
    *  otherwise (the same merge the Direct adapter wires). */
   listCredentialOptions(): readonly CredentialProviderOption[] {
+    // The routes' credential references come from the settings namespace. A
+    // failed directory read leaves the last-known ROUTES behind (after a
+    // reconnect they may belong to another Host), and a failed or stale
+    // settings read leaves the last-known REFERENCES behind. Neither may be
+    // offered as a route→reference authority: only the builtin (whose
+    // reference is a constant) stays addressable, and an explicitly typed
+    // reference still resolves. The Models page reports the failure instead.
+    if (this.mirror.providersFailure() !== undefined || this.mirror.readiness() !== 'ready') {
+      return providerOptionsFor([], () => undefined).map(option => remoteCredentialOptionOf(option))
+    }
     const directory = this.mirror.providers()
     if (directory !== undefined) {
-      return providerOptionsFor(directory, ns => this.mirror.namespace(ns)?.value)
+      return providerOptionsFor(directory, entry => providerProfileProjectionOf(this.remoteProfileOf(entry)))
         .map(option => remoteCredentialOptionOf(option))
     }
-    const settingsOnly = credentialOptionsFor(piAiProvidersOf(this.mirror.namespace(PROVIDER_SETTINGS_NS)?.value))
-    return settingsOnly.map((option, index) => {
-      const route = index === 0 ? 'deepseek-official' : option.label
-      return {
-        ...option,
-        route,
-        configured: true,
-        declared: false,
-        namesCredential: true,
-        group: 'configured' as const,
-        // The SAME adapter-owned rule the write paths apply: a hostile
-        // providers key (or the builtin) is never advertised as writable.
-        canProvisionProfile: canProvisionKeylessProfile(PROVIDER_SETTINGS_NS, ['providers', route], route),
+    return this.settingsOnlyCatalog().options
+  }
+
+  /**
+   * The ONE provider snapshot the Models page reads. The Remote mirror is
+   * already ONE committed snapshot (one settings describe + one directory
+   * read per generation), so the projection reads the mirror and never
+   * dispatches a second wire fetch. A directory the mirror could not read
+   * degrades to the settings-only fallback (the same fail-soft rule the
+   * Direct adapter applies).
+   */
+  readCatalog(): ProviderCatalogSnapshot {
+    const directory = this.mirror.providers()
+    const failure = this.mirror.providersFailure()
+    if (failure !== undefined) {
+      // A FAILED directory read is not an empty directory: the catalog is
+      // not authoritative, and the page must show the failure instead of a
+      // "no providers" list.
+      return { options: [], profiles: [], failure: `the provider directory could not be read: ${failure}` }
+    }
+    if (directory === undefined) return this.settingsOnlyCatalog()
+    const rawProfiles = new Map<string, unknown>()
+    for (const entry of directory) {
+      if (entry.provider.length === 0 || entry.settingsNs.length === 0) continue
+      rawProfiles.set(entry.provider, this.remoteProfileOf(entry))
+    }
+    const options = providerOptionsFor(directory, entry => providerProfileProjectionOf(this.remoteProfileOf(entry)))
+      .map(option => remoteCredentialOptionOf(option))
+    const profiles = options.map(option => {
+      const raw = rawProfiles.get(option.route)
+      // The deepseek official builtin is always addressable (the same rule
+      // the Direct adapter applies).
+      if (option.route === 'deepseek-official' && raw === undefined) {
+        return { route: option.route, configured: true, displayName: option.label, models: [] }
       }
+      return remoteProviderFactsOf(option.route, option.label, raw)
     })
+    const readiness = this.mirror.readiness()
+    if (readiness === 'unavailable') {
+      return { options: [], profiles: [], failure: 'the configuration mirror is unavailable' }
+    }
+    if (readiness === 'stale') {
+      // The last known values: the directory and the settings may come from
+      // different generations, so the snapshot is explicitly NOT current.
+      return { options, profiles, stale: true }
+    }
+    return { options, profiles }
+  }
+
+  /**
+   * The settings-only fallback (no mirrored directory): the conventional
+   * llm-pi-ai `providers` slot is the only profile location. Every profile
+   * route stays a provider — a keyless profile is still a CONFIGURED
+   * provider; the presence of a key is not the membership authority.
+   */
+  private settingsOnlyCatalog(): ProviderCatalogSnapshot {
+    const section = this.mirror.namespace(PROVIDER_SETTINGS_NS)?.value
+    const declared = plainRecord(plainRecord(section)?.providers)
+    const entries: ProviderCatalogEntry[] = declared === undefined
+      ? []
+      : Object.keys(declared).map(route => ({
+          provider: route,
+          displayName: route,
+          settingsNs: PROVIDER_SETTINGS_NS,
+          settingsPath: ['providers', route],
+        }))
+    const options = providerOptionsFor(entries, entry => providerProfileProjectionOf(declared?.[entry.provider]))
+      .map(option => remoteCredentialOptionOf(option))
+    const profiles = options.map(option => {
+      const raw = declared?.[option.route]
+      // The deepseek official builtin is always addressable (the same rule
+      // the Direct adapter applies).
+      if (option.route === 'deepseek-official' && raw === undefined) {
+        return { route: option.route, configured: true, displayName: option.label, models: [] }
+      }
+      return remoteProviderFactsOf(option.route, option.label, raw)
+    })
+    return { options, profiles }
+  }
+
+  /** One directory entry's profile value, read from the mirror's ONE
+   *  committed snapshot (no wire dispatch). */
+  private remoteProfileOf(entry: ProviderCatalogEntry): unknown {
+    const section = this.mirror.namespace(entry.settingsNs)?.value
+    return entry.settingsPath.length === 0 ? section : getPath(section, entry.settingsPath)
+  }
+
+  readProfile(route: string): ProviderProfileFacts {
+    const directory = this.mirror.providers()
+    if (directory !== undefined) {
+      const entry = directory.find(candidate => candidate.provider === route)
+      if (entry !== undefined) {
+        const section = this.mirror.namespace(entry.settingsNs)?.value
+        const profile = entry.settingsPath.length === 0 ? section : getPath(section, entry.settingsPath)
+        return remoteProviderFactsOf(route, entry.displayName, profile)
+      }
+    }
+    const section = this.mirror.namespace(PROVIDER_SETTINGS_NS)?.value as
+      | { providers?: Record<string, unknown> }
+      | undefined
+    return remoteProviderFactsOf(route, route, section?.providers?.[route])
+  }
+
+  configGuide(): ProviderConfigGuide {
+    // The wire carries no profile-file path; the UI states that manual-edit
+    // guidance is unavailable on this backend instead of guessing one.
+    return {}
   }
 
   async writeProfile(route: string, profile: Record<string, unknown>): Promise<void> {
@@ -1044,9 +1160,18 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
     if (!canProvisionKeylessProfile(PROVIDER_SETTINGS_NS, ['providers', route], route)) {
       throw new Error('invalid provider route')
     }
+    // The create is CONDITIONAL (the same rule the Direct adapter applies):
+    // ONE CURRENT read decides both the route's absence and the revision the
+    // write is checked against. A profile configured in between is refused by
+    // the Host's revision guard instead of being overwritten.
+    await this.mirror.ensureCurrent()
+    const descriptor = this.mirror.namespace(PROVIDER_SETTINGS_NS)
+    if (getPath(descriptor?.value, ['providers', route]) !== undefined) {
+      throw new Error(`provider route "${route}" already exists`)
+    }
     await this.mirror.mutate(PROVIDER_SETTINGS_NS, [
       { op: 'set', path: ['providers', route], value: profile },
-    ])
+    ], descriptor?.revision)
   }
 
   async writeKeylessProfile(route: string): Promise<{ kind: 'written' } | { kind: 'skipped'; reason: string }> {
@@ -1063,9 +1188,16 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
     if (directory === undefined) {
       // The directory is not mirrored (its read degraded): the conventional
       // llm-pi-ai slot applies, exactly like Direct's settings-only fallback.
+      // ONE current read: the route's profile presence AND the revision the
+      // write is checked against. A profile that appeared in the meantime is
+      // NOT overwritten — the write is skipped and the caller re-reads.
+      const descriptor = this.mirror.namespace(PROVIDER_SETTINGS_NS)
+      if (getPath(descriptor?.value, ['providers', route]) !== undefined) {
+        return { kind: 'skipped', reason: `provider route "${route}" already has a profile` }
+      }
       await this.mirror.mutate(PROVIDER_SETTINGS_NS, [
         { op: 'set', path: ['providers', route], value: {} },
-      ])
+      ], descriptor?.revision)
       return { kind: 'written' }
     }
     const entry = directory.find(candidate => candidate.provider === route)
@@ -1081,9 +1213,16 @@ class RemoteProviderProfileConfig implements ProviderProfileConfig {
     if (!canProvisionKeylessProfile(entry.settingsNs, path, route)) {
       return { kind: 'skipped', reason: `hostile or malformed directory entry for ${route}` }
     }
+    // ONE current read (see the conventional slot above): the write never
+    // overwrites a profile that exists now, and the revision fences a
+    // concurrent change between the check and the write.
+    const descriptor = this.mirror.namespace(entry.settingsNs)
+    if (getPath(descriptor?.value, path) !== undefined) {
+      return { kind: 'skipped', reason: `provider route "${route}" already has a profile` }
+    }
     await this.mirror.mutate(entry.settingsNs, [
       { op: 'set', path, value: {} },
-    ])
+    ], descriptor?.revision)
     return { kind: 'written' }
   }
 }
@@ -1313,7 +1452,7 @@ class RemotePermissionConfig implements PermissionConfig {
   async applyPermissionPreset(
     sessionId: string,
     presetId: string,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<PermissionPresetApplyOutcome> {
     // The preset id is validated against the composed catalog BEFORE it
     // reaches the official command line: an unknown (or hostile) id can never
@@ -1431,6 +1570,65 @@ function assertOfficialSubagentRoutes(routes: readonly SubagentAllowedModelRoute
   }
 }
 
+/**
+ * The Remote visual-tools switch: the mirrored `pi-tui-visual-tools` form
+ * section over the official generated settings remote. The write is a
+ * revision-checked path mutation and the mirror's post-settlement refresh is
+ * the only new authority — the mutate reply is never trusted as the new value.
+ *
+ * The Host registry itself is not observable on the wire, so `applied` stays
+ * `undefined`: the UI may present the committed configuration but must not
+ * claim the runtime registration took effect.
+ */
+class RemoteVisualToolsConfig implements VisualToolsConfig {
+  private readonly mirror: RemoteConfigMirror
+
+  constructor(mirror: RemoteConfigMirror) {
+    this.mirror = mirror
+  }
+
+  read(): VisualToolsState | undefined {
+    const view = this.mirror.namespace(VISUAL_TOOLS_NS)
+    if (view === undefined) return undefined
+    const value = plainRecord(view.value)
+    const enabled = value?.enabled
+    // A missing/non-boolean projection is unreadable, never the default.
+    if (typeof enabled !== 'boolean') return undefined
+    const revision = view.revision
+    // Without the read revision the decision cannot be submitted conditionally;
+    // report the section unreadable rather than allowing a silent overwrite.
+    if (typeof revision !== 'number') return undefined
+    const user = plainRecord(view.user)
+    return {
+      enabled,
+      revision,
+      userOverridden: user?.enabled !== undefined,
+      applied: undefined,
+    }
+  }
+
+  async setEnabled(enabled: boolean, expectedRevision: number): Promise<void> {
+    const view = this.mirror.namespace(VISUAL_TOOLS_NS)
+    if (view === undefined) {
+      throw new Error(`settings namespace "${VISUAL_TOOLS_NS}" is not available in this deployment`)
+    }
+    if (view.value === undefined) {
+      throw new Error(`settings namespace "${VISUAL_TOOLS_NS}" exposes no form projection`)
+    }
+    // The decision's revision is the fence. The mirror may have refreshed its
+    // snapshot since the UI read; re-reading view.revision here would authorize
+    // a stale decision against a newer Host document.
+    // `record`: a failed post-settlement refresh is a currentness uncertainty,
+    // not proof of refusal — the consumer re-reads and classifies.
+    await this.mirror.mutate(
+      VISUAL_TOOLS_NS,
+      [{ op: 'set', path: ['enabled'], value: enabled }],
+      expectedRevision,
+      'record',
+    )
+  }
+}
+
 /* ------------------------------------------------------------------------- *
  * The port.
  * ------------------------------------------------------------------------- */
@@ -1451,10 +1649,12 @@ export class RemoteConfigPort implements ConfigPort {
   readonly providers: ProviderProfileConfig
   readonly credentials: CredentialConfig
   readonly authorization: AuthorizationConfig
+  readonly account: AccountConfig
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
   readonly web: WebProviderConfig
+  readonly visualTools: VisualToolsConfig
 
   /** `undefined` while the `tui-app` namespace is absent from the mirror
    *  (the port's documented absence contract). */
@@ -1488,9 +1688,11 @@ export class RemoteConfigPort implements ConfigPort {
     )
     this.credentials = this.credentialConfig
     this.authorization = new RemoteAuthorizationConfig()
+    this.account = new RemoteUnsupportedAccountConfig()
     this.permissions = new RemotePermissionConfig(this.mirror, source.remote.commands)
     this.presetDefault = new RemotePresetDefaultConfig(this.mirror)
     this.subagentModelSelection = new RemoteSubagentModelSelectionConfig(this.mirror)
+    this.visualTools = new RemoteVisualToolsConfig(this.mirror)
     // S2/PR-B §3.2: the Host web-provider setting stays DIRECT-only. The wire
     // publishes no provider-selection read or write, so this backend reports a
     // static unavailable and refuses every write — it never names a Host
@@ -1582,5 +1784,86 @@ class RemoteUnsupportedWebProviderConfig implements WebProviderConfig {
 
   async setSearchApiBaseURL(): Promise<void> {
     this.refuse()
+  }
+}
+
+/** Detached provider facts for the Remote Models detail (the same semantic
+ * projection as Direct's adapter). */
+function remoteProviderFactsOf(route: string, fallbackLabel: string, profile: unknown): ProviderProfileFacts {
+  if (typeof profile !== 'object' || profile === null || Array.isArray(profile)) {
+    return { route, configured: profile !== undefined, displayName: fallbackLabel, models: [] }
+  }
+  const record = profile as Record<string, unknown>
+  const models = Array.isArray(record.models)
+    ? record.models.flatMap(entry => {
+        if (typeof entry === 'string') return [entry]
+        if (typeof entry === 'object' && entry !== null && typeof (entry as { id?: unknown }).id === 'string') {
+          return [(entry as { id: string }).id]
+        }
+        return []
+      })
+    : []
+  return {
+    route,
+    configured: true,
+    ...(typeof record.api === 'string' && record.api !== '' ? { api: record.api } : {}),
+    ...(typeof record.baseURL === 'string' && record.baseURL !== '' ? { baseURL: record.baseURL } : {}),
+    displayName: typeof record.displayName === 'string' && record.displayName !== '' ? record.displayName : fallbackLabel,
+    models,
+    ...(typeof record.apiKeyEnv === 'string' && record.apiKeyEnv !== '' ? { apiKeyEnv: record.apiKeyEnv } : {}),
+  }
+}
+
+/**
+ * The Remote backend's DeepSeek Account sub-domain: INTENTIONALLY unsupported
+ * for this stage. The rc.2 wire publishes no account state/attempt/profile/
+ * balance/sign-out RPC, and the browser callback origin is a Host listener
+ * fact that must never be synthesized by a Client. Every operation fails
+ * closed; the Account page states the backend limitation instead of faking a
+ * sign-in or a signed-out state.
+ */
+class RemoteUnsupportedAccountConfig implements AccountConfig {
+  available(): boolean {
+    return false
+  }
+
+  private refuse(): never {
+    throw new Error('DeepSeek Account is not supported on this backend')
+  }
+
+  async getState(): Promise<AccountView> {
+    this.refuse()
+  }
+
+  async getProfile(_client: AccountClientMetadata): Promise<AccountProfileOutcome> {
+    this.refuse()
+  }
+
+  async getBalance(_client: AccountClientMetadata): Promise<AccountBalanceOutcome> {
+    this.refuse()
+  }
+
+  watch(_signal: AbortSignal): AsyncIterable<AccountView> {
+    return (async function* empty(): AsyncGenerator<AccountView> {})()
+  }
+
+  getCallbackOrigin(): string | undefined {
+    return undefined
+  }
+
+  async startSignIn(_client: AccountClientMetadata): Promise<AccountView> {
+    this.refuse()
+  }
+
+  async cancelSignIn(_id: string): Promise<AccountView> {
+    this.refuse()
+  }
+
+  async signOut(_client: AccountClientMetadata): Promise<AccountView> {
+    this.refuse()
+  }
+
+  hasRunningAccountTasks(): boolean {
+    return false
   }
 }

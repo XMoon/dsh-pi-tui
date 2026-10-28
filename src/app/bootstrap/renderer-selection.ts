@@ -31,12 +31,22 @@ export interface RendererSelectionDeps {
    */
   readonly connectTsp: () => Promise<{
     readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam
+    /** B3-A1: the renderer's Task Center presentation sink (the internal
+     *  native Work Hub on TSP). It carries presentation only; the renderer's
+     *  own capability flag decides production reachability. */
+    readonly taskPresentation: import('../surface/task-presentation-port.ts').TaskCenterPresentationPort
     readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
     readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
     readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
     readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
     readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
     readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
+    /**
+     * PR-C: install the ONE image binding (the mount's loader + scope
+     * sampler) on the connected renderer. It is SYNCHRONOUS and ONE-TIME:
+     * the renderer needs it before its first tool projection.
+     */
+    readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
     readonly dispose: () => Promise<void>
   } | undefined>
   /** The environment read (production: `process.env`). */
@@ -59,16 +69,24 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
   // ordered disposal; `releaseUnmounted()` closes it when the mount was
   // rejected or never ran (idempotent, and inert after a transfer).
   return {
-    mount: () => ({
-      display: tsp.display,
-      composer: tsp.composer,
-      modelPresentation: tsp.modelPresentation,
-      presetPresentation: tsp.presetPresentation,
-      sessionBrowserPresentation: tsp.sessionBrowserPresentation,
-      interaction: tsp.interaction,
-      bindInput: (handlers) => tsp.bindInput(handlers),
-      dispose: () => tsp.dispose(),
-    }),
+    // PR-C: the image binding is installed SYNCHRONOUSLY, exactly once, at
+    // the mount — before the surface's first transcript projection. The
+    // renderer keeps the ONE loader of this mount; the wrapper never builds
+    // a second one.
+    mount: (binding) => {
+      tsp.bindImages(binding)
+      return {
+        display: tsp.display,
+        taskPresentation: tsp.taskPresentation,
+        composer: tsp.composer,
+        modelPresentation: tsp.modelPresentation,
+        presetPresentation: tsp.presetPresentation,
+        sessionBrowserPresentation: tsp.sessionBrowserPresentation,
+        interaction: tsp.interaction,
+        bindInput: (handlers) => tsp.bindInput(handlers),
+        dispose: () => tsp.dispose(),
+      }
+    },
     releaseUnmounted: () => tsp.dispose(),
   }
 }
@@ -89,6 +107,19 @@ export interface ProductionTspConnectorDeps {
    * being bypassed by a hand-rolled mount.
    */
   readonly connect?: NonNullable<Parameters<(typeof import('../../tui/tsp/session.ts'))['connectTspRenderer']>[0]['connect']>
+  /**
+   * PR-B1: the presentation bridge over the REGISTERED tool definitions. It is
+   * forwarded to the renderer so a tool row's target KIND can be proven from
+   * the tool's own registered view. It changes no displayed string.
+   */
+  readonly toolPresenter?: import('../../tui/transcript/tool-presentation.ts').ToolPresenter
+  /**
+   * PR3: the ONE Client-local clipboard callback for a published visual's
+   * authoritative payload. The composition root injects the EXISTING
+   * `ClientActions.copySelection`; this connector forwards it unchanged to the
+   * renderer, which owns no clipboard policy of its own.
+   */
+  readonly copyVisual: (text: string) => Promise<boolean>
 }
 
 /** The PRODUCTION connector: lazy import + the official SDK connect. */
@@ -96,12 +127,14 @@ export function productionTspConnector(
   deps: ProductionTspConnectorDeps,
 ): () => Promise<{
   readonly display: import('../surface/display-seam.ts').SurfaceDisplaySeam
+  readonly taskPresentation: import('../surface/task-presentation-port.ts').TaskCenterPresentationPort
   readonly composer: import('../submission/composer-port.ts').SubmissionComposerPort
   readonly modelPresentation?: import('../command/model-presentation.ts').ModelPresentation | undefined
   readonly presetPresentation?: import('../command/preset-presentation.ts').PresetPresentation | undefined
   readonly sessionBrowserPresentation?: import('../command/session-browser-presentation.ts').SessionBrowserPresentation | undefined
   readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
   readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
+  readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
   readonly dispose: () => Promise<void>
 } | undefined> {
   return async () => {

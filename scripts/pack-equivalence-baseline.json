@@ -1,0 +1,66 @@
+{
+  "digest": "5597f70ad289d70c4e37688e63ef1f81b4bd0c1dae3a758aae236ff69351e57f",
+  "inputs": [
+    {
+      "path": "package.json",
+      "present": true,
+      "sha256": "31c848e0d3031ba4b9ab2228f2a143477bcb50c238f6685cd1ae62f1eb0578af",
+      "why": "the manifest decides what is packed and how it is rewritten"
+    },
+    {
+      "path": "tsdown.config.ts",
+      "present": true,
+      "sha256": "f2423f9f27b8d04322b3da04999ac123c51b09239e7bfb1df91e3531180c52f7",
+      "why": "the bundle build decides the payload files"
+    },
+    {
+      "path": "scripts/generate-dsh-presets.mjs",
+      "present": true,
+      "sha256": "01494eca7acdc0a6c3ec83ec54381f8debbc9a094c581b049512d8a4db745f9f",
+      "why": "the generated presets are part of the payload"
+    },
+    {
+      "path": ".npmignore",
+      "present": false,
+      "sha256": null,
+      "why": "an ignore file changes which files are packed"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "present": true,
+      "sha256": "b40c9309e94f023dd3b03f53f1d4c84127a0b68461741a5786dc96f02de8bcb6",
+      "why": "the lockfile pins the build toolchain that produces the payload"
+    },
+    {
+      "path": "pnpm-workspace.yaml",
+      "present": true,
+      "sha256": "6b9c1557f49b91010b0841987bc28dba0e35ebb0b0c8b5bd5d7f8f492bab1828",
+      "why": "the workspace layout decides how pnpm resolves and packs"
+    },
+    {
+      "path": "scripts/compare-tarballs.mjs",
+      "present": true,
+      "sha256": "3790b9ce9655a32c0e4b8151f3494269cca4ffd749a5e430fb4b82caa918808c",
+      "why": "the comparator defines what equivalent means"
+    },
+    {
+      "path": "scripts/pack-equivalence-protocol.json",
+      "present": true,
+      "sha256": "70398d5ed490d49e7b8edc4b98dd93a664480a3981b430dddbf1360f49316345",
+      "why": "the protocol is the pair of commands being compared"
+    }
+  ],
+  "proofs": {
+    "npm": {
+      "equivalent": true,
+      "mode": "npm",
+      "node": "24",
+      "platform": "Linux",
+      "entryCount": 46,
+      "differingFiles": [],
+      "manifestDifferences": [],
+      "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/40741173987",
+      "commit": "487b8406d749685c543f806845cf2882acdda9be"
+    }
+  }
+}

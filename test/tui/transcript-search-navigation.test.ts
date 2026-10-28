@@ -1,0 +1,1203 @@
+/**
+ * Transcript-search navigation regression matrix (plan §14.6/§14.7): the
+ * TuiApp-level occurrence highlight / reveal / viewport-anchor contract that
+ * the old card-level tests could not exercise.
+ * @module @xmoon76/dsh-pi-tui/transcript-search-navigation.test
+ */
+
+import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
+import { afterEach, test } from 'node:test'
+import { MessageId, ToolCallId, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { TuiApp } from '../../src/tui-app.ts'
+import { TranscriptFolder, workflowPhaseKey, type TranscriptMessage, type TranscriptToolMessage } from '../../src/transcript.ts'
+import { deliveredFilesCapabilityStub } from '../support/delivered-files.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { assistantVisualPresentation, setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
+import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
+
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+afterEach(() => {
+  disposeStartedApps()
+})
+
+function startApp(width = 100, height = 30): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(width, height)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  return { vt, app }
+}
+
+async function viewport(vt: VirtualTerminal): Promise<string[]> {
+  await vt.waitForRender()
+  return vt.getViewport()
+}
+
+/** The viewport row + columns of the two `needle` occurrences on one line. */
+function occurrenceCells(lines: readonly string[]): { row: number; first: number; second: number } {
+  const row = lines.findIndex(line => line.includes('needle alpha needle beta'))
+  assert.ok(row >= 0, `occurrence line missing:\n${lines.join('\n')}`)
+  const text = lines[row]!
+  const first = text.indexOf('needle')
+  const second = text.lastIndexOf('needle')
+  return { row, first, second }
+}
+
+/** Whether a rendered cell carries the EXACT-current themed block. This is the
+ * real "is this occurrence the proven current one" signal now that the exact
+ * style deliberately no longer uses the terminal inverse attribute. */
+function isStrongCell(vt: VirtualTerminal, row: number, col: number): boolean {
+  return vt.getCellBgRgb(row, col) === 0xf5c542
+}
+
+/** Press+release a left click at one viewport cell. */
+function click(vt: VirtualTerminal, x: number, y: number): void {
+  vt.sendInput(`\x1b[<0;${x};${y}M`)
+  vt.sendInput(`\x1b[<0;${x};${y}m`)
+}
+
+test('navigation: the current strong highlight moves between occurrences in one source', async () => {
+  const { vt, app } = startApp()
+  // A Workflow member label is a direct projection with proven columns, so its
+  // two occurrences can each be the exact current occurrence.
+  const card = {
+    kind: 'workflow', turn: 0, runId: 'run-1' as never, name: 'audit', status: 'running',
+    members: [{ seq: 0, label: 'needle alpha needle beta', phase: 'P', childId: 'child-0' as never, status: 'running' }],
+  } as Extract<TranscriptMessage, { kind: 'workflow' }>
+  app.setFullscreen(true)
+  app.setTranscript([card])
+  let lines = await viewport(vt)
+  let cells = occurrenceCells(lines)
+
+  const target = (occurrence: number) => ({
+    query: 'needle',
+    match: {
+      id: 0, turn: 0, occurrence,
+      source: { kind: 'workflow-member' as const, phaseKey: workflowPhaseKey('P'), seq: 0, field: 'label' as const },
+      sourceOccurrence: occurrence,
+    },
+    message: card,
+  })
+  app.setTranscriptSearchTarget(target(0))
+  lines = await viewport(vt)
+  cells = occurrenceCells(lines)
+  assert.equal(vt.getCellBgRgb(cells.row, cells.first), 0xf5c542, `the FIRST occurrence is current:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(cells.row, cells.second), undefined, 'the second occurrence is not current')
+  assert.ok(!vt.getCellInverse(cells.row, cells.first), 'the exact current block never uses the terminal inverse attribute')
+
+  app.setTranscriptSearchTarget(target(1))
+  lines = await viewport(vt)
+  cells = occurrenceCells(lines)
+  assert.equal(vt.getCellBgRgb(cells.row, cells.first), undefined, 'the first occurrence is no longer current')
+  assert.equal(vt.getCellBgRgb(cells.row, cells.second), 0xf5c542, 'the SECOND occurrence is current')
+  app.stop()
+})
+
+test('navigation: a reveal expands an anchor-only card and targets its rendered hit', async () => {
+  const { vt, app } = startApp(100, 20)
+  const longText = Array.from({ length: 24 }, (_, index) => `line ${index}`).join('\n')
+    + '\nneedle in the compacted middle\n' + Array.from({ length: 6 }, (_, index) => `tail ${index}`).join('\n')
+  const message: TranscriptMessage = { kind: 'user', turn: 0, text: longText }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  const collapsed = (await viewport(vt)).join('\n')
+  assert.ok(!collapsed.includes('needle in the compacted middle'), 'precondition: the middle is compacted away')
+  assert.ok(collapsed.includes('rows compacted'), 'precondition: the bubble is compacted')
+
+  app.setTranscriptSearchTarget({
+    query: 'compacted middle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  app.scrollToSearchTarget()
+  const revealed = (await viewport(vt)).join('\n')
+  // A compact-capable long bubble inserts marker/tail chrome rows, so its whole
+  // card is NOT occurrence-preserving: the reveal still EXPANDS it, while the
+  // viewport may use the rendered hit only as approximate navigation.
+  assert.ok(!revealed.includes('rows compacted'), `the search reveal must expand the bubble:\n${revealed}`)
+  const targetRow = revealed.split('\n').findIndex(line => line.includes('needle in the compacted middle'))
+  assert.ok(targetRow >= 0, `the rendered query hit must be visible:\n${revealed}`)
+  const targetCol = revealed.split('\n')[targetRow]!.indexOf('compacted middle')
+  assert.ok(targetCol >= 0)
+  assert.ok(!isStrongCell(vt, targetRow, targetCol), 'approximate anchor navigation never fabricates a strong occurrence')
+  app.stop()
+})
+
+test('navigation: multiple anchor-only hits use separate approximate viewport targets', async () => {
+  const { vt, app } = startApp(100, 12)
+  const text = [
+    'top filler',
+    'needle first hit',
+    ...Array.from({ length: 18 }, (_, index) => `middle filler ${index}`),
+    'needle second hit',
+    'bottom filler',
+  ].join('\n')
+  const message: TranscriptMessage = { kind: 'user', turn: 0, text }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.scrollToBottom()
+  await viewport(vt)
+
+  const target = (sourceOccurrence: number) => ({
+    query: 'needle',
+    match: { id: sourceOccurrence, turn: 0, occurrence: sourceOccurrence, source: { kind: 'message' as const }, sourceOccurrence },
+    message,
+  })
+
+  app.setTranscriptSearchTarget(target(0))
+  app.scrollToSearchTarget()
+  let lines = await viewport(vt)
+  let row = lines.findIndex(line => line.includes('needle first hit'))
+  assert.ok(row >= 0, `the first approximate hit must be visible:\n${lines.join('\n')}`)
+  assert.ok(!isStrongCell(vt, row, lines[row]!.indexOf('needle')), 'anchor-only hit 0 stays weak')
+
+  app.setTranscriptSearchTarget(target(1))
+  app.scrollToSearchTarget()
+  lines = await viewport(vt)
+  row = lines.findIndex(line => line.includes('needle second hit'))
+  assert.ok(row >= 0, `the second approximate hit must be visible:\n${lines.join('\n')}`)
+  assert.ok(!isStrongCell(vt, row, lines[row]!.indexOf('needle')), 'anchor-only hit 1 stays weak')
+  assert.equal(app.transcriptSearchPresentationForTest()?.sourceOccurrence, 1, 'semantic source occurrence remains independent')
+  app.stop()
+})
+
+test('navigation: clearing the target removes the reveal and every decoration', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'user', turn: 0, text: 'needle alpha needle beta' }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  let lines = await viewport(vt)
+  let cells = occurrenceCells(lines)
+  // A user bubble's whole card injects the `❯` marker: anchor-only, so the
+  // current card's matches are decorated WEAKLY.
+  assert.ok(vt.getCellUnderline(cells.row, cells.first), 'precondition: the target occurrence is weak-decorated')
+  assert.ok(!isStrongCell(vt, cells.row, cells.first), 'a message-kind card is anchor-only')
+
+  app.setTranscriptSearchTarget(undefined)
+  lines = await viewport(vt)
+  cells = occurrenceCells(lines)
+  assert.ok(!vt.getCellUnderline(cells.row, cells.first), 'clearing removes the first decoration')
+  assert.ok(!vt.getCellUnderline(cells.row, cells.second), 'clearing removes every decoration')
+  assert.ok(!isStrongCell(vt, cells.row, cells.first), 'clearing leaves no strong highlight')
+  app.stop()
+})
+
+test('navigation: resize recomputes the approximate range from current wrapped lines', async () => {
+  const { vt, app } = startApp(100, 14)
+  const message: TranscriptMessage = {
+    kind: 'user',
+    turn: 0,
+    text: `${'prefix filler '.repeat(14)}needle wrapped target ${'suffix filler '.repeat(14)}`,
+  }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle wrapped',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  app.scrollToSearchTarget()
+  await viewport(vt)
+  assert.ok(vt.getViewport().some(line => line.includes('needle')), 'the target is visible before resize')
+
+  vt.resize(40, 14)
+  await viewport(vt)
+  app.scrollToSearchTarget()
+  const lines = await viewport(vt)
+  const targetRow = lines.findIndex(line => line.includes('needle'))
+  assert.ok(targetRow >= 0, `the target remains visible after wrapped-line remeasurement:\n${lines.join('\n')}`)
+  assert.ok(!isStrongCell(vt, targetRow, lines[targetRow]!.indexOf('needle')), 'resize never turns anchor-only navigation into strong provenance')
+  app.stop()
+})
+
+test('navigation: an already-visible approximate range does not jitter the viewport', async () => {
+  const { vt, app } = startApp(100, 12)
+  const text = [
+    ...Array.from({ length: 5 }, (_, index) => `prefix ${index}`),
+    'needle visible target',
+    ...Array.from({ length: 18 }, (_, index) => `suffix ${index}`),
+  ].join('\n')
+  const message: TranscriptMessage = { kind: 'user', turn: 0, text }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  app.scrollToSearchTarget()
+  const scroll = app.fullscreenScrollForTest()
+  assert.ok(scroll !== undefined)
+  await viewport(vt)
+  app.scrollToTop({ disableFollow: true })
+  await viewport(vt)
+  const before = app.fullscreenScrollForTest()!.scrollTop
+  assert.ok(vt.getViewport().some(line => line.includes('needle visible target')), 'precondition: target remains visible after a manual scroll')
+  app.scrollToSearchTarget()
+  assert.equal(app.fullscreenScrollForTest()!.scrollTop, before, 'an already-visible range must not be re-centered')
+  app.stop()
+})
+
+test('navigation: a passive transcript repaint does not snap back to the search range', async () => {
+  const { vt, app } = startApp(100, 14)
+  const targetMessage: TranscriptMessage = {
+    kind: 'user',
+    turn: 0,
+    text: [
+      ...Array.from({ length: 20 }, (_, index) => `prefix ${index}`),
+      'needle passive target',
+      ...Array.from({ length: 12 }, (_, index) => `suffix ${index}`),
+    ].join('\n'),
+  }
+  app.setFullscreen(true)
+  app.setTranscript([targetMessage])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: targetMessage,
+  })
+  app.scrollToSearchTarget()
+  await viewport(vt)
+  app.scrollToTop({ disableFollow: true })
+  await viewport(vt)
+  const before = app.fullscreenScrollForTest()!.scrollTop
+  app.setTranscript([targetMessage, { kind: 'user', turn: 1, text: 'new passive content' }])
+  await viewport(vt)
+  assert.equal(app.fullscreenScrollForTest()!.scrollTop, before, 'passive projection preserves the user viewport')
+  app.stop()
+})
+
+test('dismiss promotion: Focus root and fullscreen secondary card keep a searched tool open', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('user/message', {
+      id: MessageId('u-focus'), role: 'user', content: [{ type: 'text', text: 'run the tool' }], source: { kind: 'user' },
+    }, 1),
+    event('tool/call', {
+      turn: 0, step: 0, callId: ToolCallId('focus-tool'), name: 'bash', arguments: JSON.stringify({ command: 'echo needle' }),
+    }, 2),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('focus-result'), role: 'tool',
+        toolCallId: ToolCallId('focus-tool'),
+        content: [{ type: 'text', text: 'needle output' }],
+        source: { kind: 'tool', callId: ToolCallId('focus-tool') },
+      },
+    }, 3),
+    event('assistant/message', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('focus-answer'), role: 'assistant', content: [{ type: 'text', text: 'done' }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+    }, 4),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5),
+  ])
+  const match = folder.search('needle').find(candidate => candidate.source.kind === 'tool-field' && candidate.source.field === 'result')
+  assert.ok(match !== undefined, 'the tool result search hit exists')
+  const message = folder.resolveSearchMatch(match)
+  assert.ok(message !== undefined, 'the tool result resolves to its tool card')
+
+  const { vt, app } = startApp()
+  app.setFocusMode(true)
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  app.setTranscriptSearchTarget({ query: 'needle', match, message })
+  let lines = await viewport(vt)
+  assert.ok(lines.some(line => line.includes('needle output')), `the search reveal opens the tool body:\n${lines.join('\n')}`)
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  lines = await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride
+  assert.equal(app.focusExpandedTurnsForTest().has(0), true, 'dismiss promotes the real Focus Thought root')
+  assert.equal(overrides.get(message), true, 'dismiss promotes the fullscreen secondary owner')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears search presentation')
+  assert.ok(lines.some(line => line.includes('needle output')), `the searched tool remains open:\n${lines.join('\n')}`)
+  app.stop()
+})
+
+test('dismiss promotion: Workflow Run and Phase owners become durable after dismiss', async () => {
+  const card = {
+    kind: 'workflow', turn: 0, runId: 'run-close' as never, name: 'audit', status: 'completed',
+    members: Array.from({ length: 6 }, (_, seq) => ({
+      seq, label: seq === 5 ? 'needle member' : `member ${seq}`, phase: 'P', childId: `child-${seq}` as never, status: 'completed',
+    })),
+  } as Extract<TranscriptMessage, { kind: 'workflow' }>
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  app.setTranscript([card])
+  const match = {
+    id: 0, turn: 0, occurrence: 0,
+    source: { kind: 'workflow-member' as const, phaseKey: workflowPhaseKey('P'), seq: 5, field: 'label' as const },
+    sourceOccurrence: 0,
+  }
+  app.setTranscriptSearchTarget({ query: 'needle', match, message: card })
+  let lines = await viewport(vt)
+  assert.ok(lines.some(line => line.includes('needle member')), `the search reveal opens the member context:\\n${lines.join('\n')}`)
+
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  lines = await viewport(vt)
+  const disclosure = (app as unknown as {
+    workflowDisclosure: Map<string, { userOpen?: boolean; phases: Map<string, { userOpen?: boolean }> }>
+  }).workflowDisclosure
+  const state = disclosure.get('run-close')
+  assert.equal(state?.userOpen, true, 'dismiss promotes the Workflow Run owner')
+  assert.equal(state?.phases.get(workflowPhaseKey('P'))?.userOpen, true, 'dismiss promotes the Workflow Phase owner')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears search presentation')
+  assert.ok(lines.some(line => line.includes('Workflow')), `the durable Workflow card remains:\\n${lines.join('\n')}`)
+  app.stop()
+})
+
+test('dismiss promotion: regular secondary reveal promotes its per-card owner', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'thinking', turn: 0, text: 'needle reasoning' }
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  assert.ok((await viewport(vt)).some(line => line.includes('needle reasoning')), 'the regular search reveal is visible')
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  const overrides = (app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride
+  assert.equal(overrides.get(message), true,
+    'after F6 the regular surface has a per-card owner for the revealed Thinking and promotes it')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears search presentation')
+  app.stop()
+})
+
+test('dismiss promotion: generic assistant presentation has no durable expansion owner', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'assistant', turn: 0, text: 'needle assistant body' }
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  await viewport(vt)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  await viewport(vt)
+  const overrides = (app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride
+  assert.notEqual(overrides.get(message), true, 'generic assistant search presentation is not made durable')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears search presentation')
+  app.stop()
+})
+
+test('navigation: a two-level PTC path reveals the grandchild body', async () => {
+  const grandchild: TranscriptToolMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{}', result: 'deepest-needle output', status: 'ok',
+    subCallId: 'grand-1', parentCallId: 'child-1', rootCallId: 'root-1',
+  }
+  const child: TranscriptToolMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{}', result: 'child output', status: 'ok',
+    subCalls: [grandchild], subCallId: 'child-1', parentCallId: 'root-1', rootCallId: 'root-1',
+  }
+  const root: TranscriptToolMessage = {
+    kind: 'tool', turn: 0, name: 'run_code', args: '{}', result: 'ok', status: 'ok', subCalls: [child],
+  }
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript([root])
+  app.setTranscriptSearchTarget({
+    query: 'deepest-needle',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'subcall-field', subCallIds: ['child-1', 'grand-1'], field: 'result' },
+      sourceOccurrence: 0,
+    },
+    message: root,
+  })
+  const view = (await viewport(vt)).join('\n')
+  assert.ok(view.includes('deepest-needle output'), `the grandchild body must be visible:\n${view}`)
+  app.stop()
+})
+
+test('navigation: every visible matching card is weak-highlighted, the current card strong', async () => {
+  const { vt, app } = startApp()
+  // The current card needs a PROVABLE source: a Workflow member label.
+  const a = {
+    kind: 'workflow', turn: 0, runId: 'run-1' as never, name: 'audit', status: 'running',
+    members: [{ seq: 0, label: 'alpha needle one', phase: 'P', childId: 'child-0' as never, status: 'running' }],
+  } as Extract<TranscriptMessage, { kind: 'workflow' }>
+  const b: TranscriptMessage = { kind: 'user', turn: 1, text: 'beta needle two' }
+  const c: TranscriptMessage = { kind: 'user', turn: 2, text: 'gamma without the term' }
+  app.setFullscreen(true)
+  app.setTranscript([a, b, c])
+  // The runner publishes the semantic match representatives (deduped cards).
+  app.setSearchMatchMessages(new Set([a, b]))
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('P'), seq: 0, field: 'label' }, sourceOccurrence: 0 },
+    message: a,
+  })
+  const lines = await viewport(vt)
+  const aRow = lines.findIndex(line => line.includes('alpha needle one') && line.includes('—'))
+  const bRow = lines.findIndex(line => line.includes('beta needle two'))
+  const cRow = lines.findIndex(line => line.includes('gamma without the term'))
+  assert.ok(aRow >= 0 && bRow >= 0 && cRow >= 0, `all cards visible:\n${lines.join('\n')}`)
+  const aCol = lines[aRow]!.indexOf('needle')
+  const bCol = lines[bRow]!.indexOf('needle')
+  assert.equal(vt.getCellBgRgb(aRow, aCol), 0xf5c542, 'the target occurrence is strong (themed block)')
+  assert.ok(vt.getCellUnderline(bRow, bCol), 'the other VISIBLE matching card is weak (underline)')
+  assert.notEqual(vt.getCellBgRgb(bRow, bCol), 0xf5c542, 'the other matching card is not strong')
+  assert.ok(!vt.getCellUnderline(cRow, lines[cRow]!.indexOf('gamma')), 'a non-matching card is untouched')
+  app.stop()
+})
+
+test('navigation: a live group reflow keeps the current highlight via stable-match rebind', async () => {
+  // Post-F6 PR B: groups never cross turns, so the object-replacing reflow
+  // is exercised WITHIN one turn — a late-settling pending read in the
+  // middle of a run rebuilds the group card object while the search match
+  // id/source stay stable.
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  const readCall = (seq: number, callId: string, file: string, turn: number): SessionEvent =>
+    event('tool/call', { turn, step: 0, callId: ToolCallId(callId), name: 'read', arguments: JSON.stringify({ file }) }, seq)
+  const readResult = (seq: number, callId: string, text: string, turn: number): SessionEvent =>
+    event('tool/result', {
+      turn, step: 0,
+      message: {
+        id: MessageId(`m-${seq}`), role: 'tool',
+        toolCallId: ToolCallId(callId),
+        content: [{ type: 'text', text }],
+        source: { kind: 'tool', callId: ToolCallId(callId) },
+      },
+    }, seq)
+
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    readCall(1, 'r1', 'src/a.ts', 0),
+    readResult(2, 'r1', 'shared token A', 0),
+    readCall(3, 'r2', 'src/b.ts', 0),
+    readResult(4, 'r2', 'shared token B', 0),
+  ])
+  const project = () => folder.window({ maxTurns: 50 })
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  app.setTranscript(project().messages, folder.turnActivities())
+  // 'read' renders in the merged read head as the tool NAME — a direct
+  // projection, so it is a provable occurrence (the read result body itself
+  // needs a presenter).
+  const match = folder.search('read').find(m => m.source.kind === 'tool-field' && m.source.field === 'name')!
+  const message = folder.resolveSearchMatch(match)!
+  app.setTranscriptSearchTarget({ query: 'read', match, message })
+  let lines = await viewport(vt)
+  let row = lines.findIndex(line => line.includes('Read 2 files'))
+  assert.ok(row >= 0 && vt.getCellUnderline(row, lines[row]!.indexOf('Read')), 'precondition: the target card is decorated (anchor-only source)')
+
+  // A pending read parks between the group and a settled tail read; when it
+  // settles IN PLACE (non-tail) the run reflows and the representative card
+  // OBJECT is replaced, while match.id/source stay stable.
+  folder.apply([
+    readCall(5, 'r3', 'src/c.ts', 0),
+    readCall(6, 'r4', 'src/d.ts', 0),
+    readResult(7, 'r4', 'shared token D', 0),
+    readResult(8, 'r3', 'shared token C', 0),
+  ])
+  app.setTranscript(project().messages, folder.turnActivities())
+  // The runner's per-repaint sync (stable match → current card object).
+  app.rebindTranscriptSearchTarget(folder.resolveSearchMatch(match))
+
+  lines = await viewport(vt)
+  row = lines.findIndex(line => line.includes('Read 4 files'))
+  assert.ok(row >= 0, `the reflowed group card is visible:\n${lines.join('\n')}`)
+  // The rebind re-attached the presentation to the NEW card object: without it
+  // the card would not even be decorated (identity would not match).
+  assert.ok(vt.getCellUnderline(row, lines[row]!.indexOf('Read')), 'the rebind keeps the reflowed card decorated')
+  assert.ok(!isStrongCell(vt, row, lines[row]!.indexOf('Read')), 'a tool name/args source stays anchor-only (no guessed strong)')
+  app.stop()
+})
+
+test('navigation: tool args and result hits are anchor-only (no guessed strong)', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'echo needle' }) }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'needle output' }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  const matches = folder.search('needle')
+  const argsMatch = matches.find(m => m.source.kind === 'tool-field' && m.source.field === 'args')
+  const resultMatch = matches.find(m => m.source.kind === 'tool-field' && m.source.field === 'result')
+  assert.ok(argsMatch !== undefined && resultMatch !== undefined, `both field hits expected: ${JSON.stringify(matches)}`)
+
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const messages = folder.window({ maxTurns: 50 }).messages
+  app.setTranscript(messages, folder.turnActivities())
+  const card = messages[0]!
+
+  app.setTranscriptSearchTarget({ query: 'needle', match: argsMatch, message: card })
+  let lines = await viewport(vt)
+  const headerRow = lines.findIndex(line => line.includes('Bash'))
+  assert.ok(headerRow >= 0, `tool header must render:\n${lines.join('\n')}`)
+  // The rendered args summary is a presenter projection of the raw args, so it
+  // anchors WITHOUT a strong highlight (a raw ordinal cannot be proven).
+  assert.ok(!isStrongCell(vt, headerRow, lines[headerRow]!.indexOf('needle')), 'the ARGS hit must not strong-highlight the summary')
+
+  // A tool RESULT has no provable rendered occurrence either: it anchors with
+  // no strong highlight, so it can never mislabel another occurrence as the
+  // current N/M hit.
+  app.setTranscriptSearchTarget({ query: 'needle', match: resultMatch, message: card })
+  lines = await viewport(vt)
+  const resultRow = lines.findIndex(line => line.includes('needle output'))
+  assert.ok(resultRow >= 0, `tool result body must render:\n${lines.join('\n')}`)
+  assert.ok(!isStrongCell(vt, resultRow, lines[resultRow]!.indexOf('needle')), 'the RESULT hit must NOT strong-highlight a guessed occurrence')
+  assert.ok(!isStrongCell(vt, headerRow, lines[headerRow]!.indexOf('needle')), 'the args header is not current either')
+  app.stop()
+})
+
+test('navigation: deliverable path and description hits are anchor-only', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 1 }, 0),
+    event('deliverables/presented', { turn: 1, callId: 'present-1', files: [{ path: 'out/report.md', description: 'Final report' }] }, 1),
+    event('assistant/message', {
+      turn: 1, step: 0,
+      message: {
+        id: MessageId('a1'),
+        role: 'assistant',
+        content: [{ type: 'text', text: `earlier report\n${Array.from({ length: 18 }, (_, index) => `filler ${index}`).join('\n')}` }],
+        source: { kind: 'model', provider: 'p', model: 'm' },
+      },
+      stream: [],
+    }, 2),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+  ])
+  const matches = folder.search('report')
+  const pathMatch = matches.find(m => m.source.kind === 'assistant-deliverable' && m.source.field === 'path')
+  const descriptionMatch = matches.find(m => m.source.kind === 'assistant-deliverable' && m.source.field === 'description')
+  assert.ok(pathMatch !== undefined && descriptionMatch !== undefined, `both deliverable fields must match: ${JSON.stringify(matches)}`)
+
+  const { vt, app } = startApp(80, 12)
+  app.setFullscreen(true)
+  const card = folder.messages()[0]!
+  app.setTranscript([card], folder.turnActivities())
+
+  app.setTranscriptSearchTarget({ query: 'report', match: pathMatch, message: card })
+  let lines = await viewport(vt)
+  const pathRow = lines.findIndex(line => line.includes('report.md'))
+  assert.ok(pathRow >= 0, `delivered path row missing:\n${lines.join('\n')}`)
+  // The path is RELATIVIZED (raw prefix removed), so a raw ordinal cannot be
+  // proven: anchor only, no strong highlight.
+  assert.ok(!isStrongCell(vt, pathRow, lines[pathRow]!.indexOf('report')), 'the PATH hit must not strong-highlight a relativized path')
+
+  app.setTranscriptSearchTarget({ query: 'report', match: descriptionMatch, message: card })
+  app.scrollToSearchTarget()
+  lines = await viewport(vt)
+  const descriptionRow = lines.findIndex(line => line.includes('Final report'))
+  assert.ok(descriptionRow >= 0, `deliverable description must be the viewport destination:\n${lines.join('\n')}`)
+  assert.ok(!lines.some(line => line.includes('earlier report')),
+    `the unrelated assistant-body hit must not be the viewport destination:\n${lines.join('\n')}`)
+  assert.ok((app.fullscreenScrollForTest()?.scrollTop ?? 0) > 0, 'the source-local destination must be below the card top')
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{
+      block: { message?: TranscriptMessage }
+      searchSelection?: { selectedIndex: number; exact: boolean }
+    }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === card)?.searchSelection
+  assert.equal(selection?.selectedIndex, -1, 'source-region viewport targeting remains anchor-only')
+  assert.equal(selection?.exact, false, 'source-region viewport targeting never proves provenance')
+  assert.ok(!isStrongCell(vt, descriptionRow, lines[descriptionRow]!.indexOf('report')), 'the DESCRIPTION hit must not strong-highlight an approximate target')
+  assert.ok(!isStrongCell(vt, pathRow, lines[pathRow]!.indexOf('report')), 'the path row is not the current occurrence')
+  app.stop()
+})
+
+test('navigation: a PTC child result maps to its body, not the header or the root card', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('code-1'), name: 'run_code', arguments: JSON.stringify({ code: 'print(1)' }) }, 1),
+    event('tool/ptc-dispatch-start', {
+      rootCallId: ToolCallId('code-1'), parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('child-1'), name: 'bash', arguments: { command: 'echo needle' },
+    }, 2),
+    event('tool/ptc-dispatch', {
+      rootCallId: ToolCallId('code-1'), parentCallId: ToolCallId('code-1'),
+      subCallId: ToolCallId('child-1'), name: 'bash', arguments: { command: 'echo needle' },
+      isError: false, content: [{ type: 'text', text: 'needle in child result' }],
+    }, 3),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 4),
+  ])
+  const matches = folder.search('needle')
+  const resultMatch = matches.find(m => m.source.kind === 'subcall-field' && m.source.field === 'result')
+  assert.ok(resultMatch !== undefined, `child result hit expected: ${JSON.stringify(matches)}`)
+
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const card = folder.messages()[0]!
+  app.setTranscript([card], folder.turnActivities())
+  app.setTranscriptSearchTarget({ query: 'needle', match: resultMatch, message: card })
+  const lines = await viewport(vt)
+  const bodyRow = lines.findIndex(line => line.includes('needle in child result'))
+  assert.ok(bodyRow >= 0, `child result body must render:\n${lines.join('\n')}`)
+  // Result lines are width-truncated, so a raw result ordinal is not provable:
+  // the child body anchors without a guessed strong highlight.
+  assert.ok(!isStrongCell(vt, bodyRow, lines[bodyRow]!.indexOf('needle')), 'the child RESULT hit must not strong-highlight a truncated body')
+  const headerRow = lines.findIndex(line => line.includes('echo needle'))
+  assert.ok(headerRow < 0 || !isStrongCell(vt, headerRow, lines[headerRow]!.indexOf('needle')), 'the header/command row is not the current occurrence')
+  app.stop()
+})
+
+test('navigation: a Thinking header chrome is never strong-highlighted for a body hit', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'thinking', turn: 0, text: 'thinking about search' }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'thinking',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  const lines = await viewport(vt)
+  const headerRow = lines.findIndex(line => /Thinking/.test(line))
+  assert.ok(headerRow >= 0, `thinking header must render:\n${lines.join('\n')}`)
+  assert.ok(!isStrongCell(vt, headerRow, 0), 'the injected Thinking header must NOT be the current occurrence')
+  const bodyRow = lines.findIndex(line => line.includes('about search'))
+  assert.ok(bodyRow >= 0, `thinking body must render:\n${lines.join('\n')}`)
+  assert.ok(!isStrongCell(vt, bodyRow, lines[bodyRow]!.indexOf('about')), 'the thinking body is anchor-only (no strong)')
+  app.stop()
+})
+
+test('navigation: the user bubble marker is never strong-highlighted for a body hit', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'user', turn: 0, text: '❯ body' }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: '❯',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  const lines = await viewport(vt)
+  const row = lines.findIndex(line => line.includes('body'))
+  assert.ok(row >= 0, `user bubble must render:\n${lines.join('\n')}`)
+  const markerCol = lines[row]!.indexOf('❯')
+  assert.ok(markerCol >= 0, `the bubble marker must render:\n${lines.join('\n')}`)
+  assert.ok(!isStrongCell(vt, row, markerCol), 'the injected bubble marker must NOT be the current occurrence')
+  app.stop()
+})
+
+test('navigation: an anchor-only current shows a weaker anchor wash and no strong occurrence', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'user', turn: 0, text: 'needle alpha needle beta' }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  const lines = await viewport(vt)
+  const cells = occurrenceCells(lines)
+  // The occurrences stay WEAK; the card's anchor row carries the weaker
+  // "current result lives here" wash — never the exact occurrence block.
+  assert.ok(vt.getCellUnderline(cells.row, cells.first), 'the occurrence is weak-decorated')
+  assert.notEqual(vt.getCellBgRgb(cells.row, 0), 0xf5c542, 'an anchor-only current never paints the exact block')
+  assert.equal(vt.getCellBgRgb(cells.row, 0), 0x3a3220, `the anchor row carries the weaker current wash:\n${lines.join('\n')}`)
+  app.stop()
+})
+
+test('navigation: the anchor wash never leaks past the anchor row', async () => {
+  const { vt, app } = startApp()
+  const message: TranscriptMessage = { kind: 'assistant', turn: 0, text: 'needle first\nplain second' }
+  app.setFullscreen(true)
+  app.setTranscript([message])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message,
+  })
+  const lines = await viewport(vt)
+  const first = lines.findIndex(line => line.includes('needle first'))
+  const second = lines.findIndex(line => line.includes('plain second'))
+  assert.ok(first >= 0 && second >= 0, `both rows must render:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(first, 0), 0x3a3220, 'the anchor row is washed')
+  // The background must have been RESET before the next row: no bleed.
+  assert.notEqual(vt.getCellBgRgb(second, 0), 0x3a3220, 'the wash must not bleed into the following row')
+  app.stop()
+})
+
+test('navigation: a narrow width still paints the exact current occurrence', async () => {
+  const { vt, app } = startApp(40, 20)
+  const card = {
+    kind: 'workflow', turn: 0, runId: 'run-1' as never, name: 'audit', status: 'running',
+    members: [{ seq: 0, label: 'needle alpha needle beta', phase: 'P', childId: 'child-0' as never, status: 'running' }],
+  } as Extract<TranscriptMessage, { kind: 'workflow' }>
+  app.setFullscreen(true)
+  app.setTranscript([card])
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: {
+      id: 0, turn: 0, occurrence: 1,
+      source: { kind: 'workflow-member', phaseKey: workflowPhaseKey('P'), seq: 0, field: 'label' },
+      sourceOccurrence: 1,
+    },
+    message: card,
+  })
+  const lines = await viewport(vt)
+  const cells = occurrenceCells(lines)
+  assert.equal(vt.getCellBgRgb(cells.row, cells.first), undefined, 'the first occurrence is not current')
+  assert.equal(vt.getCellBgRgb(cells.row, cells.second), 0xf5c542, 'the second occurrence is the exact current block at 40 cols')
+  app.stop()
+})
+
+test('navigation: tool args and result anchor rows are visually distinct without a strong occurrence', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    event('turn/start', { turn: 0 }, 0),
+    event('tool/call', { turn: 0, step: 0, callId: ToolCallId('c1'), name: 'bash', arguments: JSON.stringify({ command: 'echo needle' }) }, 1),
+    event('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('r1'), role: 'tool',
+        toolCallId: ToolCallId('c1'),
+        content: [{ type: 'text', text: 'needle output' }],
+        source: { kind: 'tool', callId: ToolCallId('c1') },
+      },
+    }, 2),
+    event('turn/end', { turn: 0, reason: { kind: 'completed' } }, 3),
+  ])
+  const matches = folder.search('needle')
+  const resultMatch = matches.find(m => m.source.kind === 'tool-field' && m.source.field === 'result')!
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const messages = folder.window({ maxTurns: 50 }).messages
+  app.setTranscript(messages, folder.turnActivities())
+  app.setTranscriptSearchTarget({ query: 'needle', match: resultMatch, message: messages[0]! })
+  const lines = await viewport(vt)
+  const resultRow = lines.findIndex(line => line.includes('needle output'))
+  assert.ok(resultRow >= 0, `tool result body must render:\n${lines.join('\n')}`)
+  // Anchor-only: the occurrence never gets the exact block. The result field has
+  // no renderer-proven region, so the selection anchors at the owning card top —
+  // that row carries the weaker wash so the current N/M is still findable.
+  assert.notEqual(vt.getCellBgRgb(resultRow, lines[resultRow]!.indexOf('needle')), 0xf5c542, 'the result hit is not a proven occurrence')
+  const cardTop = lines.findIndex(line => line.includes('Bash'))
+  assert.ok(cardTop >= 0, `tool card header missing:\n${lines.join('\n')}`)
+  assert.equal(vt.getCellBgRgb(cardTop, 0), 0x3a3220, 'the owning card top carries the anchor wash')
+  app.stop()
+})
+
+test('navigation: a deliverable description truncated on its row never strong-highlights a substituted occurrence', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  // The description is one physical row with both ends preserved, so a match
+  // in the ABBREVIATED middle is not rendered at all. The row is still
+  // anchored to the RAW description region; it must never paint a guessed
+  // strong occurrence at a cell the renderer did not derive.
+  const description = `${'x'.repeat(120)} alpha beta alpha beta ${'y'.repeat(120)}`
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 1 }, 0),
+    event('deliverables/presented', { turn: 1, callId: 'present-1', files: [{ path: 'out/report.md', description }] }, 1),
+    event('assistant/message', {
+      turn: 1, step: 0,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 2),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+  ])
+  const match = folder.search('alpha beta')[0]!
+  assert.deepEqual(match.source, { kind: 'assistant-deliverable', index: 0, field: 'description' })
+
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const card = folder.messages()[0]!
+  app.setTranscript([card], folder.turnActivities())
+  app.setTranscriptSearchTarget({ query: 'alpha beta', match, message: card })
+  const lines = await viewport(vt)
+  const pathRow = lines.findIndex(line => line.includes('report.md'))
+  assert.ok(pathRow >= 0, `the delivered path row renders:\n${lines.join('\n')}`)
+  const row = pathRow + 1
+  assert.ok(lines[row]!.trimStart().startsWith('xxx'),
+    `the description owns the NEXT row and keeps its head:\n${lines.join('\n')}`)
+  assert.ok(!lines[row]!.includes('alpha'), `the middle match is abbreviated away, not rendered:\n${lines[row]}`)
+  for (let col = 0; col < 90; col += 1) {
+    assert.ok(!isStrongCell(vt, row, col), `no guessed strong cell at column ${col}`)
+  }
+  app.stop()
+})
+
+test('navigation: a truncated description keeps its full RAW source in the search corpus', async () => {
+  const event = (type: string, data: Record<string, unknown>, seq: number): SessionEvent =>
+    ({ type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent)
+  // The display is an abbreviation, never the search corpus: a token the row
+  // cuts away from its middle is still found by the fold's own search
+  // projection (M3 contract).
+  const description = `${'a'.repeat(80)} needle-ghij ${'b'.repeat(80)}`
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    event('turn/start', { turn: 1 }, 0),
+    event('deliverables/presented', { turn: 1, callId: 'present-1', files: [{ path: 'out/report.md', description }] }, 1),
+    event('assistant/message', {
+      turn: 1, step: 0,
+      message: { id: MessageId('a1'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      stream: [],
+    }, 2),
+    event('turn/end', { turn: 1, reason: { kind: 'completed' } }, 3),
+  ])
+  const match = folder.search('needle-ghij')[0]!
+  assert.deepEqual(match.source, { kind: 'assistant-deliverable', index: 0, field: 'description' })
+
+  const { vt, app } = startApp()
+  app.setFullscreen(true)
+  const card = folder.messages()[0]!
+  app.setTranscript([card], folder.turnActivities())
+  app.setTranscriptSearchTarget({ query: 'needle-ghij', match, message: card })
+  const lines = await viewport(vt)
+  const pathRow = lines.findIndex(line => line.includes('report.md'))
+  assert.ok(pathRow >= 0, `the delivered path row renders:\n${lines.join('\n')}`)
+  const row = pathRow + 1
+  assert.ok(lines[row]!.includes('a'.repeat(20)), `the description is painted on its own row:\n${lines.join('\n')}`)
+  assert.ok(!lines[row]!.includes('needle-ghij'), `the row cuts the middle token away:\n${lines[row]}`)
+  app.stop()
+})
+
+test('navigation: an explicit re-navigation re-opens a manually collapsed PTC sub-call', async () => {
+  const grandchild: TranscriptToolMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{}', result: 'deepest-needle output', status: 'ok',
+    subCallId: 'grand-1', parentCallId: 'child-1', rootCallId: 'root-1',
+  }
+  const child: TranscriptToolMessage = {
+    kind: 'tool', turn: 0, name: 'bash', args: '{}', result: 'child output', status: 'ok',
+    subCalls: [grandchild], subCallId: 'child-1', parentCallId: 'root-1', rootCallId: 'root-1',
+  }
+  const root: TranscriptToolMessage = {
+    kind: 'tool', turn: 0, name: 'run_code', args: '{}', result: 'ok', status: 'ok', subCalls: [child],
+  }
+  const { vt, app } = startApp(100, 30)
+  app.setFullscreen(true)
+  app.setTranscript([root])
+  const target = () => ({
+    query: 'deepest-needle',
+    match: {
+      id: 0, turn: 0, occurrence: 0,
+      source: { kind: 'subcall-field' as const, subCallIds: ['child-1', 'grand-1'], field: 'result' as const },
+      sourceOccurrence: 0,
+    },
+    message: root,
+  })
+  app.setTranscriptSearchTarget(target())
+  let lines = await viewport(vt)
+  const bodyRow = lines.findIndex(line => line.includes('deepest-needle output'))
+  assert.ok(bodyRow > 0, `the reveal must open the grandchild body:\n${lines.join('\n')}`)
+
+  // The USER manually collapses the grandchild by clicking its header. This adds
+  // the sub-call to the search suppression set WITHOUT revoking the reveal grant.
+  click(vt, 10, bodyRow)
+  lines = await viewport(vt)
+  assert.ok(!lines.some(line => line.includes('deepest-needle output')),
+    `the manual collapse must hide the body:\n${lines.join('\n')}`)
+  assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, true,
+    'a PTC sub-call collapse keeps the reveal grant (plan §7.5)')
+
+  // Dismissing after the manual collapse must NOT promote that suppressed path
+  // into durable disclosure, but it must clear the presentation atomically.
+  app.resetSearchPresentationDiagnosticsForTest()
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  lines = await viewport(vt)
+  const subCallExpanded = (app as unknown as { subCallExpanded: Set<string> }).subCallExpanded
+  assert.equal(subCallExpanded.has('grand-1'), false, 'a manually collapsed PTC child is not promoted on dismiss')
+  assert.equal(app.transcriptSearchPresentationForTest(), undefined, 'dismiss clears the search target')
+  assert.equal(app.searchPresentationDiagnosticsForTest().rebuilds, 1, 'dismiss clears presentation in one rebuild')
+  assert.ok(!lines.some(line => line.includes('deepest-needle output')),
+    `the suppressed child stays collapsed after dismiss:\n${lines.join('\n')}`)
+
+  // An explicit navigation that wraps to the SAME semantic target must still
+  // re-open the sub-call (plan §10.4: only the next explicit Next/Prev re-reveals).
+  app.setTranscriptSearchTarget(target())
+  lines = await viewport(vt)
+  assert.ok(lines.some(line => line.includes('deepest-needle output')),
+    `an explicit re-navigation must re-open the collapsed sub-call:\n${lines.join('\n')}`)
+  app.finishTranscriptSearchPresentation(new Set(), { preserveCurrentReveal: true })
+  lines = await viewport(vt)
+  assert.equal(subCallExpanded.has('child-1'), true, 'the ancestor child is promoted on dismiss')
+  assert.equal(subCallExpanded.has('grand-1'), true, 'the current PTC child is promoted on dismiss')
+  assert.ok(lines.some(line => line.includes('deepest-needle output')),
+    `a non-suppressed search reveal stays open after dismiss:\n${lines.join('\n')}`)
+  app.stop()
+})
+
+
+// ── a published visual Assistant keeps rendered search geometry ───────────
+
+function searchChartPublication(ref: string): PublishedVisual {
+  return {
+    ref, turn: 0, step: 1, stepStartSeq: 5, callSeq: 6, resultSeq: 7, callId: 'present-search',
+    source: {
+      ref, type: 'chart', title: 'Search latency', turn: 0, step: 0, stepStartSeq: 1, callSeq: 2, resultSeq: 3, callId: 'chart-search',
+      chart: { version: 1, type: 'chart', kind: 'bars', title: 'Search latency', unit: 'ms', series: [{ label: 'p50', value: 42 }] },
+      svg: undefined, svgSource: undefined, svgAdmissionWidth: undefined,
+    },
+  }
+}
+
+function visualAnswerFolder(ref: string, text: string): {
+  folder: TranscriptFolder
+  assistant: Extract<TranscriptMessage, { kind: 'assistant' }>
+} {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } } as unknown as SessionEvent,
+    {
+      type: 'assistant/message',
+      seq: 1,
+      time: 2,
+      data: {
+        turn: 0,
+        step: 0,
+        message: {
+          id: MessageId('search-visual'),
+          role: 'assistant',
+          content: [{ type: 'text', text }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+      },
+    } as unknown as SessionEvent,
+    { type: 'turn/end', seq: 2, time: 3, data: { turn: 0, reason: { kind: 'completed' } } } as unknown as SessionEvent,
+  ])
+  const assistant = folder.messages().find(
+    (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
+  )
+  assert.ok(assistant !== undefined)
+  setAssistantVisualPresentation(assistant, {
+    subjectKind: 'main', subjectId: 'search', sourceIdentity: {}, session: {}, sessionId: 'search', seq: 2,
+    turn: 0, step: 0, text: assistant.text, content: undefined, assistantRevision: 0,
+  }, [searchChartPublication(ref)])
+  return { folder, assistant }
+}
+
+test('search after an inline figure highlights the rendered answer row', async () => {
+  const ref = `sv1_${'f'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const { folder, assistant } = visualAnswerFolder(ref, `Before figure.\n\n${marker}\n\nAfter needle.`)
+  const { vt, app } = startApp()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: assistant,
+  })
+  const lines = await viewport(vt)
+  const row = lines.findIndex(line => line.includes('After needle.'))
+  assert.ok(row >= 0, `the searched answer row is visible:\n${lines.join('\n')}`)
+  const col = lines[row]!.indexOf('needle')
+  assert.ok(vt.getCellUnderline(row, col), 'the rendered occurrence is weak-highlighted')
+  assert.equal(vt.getCellBgRgb(row, col), undefined, 'a message-source occurrence is never falsely exact')
+  app.stop()
+})
+
+test('a search that only matches a consumed marker line paints no false anchor', async () => {
+  const ref = `sv1_${'f'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const { folder, assistant } = visualAnswerFolder(ref, `Before figure.\n\n${marker}\n\nAfter.`)
+  const { vt, app } = startApp()
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget({
+    query: `dsh-visual-${ref}`,
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: assistant,
+  })
+  const lines = await viewport(vt)
+  const row = lines.findIndex(line => line.includes('Before figure.'))
+  assert.ok(row >= 0, `the answer remains visible:\n${lines.join('\n')}`)
+  const col = lines[row]!.indexOf('Before figure.')
+  assert.equal(vt.getCellBgRgb(row, col), undefined, 'no anchor wash for a hidden marker-only match')
+  assert.equal(vt.getCellUnderline(row, col), false, 'no false occurrence highlight')
+  app.stop()
+})
+
+
+test('a visual Assistant keeps the search anchor for a folded delivered-file target', async () => {
+  const ref = `sv1_${'f'.repeat(20)}`
+  const files = Array.from({ length: 6 }, (_, index) => ({
+    path: `out/visible-${index}.md`,
+    description: `Visible report ${index}`,
+  }))
+  files[5] = { path: 'out/hidden-target.md', description: 'Hidden delivered target' }
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } } as unknown as SessionEvent,
+    {
+      type: 'deliverables/presented',
+      seq: 1,
+      time: 2,
+      data: { turn: 1, callId: 'present-1', files },
+    } as unknown as SessionEvent,
+    {
+      type: 'assistant/message',
+      seq: 2,
+      time: 3,
+      data: {
+        turn: 1,
+        step: 0,
+        message: {
+          id: MessageId('visual-deliverable-search'),
+          role: 'assistant',
+          content: [{ type: 'text', text: 'done' }],
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+      },
+    } as unknown as SessionEvent,
+    { type: 'turn/end', seq: 3, time: 4, data: { turn: 1, reason: { kind: 'completed' } } } as unknown as SessionEvent,
+  ])
+  const card = folder.messages().find(
+    (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
+  )
+  assert.ok(card !== undefined)
+  setAssistantVisualPresentation(card, {
+    subjectKind: 'main', subjectId: 'deliverable-search', sourceIdentity: {}, session: {}, sessionId: 'deliverable-search', seq: 3,
+    turn: 1, step: 0, text: card.text, content: undefined, assistantRevision: 0,
+  }, [searchChartPublication(ref)])
+  const match = folder.search('hidden-target').find(candidate => candidate.source.kind === 'assistant-deliverable')
+  assert.ok(match !== undefined, 'the hidden delivered path is in the raw search corpus')
+  assert.deepEqual(match.source, { kind: 'assistant-deliverable', index: 5, field: 'path' })
+
+  const { vt, app } = startApp(100, 24)
+  app.setFullscreen(true)
+  app.setTranscript([card], folder.turnActivities())
+  await vt.waitForRender()
+  assert.ok(assistantVisualPresentation(card) !== undefined, 'precondition: the Answer has a visual sidecar')
+  // A PASSIVE rebind does not grant the temporary reveal, so the folded tail
+  // stays closed and the hidden path has no rendered occurrence. The target is
+  // still a legitimate semantic hit and must keep its anchor selection.
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([card]),
+    target: { query: 'hidden-target', match, message: card },
+    grantReveal: false,
+  })
+  const lines = await viewport(vt)
+  assert.ok(!lines.some(line => line.includes('hidden-target.md')),
+    `precondition: the folded tail hides the target:\n${lines.join('\n')}`)
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{
+      block: { message?: TranscriptMessage }
+      searchSelection?: { selectedIndex: number; exact: boolean }
+    }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === card)?.searchSelection
+  assert.ok(selection !== undefined,
+    'a delivered-file target keeps its anchor selection; only a consumed-marker message target is suppressed')
+  assert.equal(selection.exact, false, 'the deliverable target remains anchor-only')
+  app.stop()
+})
+
+test('a search target below an inline figure scrolls the viewport to the rendered answer row', async () => {
+  const ref = `sv1_${'f'.repeat(20)}`
+  const marker = `[dsh-visual-${ref}]: <#>`
+  const filler = Array.from({ length: 30 }, (_, index) => `filler line ${index}`).join('\n')
+  const { folder, assistant } = visualAnswerFolder(ref, `Before figure.\n\n${marker}\n\n${filler}\n\nAfter needle.`)
+  const { vt, app } = startApp(80, 12)
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  app.setTranscriptSearchTarget({
+    query: 'needle',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: assistant,
+  })
+  app.scrollToSearchTarget()
+  const lines = await viewport(vt)
+  assert.ok(lines.some(line => line.includes('After needle.')),
+    `the destination row is visible after the figure:\n${lines.join('\n')}`)
+  assert.ok((app.fullscreenScrollForTest()?.scrollTop ?? 0) > 0,
+    'the source-local destination is below the card top')
+  app.stop()
+})
+
+
+test('a message target crossing a non-text block keeps its search anchor', async () => {
+  const ref = `sv1_${'f'.repeat(20)}`
+  const content = [
+    { type: 'text' as const, text: 'cross-' },
+    { type: 'image' as const, attachment: { type: 'image' as const, name: 'middle.png' } },
+    { type: 'text' as const, text: 'block' },
+  ] as ContentBlock[]
+  const folder = new TranscriptFolder()
+  folder.hydrate([
+    { type: 'turn/start', seq: 0, time: 1, data: { turn: 0 } } as unknown as SessionEvent,
+    {
+      type: 'assistant/message',
+      seq: 1,
+      time: 2,
+      data: {
+        turn: 0,
+        step: 0,
+        message: {
+          id: MessageId('cross-block-search'),
+          role: 'assistant',
+          content,
+          source: { kind: 'model', provider: 'p', model: 'm' },
+        },
+      },
+    } as unknown as SessionEvent,
+    { type: 'turn/end', seq: 2, time: 3, data: { turn: 0, reason: { kind: 'completed' } } } as unknown as SessionEvent,
+  ])
+  const card = folder.messages().find(
+    (message): message is Extract<TranscriptMessage, { kind: 'assistant' }> => message.kind === 'assistant',
+  )
+  assert.ok(card !== undefined)
+  assert.equal(card.text, 'cross-block', 'the raw corpus concatenates text blocks without a separator')
+  setAssistantVisualPresentation(card, {
+    subjectKind: 'main', subjectId: 'cross-block-search', sourceIdentity: {}, session: {}, sessionId: 'cross-block-search', seq: 2,
+    turn: 0, step: 0, text: card.text, content: card.content, assistantRevision: 0,
+  }, [searchChartPublication(ref)])
+  const match = folder.search('cross-block').find(candidate => candidate.source.kind === 'message')
+  assert.ok(match !== undefined, 'the raw message corpus has the cross-block hit')
+
+  const { vt, app } = startApp(100, 24)
+  app.setTranscript([card], folder.turnActivities())
+  await vt.waitForRender()
+  const plain = (await viewport(vt)).join('\n')
+  assert.ok(!plain.includes('cross-block'),
+    `precondition: the image block breaks the rendered contiguous text:\n${plain}`)
+  app.setTranscriptSearchPresentation({
+    matchMessages: new Set([card]),
+    target: { query: 'cross-block', match, message: card },
+    grantReveal: false,
+  })
+  const mounted = (app as unknown as {
+    mountedTranscriptBlocks: ReadonlyArray<{
+      block: { message?: TranscriptMessage }
+      searchSelection?: { selectedIndex: number; exact: boolean }
+    }>
+  }).mountedTranscriptBlocks
+  const selection = mounted.find(entry => entry.block.message === card)?.searchSelection
+  assert.ok(selection !== undefined,
+    'a legitimate message hit crossing a non-text block must keep its anchor; only hidden-marker-only hits are suppressed')
+  app.stop()
+})

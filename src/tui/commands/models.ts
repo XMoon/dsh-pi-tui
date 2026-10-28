@@ -563,7 +563,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
             // The sessionless catalog follows the choice through the STANDING
             // scope of the new preset (no Agent, no session — composition
             // probes are disabled in this deployment, see
-            // docs/surface-catalog.md). A failed read degrades inside the
+            // docs/architecture/surface-catalog.md). A failed read degrades inside the
             // coordinator: the choice itself still applies.
             const outcome = await runner.refreshStandingCatalog(resolved.id, 'preset')
             if (token !== presetOperationToken) return { kind: 'superseded' }

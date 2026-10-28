@@ -89,11 +89,12 @@ function routeEditorRenders(tui: TUI, route: ((force?: boolean) => void) | undef
  * three prompts (`❯ `, `! `, `!!`) are exactly this wide. */
 const PROMPT_WIDTH = 2
 
-/** Whether the cursor sits in a declared path-argument position (`/attach`/`/image
- * <arg>`): the classifier's `path-argument` kind, which the reopen gate
- * consumes (plan §11 — ONE classifier, never a per-command hardcode). */
-function isFileArgumentContext(textBeforeCursor: string): boolean {
-  return classifyFileCompletionContext(textBeforeCursor, FILE_ARGUMENT_COMMANDS).kind !== 'none'
+/** Whether the cursor sits in a FILE completion position (`@mention` or a
+ * declared path argument `/attach`/`/image <arg>`): the classifier's answer,
+ * which the directory reopen gate consumes (plan §11 — ONE classifier, never a
+ * per-command hardcode). A `none` position keeps the dropdown closed. */
+function isFileCompletionContext(textBeforeCursor: string, line: number, shell: boolean): boolean {
+  return classifyFileCompletionContext(textBeforeCursor, FILE_ARGUMENT_COMMANDS, { line, shell }).kind !== 'none'
 }
 
 /**
@@ -283,6 +284,38 @@ export class TuiEditor extends Editor {
     this.cancelAutocomplete()
   }
 
+  /** Whether this LINE belongs to a SHELL document: a `!`/`!!` input mode,
+   *  or a prompt-mode buffer holding the literal wire form. Shell words are
+   *  the shell plane's authority — never an attachment seat. */
+  private isShellDocumentLine(textBeforeCursor: string): boolean {
+    return this.inputMode !== 'prompt' || textBeforeCursor.trimStart().startsWith('!')
+  }
+
+  /**
+   * Open the completion dropdown for the CURRENT cursor position: an accepted
+   * inline attachment ACTION lands the cursor inside the path argument
+   * (`/image `), and the path candidates must appear WITHOUT a further
+   * keystroke — the vendored editor's natural trigger fires on characters, not
+   * on a programmatic replacement. The ONE classifier decides whether the
+   * position is really a path seat, so this seam can never open the file list
+   * on ordinary prose. A NATURAL request is used (never the forced-Tab route
+   * above): the vendored editor applies a single-candidate forced-Tab result
+   * with no confirm gesture, which would install a path instead of opening the
+   * menu, and an already-open dropdown is refreshed, not duplicated.
+   */
+  openPathCompletion(): void {
+    if (this.inputMode !== 'prompt') return
+    const { line, col } = this.getCursor()
+    const before = this.getLines()[line]?.slice(0, col) ?? ''
+    const shell = before.trimStart().startsWith('!')
+    if (classifyFileCompletionContext(before, FILE_ARGUMENT_COMMANDS, { line, shell }).kind !== 'path-argument') return
+    // NEVER the forced+explicitTab route: the vendored editor APPLIES a
+    // single-candidate forced Tab result without any confirm gesture, which
+    // would install a path into the draft (and skip the attachment read)
+    // instead of opening the menu.
+    this.requestAutocomplete({ force: false, explicitTab: false })
+  }
+
   /** Switch the input mode. A real change fires onChange (the host's
    * viewer-draft mirror and seat subscribers must observe the wire form
    * changing even when the body text did not) and CANCELS any open
@@ -338,6 +371,7 @@ export class TuiEditor extends Editor {
     const context = classifyFileCompletionContext(
       textBeforeCursor,
       FILE_ARGUMENT_COMMANDS,
+      { line: cursor.line, shell: this.inputMode !== 'prompt' || textBeforeCursor.trimStart().startsWith('!') },
     )
 
     if (context.kind === 'none') {
@@ -430,7 +464,10 @@ export class TuiEditor extends Editor {
     if (matchesKey(data, 'tab') && !this.isShowingAutocomplete() && this.inputMode === 'prompt') {
       const { line, col } = this.getCursor()
       const beforeCursor = this.getLines()[line]?.slice(0, col) ?? ''
-      const context = classifyFileCompletionContext(beforeCursor, FILE_ARGUMENT_COMMANDS)
+      const context = classifyFileCompletionContext(beforeCursor, FILE_ARGUMENT_COMMANDS, {
+        line,
+        shell: beforeCursor.trimStart().startsWith('!'),
+      })
       if (context.kind === 'mention' || context.kind === 'path-argument') {
         this.requestAutocomplete({ force: true, explicitTab: true })
         return
@@ -486,6 +523,7 @@ export class TuiEditor extends Editor {
     if (data !== '') super.handleInput(data)
     this.triggerNonstandardMentionCompletion(data)
     this.triggerInlineSkillCompletion(data)
+    this.triggerInlinePathArgumentCompletion(data)
     this.reopenAutocompleteAfterInput()
   }
 
@@ -503,7 +541,7 @@ export class TuiEditor extends Editor {
     if (printable === undefined && ![...data].some(character => character.charCodeAt(0) >= 32)) return
     const { line, col } = this.getCursor()
     const before = this.getLines()[line]?.slice(0, col) ?? ''
-    const context = classifyFileCompletionContext(before, FILE_ARGUMENT_COMMANDS)
+    const context = classifyFileCompletionContext(before, FILE_ARGUMENT_COMMANDS, { line, shell: this.isShellDocumentLine(before) })
     if (context.kind !== 'mention') return
     const beforeAt = before[context.range.start - 1]
     // Start/space/tab are already handled by the fork for bare mentions. Its
@@ -515,6 +553,34 @@ export class TuiEditor extends Editor {
     const quotedMention = context.query.startsWith('@"')
     const nonstandardBoundary = beforeAt !== undefined && beforeAt !== ' ' && beforeAt !== '\t'
     if (!quotedMention && !nonstandardBoundary) return
+    this.requestAutocomplete({ force: false, explicitTab: false })
+  }
+
+  /**
+   * Trigger the provider while the cursor sits inside a declared path
+   * ARGUMENT that is not the first line's leading command
+   * (`hi /image sh`, a later line's `/attach no`). The vendored editor's
+   * per-letter trigger only recognizes its own line-start slash-command
+   * context, so an INLINE argument position would otherwise stay silent until
+   * an explicit Tab — the same consumer-side gap the `@`/skill triggers close.
+   * The ONE classifier decides; ordinary prose and paths never reach here.
+   */
+  private triggerInlinePathArgumentCompletion(data: string): void {
+    if (this.isShowingAutocomplete()) return
+    if (this.inputMode !== 'prompt') return
+    const printable = decodePrintableKey(data) ?? (data.length === 1 && data.charCodeAt(0) >= 32 ? data : undefined)
+    // Navigation/control keys and paste markers are not typing.
+    if (printable === undefined && data.includes('\x1b')) return
+    if (printable === undefined && ![...data].some(character => character.charCodeAt(0) >= 32)) return
+    const { line, col } = this.getCursor()
+    const before = this.getLines()[line]?.slice(0, col) ?? ''
+    const context = classifyFileCompletionContext(before, FILE_ARGUMENT_COMMANDS, { line, shell: this.isShellDocumentLine(before) })
+    if (context.kind !== 'path-argument' || context.leading) return
+    // One request per TYPED character, exactly like the fork's own per-letter
+    // trigger in its line-start command context (an open dropdown refreshes
+    // through the fork's update path; a closed one must be opened here).
+    // Escape sequences and paste markers were already rejected above, so Esc
+    // never re-triggers (kimi parity).
     this.requestAutocomplete({ force: false, explicitTab: false })
   }
 
@@ -671,7 +737,7 @@ export class TuiEditor extends Editor {
     // reopen through the same directory-shaped context gate — never a
     // per-command hardcode, and never a plain trailing `/` (a `see /tmp/`
     // position stays closed).
-    if ((textBeforeCursor.endsWith('/') || textBeforeCursor.endsWith('\\')) && isFileArgumentContext(textBeforeCursor)) {
+    if ((textBeforeCursor.endsWith('/') || textBeforeCursor.endsWith('\\')) && isFileCompletionContext(textBeforeCursor, line, this.isShellDocumentLine(textBeforeCursor))) {
       this.requestAutocomplete({ force: false, explicitTab: false })
     }
   }

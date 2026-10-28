@@ -77,3 +77,12 @@ export interface DraftImageInput {
 export interface DraftImageStoreLike {
   values(): readonly DraftImage[]
 }
+
+/**
+ * The READ-ONLY draft-image projection the composer preview consumes (plan
+ * PR1). `values()` is the store's live staged set; the preview owns no state
+ * beyond its short-lived render caches. The existing unreferenced-draft
+ * cleanup is a separate callback owned by the runtime composition; this
+ * interface exposes no mutation.
+ */
+export interface DraftImagePreviewSource extends DraftImageStoreLike {}

@@ -92,7 +92,10 @@ function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean)
 		return { images: null, trueColor: hasTrueColorHint, hyperlinks: true };
 	}
 
-	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty") {
+	// Tern's terminal pane speaks the Kitty graphics protocol; classify it with
+	// the other known Kitty-capable terminals so the main and alternate screens
+	// and the host share ONE capability answer.
+	if (process.env.KITTY_WINDOW_ID || termProgram === "kitty" || termProgram === "tern") {
 		return { images: "kitty", trueColor: true, hyperlinks: true };
 	}
 
@@ -203,6 +206,117 @@ export function setCapabilities(caps: TerminalCapabilities): void {
 
 const KITTY_PREFIX = "\x1b_G";
 const ITERM2_PREFIX = "\x1b]1337;File=";
+
+export interface KittyVirtualPlacementAnchor {
+	/** The exact raw `a=p,U=1` APC sequence, byte-for-byte. */
+	readonly sequence: string;
+	readonly imageId: number;
+	readonly placementId: number;
+	readonly columns: number;
+	readonly rows: number;
+}
+
+/** The Kitty Unicode placeholder base character (Supplementary PUA, plane 16). */
+const KITTY_VIRTUAL_PLACEHOLDER = "\u{10eeee}";
+/** The virtual backend's component bound; a larger placement is not a managed A image. */
+const KITTY_VIRTUAL_MAX_CELLS = 297;
+
+function positiveIntegerControl(controls: Readonly<Record<string, string>>, key: string): number | undefined {
+	const value = controls[key];
+	if (value === undefined || value === "") return undefined;
+	const parsed = Number(value);
+	return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/**
+ * Read one managed Unicode-placeholder placement anchor from a source line.
+ *
+ * This is a stateless parser for the virtual backend's ONE first-row anchor; it
+ * does not synthesize geometry or touch the Native metadata table. A line whose
+ * first Kitty APC is not exactly `a=p,U=1,q=2` with valid 1..297 `c`/`r` is not
+ * a virtual anchor. The returned `sequence` is the exact source substring the
+ * layout seam may move without rewriting any byte.
+ */
+export function getKittyVirtualPlacementAnchor(line: string): KittyVirtualPlacementAnchor | undefined {
+	const start = line.indexOf(KITTY_PREFIX);
+	if (start === -1) return undefined;
+	const end = line.indexOf("\x1b\\", start + KITTY_PREFIX.length);
+	if (end === -1) return undefined;
+	const body = line.slice(start + KITTY_PREFIX.length, end);
+	const separator = body.indexOf(";");
+	if (separator === -1) return undefined;
+	const controls: Record<string, string> = {};
+	for (const part of body.slice(0, separator).split(",")) {
+		const equals = part.indexOf("=");
+		if (equals <= 0) continue;
+		controls[part.slice(0, equals)] = part.slice(equals + 1);
+	}
+	if (controls.a !== "p" || controls.U !== "1" || controls.q !== "2") return undefined;
+	const imageId = positiveIntegerControl(controls, "i");
+	const placementId = positiveIntegerControl(controls, "p");
+	const columns = positiveIntegerControl(controls, "c");
+	const rows = positiveIntegerControl(controls, "r");
+	if (imageId === undefined || placementId === undefined) return undefined;
+	if (columns === undefined || rows === undefined) return undefined;
+	if (columns > KITTY_VIRTUAL_MAX_CELLS || rows > KITTY_VIRTUAL_MAX_CELLS) return undefined;
+	return { sequence: line.slice(start, end + 2), imageId, placementId, columns, rows };
+}
+
+/** The private provenance prefix of a managed virtual image anchor. */
+export const MANAGED_KITTY_VIRTUAL_MARKER_PREFIX = "\x1b_pi:tmux-image:v1:i=";
+const MANAGED_KITTY_VIRTUAL_MARKER_TERMINATOR = "\x1b\\";
+
+export interface ManagedKittyVirtualMarker {
+	/** The exact private marker APC, byte-for-byte. */
+	readonly sequence: string;
+	readonly imageId: number;
+	readonly placementId: number;
+}
+
+/**
+ * Read the private provenance marker at the start of a source line. The marker
+ * is NOT a Kitty graphics command and is never written to a real terminal; it
+ * only says that the adjacent `a=p,U=1` anchor was produced by the managed
+ * component for the same Core handle. A malformed prefix returns undefined; the
+ * layout caller treats a line that starts with the prefix but does not parse as
+ * an implementation error and refuses to paint it.
+ */
+export function getManagedKittyVirtualMarker(line: string): ManagedKittyVirtualMarker | undefined {
+	if (!line.startsWith(MANAGED_KITTY_VIRTUAL_MARKER_PREFIX)) return undefined;
+	const end = line.indexOf(MANAGED_KITTY_VIRTUAL_MARKER_TERMINATOR, MANAGED_KITTY_VIRTUAL_MARKER_PREFIX.length);
+	if (end === -1) return undefined;
+	const match = /^(\d{1,10}),p=(\d{1,10})$/.exec(line.slice(MANAGED_KITTY_VIRTUAL_MARKER_PREFIX.length, end));
+	if (match === null) return undefined;
+	const imageId = Number(match[1]);
+	const placementId = Number(match[2]);
+	if (!Number.isSafeInteger(imageId) || imageId < 1 || imageId > 0xffffffff) return undefined;
+	if (!Number.isSafeInteger(placementId) || placementId < 1 || placementId > 0xffffffff) return undefined;
+	return { sequence: line.slice(0, end + 2), imageId, placementId };
+}
+
+/** Whether the line carries at least one real Unicode placeholder cell. */
+export function isKittyVirtualPlaceholderLine(line: string): boolean {
+	return line.includes(KITTY_VIRTUAL_PLACEHOLDER);
+}
+
+/**
+ * Whether a placeholder row's own colors name the same image/placement as an
+ * existing virtual anchor. This is a validation of EXISTING identity bytes, not
+ * a geometry reconstruction: the anchor's `i`/`p` stay authoritative and the
+ * row must already be a real placeholder line.
+ */
+export function matchesKittyVirtualPlaceholderIdentity(
+	line: string,
+	imageId: number,
+	placementId: number,
+): boolean {
+	const foreground = /\x1b\[38;2;(\d{1,3});(\d{1,3});(\d{1,3})m/.exec(line);
+	const underline = /\x1b\[58:2::(\d{1,3}):(\d{1,3}):(\d{1,3})m/.exec(line);
+	if (foreground === null || underline === null) return false;
+	const rgb = (match: RegExpExecArray): number =>
+		((Number(match[1]) & 0xff) << 16) | ((Number(match[2]) & 0xff) << 8) | (Number(match[3]) & 0xff);
+	return rgb(foreground) === (imageId & 0xffffff) && rgb(underline) === (placementId & 0xffffff);
+}
 
 export function isImageLine(line: string): boolean {
 	// Fast path: sequence at line start (single-row images)

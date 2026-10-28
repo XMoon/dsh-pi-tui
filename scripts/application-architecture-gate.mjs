@@ -3,8 +3,8 @@
  * @xmoon76/dsh-pi-tui/scripts/application-architecture-gate — CI guard for the
  * long-lived application-layer dependency direction between `src/app/**` owners,
  * `src/runtime/**` semantic/adaptor layers, presentation/TUI modules, and the
- * experimental Remote composition boundary (see `docs/architecture.md`; the
- * enforcement inventory lives in `docs/client-server-migration.md`).
+ * experimental Remote composition boundary (see `docs/architecture/overview.md`; the
+ * enforcement inventory lives in `docs/architecture/host-client.md`).
  *
  * This gate is deliberately separate from `scripts/client-boundary-gate.mjs`:
  *
@@ -674,7 +674,7 @@ export const ARCHITECTURE_RULES = [
  * The reviewed `runtime/remote/**` -> `runtime/direct/**` EDGES (plan §11.4
  * assertion 7), keyed by `source -> resolved target`. Exactly the two Direct
  * helpers the HF1 Host-side construction bridge already used
- * (`docs/client-server-coupling.md`), so the exception is scoped to the
+ * (`docs/architecture/host-client.md`), so the exception is scoped to the
  * reviewed dependency EDGE and never to a whole file: the same bridge
  * importing any other Direct module — or any other Remote adapter importing
  * one of these two — is a violation. The gate tests assert this set stays
@@ -1629,49 +1629,49 @@ function main() {
   if (retiredViolations.length > 0) {
     console.error('application-architecture-gate: retired source directory recreated:')
     for (const detail of retiredViolations) console.error(`  ${detail}`)
-    console.error('\nSee docs/architecture.md (source module placement).')
+    console.error('\nSee docs/architecture/overview.md (source module placement).')
     process.exit(1)
   }
   if (retiredRootViolations.length > 0) {
     console.error('application-architecture-gate: retired TS8-F root reused:')
     for (const detail of retiredRootViolations) console.error(`  ${detail}`)
-    console.error('\nSee docs/architecture.md (source module placement).')
+    console.error('\nSee docs/architecture/overview.md (source module placement).')
     process.exit(1)
   }
   if (finalStateViolations.length > 0) {
     console.error('application-architecture-gate: final source-root state violated:')
     for (const detail of finalStateViolations) console.error(`  ${detail}`)
-    console.error('\nSee docs/architecture.md (source module placement) and plan §11.4.')
+    console.error('\nSee docs/architecture/overview.md (source module placement) and plan §11.4.')
     process.exit(1)
   }
   if (registryPlacementViolations.length > 0) {
     console.error('application-architecture-gate: concrete extension registry placement violated:')
     for (const detail of registryPlacementViolations) console.error(`  ${detail}`)
-    console.error('\nSee docs/architecture.md (source module placement) and plan §11.4.')
+    console.error('\nSee docs/architecture/overview.md (source module placement) and plan §11.4.')
     process.exit(1)
   }
   if (startupIslandViolations.length > 0) {
     console.error('application-architecture-gate: startup compatibility island violated:')
     for (const detail of startupIslandViolations) console.error(`  ${detail}`)
-    console.error('\nSee docs/architecture.md (source module placement) and plan §11.4.')
+    console.error('\nSee docs/architecture/overview.md (source module placement) and plan §11.4.')
     process.exit(1)
   }
   if (remoteToDirectViolations.length > 0) {
     console.error('application-architecture-gate: Remote client adapter reached the Direct implementation:')
     for (const detail of remoteToDirectViolations) console.error(`  ${detail}`)
-    console.error('\nSee docs/architecture.md and docs/client-server-coupling.md (plan §11.4 assertion 7).')
+    console.error('\nSee docs/architecture/overview.md and docs/architecture/host-client.md (plan §11.4 assertion 7).')
     process.exit(1)
   }
   if (rootViolations.length > 0) {
     console.error('application-architecture-gate: source-root placement violated:')
     for (const detail of rootViolations) console.error(`  ${detail}`)
-    console.error('\nSee docs/architecture.md (source module placement).')
+    console.error('\nSee docs/architecture/overview.md (source module placement).')
     process.exit(1)
   }
   if (violations.length > 0) {
     console.error('application-architecture-gate: application-layer dependency direction violated:')
     for (const v of violations) console.error(`  src/${v.file}:${v.line} [${v.rule}] ${v.detail}`)
-    console.error('\nSee docs/architecture.md and docs/client-server-migration.md.')
+    console.error('\nSee docs/architecture/overview.md and docs/architecture/host-client.md.')
     process.exit(1)
   }
   console.log(`application-architecture-gate: ok (${entries.length} file(s), dependency direction clean)`)

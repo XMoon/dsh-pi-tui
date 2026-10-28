@@ -11,7 +11,7 @@
  * resolved lazily INSIDE the assembled adapters themselves (e.g. the Direct
  * Host user-shell adapter resolves the `shell` capability per call).
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/backend-direct
  */
 
@@ -38,6 +38,7 @@ import { DirectHostCommandPort } from './host-command-direct.ts'
 import { DirectPluginManagerPort } from './plugin-manager-direct.ts'
 import { DirectJobObservationPort } from './job-observation-direct.ts'
 import { DirectHostUserShellPort, type DirectShellCapability } from './host-user-shell-direct.ts'
+import { DirectDeliveredFileReadPort } from './deliverables-direct.ts'
 
 /** The minimal Host context surface the Direct adapters need (structural;
  * the services resolve from the running dsh installation). */
@@ -101,5 +102,8 @@ export function createDirectRuntimeBackend(deps: DirectBackendDeps): Backend {
       deps.ctx,
       () => deps.ctx.get('shell') as unknown as DirectShellCapability | undefined,
     ),
+    // Delivered files PR2: the official Host file service read in-process,
+    // under the same Session-derived scope the official Remote lookup uses.
+    new DirectDeliveredFileReadPort(deps.ctx),
   )
 }

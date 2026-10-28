@@ -49,6 +49,7 @@ import {
   type SlashCommand,
   type Terminal,
   type TerminalProgressState,
+  type ImageProtocol,
   type TuiInputListenerResult,
   type KeyId,
   type TuiMouseEvent,
@@ -108,17 +109,17 @@ export {
   transcriptContentWidth,
 } from './tui/components/transcript-leaves.ts'
 import {
+  ApprovalSheetFrame,
+  type ApprovalMouseGesture,
   type ApprovalOutcome,
   type ApprovalPromptRequest,
 } from './tui/panels/approval-dialog.ts'
-// The approval presentation contract stays importable from this facade (TS4
-// plan §26); the approval LIFECYCLE is owned by
-// `tui/interaction/approval-runtime.ts` (TS5 §8.3).
+// The approval request/outcome contract stays importable from this facade
+// (TS4 plan §26); the approval LIFECYCLE is owned by
+// `tui/interaction/approval-runtime.ts` (TS5 §8.3) and the presentation by
+// `tui/panels/approval-dialog.ts` (Phase 3C / C1-B).
 export {
-  approvalOverlayGeometry,
-  capWrappedToHeight,
   type ApprovalOutcome,
-  type ApprovalOverlayGeometry,
   type ApprovalPromptRequest,
 } from './tui/panels/approval-dialog.ts'
 import {
@@ -127,6 +128,21 @@ import {
   OutputViewerPanel,
 } from './tui/panels/output-viewer-panel.ts'
 import { ImageThumbnail } from './tui/components/media/image-thumbnail.ts'
+import { ImageWorkspacePanel } from './tui/components/media/image-workspace.ts'
+import type { SvgViewerSource } from './tui/components/media/svg-viewer.ts'
+import type { ImageAttachmentRefLike } from './domain/media/types.ts'
+import type { DeliveredFilesCapability, DeliveredFilesSnapshot } from './domain/deliverables/catalog.ts'
+import {
+  DeliveredFilesPanel,
+  type DeliveredFilesOpenIntent,
+} from './tui/deliverables/delivered-files-panel.ts'
+import {
+  DELIVERED_FILES_TEXT_SELECTION_INSETS,
+  deliveredFilesOverlayGeometry,
+} from './tui/deliverables/overlay-size.ts'
+import type { DeliveredFilePreviewCapability } from './runtime/deliverables-port.ts'
+import { DraftImagePreview, DRAFT_PREVIEW_COMPACT_WIDTH, DRAFT_PREVIEW_MAX_ROWS, type DraftPreviewRemoveHit } from './tui/components/media/draft-image-preview.ts'
+import { selectDraftImageOccurrences, type DraftImageOccurrence } from './client/media/image/placeholder.ts'
 import { FileAttachmentComponent } from './tui/components/media/file-attachment.ts'
 import {
   editorTheme,
@@ -147,12 +163,16 @@ import { planTaskQuickLayout, TaskQuickAccessory } from './tui/panels/task-quick
 import { JobInspectorPanel, type JobCopyUnavailable } from './tui/panels/job-inspector-panel.ts'
 import {
   SettingsWorkspacePanel,
+  type SettingsAuthPage,
+  type SettingsWorkspaceCategoryId,
   type SettingsWorkspaceCommitOutcome,
   type SettingsWorkspaceCommitRequest,
   type SettingsWorkspaceRowFacts,
   type SettingsWorkspaceRowId,
   type SettingsWorkspaceSource,
 } from './tui/panels/settings-workspace-panel.ts'
+import type { ModelsInitialView } from './tui/panels/models-workspace-page.ts'
+import type { AccountInitialView } from './tui/panels/account-workspace-page.ts'
 import type { TaskPanelItem } from './app/surface/task-presentation.ts'
 import type { JobInspectorState, TaskBrowserViewState } from './app/surface/task-runtime.ts'
 import type { TaskBrowserSummary } from './app/surface/task-browser-runtime.ts'
@@ -218,11 +238,31 @@ import {
 } from './tui/transcript/tool-presentation.ts'
 import { TranscriptSearchComponent } from './tui/interaction/transcript-search.ts'
 import { CompactTextPreview } from './tui/components/transcript/compact-text-preview.ts'
+import { ChartBody } from './tui/components/transcript/chart-body.ts'
+import { VisualAssistantBody, VisualAssistantDisposalFrame } from './tui/components/transcript/visual-assistant-body.ts'
+import type { VisualFigureOptions } from './tui/components/transcript/visual-figure.ts'
+import {
+  createNativeKittyGraphics,
+  type KittyGraphics,
+} from './tui/graphics/native-image.ts'
+import { createTmuxKittyGraphics } from './tui/graphics/tmux-image.ts'
+import { createZellijKittyGraphics } from './tui/graphics/zellij-image.ts'
+import { TmuxGraphicsRevokedError } from './tui/graphics/kitty-terminal.ts'
+import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
+import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
+import { visualParts, visualPartsForStatus } from './domain/visual/visual-facts.ts'
+import { humanFacingVisualResult, type PublishedVisual } from './domain/visual/publication.ts'
+import { assistantVisualPresentation, assistantVisualPresentationRevision } from './domain/visual/presentation.ts'
+import { planVisualPlacement, type VisualPiece } from './domain/visual/placement.ts'
+import { isVisualToolName, PRESENT_VISUAL_TOOL_NAME } from './domain/visual/tools.ts'
+import { chartDisplayTitle, chartTextRows } from './domain/visual/chart.ts'
+import { authorizeSvg, svgDetailRows } from './domain/visual/svg.ts'
+import type { SvgRasterLoader } from './client/media/svg/raster-loader.ts'
 import { longMessageDisclosureWindow } from './tui/transcript/long-message-disclosure.ts'
 import { HistoryPanel } from './tui/panels/history-panel.ts'
 import type { HistorySearchSource } from './client/history/search.ts'
 import { QuestionFlow, QuestionFrame, type QuestionFlowDraft } from './tui/interaction/question.ts'
-import { ApprovalRuntime } from './tui/interaction/approval-runtime.ts'
+import { ApprovalRuntime, type PendingApproval } from './tui/interaction/approval-runtime.ts'
 import { SaveLocationPrompt, SaveLocationFrame, type SaveLocationDeps, type SaveLocationRequest, type SaveLocationResult } from './tui/interaction/save-location.ts'
 // The interaction owners' app-facing structural types stay reachable through
 // this root facade: `app/**` owners consume the stable contract here rather
@@ -715,6 +755,38 @@ function preview(text: string, lines: number): string {
 
 /** SGR mouse reports (press/drag/release/wheel) — the alt screen owns them. */
 const MOUSE_SEQUENCE = /^\x1b\[<\d+;\d+;\d+[Mm]$/
+
+/**
+ * Decode one SGR/legacy mouse WHEEL report into a 0-based cell and the signed
+ * wheel step. `undefined` for every non-wheel mouse chunk, so press/release
+ * keep flowing to the alt screen's own click machinery.
+ */
+function parseApprovalWheel(data: string): { x: number; y: number; direction: -1 | 1 } | undefined {
+  const sgr = /^\x1b\[<(\d+);(\d+);(\d+)[Mm]$/.exec(data)
+  if (sgr !== null) {
+    const button = Number.parseInt(sgr[1]!, 10)
+    if ((button & 64) === 0) return undefined
+    const direction = button & 3
+    if (direction !== 0 && direction !== 1) return undefined
+    return {
+      x: Number.parseInt(sgr[2]!, 10) - 1,
+      y: Number.parseInt(sgr[3]!, 10) - 1,
+      direction: direction === 0 ? -1 : 1,
+    }
+  }
+  if (data.length === 6 && data.startsWith('\x1b[M')) {
+    const button = data.charCodeAt(3) - 32
+    if ((button & 64) === 0) return undefined
+    const direction = button & 3
+    if (direction !== 0 && direction !== 1) return undefined
+    return {
+      x: data.charCodeAt(4) - 33,
+      y: data.charCodeAt(5) - 33,
+      direction: direction === 0 ? -1 : 1,
+    }
+  }
+  return undefined
+}
 
 /**
  * Whether one raw chunk is terminal PROTOCOL rather than user text: an SGR or
@@ -1550,21 +1622,38 @@ interface JobWorkspaceRecord {
 }
 
 /**
+ * How one Settings workspace lease really ended (C2-R2). The reason is the ONE
+ * distinction a post-close action may base a decision on: a `verified` field
+ * whose physical effect must wait for the user to LEAVE the workspace is
+ * applied only on `user-exit`.
+ */
+export type SettingsWorkspaceCloseReason = 'user-exit' | 'forced'
+
+/**
  * The opening options of ONE Settings workspace (Phase 3B / B2-A). The
  * `/settings` command owns the readonly read projection; the app owns only the
- * temporary physical screen lease over it. `onOpenLegacy` is the compatibility
- * bridge: it is invoked AFTER this workspace has retired and the surface it
- * paused is restored, so the existing SettingsList mounts on the real return
- * surface instead of stacking under a second physical owner.
+ * temporary physical screen lease over it.
  */
 export interface SettingsWorkspaceOpenOptions {
   /**
-   * Invoked with the target row the opened legacy editor must focus (the
-   * Settings workspace row's `legacyTargetId`), or without one when the
-   * compatibility row opens the editor at its top. The target is presentation
-   * only: the editor itself owns every row id.
+   * The two version facts the `About` page shows, read once per open on the
+   * Client side: the bundle's own version and the installed Harness version
+   * (undefined = unreadable). The panel never reads a version itself.
    */
-  readonly onOpenLegacy: (targetId?: string) => void
+  readonly aboutVersionFacts: {
+    readonly tui: string
+    readonly dsh: string | undefined
+  }
+  /**
+   * C3: the lazily built per-open About status owner (the command layer
+   * constructs it once per workspace open). The panel reads its immutable
+   * snapshot and subscribes for repaints; the app never inspects it.
+   */
+  readonly aboutStatusSource?: () => import('./app/command/about-status.ts').AboutStatusController
+  /** C3: one semantic About entry (exactly one scoped snapshot refresh). */
+  readonly onAboutEnter?: () => void
+  /** C3: the About page left (pending About updates become no-ops). */
+  readonly onAboutLeave?: () => void
   /**
    * The ONE host-write channel of a writable row (Phase 3B / B2-B). The command
    * owns the Host semantics (apply + persist + authoritative re-read) and
@@ -1574,25 +1663,86 @@ export interface SettingsWorkspaceOpenOptions {
    */
   readonly onCommit?: (request: SettingsWorkspaceCommitRequest) => Promise<SettingsWorkspaceCommitOutcome>
   /**
-   * The lazy factory of the ONE Plugin Manager page hosted INSIDE this
+   * The lazy factory of the ONE embedded Plugin Manager page hosted INSIDE this
    * Settings workspace (`Settings → Plugins`). The app owner supplies it from
    * the shared surface Plugin Manager runtime; it is invoked only when the
-   * Plugins category is activated. `done` is the page's normal close path back
-   * to Settings.
+   * Plugins content column is first really painted. `onYieldNavigation` is THIS
+   * root's navigation yield: the page reports the intent and the root commits
+   * the focus change.
    */
-  readonly onOpenPlugins?: (done: () => void) => import('@xmoon76/pi-tui').Component | undefined
-  /** Fired once when the workspace is torn down by ANY path. */
-  readonly onClose?: () => void
+  readonly onOpenPlugins?: (
+    onYieldNavigation: () => void,
+  ) => import('./tui/plugin-manager/workspace.ts').EmbeddedPluginPage | undefined
+  /** Fired once when the workspace is torn down by ANY path, with the reason
+   *  the lease really closed. `user-exit` is the panel's own L0 Esc/Close
+   *  gesture and everything else (forced teardown, an interrupting modal, a
+   *  replacement screen) is `forced`. A callback that ignores the argument
+   *  stays compatible (C2-R2). */
+  readonly onClose?: (reason: SettingsWorkspaceCloseReason) => void
   /** The row this open selects first (the Web Settings return path,
    *  S2/PR-B §B3.4): a re-entry restores the SAME row instead of the default. */
   readonly initialRowId?: import('./tui/panels/settings-workspace-panel.ts').SettingsWorkspaceRowId
+  /** C2-R5: the typed professional page to mount on the first real body grant
+   *  (a bare `/footer` or `/keybindings` deeplink). It is valid ONLY with the
+   *  exact `initialRowId`; the command layer validates the pair before leasing. */
+  readonly initialSpecialist?: import('./tui/panels/settings-workspace-panel.ts').SettingsWorkspaceSpecialistRoute
+  /** The category this open lands on (`/login` / `/logout` deeplinks). */
+  readonly initialCategory?: SettingsWorkspaceCategoryId
+  /** The Models page a deeplink opens (only with `initialCategory: 'models'`). */
+  readonly initialModelsView?: ModelsInitialView
+  /** The Account page a deeplink opens (only with `initialCategory: 'account'`). */
+  readonly initialAccountView?: AccountInitialView
+  /** The Models page factory (the screen lease stays with the workspace). */
+  readonly createModelsPage?: (
+    initial: ModelsInitialView,
+    openAccount: () => void,
+  ) => SettingsAuthPage | undefined
+  /** The Account page factory. */
+  readonly createAccountPage?: (initial: AccountInitialView) => SettingsAuthPage | undefined
+  /**
+   * C2-R3: the ONE embedded specialist page factory (the existing subagent
+   * allowlist picker). It is mounted in the SAME Settings lease/body when the
+   * user explicitly activates the row that carries `specialist`; `done` returns
+   * to the Agent rows and `onAuthoritativeChange` asks for a fresh row read.
+   */
+  readonly createSubagentAllowlistPicker?: (
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /**
+   * C2-R4: the ONE embedded Web Search / Fetch settings page factory. It is
+   * mounted in the SAME Settings lease/body when the user activates the Tools
+   * row that carries `specialist: 'web-settings'`; `done` returns to that row
+   * and `navigateToModels` is the root's narrow page-switch intent (the page's
+   * credential row opens the EXISTING Models page on the typed initial view in
+   * the same lease — never `/login` text and never a secret).
+   */
+  readonly createWebSettingsPage?: (
+    done: () => void,
+    navigateToModels: (initial: ModelsInitialView) => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /**
+   * C2-R5: the ONE same-lease Footer layout page factory (the EXISTING
+   * `FooterConfiguratorPanel` over its model/composer/save transaction).
+   */
+  readonly createFooterConfiguratorPage?: (
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
+  /**
+   * C2-R5: the ONE same-lease Keyboard shortcuts page factory (the EXISTING
+   * `KeybindingEditorPanel` over the ONE `KeybindingEditorController`).
+   */
+  readonly createKeybindingsPage?: (
+    done: () => void,
+    onAuthoritativeChange: () => void,
+  ) => import('./tui/panels/settings-workspace-panel.ts').EmbeddedSpecialistPage | undefined
 }
 
-/** The live row handle of an OPEN legacy settings list: a section whose facts
- *  arrive asynchronously (the Web credential state) updates the already
- *  mounted rows through these TWO public fork seams, or focuses the row a
- *  deeplink targets. It holds no write authority and is valid only while the
- *  overlay is mounted. */
+/** The live row handle of an OPEN `SettingsList` overlay: a section whose
+ *  facts arrive asynchronously updates the already mounted rows through these
+ *  TWO public fork seams, or focuses the row a deeplink targets. It holds no
+ *  write authority and is valid only while the overlay is mounted. */
 export interface SettingsListRowHandle {
   /** Move the list cursor to one row id (a search filter may hide it). */
   focus(itemId: string): void
@@ -1617,6 +1767,13 @@ export interface SettingsWorkspaceHandle {
    *  the TUI settings document (S2/PR-B §B3.4 — a workspace surface keeps its
    *  ONE guarded document read). A superseded/closed lease is inert. */
   refreshRow(rowId: SettingsWorkspaceRowId, facts: SettingsWorkspaceRowFacts): void
+  /**
+   * C2-R5: settles when the typed deeplink page really mounted on the leased
+   * first frame, failed, or the workspace was torn down. Commands await this to
+   * return a REAL error instead of leaving a silently empty row. Resolves
+   * `{ok:true}` immediately for opens without a typed deeplink.
+   */
+  whenInitialSpecialistSettled(): Promise<import('./tui/panels/settings-workspace-panel.ts').SettingsInitialSpecialistSettlement>
 }
 
 /**
@@ -1626,7 +1783,7 @@ export interface SettingsWorkspaceHandle {
  * it is MUTUALLY EXCLUSIVE with the Job lease: at most one workspace owns the
  * terminal at any time.
  */
-/** The layout-root panel a workspace lease hosts (Settings or Plugin page). */
+/** The layout-root panel a workspace lease hosts (the Settings workspace). */
 type WorkspaceLeasePanel = Component & {
   dispose?(): void
   onCellPress?(x: number, y: number): void
@@ -1634,9 +1791,11 @@ type WorkspaceLeasePanel = Component & {
   handleMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined
 }
 
-/** The ONE temporary fullscreen workspace lease (Settings OR Plugin root). */
+/** The ONE temporary fullscreen workspace lease (the Settings workspace or the
+ *  Image UX PR2 picker/Viewer screen). The Plugin Manager is a CHILD of the
+ *  Settings lease and never takes a workspace screen of its own. */
 interface WorkspaceLeaseRecord {
-  readonly kind: 'settings' | 'plugin'
+  readonly kind: 'settings' | 'image'
   readonly token: object
   readonly screen: TuiAltScreen
   readonly panel: WorkspaceLeasePanel
@@ -1758,7 +1917,42 @@ export interface TuiAppOptions {
    * store, exposed so a mounted test can stage REAL draft bytes through the
    * production intake surface. Never read by production code paths. */
   draftImageStoreForTest?: import('./client/media/image/draft-store.ts').DraftImageStore
+  /**
+   * The READ-ONLY composer draft-image projection (image UX plan PR1). The
+   * runner supplies the live store's staged values; the preview never
+   * stages, removes by id or changes submission order. Absent: the preview
+   * band renders nothing (headless fixtures).
+   */
+  draftImagePreviewSource?: import('./client/media/image/types.ts').DraftImagePreviewSource
+  /**
+   * Register the LIVE composer draft reader with the store, so an image that
+   * Undo restored into the draft counts as ACTIVE again rather than as a
+   * retention-only entry.
+   */
+  draftImagePreviewLiveDraft?: (read: () => string) => void
+  /**
+   * Reserve the submitted text's images for the SYNCHRONOUS submit bridge.
+   * Acquired BEFORE the draft clear and released in the fork's `finally`
+   * (Enter) or this app's `finally` (`submitDraft`), so the clear's undo
+   * retirement can never evict an image the business owner is about to take
+   * over. The narrow `DraftImageStore.pinReferenced` is the production
+   * implementation.
+   */
+  draftImagePreviewReserve?: (text: string) => (() => void) | undefined
+  /**
+   * The Client-local undo-lease capability: the Store owns the bounded
+   * retention budget, the host editor's real Undo history owns whether an
+   * image can still come back. `TuiApp` only bridges actual editor
+   * mutations and real history retirement — it keeps no mirror of either.
+   */
+  draftImagePreviewUndo?: import('./client/media/image/draft-store.ts').DraftImageUndoLeasePort
   imageTheme?: import('./tui/components/media/image-thumbnail.ts').ImageThumbnailTheme
+  /**
+   * PR-D: the Client-local SVG raster cache. Wired by the mount composition
+   * (the same place the durable image loader is created); absent, an admitted
+   * SVG still shows its description and source path, with no inline raster.
+   */
+  svgRasterLoader?: SvgRasterLoader
   /**
    * The presentation scope the transcript being built belongs to (M3-5 PR2
    * review, P1). The SURFACE supplies it; the renderer samples it ONCE per
@@ -1896,6 +2090,29 @@ export interface TuiAppOptions {
    * exists. Optional — absent keeps right-click inert.
    */
   readClipboardText?: () => Promise<string | undefined>
+  /**
+   * Delivered files (Delivered files PR1): the narrow read capability behind
+   * the transcript tail and the `/deliverables` browser. `snapshot()` derives
+   * the CURRENT display subject's delivered Turns on demand; `isCurrent()`
+   * re-checks an already-captured snapshot against the live subject/projection.
+   *
+   * Optional: a headless/foreign renderer without it has NO operable owner for
+   * the capped tail, so the tail fails open (every file visible) instead of
+   * hiding files behind an entry nothing can execute.
+   */
+  deliveredFiles?: DeliveredFilesCapability
+  /**
+   * Delivered files PR2: the Host READ capability for the Details preview,
+   * already bound to one display subject. The app passes it through to the ONE
+   * browser panel; absent, the preview paints the definite unavailable state.
+   */
+  deliveredFilePreview?: (snapshot: DeliveredFilesSnapshot) => DeliveredFilePreviewCapability | undefined
+  /**
+   * Delivered files PR2: the surface diagnostic sink for an UNCLASSIFIED preview
+   * failure (the panel still paints the generic readable state). Absent leaves
+   * the failure unlogged — the app never invents a log route of its own.
+   */
+  onDeliveredFileDiagnostic?: (message: string, error: unknown) => void
   /**
    * The keyboard exit-confirmation window in ms (issue #8);
    * injectable so headless tests never wait the real 1.5s. The footer
@@ -2205,6 +2422,12 @@ interface MessageComponentEntry {
    * hint resolves the EFFECTIVE key through the keymap (a remap updates
    * the copy; the identity field stays semantic). */
   expandHint: ExpandHint
+  /** The delivered-files SURFACE signature the tail was painted for
+   *  (`pointer`/`plain` × `command`/`none`). A regular→fullscreen switch (or a
+   *  preset switch, or a mount without the browser capability) changes which
+   *  actions the tail really paints, so the cache must rebuild even though the
+   *  message and the fold boundary are unchanged. */
+  deliverableSurface: string
   /** The keymap revision the fold-hint string was rendered at: the
    * RENDERED hint bakes the EFFECTIVE key, so a keymap rebuild (user
    * remap, safe-mode flip, plugin sync) must invalidate every cached
@@ -2231,6 +2454,10 @@ interface MessageComponentEntry {
   /** Live indexed Assistant mutations can retain the projection array in
    * place; this revision remains part of the cache identity. */
   presentationRevision?: number
+  /** The committed visual-projection revision of an Assistant row. A new
+   * published figure (or a cleared sidecar) must rebuild the one Assistant
+   * body at its existing row, never mint a second transcript row. */
+  visualPresentationRevision?: number
   /** Durable assistant interruption metadata; the marker is rendered outside
    * the assistant body so searchable/model-facing text stays unchanged. */
   interrupted?: boolean
@@ -2295,6 +2522,19 @@ type TranscriptCellGesture = {
   hitId: string
   columns: number
   termRows: number
+  /** Image UX PR2: the resolved column span of an image hit (the info
+   * control range or the body row's full span). Press and release must
+   * resolve the SAME span; rows outside the image area leave it unset so the
+   * original row-only hit map/route is unchanged. */
+  imageSpan?: { startCol: number; endCol: number }
+  /** PR2.5: the resolved column span of a published-visual hit (an action
+   * verb's painted cells or the thumbnail pixel body's placement width).
+   * Press and release must resolve the SAME span. */
+  visualSpan?: { startCol: number; endCol: number }
+  /** Delivered files PR1: the resolved column span of a delivered-files
+   * action cell (a per-file `Details` verb or the list `Browse all` verb).
+   * Press and release must resolve the SAME span. */
+  deliverableSpan?: { startCol: number; endCol: number }
 }
 
 /** The gesture hit id of the pinned viewer subject bar's `‹ back` affordance. */
@@ -2307,17 +2547,175 @@ function viewerBackOwnerId(back: { subjectId: string; generation: number }): str
   return `viewer-back:${back.subjectId}:${back.generation}`
 }
 
-/** One Question-owned inspection gesture. The Question object identity is
- * part of the fence so a press cannot survive a question settle or transfer
- * to the normal fullscreen click path. */
-type QuestionTranscriptGesture = TranscriptCellGesture & {
-  question: QuestionState
+/** One blocking-owner inspection gesture: the owner identity is part of the
+ * fence so a press cannot survive that owner's settle or transfer to the
+ * normal fullscreen click path. */
+type ModalTranscriptGesture<T extends object> = TranscriptCellGesture & {
+  owner: T
   target: 'transcript' | 'todo'
+}
+
+/** One mounted transcript image OCCURRENCE (Image UX PR2): the source
+ * ContentBlock position (message OBJECT + image ordinal) and the immutable
+ * read source the thumbnail captured at construction. `imageIndex` is the
+ * image block's rank among ALL image blocks of its message (an open opaque
+ * assistant image block reserves a rank too), never the durable
+ * attachmentId — the same attachment shown in two messages, or twice in one
+ * message, is two independent occurrences. */
+type TranscriptImageOccurrence = {
+  readonly message: TranscriptMessage
+  readonly imageIndex: number
+  readonly ref: ImageAttachmentRefLike
+  /** The presentation scope captured at thumbnail construction; the viewer
+   * reads through exactly this value, never a fresh current subject. */
+  readonly scope: unknown
+  /** The mounted thumbnail component when the host rendered pixels for this
+   * occurrence (a loader-less host keeps a metadata-only occurrence). */
+  readonly thumbnail?: ImageThumbnail
+}
+
+/** One rendered image occurrence's painted hit geometry inside its message:
+ * message-relative rows plus the info row's right-edge control columns. The
+ * info row is always the thumbnail's FIRST rendered row. */
+type TranscriptImageHit = {
+  readonly occurrence: TranscriptImageOccurrence
+  readonly infoRow: number
+  /** First body row (inclusive); equal to bodyEnd when no body is painted. */
+  readonly bodyStart: number
+  /** One past the last body row (exclusive). */
+  readonly bodyEnd: number
+  /** The cells the painted PIXEL body can occupy: `[0, bodyEndCol)`. A click
+   * beyond it is inside the row but outside the image, so it is NOT a viewer
+   * target (the thumbnail never paints wider than this ceiling). */
+  readonly bodyEndCol: number
+  /** The info row's painted control span [startCol, endCol); zero width when
+   * no control was painted (regular surface / narrow). */
+  readonly controlStartCol: number
+  readonly controlEndCol: number
+}
+
+/** One column-ranged image hit identity of a painted fullscreen row
+ * (Image UX PR2): the info row's right-edge control (`collapse`) or any
+ * visible body row (`view`). A row listed here resolves through this
+ * descriptor — an info row outside its control span resolves `inert` and
+ * must never fall through to the card/container ladder. */
+type FullscreenImageRowHit = {
+  readonly row: number
+  readonly kind: 'info' | 'body'
+  /** The `[startCol, endCol)` control span for an info descriptor. */
+  readonly controlStartCol: number
+  readonly controlEndCol: number
+  readonly hitId: string
+}
+
+/** One column-ranged published-visual cell of a painted fullscreen row: the
+ * figure's real action verb (`copy`/`view`) or its painted thumbnail pixel body
+ * (`body`). A row listed here resolves through this descriptor — any other cell
+ * of the figure is `inert` and must never fall through to the card disclosure. */
+type FullscreenVisualRowHit = {
+  readonly row: number
+  readonly kind: 'action' | 'body' | 'inert'
+  /** The first painted cell of this row (the body's placement start; 0 for
+   * action/inert rows, whose segments carry their own ranges). */
+  readonly startCol: number
+  /** The widest painted cell of this row (body placement width / action row). */
+  readonly endCol: number
+  /** Body rows only: the viewer hit identity. */
+  readonly hitId?: string
+  /** Action rows only: every painted verb's exact cell range. */
+  readonly segments?: ReadonlyArray<{
+    readonly startCol: number
+    readonly endCol: number
+    readonly hitId: string
+  }>
+}
+
+/**
+ * The painted delivered-files action cells of one row (Delivered files PR1).
+ * A row listed here resolves through this descriptor: a cell outside every
+ * segment is `inert`, so the card's tail rows can never fall through to the
+ * Assistant disclosure ladder.
+ */
+type FullscreenDeliverableRowHit = {
+  readonly row: number
+  readonly segments: ReadonlyArray<{
+    readonly startCol: number
+    readonly endCol: number
+    readonly hitId: string
+  }>
+}
+
+/** The exact published-visual occurrence one mounted figure paints: the
+ * Assistant row object, its ref and the EXACT publication object the sidecar
+ * committed when the figure was built. */
+type TranscriptVisualHandle = {
+  readonly message: TranscriptMessage
+  readonly ref: string
+  readonly publication: PublishedVisual
+  /** The session-display epoch this handle was minted in: an A→B→A subject
+   * change bumps it, so no press/selection/copy receipt/viewer survives. */
+  readonly generation: number
+}
+
+/** One figure's painted geometry in one transcript row map entry. */
+type TranscriptVisualHit = {
+  readonly handle: TranscriptVisualHandle
+  readonly top: number
+  readonly height: number
+  readonly actions: ReadonlyArray<{
+    readonly action: 'copy' | 'view'
+    readonly row: number
+    readonly startCol: number
+    readonly endCol: number
+  }>
+  readonly thumbnailBody?: {
+    /** FIGURE-relative half-open row range of the REAL pixels: the entry row of
+     *  `startRow` is `top + startRow`. Never compare these against an entry row
+     *  directly — that mix made a figure's own title/description rows the pixel
+     *  band and left the painted pixels inert. */
+    readonly startRow: number
+    readonly endRow: number
+    /** Entry-relative first/last+1 column of the REAL pixels (the Assistant
+     *  bullet indent is part of the painted left boundary). */
+    readonly startCol: number
+    readonly endCol: number
+  }
+}
+
+/**
+ * One painted delivered-files action cell of an Assistant card (Delivered
+ * files PR1): the message-relative row plus the EXACT painted columns of a
+ * per-file `Details` verb or of the list `Browse all` verb, with the stable
+ * hit identity the press/release fence compares. Only cells the component
+ * really painted exist here — the card never invents a target.
+ */
+type TranscriptDeliverableHit = {
+  readonly row: number
+  readonly startCol: number
+  readonly endCol: number
+  readonly action: 'browse' | 'details'
+  /** Index into the message's `deliverables` (details only). */
+  readonly fileIndex?: number
+  readonly hitId: string
+}
+
+/** One PAINTED transcript row of the committed fullscreen frame snapshot
+ * (Image UX PR2 / PR2.5): the owner/height plus the row-level semantic
+ * identities, the column-ranged image descriptors and the published-visual
+ * cells painted in that row. Values only — the snapshot never references a
+ * live row entry. */
+type FullscreenPaintedRow = {
+  readonly ownerId: string
+  readonly height: number
+  readonly hits: ReadonlyArray<string>
+  readonly imageHits?: ReadonlyArray<FullscreenImageRowHit>
+  readonly visualHits?: ReadonlyArray<FullscreenVisualRowHit>
+  readonly deliverableHits?: ReadonlyArray<FullscreenDeliverableRowHit>
 }
 
 /** One rendered transcript block in the fullscreen row map (mouse
  * hit-testing): the message/activity owner, the painted height, the
- * attachment spans, the PTC sub-call header spans, the Workflow card hit
+ * image occurrence hits, the PTC sub-call header spans, the Workflow card hit
  * spans, and the Focus owner mark. The per-row SEMANTIC hit identity
  * (fullscreenRowHitIdentity) is derived from these spans. */
 type FullscreenRowEntry = {
@@ -2330,7 +2728,10 @@ type FullscreenRowEntry = {
   /** The stable disclosure identity of an ambient Context cluster (its owner). */
   clusterOwner?: TranscriptMessage
   height: number
-  attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+  /** Image UX PR2: every mounted image occurrence's painted geometry. */
+  attachments: ReadonlyArray<TranscriptImageHit>
+  /** PR2.5: every mounted published-visual figure's painted geometry. */
+  visuals: ReadonlyArray<TranscriptVisualHit>
   /** The outer-to-inner semantic container ancestry of this row (projected, not
    * geometry-guessed). `undefined` means the row is owned by no container. */
   containerPath?: TranscriptContainerPath
@@ -2341,6 +2742,8 @@ type FullscreenRowEntry = {
    * expanded). Rows matching no hit stay inert so chrome like the pending
    * status line never becomes an implicit button. */
   userDisclosureHits?: ReadonlyArray<UserDisclosureHit>
+  /** Delivered files PR1: the painted action cells of the card's tail. */
+  deliverables: ReadonlyArray<TranscriptDeliverableHit>
   hasTrailingSpacer: boolean
 }
 
@@ -2408,12 +2811,16 @@ type RenderedTranscriptBlock = {
   /** Physical non-owning gutter mount; absent for zero-height blocks. */
   mount?: TranscriptGutterComponent
   truncatedMarker: boolean
-  attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }>
+  attachments: ReadonlyArray<TranscriptImageHit>
+  /** PR2.5: every mounted published-visual figure's painted geometry. */
+  visuals: ReadonlyArray<TranscriptVisualHit>
   /** The outer-to-inner semantic container ancestry of this rendered block. */
   containerPath?: TranscriptContainerPath
   subCallHits?: ReadonlyArray<{ top: number; height: number; subCallId: string }>
   workflowHits?: ReadonlyArray<{ top: number; height: number; hit: WorkflowHit }>
   userDisclosureHits?: ReadonlyArray<UserDisclosureHit>
+  /** Delivered files PR1: the card's really-painted action cells. */
+  deliverables: ReadonlyArray<TranscriptDeliverableHit>
 }
 
 /** Presentation-only high-water for one running Focus turn. The activity
@@ -2456,6 +2863,25 @@ interface ScopeSettlement {
 
 export class TuiApp {
   private readonly terminal: Terminal
+  /**
+   * The ONE managed Kitty graphics owner of this physical terminal
+   * (Image-7A native / Image-7B-A tmux virtual). `undefined` on every terminal
+   * that admitted neither transport: those consumers keep the legacy fork
+   * `Image`/text path.
+   */
+  private readonly graphics: KittyGraphics | undefined
+  /**
+   * The image protocol every Alt Screen must use for this app's managed Native
+   * route. A Zellij live `OK` can admit the Kitty transport while the fork's
+   * static capability is still `null`/`iterm2`; the Alt screen's clear/redraw
+   * and release strategy must follow the MANAGED transport, while whether
+   * pixels may be painted stays `graphics.canPaint()`. `undefined` keeps the
+   * fork's existing static capability (including legacy iTerm2 and the tmux
+   * virtual path).
+   */
+  private get altScreenImageProtocol(): ImageProtocol | undefined {
+    return this.graphics?.mode === 'native' ? 'kitty' : undefined
+  }
   /** The extension surface host (M2), when the runner attached one. */
   private readonly extensionHost: SurfaceHost | undefined
   /** The unified status projection store (M0): the footer's single input.
@@ -2692,15 +3118,15 @@ export class TuiApp {
     clearFullscreenPointerGestures: () => this.clearFullscreenPointerGestures(),
     cancelLeader: () => this.keybindings.cancelLeader(),
     projectActivity: () => this.projectActivity(),
+    requestRender: () => this.requestRender(),
     terminalSize: () => ({ columns: this.terminal.columns, rows: this.terminal.rows }),
-    showApprovalOverlay: (frame, remount) => this.showOverlayOnHost(
-      frame,
-      { width: '100%', maxHeight: '100%' },
-      { remountable: true, remount },
-    ),
-    clearOverlayRemount: (handle) => { this.overlayRemounts.delete(handle) },
-    rebindApprovalOverlay: (handle, frame) => this.rebindOverlayRaw(handle, frame, { width: '100%', maxHeight: '100%' }),
-    focusEditorSeat: () => this.focusSeatOwner(),
+    mountApprovalFrame: (pending) => this.mountApprovalSeat(pending),
+    releaseApprovalFrame: (pending) => this.releaseApprovalSeat(pending),
+    resumeApprovalSuspension: (pending) => this.resumeApprovalSuspension(pending),
+    rollbackApprovalFrame: (pending) => this.rollbackApprovalSeat(pending),
+    approvalSeatRows: (expanded) => this.approvalSeatRows(expanded),
+    approvalMouseEnabled: () => this.activeScreen.mode === 'fullscreen',
+    copyApprovalArguments: (text) => this.copyWorkspaceText(text),
     // Phase 3A / PR-B: the approval is a BLOCKING owner for the optional seat
     // tenant. `beforeApprovalMount` runs AFTER the pending prompt was
     // logically committed as active and BEFORE any focus/mount callback, so
@@ -2739,7 +3165,13 @@ export class TuiApp {
   /** The Question-owned inspection press gesture. Kept separate from the
    * normal fullscreen gesture so a Question cannot leak a background press
    * into the normal click ladder after it settles. */
-  private questionTranscriptGesture: QuestionTranscriptGesture | undefined
+  private questionTranscriptGesture: ModalTranscriptGesture<QuestionState> | undefined
+  /** The press-time approval action gesture: the release must name the SAME
+   * action cell of the SAME approval frame after the sheet's painted layout
+   * (scroll / expand / resize / A→B) is re-checked. */
+  private approvalPressGesture: { frame: ApprovalSheetFrame; gesture: ApprovalMouseGesture } | undefined
+  /** The Approval-owned modal-safe transcript inspection gesture. */
+  private approvalTranscriptGesture: ModalTranscriptGesture<ApprovalSheetFrame> | undefined
   /** The press-time semantic identity of a fullscreen transcript/todo
    * cell (mouse parity): the release click may only act on the EXACT
    * identity that was pressed — an async transcript projection change
@@ -2753,14 +3185,22 @@ export class TuiApp {
    * collapse): a repaint that reinterprets the row can never pass the
    * fence even when the card object and the relative row are unchanged. */
   private fullscreenCellGesture: TranscriptCellGesture | undefined
+  /** The press-time composer-preview `×` identity (image UX PR1). Kept
+   * apart from the transcript-cell gesture: the preview is pinned chrome,
+   * not a transcript row, and its release must re-prove the exact draft
+   * text/occurrence geometry it was pressed against. */
+  private draftPreviewGesture: { remove: DraftPreviewRemoveHit; columns: number; termRows: number } | undefined
 
   /** Invalidate every fullscreen press/release latch at an ownership or
    * surface boundary. A gesture captured by one owner must never be
    * interpreted by a later modal, session, or screen. */
   private clearFullscreenPointerGestures(): void {
     this.fullscreenCellGesture = undefined
+    this.draftPreviewGesture = undefined
     this.questionPressGesture = undefined
     this.questionTranscriptGesture = undefined
+    this.approvalPressGesture = undefined
+    this.approvalTranscriptGesture = undefined
   }
 
   /** Flows waiting behind the active one (FIFO; shown on settle). */
@@ -2977,6 +3417,9 @@ export class TuiApp {
     this.clearFocusLiveHeightState()
     this.transcriptDetailExpanded = expanded
     this.rebuildMessages('focus-disclosure')
+    // A runtime-only Settings row reads this fact through the pull snapshot.
+    this.refreshSettingsWorkspaceFacts()
+    this.requestRender()
   }
   /** Fullscreen (alt-screen) instance; absent in regular mode. */
   private fullscreen: TuiAltScreen | undefined
@@ -2993,7 +3436,7 @@ export class TuiApp {
    * freeze latch and one `activeScreen` derivation, so no two physical owners
    * can ever coexist.
    */
-  private settingsWorkspace: WorkspaceLeaseRecord | undefined
+  private workspaceLease: WorkspaceLeaseRecord | undefined
   /**
    * Nesting depth of the windows that refuse a NEW workspace screen lease
    * (Job OR Settings) even though the surface is not disposed. Two kinds of
@@ -3121,9 +3564,6 @@ export class TuiApp {
   private modelPickerOverlay: OverlayHandle | undefined
   /** The live responsive frame of the /model picker. */
   private modelPickerFrame: ResponsiveOverlayFrame | undefined
-  /** Footer configurators own paste timers outside the generic overlay
-   * disposal path; final surface disposal closes every still-open one. */
-  private readonly footerConfiguratorClosers = new Set<() => void>()
   /** The injected Ctrl+R search source (the runner wires the file-backed
    * implementation; the host never touches the filesystem). */
   private readonly historySearchSource: HistorySearchSource | undefined
@@ -3219,6 +3659,17 @@ export class TuiApp {
   /** The last installed slash-command rows (host catalog + client command
    * contributions) — the headless-test read of the `/` menu source. */
   private installedCommandCompletions: readonly SlashCommand[] = []
+  /** the inline attachment stager the command plane supplies
+   * (read + stage through the ONE Client-local intake). `undefined` on an
+   * assembly without an attachment plane — an inline acceptance then only
+   * edits text, exactly like an inline skill reference. */
+  private inlineAttachmentStager: import('./tui/interaction/autocomplete/inline-attachment.ts').InlineAttachmentStager | undefined
+  /** Monotonic EDIT epoch of the host editor (bumped by every onChange —
+   *  typing, deletion, paste, Undo, programmatic restore). An inline
+   *  attachment acceptance captures it and re-checks it before any store
+   *  write, so an edit+Undo round trip that restores the same text/cursor
+   *  can never pass an equality-only fence (ABA). */
+  private editorEditEpoch = 0
   /** The latest window metadata, retained so remapped key hints stay live. */
   private transcriptWindow: (TranscriptWindowState & { firstTurn?: number; lastTurn?: number; hasNewer?: boolean }) | undefined
   /** Styling of the current notify line: info (default) is dim with a ℹ,
@@ -3303,6 +3754,28 @@ export class TuiApp {
    * plus native/platform compatibility); undefined keeps the vendor's raw
    * OSC 52 write. */
   private readonly copySelection: ((text: string) => Promise<boolean>) | undefined
+  /** Delivered files (PR1): the injected read capability, if any. */
+  private readonly deliveredFiles: DeliveredFilesCapability | undefined
+  /** The Host preview read capability resolver (PR2), if any. */
+  private readonly deliveredFilePreview:
+    | ((snapshot: DeliveredFilesSnapshot) => DeliveredFilePreviewCapability | undefined)
+    | undefined
+  private readonly onDeliveredFileDiagnostic: ((message: string, error: unknown) => void) | undefined
+  /** The ONE live delivered-files overlay lease (PR1): a repeated open reuses
+   *  it instead of mounting a second overlay. */
+  private deliveredFilesOverlay: OverlayHandle | undefined
+  private deliveredFilesFrame: ResponsiveOverlayFrame | undefined
+  private deliveredFilesPanel: DeliveredFilesPanel | undefined
+  /** The catalog the live overlay was opened for (the currentness fence). */
+  private deliveredFilesSnapshot: DeliveredFilesSnapshot | undefined
+  /** The screen that physically owns the delivered-files projection. A
+   *  workspace lease can make `activeScreen` a different, temporary screen
+   *  while this projection stays parked on the stopped return screen. */
+  private deliveredFilesScreen: TuiMainScreen | TuiAltScreen | undefined
+  /** The terminal geometry the live physical projection was mounted at. A
+   *  change rebinds the SAME logical lease with a fresh frame and live options
+   *  (never a wider host canvas that would erase the background beside it). */
+  private deliveredFilesGeometryKey: string | undefined
   private readonly openExternalUrl: ((url: string) => void) | undefined
   private readonly readClipboardText: (() => Promise<string | undefined>) | undefined
   /**
@@ -3325,8 +3798,36 @@ export class TuiApp {
   private readonly editorSeatHolder: EditorSeatHolder
   /** The durable-image loader (plan M8): optional, wired by the runner. */
   private readonly imageLoader: import('./client/media/image/loader.ts').ImageLoader | undefined
+  /** PR-D: the Client-local SVG raster cache (optional; text fallback without it). */
+  private readonly svgRasterLoader: SvgRasterLoader | undefined
   /** @see TuiAppOptions.draftImageStoreForTest — headless-test seam only. */
   readonly draftImageStoreForTest: import('./client/media/image/draft-store.ts').DraftImageStore | undefined
+  /** @see TuiAppOptions.draftImagePreviewSource — the production preview source. */
+  private readonly draftImagePreviewSource: import('./client/media/image/types.ts').DraftImagePreviewSource | undefined
+  /** @see TuiAppOptions.draftImagePreviewLiveDraft — live-draft reader. */
+  private readonly draftImagePreviewLiveDraft: ((read: () => string) => void) | undefined
+  /** @see TuiAppOptions.draftImagePreviewReserve — the synchronous pre-clear
+   *  bridge reservation. */
+  private readonly draftImagePreviewReserve: ((text: string) => (() => void) | undefined) | undefined
+  /** @see TuiAppOptions.draftImagePreviewUndo — Store-owned undo leases. */
+  private readonly draftImagePreviewUndo: import('./client/media/image/draft-store.ts').DraftImageUndoLeasePort | undefined
+  /** The ONE first-party composer draft-image preview band. */
+  private readonly draftImagePreview: DraftImagePreview
+  /** Expanded preview-text cache (raw body + mode → wire text). */
+  private draftPreviewTextCache: { raw: string; mode: string; text: string; hasPasteMarker: boolean } | undefined
+  /** Occurrence cache for the exact expanded text (no per-frame re-scan). */
+  private draftPreviewOccurrenceCache: { text: string; occurrences: readonly DraftImageOccurrence[] } | undefined
+  /** Decision for the previewed LAST occurrence when a paste marker hides
+   *  same-id occurrences (canRemove + raw-last mapping). */
+  private draftPreviewRemovalCache: {
+    raw: string
+    expanded: string
+    imageId: number
+    startOffset: number
+    endOffset: number
+    canRemove: boolean
+    lastVisible: boolean
+  } | undefined
   /** The thumbnail fallback theme (plan M9): optional, wired by the runner. */
   private readonly imageTheme: import('./tui/components/media/image-thumbnail.ts').ImageThumbnailTheme | undefined
   private readonly imageScope: (() => unknown) | undefined
@@ -3520,14 +4021,41 @@ export class TuiApp {
    * switch with the other click overrides.
    */
   private readonly collapsedOccurrences = new Map<TranscriptMessage, Set<number>>()
-  /** The stable occurrence identity of every rendered collapsible thumbnail:
-   * the image block's rank among ALL image blocks of its message (open
-   * opaque image blocks reserve a rank too), so a live stream that closes
-   * blocks out of order never renumbers an occurrence under a pressed or
-   * collapsed identity. Written at thumbnail creation, read by
-   * {@link attachmentRangesOf} (which cannot see open opaque rows — they
-   * render as plain Text children). */
-  private readonly thumbnailOccurrence = new WeakMap<ImageThumbnail, number>()
+  /** The derived OCCURRENCE record of every rendered host thumbnail
+   * (Image UX PR2): the message object + source image ordinal + the immutable
+   * read source captured at construction. Identity is the object pair
+   * (message, imageIndex) — never a string key — so the SAME durable
+   * attachment displayed in two messages, or twice in one message, is two
+   * independent occurrences. Written at thumbnail creation; read by
+   * {@link attachmentHitsOf} while measuring the mounted render tree. */
+  private readonly thumbnailOccurrence = new WeakMap<ImageThumbnail, TranscriptImageOccurrence>()
+  /** The host-rendered image occurrences of each mounted message, in render
+   * order (Image UX PR2): the `/view-image` candidate source. A metadata-only
+   * host (no ImageLoader) records occurrences without a thumbnail; a folded
+   * Tool card records none because its body is not rendered. Rebuilt with the
+   * message component, so it always describes the mounted projection. */
+  private readonly messageImageOccurrences = new Map<TranscriptMessage, TranscriptImageOccurrence[]>()
+  /** The published-visual figure handles of each mounted Assistant row, by
+   * ref, in plan order (PR2.5). Rebuilt with the message component; a handle is
+   * current only while the sidecar still commits the SAME publication object. */
+  private readonly visualFigureHandles = new Map<TranscriptMessage, Map<string, TranscriptVisualHandle>>()
+  /** The Assistant body that owns each visual row's painted geometry. The row
+   * map reads back the LAST render at the measured width (never a second
+   * render). */
+  private readonly visualAssistantBodies = new Map<
+    TranscriptMessage,
+    { readonly body: VisualAssistantBody; readonly indent: number }
+  >()
+  /** The transient display-only visual selection (`app.visual.selectNext`). */
+  private visualSelection: { readonly message: TranscriptMessage; readonly ref: string } | undefined
+  /** Bumped on every session-subject replacement: the ONE visual epoch every
+   * handle, selection, copy receipt and viewer fence is compared against. */
+  private visualEpoch = 0
+  /** The open SVG viewer's source fence: the exact handle it was opened for. */
+  private svgViewerFence: { readonly handle: TranscriptVisualHandle } | undefined
+  /** Transient collector of the occurrences produced while one message
+   * component is built; consumed by `buildMessage`. */
+  private capturedImageOccurrences: TranscriptImageOccurrence[] | undefined
   /** Rendered row heights per transcript block, for mouse hit-testing.
    * Message rows carry their message + attachment spans; Focus activity
    * rows carry the activity (the whole collapsed Thought block — and the
@@ -3550,7 +4078,7 @@ export class TuiApp {
    * (and its component) in this batch but is NOT wrapped in a gutter, so it has
    * no mounted counterpart. The identity invariant is therefore over the batch's
    * components, with zero-height blocks having no mounted row — see
-   * `docs/focus-replay-harness.md`.
+   * `docs/guides/tmux-testing.md`.
    */
   private mountedTranscriptBlocks: readonly RenderedTranscriptBlock[] = []
   /** Whether one structural transcript batch has been mounted. */
@@ -3614,6 +4142,19 @@ export class TuiApp {
          * (the seat frame and the Todo/dock block) must subtract them. */
         widgetAboveHeight: number
         widgetBelowHeight: number
+        /** Image UX PR1: the composer draft-image preview band's painted
+         * height and last-painted `×` hit. The band is pinned between the
+         * above widget zone and the editor seat; bottom-anchored hit tests
+         * subtract it exactly like the other pinned chrome. */
+        draftPreviewHeight: number
+        /** The preview component's last-painted absolute top. The pinned
+         * band can include a leading blank row, so the removal hit row must
+         * be anchored to the component's own painted box, not reconstructed
+         * from sibling heights. */
+        draftPreviewTop: number
+        /** The component's own painted hit-map height. */
+        draftPreviewHitHeight: number
+        draftPreviewRemoves: readonly DraftPreviewRemoveHit[] | undefined
         /** B4-A: the painted footprint of the first-party Task Quick band. It
          * is pinned BETWEEN the editor seat and the below widget zone, so every
          * bottom-anchored hit test must subtract it exactly like the widget
@@ -3630,7 +4171,7 @@ export class TuiApp {
          * workflow run-phase-member / attachment / Focus owner collapse),
          * so a repaint that reinterprets the pressed row can never pass
          * the release fence. */
-        rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
+        rows: ReadonlyArray<FullscreenPaintedRow>
         /** The PAINTED viewer subject bar band (viewer UX plan §6.2): the bar's
          * own 0-based screen row and the navigation hit cells `[0, cells)`
          * exactly as drawn in THIS frame, plus the viewer subject/generation
@@ -3728,7 +4269,46 @@ export class TuiApp {
         return typeof value === 'function' ? value.bind(target) : value
       },
     })
-    this.terminal = resizeAware
+    // The managed graphics handle is created ONCE per physical terminal, from
+    // the real terminal the screens will write through, and both screens plus
+    // every first-party graphics consumer share the SAME facade/Core. The
+    // native transport is preferred; a Ghostty-host Zellij pane gets its own
+    // live-query admission; only then does the strict tmux virtual factory get
+    // its own chance. Every factory fails closed, so a terminal that admits
+    // none keeps `getCapabilities()` untouched and every consumer keeps its
+    // legacy `Image`/text path.
+    const graphics = createNativeKittyGraphics(resizeAware)
+      ?? createZellijKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
+      ?? createTmuxKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
+    this.graphics = graphics
+    this.terminal = graphics?.terminal ?? resizeAware
+    // A revoked tmux admission refuses a whole managed physical batch from
+    // inside `Terminal.write()` (the fork screens call it from a render timer,
+    // where a throw would become an uncaughtException and kill the process).
+    // This boundary converts exactly that refusal into one safe text frame:
+    // the admission is already latched revoked, so every consumer's next render
+    // sees `effectiveImageProtocol() === null` and repaints text instead of
+    // placeholders. The refused batch itself wrote nothing managed, and any
+    // OTHER write error keeps propagating unchanged.
+    if (graphics?.mode === 'tmux-virtual') {
+      const virtual = graphics.terminal as Terminal & { write: (data: string) => void }
+      const facadeWrite = virtual.write.bind(virtual)
+      virtual.write = (data: string): void => {
+        try {
+          facadeWrite(data)
+        } catch (error) {
+          if (!(error instanceof TmuxGraphicsRevokedError)) throw error
+          // The refused batch wrote no managed command, and the component
+          // caches were already dropped by the latching admission, so the next
+          // frame paints text. It must be a FORCED full repaint: the refused
+          // write threw inside `doRender()`, before the screen committed this
+          // frame's lines, so a differential retry would diff against a frame
+          // the terminal never received. Scheduled on the next tick because the
+          // screen is still inside `doRender()` here.
+          process.nextTick(() => this.requestRender(true))
+        }
+      }
+    }
     // Scroll profiler (diagnostic, DSH_TUI_SCROLL_PROFILE=1): time write
     // calls and count the per-frame rewrite volume on the SAME terminal
     // instance both screens write through. Disabled builds never wrap.
@@ -3937,20 +4517,31 @@ export class TuiApp {
     this.renderers = options.renderers
     this.editorRegistry = options.editorRegistry
     this.copySelection = options.copySelection
+    this.deliveredFiles = options.deliveredFiles
+    this.deliveredFilePreview = options.deliveredFilePreview
+    this.onDeliveredFileDiagnostic = options.onDeliveredFileDiagnostic
     this.openExternalUrl = options.openExternalUrl
     this.readClipboardText = options.readClipboardText
     this.overlayBroker = new OverlayBroker({
       question: () => this.activeQuestions,
       saveLocation: () => this.activeSaveLocation,
+      approval: () => this.approvals.activeSuspension(),
       setFocusSeat: (seat) => this.setFocusSeat(seat),
       // The close path re-derives the final seat from the LIVE surface: a
       // restored dependent capturing overlay keeps keyboard ownership; the
       // editor owns it only when no capturing overlay remains.
-      reconcileFocusSeat: () => this.publishFocusSeat(),
+      reconcileFocusSeat: () => {
+        this.publishFocusSeat()
+        // A suppressed/covered projection skips the resize rebind; the broker's
+        // close/reveal reconciliation is the LAST post-transition point, so a
+        // delivered overlay that just became frontmost gets its live geometry
+        // here even though the reveal only requested a fork frame repaint.
+        this.syncDeliveredFilesOverlayGeometry()
+      },
       focusSeatOwner: () => this.focusSeatOwner(),
     })
 
-    this.tui = new TuiMainScreen(resizeAware)
+    this.tui = new TuiMainScreen(this.terminal)
     // The host default editor is the TuiEditor subclass: kimi parity for
     // `@dir/` mention completion (Tab-accepting a directory reopens the
     // dropdown at its children; Esc closes it without re-triggering). Its
@@ -4019,6 +4610,11 @@ export class TuiApp {
       })
     }
     this.editorBorder = this.editor.borderColor
+    // The SCOPED submit bridge: the fork acquires the host reservation before
+    // its clear (onBeforeSubmitClear) and runs the returned release in a
+    // finally after the synchronous clear + onSubmit dispatch. The host keeps
+    // no array/counter of these — one gesture, one release.
+    this.editor.onBeforeSubmitClear = (text) => this.draftImagePreviewReserve?.(text)
     this.editor.onSubmit = (text) => {
       const gesture: ComposerSubmitGesture = 'enter'
       // Enter is a fresh submit attempt, including an empty no-op attempt.
@@ -4081,6 +4677,10 @@ export class TuiApp {
       // does the same later. Resetting after the dispatch would clobber a
       // synchronous restore.
       this.resetEditorMode()
+      // The host editor's clear already retired its undo history and the
+      // scoped bridge holds the submitted images until this dispatch returns;
+      // the business owner (runReservedSubmit/dispatchViaSession) takes its own
+      // synchronous attachment reservation inside this call.
       this.events.onSubmit(serialized, 'enter', scopeToken)
     }
     this.editor.onChange = () => {
@@ -4088,6 +4688,17 @@ export class TuiApp {
       // pending exit confirmation. Ctrl+C clear-draft arms again after its
       // own setText mutation completes.
       this.clearExitConfirmation()
+      // An INLINE ATTACHMENT acceptance in flight binds to this epoch: any
+      // edit (including the Undo that restores identical text) invalidates it.
+      this.editorEditEpoch += 1
+      // The host editor's REAL Undo snapshots are the authority for what can
+      // still come back: converge the store's undo leases to them after every
+      // mutation (typing, deletion, paste, Undo, programmatic restore). An
+      // image that is still live stays ACTIVE; one that left the draft while
+      // an older snapshot still contains it becomes retention-only under the
+      // bounded budget. Idempotent, and cheap when the snapshot references
+      // did not change.
+      this.reconcileDraftImageUndo()
       // A text edit invalidates the prior rendered-layout snapshot and any
       // pending X063 fact. The Editor's next render publishes its already
       // computed boundary; only a hint-relevant layout change composes Footer.
@@ -4126,7 +4737,28 @@ export class TuiApp {
     this.imageLoader = options.imageLoader
     this.imageScope = options.imageScope
     this.draftImageStoreForTest = options.draftImageStoreForTest
+    this.draftImagePreviewSource = options.draftImagePreviewSource
+    this.draftImagePreviewLiveDraft = options.draftImagePreviewLiveDraft
+    this.draftImagePreviewReserve = options.draftImagePreviewReserve
+    this.draftImagePreviewUndo = options.draftImagePreviewUndo
+    // The store's ACTIVE/retention accounting follows the REAL expanded
+    // draft: an Undo-restored placeholder is a live attachment again, and an
+    // image in a viewer-covered composer draft is still live (the preview is
+    // merely hidden there). Never retention-evict a visible occurrence.
+    this.draftImagePreviewLiveDraft?.(() => this.draftImageLiveText())
+    // The HOST fork Editor is the ONE Undo-history owner whose snapshots can be
+    // inspected and trimmed. It is registered with the Store (which owns the
+    // bytes/budget), so an eviction trims the RIGHT editor's history even if
+    // the seat has moved on since. The store never consults `seatEditor()`.
+    if (this.draftImagePreviewUndo !== undefined) {
+      const undo = this.draftImagePreviewUndo
+      undo.registerUndoOwner(this.editor, placeholder => this.editor.retireDraftImageFromUndo(placeholder))
+      // A REAL undo-history retirement (submit clear) releases this owner's
+      // leases immediately; backend acceptance is irrelevant to the history.
+      this.editor.onUndoHistoryRetired = () => { undo.releaseUndoForOwner(this.editor) }
+    }
     this.imageTheme = options.imageTheme
+    this.svgRasterLoader = options.svgRasterLoader
     this.historySearchSource = options.historySearchSource
     // Keep the GETTER: the cwd must be resolved at panel-open time (a
     // session switch changes `sessionCwd()` — see the field doc).
@@ -4192,10 +4824,22 @@ export class TuiApp {
             // Paste markers are EXPANDED — the steer wire never carries
             // registry-bound marker text.
             const serialized = this.expandedSeatWireDraft()
-            this.seatEditor().setText('')
-            this.editorSeatHolder.notifyChanged()
-            this.resetEditorMode()
-            this.events.onSteer?.(serialized)
+            // Same scoped bridge as the Ctrl+S action: the clear's retention
+            // reconcile must not evict an image the steer dispatch needs.
+            const bridgeRelease = this.draftImagePreviewReserve?.(serialized)
+            try {
+              // Same undo-retiring clear as the Ctrl+S action; a queue-only
+              // empty gesture leaves the editor history alone.
+              if (serializedDraftHasPayload(serialized)) this.clearSubmittedDraft()
+              else {
+                this.seatEditor().setText('')
+                this.editorSeatHolder.notifyChanged()
+              }
+              this.resetEditorMode()
+              this.events.onSteer?.(serialized)
+            } finally {
+              bridgeRelease?.()
+            }
             return true
           }
           case 'open-external-editor': {
@@ -4294,6 +4938,22 @@ export class TuiApp {
     // replaces this.editorSeat's occupant through the NON-owning mount;
     // the previous occupant is never disposed by the seat).
     this.reconcileEditorWinner()
+    // Image UX PR1: the ONE first-party composer draft preview. It projects
+    // the EXPANDED composer draft (the submission text); the editor's
+    // canonical placeholders stay the submission authority. The band sits
+    // directly below the plugin widget zone and above the editor seat on
+    // BOTH roots.
+    this.draftImagePreview = new DraftImagePreview({
+      getDraftText: () => this.draftPreviewText(),
+      source: this.draftImagePreviewSource ?? { values: () => [] },
+      maxRows: (width) => this.draftImagePreviewMaxRows(width),
+      fullscreenMouse: () => this.fullscreen !== undefined,
+      removable: (occurrence) => this.draftPreviewCanRemove(occurrence),
+      // Image-6B: a settled JPEG/WebP derivation must repaint the mounted
+      // surface; the component owns no screen and never paints by itself.
+      requestRender: () => this.requestRender(),
+      ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
+    }, this.imageTheme ?? { fallbackColor: text => color.textDim(text) })
     // The working row sits between the todo panel and the editor seat so it
     // is always the row directly above the editor border (pi's
     // statusContainer). The widget zones sit directly around the editor
@@ -4311,6 +4971,7 @@ export class TuiApp {
     this.tui.addChild(this.queuePane)
     this.tui.addChild(this.working)
     this.tui.addChild(this.widgetsAbove)
+    this.tui.addChild(this.draftImagePreview)
     this.tui.addChild(this.editorSeat)
     this.tui.addChild(this.widgetsBelow)
     this.tui.addChild(this.footer)
@@ -4494,7 +5155,7 @@ export class TuiApp {
     // cannot mint a screen that would outlive the suspend.
     this.workspaceLeaseFreezeDepth += 1
     this.jobWorkspace?.close()
-    this.settingsWorkspace?.close()
+    this.workspaceLease?.close()
     this.keybindings.cancelLeader()
     this.clearExitConfirmation()
     this.lastEscapeAt = undefined
@@ -4526,7 +5187,7 @@ export class TuiApp {
    * is deliberately NOT reassigned: TuiBase keeps its focusedComponent
    * across stop/start on the same instance, so whatever owned focus before
    * the suspend (the seat editor, an active question's QuestionFrame, an
-   * approval overlay) still owns it — forcing the seat editor here would
+   * Approval action sheet) still owns it — forcing the seat editor here would
    * break a live question's modal focus and IME anchor.
    */
   private resumeFromExternalEditor(): void {
@@ -4582,7 +5243,7 @@ export class TuiApp {
       // the return surface only re-asserts presentation, which the
       // `leaveTerminalPresentation` closing step below releases again.
       () => this.jobWorkspace?.close(),
-      () => this.settingsWorkspace?.close(),
+      () => this.workspaceLease?.close(),
       () => this.clearNotify(),
       // Issue #8: the exit-confirmation timer dies with the surface — a stopped
       // TUI must never fire a stale disarm into a dead footer.
@@ -4704,6 +5365,15 @@ export class TuiApp {
     this.terminalProgressActive = active
     this.terminalProgressOutcome = settled
     this.convergeTerminalPresentation(false)
+  }
+
+  /**
+   * The protocol selection this surface really applies right now (the same
+   * field {@link setTerminalProgressMode} writes). Read-only: the Settings
+   * workspace's live fact is pulled from this owner, never cached beside it.
+   */
+  currentTerminalProgressMode(): TerminalProgressMode {
+    return this.terminalProgressMode
   }
 
   /**
@@ -5015,7 +5685,6 @@ export class TuiApp {
     const advancedLeases = [...this.advancedOverlayLeases]
     const unstableLeases = [...this.unstableMountLeases]
     const brokerSettles = [...this.pendingBrokerSettles]
-    const footerClosers = [...this.footerConfiguratorClosers]
     // Phase 3B / B3-A: the History panel is the optional seat tenant, so its
     // teardown below (`optionalSeat.close()`) is the ONE release path; the seat
     // identity is dropped with it.
@@ -5033,6 +5702,10 @@ export class TuiApp {
     this.optionalSeat = undefined
     if (optionalSeat !== undefined) optionalSeat.finalized = true
     runSyncDisposalSteps('tui dispose', [
+      // Delivered files (PR1): the retained panel is released BEFORE the
+      // broker's physical unmount, so its recorded hit map can never survive
+      // into a dying surface.
+      () => this.closeDeliveredFiles(),
       // Phase 3B / B1-A / B2-A: the leased workspace screen (Job OR Settings) is
       // released FIRST — through the SAME close path Esc uses, so its owner
       // notification still runs exactly once, its temporary alt screen never
@@ -5040,11 +5713,17 @@ export class TuiApp {
       // teardown below never meets a foreign physical owner. `disposed` is
       // already latched, so the close deliberately skips the screen restore.
       () => this.jobWorkspace?.close(),
-      () => this.settingsWorkspace?.close(),
+      () => this.workspaceLease?.close(),
       // The optional tenant is released FIRST (its identity is already gone):
       // no later settlement, projection or focus path in this batch may touch
       // it, and no stale surface callback can survive the teardown.
       ...(optionalSeat === undefined ? [] : [() => optionalSeat.close()]),
+      // Release the composer preview's short-lived Image/base64 caches with
+      // the surface (the component is non-owning in the shared roots).
+      () => this.draftImagePreview.dispose(),
+      // The host Editor's undo leases die with this surface: a re-created
+      // surface must never act on a retired editor's history.
+      () => this.releaseDraftPreviewUndoLeases(),
       // The diagnostic scroll-profiler instrumentation dies with the app: the
       // write-wrap is unwrapped first and any latched frame window discarded.
       () => this.resetScrollProfileFrame(),
@@ -5078,11 +5757,11 @@ export class TuiApp {
       // render a dead footer (a long-lived external store also stops
       // retaining this instance here).
       () => statusStoreUnsubscribe?.(),
-      // Settle every pending approval BEFORE stop(): settling hides overlay
-      // handles (hideCursor), and stop() ends with showCursor — the reverse
-      // order would leave the user's cursor hidden after exit. Each entry is
-      // an INDEPENDENT step, so one rejected prompt cannot strand its
-      // siblings' promises.
+      // Settle every pending approval BEFORE stop(): settling releases the
+      // approval seat/sheet and any managed overlay it suspended (hideCursor),
+      // and stop() ends with showCursor — the reverse order would leave the
+      // user's cursor hidden after exit. Each entry is an INDEPENDENT step, so
+      // one rejected prompt cannot strand its siblings' promises.
       ...this.approvals.teardownSettlementSteps(),
       () => this.disposeTrackedKeybindingEditors(),
       // Every physical overlay unmount happens BEFORE stop(): removing the
@@ -5111,11 +5790,6 @@ export class TuiApp {
       // must not hang.
       ...brokerSettles.map(settle => () => settle()),
       () => { this.pendingBrokerSettles.clear() },
-      // Footer configurators are wrapped in a generic Frame, whose removal
-      // does not forward Component.dispose(); close their owned timers before
-      // the broker unmounts the physical overlay handles.
-      ...footerClosers.map(close => () => close()),
-      () => { this.footerConfiguratorClosers.clear() },
       // FINAL teardown: physically unmount every still-tracked overlay
       // (disposeOnHide releases the panels — OutputViewer's refresh
       // interval, TaskBrowser's tick — exactly once) instead of merely
@@ -5123,6 +5797,10 @@ export class TuiApp {
       // not leave a ref'd interval firing into the disposed surface.
       () => this.overlayBroker.disposeAll(),
       () => this.stop(),
+      // Image-7A: the managed graphics Core dies with the physical terminal.
+      // The screens already emitted their own release/retire through the same
+      // facade, so this only drops the ledger (never a late terminal write).
+      () => this.graphics?.dispose(),
       () => { this.generation += 1 },
       () => this.clearNotify(),
       () => {
@@ -5402,6 +6080,13 @@ export class TuiApp {
   /** The host's own input precedence ladder (the raw stage has already
    * run — see {@link handleInput}). */
   private handleInputCore(data: string): TuiInputListenerResult {
+    // The approval action sheet is a blocking FULLSCREEN pointer owner: a
+    // wheel over its painted body scrolls the reading viewport and every other
+    // wheel is inert behind the modal (the transcript's background wheel stays
+    // under the existing modal-inspection policy). Regular never reaches this
+    // branch: the pointer surface only exists on the alt screen.
+    const approvalWheel = this.handleApprovalWheel(data)
+    if (approvalWheel !== undefined) return approvalWheel
     // MOUSE chunks bypass the host KEY ladder (X043): with the viewport
     // listener now registered AFTER this router, the ladder sees mouse
     // sequences first — and a question/approval handler consumes EVERY
@@ -5579,9 +6264,9 @@ export class TuiApp {
     // blocking owners above already had their chance, and the three blocking
     // entries abandon this workspace before it could swallow a key they need)
     // keeps input out of the hidden editor, transcript and host actions.
-    if (this.settingsWorkspace !== undefined) {
+    if (this.workspaceLease !== undefined) {
       this.clearExitConfirmation()
-      this.settingsWorkspace.panel.handleInput?.(data)
+      this.workspaceLease.panel.handleInput?.(data)
       return { consume: true }
     }
     // The subagent viewer input policy is MODE-AWARE:
@@ -6248,13 +6933,31 @@ export class TuiApp {
         // re-serialized here (serializeSeatDraft) and the mode reset with
         // the draft.
         const serialized = this.expandedSeatWireDraft()
-        this.seatEditor().setText('')
-        this.editorSeatHolder.notifyChanged()
-        this.resetEditorMode()
-        // Consumed at the app level: request the frame ourselves (the
-        // stale-clear trap — see the Ctrl+C branch).
-        this.requestRender()
-        this.events.onSteer?.(serialized)
+        // The SCOPED bridge: the clear below pushes an undo snapshot and fires
+        // onChange, whose retention reconcile must never evict an image the
+        // steer dispatch is about to hand to the business owner. Released after
+        // the synchronous steer dispatch, like the submit paths.
+        const bridgeRelease = this.draftImagePreviewReserve?.(serialized)
+        try {
+          // The SAME undo-retiring clear as a successful submit: a delivered
+          // steer draft must not be resurrected by Undo (its images are
+          // consumed by the business owner on success). The empty accelerated
+          // gesture sends the QUEUE only — it delivers no draft, so the
+          // editor's own history stays. A Replacement Editor without the seam
+          // falls back to setText('') (pushes undo), outside this assurance.
+          if (serializedDraftHasPayload(serialized)) this.clearSubmittedDraft()
+          else {
+            this.seatEditor().setText('')
+            this.editorSeatHolder.notifyChanged()
+          }
+          this.resetEditorMode()
+          // Consumed at the app level: request the frame ourselves (the
+          // stale-clear trap — see the Ctrl+C branch).
+          this.requestRender()
+          this.events.onSteer?.(serialized)
+        } finally {
+          bridgeRelease?.()
+        }
         return true
       },
       dequeueDraft: () => {
@@ -6434,6 +7137,9 @@ export class TuiApp {
         this.requestRender()
         return true
       },
+      selectNextVisual: () => this.selectNextVisual(),
+      copySelectedVisual: () => this.copySelectedVisual(),
+      openSelectedVisual: () => this.openSelectedVisual(),
     }
   }
 
@@ -6544,7 +7250,7 @@ export class TuiApp {
    * ACTIVE screen (M0 naming; previously overlayHost).
    */
   private get activeScreen(): TuiMainScreen | TuiAltScreen {
-    return this.jobWorkspace?.screen ?? this.settingsWorkspace?.screen ?? this.fullscreen ?? this.tui
+    return this.jobWorkspace?.screen ?? this.workspaceLease?.screen ?? this.fullscreen ?? this.tui
   }
 
   /**
@@ -7186,8 +7892,9 @@ export class TuiApp {
 
   /**
    * Toggle between regular (terminal scrollback) and fullscreen (alt screen).
-   * Overlays live on the active screen, so the switch hides every mounted
-   * overlay; a pending approval prompt is re-rendered on the new screen.
+   * Managed overlays live on the active screen, so the switch rebinds their
+   * physical projections; the shared Approval seat frame is re-projected on the
+   * new screen.
    */
   toggleFullscreen(): void {
     if (this.disposed) return
@@ -7208,12 +7915,41 @@ export class TuiApp {
     this.wheelScrollLines = Number.isFinite(lines) ? Math.max(1, Math.floor(lines)) : 1
   }
 
+  /** The wheel step the NEXT alt-screen mount will receive (the already-mounted
+   *  fullscreen viewport keeps its constructor-time value). A read-only fact of
+   *  the same preference {@link setWheelScrollLines} writes. */
+  currentWheelScrollLines(): number {
+    return this.wheelScrollLines
+  }
+
+  /** Whether the surface is genuinely idle for a POST-CLOSE fullscreen
+   *  hand-off: no Job/workspace lease, no blocking Question/Approval/Save owner
+   *  and the return screen is still the active physical owner. This is the
+   *  in-app re-proof `setFullscreen(..., { onlyWhenIdle: true })` performs
+   *  synchronously, so the Command layer never keeps a private shadow copy of
+   *  these owners. */
+  private surfaceIsIdleForFullscreenHandoff(): boolean {
+    return this.jobWorkspace === undefined
+      && this.workspaceLease === undefined
+      && this.activeQuestions === undefined
+      && !this.approvals.isActive()
+      && this.activeSaveLocation === undefined
+      && this.activeScreen === (this.fullscreen ?? this.tui)
+  }
+
   /**
    * Enter or leave fullscreen (alt screen), reporting the change through
    * {@link TuiAppEvents.onFullscreenChange} so the host can persist it.
    * @param enabled - true renders the alt screen, false returns to the main screen.
+   * @param options - `persistPreference: false` skips the detached persistence
+   *   callback (a caller that already stored the preference itself must not
+   *   trigger a second document write); `onlyWhenIdle` re-proves INSIDE this
+   *   method that no other blocking owner (a Job lease, another workspace
+   *   screen, a Question/Approval/Save owner) or replacement screen appeared,
+   *   and refuses the physical switch when one did. Both default to the
+   *   ordinary behavior.
    */
-  setFullscreen(enabled: boolean): void {
+  setFullscreen(enabled: boolean, options?: { readonly persistPreference?: boolean; readonly onlyWhenIdle?: boolean }): void {
     if (this.disposed) return
     // A leased workspace (Job OR Settings) owns the physical screen: a
     // display-mode switch now would detach the PAUSED return surface (killing
@@ -7222,7 +7958,13 @@ export class TuiApp {
     // preference. The request is simply not applied while a workspace is leased
     // — the preference value itself is untouched and takes effect after the user
     // leaves it.
-    if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) return
+    if (this.jobWorkspace !== undefined || this.workspaceLease !== undefined) return
+    // The post-close hand-off of a VERIFIED Settings choice re-proves the whole
+    // idle claim here, synchronously, immediately before the swap: a Question,
+    // an approval sheet, a Save prompt, a Job/workspace lease or a replacement
+    // screen that appeared since the close callback was queued refuses the
+    // switch (the stored preference still applies at the next TUI mount).
+    if (options?.onlyWhenIdle === true && !this.surfaceIsIdleForFullscreenHandoff()) return
     // Fullscreen transitions change the focused screen and disarm transient
     // keyboard confirmation state.
     this.clearExitConfirmation()
@@ -7259,8 +8001,6 @@ export class TuiApp {
     // physical projections die with the old screen (detachPhysical). The
     // remount callbacks re-create them for the same logical nodes (including
     // the approval, whose logical node keeps its suppressed children hidden).
-    for (const close of [...this.footerConfiguratorClosers]) close()
-    this.footerConfiguratorClosers.clear()
     this.overlayBroker.detachPhysical()
     // The ordinary search overlay is NOT remounted across the screen swap
     // (only extension/advanced/unstable/history leases are): its raw
@@ -7279,6 +8019,7 @@ export class TuiApp {
       // click reaches us through its onCellClick callback so cards can be
       // expanded individually, exactly like a web disclosure row.
       const alt = new TuiAltScreen(this.terminal, undefined, undefined, {
+        imageProtocolOverride: this.altScreenImageProtocol,
         // The fullscreen mouse-wheel step (Client preference): the fork
         // reads it at construction, so a change while fullscreen is
         // active applies on the next re-entry.
@@ -7429,6 +8170,9 @@ export class TuiApp {
         // renderWidgets() and may be ZERO — an empty Text occupies no row,
         // so a compensated fullscreen simply shows no widget zone.
         { component: this.widgetsAbove, shrink: 0 },
+        // Image UX PR1: the composer draft preview is first-party pinned
+        // chrome between the plugin widget zone and the editor seat.
+        { component: this.draftImagePreview, shrink: 0 },
         { component: this.editorSeat, shrink: 0 },
         // Phase 3B / B4-B (Owner revision 2026-10-15): the on-demand Task
         // Quick accessory rides the pinned stack as the band UNDER THE WHOLE
@@ -7525,7 +8269,10 @@ export class TuiApp {
       this.refreshSchemeRegistrations()
     }
     this.completeScreenHandoff()
-    this.events.onFullscreenChange?.(enabled)
+    // A caller that already persisted this preference (the Settings
+    // workspace's verified post-close hand-off) must not trigger a SECOND
+    // detached document write from this transition.
+    if (options?.persistPreference !== false) this.events.onFullscreenChange?.(enabled)
     // Re-create every remountable raw projection on the CURRENT active
     // screen, back → front by the broker's CURRENT logical z-order (not the
     // creation order, and never grouped by overlay kind).
@@ -7535,8 +8282,7 @@ export class TuiApp {
     this.overlayBroker.restoreFocusAfterSwap()
     // A question survives the switch through the SHARED seat (both screens'
     // layouts hold the same editorSeat): keep its frame focused on the new
-    // screen — the flow's input routing is screen-agnostic. The approval (if
-    // any) was rebind-restored above as the same logical node.
+    // screen — the flow's input routing is screen-agnostic.
     const question = this.activeQuestions
     if (question?.frame !== undefined) {
       this.activeScreen.setFocus(question.frame)
@@ -7548,6 +8294,15 @@ export class TuiApp {
     const saveLocation = this.activeSaveLocation
     if (saveLocation?.frame !== undefined) {
       this.activeScreen.setFocus(saveLocation.frame)
+    }
+    // The approval action sheet is the SAME seat frame across the swap (no
+    // rebind node): re-read the LIVE blockers/frame after the remount callbacks
+    // so a Question/Save opened inside them keeps the keyboard, and a settled
+    // approval can never be re-focused from the pre-swap snapshot.
+    const approvalFrame = this.approvals.activeFrame()
+    if (approvalFrame !== undefined && this.approvals.activeFrame() === approvalFrame
+      && this.activeQuestions === undefined && this.activeSaveLocation === undefined) {
+      this.activeScreen.setFocus(approvalFrame)
     }
     // The surface slice tracks the mode switch (plan §7.1).
     this.extensionHost?.updateSurface({ fullscreen: enabled })
@@ -7752,17 +8507,17 @@ export class TuiApp {
 
   /** The live non-History pinned chrome rows the History grant reserves: the
    *  header, subject bar, dock, todo, goal, queue, busy indicator, BOTH widget
-   *  zones and the footer — the editor seat is deliberately EXCLUDED (measuring
-   *  the seat from inside its own render would be cyclic; the widget zones
-   *  re-budget themselves from the live chrome, so they are counted at their
-   *  CURRENT grant). */
+   *  zones, the composer draft preview and the footer — the editor seat is
+   *  deliberately EXCLUDED (measuring the seat from inside its own render
+   *  would be cyclic; the widget zones re-budget themselves from the live
+   *  chrome, so they are counted at their CURRENT grant). */
   private historyChromeRows(width: number, footerRows?: number): number {
     const safeWidth = Math.max(1, Math.floor(width))
     let used = 0
     for (const chrome of [
       this.header, this.viewerSubjectBar, this.dock, this.todoPanel,
       this.goalLine, this.queuePane, this.working, this.widgetsAbove,
-      this.widgetsBelow, this.footer,
+      this.draftImagePreview, this.widgetsBelow, this.footer,
     ]) {
       used += chrome === this.footer && footerRows !== undefined
         ? footerRows
@@ -7879,6 +8634,12 @@ export class TuiApp {
   ): void {
     this.searchPresentationDiagnostics.transcriptSets += 1
     this.transcriptPresentationDiagnostics.setCalls += 1
+    // Delivered files (PR1): a projection commit follows every display-subject
+    // selection (session swap, viewer enter/exit, cold rehydrate, session
+    // commit). A live browser whose captured catalog no longer describes the
+    // CURRENT subject/projection is retired BEFORE this frame can paint it
+    // beside the new subject (three identity comparisons while closed).
+    this.retireStaleDeliveredFiles()
     const profileStart = this.transcriptRenderProfiler.begin()
     const previousWindow = this.transcriptWindow
     const previousWindowHint = this.transcriptWindowHint
@@ -7949,6 +8710,7 @@ export class TuiApp {
         visible: blocks.length,
         rows: this.messageRows.length,
       })
+      this.reconcileVisualViewerFence()
       return
     }
 
@@ -7965,6 +8727,7 @@ export class TuiApp {
         visible: blocks.length,
         rows: this.messageRows.length,
       })
+      this.reconcileVisualViewerFence()
       return
     }
     if (result.kind === 'content') {
@@ -7978,11 +8741,12 @@ export class TuiApp {
         visible: blocks.length,
         rows: this.messageRows.length,
       })
+      this.reconcileVisualViewerFence()
       return
     }
     this.transcriptPresentationDiagnostics.noopCommits += 1
     this.transcriptRenderProfiler.finish(profileStart, classifiedAt, 'noop', { visible: blocks.length, rows: this.messageRows.length })
-
+    this.reconcileVisualViewerFence()
   }
 
   /** Replace ONLY the turn activities (the messages stay). The runner
@@ -8047,6 +8811,9 @@ export class TuiApp {
     // set (extension/advanced indicator) is never overwritten.
     this.working.setIconStyleFrames(workingFramesFor(style))
     this.rebuildMessages('theme-keymap')
+    // The open Settings workspace projects the runtime fact from a PULL
+    // snapshot: an apply-first commit must reach it NOW, not at settlement.
+    this.refreshSettingsWorkspaceFacts()
     this.requestRender()
   }
 
@@ -8611,7 +9378,7 @@ export class TuiApp {
    * dismiss (plan §35). */
   private searchNeedsMessageDisclosureReveal(message: TranscriptMessage): boolean {
     if (isDeliveredFilesDisclosureCandidate(message)) {
-      if (!this.deliveredFilesMasterOwned()) return false
+      if (!this.deliveredFilesMasterOwned() && !this.deliveredFilesEntryAvailable()) return false
       const source = this.searchTarget?.match.source
       // Only the hidden tail (index beyond the folded limit) needs a reveal; a
       // hit in the already-visible files or the assistant body does not.
@@ -10501,7 +11268,9 @@ export class TuiApp {
       const component = resolvedComponent ?? this.componentForTranscriptBlock(block, projectionExpanded, boundary, userBoundary, width)
       const rendered = component.render(width)
       let truncatedMarker = false
-      let attachments: ReadonlyArray<{ imageIndex: number; start: number; end: number }> = []
+      let attachments: ReadonlyArray<TranscriptImageHit> = []
+      let visuals: ReadonlyArray<TranscriptVisualHit> = []
+      let deliverables: ReadonlyArray<TranscriptDeliverableHit> = []
       let subCallHits: ReadonlyArray<{ top: number; height: number; subCallId: string }> | undefined
       let subCallRegions: ReadonlyArray<SearchSourceRegion> | undefined
       let deliverableRegions: ReadonlyArray<SearchSourceRegion> | undefined
@@ -10515,7 +11284,9 @@ export class TuiApp {
         })
       } else if (block.kind === 'message') {
         truncatedMarker = block.truncated === true
-        attachments = this.attachmentRangesOf(component, width)
+        attachments = this.attachmentHitsOf(component, width, block.message)
+        visuals = this.visualHitsOf(block.message, width)
+        deliverables = this.deliverableActionHitsOf(component, width, block.message)
         if (isUserMessageDisclosureCandidate(block.message)) {
           userDisclosureHits = this.userDisclosureHitsFor(component, {
             kind: 'durable',
@@ -10559,6 +11330,8 @@ export class TuiApp {
         ...(searchSelector === undefined ? {} : { searchSelector }),
         truncatedMarker,
         attachments,
+        visuals,
+        deliverables,
         ...(containerPath === undefined ? {} : { containerPath }),
         ...(subCallHits === undefined ? {} : { subCallHits }),
         ...(workflowHits === undefined ? {} : { workflowHits }),
@@ -10596,6 +11369,54 @@ export class TuiApp {
     return result.matches
   }
 
+  /**
+   * Display-only suppression of a "void" search target: the semantic corpus
+   * still contains the hidden marker line, but no painted row does. Suppress
+   * the anchor wash for that exact case only; the N/M navigation count and the
+   * raw search authority are deliberately unchanged.
+   */
+  private searchTargetRendersNoOccurrence(message: TranscriptMessage, query: string): boolean {
+    if (message.kind !== 'assistant') return false
+    const presentation = assistantVisualPresentation(message)
+    if (presentation === undefined || presentation.publications.length === 0) return false
+    const plan = planVisualPlacement({
+      text: message.text,
+      ...(message.content === undefined ? {} : { content: message.content }),
+      publications: presentation.publications,
+    })
+    // Reconstruct the SAME raw search-corpus text the folder indexes: all text
+    // ContentBlocks concatenated WITHOUT a separator (a query may legitimately
+    // cross an image/file block), minus only the consumed marker spans. Also
+    // include the delivered-file chunks, whose cross-chunk hits keep the
+    // message as their first-chunk owner. Suppression then means "this query
+    // exists ONLY inside hidden marker text", not merely "not in one planner
+    // piece".
+    const blocks = message.content ?? [{ type: 'text' as const, text: message.text }]
+    const markersByBlock = new Map<number, { start: number; end: number }[]>()
+    for (const piece of plan.pieces) {
+      if (piece.kind !== 'visual' || piece.blockIndex === null
+        || piece.markerStart === undefined || piece.markerEnd === undefined) continue
+      const markers = markersByBlock.get(piece.blockIndex) ?? []
+      markers.push({ start: piece.markerStart, end: piece.markerEnd })
+      markersByBlock.set(piece.blockIndex, markers)
+    }
+    let residual = ''
+    for (const [blockIndex, block] of blocks.entries()) {
+      if (block.type !== 'text') continue
+      let cursor = 0
+      for (const marker of (markersByBlock.get(blockIndex) ?? []).sort((left, right) => left.start - right.start)) {
+        residual += block.text.slice(cursor, marker.start)
+        cursor = marker.end
+      }
+      residual += block.text.slice(cursor)
+    }
+    if (message.deliverables !== undefined) {
+      for (const file of message.deliverables) residual += ` ${file.path} ${file.description ?? ''}`
+    }
+    const normalize = (value: string): string => value.replace(/\s+/gu, ' ').trim().toLowerCase()
+    return !normalize(residual).includes(normalize(query))
+  }
+
   /** The rendered search presentation of ONE block while a search is active.
    * The current target builds PROVEN source geometry from the renderer-declared
    * regions; every other VISIBLE message block that is a semantic match card is
@@ -10614,6 +11435,15 @@ export class TuiApp {
     if (!current && !this.searchMatchMessages.has(block.message)) return { current: false }
     const matches = this.renderedSearchMatchesFor(block.message, rendered, target.query)
     if (!current && matches.length === 0) return { current: false }
+    if (current
+      && matches.length === 0
+      // Only a message-corpus target can be a consumed marker. A deliverable
+      // path/description hit has no rendered occurrence when its folded tail is
+      // collapsed but is a fully legitimate anchor target; never suppress it.
+      && target.match.source.kind === 'message'
+      && this.searchTargetRendersNoOccurrence(block.message, target.query)) {
+      return { current: false }
+    }
     if (current) {
       const regions = this.searchSourceRegionsFor(block.message, rendered.length, subCallRegions, deliverableRegions)
       const geometry = buildSourceGeometry(matches, regions, transcriptSearchSourceKey(target.match.source))
@@ -10658,6 +11488,40 @@ export class TuiApp {
       regions.push({ sourceKey: 'message', anchorRow: 0, rowStart: 0, rowEnd: renderedLength, enumerable: false })
     }
     return regions
+  }
+
+  /**
+   * The PAINTED action cells of an Assistant card's delivered-files tail
+   * (Delivered files PR1): the component records the row/column spans of the
+   * `Details` / `Browse all` verbs it ACTUALLY painted on its last
+   * `render(width)`; this walker only adds the component's block-relative
+   * offset (the prior children's painted heights).
+   *
+   * A card without a real pointer owner paints no verbs and therefore mints no
+   * targets, and a stale width yields none (the component's own fence).
+   */
+  private deliverableActionHitsOf(
+    component: Component,
+    width: number,
+    message: TranscriptMessage,
+  ): ReadonlyArray<TranscriptDeliverableHit> {
+    if (message.kind !== 'assistant' || message.deliverables === undefined || message.deliverables.length === 0) return []
+    if (!(component instanceof Container)) return []
+    const token = this.identityToken(message)
+    let row = 0
+    for (const child of component.children) {
+      if (child instanceof DeliveredFilesComponent) {
+        return child.paintedFileActionHits(width).map(hit => ({
+          ...hit,
+          row: row + hit.row,
+          hitId: hit.action === 'details'
+            ? `deliverable:details:${token}:${hit.fileIndex ?? 0}`
+            : `deliverable:browse:${token}`,
+        }))
+      }
+      row += child.render(width).length
+    }
+    return []
   }
 
   /** The PROVEN path/description regions of an assistant card's delivered-files
@@ -10765,7 +11629,9 @@ export class TuiApp {
       if (entry.block.kind !== 'message') {
         return { ...entry, rendered }
       }
-      const attachments = this.attachmentRangesOf(entry.component, width)
+      const attachments = this.attachmentHitsOf(entry.component, width, entry.block.message)
+      const visuals = this.visualHitsOf(entry.block.message, width)
+      const deliverables = this.deliverableActionHitsOf(entry.component, width, entry.block.message)
       const userDisclosureHits = isUserMessageDisclosureCandidate(entry.block.message)
         ? this.userDisclosureHitsFor(entry.component, {
             kind: 'durable',
@@ -10795,6 +11661,8 @@ export class TuiApp {
         ...entry,
         rendered,
         attachments,
+        visuals,
+        deliverables,
         ...(searchSelection === undefined ? { searchSelection: undefined } : { searchSelection }),
         ...(searchPresentation.selector === undefined ? { searchSelector: undefined } : { searchSelector: searchPresentation.selector }),
         ...(subCallHits === undefined ? { subCallHits: undefined } : { subCallHits }),
@@ -10930,6 +11798,8 @@ export class TuiApp {
       ...(entry.containerPath === undefined ? {} : { containerPath: entry.containerPath }),
       height,
       attachments: entry.attachments,
+      visuals: entry.visuals,
+      deliverables: entry.deliverables,
       ...(entry.subCallHits === undefined ? {} : { subCallHits: entry.subCallHits }),
       ...(entry.workflowHits === undefined ? {} : { workflowHits: entry.workflowHits }),
       ...(entry.userDisclosureHits === undefined ? {} : { userDisclosureHits: entry.userDisclosureHits }),
@@ -10983,7 +11853,7 @@ export class TuiApp {
             () => this.focusLivePaddingEnabled(),
           ))
         }
-        rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
+        rows.push({ height: padding, attachments: [], visuals: [], deliverables: [], hasTrailingSpacer: false })
       }
       transcriptRow += height + padding
     })
@@ -11018,6 +11888,34 @@ export class TuiApp {
     this.transcriptContentHeight = this.transcriptWelcomeHeight + transcriptRow + chromeHeight
     this.messageRows = rows
     this.fullscreenRowsDirty = true
+    // The image candidate map describes the CURRENT window only: a paged
+    // window must never retain retired messages (nor their captured scopes)
+    // as an off-window gallery.
+    this.pruneImageOccurrencesToBatch(renderedBlocks)
+  }
+
+  /** Bound the per-message image candidate map to the mounted batch (the map
+   * feeds `/view-image` and must never grow with full paged history). */
+  private pruneImageOccurrencesToBatch(batch: readonly RenderedTranscriptBlock[]): void {
+    const live = new Set<TranscriptMessage>()
+    for (const entry of batch) {
+      if (entry.block.kind === 'message') live.add(entry.block.message)
+    }
+    for (const message of this.messageImageOccurrences.keys()) {
+      if (!live.has(message)) this.messageImageOccurrences.delete(message)
+    }
+    // PR2.5: the figure handles/bodies describe the SAME mounted batch. A
+    // paged-out row must not keep a valid hit, selection target or viewer
+    // source alive off-window.
+    for (const message of this.visualFigureHandles.keys()) {
+      if (!live.has(message)) this.visualFigureHandles.delete(message)
+    }
+    for (const message of this.visualAssistantBodies.keys()) {
+      if (!live.has(message)) this.visualAssistantBodies.delete(message)
+    }
+    if (this.visualSelection !== undefined && !live.has(this.visualSelection.message)) {
+      this.visualSelection = undefined
+    }
   }
 
   /** Refresh aligned transcript blocks without clearing the mounted tree.
@@ -11181,39 +12079,75 @@ export class TuiApp {
     this.setCompactionPhase(active ? 'summarizing' : 'idle')
   }
 
-  /** The per-attachment click regions inside one message component: the row
-   * span (message-relative) of every COLLAPSIBLE `ImageThumbnail` child —
-   * the host wires a `collapsedRef` only for user/assistant message
-   * attachments. Tool-card images (no collapsedRef) stay inside their
-   * card's own click surface: their rows advance the counter but never
-   * enter a collapse range, so a click there still folds/unfolds the card
-   * instead of being swallowed by an inert attachment toggle. Every other
-   * child's height still advances the row counter, so the spans line up
-   * with the rendered layout.
+  /** The image occurrence hit regions inside one HOST-rendered message
+   * component (Image UX PR2): message-relative info/body rows and the info
+   * row's right-edge control columns for EVERY mounted image thumbnail.
    *
-   * The identity is the thumbnail's occurrence rank tag (written at
-   * creation by the renderers): the image block's position among ALL image
-   * blocks of the message — open opaque image blocks reserve a rank too —
-   * so a live stream that closes blocks out of order never renumbers an
-   * occurrence under a pressed or collapsed identity. The same rank the
-   * host's collapsedRef getter reads. */
-  private attachmentRangesOf(
+   * The rows are measured from the REAL render tree: a `Container` renders
+   * its children in order at the same width, so descending through the
+   * wrapper containers the host itself builds (the delivered-files /
+   * interrupted wrappers, the tool card) yields the exact painted offsets —
+   * no generic reflection over arbitrary component types, and no second
+   * component batch. Plugin-owned message components contain no host
+   * `ImageThumbnail` (the class is repository-internal), so they mint no
+   * hits and keep their original behavior.
+   *
+   * Each hit's identity is the thumbnail's derived occurrence record
+   * (message object + source image ordinal): open opaque image blocks
+   * reserve a rank too, so a live stream that closes blocks out of order
+   * never renumbers an occurrence under a pressed or collapsed identity. */
+  private attachmentHitsOf(
     component: Component,
     width: number,
-  ): ReadonlyArray<{ imageIndex: number; start: number; end: number }> {
-    if (!(component instanceof Container)) return []
-    const ranges: Array<{ imageIndex: number; start: number; end: number }> = []
-    let row = 0
-    for (const child of component.children) {
-      const height = child.render(width).length
-      if (child instanceof ImageThumbnail && child.collapsible) {
-        // Every collapsible thumbnail is created by the host renderers,
-        // which tag it with its stable occurrence rank.
-        ranges.push({ imageIndex: this.thumbnailOccurrence.get(child)!, start: row, end: row + height })
+    message: TranscriptMessage,
+  ): ReadonlyArray<TranscriptImageHit> {
+    const hits: TranscriptImageHit[] = []
+    this.collectImageHits(component, width, message, 0, hits)
+    return hits
+  }
+
+  /** Walk one Host-rendered component subtree, appending the image hits and
+   * returning the component's painted height (so the caller's row counter
+   * stays aligned with the real layout). Only `Container` children are
+   * descended into — the exact wrapper shape the host renderers build. */
+  private collectImageHits(
+    component: Component,
+    width: number,
+    message: TranscriptMessage,
+    rowOffset: number,
+    hits: TranscriptImageHit[],
+  ): number {
+    if (component instanceof ImageThumbnail) {
+      const height = component.render(width).length
+      const occurrence = this.thumbnailOccurrence.get(component)
+      if (occurrence !== undefined && occurrence.message === message) {
+        const control = component.collapseControlRange(width)
+        // The info row is ALWAYS the thumbnail's first rendered row. The body
+        // rows below it are a viewer target ONLY when that render painted REAL
+        // PIXELS: a protocol-unsupported raster format paints the fork's text
+        // fallback, which stays informational and clickable nowhere.
+        const body = component.paintedImageBody(width)
+        const bodyStart = rowOffset + 1
+        hits.push({
+          occurrence,
+          infoRow: rowOffset,
+          bodyStart,
+          bodyEnd: body === undefined ? bodyStart : bodyStart + body.rows,
+          bodyEndCol: body?.endCol ?? 0,
+          controlStartCol: control?.startCol ?? 0,
+          controlEndCol: control?.endCol ?? 0,
+        })
       }
-      row += height
+      return height
     }
-    return ranges
+    if (component instanceof Container) {
+      let row = rowOffset
+      for (const child of component.children) {
+        row += this.collectImageHits(child, width, message, row, hits)
+      }
+      return row - rowOffset
+    }
+    return component.render(width).length
   }
 
   /** Re-measure the message row map (heights + attachment spans) from the
@@ -11268,7 +12202,7 @@ export class TuiApp {
       }
       rows.push(this.fullscreenRowEntry(entry, height, height > 0 && index < renderedBlocks.length - 1))
       const padding = paddingRows.get(index) ?? 0
-      if (padding > 0) rows.push({ height: padding, attachments: [], hasTrailingSpacer: false })
+      if (padding > 0) rows.push({ height: padding, attachments: [], visuals: [], deliverables: [], hasTrailingSpacer: false })
       transcriptRow += height + padding
     }
     this.transcriptWelcomeHeight = this.welcomeCard.render(this.terminal.columns).length
@@ -11317,7 +12251,7 @@ export class TuiApp {
   /** An async image settle invalidates ONLY the thumbnail component: the
    * resolved bytes can change the attachment's rendered rows, so the next
    * paint-snapshot commit must remeasure instead of reusing the committed
-   * row geometry (geometry epoch — docs/perf-baseline.md). Every
+   * row geometry (geometry epoch — docs/architecture/transcript.md). Every
    * `ImageThumbnail` render-request wiring MUST go through here. */
   private settleThumbnailRender(): void {
     this.fullscreenRowsDirty = true
@@ -11330,20 +12264,59 @@ export class TuiApp {
    * sampled ONCE here and the component keeps it for life, so a deferred or stale
    * re-render always reads through the OWNING presentation's authorization instead
    * of whichever subject is displayed by then.
+   *
+   * Image UX PR2: the component is also tagged with its derived occurrence
+   * (message object + source image ordinal + the CAPTURED ref/scope read back
+   * from the thumbnail itself) and joins the current message's render-order
+   * candidate list. All Host image creation points go through here.
    */
   private imageThumbnail(
-    ref: import('./domain/media/types.ts').ImageAttachmentRefLike,
+    ref: ImageAttachmentRefLike,
+    message: TranscriptMessage,
+    imageIndex: number,
     collapsedRef?: () => boolean,
   ): ImageThumbnail {
     // Callers gate on the loader/theme; the assertions mirror the call sites.
-    return new ImageThumbnail(
+    const thumbnail = new ImageThumbnail(
       ref,
       this.imageLoader!,
       this.imageTheme!,
       () => this.settleThumbnailRender(),
       collapsedRef,
       this.imageScope?.(),
+      // The `[-]`/`[+]` control is a FULLSCREEN info-row affordance only.
+      () => this.fullscreen !== undefined,
+      this.graphics,
     )
+    const source = thumbnail.viewerSource
+    const occurrence: TranscriptImageOccurrence = {
+      message,
+      imageIndex,
+      ref: source.ref,
+      scope: source.scope,
+      thumbnail,
+    }
+    this.thumbnailOccurrence.set(thumbnail, occurrence)
+    this.capturedImageOccurrences?.push(occurrence)
+    return thumbnail
+  }
+
+  /** Record one METADATA-ONLY image occurrence (Image UX PR2): a loader-less
+   * host keeps the source ContentBlock as a `/view-image` candidate WITHOUT
+   * creating a thumbnail or triggering any read. The Viewer renders
+   * `Preview unavailable` for it. Folded/hidden blocks never record because
+   * their render branch is not reached. */
+  private recordImageOccurrence(
+    message: TranscriptMessage,
+    imageIndex: number,
+    ref: ImageAttachmentRefLike,
+  ): void {
+    this.capturedImageOccurrences?.push({
+      message,
+      imageIndex,
+      ref,
+      scope: this.imageScope?.(),
+    })
   }
 
   /** The live collapse flag for ONE image-block occurrence (message object
@@ -11400,6 +12373,18 @@ export class TuiApp {
     this.reconcileWorkingRow()
     this.requestRender()
     this.syncExtensionState()
+  }
+
+  /**
+   * Converge the Store's undo leases to the HOST editor's real Undo
+   * snapshots. The Editor owns the history; the Store owns the bytes and the
+   * bounded budget; this bridge runs after every host-editor mutation and
+   * after a seat handoff, and keeps no mirror of either fact.
+   */
+  private reconcileDraftImageUndo(): void {
+    const undo = this.draftImagePreviewUndo
+    if (undo === undefined) return
+    undo.reconcileUndoOwner(this.editor, this.editor.undoImagePlaceholders())
   }
 
   /** The working row's effective label: the base Working label (or the
@@ -11808,7 +12793,7 @@ export class TuiApp {
    * click-time live re-checks keep their own `refreshMessageRows` calls,
    * so the press/release fence still measures live state. Chrome heights
    * and scroll state are re-read fresh on EVERY commit. Contract:
-   * docs/perf-baseline.md ("geometry-epoch snapshot reuse"). The snapshot
+   * docs/architecture/transcript.md ("Fullscreen geometry-epoch snapshot reuse"). The snapshot
    * keeps STABLE values only. */
   private commitFullscreenPaintSnapshot(): void {
     const snapshotStart = this.scrollProfiler.enabled ? performance.now() : 0
@@ -11834,7 +12819,7 @@ export class TuiApp {
     // keep their own `refreshMessageRows` calls, so press/release validation
     // measures live state exactly as before.
     const rowsDirty = this.fullscreenRowsDirty
-    let rows: ReadonlyArray<{ ownerId: string; height: number; hits: ReadonlyArray<string> }>
+    let rows: ReadonlyArray<FullscreenPaintedRow>
     const refreshStart = this.scrollProfiler.enabled ? performance.now() : 0
     let refreshEnd = refreshStart
     let hitsEnd = refreshStart
@@ -11847,6 +12832,9 @@ export class TuiApp {
         ownerId: this.fullscreenRowOwnerId(entry, index),
         height: entry.height,
         hits: this.fullscreenRowHits(entry, index),
+        ...(entry.attachments.length === 0 ? {} : { imageHits: this.fullscreenImageRowHits(entry) }),
+        ...(entry.visuals.length === 0 ? {} : { visualHits: this.fullscreenVisualRowHits(entry) }),
+        ...(entry.deliverables.length === 0 ? {} : { deliverableHits: this.fullscreenDeliverableRowHits(entry) }),
       }))
       hitsEnd = this.scrollProfiler.enabled ? performance.now() : 0
     } else {
@@ -11870,6 +12858,10 @@ export class TuiApp {
       dockHeight: paintedHeight(this.dock),
       widgetAboveHeight: paintedHeight(this.widgetsAbove),
       widgetBelowHeight: paintedHeight(this.widgetsBelow),
+      draftPreviewHeight: paintedHeight(this.draftImagePreview),
+      draftPreviewTop: this.fullscreen?.getPaintedBox(this.draftImagePreview)?.y ?? 0,
+      draftPreviewHitHeight: this.draftImagePreview.hitMap()?.height ?? 0,
+      draftPreviewRemoves: this.draftImagePreview.hitMap()?.removes,
       taskQuickHeight: paintedHeight(this.taskQuick),
       scrollTop: scroll?.scrollTop ?? 0,
       viewportHeight: scroll?.viewportHeight ?? 0,
@@ -11921,14 +12913,330 @@ export class TuiApp {
   /** The per-row SEMANTIC hit identities of one painted transcript block
    * (mouse parity): one immutable string per row, naming the row's
    * ACTUAL action target at the last paint — the card toggle, a PTC
-   * sub-call header, a Workflow run/phase/member/agents row, an
-   * attachment, or a Focus owner collapse. The release click recomputes
+   * sub-call header, a Workflow run/phase/member/agents row, an image
+   * occurrence, or a Focus owner collapse. The release click recomputes
    * the CURRENT identity of the pressed cell and requires equality, so a
    * repaint that reinterprets the row (a Workflow 5→6 aggregate switch, a
-   * PTC settle reflow, an async image growth) can never pass the fence. */
+   * PTC settle reflow, an async image growth) can never pass the fence.
+   * Image rows additionally carry their column-ranged identities in
+   * {@link fullscreenImageRowHits}; this row-level array is what the
+   * column-independent routes read (column 0 resolution). */
   private fullscreenRowHits(entry: FullscreenRowEntry, index: number): ReadonlyArray<string> {
     const nextVisible = this.nextVisibleRowEntry(index)
-    return Array.from({ length: entry.height }, (_, row) => this.fullscreenRowHitIdentity(entry, row, nextVisible))
+    return Array.from({ length: entry.height }, (_, row) =>
+      this.fullscreenRowHitIdentity(entry, row, nextVisible, 0))
+  }
+
+  /** The column-ranged image descriptors painted in one row-map entry (Image
+   * UX PR2): the info row's right-edge control (collapse) and one descriptor
+   * per visible body row (view). The descriptors are STABLE values recorded
+   * into the frame snapshot, so a press resolves exactly the geometry the
+   * user saw. */
+  private fullscreenImageRowHits(entry: FullscreenRowEntry): ReadonlyArray<FullscreenImageRowHit> {
+    const rows: FullscreenImageRowHit[] = []
+    for (const hit of entry.attachments) {
+      const token = this.identityToken(hit.occurrence.message)
+      const ordinal = hit.occurrence.imageIndex
+      rows.push({
+        row: hit.infoRow,
+        kind: 'info',
+        controlStartCol: hit.controlStartCol,
+        controlEndCol: hit.controlEndCol,
+        hitId: `attachment:collapse:${token}:${ordinal}`,
+      })
+      for (let row = hit.bodyStart; row < hit.bodyEnd; row += 1) {
+        rows.push({
+          row,
+          kind: 'body',
+          controlStartCol: 0,
+          // Same painted-cells ceiling the live classifier uses: the painted
+          // snapshot must describe the geometry the user actually saw.
+          controlEndCol: hit.bodyEndCol,
+          hitId: `attachment:view:${token}:${ordinal}`,
+        })
+      }
+    }
+    return rows
+  }
+
+  /** The painted delivered-files action cells of one row-map entry (PR1):
+   * each painted `Details` / `Browse all` verb keeps its EXACT cell range and
+   * hit identity; the snapshot describes only what the user actually saw. */
+  private fullscreenDeliverableRowHits(entry: FullscreenRowEntry): ReadonlyArray<FullscreenDeliverableRowHit> {
+    const byRow = new Map<number, Array<{ startCol: number; endCol: number; hitId: string }>>()
+    for (const hit of entry.deliverables) {
+      const segments = byRow.get(hit.row) ?? []
+      segments.push({ startCol: hit.startCol, endCol: hit.endCol, hitId: hit.hitId })
+      byRow.set(hit.row, segments)
+    }
+    return [...byRow].map(([row, segments]) => ({ row, segments }))
+  }
+
+  /** Resolve ONE painted delivered-files descriptor against a press/release
+   * column. A row listed here NEVER falls through to the card/container
+   * ladder: a cell outside every painted verb resolves `inert`. `undefined`
+   * means the row carries no delivered-files descriptor. */
+  private resolvePaintedDeliverableRowHit(
+    hits: ReadonlyArray<FullscreenDeliverableRowHit> | undefined,
+    inMessage: number,
+    x: number,
+  ): { hitId: string; span: { startCol: number; endCol: number } } | undefined {
+    const hit = hits?.find(candidate => candidate.row === inMessage)
+    if (hit === undefined) return undefined
+    for (const segment of hit.segments) {
+      if (segment.endCol > segment.startCol && x >= segment.startCol && x < segment.endCol) {
+        return { hitId: segment.hitId, span: { startCol: segment.startCol, endCol: segment.endCol } }
+      }
+    }
+    const first = hit.segments[0]
+    return first === undefined
+      ? { hitId: 'inert', span: { startCol: 0, endCol: 0 } }
+      : { hitId: 'inert', span: { startCol: first.startCol, endCol: first.endCol } }
+  }
+
+  /** Resolve ONE painted image descriptor against a press/release column. A
+   * row listed in the image descriptors NEVER falls through to the card or
+   * container ladder: an info row outside its control span resolves `inert`
+   * (plan §6.2). `undefined` means the row carries no image descriptor. */
+  private resolvePaintedImageRowHit(
+    imageHits: ReadonlyArray<FullscreenImageRowHit> | undefined,
+    inMessage: number,
+    x: number,
+  ): { hitId: string; span: { startCol: number; endCol: number } } | undefined {
+    const hit = imageHits?.find(candidate => candidate.row === inMessage)
+    if (hit === undefined) return undefined
+    if (hit.kind === 'body') {
+      const bodySpan = { startCol: 0, endCol: hit.controlEndCol }
+      if (hit.controlEndCol <= 0 || x >= hit.controlEndCol) return { hitId: 'inert', span: bodySpan }
+      return { hitId: hit.hitId, span: bodySpan }
+    }
+    const span = { startCol: hit.controlStartCol, endCol: hit.controlEndCol }
+    if (span.endCol > span.startCol && x >= span.startCol && x < span.endCol) {
+      return { hitId: hit.hitId, span }
+    }
+    return { hitId: 'inert', span }
+  }
+
+  /** The painted published-visual cells of one row-map entry (PR2.5): each
+   * real action verb gets its exact painted cell range, the SVG thumbnail's
+   * real pixel rows are a `view` target, and every other figure row is `inert`
+   * so a click inside the figure never folds the whole Assistant card. */
+  private fullscreenVisualRowHits(entry: FullscreenRowEntry): ReadonlyArray<FullscreenVisualRowHit> {
+    const rows: FullscreenVisualRowHit[] = []
+    for (const hit of entry.visuals) {
+      const token = this.identityToken(hit.handle.message)
+      const byRow = new Map<number, Array<{ startCol: number; endCol: number; hitId: string }>>()
+      for (const action of hit.actions) {
+        const row = hit.top + action.row
+        const segments = byRow.get(row) ?? []
+        segments.push({
+          startCol: action.startCol,
+          endCol: action.endCol,
+          hitId: `visual:${action.action}:${token}:${hit.handle.ref}`,
+        })
+        byRow.set(row, segments)
+      }
+      for (let offset = 0; offset < hit.height; offset += 1) {
+        const row = hit.top + offset
+        const segments = byRow.get(row)
+        if (segments !== undefined) {
+          rows.push({
+            row,
+            kind: 'action',
+            startCol: 0,
+            endCol: Math.max(...segments.map(segment => segment.endCol)),
+            segments,
+          })
+          continue
+        }
+        const body = hit.thumbnailBody
+        // `thumbnailBody.startRow/endRow` are FIGURE-relative; `row` is the
+        // entry-relative row this loop walks (exactly like `hit.top + action.row`
+        // above). Comparing them unrebased lifted the pixel band onto the
+        // figure's own title/description rows and left the real pixels inert.
+        if (body !== undefined
+          && row >= hit.top + body.startRow
+          && row < hit.top + body.endRow) {
+          rows.push({
+            row,
+            kind: 'body',
+            startCol: body.startCol,
+            endCol: body.endCol,
+            hitId: `visual:view:${token}:${hit.handle.ref}`,
+          })
+          continue
+        }
+        rows.push({ row, kind: 'inert', startCol: 0, endCol: Math.max(1, this.terminal.columns) })
+      }
+    }
+    return rows
+  }
+
+  /** Resolve one PAINTED visual descriptor against a press/release column. A
+   * row listed here NEVER falls through to the card/container ladder: an
+   * action row outside every verb resolves `inert` (plan §1.1: clicking a
+   * title/description/loading row must not open the Viewer or fold the card). */
+  private resolvePaintedVisualRowHit(
+    visualHits: ReadonlyArray<FullscreenVisualRowHit> | undefined,
+    inMessage: number,
+    x: number,
+  ): { hitId: string; span: { startCol: number; endCol: number } } | undefined {
+    const hit = visualHits?.find(candidate => candidate.row === inMessage)
+    if (hit === undefined) return undefined
+    if (hit.kind === 'action') {
+      for (const segment of hit.segments ?? []) {
+        if (segment.endCol > segment.startCol && x >= segment.startCol && x < segment.endCol) {
+          return { hitId: segment.hitId, span: { startCol: segment.startCol, endCol: segment.endCol } }
+        }
+      }
+      const segments = hit.segments ?? []
+      const span = segments.length === 0
+        ? { startCol: 0, endCol: hit.endCol }
+        : {
+            startCol: Math.min(...segments.map(segment => segment.startCol)),
+            endCol: hit.endCol,
+          }
+      return { hitId: 'inert', span }
+    }
+    if (hit.kind === 'body' && hit.hitId !== undefined) {
+      const span = { startCol: hit.startCol, endCol: hit.endCol }
+      if (span.endCol <= span.startCol || x < span.startCol || x >= span.endCol) {
+        return { hitId: 'inert', span }
+      }
+      return { hitId: hit.hitId, span }
+    }
+    return { hitId: 'inert', span: { startCol: 0, endCol: Math.max(1, this.terminal.columns) } }
+  }
+
+  /** Resolve one LIVE visual row against a column (PR2.5): a painted action
+   * verb is its intent, the SVG thumbnail's painted pixel rows open the same
+   * Viewer, and every other figure row is inert. `undefined` means this row
+   * carries no figure occurrence. */
+  private visualRowActionAt(
+    entry: Readonly<{ visuals: ReadonlyArray<TranscriptVisualHit> }>,
+    inMessage: number,
+    x: number,
+  ):
+    | {
+        readonly hitId: string
+        readonly kind: 'copy' | 'view' | 'inert'
+        readonly handle?: TranscriptVisualHandle
+        readonly span: { startCol: number; endCol: number }
+      }
+    | undefined {
+    for (const hit of entry.visuals) {
+      if (inMessage < hit.top || inMessage >= hit.top + hit.height) continue
+      if (this.viewerMode !== undefined) {
+        // A subagent viewer is a READ-ONLY reading surface for the parent: its
+        // figure cells are never copy/view targets (the same rule the Host
+        // actions follow) and they never fall through to a card fold either.
+        return { hitId: 'inert', kind: 'inert', span: { startCol: 0, endCol: Math.max(1, this.terminal.columns) } }
+      }
+      const token = this.identityToken(hit.handle.message)
+      const row = inMessage - hit.top
+      for (const action of hit.actions) {
+        if (action.row !== row || x < action.startCol || x >= action.endCol) continue
+        return {
+          hitId: `visual:${action.action}:${token}:${hit.handle.ref}`,
+          kind: action.action,
+          handle: hit.handle,
+          span: { startCol: action.startCol, endCol: action.endCol },
+        }
+      }
+      const body = hit.thumbnailBody
+      // `row` is already figure-relative (the same coordinate the action verbs
+      // compare against); the body rows are figure-relative too.
+      if (body !== undefined && row >= body.startRow && row < body.endRow) {
+        const span = { startCol: body.startCol, endCol: body.endCol }
+        return span.endCol > span.startCol && x >= span.startCol && x < span.endCol
+          ? { hitId: `visual:view:${token}:${hit.handle.ref}`, kind: 'view', handle: hit.handle, span }
+          : { hitId: 'inert', kind: 'inert', span }
+      }
+      const segmentSpan = hit.actions.length === 0
+        ? 0
+        : Math.max(...hit.actions.map(action => action.endCol))
+      return {
+        hitId: 'inert',
+        kind: 'inert',
+        span: { startCol: 0, endCol: Math.max(1, segmentSpan) },
+      }
+    }
+    return undefined
+  }
+
+  /** Resolve one LIVE image row against a column (Image UX PR2): the info
+   * row only acts inside its painted control span (otherwise inert), every
+   * visible body row is the occurrence's view target. `undefined` means this
+   * row carries no image occurrence. */
+  /** The delivered-files action under one live cell: the card's painted verb,
+   * or `inert` when the row is a tail row but the cell is not a verb (the
+   * card's own disclosure ladder must not receive it). */
+  private deliverableRowActionAt(
+    entry: Readonly<{ deliverables: ReadonlyArray<TranscriptDeliverableHit> }>,
+    inMessage: number,
+    x: number,
+  ):
+    | {
+        readonly hitId: string
+        readonly kind: 'browse' | 'details' | 'inert'
+        readonly fileIndex?: number
+        readonly span: { startCol: number; endCol: number }
+      }
+    | undefined {
+    const hit = entry.deliverables.find(candidate => candidate.row === inMessage)
+    if (hit === undefined) return undefined
+    const span = { startCol: hit.startCol, endCol: hit.endCol }
+    if (span.endCol <= span.startCol || x < span.startCol || x >= span.endCol) {
+      return { hitId: 'inert', kind: 'inert', span }
+    }
+    return {
+      hitId: hit.hitId,
+      kind: hit.action,
+      ...(hit.fileIndex === undefined ? {} : { fileIndex: hit.fileIndex }),
+      span,
+    }
+  }
+
+  private imageRowActionAt(
+    entry: Readonly<{ attachments: ReadonlyArray<TranscriptImageHit> }>,
+    inMessage: number,
+    x: number,
+  ):
+    | {
+        readonly hitId: string
+        readonly kind: 'collapse' | 'view' | 'inert'
+        readonly occurrence: TranscriptImageOccurrence
+        readonly span: { startCol: number; endCol: number }
+      }
+    | undefined {
+    for (const hit of entry.attachments) {
+      const token = this.identityToken(hit.occurrence.message)
+      const ordinal = hit.occurrence.imageIndex
+      if (inMessage === hit.infoRow) {
+        const span = { startCol: hit.controlStartCol, endCol: hit.controlEndCol }
+        if (span.endCol > span.startCol && x >= span.startCol && x < span.endCol) {
+          return { hitId: `attachment:collapse:${token}:${ordinal}`, kind: 'collapse', occurrence: hit.occurrence, span }
+        }
+        return { hitId: 'inert', kind: 'inert', occurrence: hit.occurrence, span }
+      }
+      if (inMessage >= hit.bodyStart && inMessage < hit.bodyEnd) {
+        // Only the cells the painted image actually occupies are a viewer
+        // target: the thumbnail caps its own painted width, so the empty space
+        // to the right of a narrow image is INERT — consumed here so it can
+        // never fall through to the card/container disclosure ladder.
+        const span = { startCol: 0, endCol: hit.bodyEndCol }
+        if (hit.bodyEndCol <= 0 || x >= hit.bodyEndCol) {
+          return { hitId: 'inert', kind: 'inert', occurrence: hit.occurrence, span }
+        }
+        return {
+          hitId: `attachment:view:${token}:${ordinal}`,
+          kind: 'view',
+          occurrence: hit.occurrence,
+          span,
+        }
+      }
+    }
+    return undefined
   }
 
   /** The next VISIBLE transcript block after `index` (the blank-row
@@ -11945,18 +13253,25 @@ export class TuiApp {
   /** The per-row SEMANTIC hit identity of one transcript row (mouse
    * parity): the row's ACTUAL action target, following the click-path
    * priority EXACTLY (long-user disclosure > blank-row escape hatch > Focus
-   * activity > PTC sub-call > Workflow > attachment > Focus-secondary/card).
-   * The long-user control wins first because the bubble BODY must never fall
-   * through to the blank-row escape hatch or a container owner; a row inside a
-   * Workflow card that
+   * activity > PTC sub-call > Workflow > image occurrence > Focus-secondary/
+   * card). The long-user control wins first because the bubble BODY must never
+   * fall through to the blank-row escape hatch or a container owner; a row
+   * inside a Workflow card that
    * matches no hit is INERT (the card consumes every click — it must never
    * fall through to the owner/card branch). Shared by the paint-snapshot
    * commit and the release-click validation so both sides compute the EXACT
-   * same identity string. */
+   * same identity string.
+   *
+   * `x` is consulted ONLY for image rows (plan §6.5): the info row's
+   * right-edge control is `attachment:collapse:…`, its other columns are
+   * `inert`, and a visible body row is `attachment:view:…`. Every other
+   * route stays row-only — the F6/Question/Approval pointer semantics are
+   * deliberately unchanged. */
   private fullscreenRowHitIdentity(
     entry: FullscreenRowEntry,
     inMessage: number,
     nextVisible: FullscreenRowEntry | undefined,
+    x: number,
   ): string {
     // The long-user disclosure targets win FIRST: the bubble BODY is the local
     // disclosure surface and must never fall through to a Work/Thought
@@ -12000,12 +13315,22 @@ export class TuiApp {
       if (hit !== undefined) return this.workflowHitIdentity(hit.hit)
       return 'inert'
     }
-    // Attachment rows.
-    for (const attachment of entry.attachments) {
-      if (inMessage >= attachment.start && inMessage < attachment.end) {
-        return `attachment:${token}:${attachment.imageIndex}`
-      }
-    }
+    // Image occurrence rows: the info row's right-edge control folds THIS
+    // occurrence, a visible body row opens the Viewer, and any other info
+    // column is inert. The image rows win before the nearest container/card
+    // so an expanded Tool card's image body never folds the card.
+    const imageAction = this.imageRowActionAt(entry, inMessage, x)
+    if (imageAction !== undefined) return imageAction.hitId
+    // PR2.5: published-visual figure rows are their OWN action surface — a
+    // painted verb is its intent, the thumbnail's real pixel body opens the
+    // Viewer, and every other figure row is inert (never a card fold).
+    const visualAction = this.visualRowActionAt(entry, inMessage, x)
+    if (visualAction !== undefined) return visualAction.hitId
+    // Delivered files (PR1): a painted `Details` / `Browse all` verb is its own
+    // action surface; every other cell of a tail row is inert so it can never
+    // fold the Assistant card.
+    const deliverableAction = this.deliverableRowActionAt(entry, inMessage, x)
+    if (deliverableAction !== undefined) return deliverableAction.hitId
     // Nearest semantic container from the PROJECTED ancestry: a foldable card
     // toggles ITSELF; every other process row collapses the nearest container
     // (nested Work beats the outer Thought).
@@ -12166,12 +13491,49 @@ export class TuiApp {
   private questionFrameBounds(question: QuestionState): { top: number; bottom: number } | undefined {
     const frame = question.frame
     if (frame === undefined) return undefined
+    return this.seatFrameBounds(frame)
+  }
+
+  /** The screen bounds of one seat-owned frame (Question / Approval): the
+   * bottom edge is the last painted pinned chrome below the shared editor seat
+   * and the top edge is derived from the frame's own last render. */
+  private seatFrameBounds(frame: { readonly rows: number }): { top: number; bottom: number } {
     const width = Math.max(1, this.terminal.columns)
     const footerHeight = this.footer.render(width).length
     const belowWidgetHeight = this.widgetsBelow.render(width).length
     const taskQuickHeight = this.fullscreen?.getPaintedBox(this.taskQuick)?.height ?? 0
     const bottom = this.terminal.rows - footerHeight - belowWidgetHeight - taskQuickHeight
     return { top: bottom - frame.rows, bottom }
+  }
+
+  /**
+   * Fullscreen approval wheel: a wheel over the painted body viewport scrolls
+   * the sheet; any other wheel while the blocking sheet is active is inert (the
+   * modal's pointer plane owns it). Regular never calls this — it has no
+   * approval pointer surface at all.
+   */
+  private handleApprovalWheel(data: string): TuiInputListenerResult | undefined {
+    if (this.activeScreen.mode !== 'fullscreen' || !this.approvals.isActive()) return undefined
+    const wheel = parseApprovalWheel(data)
+    if (wheel === undefined) return undefined
+    this.clearExitConfirmation()
+    const frame = this.approvals.activeFrame()
+    if (frame === undefined) return { consume: true }
+    // Only the CURRENT seat occupant may scroll: a Question/Save/newer blocker
+    // can outrank an active-but-hidden Approval, and the wheel must stay on the
+    // visible owner's existing path instead of mutating the hidden sheet.
+    if (this.seatFallbackComponent() !== frame) return undefined
+    const width = Math.max(1, this.terminal.columns)
+    if (this.terminal.columns !== frame.termColumns || this.terminal.rows !== frame.termRows) {
+      return { consume: true }
+    }
+    const bounds = this.seatFrameBounds(frame)
+    if (wheel.y < bounds.top || wheel.y >= bounds.bottom
+      || wheel.x < 2 || wheel.x >= width - 2) return { consume: true }
+    if (frame.wheelBy(wheel.direction * this.wheelScrollLines, wheel.y - bounds.top - 1, wheel.x - 2)) {
+      this.requestRender()
+    }
+    return { consume: true }
   }
 
   /** A hit identity that is safe to inspect while a response modal owns
@@ -12190,7 +13552,10 @@ export class TuiApp {
       || hitId.startsWith('ptc:')
       || hitId.startsWith('message:disclosure:')
       || hitId.startsWith('message:toggle:')
-      || hitId.startsWith('attachment:')
+      // Image UX PR2: only the READ-ONLY occurrence fold is inspection-safe
+      // during a Question/Approval modal. `attachment:view:` opens the image
+      // Viewer and must never be reachable from the modal plane.
+      || hitId.startsWith('attachment:collapse:')
       || hitId.startsWith('workflow:run:')
       || hitId.startsWith('workflow:phase:')
       || hitId === 'todo:dock'
@@ -12200,7 +13565,7 @@ export class TuiApp {
   /** Apply one already-fenced modal inspection hit. The caller has checked
    * the painted and current semantic identities; this helper intentionally
    * has no fallback to the ordinary fullscreen action ladder. */
-  private applyModalInspectionHit(entry: FullscreenRowEntry, entryIndex: number, inMessage: number): void {
+  private applyModalInspectionHit(entry: FullscreenRowEntry, entryIndex: number, inMessage: number, x: number): void {
     const nextVisible = this.nextVisibleRowEntry(entryIndex)
     if (entry.userDisclosureHits !== undefined) {
       const hit = this.userDisclosureHitAt(entry, inMessage)
@@ -12243,11 +13608,14 @@ export class TuiApp {
       }
       return
     }
-    for (const attachment of entry.attachments) {
-      if (inMessage >= attachment.start && inMessage < attachment.end) {
-        this.toggleAttachmentCollapsed(message, attachment.imageIndex)
-        return
+    // Image rows are resolved by column: only the info control is inspection-
+    // safe (the whitelist rejected a body view before this point).
+    const imageAction = this.imageRowActionAt(entry, inMessage, x)
+    if (imageAction !== undefined) {
+      if (imageAction.kind === 'collapse') {
+        this.toggleAttachmentCollapsed(imageAction.occurrence.message, imageAction.occurrence.imageIndex)
       }
+      return
     }
     const container = this.nearestRowContainer(entry)
     if (container !== undefined) {
@@ -12272,6 +13640,7 @@ export class TuiApp {
       widgetAboveHeight: number
       widgetBelowHeight: number
       taskQuickHeight: number
+      draftPreviewHeight: number
     },
     y: number,
   ): 'todo:dock' | 'todo:panel' | undefined {
@@ -12284,6 +13653,7 @@ export class TuiApp {
       snapshot.termRows - snapshot.taskQuickHeight - snapshot.footerHeight
       - snapshot.widgetBelowHeight
       - snapshot.editorHeight
+      - snapshot.draftPreviewHeight
       - snapshot.widgetAboveHeight - snapshot.workingHeight
       - snapshot.queueHeight - snapshot.goalHeight))
     const todoTop = Math.max(0, todoBottom - snapshot.todoHeight)
@@ -12292,18 +13662,19 @@ export class TuiApp {
     return undefined
   }
 
-  /** Record a Question-owned inspection press against the last painted
-   * snapshot. The Question identity is stored with the gesture so a
-   * settle/replacement cannot hand the release to another owner. */
-  private beginQuestionTranscriptInspection(question: QuestionState, y: number): void {
-    this.questionTranscriptGesture = undefined
+  /** Record one blocking-owner inspection press against the last painted
+   * snapshot. The owner identity is stored with the gesture so a
+   * settle/replacement cannot hand the release to another owner. `x` is
+   * consulted for the image info control (its painted column span), exactly
+   * like the normal fullscreen path. */
+  private beginModalTranscriptInspection<T extends object>(owner: T, y: number, x: number): ModalTranscriptGesture<T> | undefined {
     const snapshot = this.fullscreenPaintSnapshot
-    if (snapshot === undefined) return
-    if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return
+    if (snapshot === undefined) return undefined
+    if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return undefined
     const todoHit = this.fullscreenTodoHit(snapshot, y)
     if (todoHit !== undefined) {
-      this.questionTranscriptGesture = {
-        question,
+      return {
+        owner,
         ownerId: todoHit,
         row: 0,
         hitId: 'todo',
@@ -12311,32 +13682,61 @@ export class TuiApp {
         termRows: snapshot.termRows,
         target: 'todo',
       }
-      return
     }
     const cell = this.resolveFullscreenTranscriptCell(y, snapshot)
-    if (cell === undefined) return
+    if (cell === undefined) return undefined
     const painted = snapshot.rows[cell.entryIndex]!
-    const hitId = painted.hits[cell.inMessage] ?? 'inert'
-    if (!this.isModalInspectionSafeHit(hitId)) return
-    this.questionTranscriptGesture = {
-      question,
+    const imageHit = this.resolvePaintedImageRowHit(painted.imageHits, cell.inMessage, x)
+    const hitId = imageHit?.hitId ?? painted.hits[cell.inMessage] ?? 'inert'
+    if (!this.isModalInspectionSafeHit(hitId)) return undefined
+    return {
+      owner,
       ownerId: painted.ownerId,
       row: cell.inMessage,
       hitId,
       columns: snapshot.columns,
       termRows: snapshot.termRows,
+      ...(imageHit === undefined ? {} : { imageSpan: imageHit.span }),
       target: 'transcript',
     }
   }
 
-  /** Complete a Question-owned inspection click with the same live semantic
+  /** Resolve one screen row against the LAST-PAINTED composer preview band
+   * (image UX PR1). `undefined` means the row is not part of the band; a
+   * band without a removal control returns an empty `removes` array (inert).
+   * The band is pinned chrome above the editor seat, so its top is
+   * derived from the same painted heights as the layout, never a live
+   * re-render. */
+  private draftPreviewHitAt(y: number): {
+    top: number
+    removes: readonly DraftPreviewRemoveHit[]
+    columns: number
+    termRows: number
+  } | undefined {
+    const snapshot = this.fullscreenPaintSnapshot
+    if (snapshot === undefined) return undefined
+    if (snapshot.columns !== this.terminal.columns || snapshot.termRows !== this.terminal.rows) return undefined
+    if (snapshot.draftPreviewHeight <= 0) return undefined
+    const hitHeight = snapshot.draftPreviewHitHeight
+    if (hitHeight <= 0) return undefined
+    // The component's own last-painted box is authoritative: the pinned band
+    // can include a leading blank row, so a sibling-height reconstruction can
+    // be off by one after a composer repaint.
+    const hitTop = snapshot.draftPreviewTop
+    if (y < hitTop || y >= hitTop + hitHeight) return undefined
+    return {
+      top: hitTop,
+      removes: snapshot.draftPreviewRemoves ?? [],
+      columns: snapshot.columns,
+      termRows: snapshot.termRows,
+    }
+  }
+
+  /** Complete one blocking-owner inspection click with the same live semantic
    * re-check as the normal fullscreen path. The snapshot supplies what the
    * user pressed; the refreshed live row map proves that target still means
    * the same disclosure before any action runs. */
-  private completeQuestionTranscriptInspection(question: QuestionState, y: number): void {
-    const pressed = this.questionTranscriptGesture
-    this.questionTranscriptGesture = undefined
-    if (pressed === undefined || pressed.question !== question) return
+  private completeModalTranscriptInspection<T extends object>(pressed: ModalTranscriptGesture<T>, y: number, x: number): void {
     const snapshot = this.fullscreenPaintSnapshot
     if (snapshot === undefined) return
     if (this.terminal.columns !== snapshot.columns || this.terminal.rows !== snapshot.termRows) return
@@ -12360,12 +13760,41 @@ export class TuiApp {
     const entry = this.messageRows[cell.entryIndex]
     if (entry === undefined) return
     const ownerId = this.fullscreenRowOwnerId(entry, cell.entryIndex)
-    const hitId = this.fullscreenRowHitIdentity(entry, cell.inMessage, this.nextVisibleRowEntry(cell.entryIndex))
+    const hitId = this.fullscreenRowHitIdentity(entry, cell.inMessage, this.nextVisibleRowEntry(cell.entryIndex), x)
+    const imageAction = this.imageRowActionAt(entry, cell.inMessage, x)
+    const sameImageSpan = pressed.imageSpan === undefined
+      ? imageAction === undefined
+      : imageAction !== undefined
+        && imageAction.span.startCol === pressed.imageSpan.startCol
+        && imageAction.span.endCol === pressed.imageSpan.endCol
     if (!this.isModalInspectionSafeHit(hitId)
       || pressed.ownerId !== ownerId
       || pressed.row !== cell.inMessage
-      || pressed.hitId !== hitId) return
-    this.applyModalInspectionHit(entry, cell.entryIndex, cell.inMessage)
+      || pressed.hitId !== hitId
+      || !sameImageSpan) return
+    this.applyModalInspectionHit(entry, cell.entryIndex, cell.inMessage, x)
+  }
+
+  private beginQuestionTranscriptInspection(question: QuestionState, y: number, x: number): void {
+    this.questionTranscriptGesture = this.beginModalTranscriptInspection(question, y, x)
+  }
+
+  private completeQuestionTranscriptInspection(question: QuestionState, y: number, x: number): void {
+    const pressed = this.questionTranscriptGesture
+    this.questionTranscriptGesture = undefined
+    if (pressed === undefined || pressed.owner !== question) return
+    this.completeModalTranscriptInspection(pressed, y, x)
+  }
+
+  private beginApprovalTranscriptInspection(frame: ApprovalSheetFrame, y: number, x: number): void {
+    this.approvalTranscriptGesture = this.beginModalTranscriptInspection(frame, y, x)
+  }
+
+  private completeApprovalTranscriptInspection(frame: ApprovalSheetFrame, y: number, x: number): void {
+    const pressed = this.approvalTranscriptGesture
+    this.approvalTranscriptGesture = undefined
+    if (pressed === undefined || pressed.owner !== frame) return
+    this.completeModalTranscriptInspection(pressed, y, x)
   }
 
   /**
@@ -12377,6 +13806,27 @@ export class TuiApp {
    */
   private handleFullscreenPress(x: number, y: number): void {
     this.clearFullscreenPointerGestures()
+    // Image UX PR1: the composer preview band is pinned chrome above the
+    // editor. A modal owner or a capturing overlay consumes it as inert
+    // (never a hidden draft edit); only the last-painted `×` cell starts a
+    // removal gesture that the release re-proves against the same snapshot.
+    const preview = this.draftPreviewHitAt(y)
+    if (preview !== undefined) {
+      if (this.activeQuestions !== undefined || this.approvals.isActive()) return
+      if (this.overlayBlocksTranscriptPointer() || this.searchOverlayCoversCell(x, y)) return
+      const row = y - preview.top
+      const remove = preview.removes.find(candidate =>
+        candidate.row === row
+        && x >= candidate.startCol && x < candidate.endCol)
+      if (remove !== undefined) {
+        this.draftPreviewGesture = {
+          remove,
+          columns: preview.columns,
+          termRows: preview.termRows,
+        }
+      }
+      return
+    }
     // The press half of a same-cell click: while a question owns the
     // modal front, record the flow's press-time semantic identity (the
     // release click in handleFullscreenClick validates it — a question
@@ -12403,7 +13853,28 @@ export class TuiApp {
         }
         return
       }
-      this.beginQuestionTranscriptInspection(question, y)
+      this.beginQuestionTranscriptInspection(question, y, x)
+      return
+    }
+    // The approval action sheet owns the modal front in fullscreen: only its
+    // LAST-PAINTED action cells are decision targets, and an outside press may
+    // name only the modal-safe transcript inspection hit (never a workflow
+    // action or an ordinary background click).
+    if (this.approvals.isActive()) {
+      this.fullscreenCellGesture = undefined
+      const frame = this.approvals.activeFrame()
+      if (frame === undefined) return
+      if (this.terminal.rows !== frame.termRows || this.terminal.columns !== frame.termColumns) return
+      const bounds = this.seatFrameBounds(frame)
+      if (y >= bounds.top && y < bounds.bottom) {
+        const width = this.terminal.columns
+        if (x >= 2 && x <= width - 3) {
+          const gesture = frame.beginMousePress(y - bounds.top - 1, x - 2)
+          if (gesture !== undefined) this.approvalPressGesture = { frame, gesture }
+        }
+        return
+      }
+      this.beginApprovalTranscriptInspection(frame, y, x)
       return
     }
     // Any OTHER CAPTURING overlay owns the press: no transcript / dock /
@@ -12472,16 +13943,24 @@ export class TuiApp {
     // Transcript cells: record the press-time semantic identity (the
     // message/activity owner + the block-relative row + the row's per-row
     // SEMANTIC hit identity) so a release on a repainted projection
-    // cannot activate whatever moved onto the cell.
+    // cannot activate whatever moved onto the cell. Image rows additionally
+    // record the pressed COLUMN SPAN (the info control range or the body
+    // row's full span) so a release can prove the same actionable segment.
     const cell = this.resolveFullscreenTranscriptCell(y, snapshot)
     if (cell !== undefined) {
       const painted = snapshot.rows[cell.entryIndex]!
+      const imageHit = this.resolvePaintedImageRowHit(painted.imageHits, cell.inMessage, x)
+      const visualHit = this.resolvePaintedVisualRowHit(painted.visualHits, cell.inMessage, x)
+      const deliverableHit = this.resolvePaintedDeliverableRowHit(painted.deliverableHits, cell.inMessage, x)
       this.fullscreenCellGesture = {
         ownerId: painted.ownerId,
         row: cell.inMessage,
-        hitId: painted.hits[cell.inMessage] ?? 'inert',
+        hitId: imageHit?.hitId ?? visualHit?.hitId ?? deliverableHit?.hitId ?? painted.hits[cell.inMessage] ?? 'inert',
         columns: snapshot.columns,
         termRows: snapshot.termRows,
+        ...(imageHit === undefined ? {} : { imageSpan: imageHit.span }),
+        ...(visualHit === undefined ? {} : { visualSpan: visualHit.span }),
+        ...(deliverableHit === undefined ? {} : { deliverableSpan: deliverableHit.span }),
       }
       return
     }
@@ -12514,6 +13993,31 @@ export class TuiApp {
   }
 
   private handleFullscreenClick(x: number, y: number): void {
+    // Image UX PR1: complete a composer-preview `×` gesture before the
+    // transcript/modal ladders. The pressed occurrence must still occupy the
+    // exact same painted row/columns and draft text; a repaint, a draft edit
+    // or a newly opened modal drops the gesture without acting.
+    const pressedPreview = this.draftPreviewGesture
+    if (pressedPreview !== undefined) {
+      this.draftPreviewGesture = undefined
+      if (this.activeQuestions !== undefined || this.approvals.isActive()) return
+      if (this.overlayBlocksTranscriptPointer() || this.searchOverlayCoversCell(x, y)) return
+      const preview = this.draftPreviewHitAt(y)
+      if (preview === undefined) return
+      if (preview.columns !== pressedPreview.columns || preview.termRows !== pressedPreview.termRows) return
+      const pressed = pressedPreview.remove
+      const current = preview.removes.find(candidate =>
+        candidate.imageId === pressed.imageId
+        && candidate.ordinal === pressed.ordinal
+        && candidate.startOffset === pressed.startOffset
+        && candidate.endOffset === pressed.endOffset
+        && candidate.draftText === pressed.draftText)
+      if (current === undefined) return
+      if (y - preview.top !== current.row) return
+      if (x < current.startCol || x >= current.endCol) return
+      this.removeDraftPreviewOccurrence(current)
+      return
+    }
     // A question owns the modal front: clicks inside its frame (the editor
     // seat, pinned above the footer) route to the flow — option rows select,
     // the body scroll marker toggles the expanded region. The seat's screen
@@ -12562,24 +14066,55 @@ export class TuiApp {
         return
       }
       this.questionPressGesture = undefined
-      this.completeQuestionTranscriptInspection(question, y)
+      this.completeQuestionTranscriptInspection(question, y, x)
       return
     }
+    // Approval owns the modal front: a release inside the action sheet may run
+    // only the action segment recorded at press time of THIS SAME frame; an
+    // outside release may complete only the modal-safe inspection gesture.
+    if (this.approvals.isActive()) {
+      this.fullscreenCellGesture = undefined
+      const frame = this.approvals.activeFrame()
+      const pressed = this.approvalPressGesture
+      this.approvalPressGesture = undefined
+      if (frame === undefined) {
+        this.approvalTranscriptGesture = undefined
+        return
+      }
+      if (this.terminal.rows !== frame.termRows || this.terminal.columns !== frame.termColumns) {
+        this.approvalTranscriptGesture = undefined
+        return
+      }
+      const bounds = this.seatFrameBounds(frame)
+      const width = this.terminal.columns
+      if (y >= bounds.top && y < bounds.bottom) {
+        const gesture = pressed?.frame === frame ? pressed.gesture : undefined
+        this.approvalTranscriptGesture = undefined
+        if (x >= 2 && x <= width - 3 && gesture !== undefined) {
+          frame.completeMouseClick(gesture, y - bounds.top - 1, x - 2)
+          this.requestRender()
+        }
+        return
+      }
+      this.completeApprovalTranscriptInspection(frame, y, x)
+      return
+    }
+    this.approvalPressGesture = undefined
+    this.approvalTranscriptGesture = undefined
     this.questionPressGesture = undefined
     this.questionTranscriptGesture = undefined
-    // Any OTHER managed overlay (search / settings / approvals / extension
-    // overlays) owns the click: with one up, NO transcript / dock / todo
-    // interaction below is reachable — concrete rows AND the blank-row
-    // fallback stay inert behind it (plan §17/§23.7). The question frame
-    // above is the only overlay that routes clicks itself. Any pre-overlay
-    // todo/transcript gesture is dead (a cross-mode close before the
-    // release must not resurrect it on the background surface). A
-    // nonCapturing notice is non-modal and does not own the release.
+    // Any OTHER managed overlay (search / settings / extension overlays) owns
+    // the click: with one up, NO transcript / dock / todo interaction below is
+    // reachable — concrete rows AND the blank-row fallback stay inert behind it
+    // (plan §17/§23.7). The question/approval frames above are the only seat
+    // owners that route clicks themselves. Any pre-overlay todo/transcript
+    // gesture is dead (a cross-mode close before the release must not resurrect
+    // it on the background surface). A nonCapturing notice is non-modal and
+    // does not own the release.
     if (this.overlayBlocksTranscriptPointer()) {
       this.fullscreenCellGesture = undefined
       return
     }
-    void x
     // The region determination uses the SAME last-painted snapshot as the
     // press (the fork's click detection already restricted the release to
     // the pressed cell): no render() call here either — the seat's
@@ -12713,11 +14248,37 @@ export class TuiApp {
     // settle reflow, an async image growth) — the release recomputes the
     // CURRENT hit identity and requires equality.
     const ownerId = this.fullscreenRowOwnerId(entry, cell.entryIndex)
-    const hitId = this.fullscreenRowHitIdentity(entry, inMessage, this.nextVisibleRowEntry(cell.entryIndex))
+    const hitId = this.fullscreenRowHitIdentity(entry, inMessage, this.nextVisibleRowEntry(cell.entryIndex), x)
+    const imageAction = this.imageRowActionAt(entry, inMessage, x)
+    const visualAction = this.visualRowActionAt(entry, inMessage, x)
+    const deliverableAction = this.deliverableRowActionAt(entry, inMessage, x)
+    const pressed = this.fullscreenCellGesture
+    // A pressed image/visual hit must still resolve the SAME actionable column
+    // span: a repaint/reflow that moved the control (or turned the pressed body
+    // row into an info/action row) drops the gesture even if a same-shaped
+    // target moved under the cell.
+    const sameImageSpan = pressed?.imageSpan === undefined
+      ? imageAction === undefined
+      : imageAction !== undefined
+        && imageAction.span.startCol === pressed.imageSpan.startCol
+        && imageAction.span.endCol === pressed.imageSpan.endCol
+    const sameVisualSpan = pressed?.visualSpan === undefined
+      ? visualAction === undefined
+      : visualAction !== undefined
+        && visualAction.span.startCol === pressed.visualSpan.startCol
+        && visualAction.span.endCol === pressed.visualSpan.endCol
+    const sameDeliverableSpan = pressed?.deliverableSpan === undefined
+      ? deliverableAction === undefined
+      : deliverableAction !== undefined
+        && deliverableAction.span.startCol === pressed.deliverableSpan.startCol
+        && deliverableAction.span.endCol === pressed.deliverableSpan.endCol
     if (
-      this.fullscreenCellGesture?.ownerId !== ownerId ||
-      this.fullscreenCellGesture?.row !== inMessage ||
-      this.fullscreenCellGesture?.hitId !== hitId
+      pressed?.ownerId !== ownerId ||
+      pressed?.row !== inMessage ||
+      pressed?.hitId !== hitId ||
+      !sameImageSpan ||
+      !sameVisualSpan ||
+      !sameDeliverableSpan
     ) {
       this.fullscreenCellGesture = undefined
       return
@@ -12813,17 +14374,39 @@ export class TuiApp {
           }
           return
         }
-        // Attachment rows win FIRST (plan §8.3): a click on an image's
-        // info bar or its image rows toggles THAT OCCURRENCE's display —
-        // the identity stays, the picture collapses/expands, and a
-        // repeated attachment elsewhere stays untouched. A click on an
-        // attachment inside an EXPANDED Thought must never collapse the
-        // whole turn (the attachment's own hit area is the intent).
-        for (const attachment of entry.attachments) {
-          if (inMessage >= attachment.start && inMessage < attachment.end) {
-            this.toggleAttachmentCollapsed(message, attachment.imageIndex)
-            return
+        // Image occurrence rows win FIRST (plan §6.4): the info row's
+        // right-edge `[-]`/`[+]` folds THAT occurrence, a visible body row
+        // opens the read-only Viewer, and every other info column is inert.
+        // The image rows are resolved by column BEFORE the container/card
+        // ladder, so an expanded Tool card's image body never folds the card
+        // while its other rows keep the card disclosure.
+        if (imageAction !== undefined) {
+          if (imageAction.kind === 'collapse') {
+            this.toggleAttachmentCollapsed(imageAction.occurrence.message, imageAction.occurrence.imageIndex)
+          } else if (imageAction.kind === 'view') {
+            this.openImageViewer(imageAction.occurrence)
           }
+          return
+        }
+        // PR2.5: a painted figure verb runs its ONE intent; the thumbnail's
+        // real pixel body opens the same leased SVG viewer. Every other figure
+        // row is inert (consumed here, never a card fold).
+        if (visualAction !== undefined) {
+          if (visualAction.kind === 'copy' && visualAction.handle !== undefined) {
+            this.copyVisualPayload(visualAction.handle)
+          } else if (visualAction.kind === 'view' && visualAction.handle !== undefined) {
+            this.openSvgViewer(visualAction.handle)
+          }
+          return
+        }
+        // Delivered files (PR1): a painted verb opens THIS message's Turn (or
+        // that exact file's Details). The list verb and the per-file verb use
+        // the SAME opener as `/deliverables`, never the "latest Turn".
+        if (deliverableAction !== undefined) {
+          if (deliverableAction.kind !== 'inert') {
+            this.activateDeliveredFiles(message, deliverableAction.kind, deliverableAction.fileIndex)
+          }
+          return
         }
         // A message row REVEALED BY an expanded Thought/Work container (its
         // thinking / tool / result / intermediate rows carry the projected
@@ -13238,6 +14821,15 @@ export class TuiApp {
   /** Drop all per-message expansion overrides (session-scoped state: a
    * session switch must not leak the old session's click toggles). */
   clearSessionOverrides(): void {
+    // The composer preview is session-scoped presentation: re-project the
+    // new owner's draft and release the previous session's pixel caches. The
+    // retained draft pins are NOT released here: a session switch does not
+    // retire the host editor undo stack (the fork's clearHistory is prompt
+    // recall only), so an undo after the switch must still resolve its
+    // placeholder. Pins are released at Enter submit (undoStack retired) or
+    // dispose.
+    this.invalidateDraftPreviewCaches()
+    this.draftImagePreview.invalidate()
     // A session switch is a terminal-ownership boundary: a leased workspace
     // screen (Job OR Settings) is retired FIRST, through the same close path Esc
     // uses, so it can never keep consuming input or hold a pointer/copy lease
@@ -13301,6 +14893,10 @@ export class TuiApp {
     // The attachment collapse toggles are session-scoped too: a switched-in
     // session's attachments start expanded (the click state must never leak).
     this.collapsedOccurrences.clear()
+    // Image UX PR2: the image workspace (picker/Viewer) is a leased screen
+    // whose occurrences carry the OLD owner's immutable read scope. The
+    // physical-screen lease is already retired by `closeLeasedWorkspaces`
+    // above, so a switched-in session can never re-authorize that scope.
     // The PTC sub-call disclosure state and its render-time hit map are
     // session-scoped too: a switched-in session must never inherit the old
     // session's subCallId expansions, and the old message objects must not
@@ -13339,6 +14935,18 @@ export class TuiApp {
       }
     }
     this.messageComponents.clear()
+    // The candidate snapshot describes the disposed projection: drop it with
+    // the components whose image occurrences it references.
+    this.messageImageOccurrences.clear()
+    // PR2.5: the figure handles/bodies and the transient selection describe
+    // the disposed projection too; the viewer fence is retired by the
+    // workspace close at the same session-switch boundary. The epoch bump is
+    // what makes an A→B→A subject change expire every OLD handle even when the
+    // folder hands back the SAME message/publication objects on the return.
+    this.visualEpoch += 1
+    this.visualFigureHandles.clear()
+    this.visualAssistantBodies.clear()
+    this.visualSelection = undefined
   }
 
   /** Show or clear plan mode: header + footer badges and a warning-tinted editor border. */
@@ -13452,6 +15060,7 @@ export class TuiApp {
    */
   setEditorText(text: string): void {
     this.clearExitConfirmation()
+    this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
@@ -13481,6 +15090,7 @@ export class TuiApp {
    */
   insertIntoEditor(text: string): void {
     this.clearExitConfirmation()
+    this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       const editor = this.seatEditor()
@@ -13521,6 +15131,7 @@ export class TuiApp {
    * @param mode - the viewer target; `undefined` leaves the viewer.
    */
   setViewerMode(mode: SubagentViewerTarget | undefined): void {
+    this.invalidateDraftPreviewCaches()
     // Viewer entry, exit, and child switches are focus/session transitions;
     // an armed parent exit confirmation must not survive them.
     this.clearExitConfirmation()
@@ -14789,6 +16400,28 @@ export class TuiApp {
   private hostEditorAdapter(): import('./tui/interaction/editor-seat-holder.ts').HostEditorAdapter {
     // Capture the editor so object-literal getters keep the right `this`.
     const editor = this.editor
+    // Editor.setTextAndCursor/replaceTextUndoable normalize CRLF/CR and expand
+    // tabs before clamping the cursor. Convert the flat replacement offset
+    // against that same stored representation, otherwise a tab/newline before
+    // the cursor would shift the host position by a different amount.
+    const mapFlatTextAndCursor = (text: string, offset: number): {
+      text: string
+      cursor: { line: number; col: number }
+    } => {
+      const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ')
+      const lines = normalized.split('\n')
+      let remaining = Math.max(0, Math.min(offset, text.length))
+      const rawPrefix = text.slice(0, remaining)
+      remaining = rawPrefix.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ').length
+      let line = 0
+      for (; line < lines.length; line++) {
+        const length = lines[line]?.length ?? 0
+        if (remaining <= length) break
+        remaining -= length + 1
+      }
+      const targetLine = Math.min(line, Math.max(0, lines.length - 1))
+      return { text: normalized, cursor: { line: targetLine, col: remaining } }
+    }
     return {
       getText: () => editor.getText(),
       // P1 (large-paste external-editor loss): the draft that LEAVES the
@@ -14799,6 +16432,8 @@ export class TuiApp {
       getExpandedText: () => editor.getExpandedText(),
       getExpandedCursor: () => editor.getExpandedCursor(),
       setText: (text) => editor.setText(text),
+      clearDraftAfterSubmit: () => editor.clearDraftAfterSubmit(),
+      retireDraftImageFromUndo: (placeholder) => editor.retireDraftImageFromUndo(placeholder),
       isShowingAutocomplete: () => editor.isShowingAutocomplete(),
       getInputMode: () => editor.getInputMode(),
       setInputMode: (mode) => editor.setInputMode(mode),
@@ -14828,23 +16463,12 @@ export class TuiApp {
         editor.setCursor?.({ line, col: lines[line]?.length ?? 0 })
       },
       setTextAndCursor: (text, offset) => {
-        // Editor.setTextAndCursor normalizes CRLF/CR and expands tabs before
-        // clamping the cursor. Convert the flat replacement offset against
-        // that same stored representation, otherwise a tab/newline before
-        // the cursor would shift the host position by a different amount.
-        const normalized = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ')
-        const lines = normalized.split('\n')
-        let remaining = Math.max(0, Math.min(offset, text.length))
-        const rawPrefix = text.slice(0, remaining)
-        remaining = rawPrefix.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\t/g, '    ').length
-        let line = 0
-        for (; line < lines.length; line++) {
-          const length = lines[line]?.length ?? 0
-          if (remaining <= length) break
-          remaining -= length + 1
-        }
-        const targetLine = Math.min(line, Math.max(0, lines.length - 1))
-        editor.setTextAndCursor(normalized, { line: targetLine, col: remaining })
+        const mapped = mapFlatTextAndCursor(text, offset)
+        editor.setTextAndCursor(mapped.text, mapped.cursor)
+      },
+      replaceTextUndoable: (text, offset) => {
+        const mapped = mapFlatTextAndCursor(text, offset)
+        editor.replaceTextUndoable(mapped.text, mapped.cursor)
       },
       cancelAutocomplete: () => editor.cancelHostAutocomplete(),
       insertTextAtCursor: (text) => editor.insertTextAtCursor(text),
@@ -14892,6 +16516,13 @@ export class TuiApp {
     // Re-mount the seat child: the editor seat now holds the new
     // occupant's component (the host default editor or the plugin's).
     this.mountSeatChild()
+    // A replacement editor is a new draft-text/mode authority (a host editor
+    // may also have a different paste registry): re-project the preview.
+    this.invalidateDraftPreviewCaches()
+    // The handoff rewrote the host editor's draft (and pushed its own undo
+    // state) while `current` was still the outgoing occupant: reconcile the
+    // host undo leases against the NOW-visible draft and the host snapshots.
+    this.reconcileDraftImageUndo()
   }
 
   /**
@@ -14955,15 +16586,139 @@ export class TuiApp {
   }
 
   /**
+   * Project one approval action sheet as the blocking editor-seat occupant:
+   * suspend the visible managed roots, install the frame, hand it the keyboard
+   * and repaint. A Question/Save owner outranks the approval; its own settle
+   * projects this frame through the live seat derivation instead (the approval
+   * frame is already built and stays answerable).
+   */
+  private mountApprovalSeat(pending: PendingApproval): void {
+    const frame = pending.frame
+    if (frame === undefined || this.disposed) return
+    // A live Question/Save owner outranks the approval's seat projection. The
+    // frame stays built; that owner's settle projects it through the live seat
+    // derivation and transfers the suspension graph.
+    const blockerLive = (): boolean =>
+      this.activeQuestions !== undefined || this.activeSaveLocation !== undefined
+    if (blockerLive()) return
+    const focusRevision = this.overlayBroker.focusTransitionRevision()
+    this.overlayBroker.suspendVisibleRoots(pending)
+    // A synchronous focus/blur callback inside the suspension may settle/replace
+    // THIS prompt or present a higher-priority Question/Save. Only a still-live
+    // approval that is STILL the derived seat occupant may be projected/focused;
+    // otherwise the callback's newer owner keeps the physical seat and focus.
+    if (this.disposed || this.approvals.activeFrame() !== frame || blockerLive()) return
+    this.mountSeatChild()
+    if (this.disposed || this.approvals.activeFrame() !== frame || blockerLive()
+      || this.seatFallbackComponent() !== frame) return
+    // A callback inside the suspension may have handed the keyboard to a NEWER
+    // managed overlay (an explicit focus or a newer capturing mount). That newer
+    // intent wins over this mount's late focus; the approval stays projected and
+    // takes the keyboard back through the broker's live seat derivation once the
+    // newer owner leaves.
+    if (this.overlayBroker.focusTransitionRevision() !== focusRevision
+      && this.overlayBroker.hasFocusedOverlay()) {
+      this.publishFocusSeat()
+      this.requestRender()
+      return
+    }
+    this.activeScreen.setFocus(frame)
+    this.publishFocusSeat()
+    this.requestRender()
+  }
+
+  /**
+   * Unproject an approval seat frame and re-project the LIVE occupant. This
+   * deliberately does NOT reveal the roots the prompt suspended: a queued
+   * successor must mount first (`showNext`), so the successor's own suspension
+   * can inherit the hidden roots without a transient reveal/focus between
+   * prompts. `resumeApprovalSuspension` runs after that handover decision.
+   */
+  private releaseApprovalSeat(pending: PendingApproval): void {
+    this.unprojectApprovalSeat(pending, 'approval seat release')
+  }
+
+  /** Abandon a FAILED approval presentation with the same identity-fenced
+   * seat obligation (the runtime has cleared the active slot). */
+  private rollbackApprovalSeat(pending: PendingApproval): void {
+    this.unprojectApprovalSeat(pending, 'approval seat rollback')
+  }
+
+  /**
+   * Resume/transfer the roots the released approval suspended. Runs AFTER the
+   * runtime's successor decision: a mounted successor is the live suspension
+   * owner, so the broker transfers the handles without revealing/focusing them;
+   * only a truly drained queue reveals once and restores the live seat owner.
+   */
+  private resumeApprovalSuspension(pending: PendingApproval): void {
+    runSyncDisposalSteps('approval suspension resume', [
+      () => this.overlayBroker.resumeSuspendedRoots(pending),
+      // Never steal the keyboard from a root/overlay the resume or a callback
+      // just focused; with no focused overlay this restores the live seat owner
+      // (editor / optional tenant / newer blocker).
+      () => this.focusSeatFallback(),
+      () => this.publishFocusSeat(),
+      () => this.requestRender(),
+    ])
+  }
+
+  private unprojectApprovalSeat(_pending: PendingApproval, label: string): void {
+    runSyncDisposalSteps(label, [
+      () => this.mountSeatChild(),
+      () => this.publishFocusSeat(),
+      () => this.requestRender(),
+    ])
+  }
+
+  /**
+   * The frame-row grant for the approval action sheet: the C1-A reading target
+   * (~60%, expanded ~80%) capped by the REAL pinned chrome so the header,
+   * footer and pinned bands keep their rows. On a fullscreen surface the last
+   * painted chrome boxes are authoritative; a regular document can scroll and
+   * only needs the percentage.
+   */
+  private approvalSeatRows(expanded: boolean): number {
+    const rows = Math.max(1, this.terminal.rows)
+    const width = Math.max(1, this.terminal.columns)
+    const target = Math.floor(rows * (expanded ? 0.8 : 0.6))
+    const painted = (component: Component): number =>
+      this.fullscreen?.getPaintedBox(component)?.height ?? 0
+    // The bottom pinned chrome always belongs to its owner (footer, widget
+    // zone, Task Quick). One transcript row is reserved on a surface tall
+    // enough to have a real transcript region.
+    const bottomChrome = this.widgetsBelow.render(width).length
+      + this.footer.render(width).length
+      + (this.fullscreen === undefined ? 0 : painted(this.taskQuick))
+    // The header is pinned on BOTH roots; the regular document must not clip
+    // it just because the seat frame grew.
+    let chrome = this.header.render(width).length + bottomChrome
+    if (this.fullscreen !== undefined) {
+      chrome += painted(this.viewerSubjectBar)
+        + painted(this.widgetsAbove) + painted(this.draftImagePreview)
+        + painted(this.working)
+        + painted(this.queuePane) + painted(this.goalLine)
+        + painted(this.todoPanel) + painted(this.dock)
+    }
+    const ceiling = rows - chrome - (rows >= 12 ? 1 : 0)
+    // A small terminal still gets enough rows for the title/danger facts, one
+    // reading row and the pinned actions; the sheet's own degradation decides
+    // what to drop when even that floor cannot fit, and a grant below its
+    // minimum paints one truthful resize row instead of a clipped box.
+    const floor = Math.min(ceiling, 8)
+    return Math.max(1, Math.min(ceiling, Math.max(floor, target)))
+  }
+
+  /**
    * Focus the LIVE seat owner as the fallback TAIL of a settle. It never
    * overwrites a keyboard owner that a synchronous callback established inside
-   * the SAME batch: a capturing overlay that took focus (or another blocking
-   * owner that opened) is the NEWER fact, and the broker restores its own
-   * owner right after. This is what keeps a pre-settle snapshot from stealing
-   * the keyboard back (Phase 3A / PR-B §B3).
+   * the SAME batch: a capturing overlay that took focus is the NEWER fact, and
+   * the broker restores its own owner right after. This is what keeps a
+   * pre-settle snapshot from stealing the keyboard back (Phase 3A / PR-B §B3).
+   * A blocking owner whose frame is not built yet yields `undefined` from the
+   * seat derivation, so this never focuses a not-yet-painted frame.
    */
   private focusSeatFallback(): void {
-    if (this.optionalSeatBlocking() || this.overlayBroker.hasFocusedOverlay()) return
+    if (this.disposed || this.overlayBroker.hasFocusedOverlay()) return
     const owner = this.seatFallbackComponent()
     if (owner === undefined) return
     this.activeScreen.setFocus(owner)
@@ -15158,21 +16913,19 @@ export class TuiApp {
   /**
    * The ONE component the physical editor seat should currently project,
    * derived from the LIVE owner (Phase 3A / PR-B): a Question frame outranks a
-   * Save Location frame, an ACTIVE and still-current optional tenant outranks
-   * the seat editor, and the latest host/plugin editor is the final fallback.
+   * Save Location frame, a live Approval action sheet (the blocking seat owner)
+   * outranks an ACTIVE optional tenant, and the latest host/plugin editor is the
+   * final fallback. An approval whose frame is not built yet returns
+   * `undefined` (a callback's late tail must not project the editor over it).
    * A PARKED, finalized or stale tenant is never returned — the seat is not a
    * place where a parked panel waits for its next key.
-   *
-   * `undefined` means a blocking owner is live but its frame is not ready
-   * (the owner commits its intent before it builds/mounts the frame): the
-   * caller must leave the current occupant alone rather than project a newer
-   * winner's tail over it.
    */
   private seatFallbackComponent(): Component | undefined {
     const question = this.activeQuestions
     if (question !== undefined) return question.frame
     const saveLocation = this.activeSaveLocation
     if (saveLocation !== undefined) return saveLocation.frame
+    if (this.approvals.isActive()) return this.approvals.activeFrame()
     const optional = this.optionalSeat
     if (optional !== undefined && optional.phase === 'active'
       && !optional.finalized && optional.isCurrent()) {
@@ -15183,8 +16936,8 @@ export class TuiApp {
 
   /**
    * Whether the seat editor (host default or plugin winner) currently owns the
-   * PHYSICAL seat projection. A live Question/Save frame or an ACTIVE optional
-   * tenant owns it instead; an approval alone does not.
+   * PHYSICAL seat projection. A live Question/Save/Approval frame or an ACTIVE
+   * optional tenant owns it instead.
    */
   private seatEditorOwnsProjection(): boolean {
     return this.seatFallbackComponent() === this.seatEditor().component
@@ -15652,7 +17405,7 @@ export class TuiApp {
     if (this.optionalTenantOwnsSeat()) return false
     if (this.overlayBroker.hasFocusedOverlay()) return false
     if (this.jobWorkspace !== undefined) return false
-    if (this.settingsWorkspace !== undefined) return false
+    if (this.workspaceLease !== undefined) return false
     if (this.keybindings.leaderMachine()?.pending === true) return false
     return true
   }
@@ -15679,6 +17432,7 @@ export class TuiApp {
    * the raw text. The single decode point for every host restore path.
    */
   private setSeatSerializedInput(text: string): void {
+    this.invalidateDraftPreviewCaches()
     const seat = this.seatEditor()
     if (seat.id === 'host') {
       this.editor.setSerializedInput(text)
@@ -15891,6 +17645,32 @@ export class TuiApp {
     if (message.kind === 'thinking') {
       return this.effectiveThinkingExpanded(message, ignoreSearch)
     }
+    // DELIVERED FILES own their disclosure through a SEPARATE capability: the
+    // `/deliverables` browser is a real owner even when the process-fold key
+    // is disabled, so this branch must resolve BEFORE the generic capability
+    // gate below. Its three cases are: master-owned (Ctrl+O on this surface),
+    // command-owned (the browser capability exists), and no operable owner
+    // (fail open).
+    if (isDeliveredFilesDisclosureCandidate(message)) {
+      const masterOwned = this.deliveredFilesMasterOwned()
+      const commandOwned = this.deliveredFilesEntryAvailable()
+      // Neither an operable Ctrl+O owner NOR the browser command exists: the
+      // tail FAILS OPEN rather than hiding files behind a dead entry.
+      if (!masterOwned && !commandOwned) return true
+      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
+      // A per-card override is a MASTER-owned durable choice: on a surface
+      // whose Ctrl+O owns something else it has no operator, so it must never
+      // silently expand the tail there (that leaves a permanent expansion with
+      // no affordance to undo it).
+      if (masterOwned) {
+        const override = this.expandedOverride.get(message)
+        if (override !== undefined) return override
+        return message.turn >= boundary
+      }
+      // Command-owned: the folded four until the browser opens or a search
+      // reveals a hidden match (never promoted into a durable override).
+      return false
+    }
     // The capability decides BEFORE any renderer builds a folded view: a
     // surface with no operable disclosure action (regular without an effective
     // expand key) presents every fold in full, so no hidden count, marker or
@@ -15918,19 +17698,6 @@ export class TuiApp {
       if (override !== undefined) return override
       if (this.fullscreen !== undefined && isFocusDisplayPreset(this.displayState.preset)) return false
       return message.turn >= userBoundary
-    }
-    // Delivered files are an assistant turn-tail with a per-OWNER capability:
-    // only the regular / fullscreen-Full Ctrl+O master owns the capped state. A
-    // surface whose Ctrl+O owns something else (fullscreen Focus root bulk,
-    // fullscreen Compact Work bulk) — or whose expand key is disabled — has no
-    // operable owner at all, so the tail FAILS OPEN (all files visible) instead
-    // of rendering a collapsed disclosure nobody can operate.
-    if (isDeliveredFilesDisclosureCandidate(message)) {
-      if (!this.deliveredFilesMasterOwned()) return true
-      if (!ignoreSearch && this.searchForcesMessageExpanded(message)) return true
-      const override = this.expandedOverride.get(message)
-      if (override !== undefined) return override
-      return message.turn >= boundary
     }
     // A member of an OPEN Work run (Compact, or nested Work inside an expanded
     // Focus Thought). Regular has no mouse, so the open run full-reveals its own
@@ -16028,7 +17795,7 @@ export class TuiApp {
     message: TranscriptMessage,
     boundary: number,
     userBoundary: number,
-  ): { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint } {
+  ): { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint; deliverableSurface: string } {
     const expanded = this.effectiveMessageExpanded(message, boundary, userBoundary)
     const insideFocusSecondary = 'turn' in message
       && this.isInsideExpandedFocus(message, boundary)
@@ -16073,7 +17840,15 @@ export class TuiApp {
       || !this.messageFoldDisclosureAvailable()
       || this.surfacedInteractionFailsOpen(message)
       || (this.fullscreen === undefined && (insideFocusSecondary || insideOpenWorkRun))
-    return { expanded, fullReveal, expandHint }
+    // The delivered tail's PAINTED actions depend on the surface (a real
+    // pointer owner needs the AltScreen) and on whether the browser
+    // capability exists. The path labels are relativized against the CURRENT
+    // display subject's workspace, so a viewer's root is a render input too.
+    // All three are part of the cache identity.
+    const deliverableSurface = (message.kind === 'assistant' && (message.deliverables?.length ?? 0) > 0)
+      ? `${this.deliveredFilesPointerOwned() ? 'pointer' : 'plain'}:${this.deliveredFilesEntryAvailable() ? 'command' : 'none'}:${this.displayWorkspaceRoot() ?? ''}`
+      : ''
+    return { expanded, fullReveal, expandHint, deliverableSurface }
   }
 
   private componentForMessage(
@@ -16134,6 +17909,7 @@ export class TuiApp {
           || entry.fullReveal !== state.fullReveal
           || entry.expandHint !== state.expandHint
     if (foldStateChanged
+      || entry.deliverableSurface !== state.deliverableSurface
       || (entry.builtWidth !== undefined && entry.builtWidth !== width)
       || entry.themeRev !== this.themeRevision
       || entry.iconStyle !== this.iconStyle
@@ -16167,6 +17943,7 @@ export class TuiApp {
       entry.expanded = rebuilt.expanded
       entry.fullReveal = rebuilt.fullReveal
       entry.expandHint = rebuilt.expandHint
+      entry.deliverableSurface = rebuilt.deliverableSurface
       entry.keymapRev = rebuilt.keymapRev
       entry.searchPresentationRev = rebuilt.searchPresentationRev
       entry.rendererId = rebuilt.rendererId
@@ -16232,7 +18009,7 @@ export class TuiApp {
     message: TranscriptMessage,
     boundary: number,
     userBoundary: number,
-    state: { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint },
+    state: { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint; deliverableSurface: string },
     width: number,
   ): MessageComponentEntry {
     const registry = this.renderers
@@ -16266,13 +18043,16 @@ export class TuiApp {
       this.subCallHitsByMessage.delete(message)
       this.workflowHitsByMessage.delete(message)
       this.searchSourceRegionsByMessage.delete(message)
+      // A plugin-owned component renders no Host image occurrences, so a
+      // stale candidate list from a previous Host build must not survive.
+      this.messageImageOccurrences.delete(message)
     }
     return {
       // The EFFECTIVE expansion (the surface-adaptive rule) drives the
       // renderer: fullscreen secondaries default compact (per-card
       // override full-reveals), regular expanded roots full-reveal.
       component: hostBuilt
-        ? this.renderMessage(message, state.expanded, state.expandHint, state.fullReveal, width)
+        ? this.renderHostMessage(message, state, width)
         : this.withDeliveredFiles(rendered.component, message, state.expanded),
       boundary,
       userBoundary,
@@ -16282,6 +18062,7 @@ export class TuiApp {
       expanded: state.expanded,
       fullReveal: state.fullReveal,
       expandHint: state.expandHint,
+      deliverableSurface: state.deliverableSurface,
       // The RENDERED fold hints bake the EFFECTIVE key: the keymap
       // revision joins the cache identity so a remap/safe-mode/plugin
       // rebuild refreshes every hint-bearing card (review finding).
@@ -16290,6 +18071,25 @@ export class TuiApp {
       rendererRevision,
       subCallExpandedRev: this.subCallExpandedRevision,
       searchPresentationRev: this.searchPresentationRevision,
+    }
+  }
+
+  /** Build one HOST message component while collecting its rendered image
+   * occurrences in render order (Image UX PR2). Called once per host build
+   * from `buildMessage`; the collector is consumed in `finally` so a throwing
+   * renderer never leaks a half-built candidate list into the picker. */
+  private renderHostMessage(
+    message: TranscriptMessage,
+    state: { expanded: boolean; fullReveal: boolean; expandHint: ExpandHint },
+    width: number,
+  ): Component {
+    const occurrences: TranscriptImageOccurrence[] = []
+    this.capturedImageOccurrences = occurrences
+    try {
+      return this.renderMessage(message, state.expanded, state.expandHint, state.fullReveal, width)
+    } finally {
+      this.capturedImageOccurrences = undefined
+      this.messageImageOccurrences.set(message, occurrences)
     }
   }
 
@@ -16304,6 +18104,7 @@ export class TuiApp {
         entry.content = message.kind === 'user' || message.kind === 'assistant' ? message.content : undefined
         entry.displayBlocks = message.kind === 'assistant' ? message.displayBlocks : undefined
         entry.presentationRevision = message.kind === 'assistant' ? assistantPresentationRevision(message) : undefined
+        entry.visualPresentationRevision = message.kind === 'assistant' ? assistantVisualPresentationRevision(message) : undefined
         entry.interrupted = message.kind === 'assistant' ? message.interrupted === true : undefined
         entry.running = message.kind === 'thinking' ? message.running : undefined
         entry.label = message.kind === 'system' ? message.label : undefined
@@ -16358,6 +18159,7 @@ export class TuiApp {
         return entry.text !== message.text || entry.content !== message.content
           || entry.displayBlocks !== message.displayBlocks
           || entry.presentationRevision !== assistantPresentationRevision(message)
+          || entry.visualPresentationRevision !== assistantVisualPresentationRevision(message)
           || entry.interrupted !== (message.interrupted === true)
       case 'thinking':
         return entry.text !== message.text || entry.running !== message.running
@@ -16426,16 +18228,19 @@ export class TuiApp {
         textBlocks.push(block)
       } else if (block.type === 'image') {
         if (!canRenderImages) {
-          // Loader-less hosts keep the image position as an inline marker.
+          // Loader-less hosts keep the image position as an inline marker —
+          // and still register the source occurrence as a viewer candidate
+          // (the Viewer will show `Preview unavailable`; no read is fired).
           textBlocks.push(block)
+          this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
         } else {
           flushText()
-          const thumbnail = this.imageThumbnail(
-            block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike,
+          container.addChild(this.imageThumbnail(
+            block.attachment as ImageAttachmentRefLike,
+            message,
+            imageIndex,
             this.occurrenceCollapsedRef(message, imageIndex),
-          )
-          this.thumbnailOccurrence.set(thumbnail, imageIndex)
-          container.addChild(thumbnail)
+          ))
         }
         imageIndex += 1
       } else if (block.type === 'file') {
@@ -16497,12 +18302,14 @@ export class TuiApp {
       for (const block of content) {
         if (block.type === 'image') {
           if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
-            const thumbnail = this.imageThumbnail(
-              block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike,
+            container.addChild(this.imageThumbnail(
+              block.attachment as ImageAttachmentRefLike,
+              message,
+              imageIndex,
               this.occurrenceCollapsedRef(message, imageIndex),
-            )
-            this.thumbnailOccurrence.set(thumbnail, imageIndex)
-            container.addChild(thumbnail)
+            ))
+          } else {
+            this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
           }
           imageIndex += 1
         }
@@ -16525,12 +18332,14 @@ export class TuiApp {
         textBlocks.push(block)
         flushText()
         if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
-          const thumbnail = this.imageThumbnail(
-            block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike,
+          container.addChild(this.imageThumbnail(
+            block.attachment as ImageAttachmentRefLike,
+            message,
+            imageIndex,
             this.occurrenceCollapsedRef(message, imageIndex),
-          )
-          this.thumbnailOccurrence.set(thumbnail, imageIndex)
-          container.addChild(thumbnail)
+          ))
+        } else {
+          this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
         }
         imageIndex += 1
       } else if (block.type === 'file') {
@@ -16543,6 +18352,159 @@ export class TuiApp {
     }
     flushText()
     return container
+  }
+
+  /**
+   * Render the ONE ordered Assistant body for qualified published visuals.
+   * The bullet wrapper stays the SAME single `BulletedComponent` owner as the
+   * no-visual path; the ordered body only replaces the inner markdown/block
+   * sequence, never the transcript row or its disclosure identity.
+   */
+  private renderVisualAssistantBody(
+    message: Extract<TranscriptMessage, { kind: 'assistant' }>,
+    publications: readonly PublishedVisual[],
+    bullet: string,
+  ): Component {
+    const blocks = message.content !== undefined && message.content.length > 0
+      ? message.content
+      : [{ type: 'text' as const, text: message.text }]
+    const plan = planVisualPlacement({
+      text: message.text,
+      ...(message.content === undefined ? {} : { content: message.content }),
+      publications,
+    })
+    // A rebuild replaces the exact occurrence set this row commits: the old
+    // handles must never satisfy a press, a selection or a copy receipt.
+    this.visualFigureHandles.delete(message)
+    const body = new VisualAssistantBody({
+      pieces: plan.pieces,
+      definitions: plan.definitions,
+      blocks,
+      theme: markdownTheme,
+      markdownOptions: HOST_MARKDOWN_OPTIONS,
+      paint: text => color.textDim(text),
+      requestRender: () => this.settleThumbnailRender(),
+      figure: piece => this.visualFigureOptions(message, piece),
+      nonText: (block, blockIndex) => this.renderVisualAssistantNonText(block, blockIndex, message),
+    })
+    this.visualAssistantBodies.set(message, { body, indent: visibleWidth(bullet) })
+    return new BulletedComponent(body, bullet)
+  }
+
+  /**
+   * Build the per-figure inputs for one published occurrence: the exact
+   * authorized publication, the live selection predicate and the Copy/View
+   * intents. The figure owns no Session and no keymap; every business effect
+   * resolves the CURRENT handle here at execution time.
+   */
+  private visualFigureOptions(
+    message: Extract<TranscriptMessage, { kind: 'assistant' }>,
+    piece: VisualPiece,
+  ): VisualFigureOptions {
+    const handle: TranscriptVisualHandle = {
+      message,
+      ref: piece.ref,
+      publication: piece.publication,
+      generation: this.visualEpoch,
+    }
+    let byRef = this.visualFigureHandles.get(message)
+    if (byRef === undefined) {
+      byRef = new Map()
+      this.visualFigureHandles.set(message, byRef)
+    }
+    byRef.set(piece.ref, handle)
+    const source = piece.publication.source
+    const isSvg = source.svg !== undefined && source.svgSource !== undefined
+    return {
+      publication: piece.publication,
+      selected: () => this.isVisualSelected(message, piece.ref),
+      paint: text => color.textDim(text),
+      requestRender: () => this.settleThumbnailRender(),
+      onCopy: () => this.copyVisualPayload(handle),
+      ...(isSvg ? { onView: () => this.openSvgViewer(handle) } : {}),
+      ...(isSvg && this.svgRasterLoader !== undefined && this.imageTheme !== undefined
+        ? {
+            svgLoader: this.svgRasterLoader,
+            svgTheme: this.imageTheme,
+            svgAdmissionWidth: source.svgAdmissionWidth,
+            ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
+          }
+        : {}),
+    }
+  }
+
+  /**
+   * Materialize one non-text Assistant ContentBlock through the EXISTING host
+   * renderer (image occurrence + viewer ownership, file row, bounded fallback).
+   * This is the same behavior `renderBlockSequence` uses at that position.
+   */
+  private renderVisualAssistantNonText(
+    block: import('@deepseek-ai/dsh-llm').ContentBlock,
+    blockIndex: number,
+    message: Extract<TranscriptMessage, { kind: 'assistant' }>,
+  ): Component | undefined {
+    if (block.type === 'reasoning' || block.type === 'tool-call') return undefined
+    if (block.type === 'image') {
+      let imageIndex = 0
+      for (const [index, candidate] of (message.content ?? []).entries()) {
+        if (index >= blockIndex) break
+        if (candidate.type === 'image') imageIndex += 1
+      }
+      if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
+        return this.imageThumbnail(
+          block.attachment as ImageAttachmentRefLike,
+          message,
+          imageIndex,
+          this.occurrenceCollapsedRef(message, imageIndex),
+        )
+      }
+      this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
+      return new Text(sanitizeDisplayText(textWithAttachmentMarkers([block])), 0, 0)
+    }
+    if (block.type === 'file') {
+      return new FileAttachmentComponent(block.attachment, { fallbackColor: color.textDim })
+    }
+    return new Text(color.textDim(sanitizeDisplayText(finalizedBlockFallbackText(block))), 0, 0)
+  }
+
+  /**
+   * The painted published-visual geometry of one message entry, in ENTRY
+   * coordinates. The Assistant body renders at the bullet's inner width, so
+   * the figure's columns shift by the bullet prefix; rows are unchanged (the
+   * visual body is the first painted child of every Assistant wrapper).
+   */
+  private visualHitsOf(message: TranscriptMessage, width: number): ReadonlyArray<TranscriptVisualHit> {
+    const record = this.visualAssistantBodies.get(message)
+    const byRef = this.visualFigureHandles.get(message)
+    if (record === undefined || byRef === undefined) return []
+    const inner = Math.max(1, width - record.indent)
+    const hits: TranscriptVisualHit[] = []
+    for (const painted of record.body.paintedVisualHits(inner)) {
+      const handle = byRef.get(painted.ref)
+      if (handle === undefined) continue
+      hits.push({
+        handle,
+        top: painted.top,
+        height: painted.height,
+        actions: painted.actions.map(action => ({
+          action: action.action,
+          row: action.row,
+          startCol: action.startCol + record.indent,
+          endCol: action.endCol + record.indent,
+        })),
+        ...(painted.thumbnailBody === undefined
+          ? {}
+          : {
+              thumbnailBody: {
+                startRow: painted.thumbnailBody.startRow,
+                endRow: painted.thumbnailBody.endRow,
+                startCol: record.indent,
+                endCol: painted.thumbnailBody.endCol + record.indent,
+              },
+            }),
+      })
+    }
+    return hits
   }
 
   /**
@@ -16561,7 +18523,16 @@ export class TuiApp {
     const result = new Container()
     result.addChild(body)
     result.addChild(new Text('', 0, 0))
-    result.addChild(new DeliveredFilesComponent(message.deliverables, this.workspaceRoot, expanded))
+    result.addChild(new DeliveredFilesComponent(message.deliverables, expanded, {
+      pointerActions: this.deliveredFilesPointerOwned(),
+      // A surface without the injected browser capability has no executable
+      // `/deliverables` entry, so the tail must not advertise one.
+      commandEntry: this.deliveredFilesEntryAvailable(),
+      // The CURRENT display subject's root: a viewer's files must never be
+      // shortened against the main Session's cwd (and a missing root keeps the
+      // declared path unchanged instead of guessing one).
+      workspaceRoot: this.displayWorkspaceRoot(),
+    }))
     return result
   }
 
@@ -16619,11 +18590,25 @@ export class TuiApp {
       const bullet = color.primary(iconPrefix('assistant-bullet', this.iconStyle))
       const makeAssistantText = (text: string): Component =>
         new BulletedComponent(new Markdown(sanitizeDisplayText(text), 0, 0, markdownTheme, undefined, HOST_MARKDOWN_OPTIONS), bullet)
-      const body = message.displayBlocks !== undefined
+      // ONLY the exact final Assistant row carries a sidecar (the runtime
+      // derives it from the complete Direct Session log). Every other answer
+      // keeps the original path byte for byte.
+      const publications = assistantVisualPresentation(message)?.publications
+      const visualBody = publications === undefined || publications.length === 0
+        ? undefined
+        : this.renderVisualAssistantBody(message, publications, bullet)
+      if (visualBody === undefined) {
+        // The row no longer carries a qualified visual: no figure geometry may
+        // survive as a click/selection/copy target.
+        this.visualAssistantBodies.delete(message)
+        this.visualFigureHandles.delete(message)
+        if (this.visualSelection?.message === message) this.visualSelection = undefined
+      }
+      const body = visualBody ?? (message.displayBlocks !== undefined
         ? this.renderAssistantDisplaySequence(message.displayBlocks, makeAssistantText, message)
         : message.content !== undefined && message.content.some(block => block.type !== 'text')
           ? this.renderBlockSequence(message.content, makeAssistantText, message)
-          : makeAssistantText(message.text)
+          : makeAssistantText(message.text))
       let bodyWithStatus = body
       if (message.interrupted) {
         const interrupted = new Container()
@@ -16631,7 +18616,10 @@ export class TuiApp {
         interrupted.addChild(new Text(color.textDimItalic('  (interrupted)'), 0, 0))
         bodyWithStatus = interrupted
       }
-      return this.withDeliveredFiles(bodyWithStatus, message, expanded)
+      const withFiles = this.withDeliveredFiles(bodyWithStatus, message, expanded)
+      if (visualBody === undefined) return withFiles
+      if (withFiles === visualBody) return withFiles
+      return new VisualAssistantDisposalFrame(withFiles, visualBody)
     }
     if (message.kind === 'thinking') {
       // The unified Thinking disclosure card (plan §4/§13): COMPACT is
@@ -17061,6 +19049,18 @@ export class TuiApp {
         // folded row shows the content summary (e.g. ` — PNG image ·
         // 800x600 px`), never the raw envelope.
         resultPreview = imageFoldedPreview(message.result)
+      } else if (isVisualToolName(message.name)) {
+        // The three visual tools carry machine blocks (the projected
+        // `visual-ref-v1:` line, the chart/SVG fact and present_visual's
+        // `visual-published-v1:` receipt) beside their human text. The folded
+        // preview reads the SAME source-aware projection as the expanded body,
+        // so no machine line ever appears in one row of the folded card.
+        const human = humanFacingVisualResult({
+          toolName: message.name,
+          blocks: message.resultBlocks,
+          text: message.result,
+        })
+        resultPreview = human.text === '' ? '' : ` — ${preview(human.text, RESULT_PREVIEW_LINES)}`
       } else if (message.name === 'ask_user_question') {
         // The folded preview never shows the raw `{"answers":[…]}` JSON the
         // tool's render text carries (Web AskQuestionRow parity): the
@@ -17255,7 +19255,12 @@ export class TuiApp {
         card.addChild(new Text(truncateToWidth(`${pad}  ${this.shellPrompt(child.name)}${color.textDim(sanitizedPhysicalLine(command))}`, width, '…'), 0, 0))
         rows += 1
       }
-      if (child.result !== '') {
+      if (isVisualToolName(child.name)) {
+        const resultStart = row + rows
+        const rendered = this.renderVisualChildBody(card, child, width, indent, bodyExpanded)
+        regions.push({ sourceKey: transcriptSearchSourceKey({ kind: 'subcall-field', subCallIds: path, field: 'result' }), anchorRow: resultStart, rowStart: resultStart, rowEnd: resultStart + rendered, enumerable: false })
+        rows += rendered
+      } else if (child.result !== '') {
         const resultStart = row + rows
         // A captured terminal sub-call stdout keeps whitelisted SGR; every
         // other external result is plain. The projected line count is the
@@ -17612,6 +19617,164 @@ export class TuiApp {
   }
 
   /**
+   * Render one PR-D visual tool's expanded body from the FINAL durable
+   * content. The machine line is never shown: the chart body is the numeric
+   * projection, while the SVG body always keeps the readable description and —
+   * only when the credential matches the call source and the admission gate
+   * accepts it — adds the inline raster. An explicit expansion also shows the
+   * admitted source (the ordinary long-source reading path; no new modal).
+   * @param card - the card container to fill.
+   * @param message - the visual tool row.
+   * @param explicitlyExpanded - whether the user expanded this card by hand.
+   */
+  private renderVisualToolBody(
+    card: Container,
+    message: Extract<TranscriptMessage, { kind: 'tool' }>,
+    explicitlyExpanded: boolean,
+  ): void {
+    const blocks = message.resultBlocks ?? [{ type: 'text' as const, text: message.result }]
+    const parts = visualPartsForStatus(message.status, blocks)
+    const paint = message.status === 'error' ? color.error : color.textDim
+    if (message.name === 'dsh_pi_tui_chart') {
+      if (parts.fact?.type === 'chart') {
+        card.addChild(new ChartBody(parts.fact, paint))
+        return
+      }
+      const text = parts.humanText === '' ? message.result : parts.humanText
+      if (text !== '') {
+        for (const line of text.split('\n')) card.addChild(new Text(paint(sanitizeDisplayText(line)), 0, 0))
+      }
+      return
+    }
+    if (message.name === PRESENT_VISUAL_TOOL_NAME) {
+      // The publication tool's body is its human summary line; the receipt
+      // machine block never reaches the card (C1's source-aware filter).
+      const human = humanFacingVisualResult({
+        toolName: message.name,
+        blocks: message.resultBlocks,
+        text: message.result,
+      })
+      for (const line of human.text.split('\n')) {
+        if (line !== '') card.addChild(new Text(paint(sanitizeDisplayText(line)), 0, 0))
+      }
+      return
+    }
+    // SVG: the readable description is ALWAYS visible; the drawing is an
+    // enhancement authorized by the final content, the durable call source AND
+    // a successful result. A block/error result keeps its feedback text only.
+    const authorization = authorizeSvg(message.args, blocks, message.status)
+    const detailRows = authorization.state === 'ready'
+      ? svgDetailRows(authorization.fact)
+      : parts.humanText === '' ? message.result.split('\n') : parts.humanText.split('\n')
+    for (const line of detailRows) {
+      if (line !== '') card.addChild(new Text(paint(sanitizeDisplayText(line)), 0, 0))
+    }
+    if (authorization.state === 'text') {
+      // A successful result whose credential/admission failed gets an explicit
+      // reason; an error/block already carries the policy/tool reason and must
+      // not be relabelled as a drawing failure.
+      if (message.status === 'ok') {
+        card.addChild(new Text(color.textMuted(sanitizeDisplayText(`  Drawing unavailable — ${authorization.reason}`)), 0, 0))
+      }
+      return
+    }
+    if (this.svgRasterLoader !== undefined && this.imageTheme !== undefined) {
+      card.addChild(new SvgThumbnail(
+        authorization.fact.digest,
+        authorization.source,
+        authorization.admission.width,
+        this.svgRasterLoader,
+        this.imageTheme,
+        () => this.settleThumbnailRender(),
+        undefined,
+        this.graphics,
+      ))
+    }
+    if (explicitlyExpanded) {
+      card.addChild(new Text(color.textMuted('  SVG source'), 0, 0))
+      card.addChild(new CompactTextPreview(sanitizeDisplayText(authorization.source), 4000, '  ', true))
+    }
+  }
+
+  /**
+   * Render one PTC child's visual body as width-aware text rows. The child
+   * card keeps its own nested identity; it never borrows the parent's result.
+   * A chart child shows the same exact values/bars; an SVG child shows the
+   * description and, when expanded, the admitted source. The rows returned
+   * are the component's own wrapped row count, so the search geometry stays
+   * aligned with the painted card.
+   */
+  private renderVisualChildBody(
+    card: Container,
+    child: Extract<TranscriptMessage, { kind: 'tool' }>,
+    width: number,
+    indent: number,
+    expanded: boolean,
+  ): number {
+    const blocks = child.resultBlocks ?? [{ type: 'text' as const, text: child.result }]
+    const parts = visualPartsForStatus(child.status, blocks)
+    const lines: string[] = []
+    let thumbnail: SvgThumbnail | undefined
+    let thumbnailRows = 0
+    if (child.name === 'dsh_pi_tui_chart') {
+      if (parts.fact?.type === 'chart') {
+        lines.push(chartDisplayTitle(parts.fact), ...chartTextRows(parts.fact, Math.max(1, width - indent - 2)))
+      } else {
+        lines.push(...(parts.humanText === '' ? child.result : parts.humanText).split('\n'))
+      }
+    } else if (child.name === PRESENT_VISUAL_TOOL_NAME) {
+      // The publication tool has no drawing: its child body is the human
+      // summary, with the receipt machine block filtered by the same
+      // source-aware projection the top-level card uses.
+      const human = humanFacingVisualResult({
+        toolName: child.name,
+        blocks: child.resultBlocks,
+        text: child.result,
+      })
+      lines.push(...human.text.split('\n'))
+    } else {
+      const authorization = authorizeSvg(child.args, blocks, child.status)
+      if (authorization.state === 'ready') {
+        lines.push(...svgDetailRows(authorization.fact))
+        if (expanded) lines.push('SVG source', ...authorization.source.split('\n'))
+        // The nested card gets the SAME image enhancement as the top-level
+        // card, with a FIXED row budget: the async settle must not move the
+        // following child headers or the search geometry.
+        if (this.svgRasterLoader !== undefined && this.imageTheme !== undefined) {
+          thumbnail = new SvgThumbnail(
+            authorization.fact.digest,
+            authorization.source,
+            authorization.admission.width,
+            this.svgRasterLoader,
+            this.imageTheme,
+            () => this.settleThumbnailRender(),
+            MAX_IMAGE_ROWS + 1,
+            this.graphics,
+          )
+          thumbnailRows = thumbnail.render(width).length
+        }
+      } else {
+        lines.push(...(parts.humanText === '' ? child.result : parts.humanText).split('\n'))
+        if (child.status === 'ok') lines.push(`Drawing unavailable — ${authorization.reason}`)
+      }
+    }
+    const text = lines.filter(line => line !== '').join('\n')
+    let rendered = thumbnailRows
+    if (text !== '') {
+      const preview = new CompactTextPreview({
+        text: sanitizeDisplayText(text),
+        maxVisualRows: Number.MAX_SAFE_INTEGER,
+        indent: ' '.repeat(indent + 2),
+        preserveBlankLines: true,
+      })
+      rendered += preview.render(width).length
+      card.addChild(preview)
+    }
+    if (thumbnail !== undefined) card.addChild(thumbnail)
+    return rendered
+  }
+
+  /**
    * Render one expanded tool card's body. When the runner wired a presenter,
    * the body follows the tool's own render intent (presentResult): a read
    * card shows numbered lines plus the relativized path and total line
@@ -17891,6 +20054,7 @@ export class TuiApp {
           const content = resultView.content ?? []
           if (content.length > 0) {
             const hasImages = content.some(block => block.type === 'image')
+            let imageIndex = 0
             if (hasImages && this.imageLoader !== undefined && this.imageTheme !== undefined) {
               let buffer = ''
               const flush = (): void => {
@@ -17904,7 +20068,15 @@ export class TuiApp {
                   buffer += block.text
                 } else if (block.type === 'image') {
                   flush()
-                  card.addChild(this.imageThumbnail(block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike))
+                  // The ordinal is the image block's SOURCE rank (all image
+                  // blocks reserve a rank), never "the Nth thumbnail".
+                  card.addChild(this.imageThumbnail(
+                    block.attachment as ImageAttachmentRefLike,
+                    message,
+                    imageIndex,
+                    this.occurrenceCollapsedRef(message, imageIndex),
+                  ))
+                  imageIndex += 1
                 } else {
                   // Known process blocks keep their legacy JSON form;
                   // file and unknown blocks use their bounded presentation,
@@ -17917,7 +20089,13 @@ export class TuiApp {
             } else {
               for (const block of content) {
                 if (block.type === 'text') card.addChild(new Text(color.textDim(sanitizeDisplayText(block.text)), 0, 0))
-                else card.addChild(new Text(color.textDim(sanitizeDisplayText(this.blockDisplayText(block))), 0, 0))
+                else {
+                  if (block.type === 'image') {
+                    this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
+                    imageIndex += 1
+                  }
+                  card.addChild(new Text(color.textDim(sanitizeDisplayText(this.blockDisplayText(block))), 0, 0))
+                }
               }
             }
             return
@@ -17946,6 +20124,14 @@ export class TuiApp {
       }
     }
     if (emptyResult) return
+    // The visual tools: the FINAL durable content is the admission source. The
+    // chart draws from its machine line; the SVG draws only when the credential
+    // matches the call source and the source passes admission; the publication
+    // tool paints only its human summary.
+    if (isVisualToolName(message.name)) {
+      this.renderVisualToolBody(card, message, explicitlyExpanded)
+      return
+    }
     // Generic fallback: the raw result text dimmed (diffs keep their own
     // + / − colors, which already distinguish them from assistant output).
     // A read card without a presenter still renders its envelope as numbered
@@ -18004,11 +20190,11 @@ export class TuiApp {
       if (envelope !== undefined) {
         card.addChild(new Text(color.textDim(`  ${sanitizeDisplayText(envelope.summary)}`), 0, 0))
         card.addChild(new Text(color.textMuted(`  path: ${sanitizeDisplayText(relativizeToCwd(envelope.path, this.workspaceRoot))}`), 0, 0))
-        this.renderResultImageBlocks(card, message.resultBlocks)
+        this.renderResultImageBlocks(card, message.resultBlocks, message)
         return
       }
       if (message.status === 'ok') {
-        this.renderResultImageBlocks(card, message.resultBlocks)
+        this.renderResultImageBlocks(card, message.resultBlocks, message)
         return
       }
     }
@@ -18044,6 +20230,7 @@ export class TuiApp {
       // M11: covers read-image, MCP image results, screenshot tools).
       const blocks = message.resultBlocks ?? []
       const hasResultImages = blocks.some(block => block.type === 'image')
+      let imageIndex = 0
       if (hasResultImages && this.imageLoader !== undefined && this.imageTheme !== undefined) {
         let buffer = ''
         const flush = (): void => {
@@ -18057,7 +20244,15 @@ export class TuiApp {
             buffer += block.text
           } else if (block.type === 'image') {
             flush()
-            card.addChild(this.imageThumbnail(block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike))
+            // The ordinal is the image block's SOURCE rank among all result
+            // image blocks, never "the Nth rendered thumbnail".
+            card.addChild(this.imageThumbnail(
+              block.attachment as ImageAttachmentRefLike,
+              message,
+              imageIndex,
+              this.occurrenceCollapsedRef(message, imageIndex),
+            ))
+            imageIndex += 1
           } else {
             // Known process blocks keep their legacy JSON form; file and
             // unknown blocks use their bounded presentation, in order.
@@ -18067,6 +20262,14 @@ export class TuiApp {
         }
         flush()
       } else {
+        // Loader-less host: keep the image blocks as metadata-only viewer
+        // candidates (never a read) and render the bounded text projection.
+        for (const block of blocks) {
+          if (block.type === 'image') {
+            this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
+            imageIndex += 1
+          }
+        }
         const lines = blocks.length > 0
           ? resultTextLines(blocks, message.status === 'error' ? { name: 'error', code: 'tool' } : undefined)
           : [message.result]
@@ -18094,17 +20297,30 @@ export class TuiApp {
 
   /** Append the result's IMAGE blocks as thumbnails (any tool card that
    * returns images but has its own summary path — read_image today, MCP
-   * image results and screenshot tools next). No-op without the pipeline
-   * or without image blocks. */
+   * image results and screenshot tools next). Each thumbnail carries its
+   * SOURCE image ordinal and the same per-occurrence collapse owner user/
+   * assistant images use (Image UX PR2). Without a loader the blocks still
+   * register as metadata-only viewer candidates — never a read. */
   private renderResultImageBlocks(
     card: Container,
     blocks: readonly import('@deepseek-ai/dsh-llm').ContentBlock[] | undefined,
+    message: TranscriptMessage,
   ): void {
-    if (blocks === undefined || this.imageLoader === undefined || this.imageTheme === undefined) return
+    if (blocks === undefined) return
+    let imageIndex = 0
     for (const block of blocks) {
-      if (block.type === 'image') {
-        card.addChild(this.imageThumbnail(block.attachment as import('./domain/media/types.ts').ImageAttachmentRefLike))
+      if (block.type !== 'image') continue
+      if (this.imageLoader !== undefined && this.imageTheme !== undefined) {
+        card.addChild(this.imageThumbnail(
+          block.attachment as ImageAttachmentRefLike,
+          message,
+          imageIndex,
+          this.occurrenceCollapsedRef(message, imageIndex),
+        ))
+      } else {
+        this.recordImageOccurrence(message, imageIndex, block.attachment as ImageAttachmentRefLike)
       }
+      imageIndex += 1
     }
   }
 
@@ -18138,6 +20354,22 @@ export class TuiApp {
    * bypasses the render throttle (used to repaint the autocomplete list on
    * the keystroke's own frame). After a final dispose the request is a
    * benign no-op (M0 stale-generation contract). */
+  /**
+   * Push the LIVE runtime facts of an open Settings workspace through its pull
+   * projection without waiting for a commit settlement. The owners that do not
+   * live on this class (the shared prompt-policy objects) call this right after
+   * they mutate, so a pending row's `Runtime` fact follows the change that has
+   * really happened while `Persisted` still reports the stored value.
+   *
+   * It never becomes a second state: the projection re-reads the same
+   * authorities the snapshot builder reads on every frame.
+   */
+  refreshSettingsWorkspaceRuntimeFacts(): void {
+    if (this.disposed) return
+    this.refreshSettingsWorkspaceFacts()
+    this.requestRender()
+  }
+
   requestRender(force = false): void {
     if (this.disposed) return
     // One monotonic tick for the frame-scoped caches (the Task Quick
@@ -18261,9 +20493,10 @@ export class TuiApp {
         // Phase 3B / B3-A: the History seat reads the LIVE terminal geometry and
         // chrome height on every render, so a resize only has to repaint it (the
         // ordinary render funnel below does that) and drop the pointer state
-        // that described the old frame.
+        // that described the old frame. The approval sheet derives its budget
+        // from the same live geometry on every render and the frame's painted
+        // terminal identity fences stale clicks; no overlay rebind is involved.
         this.historyPanel?.resetPointerGesture()
-        this.approvals.syncGeometry()
       }
       // PR #57 review (P1): the footer's physical-line budget derives from
       // the terminal GEOMETRY, the ACTIVE SURFACE and the MEASURED chrome
@@ -18331,6 +20564,7 @@ export class TuiApp {
         this.lastFooterGeometry = { surface, width, height, total: available }
         this.renderFooter()
       }
+      this.syncDeliveredFilesOverlayGeometry()
     } finally {
       this.syncingSurfaceGeometry = false
     }
@@ -18599,6 +20833,9 @@ export class TuiApp {
     this.clearFocusLiveHeightState()
     this.thinkingExpanded = expanded
     this.rebuildMessages()
+    // A runtime-only Settings row reads this fact through the pull snapshot.
+    this.refreshSettingsWorkspaceFacts()
+    this.requestRender()
   }
 
   /** Drop every per-message Thinking override. Alt+T calls this FIRST so
@@ -18945,7 +21182,7 @@ export class TuiApp {
    * updates merge. M1: these legacy fields still feed the extension
    * live-session snapshot (turns/steps/model/cwd/branch/permission), while the
    * SAME facts project into the unified status store the footer composes from.
-   * `/status` reads the authority-grouped `SessionStatsFacts` directly — not
+   * The About report reads the authority-grouped `SessionStatsFacts` directly — not
    * these legacy fields.
    * @param status - the new status values.
    */
@@ -19282,6 +21519,7 @@ export class TuiApp {
    */
   setDraft(text: string): void {
     this.clearExitConfirmation()
+    this.invalidateDraftPreviewCaches()
     const target = this.viewerMode
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       this.subagentDrafts.set(target.childSessionId, text)
@@ -19384,29 +21622,49 @@ export class TuiApp {
       return
     }
     const scopeToken = this.rememberInput(serialized)
-    // Clear the draft like a normal Enter submit (the runner's dispatch
-    // owns the session/guard path). M9: clear the CURRENT seat occupant.
-    this.seatEditor().setText('')
+    // The SCOPED bridge: reserve the submitted images BEFORE the clear (which
+    // retires the seat's undo history) and release after the synchronous
+    // submit dispatch. The business owner takes its own submission pin inside
+    // that dispatch; nothing here survives the call stack.
+    const bridgeRelease = this.draftImagePreviewReserve?.(serialized)
+    try {
+      // Clear the draft through the SAME seam as the host Enter submit. A
+      // Replacement Editor without it falls back to setText('') (which PUSHES
+      // an undo snapshot); its seat exposes no preview `x`, so no image can
+      // depend on a retired history there.
+      this.clearSubmittedDraft()
+      // Reset BEFORE the dispatch: a synchronous rejection restores the
+      // serialized text (and with it the mode) through setEditorText.
+      this.resetEditorMode()
+      this.events.onSubmit(serialized, request, scopeToken)
+      this.requestRender()
+    } finally {
+      bridgeRelease?.()
+    }
+  }
+
+  /** Clear the current Composer draft through the host Editor's undo-retiring
+   *  seam when present; a Replacement Editor without it falls back to setText
+   *  (which PUSHES undo). */
+  private clearSubmittedDraft(): void {
+    const editor = this.seatEditor()
+    if (editor.clearDraftAfterSubmit !== undefined) editor.clearDraftAfterSubmit()
+    else editor.setText('')
     this.editorSeatHolder.notifyChanged()
-    // Reset BEFORE the dispatch: a synchronous rejection restores the
-    // serialized text (and with it the mode) through setEditorText.
-    this.resetEditorMode()
-    this.events.onSubmit(serialized, request, scopeToken)
-    this.requestRender()
   }
 
   /**
    * Headless-test hook: current managed-overlay graph sizes. `handles` is the
    * live logical node count, `dependents` the number of suppression edges and
-   * `suspended` the directly suspended roots under the active question. The
-   * LOGICAL graph survives a fullscreen swap (only the physical projections
-   * are rebound), so it is not cleared by the screen teardown.
+   * `suspended` the directly suspended roots under the active blocking seat
+   * owner. The LOGICAL graph survives a fullscreen swap (only the physical
+   * projections are rebound), so it is not cleared by the screen teardown.
    */
   overlayGraphState(): { handles: number; dependents: number; suspended: number } {
     return {
       handles: this.overlayBroker.graphState().handles,
       dependents: this.overlayBroker.graphState().dependents,
-      suspended: this.activeQuestions?.suspendedOverlays.size ?? 0,
+      suspended: this.overlayBroker.graphState().suspended,
     }
   }
 
@@ -19493,8 +21751,10 @@ export class TuiApp {
       const width = Math.max(1, this.terminal.columns)
       // The protected pinned chrome is EXACTLY the set
       // footerPhysicalLineBudget() measures for the same root, minus the
-      // widget zones themselves (they are what this budget decides).
-      const fixed = this.protectedChromeRows(width)
+      // widget zones themselves (they are what this budget decides). The
+      // composer preview is higher-priority pinned chrome, so its painted
+      // height is reserved before a widget row is admitted.
+      const fixed = this.protectedChromeRows(width) + this.draftImagePreview.render(width).length
       // Reserve the FULL supported footer capacity plus the one-row
       // transcript minimum before admitting a widget row (plan §3.1). The
       // reservation is deliberately conservative: the composer still renders
@@ -19550,6 +21810,247 @@ export class TuiApp {
     return used
   }
 
+  /**
+   * The EXPANDED composer draft the preview projects (image UX PR1). This is
+   * the same text submission expands (`getDraft()`), so occurrence count and
+   * identity can never disagree with what would be sent. Large-paste markers
+   * are expanded here; the raw body is kept separately for safe occurrence
+   * removal. Subagent viewers are text-only today, so the preview is hidden
+   * there. The cache is keyed by raw body + visible mode.
+   */
+  private draftPreviewText(): string {
+    if (this.viewerMode !== undefined) return ''
+    const editor = this.seatEditor()
+    const raw = editor.getText()
+    const mode = this.seatInputMode()
+    const cached = this.draftPreviewTextCache
+    if (cached !== undefined && cached.raw === raw && cached.mode === mode) return cached.text
+    const hasPasteMarker = raw.includes('[paste #')
+    const text = hasPasteMarker ? this.getDraft() : this.serializeSeatDraft(raw)
+    this.draftPreviewTextCache = { raw, mode, text, hasPasteMarker }
+    return text
+  }
+
+  /** The REAL expanded draft the store classifies ACTIVE vs retention-only
+   *  against. Unlike the preview projection it stays defined while a viewer
+   *  covers the composer: both the child draft and the preserved main draft
+   *  can return to the composer, so either one's images are live. */
+  private draftImageLiveText(): string {
+    if (this.viewerMode === undefined) return this.draftPreviewText()
+    return `${this.mainDraftBeforeViewer ?? ''}\n${this.getDraft()}`
+  }
+
+  /** Occurrences of the exact expanded preview text (cached per text). */
+  private draftPreviewOccurrencesFor(text: string): readonly DraftImageOccurrence[] {
+    const source = this.draftImagePreviewSource
+    if (source === undefined) return []
+    const cached = this.draftPreviewOccurrenceCache
+    if (cached !== undefined && cached.text === text) return cached.occurrences
+    const occurrences = selectDraftImageOccurrences(text, source)
+    this.draftPreviewOccurrenceCache = { text, occurrences }
+    return occurrences
+  }
+
+  /**
+   * Whether the previewed (LAST) occurrence can be removed from the raw
+   * editor text. With no paste marker every occurrence is visible. With a
+   * paste marker:
+   * - raw/expanded counts per image id being equal proves no hidden
+   *   occurrence of that id (all visible);
+   * - when the counts differ, ONLY the previewed last occurrence can still be
+   *   proven visible by the suffix test below. The previewed last is the last
+   *   occurrence of its id; if the raw text after the raw LAST occurrence of
+   *   that id is a marker-free literal identical to the expanded suffix after
+   *   the previewed occurrence, no hidden content can follow it, so it maps
+   *   safely to the raw last occurrence. This is the same-id hidden-before-
+   *   visible-last case. A hidden LAST occurrence has the paste marker after
+   *   the raw last, so the suffix contains `[paste #` and the control is
+   *   suppressed.
+   */
+  private draftPreviewRemovalDecision(): {
+    imageId: number
+    startOffset: number
+    endOffset: number
+    canRemove: boolean
+    lastVisible: boolean
+  } | undefined {
+    const cache = this.draftPreviewTextCache
+    if (cache === undefined) return undefined
+    if (!cache.hasPasteMarker) {
+      return { imageId: -1, startOffset: -1, endOffset: -1, canRemove: true, lastVisible: false }
+    }
+    const cached = this.draftPreviewRemovalCache
+    if (cached !== undefined && cached.raw === cache.raw && cached.expanded === cache.text) {
+      return {
+        imageId: cached.imageId,
+        startOffset: cached.startOffset,
+        endOffset: cached.endOffset,
+        canRemove: cached.canRemove,
+        lastVisible: cached.lastVisible,
+      }
+    }
+    const source = this.draftImagePreviewSource
+    if (source === undefined) return undefined
+    const expandedOccurrences = this.draftPreviewOccurrencesFor(cache.text)
+    const last = expandedOccurrences[expandedOccurrences.length - 1]
+    if (last === undefined) return undefined
+    const rawOccurrences = selectDraftImageOccurrences(cache.raw, source)
+    const rawOfImage = rawOccurrences.filter(candidate => candidate.image.id === last.image.id)
+    const expandedOfImage = expandedOccurrences.filter(candidate => candidate.image.id === last.image.id)
+    const decision = {
+      imageId: last.image.id,
+      startOffset: last.startOffset,
+      endOffset: last.endOffset,
+      canRemove: false,
+      lastVisible: false,
+    }
+    if (rawOfImage.length === expandedOfImage.length) {
+      decision.canRemove = true
+    } else if (rawOfImage.length > 0) {
+      const rawLast = rawOfImage[rawOfImage.length - 1]!
+      const rawSuffix = cache.raw.slice(rawLast.endOffset)
+      const expandedSuffix = cache.text.slice(last.endOffset)
+      if (!rawSuffix.includes('[paste #') && rawSuffix === expandedSuffix) {
+        decision.canRemove = true
+        decision.lastVisible = true
+      }
+    }
+    this.draftPreviewRemovalCache = { raw: cache.raw, expanded: cache.text, ...decision }
+    return decision
+  }
+
+  /** Whether the component's previewed occurrence has a removal control. */
+  private draftPreviewCanRemove(occurrence: DraftImageOccurrence): boolean {
+    // A removal is only safe when the current seat can (a) record it as a real
+    // undoable edit — the following Undo must restore exactly this occurrence —
+    // and (b) retire the Editor's undo snapshots when the bounded retention
+    // budget evicts the image. The host Editor exposes both seams; a plugin
+    // Replacement Editor exposes neither (preview stays display-only).
+    const seat = this.seatEditor()
+    if (seat.retireDraftImageFromUndo === undefined || seat.replaceTextUndoable === undefined) return false
+    const decision = this.draftPreviewRemovalDecision()
+    if (decision === undefined) return false
+    if (decision.imageId === -1) return true
+    return decision.canRemove
+      && decision.imageId === occurrence.image.id
+      && decision.startOffset === occurrence.startOffset
+      && decision.endOffset === occurrence.endOffset
+  }
+
+  /**
+   * The composer preview band's row grant for one frame (image UX PR1).
+   *
+   * One card needs four rows (identity + up to three image rows); a one-to-
+   * three-row grant degrades to the one-line summary. The grant is derived
+   * from the SAME unified layout budget as the pinned chrome: terminal rows
+   * minus the current protected chrome/editor plus a bounded reservation for
+   * the widget zones and the full footer capacity, minus one transcript row.
+   * The bounded reservation avoids a preview↔widget/footer feedback cycle; it
+   * may under-grant, never overflow. No stale cached height is read.
+   */
+  private draftImagePreviewMaxRows(width: number): number {
+    const source = this.draftImagePreviewSource
+    if (source === undefined || this.disposed || this.viewerMode !== undefined) return 0
+    // No staged image can be referenced: never expand a large paste on the
+    // typing/render hot path just to discover an empty band.
+    if (source.values().length === 0) return 0
+    const text = this.draftPreviewText()
+    if (this.draftPreviewOccurrencesFor(text).length === 0) return 0
+    const safeWidth = Math.max(1, Math.floor(width))
+    const rows = Math.max(1, Math.floor(this.terminal.rows))
+    const widgetAboveMax = 3
+    const widgetBelowMax = Math.max(1, Math.min(3, Math.max(1, Math.floor(rows / 4))))
+    const used = this.protectedChromeRows(safeWidth) + widgetAboveMax + widgetBelowMax + FOOTER_MAX_PHYSICAL_LINES
+    const room = rows - used - 1
+    if (room <= 0) return 0
+    if (safeWidth < DRAFT_PREVIEW_COMPACT_WIDTH) return 1
+    return room >= DRAFT_PREVIEW_MAX_ROWS ? DRAFT_PREVIEW_MAX_ROWS : 1
+  }
+
+  /**
+   * Remove the previewed occurrence from the RAW editor text (the fullscreen
+   * composer preview `x`). The previewed expanded occurrence is mapped back
+   * to its raw occurrence by the SAME image id's occurrence rank; when the
+   * previewed last occurrence is proven visible after a hidden same-id
+   * occurrence, it maps to the raw LAST occurrence instead. Only occurrences
+   * approved by {@link draftPreviewRemovalDecision} have a control. One
+   * adjacent separator space is removed, the cursor is shifted, paste
+   * markers/mode are preserved via `setTextAndCursor`. The removed draft is
+   * NOT pruned here: the store keeps it exactly while the host editor's real
+   * undo snapshots can still restore the canonical placeholder, and the
+   * ordinary attach/submit cleanup honors that leased draft.
+   */
+  private removeDraftPreviewOccurrence(hit: DraftPreviewRemoveHit): void {
+    if (this.viewerMode !== undefined) return
+    if (this.activeQuestions !== undefined || this.approvals.isActive()) return
+    const source = this.draftImagePreviewSource
+    if (source === undefined) return
+    this.clearExitConfirmation()
+    const editor = this.seatEditor()
+    const raw = editor.getText()
+    const expanded = this.draftPreviewText()
+    if (expanded !== hit.draftText) return
+    const decision = this.draftPreviewRemovalDecision()
+    if (decision === undefined) return
+    if (decision.imageId !== -1) {
+      if (!decision.canRemove
+        || decision.imageId !== hit.imageId
+        || decision.startOffset !== hit.startOffset
+        || decision.endOffset !== hit.endOffset) return
+    }
+    const expandedOccurrences = this.draftPreviewOccurrencesFor(expanded)
+    const hitIndex = expandedOccurrences.findIndex(candidate =>
+      candidate.image.id === hit.imageId
+      && candidate.startOffset === hit.startOffset
+      && candidate.endOffset === hit.endOffset)
+    if (hitIndex === -1) return
+    let imageOrdinal = 0
+    for (let index = 0; index < hitIndex; index += 1) {
+      if (expandedOccurrences[index]!.image.id === hit.imageId) imageOrdinal += 1
+    }
+    const rawOfImage = selectDraftImageOccurrences(raw, source)
+      .filter(candidate => candidate.image.id === hit.imageId)
+    const occurrence = decision.lastVisible
+      ? rawOfImage[rawOfImage.length - 1]
+      : rawOfImage[imageOrdinal]
+    if (occurrence === undefined) return
+    let start = occurrence.startOffset
+    let end = occurrence.endOffset
+    if (raw[end] === ' ') end += 1
+    else if (start > 0 && raw[start - 1] === ' ') start -= 1
+    const cursor = editor.getCursor?.() ?? raw.length
+    const next = raw.slice(0, start) + raw.slice(end)
+    const removed = end - start
+    const nextCursor = cursor <= start ? cursor : cursor >= end ? cursor - removed : start
+    // A REAL undoable edit: push the pre-removal snapshot (so the following
+    // Undo restores exactly this one occurrence), install the text/cursor
+    // while preserving surviving paste entries, and fire onChange. The host
+    // onChange converges the Store's undo leases for the removed image.
+    if (editor.replaceTextUndoable === undefined) return
+    editor.replaceTextUndoable(next, nextCursor)
+    this.invalidateDraftPreviewCaches()
+    // The fork withholds onCellClick when a second press at the same cell
+    // falls inside its 500 ms multi-click window (a double-click/word-select
+    // gesture). A successful removal must leave the next x as a fresh click.
+    this.fullscreen?.resetTextSelection()
+    this.requestRender()
+  }
+
+  /** Dispose backstop: the surface releases the host Editor's undo leases so
+   *  a re-created surface can never act on a retired editor's history. The
+   *  Store owns every lease record and its own teardown. */
+  private releaseDraftPreviewUndoLeases(): void {
+    this.draftImagePreviewUndo?.releaseUndoForOwner(this.editor)
+  }
+
+  /** Invalidate the expanded-text/occurrence/removal caches at every
+   * editor-ownership or explicit draft-restore boundary. */
+  private invalidateDraftPreviewCaches(): void {
+    this.draftPreviewTextCache = undefined
+    this.draftPreviewOccurrenceCache = undefined
+    this.draftPreviewRemovalCache = undefined
+  }
+
   /** PR-D (review F1): re-derive the fullscreen widget zones when the LIVE
    * protected pinned chrome height differs from the one the current grant
    * was derived from. The chrome height changes WITHOUT a terminal resize —
@@ -19567,7 +22068,8 @@ export class TuiApp {
   private syncLiveWidgetBudget(): void {
     if (this.fullscreen === undefined || this.extensionHost === undefined) return
     const width = Math.max(1, this.terminal.columns)
-    if (this.protectedChromeRows(width) === this.lastWidgetBudgetChromeRows) return
+    const chromeRows = this.protectedChromeRows(width) + this.draftImagePreview.render(width).length
+    if (chromeRows === this.lastWidgetBudgetChromeRows) return
     this.renderWidgets()
   }
 
@@ -19860,7 +22362,7 @@ export class TuiApp {
       return { perRow: FOOTER_MAX_PHYSICAL_LINES_PER_ROW, total: FOOTER_MAX_PHYSICAL_LINES }
     }
     let used = 0
-    for (const chrome of [this.header, this.viewerSubjectBar, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.widgetsAbove, this.editorSeat, this.widgetsBelow]) {
+    for (const chrome of [this.header, this.viewerSubjectBar, this.dock, this.todoPanel, this.goalLine, this.queuePane, this.working, this.widgetsAbove, this.draftImagePreview, this.editorSeat, this.widgetsBelow]) {
       used += chrome.render(width).length
     }
     return {
@@ -20012,6 +22514,47 @@ export class TuiApp {
     return !isFocusDisplayPreset(this.displayState.preset) && this.displayState.preset !== 'compact'
   }
 
+  /** Whether this surface can open the delivered-files browser at all: the
+   *  injected read capability exists (the PiTui mount wires it from the
+   *  application owner; a headless/foreign renderer does not). A surface
+   *  without it has no operable entry for a capped tail, so the tail fails
+   *  open instead of hiding files behind a command nothing executes. */
+  private deliveredFilesEntryAvailable(): boolean {
+    return this.deliveredFiles !== undefined
+  }
+
+  /** Whether a painted per-file `Details` / list `Browse all` verb on the
+   *  transcript tail is a REAL pointer target: only a fullscreen AltScreen
+   *  routes transcript pointer events. This answers the TRANSCRIPT half only —
+   *  the display preset is deliberately absent, because the tail's pointer
+   *  capability is Full/Compact/Focus parity, not a preset permission. Regular
+   *  terminals have no transcript mouse at all — `/deliverables` is their
+   *  entry, so no pointer affordance may be painted there. */
+  private deliveredFilesPointerOwned(): boolean {
+    // A mount WITHOUT the browser capability has no executable action at all
+    // (the click would silently do nothing), so it must not paint one — the
+    // tail fails open there instead (`deliveredFilesEntryAvailable`).
+    if (this.deliveredFiles === undefined) return false
+    return this.fullscreen !== undefined
+  }
+
+  /** Whether the Delivered files OVERLAY receives pointer events: the overlay
+   *  is a managed alt-screen surface of its own, so its pointer owner is the
+   *  live AltScreen — never a DisplayPreset. Evaluated live by the panel
+   *  because the SAME panel survives a fullscreen screen swap. */
+  private deliveredFilesOverlayPointerOwned(): boolean {
+    return this.fullscreen !== undefined
+  }
+
+  /** The workspace root of the CURRENT display subject: the viewed child's own
+   *  root while a child viewer is mounted, else the live main Session's root.
+   *  A missing root is a real answer (the tail then paints the declared path
+   *  unchanged); it must never fall back to `process.cwd()` or a stale
+   *  component-captured cwd. */
+  private displayWorkspaceRoot(): string | undefined {
+    return this.displaySubjectPresentation?.workspaceRoot ?? this.workspaceRoot
+  }
+
   /** The effective disclosure state of one ephemeral pending-user row: the
    * explicit per-row override wins, otherwise the surface rule — fullscreen
    * Focus is compact-by-default (Ctrl+O owns the Thought roots there), every
@@ -20152,6 +22695,10 @@ export class TuiApp {
       hostShellCompletion,
     )
     this.installedCommandCompletions = [...commands]
+    // The inline attachment acceptance rides THIS provider (the
+    // base one owns the strict snapshot; the delegating wrap only forwards
+    // applyCompletion, so either installation must install the same sink).
+    base.setInlineAttachmentAcceptSink(acceptance => this.acceptInlineAttachment(acceptance))
     if (extensionSuggest === undefined) {
       this.editor.setAutocompleteProvider(base)
       return
@@ -20250,6 +22797,147 @@ export class TuiApp {
         base.shouldTriggerFileCompletion(lines, cursorLine, cursorCol),
     }
     this.editor.setAutocompleteProvider(delegated)
+  }
+
+  /**
+   * Install the INLINE ATTACHMENT stager: the command plane's
+   * ONE Client-local read + `DraftImageStore`/`DraftFileStore` staging entry,
+   * reused by the leading `/image` `/attach` commands. The app never reads a
+   * file and the command plane never edits the editor — the stager is handed a
+   * narrow stake whose `commit` is this surface's ONE undoable edit.
+   *
+   * `undefined` disables inline attachment staging on this assembly (an
+   * accepted file then only inserts its path, like any other completion). It
+   * is a setter, not another position on `setCommandCompletions`: the stager
+   * is a command-plane capability, independent of which completion catalog is
+   * installed.
+   */
+  setInlineAttachmentStager(stager: import('./tui/interaction/autocomplete/inline-attachment.ts').InlineAttachmentStager | undefined): void {
+    this.inlineAttachmentStager = stager
+  }
+
+  /**
+   * Settle ONE inline attachment acceptance: the
+   * vendored editor installs the applied document AFTER `applyCompletion`
+   * returns, so the acceptance is settled in a microtask that FIRST proves the
+   * live editor really holds the accepted document at the accepted cursor.
+   * Nothing is read, staged or edited otherwise.
+   *
+   * A FILE acceptance then hands a stake to the command plane. The stake's
+   * `commit` is the ONE real undoable edit: it re-proves the seat, the raw
+   * draft and the exact fragment immediately before writing the canonical
+   * placeholder in place. A stale stake never edits the live draft (the user
+   * kept typing, Undo'd, switched the seat or the session) — it refuses, and
+   * the intake's own fence reports it.
+   */
+  private acceptInlineAttachment(acceptance: import('./tui/interaction/autocomplete/inline-attachment.ts').InlineAttachmentAcceptance): void {
+    queueMicrotask(() => {
+      if (this.disposed) return
+      // ACTION: the cursor now sits inside the path argument — open the
+      // existing Client-local path candidates without another keystroke.
+      if (acceptance.kind === 'action') {
+        this.editor.openPathCompletion()
+        return
+      }
+      // A DIRECTORY only continued the path seat: the ordinary reopen gate
+      // (the accepted value may end with a separator) has already run through
+      // the editor's own input path; nothing is read.
+      if (acceptance.kind === 'directory') return
+      // The accepted document must be the LIVE one: the editor state the fork
+      // installed after applyCompletion. A canonical comparison (line array +
+      // cursor) rejects every interleaved edit that landed in between.
+      const seat = this.seatEditor()
+      const raw = seat.getText()
+      if (seat.id !== 'host' || raw !== acceptance.lines.join('\n')) return
+      const cursor = this.editor.getCursor()
+      if (cursor.line !== acceptance.cursorLine || cursor.col !== acceptance.cursorCol) return
+      const stager = this.inlineAttachmentStager
+      if (stager === undefined) return
+      const span = acceptance.span
+      if (span === undefined) return
+      const generation = this.generation
+      // `SeatEditor.getCursor()` is the FLAT offset (line lengths summed +
+      // col), so the accepted {line,col} is converted once here.
+      let acceptanceCursorOffset = acceptance.cursorCol
+      for (let index = 0; index < acceptance.cursorLine; index += 1) {
+        acceptanceCursorOffset += (acceptance.lines[index]?.length ?? 0) + 1
+      }
+      const acceptanceEpoch = this.editorEditEpoch
+      const source = { seat, raw }
+      /** The accepted OPERATION still owns the surface: same seat, same raw
+       *  draft, same cursor AND the same edit epoch (no typing/Undo since).
+       *  Text equality alone cannot tell "nothing happened" from
+       *  "edit → Undo" (ABA). */
+      const sourceCurrent = (): boolean => {
+        if (this.disposed || this.generation !== generation) return false
+        const live = this.seatEditor()
+        if (live !== source.seat || live.getText() !== source.raw) return false
+        if (this.editorEditEpoch !== acceptanceEpoch) return false
+        const cursor = live.getCursor?.()
+        return cursor === undefined || cursor === acceptanceCursorOffset
+      }
+      stager({
+        command: acceptance.command,
+        path: acceptance.path,
+        rawDraft: raw,
+        span,
+        // The seat identity AND the surface generation: a plugin editor taking
+        // the seat (or a remount) is a different owner, even for identical
+        // text.
+        current: sourceCurrent,
+        draft: () => {
+          if (this.disposed || this.generation !== generation) return undefined
+          const live = this.seatEditor()
+          return live === source.seat ? live.getText() : undefined
+        },
+        commit: (placeholder: string) => this.commitInlineAttachment(
+          source.seat, source.raw, span, placeholder, sourceCurrent,
+        ),
+        notify: (message, kind) => this.notify(message, kind ?? 'info'),
+      })
+    })
+  }
+
+  /**
+   * Commit ONE canonical attachment placeholder in place: replace exactly the accepted fragment of the RAW draft through
+   * the host editor's real undoable-edit seam, and place the cursor right
+   * after the placeholder. The whole raw document is sliced — never rebuilt
+   * from expanded text — so paste markers, other tokens and every other line
+   * survive byte for byte, and ONE Undo restores the editable fragment.
+   *
+   * Returns false (and edits nothing) when the accepted OPERATION no longer
+   * owns the surface — `sourceCurrent()` is the ONE fence (seat, raw draft,
+   * cursor AND edit epoch), re-evaluated here, immediately before the write,
+   * because the async intake may have taken any amount of time. The caller's
+   * owned task keeps its ordinary failure classification for an editor-level
+   * throw.
+   */
+  private commitInlineAttachment(
+    seat: import('./tui/interaction/editor-seat-holder.ts').SeatEditor,
+    expectedRaw: string,
+    span: import('./tui/interaction/autocomplete/inline-attachment.ts').InlineAttachmentSpan,
+    placeholder: string,
+    sourceCurrent: () => boolean,
+  ): boolean {
+    if (!sourceCurrent()) return false
+    if (this.seatEditor() !== seat) return false
+    const raw = seat.getText()
+    if (raw !== expectedRaw) return false
+    const lines = raw.split('\n')
+    const line = lines[span.line]
+    if (line === undefined || span.end > line.length || span.start >= span.end) return false
+    const nextLine = `${line.slice(0, span.start)}${placeholder}${line.slice(span.end)}`
+    const nextLines = [...lines]
+    nextLines[span.line] = nextLine
+    const next = nextLines.join('\n')
+    // The seat's undoable seam takes a FLAT offset; the placeholder spans one
+    // line, so the cursor is the sum of the preceding lines plus its end.
+    let cursor = span.start + placeholder.length
+    for (let index = 0; index < span.line; index += 1) cursor += (lines[index]?.length ?? 0) + 1
+    if (seat.replaceTextUndoable === undefined) return false
+    this.invalidateDraftPreviewCaches()
+    seat.replaceTextUndoable(next, cursor)
+    return true
   }
 
   /**
@@ -20872,6 +23560,325 @@ export class TuiApp {
   }
 
   /**
+   * Open the ONE delivered-files browser (Delivered files PR1 / M6).
+   *
+   * NOT a second public extension API: `/deliverables` and the fullscreen
+   * transcript's painted `Browse all` / `Details` verbs are its only callers,
+   * and both pass the catalog the application owner just derived.
+   *
+   * The captured catalog is re-validated against the LIVE display subject
+   * before mounting (a session/child/Fold replacement between capture and
+   * mount must never show another subject's files), and a repeated open reuses
+   * the ONE live lease instead of stacking a second overlay.
+   */
+  openDeliveredFiles(snapshot: DeliveredFilesSnapshot, intent?: DeliveredFilesOpenIntent): void {
+    if (this.disposed) return
+    const capability = this.deliveredFiles
+    if (capability === undefined) return
+    if (!capability.isCurrent(snapshot)) return
+    // The PANEL is the lease identity, not the raw handle: a repeated open
+    // issued from a callback inside the mount must coalesce even though the
+    // handle does not exist yet.
+    if (this.deliveredFilesPanel !== undefined) {
+      this.deliveredFilesOverlay?.focus()
+      return
+    }
+    const preview = this.deliveredFilePreview?.(snapshot)
+    const panel = new DeliveredFilesPanel({
+      snapshot,
+      ...(intent === undefined ? {} : { initial: intent }),
+      // The panel repaints for ITS OWN content changes (filter, page, Turn,
+      // selection, copy/preview state). A painted text selection names cells of
+      // the frame being replaced, so it is dropped BEFORE that frame is
+      // repainted (dsh-pi-tui divergence X068). The fork's own drag-highlight
+      // repaint never runs through this callback, so an in-flight gesture
+      // survives it.
+      requestRender: () => {
+        // `preserveClickHistory`: repainting the panel's own content is not a
+        // corpus replacement, and dropping the fork's multi-click window here
+        // would turn every double-click into two single clicks (the first
+        // click's own disclosure repaint runs through this callback).
+        this.fullscreen?.resetTextSelection({ preserveClickHistory: true })
+        this.requestRender()
+      },
+      close: () => this.closeDeliveredFiles(),
+      copyPath: (path, settle) => this.copyDeliveredFilePath(snapshot, path, settle),
+      // Delivered files PR2: the Host read capability BOUND to this snapshot's
+      // subject, resolved once per open. The panel never chooses a Session.
+      ...(preview === undefined ? {} : { preview }),
+      // A per-row verb / footer action is painted only where a pointer can
+      // reach it: PiTui enables terminal mouse reporting on the fullscreen alt
+      // screen alone. LIVE, not captured: the SAME panel survives a fullscreen
+      // screen swap, so the answer must follow the surface it is painted on.
+      // This is the OVERLAY's own pointer ownership and deliberately ignores
+      // the DisplayPreset (the overlay is not the transcript click ladder).
+      pointerActions: () => this.deliveredFilesOverlayPointerOwned(),
+      // The ONE owned-task entry (AGENTS.md): every preview request is an owned
+      // workflow, so its failure reaches diagnostics instead of escaping.
+      ...(this.events.runOwned === undefined
+        ? {}
+        : {
+            runOwned: (label: string, task: () => Promise<void>) => {
+              this.events.runOwned!(label, () => task(), {})
+            },
+          }),
+      reportUnclassifiedFailure: (message, error) => this.deliverablePreviewFailure(message, error),
+    })
+    const frame = this.createDeliveredFilesFrame(panel)
+    // ONE geometry result feeds the host options, the responsive frame's
+    // outer size and the panel's row grant. A terminal resize rebinds this
+    // SAME logical lease with fresh options instead of using a wider canvas
+    // (a wider canvas would overwrite the transcript beside the frame).
+    const size = this.deliveredFilesOverlaySize()
+    const overlayOptions = this.deliveredFilesOverlayOptions(size)
+    // PUBLISH THE LEASE BEFORE THE MOUNT. `showOverlayOnHost` can synchronously
+    // run a plugin onFocus callback or start a fullscreen swap whose remount
+    // pass re-creates this node's projection, and BOTH must observe the
+    // committed panel: the remount below checks this identity, and a reentrant
+    // open must coalesce instead of stacking a second overlay.
+    this.deliveredFilesPanel = panel
+    this.deliveredFilesFrame = frame
+    this.deliveredFilesSnapshot = snapshot
+    this.deliveredFilesScreen = this.activeScreen
+    this.deliveredFilesGeometryKey = this.currentDeliveredFilesGeometryKey()
+    let handle: OverlayHandle
+    try {
+      handle = this.showOverlayOnHost(
+        frame,
+        overlayOptions,
+        {
+          // REMOUNTABLE: a fullscreen screen swap must keep the SAME panel
+          // (filter/turn/selection/scroll survive it) behind a fresh projection.
+          remountable: true,
+          remount: (logical) => {
+            if (this.deliveredFilesPanel !== panel) return
+            const next = this.createDeliveredFilesFrame(panel)
+            this.deliveredFilesFrame = next
+            this.deliveredFilesScreen = this.activeScreen
+            const nextSize = this.deliveredFilesOverlaySize()
+            this.deliveredFilesGeometryKey = this.currentDeliveredFilesGeometryKey()
+            this.rebindOverlayRaw(logical, next, this.deliveredFilesOverlayOptions(nextSize))
+          },
+        },
+      )
+    } catch (error) {
+      // Release the precommit ONLY while THIS mount still owns it. A callback
+      // inside a failing mount may already have closed this lease and installed
+      // a NEWER one (close → open B → A throws): erasing B's fields here would
+      // leave its broker node live with no app lease identity, and the next open
+      // (which coalesces on the panel field) would stack a second overlay.
+      if (this.deliveredFilesPanel === panel) {
+        this.deliveredFilesPanel = undefined
+        this.deliveredFilesFrame = undefined
+        this.deliveredFilesSnapshot = undefined
+        this.deliveredFilesScreen = undefined
+        this.deliveredFilesGeometryKey = undefined
+      }
+      panel.dispose()
+      throw error
+    }
+    if (this.deliveredFilesPanel !== panel) {
+      // A callback inside the mount already closed (or replaced) this lease:
+      // the fresh physical projection is orphaned and must not survive.
+      this.overlayRemounts.delete(handle)
+      handle.hide()
+      return
+    }
+    this.deliveredFilesOverlay = handle
+  }
+
+  /** Report one UNCLASSIFIED preview failure to the surface diagnostics. */
+  private deliverablePreviewFailure(message: string, error: unknown): void {
+    this.onDeliveredFileDiagnostic?.(message, error)
+  }
+
+  /** Close the live delivered-files browser (idempotent). The lease identity is
+   *  dropped BEFORE the broker close can run focus callbacks, so a callback
+   *  that re-opens the browser mounts a NEW lease instead of writing into the
+   *  retired one. */
+  closeDeliveredFiles(): void {
+    const overlay = this.deliveredFilesOverlay
+    const panel = this.deliveredFilesPanel
+    // The selection lives on the SCREEN, not in the panel: closing the modal
+    // must drop it before the frame disappears, so a stale highlight or a
+    // later release can never copy text from this overlay. (dsh-pi-tui
+    // divergence X068.)
+    if (this.deliveredFilesScreen !== undefined && this.deliveredFilesScreen === this.activeScreen) {
+      this.fullscreen?.resetTextSelection()
+    }
+    this.deliveredFilesOverlay = undefined
+    this.deliveredFilesFrame = undefined
+    this.deliveredFilesPanel = undefined
+    this.deliveredFilesSnapshot = undefined
+    this.deliveredFilesScreen = undefined
+    this.deliveredFilesGeometryKey = undefined
+    if (overlay !== undefined) this.overlayRemounts.delete(overlay)
+    overlay?.hide()
+    panel?.dispose()
+  }
+
+  /** Retire a live delivered-files browser whose captured catalog no longer
+   *  describes the CURRENT display subject/projection. */
+  private retireStaleDeliveredFiles(): void {
+    const snapshot = this.deliveredFilesSnapshot
+    if (snapshot === undefined) return
+    if (this.deliveredFiles?.isCurrent(snapshot) === true) return
+    this.closeDeliveredFiles()
+  }
+
+  /** The live terminal key a delivered-files physical projection was mounted
+   *  at. The formula is a pure function of columns/rows, so this is the same
+   *  thing as the derived size key without recomputing the size twice. */
+  private currentDeliveredFilesGeometryKey(): string {
+    return `${Math.max(1, Math.floor(this.terminal.columns))}:${Math.max(1, Math.floor(this.terminal.rows))}`
+  }
+
+  /**
+   * Rebind the ONE delivered-files lease after a terminal geometry change.
+   *
+   * The host overlay options are numeric (the frozen formula is not a simple
+   * percentage), so a new size needs a fresh physical projection. The logical
+   * lease, panel state, filter/cursor/scroll and keyboard intent survive: the
+   * old raw is hidden, the fresh frame is mounted at the SAME live
+   * `deliveredFilesOverlaySize()` result, and a focused panel takes the
+   * keyboard back WITHOUT being promoted (or retargeting a click).
+   *
+   * A hidden/suppressed projection, or one currently behind another visible
+   * root, is not touched: appending a fresh raw would paint it above that
+   * owner. The key stays stale until it is the frontmost visible lease again;
+   * the ordinary render-request funnel then lands here.
+   */
+  private syncDeliveredFilesOverlayGeometry(): void {
+    const panel = this.deliveredFilesPanel
+    const handle = this.deliveredFilesOverlay
+    const screen = this.deliveredFilesScreen
+    if (panel === undefined || handle === undefined || screen === undefined) return
+    // A workspace lease temporarily makes `activeScreen` the Settings/Image
+    // screen while this projection stays parked on the STOPPED return screen.
+    // Never move it onto the temporary screen; the return surface's own
+    // `resumeReturnSurface()` request re-enters here after it becomes active.
+    if (this.activeScreen !== screen) return
+    const key = this.currentDeliveredFilesGeometryKey()
+    if (key === this.deliveredFilesGeometryKey) return
+    if (handle.isHidden() || !this.overlayBroker.isFrontmostVisible(handle)) return
+    this.deliveredFilesGeometryKey = key
+    const size = this.deliveredFilesOverlaySize()
+    const frame = this.createDeliveredFilesFrame(panel)
+    this.deliveredFilesFrame = frame
+    const wasFocused = handle.isFocused()
+    const previous = this.overlayBroker.rawOf(handle)
+    // TRANSACTION ORDER: mount + rebind the fresh projection FIRST. Neither
+    // call runs a focus callback (`initialFocus:false`), so a newer overlay
+    // cannot appear between them. Only then move the keyboard if the OLD raw
+    // was the physical owner. Do NOT hide the old raw first: its focused
+    // `hide()` synchronously falls back to `preFocus`, whose plugin onFocus may
+    // legally open and focus an even newer overlay — the outer rebind must not
+    // then steal that newer focus.
+    const raw = screen.showOverlay(frame, {
+      ...this.deliveredFilesOverlayOptions(size),
+      disposeOnHide: false,
+      initialFocus: false,
+    })
+    this.overlayBroker.rebind(handle, raw)
+    if (wasFocused) raw.focus({ preserveOrder: true })
+    // No write after the focus transition except retiring the old projection:
+    // the old raw is no longer the physical owner (the new raw was focused, or
+    // a newer callback owner superseded it), so its hide cannot trigger the
+    // fork's focus fallback. If the focus callback closed/replaced this lease,
+    // `previous` is an orphaned projection and hiding it is still safe.
+    previous?.hide()
+  }
+
+  /** The delivered-files overlay's geometry: the ONE centered percentage
+   *  window documented as the design-language §12.2 per-surface exception.
+   *  The frame, the host options and the panel's row grant all read THIS
+   *  result. */
+  private deliveredFilesOverlaySize(): { width: number; maxHeight: number; margin: number | undefined } {
+    const geometry = deliveredFilesOverlayGeometry(this.terminal.columns, this.terminal.rows)
+    return { width: geometry.width, maxHeight: geometry.maxHeight, margin: undefined }
+  }
+
+  /**
+   * The ONE overlay-options assembly of the Delivered files modal: the frozen
+   * geometry plus the text-selection opt-in. Every mount path (initial mount,
+   * fullscreen remount and resize rebind) goes through THIS function so a
+   * projection can never be repainted without the opt-in, and no OTHER overlay
+   * can acquire it by accident (dsh-pi-tui divergence X068).
+   */
+  private deliveredFilesOverlayOptions(
+    size: { width: number; maxHeight: number; margin: number | undefined },
+  ): OverlayOptions {
+    return {
+      width: size.width,
+      maxHeight: size.maxHeight,
+      textSelectionInsets: DELIVERED_FILES_TEXT_SELECTION_INSETS,
+
+    }
+  }
+
+  private createDeliveredFilesFrame(panel: DeliveredFilesPanel): ResponsiveOverlayFrame {
+    return new ResponsiveOverlayFrame(
+      panel,
+      () => {
+        const size = this.deliveredFilesOverlaySize()
+        return {
+          width: size.width,
+          maxHeight: size.maxHeight,
+          key: `${this.terminal.columns}:${this.terminal.rows}:${size.width}:${size.maxHeight}`,
+        }
+      },
+      (geometry) => panel.setMaxRows(Math.max(1, geometry.maxHeight - 2)),
+    )
+  }
+
+  /** Copy the RAW declared Host path through the ONE Client clipboard owner,
+   *  gated on the SAME currentness as the panel's data. */
+  private copyDeliveredFilePath(
+    snapshot: DeliveredFilesSnapshot,
+    path: string,
+    settle: (ok: boolean) => void,
+  ): void {
+    if (this.deliveredFiles?.isCurrent(snapshot) !== true) return
+    const copy = this.copySelection
+    const runner = this.events.runOwned
+    if (copy === undefined || runner === undefined) {
+      settle(false)
+      return
+    }
+    runner('delivered path copy', () => copy(path), {
+      onResult: ok => settle(ok),
+      onError: () => settle(false),
+    })
+  }
+
+  /**
+   * The delivered-files action of one PAINTED transcript tail cell
+   * (Delivered files PR1): the list verb opens THIS message's Turn, the
+   * per-file verb opens that exact file's Details. The catalog is captured
+   * fresh HERE, so the opener never reuses a stale projection, and it is
+   * always the SAME opener `/deliverables` uses.
+   */
+  private activateDeliveredFiles(
+    message: TranscriptMessage,
+    action: 'browse' | 'details',
+    fileIndex: number | undefined,
+  ): void {
+    if (message.kind !== 'assistant') return
+    const capability = this.deliveredFiles
+    if (capability === undefined) return
+    const snapshot = capability.snapshot()
+    if (snapshot === undefined) return
+    if (action === 'browse') {
+      this.openDeliveredFiles(snapshot, { turn: message.turn, page: 'files' })
+      return
+    }
+    const files = message.deliverables ?? []
+    const file = fileIndex === undefined ? undefined : files[fileIndex]
+    if (file === undefined) return
+    this.openDeliveredFiles(snapshot, { turn: message.turn, path: file.path, page: 'details' })
+  }
+
+  /**
    * Mount the `/model` picker as a root-owned responsive capturing overlay.
    * A narrow seam: the component owns every picker state (the single model list
    * with its inline per-model effort); the host owns only the responsive frame,
@@ -21050,108 +24057,42 @@ export class TuiApp {
     runSyncDisposalSteps('keybinding editor disposal', panels.map(panel => () => panel.dispose?.()))
   }
 
-  /** Open the action-first Keyboard Shortcuts Editor in the standard overlay
-   * lifecycle. The panel owns its Esc hierarchy; this method owns the Frame
-   * mount and the final disposal. */
-  openKeybindingEditor(panel: Component): () => void {
-    let handle: OverlayHandle | undefined
-    const unregister = this.trackKeybindingEditor(panel)
-    // The owning FocusForwardingFrame + disposeOnHide dispose the panel on
-    // hide (X007); `unregister` still runs first so the tracking set never
-    // holds a closing panel.
-    const close = (): void => {
-      unregister()
-      handle?.hide()
-    }
-    handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
-      width: 88,
-      maxHeight: '100%',
-    })
-    return close
-  }
-
-  /** Content-row budget used by client-local editor overlays. */
+  /** The standalone content-row cap of the Keyboard shortcuts page (the
+   *  same-lease Settings body lowers it through `setMaxRows`). */
   keybindingEditorMaxRows(): number {
     return Math.max(1, this.terminal.rows - 4)
   }
 
   /**
-   * M3: open the interactive footer configurator overlay. The panel
-   * renders the model's draft layout + a live preview composed by the REAL
-   * composer against the current snapshot; the save paths (S, the "Save
-   * changes" row, "Save & Exit") AWAIT onSave, Enter navigates, and Esc
-   * walks back page by page — a clean selector closes, a dirty one opens
-   * the exit-confirm page. PR E transaction: the overlay closes only
-   * after onSave RESOLVES; a rejection keeps it open (the integration
-   * layer notifies). Returns a closer.
+   * C2-R5: compose the ONE Footer layout page over THIS app's live dependencies
+   * (status snapshot, task-browser routing gate, extension footer text and the
+   * composer). The panel is mounted by the Settings workspace root inside the
+   * SAME screen lease; this method only builds it and never opens an overlay.
+   * `onSave` stays the command owner's single persist-first transaction; the
+   * panel closes through its `onCancel` (clean/discard) or the save chain.
    */
-  openFooterConfigurator(options: {
+  createFooterConfiguratorPanel(options: {
     model: FooterConfiguratorModel
     registry: FooterItemRegistry
     /** A layered composer for an unsaved custom-definition draft. */
     composer?: FooterComposer
+    sessionOnly: boolean
     onSave: (layout: FooterLayoutV1, customItems?: readonly import('./domain/footer/custom-items.ts').FooterCustomItemSettings[]) => void | Promise<void>
     onCancel: () => void
-  }): () => void {
-    let handle: OverlayHandle | undefined
-    let closed = false
-    // The owning FocusForwardingFrame + disposeOnHide dispose the panel on
-    // hide (X007) — the closer only unmounts the overlay; no manual
-    // panel.dispose() (a second dispose would be a double-release).
-    const close = (): void => {
-      if (closed) return
-      closed = true
-      this.footerConfiguratorClosers.delete(close)
-      handle?.hide()
-    }
-    const panel = new FooterConfiguratorPanel({
+  }): FooterConfiguratorPanel {
+    return new FooterConfiguratorPanel({
       model: options.model,
       registry: options.registry,
       snapshot: () => this.statusStore.snapshot(),
       composer: options.composer ?? this.footerComposer,
       taskBrowserAvailable: () => this.taskBrowserAvailable(),
       extensionFooterText: () => this.extensionHost?.footerText() ?? '',
-      maxVisible: () => {
-        // The budget is bounded by the LIVE terminal height MINUS the
-        // Frame's two border rows — a floor above rows-2 would overflow
-        // very short terminals (the Frame never clamps). 1 is the
-        // absolute minimum (a 3-row terminal still shows the title).
-        const rows = Math.max(1, this.terminal.rows - 2)
-        return Math.min(30, rows)
-      },
+      maxVisible: () => Math.max(1, this.terminal.rows),
       requestRender: () => this.requestRender(),
-      onSave: (layout, customItems) => {
-        // PR E §9: persist FIRST, close on RESOLUTION only — the old
-        // close-before-save order destroyed the editor on a failed
-        // settings write, leaving the draft unreachable.
-        return Promise.resolve()
-          .then(() => options.onSave(layout, customItems))
-          .then(() => { close() })
-        // A rejection propagates to the panel, which clears its saving
-        // state and keeps the configurator open.
-      },
-      onCancel: () => {
-        close()
-        options.onCancel()
-      },
+      sessionOnly: options.sessionOnly,
+      onSave: options.onSave,
+      onCancel: options.onCancel,
     })
-    handle = this.showOverlayOnHost(new FocusForwardingFrame(panel, true), {
-      width: 88,
-      // The overlay's hard cut must never exceed the terminal: the panel
-      // budgets its content to rows-2 (Frame borders add 2), so the
-      // maxHeight must be at least the panel's full render + borders —
-      // a fixed 30 would slice the bottom border on tall terminals (a
-      // 40-row terminal renders 30 content rows + 2 borders = 32 > 30).
-      // It must also track the LIVE height: a NUMBER is captured at open
-      // time and never changes — opening on a 10-row terminal and growing
-      // to 40 left the overlay clamped at 10, hard-cutting the editable
-      // body and the bottom border even though the panel had re-budgeted
-      // itself for the new size. '100%' is re-resolved against the
-      // CURRENT terminal height on every overlay frame.
-      maxHeight: '100%',
-    })
-    this.footerConfiguratorClosers.add(close)
-    return close
   }
 
   /**
@@ -21178,7 +24119,7 @@ export class TuiApp {
       throw new Error('cannot lease a Job workspace screen while the surface is completing a transition')
     }
     if (this.jobWorkspace !== undefined) throw new Error('a Job workspace screen is already leased')
-    if (this.settingsWorkspace !== undefined) throw new Error('a Settings workspace screen is already leased')
+    if (this.workspaceLease !== undefined) throw new Error('another workspace screen is already leased')
     // A blocking owner outranks the Job view: refuse the lease and leave the
     // current keyboard owner untouched (the opener releases its observation).
     if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
@@ -21194,7 +24135,7 @@ export class TuiApp {
         throw new Error('cannot lease a Job workspace screen while the surface is completing a transition')
       }
       if (this.jobWorkspace !== undefined) throw new Error('a Job workspace screen is already leased')
-      if (this.settingsWorkspace !== undefined) throw new Error('a Settings workspace screen is already leased')
+      if (this.workspaceLease !== undefined) throw new Error('another workspace screen is already leased')
       if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
         throw new Error('a blocking modal owns the surface')
       }
@@ -21283,6 +24224,7 @@ export class TuiApp {
       focusComponent: (component) => screen.setFocus(component),
     })
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
+      imageProtocolOverride: this.altScreenImageProtocol,
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,
@@ -21412,13 +24354,13 @@ export class TuiApp {
    * is disposed or rebuilt, and `TuiApp.fullscreen` (the USER's transcript
    * display mode) is never touched, so no `onFullscreenChange` is emitted.
    *
-   * The lease is committed to `this.settingsWorkspace` BEFORE the physical
+   * The lease is committed to `this.workspaceLease` BEFORE the physical
    * switch, so every render request, input route and re-entrant closer observes
    * the same current owner. It is MUTUALLY EXCLUSIVE with the Job lease: at most
    * ONE workspace screen owns the terminal, and a blocking Question/Approval/Save
    * owner refuses the lease entirely.
    * @param source - the readonly read projection of the `/settings` command.
-   * @param options - the legacy-settings bridge and the teardown notification.
+   * @param options - the pages, the write channel and the teardown notification.
    * @returns the instance-fenced handle of THIS workspace.
    */
   openSettingsWorkspace(
@@ -21427,34 +24369,61 @@ export class TuiApp {
   ): SettingsWorkspaceHandle {
     this.assertWorkspaceLeaseAvailable('Settings')
     let record: WorkspaceLeaseRecord
+    // The ONE close reason of THIS open (C2-R2): the panel's own L0 gesture
+    // sets `user-exit`, and every other teardown keeps the conservative
+    // `forced`.
+    let closeReason: SettingsWorkspaceCloseReason = 'forced'
     const panel = new SettingsWorkspacePanel(source, {
       rows: () => this.terminal.rows,
       columns: () => this.terminal.columns,
       requestRender: () => this.requestRender(),
       notice: () => this.currentNotice(),
-      onClose: () => record.close(),
-      onOpenLegacy: (targetId?: string) => openLegacy(targetId),
+      aboutVersionFacts: options.aboutVersionFacts,
+      ...(options.aboutStatusSource === undefined ? {} : { aboutStatusSource: options.aboutStatusSource }),
+      ...(options.onAboutEnter === undefined ? {} : { onAboutEnter: options.onAboutEnter }),
+      ...(options.onAboutLeave === undefined ? {} : { onAboutLeave: options.onAboutLeave }),
+      onClose: () => {
+        // The user's OWN close gesture (L0 Esc / Close): record it BEFORE the
+        // lease is retired, so the notification that follows the restore sees
+        // the real reason.
+        closeReason = 'user-exit'
+        record.close()
+      },
       ...(options.onOpenPlugins === undefined ? {} : { onOpenPlugins: options.onOpenPlugins }),
+      ...(options.createModelsPage === undefined ? {} : { createModelsPage: options.createModelsPage }),
+      ...(options.createAccountPage === undefined ? {} : { createAccountPage: options.createAccountPage }),
+      ...(options.createSubagentAllowlistPicker === undefined
+        ? {}
+        : { createSubagentAllowlistPicker: options.createSubagentAllowlistPicker }),
+      ...(options.createWebSettingsPage === undefined
+        ? {}
+        : { createWebSettingsPage: options.createWebSettingsPage }),
+      ...(options.createFooterConfiguratorPage === undefined
+        ? {}
+        : { createFooterConfiguratorPage: options.createFooterConfiguratorPage }),
+      ...(options.createKeybindingsPage === undefined
+        ? {}
+        : { createKeybindingsPage: options.createKeybindingsPage }),
       // The clipboard capability stays the SAME Client-local `copySelection` the
       // rest of the surface already uses; the settlement re-proves THIS workspace
       // record before it may notify.
       onCopy: (text) => {
         const copy = this.copySelection
         const runner = this.events.runOwned
-        if (copy === undefined || runner === undefined || this.settingsWorkspace !== record) {
-          if (this.settingsWorkspace === record) this.notify('Copy failed', 'error')
+        if (copy === undefined || runner === undefined || this.workspaceLease !== record) {
+          if (this.workspaceLease === record) this.notify('Copy failed', 'error')
           return
         }
         runner('settings copy', () => copy(text), {
           onResult: (ok) => {
-            if (this.disposed || this.settingsWorkspace !== record) return
+            if (this.disposed || this.workspaceLease !== record) return
             // `true` only proves the strategy EMITTED the bytes (OSC52 has no
             // clipboard ACK), so the wording never claims the system clipboard
             // received them.
             this.notify(ok ? 'Copy sent' : 'Copy failed', ok ? 'info' : 'error')
           },
           onError: () => {
-            if (this.disposed || this.settingsWorkspace !== record) return
+            if (this.disposed || this.workspaceLease !== record) return
             this.notify('Copy failed', 'error')
           },
         })
@@ -21472,57 +24441,38 @@ export class TuiApp {
         }
         runner('settings field write', () => commit(request), {
           onResult: (outcome) => {
-            if (this.disposed || this.settingsWorkspace !== record) return
+            if (this.disposed || this.workspaceLease !== record) return
             settle(outcome)
           },
           onError: (error) => {
-            if (this.disposed || this.settingsWorkspace !== record) return
+            if (this.disposed || this.workspaceLease !== record) return
             settle({ outcome: 'not-saved', reason: safeErrorMessage(error) })
           },
         })
       },
     }, {
-      // The Web Settings re-entry restores ITS row (S2/PR-B §B3.4): a return
-      // from the legacy Web section never lands the user on the default theme
-      // row.
+      // A typed row deeplink restores ITS row: a re-entry from a specialist
+      // page (or the Web page) never lands the user on the default theme row.
       ...options.initialRowId === undefined ? {} : { initialRowId: options.initialRowId },
+      ...options.initialSpecialist === undefined ? {} : { initialSpecialist: options.initialSpecialist },
+      ...options.initialCategory === undefined ? {} : { initialCategory: options.initialCategory },
+      ...options.initialModelsView === undefined ? {} : { initialModelsView: options.initialModelsView },
+      ...options.initialAccountView === undefined ? {} : { initialAccountView: options.initialAccountView },
     })
-    record = this.leaseWorkspaceScreen('settings', panel, options.onClose)
+    record = this.leaseWorkspaceScreen('settings', panel, () => options.onClose?.(closeReason))
     const close = (): void => record.close()
-    /** The compatibility bridge: retire THIS workspace and restore the surface it
-     *  paused BEFORE the existing settings editor can mount — the legacy
-     *  `app.openSettings()` call may synchronously re-enter, so the lease must
-     *  already be gone. A failed open restores the main surface with a real error
-     *  and never resurrects the closed workspace. */
-    const openLegacy = (targetId?: string): void => {
-      if (this.settingsWorkspace !== record) return
-      close()
-      if (this.disposed) return
-      if (
-        this.jobWorkspace !== undefined ||
-        this.settingsWorkspace !== undefined ||
-        this.activeQuestions !== undefined ||
-        this.approvals.isActive() ||
-        this.activeSaveLocation !== undefined ||
-        this.activeScreen !== record.returnScreen
-      ) {
-        this.notify('could not open the settings editor: the surface changed', 'error')
-        return
-      }
-      try {
-        options.onOpenLegacy(targetId)
-      } catch (error) {
-        if (!this.disposed) {
-          this.notify(`could not open the settings editor: ${safeErrorMessage(error)}`, 'error')
-        }
-      }
-    }
     return {
       close,
       refreshRow: (rowId, facts) => {
-        if (this.disposed || this.settingsWorkspace !== record || record.kind !== 'settings') return
+        if (this.disposed || this.workspaceLease !== record || record.kind !== 'settings') return
         ;(record.panel as SettingsWorkspacePanel).refreshRow(rowId, facts)
         this.requestRender()
+      },
+      whenInitialSpecialistSettled: () => {
+        if (this.disposed || this.workspaceLease !== record || record.kind !== 'settings') {
+          return Promise.resolve({ ok: false, reason: 'the Settings workspace was superseded before the page opened' })
+        }
+        return (record.panel as SettingsWorkspacePanel).whenInitialSpecialistSettled()
       },
     }
   }
@@ -21538,7 +24488,7 @@ export class TuiApp {
     if (this.workspaceLeaseFreezeDepth > 0) {
       throw new Error(`cannot lease a ${which} workspace screen while the surface is completing a transition`)
     }
-    if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) {
+    if (this.jobWorkspace !== undefined || this.workspaceLease !== undefined) {
       throw new Error('a workspace screen is already leased')
     }
     if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
@@ -21550,7 +24500,7 @@ export class TuiApp {
     if (this.workspaceLeaseFreezeDepth > 0) {
       throw new Error(`cannot lease a ${which} workspace screen while the surface is completing a transition`)
     }
-    if (this.jobWorkspace !== undefined || this.settingsWorkspace !== undefined) {
+    if (this.jobWorkspace !== undefined || this.workspaceLease !== undefined) {
       throw new Error('a workspace screen is already leased')
     }
     if (this.activeQuestions !== undefined || this.approvals.isActive() || this.activeSaveLocation !== undefined) {
@@ -21559,22 +24509,26 @@ export class TuiApp {
   }
 
   /**
+  /**
    * The ONE temporary fullscreen lease primitive shared by the Settings
-   * workspace and the direct `/plugins` root: same Alt Screen start/stop,
+   * workspace and the Image UX picker/Viewer: same Alt Screen start/stop,
    * return-focus restore, re-entrant cleanup and mutual exclusion. It commits
-   * the record to `this.settingsWorkspace` BEFORE the physical switch, so every
+   * the record to `this.workspaceLease` BEFORE the physical switch, so every
    * render request, input route and closer observes the same current owner.
+   * The Plugin Manager is a CHILD of the Settings lease and never takes a
+   * workspace screen of its own.
    */
   private leaseWorkspaceScreen(
-    kind: 'settings' | 'plugin',
+    kind: 'settings' | 'image',
     panel: WorkspaceLeasePanel,
     onClose?: () => void,
   ): WorkspaceLeaseRecord {
-    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : 'Plugin Manager')
+    this.assertWorkspaceLeaseAvailable(kind === 'settings' ? 'Settings' : 'Image')
     const returnScreen: TuiMainScreen | TuiAltScreen = this.fullscreen ?? this.tui
     const returnFocus = returnScreen.getFocusedComponent()
     const token: object = {}
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
+      imageProtocolOverride: this.altScreenImageProtocol,
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,
@@ -21595,17 +24549,17 @@ export class TuiApp {
     const finalizeOnce = (): void => {
       if (finalized) return
       finalized = true
-      if (this.settingsWorkspace === record) this.settingsWorkspace = undefined
+      if (this.workspaceLease === record) this.workspaceLease = undefined
     }
     const close = (): void => {
       if (finalized) return
-      runSyncDisposalSteps(`${kind} workspace close`, [
+      runSyncDisposalSteps('settings workspace close', [
         finalizeOnce,
         () => screen.stop({ preserveScreen: true }),
         () => panel.dispose?.(),
         () => {
           // Restore ONLY while no newer physical owner exists.
-          if (!this.disposed && this.settingsWorkspace === undefined && this.activeScreen === returnScreen) {
+          if (!this.disposed && this.workspaceLease === undefined && this.activeScreen === returnScreen) {
             this.resumeReturnSurface(returnScreen, returnFocus)
           }
         },
@@ -21616,10 +24570,10 @@ export class TuiApp {
      *  close or replace THIS workspace. The stale opener then abandons its own
      *  sequence instead of starting a screen for a record that is already gone. */
     const assertStillOpening = (): void => {
-      if (this.settingsWorkspace !== record) throw new Error(`the ${kind} workspace was superseded while it was opening`)
+      if (this.workspaceLease !== record) throw new Error(`the ${kind} workspace was superseded while it was opening`)
     }
     record = { kind, token, screen, panel, returnScreen, returnFocus, finalizeOnce, close }
-    this.settingsWorkspace = record
+    this.workspaceLease = record
     try {
       this.leaveTerminalPresentation()
       assertStillOpening()
@@ -21634,13 +24588,13 @@ export class TuiApp {
       screen.setFocus(panel)
       this.completeScreenHandoff()
     } catch (error) {
-      const alreadyClosed = this.settingsWorkspace !== record
+      const alreadyClosed = this.workspaceLease !== record
       runSyncDisposalStepsWithPrimary(`${kind} workspace open unwind`, error, [
         finalizeOnce,
         () => { if (!alreadyClosed) screen.stop({ preserveScreen: true }) },
         () => { if (!alreadyClosed) panel.dispose?.() },
         () => {
-          if (!alreadyClosed && !this.disposed && this.settingsWorkspace === undefined && this.activeScreen === returnScreen) {
+          if (!alreadyClosed && !this.disposed && this.workspaceLease === undefined && this.activeScreen === returnScreen) {
             this.resumeReturnSurface(returnScreen, returnFocus)
           }
         },
@@ -21648,18 +24602,6 @@ export class TuiApp {
       throw error
     }
     return record
-  }
-
-  /**
-   * Host the fullscreen Plugin Manager page from the direct `/plugins` root
-   * through the SAME workspace lease (`Esc close` restores the physical
-   * surface, focus, draft and scroll exactly as Settings does). Returns the
-   * closer the owner uses on a normal close.
-   */
-  openPluginManagerWorkspace(panel: Component, onClosed?: () => void): () => void {
-    if (this.disposed) throw new Error('cannot lease a Plugin Manager workspace screen on a disposed surface')
-    const record = this.leaseWorkspaceScreen('plugin', panel, onClosed)
-    return () => record.close()
   }
 
   /** The live terminal row budget for a fullscreen workspace panel. */
@@ -21792,7 +24734,7 @@ export class TuiApp {
    * A no-op when nothing is leased.
    */
   private closeLeasedWorkspaces(context: string): void {
-    if (this.jobWorkspace === undefined && this.settingsWorkspace === undefined) return
+    if (this.jobWorkspace === undefined && this.workspaceLease === undefined) return
     const freezeDepthBefore = this.workspaceLeaseFreezeDepth
     this.workspaceLeaseFreezeDepth = freezeDepthBefore + 1
     try {
@@ -21802,13 +24744,380 @@ export class TuiApp {
         this.routeTerminalSettlementFailure(`job workspace abandonment (${context})`, error)
       }
       try {
-        this.settingsWorkspace?.close()
+        this.workspaceLease?.close()
       } catch (error) {
         this.routeTerminalSettlementFailure(`settings workspace abandonment (${context})`, error)
       }
     } finally {
       this.workspaceLeaseFreezeDepth = freezeDepthBefore
     }
+  }
+
+  /**
+   * The image occurrences of the CURRENT mounted transcript batch, in
+   * projection order (mounted message order + each message's render order) —
+   * the ONE `/view-image` candidate source and the currentness check for a
+   * candidate opened from an older list snapshot. Only actually rendered
+   * occurrences are recorded (a folded Tool card / hidden Focus Work member /
+   * open opaque marker records none).
+   */
+  private mountedImageOccurrences(): TranscriptImageOccurrence[] {
+    const occurrences: TranscriptImageOccurrence[] = []
+    for (const block of this.mountedTranscriptBlocks) {
+      if (block.block.kind !== 'message') continue
+      const rendered = this.messageImageOccurrences.get(block.block.message)
+      if (rendered !== undefined) occurrences.push(...rendered)
+    }
+    return occurrences
+  }
+
+  /** One occurrence of the CURRENT mounted batch, matched by its identity
+   * (message OBJECT + source image ordinal) — never by attachment id or file
+   * name. `undefined` means the candidate left the mounted window. */
+  private mountedImageOccurrence(
+    message: TranscriptMessage,
+    imageIndex: number,
+  ): TranscriptImageOccurrence | undefined {
+    const mounted = this.mountedTranscriptBlocks.some(block =>
+      block.block.kind === 'message' && block.block.message === message)
+    if (!mounted) return undefined
+    return this.messageImageOccurrences.get(message)?.find(occurrence => occurrence.imageIndex === imageIndex)
+  }
+
+  /** A workspace lease must be idle and unclaimed (the shared lease primitive
+   * re-asserts exactly these conditions before the physical switch). */
+  private canLeaseImageWorkspace(): boolean {
+    return !this.disposed
+      && this.workspaceLeaseFreezeDepth === 0
+      && this.jobWorkspace === undefined
+      && this.workspaceLease === undefined
+      && this.activeQuestions === undefined
+      && !this.approvals.isActive()
+      && this.activeSaveLocation === undefined
+  }
+
+  /**
+   * `/view-image` (Image UX PR2): open the LEAASED image workspace in its list
+   * state. The list is the CURRENT mounted transcript window's occurrence
+   * snapshot (`SearchablePicker`, no full-text search); Enter opens the Viewer
+   * as the same screen's second internal state, Esc returns to the list and a
+   * second Esc closes the workspace, restoring the original transcript screen
+   * untouched. No occurrence → a notice, never a screen, never a read.
+   *
+   * ARCHITECTURE (Owner decision, 2026-10-24): this is a temporary physical
+   * screen lease (like the Settings/Job workspaces), not a capturing overlay:
+   * the pinned pi-tui overlay compositor drops any row whose BASE is an inline
+   * image line, so a framed overlay cannot reliably paint the transcript
+   * image or cover the rows behind it. A leased screen renders the image as a
+   * normal BASE line of its own screen — the proven path.
+   */
+  openTranscriptImagePicker(): void {
+    if (!this.canLeaseImageWorkspace()) return
+    const occurrences = this.mountedImageOccurrences()
+    if (occurrences.length === 0) {
+      this.notify('No images in the current transcript window', 'info')
+      return
+    }
+    const byValue = new Map<string, TranscriptImageOccurrence>()
+    const candidates = occurrences.map((occurrence, index) => {
+      const value = `${this.identityToken(occurrence.message)}:${occurrence.imageIndex}`
+      byValue.set(value, occurrence)
+      // The attachment name is UNTRUSTED and it lands on a terminal row. The
+      // picker only folds line breaks (`singlePhysicalLine`) — it is NOT a
+      // terminal-control filter — so the projection belongs HERE, at the
+      // presentation boundary that owns this label
+      // (`docs/architecture/terminal-output.md`). The durable ref, scope,
+      // candidate identity and loader path keep the ORIGINAL name.
+      const name = sanitizedPhysicalLine(occurrence.ref.name ?? 'image')
+      return {
+        value,
+        label: `#${index + 1} · ${name} · ${occurrence.ref.width}×${occurrence.ref.height} · ${occurrence.ref.mediaType}`,
+      }
+    })
+    let record: WorkspaceLeaseRecord | undefined
+    const panel = new ImageWorkspacePanel({
+      rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
+      requestRender: () => this.requestRender(),
+      ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
+      ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
+      theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
+      candidates,
+      // Currentness at SELECTION time: a candidate that left the mounted
+      // window (a page change, a folded Tool card, a session switch already
+      // closes the screen) never authorizes a read of a retired scope.
+      resolve: (value) => {
+        const snapshot = byValue.get(value)
+        if (snapshot === undefined) return undefined
+        const current = this.mountedImageOccurrence(snapshot.message, snapshot.imageIndex)
+        return current === undefined ? undefined : { ref: current.ref, scope: current.scope }
+      },
+      onStale: () => {
+        record?.close()
+        this.notify('the image left the current transcript window', 'info')
+      },
+      onClose: () => record?.close(),
+      initial: { kind: 'list' },
+    })
+    record = this.leaseWorkspaceScreen('image', panel)
+  }
+
+  /**
+   * Open the image workspace DIRECTLY in its Viewer state (a fullscreen image
+   * body click): the same leased screen and Viewer panel, without the list
+   * below, so Esc closes the workspace and restores the transcript exactly.
+   * The occurrence must still belong to the current mounted batch; it reads
+   * through the immutable captured scope and never rebuilds/scrolls the
+   * transcript.
+   */
+  openImageViewer(occurrence: TranscriptImageOccurrence): void {
+    if (!this.canLeaseImageWorkspace()) return
+    const current = this.mountedImageOccurrence(occurrence.message, occurrence.imageIndex)
+    if (current === undefined) {
+      this.notify('the image left the current transcript window', 'info')
+      return
+    }
+    let record: WorkspaceLeaseRecord | undefined
+    const panel = new ImageWorkspacePanel({
+      rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
+      requestRender: () => this.requestRender(),
+      ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
+      ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
+      theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
+      candidates: [],
+      resolve: () => undefined,
+      onStale: () => {
+        record?.close()
+        this.notify('the image left the current transcript window', 'info')
+      },
+      onClose: () => record?.close(),
+      initial: { kind: 'viewer', source: { ref: current.ref, scope: current.scope } },
+    })
+    record = this.leaseWorkspaceScreen('image', panel)
+  }
+
+  // ── PR2.5 published-visual selection / Copy / Viewer ────────────────────
+
+  /** Whether one mounted figure is the transient visual selection. */
+  private isVisualSelected(message: TranscriptMessage, ref: string): boolean {
+    const selection = this.visualSelection
+    return selection !== undefined && selection.message === message && selection.ref === ref
+  }
+
+  /**
+   * Whether one handle's source is still the CURRENT legit occurrence: the
+   * row must still be mounted with its visual body, and the sidecar derived
+   * from the official Session must still commit the SAME publication object.
+   * A re-render that rebuilds the figure keeps the source current; a policy/
+   * window/session change does not.
+   */
+  private visualSourceCurrent(handle: TranscriptVisualHandle): boolean {
+    if (handle.generation !== this.visualEpoch) return false
+    if (!this.visualAssistantBodies.has(handle.message)) return false
+    const publications = assistantVisualPresentation(handle.message)?.publications
+    if (publications === undefined) return false
+    return publications.find(publication => publication.ref === handle.ref) === handle.publication
+  }
+
+  /** Resolve one (message, ref) against the CURRENT figure set and sidecar. */
+  private currentVisualHandle(message: TranscriptMessage, ref: string): TranscriptVisualHandle | undefined {
+    const handle = this.visualFigureHandles.get(message)?.get(ref)
+    if (handle === undefined || !this.visualSourceCurrent(handle)) return undefined
+    return handle
+  }
+
+  /** Every current published-visual occurrence of the mounted window, in the
+   * ACTUAL display order: the ordered figures of each Assistant body (the
+   * placement plan's `pieces`, tail included), then the mounted message order.
+   * The publication list is authorization order only — a marker order that
+   * differs from the publication order must not reorder the selection cycle. */
+  private mountedVisualHandles(): TranscriptVisualHandle[] {
+    const handles: TranscriptVisualHandle[] = []
+    for (const block of this.mountedTranscriptBlocks) {
+      if (block.block.kind !== 'message') continue
+      const message = block.block.message
+      const record = this.visualAssistantBodies.get(message)
+      const byRef = this.visualFigureHandles.get(message)
+      const publications = assistantVisualPresentation(message)?.publications
+      if (record === undefined || byRef === undefined || publications === undefined) continue
+      const currentByRef = new Map(publications.map(publication => [publication.ref, publication]))
+      for (const ref of record.body.visualRefs()) {
+        const handle = byRef.get(ref)
+        if (handle !== undefined && currentByRef.get(ref) === handle.publication) handles.push(handle)
+      }
+    }
+    return handles
+  }
+
+  /** The selected handle, or undefined when the selection is no longer a
+   * current legit occurrence (which clears it before returning). */
+  private selectedVisualHandle(): TranscriptVisualHandle | undefined {
+    const selection = this.visualSelection
+    if (selection === undefined) return undefined
+    const handle = this.currentVisualHandle(selection.message, selection.ref)
+    if (handle === undefined) {
+      this.visualSelection = undefined
+      this.requestRender()
+      return undefined
+    }
+    return handle
+  }
+
+  /** `app.visual.selectNext`: cycle the current window's published visuals. */
+  private selectNextVisual(): boolean {
+    if (this.viewerMode !== undefined) return true
+    const handles = this.mountedVisualHandles()
+    if (handles.length === 0) {
+      this.notify('No published visuals in the current transcript window', 'info')
+      return true
+    }
+    const selection = this.visualSelection
+    const current = selection === undefined
+      ? -1
+      : handles.findIndex(handle => handle.message === selection.message && handle.ref === selection.ref)
+    const next = (current + 1) % handles.length
+    const handle = handles[next]!
+    this.visualSelection = { message: handle.message, ref: handle.ref }
+    this.requestRender()
+    this.notify(`Selected ${next + 1}/${handles.length} · ${handle.publication.source.title}`, 'info')
+    return true
+  }
+
+  /** The live select-key hint, with no dangling separator when the action has
+   *  been disabled (`false` or no effective key). */
+  private visualSelectHint(): string {
+    const hint = this.keybindings.keyHint('app.visual.selectNext')
+    return hint === '' ? 'Select a visual first' : `Select a visual first · ${hint}`
+  }
+
+  /** `app.visual.copySelected`: copy the selected figure's exact payload. */
+  private copySelectedVisual(): boolean {
+    if (this.viewerMode !== undefined) return true
+    const handle = this.selectedVisualHandle()
+    if (handle === undefined) {
+      // The honest one-line route: never guess "the last visual".
+      this.notify(this.visualSelectHint(), 'info')
+      return true
+    }
+    this.copyVisualPayload(handle)
+    return true
+  }
+
+  /** `app.visual.openSelected`: open the selected SVG in the leased viewer.
+   * A Chart has no viewer (its exact values live on the row) — the request is
+   * answered truthfully instead of minting a second surface. */
+  private openSelectedVisual(): boolean {
+    if (this.viewerMode !== undefined) return true
+    const handle = this.selectedVisualHandle()
+    if (handle === undefined) {
+      this.notify(this.visualSelectHint(), 'info')
+      return true
+    }
+    if (handle.publication.source.svgSource === undefined) {
+      this.notify('Chart has no viewer', 'info')
+      return true
+    }
+    this.openSvgViewer(handle)
+    return true
+  }
+
+  /**
+   * The ONE visual payload contract: a chart copies
+   * `JSON.stringify(final ChartFact, null, 2)`; an SVG copies the admitted
+   * `PublishedVisual.source.svgSource` raw bytes (no trim, no re-encoding).
+   * The shared Client-local clipboard owner is the transport; the notice is
+   * published only after it settles AND the same source is still current.
+   */
+  private copyVisualPayload(handle: TranscriptVisualHandle): void {
+    // ADMISSION, not just notice suppression: the same current-source proof
+    // `openSvgViewer` applies must gate the WRITE itself. A stale frame target
+    // must never start a clipboard write; the settle fence below only decides
+    // whether an already-started write may report.
+    if (!this.visualSourceCurrent(handle)) return
+    const copy = this.copySelection
+    const runner = this.events.runOwned
+    if (copy === undefined || runner === undefined) {
+      this.notify('Copy failed', 'error')
+      return
+    }
+    const source = handle.publication.source
+    const text = source.chart !== undefined ? JSON.stringify(source.chart, null, 2) : source.svgSource
+    if (text === undefined) {
+      this.notify('Copy failed', 'error')
+      return
+    }
+    runner('visual copy', () => copy(text), {
+      onResult: (ok) => {
+        if (this.disposed || !this.visualSourceCurrent(handle)) return
+        this.notify(ok ? 'Copied visual' : 'Copy failed', ok ? 'info' : 'error')
+      },
+      onError: () => {
+        if (this.disposed || !this.visualSourceCurrent(handle)) return
+        this.notify('Copy failed', 'error')
+      },
+    })
+  }
+
+  /**
+   * Open one published SVG in the EXISTING leased image workspace, as its
+   * `svg-viewer` variant: the same physical screen lease, the same
+   * `preserveScreen` return stack and the same close owner as `/view-image`.
+   * The source string is captured immutably here; the viewer never re-derives
+   * publication authority and never starts a rasterizer of its own.
+   */
+  private openSvgViewer(handle: TranscriptVisualHandle): void {
+    const source = handle.publication.source
+    if (source.svg === undefined || source.svgSource === undefined) {
+      this.notify('Chart has no viewer', 'info')
+      return
+    }
+    if (!this.visualSourceCurrent(handle)) return
+    if (!this.canLeaseImageWorkspace()) return
+    const viewerSource: SvgViewerSource = {
+      title: source.svg.title,
+      svgSource: source.svgSource,
+      digest: source.svg.digest,
+      onCopy: () => this.copyVisualPayload(handle),
+    }
+    let record: WorkspaceLeaseRecord | undefined
+    const panel = new ImageWorkspacePanel({
+      rows: () => this.terminal.rows,
+      columns: () => this.terminal.columns,
+      requestRender: () => this.requestRender(),
+      ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
+      ...(this.svgRasterLoader === undefined ? {} : { svgLoader: this.svgRasterLoader }),
+      ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
+      theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
+      candidates: [],
+      resolve: () => undefined,
+      onStale: () => {
+        record?.close()
+        this.notify('the visual left the current transcript window', 'info')
+      },
+      onClose: () => record?.close(),
+      initial: { kind: 'svg-viewer', source: viewerSource },
+    })
+    this.svgViewerFence = { handle }
+    record = this.leaseWorkspaceScreen('image', panel, () => {
+      if (this.svgViewerFence?.handle === handle) this.svgViewerFence = undefined
+    })
+  }
+
+  /**
+   * Retire the SVG viewer when its source is no longer the current legit
+   * occurrence (a session switch, a newer final Assistant row, a replaced
+   * publication or a window change). The selection is display-only and dies
+   * with it; the raster subscription dies with the viewer's own dispose and
+   * the loader aborts only that variant's unused request.
+   */
+  private reconcileVisualViewerFence(): void {
+    const fence = this.svgViewerFence
+    if (fence === undefined) return
+    if (this.visualSourceCurrent(fence.handle)) return
+    this.svgViewerFence = undefined
+    this.visualSelection = undefined
+    this.closeLeasedWorkspaces('visual source changed')
   }
 
   /**
@@ -21930,7 +25239,7 @@ export class TuiApp {
    * report still colour the surface? It is never a persistence truth, and the runtime
    * owner keeps it because the persisted document lags a just-confirmed choice whose
    * write is still in flight. Every SELECTION site records it (the boot restore, the
-   * legacy `/settings` theme row, the Settings workspace, the reload re-apply and the
+   * `/settings` theme row, the Settings workspace, the reload re-apply and the
    * advanced host-state `setTheme`); DERIVED applies never do (a detection's own answer,
    * a scheme report, the plugin-unload fallback).
    */
@@ -21962,7 +25271,7 @@ export class TuiApp {
    *  runtime change — including one the workspace's own pending commit applied before
    *  its write settled. */
   private refreshSettingsWorkspaceFacts(): void {
-    const workspace = this.settingsWorkspace
+    const workspace = this.workspaceLease
     if (workspace === undefined || workspace.kind !== 'settings') return
     ;(workspace.panel as SettingsWorkspacePanel).rereadFacts()
   }
@@ -22193,7 +25502,7 @@ export class TuiApp {
     // nothing (and a switch to a manual theme would keep the subscription) until the
     // lease ended. Job and Settings are the two leases.
     this.jobWorkspace?.screen.setTerminalColorSchemeNotifications(following)
-    this.settingsWorkspace?.screen.setTerminalColorSchemeNotifications(following)
+    this.workspaceLease?.screen.setTerminalColorSchemeNotifications(following)
   }
 
   /**
@@ -22224,7 +25533,7 @@ export class TuiApp {
     // A Job or Settings workspace screen owns the terminal just like the
     // transcript alt screen: scheme reports arrive THERE while it is leased.
     if (this.jobWorkspace !== undefined) screens.push(this.jobWorkspace.screen)
-    if (this.settingsWorkspace !== undefined) screens.push(this.settingsWorkspace.screen)
+    if (this.workspaceLease !== undefined) screens.push(this.workspaceLease.screen)
     for (const screen of screens) {
       this.schemeDisposers.push(screen.onTerminalColorSchemeChange((scheme) => {
         for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
@@ -22269,10 +25578,11 @@ export class TuiApp {
     return this.approvals.showPrompt(request, agentInputWait)
   }
 
-  /** Headless-test hook: the number of live approval frames (a fullscreen
-   * swap must replace, not accumulate, them). */
-  ownedApprovalFramesForTest(): number {
-    return this.approvals.ownedFramesForTest()
+  /** Headless-test hook: the live approval action-sheet frame, or undefined
+   * when no prompt is presenting one (a fullscreen swap keeps the SAME frame;
+   * a settle/A→B replacement must never leak the previous one). */
+  approvalFrameForTest(): Component | undefined {
+    return this.approvals.activeFrame()
   }
 
   /**

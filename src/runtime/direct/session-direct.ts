@@ -10,7 +10,7 @@
  * `title`+`agentPreset` projection batch delegates to
  * `session-projection-direct.ts` (the official projection/cache ladder).
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-direct
  */
 
@@ -358,7 +358,7 @@ export class DirectSessionReader implements SessionReader {
       const snapshot = projections.snapshot(agent.session, ['contextPressure'])
       return contextPressureOccupancy(snapshot?.values?.contextPressure)
     } catch {
-      // The projection capability is best-effort here; the /status row falls
+      // The projection capability is best-effort here; the About context row falls
       // back to unmeasured.
       return undefined
     }

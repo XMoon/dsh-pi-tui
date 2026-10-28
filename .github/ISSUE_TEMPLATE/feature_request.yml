@@ -1,0 +1,65 @@
+name: Feature request
+description: Propose a product change or a new capability
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the outcome you want, not the implementation. If the work
+        already has an issue, add your use case there instead of opening a
+        duplicate.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: >
+        What is hard or impossible today? Describe the situation, not the
+        solution.
+      placeholder: >
+        There is no way to edit a single queued message; Ctrl+S steers every
+        queued occurrence at once.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What the user would be able to do after this change.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: locality
+    attributes:
+      label: Locality
+      description: >
+        Where the behavior lives. Host-owned behavior must not assume the
+        Client's cwd or filesystem equals the Host's.
+      options:
+        - Client-local (terminal UI, editor, local files)
+        - Host-owned (runs in the Host environment)
+        - Split (needs both sides, with an explicit seam)
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds, or another way to reach the same outcome.
+    validations:
+      required: false
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: >
+        A comparable capability elsewhere, a design document, or an upstream
+        contract.
+    validations:
+      required: false

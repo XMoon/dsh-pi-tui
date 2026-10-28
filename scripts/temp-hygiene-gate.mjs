@@ -21,10 +21,25 @@ import { pathToFileURL } from 'node:url'
 
 const FORBIDDEN_TOKEN = /\bmkdtemp(?:Sync)?\b/gu
 
-/** Files allowed to contain the tokens, relative to the test root. Each entry needs a reason. */
+/**
+ * Files allowed to contain the tokens. Each entry needs a reason.
+ *
+ * The entry names the file by its BASENAME, not by its path. The test tree
+ * is organised by production ownership, so a file moves between
+ * directories as the owners change — and a path-keyed allowlist breaks
+ * silently at every move: the gate then reports the allowlisted file as a
+ * violation, and the only way to make it green is to widen the list until
+ * it no longer means anything.
+ *
+ * A basename matches the file wherever it lives, so a move does not
+ * change the gate's verdict. The list stays tiny, and the reason explains
+ * why the file genuinely needs the token.
+ */
 export const ALLOWED_DIRECT_USAGE = [
-  { file: 'support/temp-lifecycle.ts', reason: 'the helper itself: the one place allowed to create test temp dirs' },
+  { file: 'temp-lifecycle.ts', reason: 'the helper itself: the one place allowed to create test temp dirs' },
   { file: 'temp-hygiene-gate.test.mjs', reason: 'the gate\'s own test fixtures must contain the forbidden tokens' },
+  { file: 'new-test-policy.test.mjs', reason: 'the policy gate\'s own fixture tree must be a disposable root, and its probe sources must contain the forbidden tokens' },
+  { file: 'production-reads-gate.test.mjs', reason: 'the reads gate\'s own fixture root must be a disposable tree' },
   { file: 'dev-bootstrap-ephemeral.test.mjs', reason: 'embedded fake-pnpm child script must create real temp dirs to drive the real source-pack script (contained by the runner)' },
   { file: 'dsh-source-identity.test.mjs', reason: 'embedded fake-pnpm child script must create real temp dirs to drive the real source-pack script (contained by the runner)' },
 ]
@@ -44,9 +59,45 @@ export function collectTestFiles(rootDir, files = []) {
   return files
 }
 
+/**
+ * Whether a file is allowed to contain the tokens.
+ *
+ * The allowlist names files by their BASENAME, so a file that moves
+ * between ownership directories keeps its verdict.
+ *
+ * A basename is only safe while it is UNIQUE in the tree. If two files
+ * share an allowed basename, the second one inherits the exemption — so
+ * the gate checks the uniqueness of every allowlisted basename and fails
+ * closed when one of them is ambiguous. A carve-out that a new file can
+ * silently take over is not a carve-out; it is a hole.
+ */
 function isAllowedFile(rootDir, file) {
   const rel = relative(rootDir, file).split('\\').join('/')
-  return ALLOWED_DIRECT_USAGE.some((allowed) => allowed.file === rel)
+  const basename = rel.slice(rel.lastIndexOf('/') + 1)
+  return ALLOWED_DIRECT_USAGE.some((allowed) => allowed.file === basename)
+}
+
+/**
+ * The allowlisted basenames that are NOT unique in the tree.
+ *
+ * @param {string} rootDir - the test root.
+ * @returns {string[]} the ambiguous basenames.
+ */
+export function ambiguousAllowlistEntries(rootDir) {
+  const counts = new Map()
+  for (const file of collectTestFiles(rootDir)) {
+    // The basename is taken from the POSIX form of the path: `join()`
+    // produces backslashes on Windows, and a basename extracted on `/`
+    // alone would be the WHOLE path there — so two files would never
+    // count as the same name and the uniqueness protection would not
+    // protect anything.
+    const posix = file.split('\\').join('/')
+    const basename = posix.slice(posix.lastIndexOf('/') + 1)
+    counts.set(basename, (counts.get(basename) ?? 0) + 1)
+  }
+  return ALLOWED_DIRECT_USAGE
+    .map((allowed) => allowed.file)
+    .filter(basename => (counts.get(basename) ?? 0) > 1)
 }
 
 /** Scan one source file's text; returns violations (file:line + matched token). */
@@ -62,6 +113,21 @@ export function scanSource(filePath, sourceText) {
 /** Scan a whole test root: discovers scannable files, allows the whitelist, reports the rest. */
 export function scanTree(rootDir) {
   const violations = []
+  // The allowlist is checked for AMBIGUITY FIRST, and the ambiguity is a
+  // violation of its own.
+  //
+  // The allowlist names a file by its BASENAME, so a second file with the
+  // same basename inherits the exemption: the gate would stay green while
+  // a file nobody reviewed creates temp dirs. The CLI caught that, but the
+  // CLI is not what CI runs — the guard TEST is — so the check has to be
+  // in the scan itself.
+  for (const basename of ambiguousAllowlistEntries(rootDir)) {
+    violations.push({
+      file: basename,
+      line: 0,
+      api: 'ambiguous-allowlist-entry',
+    })
+  }
   for (const file of collectTestFiles(rootDir)) {
     if (isAllowedFile(rootDir, file)) continue
     violations.push(...scanSource(file, readFileSync(file, 'utf8')))
@@ -70,8 +136,15 @@ export function scanTree(rootDir) {
 }
 
 function printViolations(violations) {
-  console.error(`temp-hygiene-gate: ${violations.length} mkdtemp* token(s) outside the allowed files`)
+  console.error(`temp-hygiene-gate: ${violations.length} violation(s)`)
   for (const violation of violations) {
+    if (violation.api === 'ambiguous-allowlist-entry') {
+      console.error('')
+      console.error(`  ${violation.file}`)
+      console.error('    two files share an allowed basename, so the second one inherits the')
+      console.error('    exemption. Narrow the entry to a path, or rename one of the files.')
+      continue
+    }
     console.error('')
     console.error(`  ${violation.file}:${violation.line}`)
     console.error(`    hit: ${violation.api}`)

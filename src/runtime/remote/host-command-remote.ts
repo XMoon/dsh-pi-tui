@@ -35,7 +35,7 @@ export interface RemoteCommandsSource {
     agentId: string,
     line: string,
     attachments: readonly unknown[],
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<RemoteCommandResult>
 }
 

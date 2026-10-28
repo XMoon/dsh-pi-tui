@@ -120,10 +120,18 @@ import { createSessionScopeAuthority, type LiveSessionScope } from '../app/sessi
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
+import {
+  createVisualEventSnapshotProvider,
+  type VisualEventSnapshotProvider,
+} from './bootstrap/visual-snapshot.ts'
+import { proveVisualLineage, type VisualLineageQuery } from './bootstrap/visual-lineage.ts'
 import type { SurfaceRendererMount } from '../app/surface/runtime.ts'
 import { productionTspConnector, selectRendererMount, tspRequested } from './bootstrap/renderer-selection.ts'
 import { createTerminalOutputGate } from './bootstrap/terminal-output.ts'
-import { createPluginManagerWorkspacePanel } from '../tui/plugin-manager/workspace.ts'
+import {
+  createPluginManagerWorkspacePanel,
+  type EmbeddedPluginPage,
+} from '../tui/plugin-manager/workspace.ts'
 import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { type WorkingDirectoryServiceLike } from '../runtime/direct/working-directory-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
@@ -480,6 +488,57 @@ export function applyRunnerWithRuntime(
     // guarded writer stays hoisted with the runner scope so the terminal-total
     // fatal catch (outside the startup IIFE) can disable focus reporting too.
 
+    /**
+     * The exact live Session the visual sidecar may read: the main Direct
+     * attachment, or the mounted viewed child's Agent. The selection/fence
+     * logic lives in the testable wiring helper; Remote returns undefined and
+     * keeps PR1's Tool/Work behavior.
+     *
+     * The ONE ancestry proof rides the same provider: a forked Session's
+     * inherited prefix is proven once per selected identity through the
+     * official `sessionQuery.observeSession()` read, and a settled proof asks
+     * the mounted surface for one repaint. Remote stays undefined because it
+     * has no trusted complete-log seam.
+     */
+    let visualEventSnapshotProvider: VisualEventSnapshotProvider | undefined
+    const visualEventSnapshotFor = (subject: {
+      readonly subjectKind: 'main' | 'viewed-child'
+      readonly subjectId: string | undefined
+    }) => {
+      visualEventSnapshotProvider ??= createVisualEventSnapshotProvider({
+        isRemote: () => remoteSources !== undefined,
+        mainAgent: () => agentNow(),
+        viewedChildAgent: () => viewerRef?.viewedChildAgent(),
+        lineage: {
+          prove: (sessionId) => {
+            const query = ctx.get('sessionQuery') as VisualLineageQuery | undefined
+            if (query === undefined || typeof query.observeSession !== 'function') {
+              return Promise.resolve({
+                spans: [],
+                unproven: `${sessionId}: the official sessionQuery service is unavailable`,
+              })
+            }
+            return proveVisualLineage(sessionId, query)
+          },
+          run: (label, task) => runDetached(label, task, {
+            diag,
+            sessionId: () => ownership.currentSessionId(),
+          }),
+          isCurrentSubject: (subject, session) => {
+            if (cleanedUp) return false
+            const live = subject.subjectKind === 'main' ? agentNow() : viewerRef?.viewedChildAgent()
+            return live !== undefined && (live as { readonly session?: object }).session === session
+          },
+          requestRepaint: () => {
+            if (cleanedUp) return
+            surface.repaint()
+          },
+          reportProblem: (message) => diag.debug('visual lineage unproven', { message }),
+        },
+      })
+      return visualEventSnapshotProvider(subject)
+    }
+
     // A4: the mounted surface's ONE application owner. It owns the concrete
     // surface state (the opening journal + the unified status projection store,
     // the footer's single input) and the notification/focus presentation from
@@ -507,6 +566,9 @@ export function applyRunnerWithRuntime(
       // implementation; the application surface owner consumes only the injected
       // factory and never imports `tui/**` itself.
       createPluginManagerPanel: createPluginManagerWorkspacePanel,
+      // The PR2 read-only visual snapshot supply: Direct main attachment or the
+      // mounted viewed child's exact Session, undefined on Remote.
+      visualEventSnapshotFor,
     })
 
     // The live Agent is declared before the TUI-facing facade so every read
@@ -628,12 +690,23 @@ export function applyRunnerWithRuntime(
      * consumes. It owns NO presentation semantics (no fold, no search, no
      * viewport, no status derivation).
      */
+    // The existing main Folder is created LATER in this composition (the
+    // presentation owner below); the bridge reads it through this late-bound
+    // seam only when a display `/copy` must prove the final-row identity. No
+    // second Folder is instantiated.
+    let mainFolderForBridge: (() => ReturnType<typeof presentation.mainFolder>) | undefined
     const presentationBridge = createPresentationBridge({
       remoteSources,
       currentSessionId: () => ownership.currentSessionId(),
       currentDirectAgent: () => agentNow(),
       assistantStreamBaselineFor: (agent) => assistantStreamBaselineFor(agent),
       directSessionFor: (sessionId) => command.attachmentForSession(sessionId).session,
+      mainFolder: () => mainFolderForBridge?.(),
+      currentGeneration: () => ownership.generation(),
+      mainVisualSnapshot: () => visualEventSnapshotFor({
+        subjectKind: 'main',
+        subjectId: ownership.currentSessionId(),
+      }),
     })
     /**
      * Whether the ownership subject captured at ADMISSION is still the CURRENT
@@ -1283,6 +1356,7 @@ export function applyRunnerWithRuntime(
         },
       }),
     })
+    mainFolderForBridge = () => presentation.mainFolder()
 
     /**
      * The Remote branch's live ingress handle for the CURRENT session
@@ -1696,9 +1770,19 @@ export function applyRunnerWithRuntime(
       surface: {
         setNotificationMode: (mode) => surface.setNotificationMode(mode),
         setNotificationMethod: (method) => surface.setNotificationMethod(method),
+        currentNotificationMode: () => surface.currentNotificationMode(),
+        currentNotificationMethod: () => surface.currentNotificationMethod(),
         setTerminalProgressMode: (mode) => surface.setTerminalProgressMode(mode),
         openJobView: (jobId) => surface.openJobView(jobId),
         openTasksBrowser: (viewMode) => surface.openTasksBrowser(viewMode),
+        // Image UX PR3-B: the LIVE composer of the mounted renderer. Command
+        // registration runs AFTER the mount, so this getter (never an eagerly
+        // captured value) is what the attachment intake reads.
+        composer: () => surface.composer,
+        // Delivered files (PR1 / M2): the surface's own display-subject
+        // decision, exposed as a function-type read capability. The runner
+        // forwards it to `/deliverables`; no Folder instance crosses the seam.
+        deliveredFilesSnapshot: () => surface.deliveredFilesSnapshot(),
       },
       backend: {
         kind: selectedRuntime.kind,
@@ -1732,9 +1816,17 @@ export function applyRunnerWithRuntime(
       },
       status: {
         forceContextMeasurement: () => status.forceContextMeasurement(),
+        forceContextMeasurementResult: () => status.forceContextMeasurementResult(),
         sessionCwd: () => status.sessionCwd(),
         refresh: () => status.refresh(),
         updateWelcomeCard: () => status.updateWelcomeCard(),
+        // C3 (owner ruling on RFL-A-017): the ONE session-scope invalidation
+        // trigger — the SessionOwnershipCore's payload-less owner/generation
+        // notification, forwarded strictly unchanged (no alternate observer,
+        // no polling). This REPLACES the StatusStore subscription: the
+        // store's content-equality suppression can never carry a scope-
+        // identity signal.
+        subscribeSessionScopeInvalidation: (listener) => ownership.subscribeScopeInvalidation(listener),
       },
       settings: {
         applyFooterSettings: (doc, saved) => settings.applyFooterSettings(doc, saved),
@@ -1768,8 +1860,12 @@ export function applyRunnerWithRuntime(
         clearError: (ref) => extensionService?._clearRegistryError(ref),
       },
       pluginManager: {
-        open: () => pluginManager.open(),
-        page: (done) => pluginManager.page(done),
+        // The composition zone KNOWS the concrete panel it injected below
+        // (`createPluginManagerWorkspacePanel`): this is the ONE narrowing from
+        // the UI-neutral `Component` the surface runtime hands back to the
+        // Settings-only page contract. The application layer stays UI-neutral.
+        page: (onYieldNavigation) =>
+          pluginManager.page(onYieldNavigation) as EmbeddedPluginPage | undefined,
       },
       client: {
         get runCopyCommand() { return clientActions.runCopyCommand },
@@ -1798,7 +1894,7 @@ export function applyRunnerWithRuntime(
         },
         // TPS plan PR-2: the measured performance values come from the SAME
         // Session's own Host `piTuiPerformance` projection on BOTH branches —
-        // the /status subject is the session id this seam was asked about.
+        // the About subject is the session id this seam was asked about.
         sessionStats: (sessionId, signal) => remoteSources === undefined
           ? Promise.resolve(sessionStatsFactsOf(
               presentationBridge.directSessionStats(sessionId),
@@ -1908,8 +2004,15 @@ export function applyRunnerWithRuntime(
           return backend.sessionReader.sessionStatus(sessionId)?.permission
         },
         presetNames: () => [...backend.config.permissions.presetNames()],
+        // The cycle gesture owns no cancellation controller of its own: its
+        // write rides THIS runner's existing lifetime signal. An explicit
+        // caller signal (when one exists) still wins.
         apply: (sessionId, presetId, signal) =>
-          backend.config.permissions.applyPermissionPreset(sessionId, presetId, signal),
+          backend.config.permissions.applyPermissionPreset(
+            sessionId,
+            presetId,
+            signal ?? lifecycleController.signal,
+          ),
       },
       generation: () => ownership.generation(),
       currentSessionId: () => ownership.currentSessionId(),
@@ -2180,7 +2283,7 @@ export function applyRunnerWithRuntime(
     // double-cleanup or double-exit. Only the FIRST cancel is brought forward;
     // the full retirement (idle → descendants → flush → dispose) is still NOT
     // awaited here — it runs inside the application-tree disposal that appExit
-    // starts, under the DSH process-shutdown watchdog (see docs/concurrency.md).
+    // starts, under the DSH process-shutdown watchdog (see docs/architecture/concurrency.md).
     const { requestExit } = createExitController({
       diag,
       cleanup: surfaceLifecycle.disposeSurface,
@@ -2390,6 +2493,11 @@ export function applyRunnerWithRuntime(
       supportsModelPickerUi: () => surface.modelPresentation !== undefined,
       supportsPresetPickerUi: () => surface.presetPresentation !== undefined,
        supportsSessionBrowserUi: () => surface.sessionBrowserPresentation !== undefined,
+      // B3-A3: the ONE Task Center capability of the CURRENTLY mounted display
+      // seam (PiTui = true, TSP = its negotiated kinds). Read live at the
+      // post-classification admission, so the SDK-decline PiTui fallback keeps
+      // its own truth instead of an env-string guess.
+      supportsTaskCenterUi: () => surface.display.supportsTaskCenter,
       // PR3-B §7.3 (F2): PiTui retains a stale submission's draft restore
       // across a switch (its contract); the TSP renderer's committed switch
       // DROPPED the outgoing draft, so the stale restore is suppressed.
@@ -2606,6 +2714,15 @@ export function applyRunnerWithRuntime(
           onFatal: rendererOnFatal,
           log: (message, fields) => diag.info(message, fields),
           logError: (message, fields) => diag.error(message, fields),
+          // PR-B1: the SAME bridge the PiTui renderer consumes. The TSP
+          // renderer reads it ONLY to prove a tool row's target kind; the
+          // Direct/Remote locality is the bridge's own (a Direct lookup of
+          // the scoped registry, a Remote derivation from the raw args).
+          toolPresenter: present,
+          // PR3: the ONE Client-local clipboard callback for a published
+          // visual's authoritative payload. Clipboard policy stays in
+          // ClientActions; the renderer only forwards the exact payload.
+          copyVisual: text => clientActions.copySelection(text),
         }),
         env: process.env,
       })
@@ -2782,9 +2899,51 @@ export function applyRunnerWithRuntime(
       // leg — otherwise a remote host helper would strand the copy in the
       // remote clipboard.
       copySelection: (text) => clientActions.copySelection(text),
+      // Delivered files (PR1): the surface's own display-subject decision,
+      // exposed to the mounted renderer as the narrow two-function capability.
+      // The TUI never sees the Folder or the runtime object.
+      deliveredFiles: {
+        snapshot: () => surface.deliveredFilesSnapshot(),
+        isCurrent: (snapshot) => surface.isDeliveredFilesSnapshotCurrent(snapshot),
+      },
+      // Delivered files (PR2): the Host READ port, BOUND to the snapshot's own
+      // display subject. The app reselects no session of its own and never
+      // falls back to the Client filesystem; an assembly without the port gets
+      // the definite unavailable state.
+      deliveredFilePreview: (snapshot) => {
+        const port = backend.deliveredFileRead
+        return {
+          stat: (path: string, signal: AbortSignal) => port.stat(snapshot.sessionId, path, signal),
+          // The PORT owns the page size; the capability never passes one.
+          read: (path: string, offset: number, signal: AbortSignal) =>
+            port.read(snapshot.sessionId, path, offset, signal),
+        }
+      },
+      reportDeliveredFileFailure: (message, error) => {
+        // Structured, never a swallowed failure: the unclassified cause stays
+        // readable in the diagnostics channel beside the message.
+        diag.error(message, {
+          error: error instanceof Error ? (error.stack ?? error.message) : String(error),
+        })
+      },
       // Headless-test seam (M3-4 PR3 image L6): the live image draft store.
       // Production paths never read it.
       draftImageStoreForTest: draftImages,
+      // Image UX PR1: the composer preview reads the SAME store through a
+      // READ-ONLY projection. The Store owns the bytes and the bounded
+      // undo-retention budget; the host fork Editor owns the real Undo
+      // history. The bridge reservation is scoped to one synchronous submit
+      // dispatch. No second writer/table.
+      draftImagePreviewSource: {
+        values: () => draftImages.values(),
+      },
+      draftImagePreviewLiveDraft: (read) => draftImages.setLiveDraftTextSource(read),
+      draftImagePreviewReserve: (text) => draftImages.pinReferenced(text),
+      draftImagePreviewUndo: {
+        registerUndoOwner: (owner, retireDraftImage) => draftImages.registerUndoOwner(owner, retireDraftImage),
+        releaseUndoForOwner: (owner) => draftImages.releaseUndoForOwner(owner),
+        reconcileUndoOwner: (owner, placeholders) => draftImages.reconcileUndoOwner(owner, placeholders),
+      },
       // Fullscreen OSC 8 link clicks + the Windows right-click paste: the alt
       // screen's mouse capture swallows both native behaviors, so the host
       // opens http/https links itself and reads the clipboard through the same
@@ -2862,7 +3021,7 @@ export function applyRunnerWithRuntime(
       // the TuiSettingsConfig port is get/replace only, a future Remote
       // adapter cannot map a callback across the process boundary, and the
       // migration rule forbids callbacks across the wire (see
-      // docs/client-server-migration.md). A settings edit takes effect after
+      // docs/architecture/host-client.md). A settings edit takes effect after
       // `/keybindings reload`; the fail-soft parser above keeps the keymap's
       // last-known-good state on any read/parse error.
       // M2: the plugin contributions compile into the effective keymap at the

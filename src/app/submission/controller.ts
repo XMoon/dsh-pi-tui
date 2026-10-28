@@ -240,6 +240,13 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   /** The installed native Session Browser presenter, including its capabilities. */
   readonly supportsSessionBrowserUi?: () => boolean
   /**
+   * B3-A3: the mounted renderer's ONE Task Center capability
+   * (`SurfaceDisplaySeam.supportsTaskCenter`). It admits the `/tasks` +
+   * `/subagents` family ONLY; the winner still comes from the existing
+   * classifier and the handler stays the unchanged registered one.
+   */
+  readonly supportsTaskCenterUi?: () => boolean
+  /**
    * PR3-B §7.3 (F2): whether this renderer RETAINS a stale submission's
    * draft restore across a session switch. PiTui = true (steer.test.ts's
    * restore family is its contract); the TSP renderer = false (its
@@ -1361,7 +1368,12 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         if (deps.isCleanedUp()) return
         if (result !== undefined && result.kind === 'error') {
           if (bridgeCommandRef !== undefined) deps.extensions.recordError(bridgeCommandRef, new Error(result.text))
-          deps.app().notify(result.text)
+          // A returned refusal IS an error: the renderer must classify it as
+          // one. The card-less Client-registry branch above has always passed
+          // `'error'`; without it the local route published the same refusal as
+          // an ordinary info notice, so a renderer that marks only errors (the
+          // TSP Dock's `!` prefix) showed a bare line for a real refusal.
+          deps.app().notify(result.text, 'error')
         } else if (bridgeCommandRef !== undefined) {
           deps.extensions.clearError(bridgeCommandRef)
         }
@@ -1722,6 +1734,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         modelPicker: deps.supportsModelPickerUi?.() === true,
         presetPicker: deps.supportsPresetPickerUi?.() === true,
         sessionBrowser: deps.supportsSessionBrowserUi?.() === true,
+        taskCenter: deps.supportsTaskCenterUi?.() === true,
       }, parsed.rawInput)
       // ONLY the TUI-owned builtin family is this gate's business. A Host
       // command, an extension contribution, a skill invocation or an ordinary

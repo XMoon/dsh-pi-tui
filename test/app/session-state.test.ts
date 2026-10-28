@@ -1,0 +1,2235 @@
+/**
+ * Headless tests for session-scoped state isolation: the skill command
+ * catalog refresh race (an old session's late refresh must not clobber the
+ * new session's commands) and the TuiApp per-session override clearing.
+ * @module @xmoon76/dsh-pi-tui/session-state.test
+ */
+
+import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
+import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
+import { afterEach, test } from 'node:test'
+import { Context } from '@deepseek-ai/cordis'
+import type { Agent, ModelSelection } from '@deepseek-ai/dsh-agent'
+import { TuiApp } from '../../src/tui-app.ts'
+import { LOCAL_COMMANDS } from '../../src/index.ts'
+import { CatalogRefreshCoordinator } from '../../src/app/command/catalog-refresh.ts'
+import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
+import { TransitionInProgressError } from '../../src/app/session/operation-barrier.ts'
+import { SessionScopeSupersededError } from '../../src/app/session/scope.ts'
+import { readSurfaceCatalog, type SurfaceCatalogContext } from '../../src/runtime/direct/surface-catalog.ts'
+import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import { darkColors, lightColors } from '../../src/domain/display/theme.ts'
+import { currentPalette } from '../../src/tui/theme/runtime.ts'
+import { ThemeRegistry } from '../../src/extension/internal/theme-registry.ts'
+import { SettingsRegistry } from '../../src/extension/internal/settings-registry.ts'
+import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { sessionScopeFacts } from '../support/session-scope-facts.ts'
+import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
+import { DefaultIntentTracker } from '../../src/app/command/model-default-intent.ts'
+import { DirectModelSelectionOwner } from '../../src/runtime/direct/model-selection-direct.ts'
+import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
+import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
+import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import {
+  confirmSettingsChoice,
+  openSettingsChoice,
+  openSettingsRows,
+  paintedDetailsText,
+  paintedSelectedRowCell,
+  selectSettingsChoice,
+  selectSettingsRow,
+  settingsDetailsPaneStart,
+} from '../support/settings-workspace-navigation.ts'
+import { stripTerminalSequences } from '@xmoon76/pi-tui'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/tui/process-slot.ts). */
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+afterEach(() => {
+  disposeStartedApps()
+})
+
+// themeOptOut() skips terminal queries under NO_COLOR / FORCE_COLOR=0 /
+// CI=true — CI runners export CI=true, which would short-circuit the
+// autodetect paths this suite drives through the /settings panel. Clear all
+// three (the tests inject terminal replies, so the opt-out only masks the
+// code under test).
+process.env.NO_COLOR = ''
+process.env.FORCE_COLOR = ''
+process.env.CI = ''
+
+/** A promise the test resolves manually, to stage late completions. */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(res => { resolve = res })
+  return { promise, resolve }
+}
+
+/** A minimal fake agent whose identity marks which session a refresh ran for. */
+function fakeAgent(sessionId: string): Agent {
+  // The alpha.4 Session shape over a private backing log.
+  const events: unknown[] = []
+  const session = {
+    id: sessionId,
+    header: { cwd: '/ws' },
+    get seq() { return events.length },
+    eventAt: (seq: number) => events[seq],
+    snapshotEvents: () => Object.freeze([...events]),
+    append: (type: string, data: unknown) => {
+      const event = { type, seq: events.length, time: Date.now(), data }
+      events.push(event)
+      return event
+    },
+  }
+  const agentContext = {
+    get: () => undefined,
+    on: () => () => {},
+    agent: undefined as Agent | undefined,
+  }
+  const agent = {
+    session,
+    ctx: agentContext,
+    options: { provider: 'p', model: 'm' },
+  } as unknown as Agent
+  agentContext.agent = agent
+  return agent
+}
+
+/** A stub runner with a MUTABLE generation and live agent (the test plays
+ * the session switch by mutating state). */
+/** The TuiApp the migrated Settings cases use: the REAL owned-task writer
+ *  entry plus the process-slot lifecycle guard. */
+function newSettingsApp(vt: VirtualTerminal): TuiApp {
+  const app = new TuiApp(vt, {
+    onSubmit: () => {},
+    onExit: () => {},
+    runOwned: (_label, task, runOptions) => {
+      void Promise.resolve()
+        .then(() => task())
+        .then(
+          result => runOptions.onResult?.(result),
+          error => runOptions.onError?.(error),
+        )
+    },
+  })
+  app.start()
+  startedApps.add(app)
+  return app
+}
+
+/** SGR primary-button press+release at a 0-based viewport cell (real mouse). */
+async function clickSettingsCell(vt: VirtualTerminal, x: number, y: number): Promise<void> {
+  vt.sendInput(`\x1b[<0;${x + 1};${y + 1}M`)
+  vt.sendInput(`\x1b[<0;${x + 1};${y + 1}m`)
+  await vt.waitForRender()
+}
+
+const settingsPlain = (vt: VirtualTerminal): readonly string[] =>
+  vt.getViewport().map(stripTerminalSequences)
+
+/** The physical cell of one painted Details-pane text (0-based). */
+function settingsDetailsCell(vt: VirtualTerminal, needle: string): { x: number; y: number } {
+  const start = settingsDetailsPaneStart(vt)
+  const lines = settingsPlain(vt)
+  for (const [y, line] of lines.entries()) {
+    const at = line.slice(start).indexOf(needle)
+    if (at >= 0) return { x: start + at + 1, y }
+  }
+  throw new Error(`the Details pane must paint ${JSON.stringify(needle)}:\n${lines.join('\n')}`)
+}
+
+/** The physical cell of one painted Rows-pane text (0-based). */
+function settingsRowsCell(vt: VirtualTerminal, needle: string): { x: number; y: number } {
+  const lines = settingsPlain(vt)
+  const start = lines.find(line => line.includes('[Rows ('))?.indexOf('[Rows (') ?? 0
+  for (const [y, line] of lines.entries()) {
+    const at = line.slice(start).indexOf(needle)
+    if (at >= 0) return { x: start + at + 1, y }
+  }
+  throw new Error(`the Rows pane must paint ${JSON.stringify(needle)}:\n${lines.join('\n')}`)
+}
+
+function stubRunner(
+  ctx: Context,
+  app: TuiApp,
+  state: { agent: Agent | undefined; generation: number },
+  diag: ReturnType<typeof createDiag> = createDiag({ filePath: undefined, stderrLevel: 'off' }),
+): TuiCommandRunner {
+  // The REAL pure intent machine (the same class the production runner uses),
+  // so the command-level tests exercise the authoritative state machine.
+  const defaultIntent = new DefaultIntentTracker<ModelSelection>()
+  const owner = new DirectModelSelectionOwner({ currentSelection: () => ({ provider: 'p', model: 'default-model' }) })
+  return {
+    ctx,
+    app,
+    deliveredFilesSnapshot: () => undefined,
+    diag,
+    ...sessionScopeFacts(() => state.agent, () => state.generation),
+    get currentSessionId() { return state.agent?.session.id },
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => defaultIntent.intent
+      ?? (ctx.get('agentDefaultModel') as { currentSelection(): ModelSelection } | undefined)?.currentSelection(),
+    get defaultIntent() { return defaultIntent.intent },
+    get defaultIntentRecord() { return defaultIntent.record },
+    setDefaultIntent: (next) => { defaultIntent.set(next) },
+    settleIntent: (id, outcome) => { defaultIntent.settle(id, outcome) },
+    tuiSettings: undefined,
+    applyFooterSettings: () => {},
+    agents: {} as never,
+    sessionReader: {
+      list: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
+    },
+    catalog: new DirectCatalogPort(ctx as never, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined, owner),
+    config: new DirectConfigPort(ctx as never, undefined, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
+    commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
+    clientCommands: createClientCommandRegistry(parseCommand),
+    hostFile: new DirectHostFilePort((sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
+    interaction: {
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
+      onApprovalRequest: () => {},
+      setApprovalPolicy: () => true,
+    },
+    sessionWriter: {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      // The /title tests provide a fake sessionTitle service on the ctx;
+      // the stub writer routes to it exactly like the Direct adapter
+      // (identity-based: the sessionId resolves to the live session).
+      rename: async (sessionId, name) => {
+        const titles = ctx.get('sessionTitle') as { rename(s: unknown, n: string): unknown } | undefined
+        if (titles === undefined) return { kind: 'rejected' as const, error: { code: 'service/unavailable', message: 'session title service unavailable' } }
+        const snapshot = titles.rename({ id: sessionId } as never, name) as { title?: unknown } | undefined
+        return { kind: 'committed' as const, value: { title: typeof snapshot?.title === 'string' ? snapshot.title : name } }
+      },
+      refreshTitle: async (sessionId, signal) => {
+        const titles = ctx.get('sessionTitle') as { refresh(s: unknown, signal: AbortSignal): Promise<{ title: string } | undefined> } | undefined
+        if (titles === undefined) return { kind: 'unsupported' as const, reason: 'session title service unavailable' }
+        const regenerated = await titles.refresh({ id: sessionId } as never, signal)
+        return { kind: 'ok' as const, title: regenerated?.title }
+      },
+    },
+    cwd: '/ws',
+    sessionCwd: () => '/ws',
+    imageStore: new DraftImageStore(),
+    copyToClipboard: async () => true,
+    imageLimits: () => undefined,
+    insertIntoEditor: () => {},
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    pendingPreset: undefined,
+    effectivePresetId: undefined,
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    get defaultIntentOutcome() { return defaultIntent.outcome },
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: (persisted) => {
+      if (persisted === undefined) return
+      defaultIntent.reconcile(selection => persisted.provider === selection.provider
+        && persisted.model === selection.model
+        && persisted.reasoningEffort === selection.reasoningEffort)
+    },
+    sessionBlank: () => undefined,
+    refreshStatus: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
+    focusEnabled: () => false,
+    setFocusMode: () => {},
+    setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
+    updateWelcomeCard: () => {},
+    openJobView: () => {},
+    createPluginManagerPage: () => undefined,
+    // The merged /tasks browser: jobs + subagents, Enter routes to
+    // openJobView through `this` so a Proxy-wrapped runner can spy on it.
+    openTasksBrowser() {
+      const jobs = ctx.get('jobs') as
+        | { list: (agent: never) => { id: string; kind: string; label: string; status: string; startedAt: number; detail?: string }[] }
+        | undefined
+      const snapshots = jobs?.list(state.agent as never) ?? []
+      app.openTaskBrowser(
+        snapshots.map(job => ({
+          value: job.id,
+          label: `${job.kind} · ${job.label}`,
+          status: job.status,
+          detail: job.detail,
+          startedAt: job.startedAt,
+          group: 'jobs',
+        })),
+        (value) => { this.openJobView(value); return 'close' },
+        () => {},
+        { mode: 'full', header: 'tasks', enableSearch: true },
+      )
+    },
+    openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {},
+    requestExit: () => {},
+    extensions: { themes: new ThemeRegistry(), settings: new SettingsRegistry() } as never,
+    exit: () => {},
+  }
+}
+
+/** A fake commands service recording registrations, and a fake skills
+ * service whose catalog is controllable per agent. Catalog entries carry
+ * the official invocation policy so the user-invocation filter can run. */
+type FakeSkillEntry = { name: string; description: string; invocation: { modelInvocable: boolean; userInvocable: boolean } }
+function fakeServices() {
+  const registered: string[] = []
+  const defs: { name: string; handler?: unknown }[] = []
+  const disposers = new Map<string, () => void>()
+  const catalogs = new Map<object, { promise: Promise<readonly FakeSkillEntry[]>; resolve: (v: readonly FakeSkillEntry[]) => void }>()
+  const commands = {
+    register: (def: { name: string; handler?: unknown }): (() => void) => {
+      registered.push(def.name)
+      defs.push(def)
+      const disposer = (): void => {
+        const index = registered.indexOf(def.name)
+        if (index !== -1) registered.splice(index, 1)
+      }
+      disposers.set(def.name, disposer)
+      return disposer
+    },
+    list: () => [{ name: 'builtin', description: 'a builtin', input: { hint: '' } }],
+    find: () => undefined,
+    execute: async () => undefined,
+  }
+  const skills = {
+    list: (options: { scope?: object }): Promise<readonly FakeSkillEntry[]> => {
+      const scope = options.scope ?? {}
+      const existing = catalogs.get(scope)
+      if (existing !== undefined) return existing.promise
+      const gate = deferred<readonly FakeSkillEntry[]>()
+      catalogs.set(scope, gate)
+      return gate.promise
+    },
+    get: async () => undefined,
+  }
+  return {
+    registered,
+    defs,
+    catalogs,
+    commands: { ...commands, dispose: (name: string) => disposers.get(name)?.() },
+    skills,
+  }
+}
+
+test('the live session cwd the retired Working-directory row showed still follows the session owner', async () => {
+  // Frozen R6 decision: the new Settings surface does NOT add a Working
+  // directory row (the old read-only row was a legacy-editor fact). The
+  // SEMANTIC capability is proven on the runner seam the surface reads: the
+  // surface cwd follows the live session owner's header, never a stale open.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = newSettingsApp(vt)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const alpha = fakeAgent('session-a')
+  ;(alpha.session as unknown as { header: { cwd: string } }).header.cwd = '/ws/alpha'
+  const state: { agent: Agent | undefined; generation: number } = { agent: alpha, generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'sessionCwd') {
+        return (): string => state.agent === undefined
+          ? '/ws'
+          : (state.agent.session as unknown as { header: { cwd: string } }).header.cwd
+      }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  assert.equal(proxy.sessionCwd(), '/ws/alpha', 'the live session owner decides the surface cwd')
+  // A session switch to another workspace must move the fact on the next read.
+  const beta = fakeAgent('session-b')
+  ;(beta.session as unknown as { header: { cwd: string } }).header.cwd = '/ws/beta'
+  state.agent = beta
+  state.generation += 1
+  assert.equal(proxy.sessionCwd(), '/ws/beta', 'the fact follows the live session, never a snapshot')
+  app.stop()
+})
+
+test('the Appearance Theme row reaches Rows → Detail → Choice with REAL mouse input and an explicit Confirm', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = newSettingsApp(vt)
+  try {
+    const services = fakeServices()
+    ctx.provide('commands', services.commands as never)
+    const userFooterCustomItems = [{ schemaVersion: 1, id: 'user:prod', kind: 'text', text: 'PROD' }]
+    ctx.provide('settings', {
+      describe: () => [{ ns: 'tui-app', value: {}, user: { footerCustomItems: userFooterCustomItems } }],
+    } as never)
+    const doc: Record<string, unknown> = {
+      theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
+      busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
+    }
+    const persisted: unknown[] = []
+    const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+    Object.assign(runner, {
+      tuiSettings: {
+        get: () => doc as never,
+        replace: (next: Record<string, unknown>) => {
+          persisted.push(next.theme)
+          Object.assign(doc, next)
+          return next
+        },
+      },
+    })
+    registerTuiCommandsWithDirectSeams(runner)
+    const settingsDef = services.defs.find(def => def.name === 'settings')
+    assert.ok(settingsDef?.handler !== undefined)
+    const invoke = (): unknown => (settingsDef!.handler as () => unknown)()
+    await openSettingsRows(vt, invoke, 'Appearance')
+    await selectSettingsRow(vt, 'Configured theme')
+    // REAL mouse press/release on the painted Rows cell selects the row.
+    const rowCell = settingsRowsCell(vt, 'Configured theme')
+    await clickSettingsCell(vt, rowCell.x, rowCell.y)
+    assert.match(paintedSelectedRowCell(vt) ?? '', /^Configured theme/u, 'the click selected its own painted row')
+    // Enter opens the native choice; a REAL mouse click picks the candidate
+    // (a preview, never a write), and the explicit Confirm dispatches it.
+    await openSettingsChoice(vt)
+    const lightCell = settingsDetailsCell(vt, 'light')
+    await clickSettingsCell(vt, lightCell.x, lightCell.y)
+    assert.equal(persisted.length, 0, 'selecting a candidate by mouse never writes')
+    vt.sendInput('\r') // the ONE explicit Confirm
+    await vt.waitForRender()
+    for (let round = 0; round < 12 && persisted.length === 0; round += 1) await vt.waitForRender()
+    assert.equal(persisted.length, 1, 'the explicit Confirm dispatched exactly one write')
+    assert.equal(persisted[0], 'light')
+    assert.equal(doc.theme, 'light', 'the document stores the builtin choice')
+    assert.deepEqual(doc.footerCustomItems, userFooterCustomItems,
+      'the USER custom-item storage rides the write verbatim')
+    assert.equal(app.currentTheme(), 'light', 'the runtime palette really changed')
+    assert.match(paintedDetailsText(vt), /Status\s+Verified/u)
+  } finally {
+    app.stop()
+  }
+})
+
+test('the Appearance Theme write refuses an unreadable USER custom-item layer without promoting project data', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = newSettingsApp(vt)
+  try {
+    const services = fakeServices()
+    ctx.provide('commands', services.commands as never)
+    // No `settings` service: the Direct adapter cannot read the USER layer, so
+    // a whole-document write must abort instead of promoting the project value.
+    const projectFooterCustomItems = [{ schemaVersion: 1, id: 'user:project', kind: 'text', text: 'PROJECT' }]
+    const doc: Record<string, unknown> = {
+      theme: 'dark', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
+      busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
+      footerCustomItems: projectFooterCustomItems,
+    }
+    const persisted: Record<string, unknown>[] = []
+    const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+    Object.assign(runner, {
+      tuiSettings: {
+        get: () => doc as never,
+        replace: (next: Record<string, unknown>) => {
+          persisted.push(next)
+          Object.assign(doc, next)
+          return next
+        },
+      },
+    })
+    registerTuiCommandsWithDirectSeams(runner)
+    const settingsDef = services.defs.find(def => def.name === 'settings')
+    assert.ok(settingsDef?.handler !== undefined)
+    await openSettingsRows(vt, () => (settingsDef!.handler as () => unknown)(), 'Appearance')
+    await selectSettingsRow(vt, 'Configured theme')
+    await confirmSettingsChoice(vt, 'light', async () => (await paintedDetailsText(vt)).includes('Not saved'))
+    assert.deepEqual(persisted, [], 'an unavailable USER projection aborts the unrelated settings write')
+    assert.equal(doc.theme, 'dark', 'the merged document stays untouched when the write is aborted')
+    assert.deepEqual(doc.footerCustomItems, projectFooterCustomItems, 'the project value is never promoted')
+    const detail = paintedDetailsText(vt)
+    assert.match(detail, /Not saved/u)
+    assert.doesNotMatch(detail, /Status\s+Verified/u, 'a refused write is never Verified')
+    assert.match(detail, /Value\s+dark/u, 'the stored fact still names the semantic value')
+  } finally {
+    app.stop()
+  }
+})
+
+test('a Theme candidate whose source unloaded before the Confirm is refused without persisting or rolling a false value', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = newSettingsApp(vt)
+  try {
+    const services = fakeServices()
+    ctx.provide('commands', services.commands as never)
+    ctx.provide('settings', {
+      describe: () => [{ ns: 'tui-app', value: {}, user: { footerCustomItems: [] } }],
+    } as never)
+    const doc: Record<string, unknown> = {
+      theme: 'auto', iconStyle: 'emoji', footer: 'default', fullscreen: 'off',
+      busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'input', focusMode: 'off', wheelScrollLines: '1',
+    }
+    const persisted: unknown[] = []
+    const registry = new ThemeRegistry()
+    const handle = registry.register(
+      { id: 'solarized', name: 'Solarized', palette: { text: '#123456' } as never },
+      'owner-a-owner',
+      'owner-a',
+    )
+    const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+    Object.assign(runner, {
+      tuiSettings: {
+        get: () => doc as never,
+        replace: (next: Record<string, unknown>) => {
+          persisted.push(next.theme)
+          Object.assign(doc, next)
+          return next
+        },
+      },
+      extensions: { themes: registry, settings: new SettingsRegistry() } as never,
+    })
+    registerTuiCommandsWithDirectSeams(runner)
+    const settingsDef = services.defs.find(def => def.name === 'settings')
+    assert.ok(settingsDef?.handler !== undefined)
+    await openSettingsRows(vt, () => (settingsDef!.handler as () => unknown)(), 'Appearance')
+    await selectSettingsRow(vt, 'Configured theme')
+    await openSettingsChoice(vt) // the frozen choice still paints the plugin row
+    // HMR: the contribution unloads between the open and the Confirm.
+    handle.dispose()
+    assert.equal(registry.paletteForSelectable('plugin:owner-a/solarized'), undefined,
+      'the source is really gone at confirm time')
+    await selectSettingsChoice(vt, 'plugin:owner-a/solarized')
+    vt.sendInput('\r') // Confirm the stale identity
+    await vt.waitForRender()
+    for (let round = 0; round < 12 && !(await paintedDetailsText(vt)).includes('Not saved'); round += 1) {
+      await vt.waitForRender()
+    }
+    const detail = paintedDetailsText(vt)
+    assert.deepEqual(persisted, [], 'a stale source never persists')
+    assert.equal(doc.theme, 'auto', 'the committed choice is unchanged')
+    assert.match(detail, /Not saved/u)
+    assert.match(detail, /no longer available/u, 'the real refusal reason is stated')
+    assert.doesNotMatch(detail, /Status\s+Verified/u)
+    assert.ok((paintedSelectedRowCell(vt) ?? '').includes('auto'),
+      'the row states the committed choice, never the stale identity')
+  } finally {
+    app.stop()
+  }
+})
+
+test('/tasks Enter opens the job detail through the shared openJobView', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('jobs', {
+    list: () => [{ id: 'bash-1', kind: 'bash', label: 'pnpm build', status: 'completed', startedAt: Date.now(), detail: 'exit code: 0' }],
+  } as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const opened: string[] = []
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'openJobView') return (id: string): void => { opened.push(id) }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const tasksDef = services.defs.find(def => def.name === 'tasks')
+  assert.ok(tasksDef?.handler !== undefined, 'tasks handler missing')
+  ;(tasksDef!.handler as () => unknown)()
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('bash · pnpm build'), `job row missing:\n${view}`)
+  // Enter on the row must open the detail — completed jobs are reachable
+  // exactly through this path (the ↓ trigger only arms while one runs).
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.deepEqual(opened, ['bash-1'], '/tasks selection must route to openJobView')
+  app.stop()
+})
+
+test('a stale catalog refresh cannot install commands into a newer session', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const installed = registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
+  // A coordinator over the real surface hooks: the post-mount refresh owner.
+  const coordinator = new CatalogRefreshCoordinator({
+    readAgent: (agent, signal) => readSurfaceCatalog(agent as never, signal, ctx as unknown as SurfaceCatalogContext),
+    readStanding: async () => { throw new Error('not used') },
+    installSnapshot: installed.installSnapshot,
+    enterCatalogTransition: installed.enterTransition,
+  }, new AbortController().signal, createDiag({ filePath: undefined, stderrLevel: 'off' }))
+
+  // Session A's refresh starts and hangs on the catalog fetch.
+  const refreshA = coordinator.refresh({
+    source: 'live-session',
+    target: { kind: 'agent', key: state.generation },
+    agent: state.agent,
+  })
+  // The session switches to B while A's catalog is still loading.
+  state.agent = fakeAgent('session-b')
+  state.generation = 2
+  const refreshB = coordinator.refresh({
+    source: 'live-session',
+    target: { kind: 'agent', key: state.generation },
+    agent: state.agent,
+  })
+  // B's catalog arrives: its commands register.
+  services.catalogs.get(state.agent)?.resolve([{ name: 'skill-b', description: 'b', invocation: { modelInvocable: true, userInvocable: true } }])
+  const outcomeB = await refreshB
+  assert.equal(outcomeB.kind, 'applied')
+  assert.ok(services.registered.includes('skill-b'), 'the current session\'s commands must register')
+  // A's catalog lands LATE: the coordinator's epoch must drop it entirely.
+  for (const [scope, gate] of services.catalogs) {
+    if (scope !== state.agent) gate.resolve([{ name: 'skill-a', description: 'a', invocation: { modelInvocable: true, userInvocable: true } }])
+  }
+  const outcomeA = await refreshA
+  assert.equal(outcomeA.kind, 'superseded', 'the stale refresh must report superseded')
+  assert.ok(!services.registered.includes('skill-a'), 'a stale refresh must not register old-session commands')
+  assert.ok(services.registered.includes('skill-b'), 'the new session\'s commands survive the stale refresh')
+  app.stop()
+})
+
+test('/quit is a registered alias of /exit sharing its handler', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: undefined, generation: 1 }
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
+  const exitDef = services.defs.find(def => def.name === 'exit')
+  const quitDef = services.defs.find(def => def.name === 'quit')
+  assert.ok(exitDef !== undefined, '/exit must be registered')
+  assert.ok(quitDef !== undefined, '/quit must be registered')
+  assert.equal(quitDef!.handler, exitDef!.handler, '/quit must share the /exit handler')
+  app.stop()
+})
+
+test('/subagents is a registered alias of /tasks sharing its handler', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: undefined, generation: 1 }
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
+  const tasksDef = services.defs.find(def => def.name === 'tasks')
+  const subagentsDef = services.defs.find(def => def.name === 'subagents')
+  assert.ok(tasksDef !== undefined, '/tasks must be registered')
+  assert.ok(subagentsDef !== undefined, '/subagents must be registered as an alias')
+  assert.equal(subagentsDef!.handler, tasksDef!.handler, '/subagents must share the /tasks handler')
+  app.stop()
+})
+
+test('/queue is fully removed: the name is no longer host-owned or registered', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
+  const queueDef = services.defs.find(def => def.name === 'queue')
+  assert.equal(queueDef, undefined,
+    '/queue must not be registered — the name is released (input steers to the model like any unknown /line)')
+  assert.ok(!LOCAL_COMMANDS.has('queue'), '/queue must be gone from LOCAL_COMMANDS')
+  app.stop()
+})
+
+test('/exit and /quit route through the runner requestExit, never their own teardown', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: undefined, generation: 1 }
+  // The handler must call the ONE exit orchestration — a handler that
+  // stops the app, flushes or exits itself would diverge from Ctrl+C/Ctrl+D
+  // (no timeout, no catch) and could hang a stopped UI forever.
+  const requested: string[] = []
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'requestExit') return (): void => { requested.push('exit') }
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  for (const name of ['exit', 'quit']) {
+    const def = services.defs.find(entry => entry.name === name)
+    assert.ok(def?.handler !== undefined, `${name} handler missing`)
+    ;(def!.handler as () => unknown)()
+  }
+  assert.deepEqual(requested, ['exit', 'exit'], 'both /exit and /quit must call runner.requestExit')
+  app.stop()
+})
+
+test('a failed global-default save keeps the durable Session choice (a live write never enters the sessionless tracker)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  // The runner's selection facade: the /model apply NEVER writes it directly
+  // (the catalog port commits the Session selection after the durable
+  // append), so a failed save leaves it at the previous value.
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'm1' }),
+    // The persistence write FAILS: the durable Session choice must stand, and
+    // no SESSIONLESS default intent is involved (a live write never records one).
+    saveSelection: async () => { throw new Error('quota exceeded') },
+  } as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+    const modelDef = services.defs.find(entry => entry.name === 'model')
+    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+    await (modelDef!.handler as () => Promise<unknown>)()
+    await vt.waitForRender()
+    vt.sendInput('\r') // Enter: open the provider's model submenu
+    await vt.waitForRender()
+    await Promise.resolve()
+    vt.sendInput('\r') // Enter: select the first model → apply → save rejects
+    await vt.waitForRender()
+    await Promise.resolve()
+    assert.deepEqual(unhandled, [], 'the save rejection must not leak as an unhandled rejection')
+    const sessionSelection = (proxy.catalog as DirectCatalogPort).models.sessionSelection('session-a')
+    assert.deepEqual(sessionSelection, { provider: 'p', model: 'm1' },
+      'the durable Session choice must stand even when the global-default save fails')
+    assert.equal(proxy.defaultIntent, undefined,
+      'a live Session write never enters the sessionless default-intent tracker')
+    const view = vt.getViewport().join('\n')
+    assert.ok(!view.includes('model selection save'),
+      `a best-effort default-save failure must not surface as a Session selection failure:\n${view}`)
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    app.stop()
+  }
+})
+
+test('a FAILED global-default save still commits the live Session choice (no sessionless intent involved)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  // The default save is gated: the Session append commits first, then the
+  // default write FAILS. The failure is best-effort and must NEVER surface as
+  // a Session selection failure (a live write has no sessionless intent).
+  const gates = new Map<string, { reject: (e: Error) => void }>()
+  const saveStarted = new Map<string, () => void>()
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'm1' }),
+    saveSelection: (next: { model: string }) => {
+      const gate = { reject: () => {} } as { reject: (e: Error) => void }
+      const promise = new Promise<unknown>((_resolve, reject) => { gate.reject = reject })
+      gates.set(next.model, gate)
+      saveStarted.get(next.model)?.()
+      return promise
+    },
+  } as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  try {
+    const modelDef = services.defs.find(entry => entry.name === 'model')
+    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+    await (modelDef!.handler as () => Promise<unknown>)()
+    await vt.waitForRender()
+    const saveStartedM1 = deferred<void>()
+    saveStarted.set('m1', saveStartedM1.resolve)
+    // Select m1: rc.2 returns the Session success immediately while the
+    // best-effort default save hangs on the gate.
+    vt.sendInput('\r')
+    await vt.waitForRender()
+    await Promise.resolve()
+    vt.sendInput('\r')
+    await saveStartedM1.promise
+    await vt.waitForRender()
+    const saveM1 = gates.get('m1')
+    assert.ok(saveM1 !== undefined, 'save(m1) must have started')
+    // The durable Session append already committed and the picker never waits
+    // for the background default save to settle.
+    const catalog = proxy.catalog as DirectCatalogPort
+    assert.deepEqual(catalog.models.sessionSelection('session-a'), { provider: 'p', model: 'm1' },
+      'the durable append must commit the Session choice before the save settles')
+    assert.ok(!vt.getViewport().join('\n').includes('Selecting'),
+      'the picker must not stay in a selecting state waiting for the background save')
+    saveM1.reject(new Error('quota exceeded'))
+    await vt.waitForRender()
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(proxy.defaultIntent, undefined,
+      'a live Session write never enters the sessionless default-intent tracker')
+    assert.deepEqual(catalog.models.sessionSelection('session-a'), { provider: 'p', model: 'm1' },
+      'a best-effort default-save failure must not undo the committed Session choice')
+    assert.ok(!vt.getViewport().join('\n').includes('model selection save'),
+      'the default-save failure must not surface as a Session selection failure')
+  } finally {
+    app.stop()
+  }
+})
+
+test('a failed live default save after a session switch never mutates any Session selection', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  const gates = new Map<string, { reject: (e: Error) => void }>()
+  const saveStarted = deferred<void>()
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'm1' }),
+    saveSelection: (next: { model: string }) => {
+      const gate = { reject: () => {} } as { reject: (e: Error) => void }
+      const promise = new Promise<unknown>((_resolve, reject) => { gate.reject = reject })
+      gates.set(next.model, gate)
+      saveStarted.resolve()
+      return promise
+    },
+  } as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  try {
+    const modelDef = services.defs.find(entry => entry.name === 'model')
+    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+    await (modelDef!.handler as () => Promise<unknown>)()
+    await vt.waitForRender()
+    vt.sendInput('\r') // select the first model → apply → save hangs
+    await saveStarted.promise
+    const saveM1 = gates.get('m1')
+    assert.ok(saveM1 !== undefined, 'save(m1) must have started')
+    // A live Session write is NOT a sessionless global-default intent: the
+    // DefaultIntentTracker is reserved for the sessionless path.
+    assert.equal(proxy.defaultIntent, undefined, 'a live Session write never enters the default-intent tracker')
+    const catalog = proxy.catalog as DirectCatalogPort
+    assert.deepEqual(catalog.models.sessionSelection('session-a'), { provider: 'p', model: 'm1' },
+      'the durable append must commit the Session choice before the save settles')
+    // The user switches to another Session while the save is pending. A live
+    // Session write never enters the sessionless default-intent tracker, so a
+    // late failure can only affect Session-level state — never a global intent.
+    state.agent = fakeAgent('session-b')
+    saveM1.reject(new Error('quota exceeded'))
+    await vt.waitForRender()
+    await Promise.resolve()
+    assert.equal(proxy.defaultIntent, undefined,
+      'a live Session write never enters the sessionless default-intent tracker')
+    assert.deepEqual(catalog.models.sessionSelection('session-b'), { provider: 'p', model: 'default-model' },
+      'a failed save after a switch must never mutate the NEW Session selection (it keeps its default fallback)')
+  } finally {
+    app.stop()
+  }
+})
+
+test('a stale live /model settle never repaints the new Session (no sessionless-intent leak)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  const gates = new Map<string, { reject: (e: Error) => void }>()
+  const saveStarted = new Map<string, () => void>()
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'm1' }),
+    saveSelection: (next: { model: string }) => {
+      const gate = { reject: () => {} } as { reject: (e: Error) => void }
+      const promise = new Promise<unknown>((_resolve, reject) => { gate.reject = reject })
+      gates.set(next.model, gate)
+      saveStarted.get(next.model)?.()
+      return promise
+    },
+  } as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  try {
+    const modelDef = services.defs.find(entry => entry.name === 'model')
+    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+    await (modelDef!.handler as () => Promise<unknown>)()
+    await vt.waitForRender()
+    const saveStartedM1 = deferred<void>()
+    saveStarted.set('m1', saveStartedM1.resolve)
+    vt.sendInput('\r') // select m1 -> apply -> save hangs
+    await saveStartedM1.promise
+    assert.equal(proxy.defaultIntent, undefined, 'a live Session write never enters the default-intent tracker')
+    // The surface switches to Session B before the write settles.
+    state.generation = 2
+    state.agent = fakeAgent('session-b')
+    gates.get('m1')!.reject(new Error('quota exceeded'))
+    await vt.waitForRender()
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.equal(proxy.defaultIntent, undefined,
+      'a stale live settle never leaks a sessionless default intent into a later fresh create')
+    assert.ok(!vt.getViewport().join('\n').includes('model selection save'),
+      'a stale settle must not repaint the new Session')
+  } finally {
+    app.stop()
+  }
+})
+
+test('a sessionless /model pick awaits its default save and reports the committed selection', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  let persisted = { provider: 'p', model: 'original' }
+  const saveStarted = deferred<void>()
+  let releaseSave!: () => void
+  const saveGate = new Promise<void>(resolve => { releaseSave = resolve })
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ ...persisted }),
+    saveSelection: async (next: { provider: string; model: string }) => { saveStarted.resolve(); await saveGate; persisted = { ...next } },
+  } as never)
+  const state = { agent: undefined, generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  try {
+    const modelDef = services.defs.find(entry => entry.name === 'model')
+    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+    await (modelDef!.handler as () => Promise<unknown>)()
+    await vt.waitForRender()
+    vt.sendInput('\r') // pick m1 -> the picker awaits the global-default save
+    await saveStarted.promise
+    await vt.waitForRender()
+    assert.ok(vt.getViewport().join('\n').includes('Selecting'),
+      'a sessionless pick shows the selecting state while the save settles')
+    releaseSave()
+    await vt.waitForRender()
+    await Promise.resolve()
+    await Promise.resolve()
+    assert.deepEqual(persisted, { provider: 'p', model: 'm1' }, 'the committed default is persisted')
+    assert.equal(proxy.defaultIntent, undefined, 'a committed sessionless save clears the intent')
+    assert.equal(proxy.defaultIntentOutcome, 'committed')
+  } finally {
+    app.stop()
+  }
+})
+
+test('an AMBIGUOUS sessionless default save keeps an explicit UNRESOLVED intent, never a failed choice', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }, { id: 'm2' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  let persisted = { provider: 'p', model: 'original' }
+  const saveStarted = deferred<void>()
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ ...persisted }),
+    saveSelection: async () => { saveStarted.resolve(); throw new Error('quota exceeded') },
+  } as never)
+  const state = { agent: undefined, generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  try {
+    const modelDef = services.defs.find(entry => entry.name === 'model')
+    assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+    await (modelDef!.handler as () => Promise<unknown>)()
+    await vt.waitForRender()
+    vt.sendInput('\r') // pick m1 -> the save FAILS
+    await saveStarted.promise
+    await vt.waitForRender()
+    await Promise.resolve()
+    await Promise.resolve()
+    // A thrown settings write may or may not have landed: v2 §0.3.2 keeps the
+    // explicit unresolved state (never a failed choice) until a Host read.
+    assert.deepEqual(proxy.defaultIntent, { provider: 'p', model: 'm1' }, 'the ambiguous intent stays explicit')
+    assert.equal(proxy.defaultIntentOutcome, 'unresolved')
+    assert.ok(vt.getViewport().join('\n').includes('model default save'), 'the failure is surfaced')
+    assert.deepEqual(persisted, { provider: 'p', model: 'original' }, 'the failed write is not persisted')
+  } finally {
+    app.stop()
+  }
+})
+test('a failing skill catalog refresh degrades to a detached issue, never an unhandled rejection', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  services.skills.list = async () => { throw new Error('catalog down') }
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  const lines: string[] = []
+  const diag = createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [{ write: (line: string) => { lines.push(line) } }] })
+  try {
+    const state = { agent: fakeAgent('session-a'), generation: 1 }
+    const installed = registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state, diag))
+    const coordinator = new CatalogRefreshCoordinator({
+      readAgent: (agent, signal) => readSurfaceCatalog(agent as never, signal, ctx as unknown as SurfaceCatalogContext),
+      readStanding: async () => { throw new Error('not used') },
+      installSnapshot: installed.installSnapshot,
+      enterCatalogTransition: installed.enterTransition,
+    }, new AbortController().signal, diag)
+    // The provider failure becomes a DETACHED issue inside the snapshot:
+    // the refresh still applies (the commands field survives), the issue
+    // lands in diagnostics, and nothing rejects.
+    const outcome = await coordinator.refresh({
+      source: 'live-session',
+      target: { kind: 'agent', key: state.generation },
+      agent: state.agent,
+    })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    assert.deepEqual(unhandled, [], 'the catalog failure must not leak as an unhandled rejection')
+    assert.equal(outcome.kind, 'applied', 'a provider issue is a partial failure, not a refresh failure')
+    if (outcome.kind === 'applied') {
+      assert.equal(outcome.snapshot.issues.length, 1, 'the issue must be recorded on the snapshot')
+      assert.equal(outcome.snapshot.issues[0]?.provider, 'skills')
+      assert.deepEqual(outcome.snapshot.skills, [], 'the failed skills field stays empty')
+    }
+    assert.ok(lines.some(line => /INFO catalog applied/.test(line) && /issues=1/.test(line)),
+      `diag must record the partial failure:\n${lines.join('\n')}`)
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    app.stop()
+  }
+})
+
+test('clearSessionOverrides drops per-message expansion toggles', () => {
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  const overrides = (app as unknown as { expandedOverride: Map<object, boolean> }).expandedOverride
+  const messageA = { kind: 'thinking', turn: 0 }
+  const messageB = { kind: 'tool', turn: 1 }
+  overrides.set(messageA, true)
+  overrides.set(messageB, true)
+  assert.equal(overrides.size, 2)
+  app.clearSessionOverrides()
+  assert.equal(overrides.size, 0, 'session-scoped expansion overrides must clear on switch')
+  app.stop()
+})
+
+/** A title-handler invocation; only rawInput and signal are consumed. */
+function titleInvocation(rawInput: string, signal: AbortSignal = new AbortController().signal) {
+  return { commandId: 'cmd-test', agent: undefined as never, rawInput, signal }
+}
+
+/** A fake sessionTitle service recording rename/refresh calls. */
+function fakeTitles(overrides: {
+  refresh?: (session: unknown, signal?: AbortSignal) => Promise<unknown>
+  rename?: (session: unknown, name: string) => unknown
+} = {}) {
+  const calls = {
+    rename: [] as { sessionId: string; name: string }[],
+    refresh: [] as { sessionId: string; signal: AbortSignal | undefined }[],
+  }
+  const titles = {
+    get: () => undefined,
+    rename: (session: unknown, name: string): unknown => {
+      calls.rename.push({ sessionId: (session as { id: string }).id, name })
+      if (overrides.rename !== undefined) return overrides.rename(session, name)
+      return { title: name, eventSeq: 1, messageSeqs: [], source: { kind: 'user' } }
+    },
+    refresh: async (session: unknown, signal?: AbortSignal): Promise<unknown> => {
+      calls.refresh.push({ sessionId: (session as { id: string }).id, signal })
+      if (overrides.refresh !== undefined) return overrides.refresh(session, signal)
+      return undefined
+    },
+  }
+  return { titles, calls }
+}
+
+test('/rename is a registered alias of /title sharing its handler', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  const titleDef = services.defs.find(def => def.name === 'title')
+  const renameDef = services.defs.find(def => def.name === 'rename')
+  assert.ok(titleDef !== undefined, '/title must be registered')
+  assert.ok(renameDef !== undefined, '/rename must be registered')
+  assert.equal(renameDef!.handler, titleDef!.handler, '/rename must share the /title handler')
+  app.stop()
+})
+
+test('/title without an argument regenerates and overwrites the current title', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const { titles, calls } = fakeTitles({
+    refresh: async () => ({ title: 'fresh ai title', eventSeq: 3, messageSeqs: [], source: { kind: 'auto' } }),
+  })
+  ctx.provide('sessionTitle', titles as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const signal = new AbortController().signal
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('', signal))
+  assert.equal(result.kind, 'success')
+  assert.deepEqual(calls.rename, [], 'a no-argument call must never pin a title')
+  assert.equal(calls.refresh.length, 1, 'a no-argument call must refresh once')
+  assert.equal(calls.refresh[0]!.sessionId, state.agent.session.id, 'refresh must target the live session id')
+  assert.equal(calls.refresh[0]!.signal, signal, 'the invocation signal must be forwarded to refresh')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('title regenerated: fresh ai title'), `regeneration notice missing:\n${view}`)
+  app.stop()
+})
+
+test('/rename without an argument behaves identically (regenerates)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const { titles, calls } = fakeTitles({
+    refresh: async () => ({ title: 'renamed by ai', eventSeq: 4, messageSeqs: [], source: { kind: 'auto' } }),
+  })
+  ctx.provide('sessionTitle', titles as never)
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  const renameDef = services.defs.find(def => def.name === 'rename')
+  assert.ok(renameDef?.handler !== undefined, '/rename handler missing')
+  const result = await (renameDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+  assert.equal(result.kind, 'success')
+  assert.equal(calls.refresh.length, 1, '/rename without an argument must refresh')
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('title regenerated: renamed by ai'), `regeneration notice missing:\n${view}`)
+  app.stop()
+})
+
+test('/title without an argument on a blank session leaves the title as-is', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const { titles, calls } = fakeTitles({ refresh: async () => undefined })
+  ctx.provide('sessionTitle', titles as never)
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+  assert.equal(result.kind, 'success', 'a blank session must degrade to a success notice, not an error')
+  assert.equal(calls.refresh.length, 1)
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('no conversation yet — title left as-is'), `blank-session notice missing:\n${view}`)
+  app.stop()
+})
+
+test('/title with an argument pins the title; an invalid title surfaces as an error result', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const { titles, calls } = fakeTitles({
+    // The service rejects only hostile input; a plain title pins cleanly.
+    rename: (_session, name: string) => {
+      if (name.includes('\u0000')) throw new Error('session title must contain visible characters')
+    },
+  })
+  ctx.provide('sessionTitle', titles as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, state))
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const ok = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('fix footer'))
+  assert.equal(ok.kind, 'success')
+  assert.deepEqual(calls.rename, [{ sessionId: state.agent.session.id, name: 'fix footer' }],
+    'an argument must pin exactly the trimmed name')
+  assert.deepEqual(calls.refresh, [], 'an argument must never trigger regeneration')
+  // Whitespace-only input counts as NO argument: it regenerates, never pins.
+  const whitespace = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('   '))
+  assert.equal(whitespace.kind, 'success')
+  assert.equal(calls.refresh.length, 1, 'whitespace-only input must take the regeneration path')
+  // Hostile input the service rejects must surface as an error result.
+  const bad = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('\u0000bad'))
+  assert.equal(bad.kind, 'error')
+  assert.ok((bad.text ?? '').includes('must contain visible characters'),
+    `the invalid-title failure must surface as an error result, got: ${bad.text}`)
+  app.stop()
+})
+
+test('/title foo reports a frozen transition as the transition notice, never the stale capture', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  // Drive the REAL /title writer entry with a writer section that throws the
+  // transition refusal: the transition froze the barrier FIRST, the capture is
+  // NOT stale.
+  let writerEntered = false
+  Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new TransitionInProgressError() } })
+  registerTuiCommandsWithDirectSeams(runner)
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('foo'))
+  assert.equal(writerEntered, true, 'the /title writer entry must be the refusing stub')
+  assert.equal(result.kind, 'error')
+  assert.notEqual(result.text, 'the session changed while updating the title — try again',
+    '/title foo must not report a frozen transition as the session-change text')
+  assert.equal(result.text, 'a session transition is in progress — try again in a moment')
+  app.stop()
+})
+
+test('/title foo reports a superseded capture as the stale notice', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  let writerEntered = false
+  Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new SessionScopeSupersededError() } })
+  registerTuiCommandsWithDirectSeams(runner)
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('foo'))
+  assert.equal(writerEntered, true, 'the /title writer entry must be the refusing stub')
+  assert.equal(result.kind, 'error')
+  assert.equal(result.text, 'the session changed while updating the title — try again')
+  app.stop()
+})
+
+test('/title foo renders an indeterminate write as a no-retry notice, never a silent suppression', async () => {
+  // External review F5: the indeterminate branch suppresses the draft
+  // disposition (no retry-ready intent), but a suppressed command with no
+  // notice is invisible on the Remote Client-owned command path. The handler
+  // must RENDER its own no-retry notice.
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  const writer = (runner as unknown as { sessionWriter: Record<string, unknown> }).sessionWriter
+  let renames = 0
+  Object.assign(runner, {
+    sessionWriter: {
+      ...writer,
+      rename: async () => {
+        renames += 1
+        return {
+          kind: 'indeterminate' as const,
+          error: { code: 'gateway/internal', message: 'the rename may have committed' },
+        }
+      },
+    },
+  })
+  registerTuiCommandsWithDirectSeams(runner)
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation('foo'))
+  assert.equal(result.kind, 'error')
+  assert.match(result.text ?? '', /do not retry/, 'the no-retry error result is preserved')
+  assert.equal(renames, 1, 'an indeterminate title write is never retried')
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join('\n'), /do not retry/,
+    'the indeterminate no-retry notice must be RENDERED, not only returned')
+  app.stop()
+})
+
+test('/title (regenerate) reports a frozen transition as the transition notice, never the stale capture', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  let writerEntered = false
+  Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new TransitionInProgressError() } })
+  registerTuiCommandsWithDirectSeams(runner)
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+  assert.equal(writerEntered, true, 'the /title regenerate writer entry must be the refusing stub')
+  assert.equal(result.kind, 'error')
+  assert.notEqual(result.text, 'the session changed while updating the title — try again',
+    '/title must not report a frozen transition as the session-change text')
+  assert.equal(result.text, 'a session transition is in progress — try again in a moment')
+  app.stop()
+})
+
+test('/title (regenerate) reports a superseded capture as the stale notice', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('sessionTitle', fakeTitles().titles as never)
+  const runner = stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 })
+  let writerEntered = false
+  Object.assign(runner, { withWriter: async () => { writerEntered = true; throw new SessionScopeSupersededError() } })
+  registerTuiCommandsWithDirectSeams(runner)
+  const titleDef = services.defs.find(def => def.name === 'title')
+  assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+  const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+  assert.equal(writerEntered, true, 'the /title regenerate writer entry must be the refusing stub')
+  assert.equal(result.kind, 'error')
+  assert.equal(result.text, 'the session changed while updating the title — try again')
+  app.stop()
+})
+
+test('/title without an argument surfaces a failing refresh as an error result', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const { titles } = fakeTitles({ refresh: async () => { throw new Error('provider quota exceeded') } })
+  ctx.provide('sessionTitle', titles as never)
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(reason) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+    const titleDef = services.defs.find(def => def.name === 'title')
+    assert.ok(titleDef?.handler !== undefined, '/title handler missing')
+    const result = await (titleDef!.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+    assert.equal(result.kind, 'error')
+    assert.ok((result.text ?? '').includes('provider quota exceeded'),
+      `the refresh failure must surface as an error result, got: ${result.text}`)
+    assert.deepEqual(unhandled, [], 'the refresh rejection must not leak as an unhandled rejection')
+  } finally {
+    process.off('unhandledRejection', onUnhandled)
+    app.stop()
+  }
+})
+
+test('/title and /rename degrade when the sessionTitle service is absent', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  registerTuiCommandsWithDirectSeams(stubRunner(ctx, app, { agent: fakeAgent('session-a'), generation: 1 }))
+  const titleDef = services.defs.find(def => def.name === 'title')
+  const renameDef = services.defs.find(def => def.name === 'rename')
+  assert.ok(titleDef?.handler !== undefined && renameDef?.handler !== undefined)
+  for (const def of [titleDef!, renameDef!]) {
+    const result = await (def.handler as (inv: ReturnType<typeof titleInvocation>) => Promise<{ kind: string; text?: string }>)(titleInvocation(''))
+    assert.equal(result.kind, 'error')
+    assert.equal(result.text, 'session title service unavailable')
+  }
+  app.stop()
+})
+
+
+function scriptedModelCatalog(
+  outcome: () => Promise<{ kind: string; value?: { provider: string; model: string }; error?: { code: string; message: string }; reason?: string }>,
+  current: { provider: string; model: string } = { provider: 'p', model: 'old-model' },
+  ownership: 'current' | 'superseded' = 'current',
+  /** Optional loader failure (e.g. a typed SupersededReadError). */
+  loadDirectoryError?: unknown,
+  /** Optional global-default write outcome (defaults to committed). */
+  saveDefaultOutcome?: { kind: string; error?: { code: string; message: string }; reason?: string },
+): TuiCommandRunner['catalog'] {
+  return {
+    models: {
+      available: () => true,
+      loadDirectory: async () => {
+        if (loadDirectoryError !== undefined) throw loadDirectoryError
+        return {
+          default: current,
+          routableProviders: ['p'],
+          groups: [{ id: 'p', name: 'Provider P', models: [{ id: 'm1', name: 'M1' }] }],
+          failures: [],
+        }
+      },
+      defaultSelection: () => current,
+      saveDefaultSelection: async () => (saveDefaultOutcome ?? { kind: 'committed' as const, value: undefined }) as never,
+      sessionSelection: () => current,
+      selectSessionModel: (async () => ({ ownership, outcome: await outcome() })) as TuiCommandRunner['catalog']['models']['selectSessionModel'],
+      discoverModels: async () => [],
+      listConfigurableProviders: () => [],
+    },
+    presets: {} as never,
+    skills: {} as never,
+  }
+}
+
+/** Drive /model to select the first listed model so `apply` runs exactly once. */
+async function pickFirstModel(vt: VirtualTerminal, handler: () => Promise<unknown>): Promise<void> {
+  await handler()
+  await vt.waitForRender()
+  vt.sendInput('\r') // select m1 -> apply
+  await vt.waitForRender()
+  await Promise.resolve()
+}
+
+test('a REJECTED model selection keeps the prior authoritative selection and shows the Host refusal', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const catalog = scriptedModelCatalog(async () => ({
+    kind: 'rejected',
+    error: { code: 'session/model-unavailable', message: 'no such route' },
+  }))
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('no such route'), `the Host refusal must be shown:\n${view}`)
+  app.stop()
+})
+
+test('an INDETERMINATE model selection never claims the requested model as committed', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const catalog = scriptedModelCatalog(async () => ({
+    kind: 'indeterminate',
+    error: { code: 'session/model-indeterminate', message: 'carrier lost' },
+  }))
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('indeterminate'), `an indeterminate settle must be explained, never retried:\n${view}`)
+  assert.ok(view.includes('do not retry'), `the no-retry guidance must be shown:\n${view}`)
+  app.stop()
+})
+
+test('a late model selection settle from a replaced Session cannot repaint the new Session', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const gate = deferred<{ kind: 'rejected'; error: { code: string; message: string } }>()
+  const catalog = scriptedModelCatalog(() => gate.promise)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  // The surface switches to Session B before A's selection settles.
+  state.generation = 2
+  state.agent = fakeAgent('session-b')
+  gate.resolve({ kind: 'rejected', error: { code: 'session/model-unavailable', message: 'stale refusal' } })
+  await vt.waitForRender()
+  await Promise.resolve()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('stale refusal'), `a stale settle must not repaint the new Session:\n${view}`)
+  app.stop()
+})
+
+test('/model dismisses the whole overlay after a committed no-effort selection', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const catalog = scriptedModelCatalog(async () => ({ kind: 'committed', value: { provider: 'p', model: 'm1' } }))
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Provider P'), `the provider overlay must be dismissed:\n${view}`)
+  assert.ok(!view.includes('M1'), `the model list must be dismissed too:\n${view}`)
+  app.stop()
+})
+
+test('a SUPERSEDED /model result emits no notice and never claims the requested model (v2 §0.2.1)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  // The Host committed, but this result no longer owns the local surface.
+  const catalog = scriptedModelCatalog(
+    async () => ({ kind: 'committed', value: { provider: 'p', model: 'm1' } }),
+    { provider: 'p', model: 'old-model' },
+    'superseded',
+  )
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('model selection:'), `a superseded result must not emit a stale notice:\n${view}`)
+  assert.ok(!view.includes('do not retry'), `a superseded result must not emit the indeterminate notice:\n${view}`)
+  app.stop()
+})
+
+test('a /model result whose Session generation was swapped mid-write makes NO close/open decision (v2 §0.3.1)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  // The port reports `current`, but a transition commits while the write is in
+  // flight — the runner generation moves under the result.
+  const catalog = scriptedModelCatalog(async () => {
+    state.generation = 2
+    return { kind: 'committed', value: { provider: 'p', model: 'm1' } }
+  })
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('model selection:'), `a generation-swapped result must not emit a notice:\n${view}`)
+  assert.ok(view.includes('Selecting…'),
+    `the stale overlay must not make a close/open decision (it stays as-is):\n${view}`)
+  app.stop()
+})
+
+test('a same-generation port-superseded /model result makes NO repaint/close decision (v2 §0.3.1)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  // The port itself reports superseded WITHOUT a generation swap (e.g. a newer
+  // selection or a vanished binding): the command must not clear the marker,
+  // repaint, close/open, or notify.
+  const catalog = scriptedModelCatalog(
+    async () => ({ kind: 'committed', value: { provider: 'p', model: 'm1' } }),
+    { provider: 'p', model: 'old-model' },
+    'superseded',
+  )
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('model selection:'), `a superseded result must not emit a notice:\n${view}`)
+  assert.ok(view.includes('Selecting…'),
+    `a same-generation superseded result must not make a close/open decision:\n${view}`)
+  app.stop()
+})
+
+test('a superseded model-catalog read keeps the /model surface silent (no stale error notice)', async () => {
+  const { SupersededReadError } = await import('../../src/runtime/read-error.ts')
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const catalog = scriptedModelCatalog(async () => ({ kind: 'committed' }), undefined, 'current', new SupersededReadError('connection changed'))
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  const result = await (modelDef!.handler as () => Promise<{ kind: string; text?: string }>)()
+  assert.equal(result.text, undefined, 'a superseded read must not surface a catalog error')
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('model catalog unavailable'), `no stale catalog notice:\n${view}`)
+  assert.ok(!view.includes('Loading models…'),
+    `a superseded read must not leave the panel stuck on Loading…:\n${view}`)
+  assert.ok(!view.includes('Models'), `the superseded loading panel must close:\n${view}`)
+  app.stop()
+})
+
+test('a sessionless INDETERMINATE default write keeps an explicit UNRESOLVED intent (v2 §0.3.2)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  // No live agent: the choice is a sessionless global-default intent.
+  const state = { agent: undefined, generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const catalog = scriptedModelCatalog(
+    async () => ({ kind: 'committed', value: { provider: 'p', model: 'm1' } }),
+    { provider: 'p', model: 'old-model' },
+    'current',
+    undefined,
+    { kind: 'indeterminate', error: { code: 'session/model-default-indeterminate', message: 'possibly landed' } },
+  )
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  assert.equal(proxy.defaultIntentOutcome, 'unresolved',
+    'an ambiguous default write is unresolved, never a failed choice')
+  assert.deepEqual(proxy.defaultIntent, { provider: 'p', model: 'm1' }, 'the unresolved intent stays explicit')
+  app.stop()
+})
+
+test('an authoritative Host read reconciles an UNRESOLVED sessionless default intent (v2 §0.3.2)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: undefined, generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  // The persisted Host default already carries m1, but the write result was
+  // ambiguous — a later authoritative read must reconcile it to committed.
+  const catalog = scriptedModelCatalog(
+    async () => ({ kind: 'committed', value: { provider: 'p', model: 'm1' } }),
+    { provider: 'p', model: 'm1' },
+    'current',
+    undefined,
+    { kind: 'indeterminate', error: { code: 'session/model-default-indeterminate', message: 'ambiguous' } },
+  )
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await pickFirstModel(vt, modelDef!.handler as () => Promise<unknown>)
+  assert.equal(proxy.defaultIntentOutcome, 'unresolved')
+  // Reopen /model: the directory read is the authoritative Host truth.
+  await (modelDef!.handler as () => Promise<unknown>)()
+  await vt.waitForRender()
+  assert.equal(proxy.defaultIntentOutcome, 'committed', 'the Host read proves the ambiguous write landed')
+  assert.equal(proxy.defaultIntent, undefined, 'the resolved intent clears')
+  app.stop()
+})
+
+test('a /model picker opened on S1 cannot apply to S2 after a session switch (subject fence)', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  const saved: unknown[] = []
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'default-model' }),
+    saveSelection: async (next: unknown) => { saved.push(next) },
+  } as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await (modelDef!.handler as () => Promise<unknown>)()
+  await vt.waitForRender()
+  // Prove the overlay actually opened (not a vacuous early return).
+  assert.match(vt.getViewport().join('\n'), /Models/, 'the model picker must open before the switch')
+  // A Session switch lands AFTER the overlay opened.
+  state.agent = fakeAgent('session-b')
+  state.generation = 2
+  vt.sendInput('\r') // submit the STALE overlay
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(saved, [], 'a stale picker must not dispatch any model write')
+  const catalog = proxy.catalog as DirectCatalogPort
+  assert.deepEqual(catalog.models.sessionSelection('session-b'), { provider: 'p', model: 'default-model' },
+    'a stale picker must never apply its selection to the new Session')
+  app.stop()
+})
+
+test('a sessionless /model picker cannot write a Session that appeared in the same generation', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  const saved: unknown[] = []
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'default-model' }),
+    saveSelection: async (next: unknown) => { saved.push(next) },
+  } as never)
+  const state = { agent: undefined as Agent | undefined, generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await (modelDef!.handler as () => Promise<unknown>)()
+  await vt.waitForRender()
+  assert.match(vt.getViewport().join('\n'), /Models/, 'the sessionless picker must open before the create')
+  // A first create publishes a live Agent BEFORE the generation bump.
+  state.agent = fakeAgent('session-new')
+  vt.sendInput('\r') // submit the stale sessionless overlay
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(saved, [], 'the stale sessionless picker must not dispatch any model write')
+  const catalog = proxy.catalog as DirectCatalogPort
+  assert.deepEqual(catalog.models.sessionSelection('session-new'), { provider: 'p', model: 'default-model' },
+    'the stale sessionless picker must not write the new Session')
+  app.stop()
+})
+
+test('a sessionless /model whose subject drifts to a same-generation live Session makes no UI decision', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const selection = {
+    current: { provider: 'p', model: 'old-model' },
+    assembled: undefined,
+    saveSelection: async () => {},
+  }
+  ctx.provide('llm', { resolveCallConfig: async (next: { provider: string; model: string; reasoningEffort?: string }) => next,
+    listProviders: () => [{ id: 'p', name: 'provider p' }],
+    listModels: async () => [{ id: 'm1' }],
+    resolveModelInfo: async () => ({}),
+  } as never)
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  const saveStarted = deferred<void>()
+  ctx.provide('agentDefaultModel', {
+    currentSelection: () => ({ provider: 'p', model: 'original' }),
+    saveSelection: async () => { saveStarted.resolve(); await gate; throw new Error('quota exceeded') },
+  } as never)
+  const state = { agent: undefined as Agent | undefined, generation: 1 }
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'selected') return selection
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  await (modelDef!.handler as () => Promise<unknown>)()
+  await vt.waitForRender()
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  vt.sendInput('\r') // sessionless pick -> gated default write
+  await saveStarted.promise
+  // A first create publishes a live Agent BEFORE the generation bump.
+  state.agent = fakeAgent('session-new')
+  release()
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(proxy.defaultIntentOutcome, 'unresolved', 'the business settlement still settles the tracker')
+  assert.ok(!vt.getViewport().join('\n').includes('model default save'),
+    'a stale (drifted) operation must not touch the UI surface')
+  app.stop()
+})
+
+// ── immediate-open / loading lifecycle (round 2) ─────────────────────────
+
+/** A catalog whose directory read is held until `releaseDirectory()` /
+ *  `failDirectory()` (the loading-state repro). */
+function gatedModelCatalog(modelId = 'm1', modelName = 'M1'): {
+  catalog: TuiCommandRunner['catalog']
+  releaseDirectory: () => void
+  failDirectory: (error: unknown) => void
+  directoryStarted: () => boolean
+} {
+  let release!: () => void
+  let fail!: (error: unknown) => void
+  const gate = new Promise<void>((resolve, reject) => { release = resolve; fail = reject })
+  let started = false
+  const catalog = {
+    models: {
+      available: () => true,
+      loadDirectory: async () => {
+        started = true
+        await gate
+        return {
+          default: { provider: 'p', model: modelId },
+          routableProviders: ['p'],
+          groups: [{ id: 'p', name: 'Provider P', models: [{ id: modelId, name: modelName }] }],
+          failures: [],
+        }
+      },
+      listProviders: () => [{ id: 'p', name: 'Provider P' }],
+      listModels: async () => [{ id: modelId }],
+      defaultSelection: () => ({ provider: 'p', model: modelId }),
+      saveDefaultSelection: async () => ({ kind: 'committed' as const, value: undefined }) as never,
+      sessionSelection: () => undefined,
+      selectSessionModel: (async () => ({
+        ownership: 'current',
+        outcome: { kind: 'committed', value: { provider: 'p', model: modelId } },
+      })) as TuiCommandRunner['catalog']['models']['selectSessionModel'],
+      discoverModels: async () => [],
+      listConfigurableProviders: () => [],
+    },
+    presets: {} as never,
+    skills: {} as never,
+  } as TuiCommandRunner['catalog']
+  return { catalog, releaseDirectory: release, failDirectory: fail, directoryStarted: () => started }
+}
+
+function modelRunner(state: { agent: ReturnType<typeof fakeAgent> | undefined; generation: number }, vt: VirtualTerminal, catalogFor: () => TuiCommandRunner['catalog']): {
+  app: TuiApp
+  handler: () => Promise<unknown>
+} {
+  const ctx = new Context()
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const runner = stubRunner(ctx, app, state)
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalogFor()
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  return { app, handler: modelDef!.handler as () => Promise<unknown> }
+}
+
+test('/model mounts the loading panel before the directory settles', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const gated = gatedModelCatalog()
+  const { app, handler } = modelRunner({ agent: fakeAgent('session-a'), generation: 1 }, vt, () => gated.catalog)
+  await handler()
+  await vt.waitForRender()
+  const loading = vt.getViewport().join('\n')
+  assert.ok(loading.includes('Loading models…'), `the panel must mount before the read settles:\n${loading}`)
+  assert.equal(gated.directoryStarted(), true, 'the background directory read must already have started')
+  gated.releaseDirectory()
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  const loaded = vt.getViewport().join('\n')
+  assert.ok(loaded.includes('M1'), `the panel must hydrate in place:\n${loaded}`)
+  assert.ok(!loaded.includes('Loading models…'), `the loading state must be replaced:\n${loaded}`)
+  app.stop()
+})
+
+test('a /model error while loading renders in the SAME panel', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const gated = gatedModelCatalog()
+  const { app, handler } = modelRunner({ agent: fakeAgent('session-a'), generation: 1 }, vt, () => gated.catalog)
+  await handler()
+  await vt.waitForRender()
+  gated.failDirectory(new Error('catalog exploded'))
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Model catalog unavailable'), `the error must render in-panel:\n${view}`)
+  app.stop()
+})
+
+test('a session switch while /model is loading silently closes the stale panel', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const gated = gatedModelCatalog()
+  const state = { agent: fakeAgent('session-a') as ReturnType<typeof fakeAgent> | undefined, generation: 1 }
+  const { app, handler } = modelRunner(state, vt, () => gated.catalog)
+  await handler()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Loading models…'))
+  state.agent = fakeAgent('session-b')
+  state.generation = 2
+  gated.releaseDirectory()
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('M1'), `a stale catalog must not hydrate the new Session:\n${view}`)
+  assert.ok(!view.includes('Loading models…'), `the stale panel must close silently:\n${view}`)
+  app.stop()
+})
+
+test('a repeated /model supersedes the previous loading panel', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const first = gatedModelCatalog('m1', 'First Model')
+  const second = gatedModelCatalog('m2', 'Second Model')
+  let active = first.catalog
+  const { app, handler } = modelRunner({ agent: fakeAgent('session-a'), generation: 1 }, vt, () => active)
+  await handler()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Loading models…'))
+  active = second.catalog
+  await handler() // a second /model supersedes the first surface
+  await vt.waitForRender()
+  first.releaseDirectory() // the FIRST read settles late
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  let view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('First Model'), `the superseded surface must not resurface:\n${view}`)
+  second.releaseDirectory()
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Second Model'), `the newest surface must hydrate:\n${view}`)
+  app.stop()
+})
+
+test('a lifecycle-aborted /model directory read is a cancellation diagnostic, not an error', async () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(100, 30)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  const state = { agent: fakeAgent('session-a'), generation: 1 }
+  // A read that rejects with a NON-abort-shaped error while the lifecycle
+  // signal is aborted: only the task-local predicate can recognize it as a
+  // cancellation.
+  const catalog = scriptedModelCatalog(async () => ({ kind: 'committed' }), undefined, 'current', new Error('transport closed'))
+  const lines: string[] = []
+  const diag = createDiag({ filePath: undefined, stderrLevel: 'off', sinks: [{ write: (line: string) => { lines.push(line) } }] })
+  const runner = stubRunner(ctx, app, state, diag)
+  const controller = new AbortController()
+  const proxy = new Proxy(runner, {
+    get(target, prop, receiver) {
+      if (prop === 'catalog') return catalog
+      if (prop === 'signal') return controller.signal
+      return Reflect.get(target, prop, receiver)
+    },
+  })
+  registerTuiCommandsWithDirectSeams(proxy as unknown as typeof runner)
+  const modelDef = services.defs.find(entry => entry.name === 'model')
+  assert.ok(modelDef?.handler !== undefined, '/model handler missing')
+  controller.abort()
+  await (modelDef!.handler as () => Promise<unknown>)()
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.ok(!lines.some(line => line.includes(' ERROR ')),
+    `an aborted read must be a cancellation (debug), not an ERROR:\n${lines.join('')}`)
+  app.stop()
+})
+
+test('Esc while /model is loading leaves a late directory settle inert', async () => {
+  const vt = new VirtualTerminal(100, 30)
+  const gated = gatedModelCatalog()
+  const { app, handler } = modelRunner({ agent: fakeAgent('session-a'), generation: 1 }, vt, () => gated.catalog)
+  await handler()
+  await vt.waitForRender()
+  assert.ok(vt.getViewport().join('\n').includes('Loading models…'), vt.getViewport().join('\n'))
+  vt.sendInput('\x1b') // Esc closes the loading panel
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('Models'), `Esc must close the loading panel:\n${vt.getViewport().join('\n')}`)
+  gated.releaseDirectory() // the read settles AFTER the user left
+  await vt.waitForRender()
+  await Promise.resolve()
+  await Promise.resolve()
+  const view = vt.getViewport().join('\n')
+  assert.ok(!view.includes('Models'), `a late settle must not resurrect the closed panel:\n${view}`)
+  assert.ok(!view.includes('Loading models…'), `the loading state must stay gone:\n${view}`)
+  app.stop()
+})

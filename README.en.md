@@ -40,8 +40,8 @@ dsh --profile pi-tui
 > `0.2.1-alpha.5`, while `@xmoon76/dsh-pi-tui@next` still resolves to
 > `0.5.2-rc.1` (peer floor `>=0.2.0-rc.2`, and npm semver excludes a
 > different-major.minor.patch prerelease). Use the pairing table below and
-> [the compatibility document](docs/dsh-compatibility.md) for the exact pair; the
-> stable `0.5.3` publishes to `@latest`, not `@next`, so no installable compatible
+> [compatibility guide](docs/guides/dsh-compatibility.md) for the matching rules; the
+> stable `0.5.4` publishes to `@latest`, not `@next`, so no installable compatible
 > combination exists on those two moving channels. Validate this exact checkout
 > with `pnpm compat:dsh:npm`.
 
@@ -52,7 +52,7 @@ checkout and exercises the full build/test/package path):
 pnpm compat:dsh:npm
 ```
 
-See the [compatibility guide](docs/dsh-compatibility.md) for the stable minimum,
+See the [compatibility guide](docs/guides/dsh-compatibility.md) for the stable minimum,
 next compatibility range, and fallback paths.
 
 ### Requirements
@@ -64,23 +64,25 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.3` (stable / `@latest`) | `dsh-v0.2.1-rc.2` | Current published stable line; both the minimum and the exact validation target are the 0.2.1-rc.2 family |
+| `0.5.4` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Current stable line; the minimum DSH version is 0.2.1-rc.2, and this checkout's exact validation target is 0.2.1-rc.4 |
+| `0.5.3` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.1` (stable, previous) | `dsh-v0.2.0-rc.2` | Previous stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
 | `0.5.2-rc.1` (published next-channel preview) | `dsh-v0.2.0-rc.2` | Previous next preview: published to the npm `next` dist-tag on 2026-10-17; its whole peer floor stays `>=0.2.0-rc.2`, so it does not cover 0.2.1-rc.2 |
-| `dsh-v0.2.1-rc.1` (no paired TUI) | none | No released TUI in this matrix claims that intermediate release; never reuse `0.5.3` for it |
+| `dsh-v0.2.1-rc.1` (no paired TUI) | none | No released TUI in this matrix claims that intermediate release; never reuse `0.5.4` for it |
 | `0.5.0` (stable, previous) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Previous stable; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
 | `0.4.9` (stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable; the compatible TUI for a 0.1.7-rc.2 runtime |
 | `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. `0.5.3` is the current
-published stable release: its minimum DSH version (peer floor) and its exact
-validation target are both the `0.2.1-rc.2` family. The intermediate
+Do not mix the stable and `@next` prerelease lines. `0.5.4` is the current
+stable release: its minimum DSH version (peer floor) stays the `0.2.1-rc.2`
+family, and this checkout's exact validation target is `0.2.1-rc.4`. The
+published `0.5.3` is the previous stable line and also pairs with `0.2.1-rc.2`,
+`0.2.1-rc.3` and `0.2.1-rc.4`. The intermediate
 `dsh-v0.2.1-rc.1` has no paired TUI, and `0.5.2-rc.1` is the previous preview
 published to the npm `next` channel (its pairing, 0.2.0-rc.2, stays in the table
-above; it does not cover 0.2.1-rc.2, which is why the new stable line uses the
-`0.5.3` identity). The previous stable
+above; it does not cover 0.2.1-rc.2). The previous stable
 `0.5.1` keeps pairing with 0.2.0-rc.2: it lifts the whole DSH peer floor to
 `>=0.2.0-rc.2` (the Question lifecycle consumes contracts published only in
 that rc.2 family). The previous stable `0.5.0`
@@ -88,9 +90,10 @@ line keeps its `>=0.1.7-rc.2` floor (exact validation target 0.2.0-rc.1);
 older runtimes fail at the normal
 incompatible-runtime boundary, so install the paired TUI line from the table
 above. The startup notice
-is best-effort rather than a Loader startup-order guarantee. See the [full
-historical compatibility matrix](docs/dsh-compatibility.md) for official-tag
-pairings and fallback commands, and see the [latest `next`
+is best-effort rather than a Loader startup-order guarantee. The pairing table
+above is the published-line summary; see the [compatibility
+guide](docs/guides/dsh-compatibility.md) for general matching, fallback and
+diagnosis, and the [latest `next`
 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md) for the current
 integration status.
 
@@ -138,7 +141,12 @@ dsh --profile pi-tui --session <session-id>
 * Full-text Transcript search
 * Folding for long Session history
 * Context, token, model, and runtime status
+* Full-screen Settings workspace: About status, Models / Account, Agent and dynamic Extensions
 * Approval and `ask_user_question` dialogs
+* Images: terminal-capability admission, JPEG/WebP previews, draft images and a read-only viewer
+* Chart/SVG tools, `present_visual` publication and inline final-answer rendering
+* Delivered-files tail and the `/deliverables` browser
+* Experimental TSP renderer: native tool cards, Work Hub, images and published figures
 * Plan Review
 * Todo / Goal status
 * Human-readable terminal window titles
@@ -147,6 +155,8 @@ dsh --profile pi-tui --session <session-id>
 * No duplicate ghost Tool Cards after compaction / pruning
 
 `Ctrl+O` controls Tool and System details and expands/collapses long user prompts in regular mode and in fullscreen outside Focus — in fullscreen Focus it bulk-expands the recent Thought roots or collapses them all, while long user prompts are expanded by clicking the marker (or by a search hit) and collapsed with `Ctrl+O`. `Alt+T` controls Thinking separately.
+
+Tool approvals appear in the editor seat: the full Reason/Arguments body is readable in a scrollable area (no six-line preview), with `y` to allow once, `n` to reject, `Esc`/`Ctrl+C` to cancel, `c` to copy the raw arguments and `e` to expand. Fullscreen can click the actually painted Allow once / Reject / Cancel actions and wheel the body; regular mode stays keyboard-only. Short viewports show the real compact payload or `Resize to inspect more`, never a cropped decision.
 
 ### Conversation display
 
@@ -223,16 +233,34 @@ Transcript's tool card. Explicit `run_in_background: true` jobs (and jobs
 promoted to the background after a foreground timeout) remain visible in
 `TRACKED` after completion as long as the Job Registry keeps their record.
 
-`/plugins` opens the active profile's fullscreen Plugin Manager: the catalog is
-grouped as TUI & Extensions / Official DSH / Third-party / Experimental (the
-Experimental group is always last), with a two-column wide layout and a
-one-column narrow layout. Search, status filters, provenance/status facts,
-official catalog installs, enablement and removal are available from the page;
-the actual Host-reported version, restart requirement and errors are shown
-verbatim. The `dsh-pi-tui` bundle currently providing the surface is read-only
-and cannot be disabled or removed from its own screen. The first-level
-`Settings → Plugins` category opens the same page in place, and returning
-preserves the Settings category, scroll and selection.
+`/plugins` is a deep link into `/settings → Plugins`: both take the SAME
+Settings fullscreen lease and the SAME Plugin Manager page — there is no
+separate plugin screen and no Session create/switch. The catalog is grouped as
+TUI & Extensions / Official DSH / Third-party / Experimental (the Experimental
+group is always last). At >=120 columns, and only while the frame can grant six
+real business-body rows, the frame shows
+`Categories | Plugin List | Details`; a shorter frame degrades to the pair or one
+column instead of squeezing the body. At 76-119 columns it shows
+`Categories | List` or `List | Details` depending on the keyboard owner — the pair
+again needs six real business-body rows, otherwise it degrades to one column; below
+76 columns it is one column. Install, dangerous confirmations and Diagnostics
+always take the full width so risk text is never squeezed. Settings paints the
+shared header/metadata/rule/pane header and the single last-row action bar; the
+plugin page contributes only its business body. Search, status filters,
+provenance/status facts, official catalog installs, enablement and removal are
+available from the page; the actual Host-reported version, restart requirement
+and errors are shown verbatim. The `dsh-pi-tui` bundle currently providing the
+surface is read-only and cannot be disabled or removed from its own screen. The
+category preview and `/plugins` share one page instance and one background
+install request: `Esc` from the List returns to the Settings category and a
+second `Esc` closes the workspace. Press `d` inside the page
+for the read-only **Diagnostics** view: extension contribution health grouped by
+owner (`active/failed/shadowed` with the full `lastError`), live registry counts,
+the actual advertised capabilities, and contributions with no proven Loader-entry
+owner under `Unassociated extension contributions`. `c` copies the selected fact,
+`C` copies everything, `r` rereads and Esc returns. Diagnostics reads only the
+extension ledger; Host package state and install logs stay out of it. `copy`
+still proves emission only, never an OS-clipboard receipt.
 
 The 14 official rc.2 Experimental bundles carry a bounded, identity-exact
 Detail statement of their terminal surface and limits/risks (Web-only,
@@ -285,6 +313,24 @@ enabled, a NEW session's official `subagent` tool may pick the child
 provider/model per call (bounded by the allowlist). The setting is sampled at
 session composition and never rewrites the tools of an already-running
 session.
+
+### Delivered files and `/deliverables`
+
+A final answer's `present` files render as a compact tail: at most four files,
+two rows each (path relative to the current display subject's workspace plus
+description), with `+N more · /deliverables` beyond four. On a fullscreen
+AltScreen, Full, Compact and Focus can click `Browse all` and per-file
+`Details`; a regular split keeps only the command entry.
+
+`/deliverables` opens the delivery panel for the currently displayed session
+(including a viewed child) with Files / Turns / Details: `↑↓` selects, `Enter`
+opens details, `/` filters by filename, full Host path and description, `T`
+switches among Turns with deliveries, `C` copies the raw Host path and `Esc`
+goes back or closes. `Enter Preview` on Details reads one 120-line page of UTF-8
+Host text; binary/document suffixes show that preview is unavailable without
+reading bytes; a file that changes between pages restarts from the beginning.
+Panel text is mouse-selectable, the panel is centered, and a terminal resize
+keeps the current page, filter, cursor and scroll position.
 
 ### Shell
 
@@ -362,6 +408,9 @@ Common entry points:
 ```text
 /model
 /settings
+/status
+/deliverables
+/view-image
 /login
 /permission
 /plan
@@ -371,116 +420,74 @@ Common entry points:
 /statusline
 ```
 
-Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics. `/model` candidates come only from the Host catalog: rc.2's `deepseek-flash` is identified by the exact `(provider, model)` pair (the display name `DeepSeek-V4.1-Flash` is never the ID), and a selection writes the official Session/global default. A deployment catalog that no longer offers the ID shows no invented row.
+Model selection, Reasoning Effort, permission presets, Plan, and Goal all keep the corresponding DSH runtime semantics. `/model` candidates come only from the Host catalog: `deepseek-flash` is identified by the exact `(provider, model)` pair (the display name `DeepSeek-V4.1-Flash` is never the ID), and a selection writes the official Session/global default. A deployment catalog that no longer offers the ID shows no invented row.
 
-`/settings` opens a real full-screen workspace where the three-, two- and
-single-column layouts are projections of the SAME `categories → rows → detail`
-levels: wide terminals show all three columns, medium ones show
-`categories + rows` or `rows + details` for the current level, and narrow ones
-show only the current level. At every width ASCII `Right` advances exactly one
-level and `Left` returns one level (inert at L0); `Enter` follows the same
-transitions, and `Esc`/`Backspace` step back, closing at the outermost level.
-`Tab`/`Shift+Tab` remain inert. The Action Bar stays pinned to the last physical
-row. Multi-column choosing retains the active `[Details]` marker unless that
-heading would consume the only content row. It presents the real Appearance /
-Display facts: the theme's source-qualified raw value plus its friendly name,
-Icon style, the live Transcript display preset alongside the persisted preference,
-the live Thinking detail state, and each row's configuration Scope and backend
-readiness. `R`
-re-reads and `C` copies the selected row's exact source value. Browsing, choosing
-and copying alone never write configuration.
+`/settings` and `/status` open the same full-screen settings workspace on the
+About home. Wide and medium terminals show a category rail plus the content
+column; narrow terminals (under 76 columns) show About directly. The fixed
+categories are About / Models / Account / Agent / Appearance / Conversation /
+Input & Terminal / Tools / Plugins, with Extensions appended only while the
+extension settings registry has rows. `Tab`/`Shift+Tab` move focus between
+regions, `Right`/`Enter` go one level deeper, `Left`/`Esc`/`Backspace` step
+back, and the outermost back closes the workspace; the Action Bar stays on the
+last row.
 
-The **`Configured theme` and `Transcript display` rows are directly editable**:
-from L1, `Right` or `Enter`, the painted `[Change…]` button, or ordinary visible
-Detail content opens the candidate choice in the SAME L2 pane. Current-value and
-Runtime/Persisted facts stay in the same pane above the candidate region and scroll
-independently. `Up`/`Down`/`Home`/`End` move the candidate; `PgUp`/`PgDn` and the
-wheel over facts scroll only the fact region, while the candidate wheel scrolls
-independently. During choice, `C` copies the original row value only while the
-Action Bar paints `c copy`; it never copies or commits the draft candidate. `Enter`
-or `[Confirm]` confirms explicitly, and `Left`/`Esc`/`Backspace` or `[Cancel]`
-cancels directly to L1 without writing anything. If the selected candidate identity
-has scrolled out of view, the first Enter only reveals it; confirmation requires a
-later Enter. From L2 browse or a settled outcome, Enter reopens choice for a
-writable non-pending row. At 44×8, a long identity may first reclaim the optional
-`Choose value` heading; if still needed, the fact area shrinks only to one original
-`Value` row. The complete identity, `Confirm` and `Enter confirm` must be visible
-before a write.
-An identity beyond the remaining candidate capacity stays unconfirmable. Only
-buttons and candidates that are really painted can be clicked. A confirmed change is stored through the existing
-serialized whole-document write path and then re-read from the authority: the
-detail names the live runtime fact (`Runtime`, e.g. the current palette) and the
-stored preference (`Persisted`) separately and states `Saving…`, `Verified`,
-`Not saved · <reason>`, `Commit accepted · verification unavailable` or
-`Outcome unknown · <reason>` — only a completed write whose authoritative
-re-read agrees is called Verified; a rejected write re-reads the authority first
-and reports Not saved only while it still carries the value the request started
-from; a third value, a value already in place or an unreadable authority is
-Outcome unknown, and a success whose readable readback disagrees is a failure
-rather than "verification unavailable". On a non-ready backend the theme is
-neither applied nor written; a display preset may already be live locally and
-then says that it was not stored instead of pretending it was. A plugin theme is
-resolved again by its source-qualified identity at confirm time, so an unloaded
-plugin theme is listed as unavailable and refused rather than degrading into a
-same-named file theme. Icon style and Thinking detail stay read-only rows. The
-existing complete settings editor is still available: `Other settings` → `Open
-existing settings…` retires the workspace and restores the surface it paused
-before opening the original editor, so Theme, the Plugin Manager, keybindings,
-permissions and extension settings keep every existing write path.
+About shows the TUI/DSH versions, backend, captured session identity,
+whole-session statistics, TTFB/throughput and Context occupancy; `c` copies the
+selected fact's raw value, `C` copies the full report and `r` refreshes. The old
+`/status` page is gone; extension diagnostics moved to
+`Settings → Plugins → Diagnostics` (`d`).
 
-`Other settings` in `/settings` now has a `Web Search / Fetch` row: it retires the workspace,
-opens the existing editor's Web section and focuses its first item. The section switches the search
-provider (`Messages`, the official default, or the separately billed `DeepSeek Search API`), the fetch
-provider (`HTTP`, the official default, or `DeepSeek Fetch API`), the Search API result count (1–50,
-quick picks 5/10/20/50), `Share Original Question` (on by default; each new Search API call carries
-up to 128 characters of the triggering human question as `ori_question`, never the full history or
-system prompt) and the API endpoint base (an https address the user must confirm explicitly; the
-credential and query are sent to it). Both APIs are separate opt-in billed providers: a login or an
-ordinary Messages plan does not guarantee coverage of their fees, and the default
-`Messages`/`HTTP` combination calls no billed API. This Web configuration belongs to the base
-profile, not to a Bxx Optional Bundle, so installing or enabling another bundle never changes these
-providers. `[current]` moves only after
-the official mutation and its authoritative read-back agree, and a refused write reads `Not saved`.
-The choice applies to the next search/fetch; a running operation is never changed retroactively. The
-DeepSeek API key row shows only whether the reference is configured and its source layer; configure
-or clear it through the existing masked `/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY` paths,
-which run after the settings surface closes. Esc from the Web section restores the same
-`Web Search / Fetch` row; the original `Open existing settings…` entry still returns to the
-conversation. A Remote backend reports the section unavailable and names no Host namespace.
+Models lists the Host provider catalog, API-key presence (not a connectivity
+test), provider details, masked input and clear confirmations, the Add Provider
+wizard and provider-native sign-in; the home lists only configured providers,
+with unconfigured ones in the Add Provider catalog. Account shows sign-in state,
+the browser authorization URL, SSH tunnel guidance, independent wallets, exact
+attempt cancellation, refresh and a confirmed sign-out. `/login` and `/logout`
+open the matching page deep link. DeepSeek Account sign-in uses the official Host
+`host-webserver` loopback `/oauth/callback` on `127.0.0.1:0`; the TUI never
+receives a token or grant, and `--help` opens no port.
 
-The `Icon style` option in `/settings` switches the TUI's structural icons:
-`Emoji` (default, colorful), `Symbols` (compact single-cell terminal
-symbols), or `Minimal` (decorative icons hidden; only status/interaction
-markers remain). Switching applies immediately and persists.
+Settings edits in place: Appearance (Icon style, Status line mode), Conversation
+(Transcript detail, Thinking detail, Progress updates, Response style, Submit
+while busy, Git attribution), Input & Terminal (Home/End keys, Fullscreen, wheel
+lines, notifications, Terminal progress, Footer layout, Keyboard shortcuts),
+Agent (approval policy, default permission, subagent model allowlist/selection,
+user shell sandbox), Tools (Web Search / Fetch, Visual tools) and Extensions
+(dynamic settings grouped by plugin). Every write needs explicit confirmation
+and reports `Verified` / `Not saved` / `Outcome unknown` from the authoritative
+read-back; `Fullscreen` applies after Settings closes normally. `/footer`,
+`/statusline`, bare `/keybindings` and `/plugins` are deep links into the same
+workspace; the legacy main settings editor and standalone plugin screen are
+gone.
 
-The `Terminal progress` row in `/settings` selects the native terminal status
-reporting in four modes: `9;4+7501` (default — both the OSC 9;4 progress bar and
-the OSC 7501 semantic state), `9;4` (progress-bar compatibility only), `7501`
-(semantic state only: working, waiting for approval/answer, done, error) and
-`Off` (clear and stop reporting). Switching applies immediately; done and error
-are reported only once a real run's last turn result is proven, while a
-cancelled or interrupted run returns to idle. A persisted `On` reads as the
-dual-protocol default.
+The **Visual tools** switch under `Settings → Tools` (default On) is the
+profile-wide `pi-tui-visual-tools.enabled` and controls `dsh_pi_tui_chart`,
+`dsh_pi_tui_svg` and `present_visual` together. After it is turned off, new
+model requests no longer see the three tools, while historical results remain
+displayable, copyable, searchable and exportable. Direct verifies the Host
+registry state before showing Verified; Remote only reports that the preference
+was saved.
 
-Terminal compatibility: a terminal that does not know OSC 7501 simply ignores
-it — Ghostty's GUI currently shows the OSC 9;4 progress bar and not the 7501
-semantic state, which is expected and not a reporting failure. Inside tmux and
-other terminal multiplexers an unknown OSC may not be forwarded to the outer
-terminal (this feature deliberately implements no tmux DCS passthrough and does
-not change multiplexer settings); use an outer terminal that supports it when
-the state must survive a multiplexer. The OSC 7501 semantic state describes the
-current Main Agent only.
+`Settings → Tools → Web Search / Fetch` is a page in the same workspace: search
+and fetch providers, result count, `Share Original Question`, HTTPS endpoint and
+a read-only API-key reference. Each value is written only by an explicit Enter
+confirmation and shows the Host's authoritative read-back. The two APIs are
+separately billed providers; the default Messages/HTTP pair calls no billed API.
 
-This project's own Remote composition (experimental, our Host) reports the same
-state: the Host side is served by this extension's private Host status stream and
-shares ONE interval classifier with Direct. **A third-party DSH Host without this
-extension's Host plugin is not supported** (it has no equivalent event source).
-
-Slash Commands registered by other plugins through `ctx.commands` are discovered automatically.
+`Extensions` groups the live registration rows by owner with `Tab`/`Shift+Tab`
+cycling groups and arrows/Home/End/paging/wheel staying inside the group.
+Entries open native Detail/Choice; only an explicit Confirm writes to the
+running plugin, `Verified` requires a live read-back, and a same-id HMR
+re-registration inherits no old state. Extension settings never write the TUI
+settings document or a Host profile.
 
 ### Footer customization
 
-`/footer` is the interactive Footer editor. You can combine builtin status items, change their side and order, choose a Style and Tone, edit Prefix/Suffix and Importance, and create your own Footer items.
+`/footer` opens the Footer editor inside the same full-screen Settings workspace
+(Appearance → Configure footer layout). You can combine builtin status items,
+change their side and order, choose a Style and Tone, edit Prefix/Suffix and
+Importance, and create your own Footer items.
 
 Four item sources are supported:
 
@@ -495,10 +502,26 @@ A `/footer` Custom Command Item is different from `footer: command`: the former 
 
 For the full `/footer` workflow, Custom Text / Command items, YAML reference, security model, and troubleshooting, see:
 
-- [Footer customization guide](docs/footer-customization.md)
-- [Extension API for plugin authors](docs/extension-api.md)
+- [Footer customization guide](docs/guides/footer.md)
+- [Extension API for plugin authors](docs/extensions/stable.md)
 
 `/statusline` is an alias of `/footer`.
+
+### Images
+
+Ctrl+V reads the system clipboard: an image becomes the canonical placeholder `[image #N (WxH)]` with draft thumbnails in one row above the composer (a short window lets the client hide that row, while typing and sending still work and the status line keeps reporting the real draft count); text is inserted at the live caret. `/image` and `/attach` can also add an image or a regular file to the current draft. A placeholder that appears several times shows several positions while the bytes are read and uploaded once.
+
+Images in user messages, assistant messages and tool results are shown inside their own card, in their original order: one identity line (name, pixel size, byte count) plus one image. The PiTUI viewer is described below; in the experimental TSP renderer, viewing and zooming are the Tern client's own affordances (moving between neighbouring images depends on the client's version and capabilities). When an image cannot be read, its format is unsupported, or it exceeds the 16 MiB single-image limit, the card states the identity and the real reason instead of drawing a fabricated image. On a native Kitty terminal, transcript thumbnails, the composer draft card and the fullscreen image viewer all first convert JPEG/WebP to a bounded PNG in the background before painting pixels (WebP uses only its first frame, EXIF orientation is applied, and the longest edge is capped at 768 pixels; the identity row and the viewer keep the original name, dimensions, media type and byte count; the draft card only derives the one last local image it is allowed to show). A collapsed occurrence never starts a conversion; while converting or after a failure only text is shown (a failure reads `Preview unavailable`), and only a body that really painted pixels is clickable. The fullscreen viewer shows that same bounded derivative rather than a full-resolution original; PNG, iTerm2, GIF, narrow and graphics-unsupported terminals keep their existing behavior.
+
+The rightmost three cells of a fullscreen image info row are `[-]`/`[+]`, folding only that image; clicking its body opens the read-only viewer. `/view-image` lists the images of the currently mounted transcript window; `Enter` views one and `Esc back` returns to the same list.
+
+### TSP renderer (experimental)
+
+Set `DSH_PI_TUI_RENDERER=tsp` to enable the experimental Tern TSP renderer:
+native tool cards, Preparing rows, PTC child calls, the Work Hub
+(`/tasks`, `/subagents`), image paste and historical images, and native display
+with Copy for published charts/SVGs. The default renderer remains PiTui;
+Settings and Plugins pages that TSP cannot host are refused explicitly.
 
 ## Common keys
 
@@ -518,6 +541,9 @@ For the full `/footer` workflow, Custom Text / Command items, YAML reference, se
 | `Ctrl+End`    | Jump to the latest Transcript output in fullscreen; a clickable `↓ Latest` appears after leaving the live tail |
 | `Ctrl+O`      | Expand / collapse Tool and System details and long user prompts in regular/fullscreen-non-Focus; in fullscreen Focus, bulk-toggle the Thought roots (expand long user prompts by clicking the marker) |
 | `Alt+T`       | Expand / collapse Thinking                          |
+| `Alt+V`       | Select / cycle the current window's published charts or SVGs |
+| `Alt+C`       | Copy the selected chart / SVG                       |
+| `Alt+O`       | Open the selected SVG                               |
 | `Ctrl+G`      | Edit current input in `$VISUAL`/`$EDITOR`           |
 | `Ctrl+V`      | Paste image                                         |
 | `Tab`         | Autocomplete slash commands and file paths          |
@@ -575,8 +601,9 @@ keybindings:
   action-first, editable Keyboard Shortcuts Editor: it groups actions by
   category, searches action IDs/descriptions/current keys/default keys, and
   marks customized, conflict, Unbound, Disabled, and fixed states. A standalone Leader key row also configures the global leader key.
-- `/settings` has one `Keyboard shortcuts` launcher that opens the same editor
-  and persistence controller as `/keybindings`.
+- `/settings` has one `Keyboard shortcuts…` entry that opens the same-lease
+  full-screen page and the same persistence controller as bare `/keybindings`
+  (no 88-column overlay).
 - The recorder reads a real terminal key, parses it with `parseKey`, and stores
   the canonical `KeyId`; known dead, typing-swallowing, terminal-ambiguous, and
   conflicting shortcuts are rejected before saving. Ordinary recording cancels
@@ -729,12 +756,11 @@ export function apply(ctx: Context): void {
 
 Documentation:
 
-* [Extension API](docs/extension-api.md)
-* [Extension tiers](docs/extension-tiers.md)
-* [Advanced API](docs/extension-advanced.md)
-* [Unstable API](docs/extension-unstable.md)
-* [Plugin authoring](docs/plugin-authoring.md)
-* [Capability matrix](docs/extension-capability-matrix.md)
+* [Extension API](docs/extensions/stable.md)
+* [Extension tiers](docs/extensions/tiers.md)
+* [Advanced API](docs/extensions/advanced.md)
+* [Unstable API](docs/extensions/unstable.md)
+* [Plugin authoring](docs/extensions/authoring.md)
 
 ## Development
 
@@ -792,7 +818,7 @@ The published package already contains the Pi TUI fork required at runtime. No s
 
 ### CI validation policy
 
-CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Source Mode reads the source target from `test/compat/dsh-source.json` and validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary; npm Mode uses the DSH version declared by the checkout's `package.json` and frozen lockfile to run the registry lane. The published `pi2dsh` ecosystem check is explicitly marked skipped for an unpublished source family. See [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md) for the full workflow.
+CI follows the tracked `test/compat/dsh-mode.json` policy for pushes to `next` and pull requests targeting `next`; `main` and every tag use npm Mode. Source Mode reads the source target from `test/compat/dsh-source.json` and validates the complete official DSH tarball family, TUI presets, and the old-runtime boundary; npm Mode uses the DSH version declared by the checkout's `package.json` and frozen lockfile to run the registry lane. The published `pi2dsh` ecosystem check runs in both modes and always targets the published ecosystem (it installs the published DSH and pi2dsh from the registry), so a source pack is explicitly skipped rather than passed. See [`docs/guides/dsh-compatibility.md`](docs/guides/dsh-compatibility.md) for the compatibility method.
 
 ## Repository layout
 
@@ -819,15 +845,13 @@ Contributor-oriented repository structure and development rules are documented i
 
 | Document                                               | Content                           |
 | ------------------------------------------------------ | --------------------------------- |
-| [docs/README.md](docs/README.md)                       | Documentation index               |
-| [docs/architecture.md](docs/architecture.md)           | Architecture and module ownership |
-| [docs/input-history.md](docs/input-history.md)         | Input history                     |
-| [docs/surface-decisions.md](docs/surface-decisions.md) | TUI interaction decisions         |
-| [docs/concurrency.md](docs/concurrency.md)             | Session concurrency               |
-| [docs/failure-model.md](docs/failure-model.md)         | Async failure / cancellation      |
-| [docs/perf-baseline.md](docs/perf-baseline.md)         | Performance baseline              |
-| [docs/local-development.md](docs/local-development.md) | Local development and worktree policy |
-| [docs/extension-api.md](docs/extension-api.md)         | Extension API                     |
+| [docs/README.md](docs/README.md)                             | Documentation policy and index |
+| [docs/architecture/overview.md](docs/architecture/overview.md) | Architecture, layers and dependency direction |
+| [docs/architecture/host-client.md](docs/architecture/host-client.md) | Host/Client boundary and currentness contracts |
+| [docs/architecture/surface-behavior.md](docs/architecture/surface-behavior.md) | Workspace/task/plugin surface behavior |
+| [docs/guides/development.md](docs/guides/development.md)     | Local development, worktrees and benchmark reruns |
+| [docs/extensions/stable.md](docs/extensions/stable.md)       | Extension API                     |
+| [docs/guides/code-review.md](docs/guides/code-review.md)     | Repository review checkpoints     |
 | [AGENTS.md](AGENTS.md)                                 | Contributor operating manual      |
 
 ## Changelog

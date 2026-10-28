@@ -34,7 +34,7 @@
  * the footer, the public widget zones or the transcript floor. A 0-grant
  * frame cannot be entered (the host declines).
  *
- * Visual vocabulary is frozen by `docs/tui-design-language.md` (§3.2 role
+ * Visual vocabulary is frozen by `docs/architecture/design-language.md` (§3.2 role
  * table, §4.3/§4.4 glyph inventory): one `‣` marker and a Title Case status
  * word, `> ` as the only active marker, no cursor glyph, no brackets, no
  * second palette token, no frame/border — plus the ONE Owner-authorized top
@@ -206,7 +206,7 @@ function renderHeaderRow(width: number, start: number, count: number, total: num
  * Nesting is painted as INDENTATION derived from the durable depth, never as the
  * modal panel's `├─ ` connector: U+2500 is East-Asian-Width ambiguous, and the
  * design language forbids putting an ambiguous glyph in a NEW place
- * (`docs/tui-design-language.md` §4.3). The status word is projected through the
+ * (`docs/architecture/design-language.md` §4.3). The status word is projected through the
  * same single-physical-line sanitizer as the label: a status is an external
  * (possibly Remote/wire) string, and this row is budgeted as exactly one
  * terminal row.

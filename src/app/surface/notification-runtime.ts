@@ -30,7 +30,7 @@
  */
 
 import { CompletionNotificationController } from '../../domain/notification/controller.ts'
-import { parseNotificationMethod, parseNotificationMode, type NotificationMethod } from '../../domain/notification/settings.ts'
+import { parseNotificationMethod, parseNotificationMode, type NotificationMethod, type NotificationMode } from '../../domain/notification/settings.ts'
 import type { TerminalFocusState } from '../../domain/notification/types.ts'
 
 /** One completion status fact (the controller's parameter type). */
@@ -85,6 +85,10 @@ export interface NotificationRuntime {
   /** The notification settings write path (`/notify`, `agent/status` policy). */
   setMode(mode: string): void
   setMethod(method: string): void
+  /** The mode the ONE controller currently applies (read-only). */
+  currentMode(): NotificationMode
+  /** The delivery method the ONE controller currently applies (read-only). */
+  currentMethod(): NotificationMethod
   /** A terminal focus report (CSI ? 1004): the tracker only records state. */
   handleTerminalFocus(focused: boolean): void
   /** Any REAL input proves the user is operating the terminal (restores
@@ -123,6 +127,12 @@ export function createNotificationRuntime(options: NotificationRuntimeOptions): 
     },
     setMethod(method) {
       completionController.setMethod(parseNotificationMethod(method))
+    },
+    currentMode() {
+      return completionController.currentMode()
+    },
+    currentMethod() {
+      return completionController.currentMethod()
     },
     handleTerminalFocus(focused) {
       presentation.handleFocusReport(focused)

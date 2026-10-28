@@ -23,7 +23,7 @@
  *     another one.
  *
  * This driver is NOT part of `pnpm test` or CI: it needs the external Tern CLI
- * and it takes minutes. See `docs/tern-pane-harness.md`.
+ * and it takes minutes. See `docs/guides/tern-pane-testing.md`.
  *
  * Every run creates its OWN directory and deletes nothing: the default is a fresh
  * `<repo>/temp/tern-pane-XXXXXX`, `--out` must name a directory that does not
@@ -39,6 +39,7 @@ import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { index, rect, visiblePoint } from './tern-pane-geometry.mjs'
 import { isRepeatableCommand, shellQuote } from './tern-pane-instrument.mjs'
+import { OWNED_CHILD_CLOSE_DEADLINE_MS, ownChild, stopOwnedChildren } from './lib/owned-child-shutdown.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = join(here, '..')
@@ -49,7 +50,7 @@ const repo = join(here, '..')
  * serve` in the run directory and sends `./launch.sh`. A spaced absolute path is
  * refused outright (`expected run <command>`), and double-quoting one is accepted
  * but starts nothing — both measured against the real client, see
- * `docs/tern-pane-harness.md`.
+ * `docs/guides/tern-pane-testing.md`.
  */
 const RUN_SCRIPT_NAME = 'launch.sh'
 const RUN_SCRIPT = `./${RUN_SCRIPT_NAME}`
@@ -155,12 +156,55 @@ async function createHarness({ ternBin, root, socket = 'tern.sock' }) {
   // The server's cwd is the run directory: `run` takes ONE path-shaped token and
   // resolves it against that cwd, which is how a run directory containing spaces
   // still starts its subject (a spaced absolute path is refused, and quoting it is
-  // accepted but silently runs nothing — measured, see docs/tern-pane-harness.md).
+  // accepted but silently runs nothing — measured, see docs/guides/tern-pane-testing.md).
   const serve = spawn(ternBin, ['serve', '--control', endpoint, '--out', join(root, 'shots')], { stdio: ['ignore', 'pipe', 'pipe'], cwd: root })
+  // The serve child's terminal state is observed the moment it exists: `stop()`
+  // only REQUESTS a signal, and this driver must not exit while the pane server
+  // it started may still be alive.
+  const serveChild = ownChild(serve, { kind: 'serve' })
   serve.stdout.on('data', (d) => log(`serve.out ${String(d).trim()}`))
   serve.stderr.on('data', (d) => log(`serve.err ${String(d).trim()}`))
-  const stopServe = () => serve.kill('SIGKILL')
-  process.on('exit', stopServe)
+  // One ordered teardown, reused by both signals, the ready-failure path and the
+  // normal `finally`: a second entry must not send a second signal.
+  let stopPromise
+  const stopServe = () => {
+    stopPromise ??= (async () => {
+      const outcome = await stopOwnedChildren([serveChild])
+      if (outcome.timedOut) {
+        // A deadline is NOT a teardown: name the child that did not settle.
+        check('the Tern serve process settled before the driver exited', false,
+          `no close within ${OWNED_CHILD_CLOSE_DEADLINE_MS}ms: serve pid=${serveChild.pid ?? 'not-spawned'}`)
+      }
+      return outcome
+    })()
+    return stopPromise
+  }
+  // The synchronous LAST RESORT for an exit path this driver does not own: it
+  // can only request the signal (the ordered stop above already did) and never
+  // claims the child is gone.
+  process.on('exit', () => serveChild.stop())
+  // MEASURED: a process killed with a default SIGTERM never runs its `exit`
+  // hooks, so without a handler the `serve` it started outlives the cancelled
+  // run. Both signals get ONE teardown that WAITS for the child's `close`, then
+  // re-raises the signal so the exit status still reflects the interruption.
+  let signalTeardown = false
+  const onSignal = (signal) => {
+    if (signalTeardown) return
+    signalTeardown = true
+    void stopServe().finally(() => {
+      // Re-raise only AFTER this driver's OWN handlers are gone: with a handler
+      // still installed, `process.kill(self, signal)` simply re-enters it and
+      // the process lives on. The handlers are removed BY IDENTITY, so a
+      // listener this driver does not own is never dropped.
+      process.off('SIGINT', onSigint)
+      process.off('SIGTERM', onSigterm)
+      process.kill(process.pid, signal)
+    })
+  }
+  const onSigint = () => onSignal('SIGINT')
+  const onSigterm = () => onSignal('SIGTERM')
+  process.on('SIGINT', onSigint)
+  process.on('SIGTERM', onSigterm)
 
   const results = []
   let step = 0
@@ -296,6 +340,9 @@ exec node --import tsx/esm ${shellQuote(subject)} 2>> ${shellQuote(join(root, 's
     while (Date.now() < deadline) {
       const reply = ctlOnce('stats')
       if (reply !== undefined && reply.ok !== false) return true
+      // A serve that has already terminated can never answer: waiting out the
+      // whole deadline would only delay the startup failure it already is.
+      if (serveChild.closed) return false
       await sleep(250)
     }
     return false
@@ -310,6 +357,9 @@ exec node --import tsx/esm ${shellQuote(subject)} 2>> ${shellQuote(join(root, 's
     // Teardown must not mask an earlier failure with one of its own.
     quit: () => { ctlOnce('quit') },
     stopServe,
+    // A serve that has terminated can never answer the control socket: the
+    // startup failure is reported as that, not as a timeout it already missed.
+    serveClosed: () => serveChild.closed,
   }
 }
 
@@ -363,8 +413,10 @@ harness.log(`FLOW ${flowPath}`)
 // Keep the flow with the run so the artifacts can be audited and re-run later.
 copyFileSync(flowPath, join(root, `flow${extname(flowPath)}`))
 if (!harness.ready) {
-  console.error(`the Tern serve control socket never answered (${root})`)
-  harness.stopServe()
+  console.error(harness.serveClosed()
+    ? `the Tern serve process exited before it answered the control socket (${root})`
+    : `the Tern serve control socket never answered (${root})`)
+  await harness.stopServe()
   process.exit(2)
 }
 try {
@@ -377,6 +429,6 @@ try {
   harness.check('the flow ran to completion', false, String(error?.message ?? error))
 } finally {
   harness.quit()
-  harness.stopServe()
+  await harness.stopServe()
 }
 process.exit(harness.finish({ tern: ternVersion, flow: flowPath }))

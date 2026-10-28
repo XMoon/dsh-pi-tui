@@ -156,12 +156,16 @@ export class KeybindingEditorPanel implements Component, Focusable {
   /** The standalone cap (`/keybindings` mounted on its own overlay). */
   private readonly standaloneRows: () => number
   /** The EFFECTIVE content-row grant: the standalone cap lowered by the
-   * parent SettingsList's live grant when this panel is a `/settings`
-   * submenu, so a nested panel never claims the whole terminal height. */
+   * parent's live grant when this panel is embedded in the Settings body. */
   private readonly maxRows: () => number
-  /** Live parent content-row grant (the `SettingsList` `RowBudgetAware`
-   * slot); undefined while the panel is standalone. */
+  /** Live parent content-row grant (`setMaxRows`); undefined while standalone. */
   private parentContentRows: number | undefined
+  /** The parent grant and sub-view the LAST completed render painted. A changed
+   *  grant or sub-view admits only the real Esc until it repaints. */
+  private paintedGrant: number | undefined
+  private paintedView = ''
+  /** The page identity the root paints in its shared pane header. */
+  readonly title = 'Keyboard shortcuts'
   /** The shared Input is the ONLY query source of truth (left/right/Home/
    * End/Ctrl+A/E/B/F/delete/kill/undo all work here — the old hand-rolled
    * `query += chunk` string editing could only append and Backspace). */
@@ -189,6 +193,17 @@ export class KeybindingEditorPanel implements Component, Focusable {
    * change between press and release must never activate a different
    * action. */
   private mousePressedId: string | undefined
+  /** The grant/sub-view the press was admitted against: a repaint under a
+   *  different grant (a resize) refuses the release even at the same cell. */
+  private mousePressedGrant: number | undefined
+  private mousePressedView: string | undefined
+  /** The selectable identities the LAST frame really painted. A hidden row
+   *  (a degenerate grant or a trimmed list) can never be opened by Enter. */
+  /** Undefined before the first frame: a direct panel harness may feed input
+   *  before a paint, while a REAL surface always paints first. */
+  private paintedSelectableIds: Set<string> | undefined
+  /** A detail-mutation settlement that has not painted its frame yet. */
+  private settlementAwaitingPaint = false
   /** The width the hit map was painted at; a stale-width event is rejected. */
   private lastRenderWidth = 0
 
@@ -206,43 +221,102 @@ export class KeybindingEditorPanel implements Component, Focusable {
     ))
   }
 
-  /** RowBudgetAware seam (the fork's `SettingsList` submenu slot): the
-   * parent forwards its live content-row grant when the submenu opens and
-   * on every later change. ONLY the row grant is updated — the query,
-   * selection, child panels and mutation generation are untouched, so a
-   * nested resize never resets the editor state. */
+  /** The parent's live row grant (the Settings root when embedded). A repeated
+   *  identical grant never requests another render: the root calls this on
+   *  every frame. */
   setMaxRows(rows: number): void {
-    this.parentContentRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : undefined
+    const next = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : undefined
+    if (next === this.parentContentRows) return
+    this.parentContentRows = next
     this.requestRender()
+  }
+
+  /** Whether the current grant or sub-view has not painted yet. The root admits
+   *  only the real Esc until this is false. */
+  grantAwaitingPaint(): boolean {
+    if (this.parentContentRows === undefined) return false
+    return this.paintedGrant !== this.parentContentRows || this.paintedView !== this.viewKey()
+  }
+
+  /** The page's own exit/confirmation gradient: a non-empty query, a detail
+   *  editor, the leader editor/recorder and an in-flight mutation all refuse
+   *  USER navigation away from the page. A settlement whose frame has not
+   *  painted yet is part of the detail view here: the parent may not swap the
+   *  category out from under a result the user has not read. */
+  blocksParentNavigation(): boolean {
+    return this.query !== ''
+      || this.actionEditor !== undefined
+      || this.leaderEditing
+      || this.leaderPending
+      || this.settlementAwaitingPaint
+  }
+
+  private viewKey(): string {
+    if (this.actionEditor !== undefined) return `action:${this.actionEditor.actionId()}`
+    if (this.leaderEditing) return 'leader'
+    return 'list'
   }
 
   render(width: number): string[] {
     const safeWidth = Math.max(1, width)
     this.lastRenderWidth = safeWidth
+    // Every completed frame records the parent grant and the sub-view it really
+    // painted; `grantAwaitingPaint` compares against them.
+    this.paintedGrant = this.parentContentRows
+    this.paintedView = this.viewKey()
+    // This frame is about to carry whatever the mounted detail settled with.
+    this.settlementAwaitingPaint = false
     if (this.actionEditor !== undefined) return this.actionEditor.render(safeWidth)
     if (this.leaderEditing) return this.renderLeaderEditor(safeWidth)
 
     const limit = Math.max(1, this.maxRows())
-    const title = color.textStrong('Keyboard shortcuts')
     const searchRow = this.searchRow(safeWidth)
     // The Esc verb follows the two-stage lifecycle: a non-empty query
     // clears first, an empty query closes the panel.
     const escVerb = this.query === '' ? 'close' : 'clear'
-    const hint = color.textDim(`Enter: details · type: search · ←→: edit · ↑↓: move · Esc: ${escVerb}`)
+    // Whole-segment fallbacks: the Esc verb is the LAST thing to yield, so a
+    // narrow frame never truncates the only way back out of the page. `← Back`
+    // is advertised ONLY where it is accepted: an empty query means the search
+    // Input does not own `←`; a non-empty one never claims the back verb.
+    const back = this.query === '' ? ' · ← Back' : ''
+    const hintText = [
+      `Enter details · type search · ←→ edit · ↑↓ move${back} · Esc ${escVerb}`,
+      `Enter details · type search · ←→ edit${back} · Esc ${escVerb}`,
+      `Enter details · type search${back} · Esc ${escVerb}`,
+      `Enter details${back} · Esc ${escVerb}`,
+      `Enter details · Esc ${escVerb}`,
+      `Esc ${escVerb}`,
+    ].find(text => visibleWidth(text) <= safeWidth) ?? `Esc ${escVerb}`
+    // The 2/3-row grants still paint the search row, so `type search` is
+    // admitted there; the 1-row grant paints ONLY the bar and admits only its
+    // own back verbs, so it must never advertise the search it refuses.
+    const passiveHintText = [
+      `type search${back} · Esc ${escVerb}`,
+      ...(this.query === '' ? [`← Back · Esc ${escVerb}`] : []),
+      `Esc ${escVerb}`,
+    ].find(text => visibleWidth(text) <= safeWidth) ?? `Esc ${escVerb}`
+    const barOnlyHintText = [
+      ...(this.query === '' ? [`← Back · Esc ${escVerb}`] : []),
+      `Esc ${escVerb}`,
+    ].find(text => visibleWidth(text) <= safeWidth) ?? `Esc ${escVerb}`
+    const hint = color.textDim(hintText)
     // Degenerate grants: the bottom operation hint is the non-negotiable
-    // tail. Below four rows the title and the search row take what fits, in
-    // an order that keeps the panel identifiable and the query editable.
+    // tail. Below four rows the search row takes what fits, and the panel is
+    // already identified by the shared pane header.
     if (limit === 1) {
       this.hitMap = [{ kind: 'inert' }]
-      return [hint]
+      this.paintedSelectableIds = new Set()
+      return [color.textDim(barOnlyHintText)]
     }
     if (limit === 2) {
-      this.hitMap = [{ kind: 'inert' }, { kind: 'inert' }]
-      return [title, hint]
+      this.hitMap = [{ kind: 'search' }, { kind: 'inert' }]
+      this.paintedSelectableIds = new Set()
+      return [searchRow, color.textDim(passiveHintText)]
     }
     if (limit === 3) {
-      this.hitMap = [{ kind: 'inert' }, { kind: 'search' }, { kind: 'inert' }]
-      return [title, searchRow, hint]
+      this.hitMap = [{ kind: 'search' }, { kind: 'inert' }, { kind: 'inert' }]
+      this.paintedSelectableIds = new Set()
+      return [searchRow, color.textDim(truncateToWidth(`Keymap: ${this.model.summary}`, safeWidth)), color.textDim(passiveHintText)]
     }
 
     const entries = this.displayEntries()
@@ -254,9 +328,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // separators and scroll markers yield first, then the optional
     // description/safe-mode chrome, and the operation hint is mandatory, so
     // it can never be head-cut off the bottom.
-    const rows: BudgetRow[] = [
-      { text: title, hit: { kind: 'inert' } },
-    ]
+    const rows: BudgetRow[] = []
     if (this.model.leader.safeMode) {
       rows.push(
         { text: color.warning('Safe mode is active. Custom shortcuts are ignored.'), hit: { kind: 'inert' }, drop: 32 },
@@ -264,7 +336,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
       )
     }
     rows.push({
-      text: color.textDim(`Search actions, descriptions, IDs, categories, or keys · ${this.model.summary}`),
+      text: color.textDim(truncateToWidth(`Keymap: ${this.model.summary}`, safeWidth)),
       hit: { kind: 'inert' },
       drop: 30,
     })
@@ -314,6 +386,13 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // The hit map is built from the EXACT rows this render returns, so a
     // click can only act on last-painted geometry.
     this.hitMap = kept.map(row => row.hit)
+    this.paintedSelectableIds = new Set(kept.flatMap(row =>
+      row.hit.kind === 'select' ? [row.hit.id] : []))
+    // With no selectable row painted, Enter is not an available action: the
+    // mandatory last-row bar states the keys the frame really accepts.
+    if (this.paintedSelectableIds.size === 0 && kept.length > 0) {
+      kept[kept.length - 1] = { text: color.textDim(passiveHintText), hit: { kind: 'inert' } }
+    }
     return kept.map(row => row.text)
   }
 
@@ -360,6 +439,19 @@ export class KeybindingEditorPanel implements Component, Focusable {
       }
       return
     }
+    // `←` is the back verb ONLY on the query-less root list: with a query the
+    // search Input owns it (cursor movement), and every sub-view above this
+    // branch (detail, leader) keeps its own meaning.
+    if (this.query === '' && matchesKey(data, 'left')) {
+      this.dispose()
+      this.onClose()
+      return
+    }
+    // A grant that paints ONLY the Action Bar shows no search, list or detail
+    // control: no ordinary key may edit what the user cannot see. The page's
+    // own ROOT back verbs (the real Esc, and `←` on the query-less root list)
+    // already returned above.
+    if (this.maxRows() < 2) return
     const selectable = this.selectableEntries(this.displayEntries())
     this.ensureSelection(selectable)
     // The parent owns ONLY the list/control keys; EVERY other key —
@@ -383,6 +475,12 @@ export class KeybindingEditorPanel implements Component, Focusable {
       return
     }
     if (matchesKey(data, 'enter') || data === '\n' || data === '\r') {
+      // Enter opens only the action row THIS frame painted (a degenerate grant
+      // can leave the list without any selectable row).
+      const selected = selectable.find(entry => this.isSelectedEntry(entry))
+      if (selected === undefined) return
+      if (this.paintedSelectableIds !== undefined
+        && !this.paintedSelectableIds.has(this.entryId(selected))) return
       this.openSelected(selectable)
       return
     }
@@ -412,7 +510,13 @@ export class KeybindingEditorPanel implements Component, Focusable {
     // latch that a later click could match. The local copy still guards
     // the valid-row comparison below.
     const pressedId = this.mousePressedId
-    if (event.type === 'click') this.mousePressedId = undefined
+    const pressedGrant = this.mousePressedGrant
+    const pressedView = this.mousePressedView
+    if (event.type === 'click' || event.type === 'wheel') {
+      this.mousePressedId = undefined
+      this.mousePressedGrant = undefined
+      this.mousePressedView = undefined
+    }
     // The hit map is only valid for the last painted width: a resize
     // that has not been repainted must not dispatch against stale
     // geometry (last-painted geometry is authoritative).
@@ -454,6 +558,8 @@ export class KeybindingEditorPanel implements Component, Focusable {
         const currentIndex = selectable.findIndex(entry => this.entryId(entry) === hit.id)
         if (currentIndex === -1) return undefined
         this.mousePressedId = hit.id
+        this.mousePressedGrant = this.paintedGrant
+        this.mousePressedView = this.paintedView
         if (this.selectedIndex !== currentIndex) {
           this.selectedIndex = currentIndex
           this.selectedId = hit.id
@@ -466,6 +572,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
       // not activate a different action. The identity was released at
       // handler entry; the local copy guards the comparison.
       if (pressedId !== hit.id) return undefined
+      if (pressedGrant !== this.paintedGrant || pressedView !== this.paintedView) return undefined
       const selectable = this.selectableEntries(this.displayEntries())
       const currentIndex = selectable.findIndex(entry => this.entryId(entry) === hit.id)
       if (currentIndex === -1) return undefined
@@ -486,6 +593,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.settlementAwaitingPaint = false
     this.mutationGeneration += 1
     this.actionEditor?.dispose?.()
     this.actionEditor = undefined
@@ -555,10 +663,21 @@ export class KeybindingEditorPanel implements Component, Focusable {
       return
     }
     if (selected.kind !== 'action') return
-    this.actionEditor = new ActionEditorPanel({
+    const detail = new ActionEditorPanel({
       model: this.model,
       action: selected.row,
-      runMutation: this.runMutation,
+      // Track the settlement until ITS frame paints: the list is the single
+      // owner of the page-level navigation lock, so the result can never be
+      // skipped by a category change or a close.
+      runMutation: (mutation, onResult, onError) => this.runMutation(mutation, result => {
+        this.settlementAwaitingPaint = true
+        if (this.actionEditor === detail) this.requestRender()
+        onResult(result)
+      }, error => {
+        this.settlementAwaitingPaint = true
+        if (this.actionEditor === detail) this.requestRender()
+        onError(error)
+      }),
       onModelChange: model => this.applyModel(model),
       onBack: () => {
         this.actionEditor?.dispose()
@@ -568,6 +687,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
       requestRender: this.requestRender,
       maxRows: this.maxRows,
     })
+    this.actionEditor = detail
     this.requestRender()
   }
 
@@ -580,12 +700,22 @@ export class KeybindingEditorPanel implements Component, Focusable {
       : this.model.leader.key === undefined
         ? 'Not configured'
         : formatKeyId(this.model.leader.key)
-    // Tail priority: the operation row (which carries `Esc: back`) is
-    // mandatory, the in-flight/error status is dropped last among the
-    // optional rows, and the blank spacers yield before the description —
-    // so a short grant never replaces the way back with empty lines.
+    // Tail priority: the ONE operation row is mandatory and LAST (the page has
+    // exactly one physical Action Bar); the error/status is dropped last among
+    // the optional rows, and blank spacers yield before the description — so a
+    // short grant never replaces the way back with blanks.
+    // The bar states what THIS grant can really do: a bar-only frame has no
+    // leader control to act on, so it advertises (and admits) only the Esc.
+    const bar = this.leaderPending
+      ? 'Saving… · one write at a time'
+      : this.maxRows() < 2
+        ? 'Esc back'
+        : safeMode
+          ? 'Esc back'
+          : ['Enter record · r reset leader · Esc back', 'Enter record · Esc back', 'Esc back']
+            .find(text => visibleWidth(text) <= width) ?? 'Esc back'
     const rows: BudgetRow[] = [
-      { text: color.textStrong('Keyboard shortcuts › Leader key'), hit: { kind: 'inert' }, drop: 15 },
+      { text: color.textStrong('Leader key'), hit: { kind: 'inert' }, drop: 15 },
       { text: '', hit: { kind: 'inert' }, drop: 10 },
       { text: color.text('A leader key prefixes multi-key shortcuts.'), hit: { kind: 'inert' }, drop: 20 },
       { text: color.textDim(`Current: ${current}`), hit: { kind: 'inert' }, drop: 25 },
@@ -598,19 +728,11 @@ export class KeybindingEditorPanel implements Component, Focusable {
           drop: 30,
         }]
         : []),
-      { text: '', hit: { kind: 'inert' }, drop: 5 },
-      ...(safeMode
-        ? [{ text: color.textDim('Esc: back'), hit: { kind: 'inert' } as KeybindingMouseHit }]
-        : [
-          { text: color.accent('Enter: record a new leader key'), hit: { kind: 'inert' } as KeybindingMouseHit },
-          { text: color.textDim('r: reset leader key · Esc: back'), hit: { kind: 'inert' } as KeybindingMouseHit },
-        ]),
-      ...(this.leaderPending
-        ? [{ text: color.accent('Saving…'), hit: { kind: 'inert' } as KeybindingMouseHit, drop: 40 }]
-        : []),
       ...(this.message !== undefined
-        ? [{ text: color.error(truncateToWidth(this.message, width)), hit: { kind: 'inert' } as KeybindingMouseHit, drop: 45 }]
+        ? [{ text: color.error(truncateToWidth(this.message, width)), hit: { kind: 'inert' } as KeybindingMouseHit, drop: 40 }]
         : []),
+      { text: '', hit: { kind: 'inert' }, drop: 5 },
+      { text: color.textDim(bar), hit: { kind: 'inert' } },
     ]
     return trimToGrant(rows, Math.max(1, this.maxRows())).map(row => row.text)
   }
@@ -621,6 +743,9 @@ export class KeybindingEditorPanel implements Component, Focusable {
       return
     }
     if (this.leaderPending) return
+    // A grant that paints no business row shows no leader control: only the
+    // real Esc may act, so `r`/Enter cannot start an invisible write or recorder.
+    if (this.maxRows() < 2 && !matchesKey(data, 'escape')) return
     if (matchesKey(data, 'escape')) {
       this.leaderEditing = false
       this.message = undefined
@@ -649,6 +774,7 @@ export class KeybindingEditorPanel implements Component, Focusable {
           if (!this.disposed) this.requestRender()
         },
         requestRender: this.requestRender,
+        maxRows: this.maxRows,
       })
       this.message = undefined
       this.requestRender()
@@ -728,8 +854,8 @@ export class KeybindingEditorUnavailablePanel implements Component {
   }
 
   /** RowBudgetAware seam (mirrors KeybindingEditorPanel): the fixed four-row
-   * fallback is unchanged on an ample grant and keeps `Esc: back` on a
-   * short one. */
+   * fallback is unchanged on an ample grant and keeps its Esc bar on a short
+   * one. */
   setMaxRows(rows: number): void {
     this.parentContentRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : undefined
   }
@@ -739,7 +865,7 @@ export class KeybindingEditorUnavailablePanel implements Component {
       { text: truncateToWidth(color.textStrong('Keyboard shortcuts unavailable'), Math.max(1, width)), hit: { kind: 'inert' }, drop: 15 },
       { text: '', hit: { kind: 'inert' }, drop: 5 },
       { text: truncateToWidth(color.error('The settings service could not be read.'), Math.max(1, width)), hit: { kind: 'inert' }, drop: 10 },
-      { text: truncateToWidth(color.textDim('Esc: back'), Math.max(1, width)), hit: { kind: 'inert' } },
+      { text: truncateToWidth(color.textDim('Esc back'), Math.max(1, width)), hit: { kind: 'inert' } },
     ]
     if (this.parentContentRows === undefined) return rows.map(row => row.text)
     return trimToGrant(rows, this.parentContentRows).map(row => row.text)

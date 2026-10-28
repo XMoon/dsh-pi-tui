@@ -141,7 +141,7 @@ export class EditorRegistry {
     return best
   }
 
-  /** Whether any editor is live (health /status). */
+  /** Whether any editor is live (Plugin Manager diagnostics). */
   hasAny(): boolean {
     for (const record of this.records.values()) {
       if (!record.disposed) return true
@@ -149,7 +149,7 @@ export class EditorRegistry {
     return false
   }
 
-  /** An immutable snapshot (diagnostics + /status). */
+  /** An immutable snapshot (Plugin Manager diagnostics). */
   snapshot(): EditorRegistrySnapshot {
     const editors = [...this.records.values()]
       .filter(record => !record.disposed)

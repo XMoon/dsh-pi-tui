@@ -23,7 +23,7 @@
  * current Remote composition's unsupported set (credential record read/delete,
  * session approval-policy override, authorization flows).
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/config-port
  */
 
@@ -239,6 +239,64 @@ export interface CredentialProviderOption {
   readonly canProvisionProfile: boolean
 }
 
+/** One provider profile's detached Host facts (the Models detail pane). All
+ * fields are semantic presentation facts; no settings namespace or path
+ * crosses the port. A route without a profile answers `configured: false`. */
+export interface ProviderProfileFacts {
+  readonly route: string
+  readonly configured: boolean
+  readonly api?: string
+  readonly baseURL?: string
+  readonly displayName?: string
+  readonly models: readonly string[]
+  /** The explicit `apiKeyEnv` reference, when the profile names one. */
+  readonly apiKeyEnv?: string
+}
+
+/** The safe manual-edit guidance for a complex profile: the confirmed USER
+ * profile patch path (never guessed), when the Host profile context exposes
+ * one. */
+export interface ProviderConfigGuide {
+  readonly profilePatchPath?: string
+}
+
+/**
+ * ONE detached provider snapshot: the merged provider options (one entry per
+ * provider ROUTE) and the profile facts of every route, read in a SINGLE
+ * pass.
+ *
+ * The adapter reads the configurable-provider directory ONCE and the settings
+ * ONCE per snapshot: a large installation must never pay one settings read
+ * (and one deep copy of a large section) PER PROVIDER ROUTE. The snapshot is
+ * the one authoritative read the Models page projects from — the page never
+ * re-reads a route on its own.
+ *
+ * The ROUTE is the provider identity: two routes may name the SAME credential
+ * reference, and both stay in the snapshot (the credential READ is
+ * deduplicated by reference in the read planner, never by dropping a
+ * provider).
+ */
+export interface ProviderCatalogSnapshot {
+  /** The merged provider options, one entry per provider route. */
+  readonly options: readonly CredentialProviderOption[]
+  /** The detached profile facts of every route in `options`. */
+  readonly profiles: readonly ProviderProfileFacts[]
+  /**
+   * Why the catalog could not be read AUTHORITATIVELY (a failed directory
+   * or settings read). `undefined` means the snapshot is authoritative.
+   * A failed read is never an empty catalog: a consumer must show the
+   * failure instead of presenting "no providers".
+   */
+  readonly failure?: string
+  /**
+   * Whether the values are the LAST KNOWN ones and not current (a stale
+   * mirror): the directory and the settings may come from different
+   * generations, so a consumer must mark them as not current instead of
+   * presenting them as a fresh read.
+   */
+  readonly stale?: boolean
+}
+
 /** The provider-profile sub-domain: the add-provider wizard and the
  * /login merge. The adapter owns the Host schema knowledge — a consumer
  * names a ROUTE, never a settings namespace or path: the merged
@@ -254,8 +312,26 @@ export interface ProviderProfileConfig {
    * domain/catalog/provider.ts merge, wired by the adapter). Detached DTOs with
    * semantic flags only — no settings namespace or path ever crosses. */
   listCredentialOptions(): readonly CredentialProviderOption[]
-  /** Persist one provider profile (the add-provider wizard; the adapter
-   * owns the llm-pi-ai schema). */
+  /**
+   * The ONE provider snapshot: the merged options AND every route's profile
+   * facts, from a single directory + settings read. The Models page reads
+   * the catalog through this one method, so a refresh never repeats the
+   * directory enumeration or the settings read per route.
+   */
+  readCatalog(): ProviderCatalogSnapshot
+  /** The detached profile facts of one route (the Models detail pane). */
+  readProfile(route: string): ProviderProfileFacts
+  /** The confirmed manual-edit guidance for complex profile fields. */
+  configGuide(): ProviderConfigGuide
+  /**
+   * Persist the profile of a NEW provider route (the add-provider wizard;
+   * the adapter owns the llm-pi-ai schema).
+   *
+   * The write is CONDITIONAL: the adapter refuses when the route already
+   * has a profile, and it checks the write against the revision its own
+   * decision was read at. A profile configured in the meantime is therefore
+   * REFUSED (the caller re-reads and retries) — never overwritten.
+   */
   writeProfile(route: string, profile: Record<string, unknown>): Promise<void>
   /** After a successful authorization: write a MINIMAL keyless profile for
    * a catalog route (never an apiKeyEnv — provider-native auth keeps the
@@ -411,11 +487,16 @@ export interface PermissionConfig {
   /** Apply one permission preset to a live session (/yolo applies
    * `danger-full-access` through the OFFICIAL command line so the switch
    * takes the exact host path — sandbox + approval writer + policy-change
-   * message + preset log). */
+   * message + preset log).
+   *
+   * `signal` is REQUIRED: the official `/permission` command reads
+   * `signal.aborted` before it dispatches, so every real UI/runner caller
+   * must supply its own live lifetime signal (never a fake or orphan
+   * controller). */
   applyPermissionPreset(
     sessionId: string,
     presetId: string,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<PermissionPresetApplyOutcome>
 }
 
@@ -536,6 +617,51 @@ export interface WebProviderConfig {
   setSearchApiBaseURL(url: string): Promise<void>
 }
 
+/** The effective state of the Host `pi-tui-visual-tools` row — the ONE
+ *  profile-wide switch that decides whether the built-in `dsh_pi_tui_chart`,
+ *  `dsh_pi_tui_svg` and `present_visual` tools are registered for every Agent
+ *  of this Host. It is one switch for all three: there is no per-tool field.
+ *
+ *  This is a Host CONFIGURATION fact, not a TUI preference and not a Session
+ *  property: the persistent authority is the `pi-tui-visual-tools` profile
+ *  entry's `enabled` volatile field, and the runtime sink is the official
+ *  `ToolRuntime` registry. */
+export interface VisualToolsState {
+  /** The effective `enabled` value the Host will apply. */
+  readonly enabled: boolean
+  /** The namespace revision this state was read at. A Confirm submits it back
+   *  as the official `expectedRevision`, so an external write between the read
+   *  and the Confirm is a conflict instead of a silent last-write-wins. */
+  readonly revision: number
+  /** Whether the USER profile layer declares the value. `false` means the
+   *  effective value is inherited/default — the only provenance the Host form
+   *  exposes — so the UI may mark it `[default]` instead of claiming a user
+   *  choice; the schema default itself is never re-derived here. */
+  readonly userOverridden: boolean
+  /** Whether ALL THREE tool registrations are live, as the owning Host row
+   *  reports them. `undefined` when this backend cannot observe the Host
+   *  registry (Remote has no such wire), in which case neither success nor
+   *  failure may be claimed. */
+  readonly applied: boolean | undefined
+}
+
+/**
+ * The profile-wide visual-tools switch. The write is the official
+ * revision-checked settings mutation of the `pi-tui-visual-tools` entry; the
+ * Loader then commits `enabled` into the row's live reference and reconciles
+ * the registry. A resolved write is NOT a read-back: the caller must
+ * {@link VisualToolsConfig.read} again and only that read earns `Verified`.
+ */
+export interface VisualToolsConfig {
+  /** The current Host state, or `undefined` when the profile section cannot be
+   *  read at all (missing namespace/service). Never a fabricated default. */
+  read(): VisualToolsState | undefined
+  /** Persist `enabled` through the official settings write at the revision the
+   *  user's decision was read at. A stale revision is a refusal (the official
+   *  conflict), never a silent overwrite. */
+  setEnabled(enabled: boolean, expectedRevision: number): Promise<void>
+}
+
 /**
  * How current this backend's config reads are (M3-3B, plan §9.1).
  *
@@ -550,6 +676,106 @@ export interface WebProviderConfig {
  * from "this was the value", and a backend that cannot know must say so.
  */
 export type ConfigReadiness = 'ready' | 'stale' | 'unavailable'
+
+/** Identity of the requesting UI for one DeepSeek Account operation. The Host
+ * derives the Platform request headers from it, so the Client samples it per
+ * request (never caches an old timezone offset across a DST change). */
+export interface AccountClientMetadata {
+  readonly version: string
+  /** Active UI language; the Host reduces it to the Platform wire locale. */
+  readonly locale: string
+  /** Offset from UTC in seconds, positive east of Greenwich. */
+  readonly timezoneOffsetSeconds: number
+}
+
+/** One browser sign-in attempt as the account surface sees it. The attempt id
+ * is the only cancellation identity; it is passed straight back to
+ * {@link AccountConfig.cancelSignIn} and never derived from a URL or label. */
+export interface AccountSignInAttempt {
+  readonly id: string
+  readonly phase:
+    | 'initializing'
+    | 'waiting-browser'
+    | 'exchanging'
+    | 'committing'
+    | 'succeeded'
+    | 'cancelled'
+    | 'expired'
+    | 'failed'
+  readonly authorizeUrl?: string
+  readonly expiresAt?: number
+  readonly errorCode?: 'no-response' | 'network' | 'protocol' | 'expired' | 'storage'
+}
+
+/** Stored-account presence plus the latest attempt. `credential-stored` is a
+ * STORAGE fact, never a claim that the Platform validated the grant. */
+export interface AccountView {
+  readonly status: 'signed-out' | 'credential-stored'
+  readonly links: { readonly usageUrl: string; readonly topUpUrl: string }
+  readonly attempt: AccountSignInAttempt | null
+}
+
+/** The Platform profile projection (contacts already masked by Platform). */
+export interface AccountProfile {
+  readonly id: string | null
+  readonly name: string | null
+  readonly contact: string | null
+  readonly avatarUrl?: string | null
+}
+
+/** One recharge or bonus wallet; the decimal string is retained verbatim. */
+export interface AccountWallet {
+  readonly currency: string
+  readonly balance: string
+}
+
+/** Profile and balance settle INDEPENDENTLY: each may be ready or failed, and
+ * `null` means signed out / the grant changed under the query. */
+export type AccountProfileOutcome =
+  | { readonly status: 'ready'; readonly value: AccountProfile }
+  | { readonly status: 'failed' }
+  | null
+
+export type AccountBalanceOutcome =
+  | {
+      readonly status: 'ready'
+      readonly value: readonly AccountWallet[]
+      readonly bonusWallets: readonly AccountWallet[]
+    }
+  | { readonly status: 'failed' }
+  | null
+
+/**
+ * The DeepSeek Account sub-domain — the ONLY Host authority for browser
+ * account sign-in, profile/balance reads, cancellation and sign-out. It never
+ * exposes a token, grant payload, PKCE value, Platform session or generic
+ * account service object; every DTO is detached, and the callback origin is
+ * the Host webserver's own bound loopback root (never a Client-supplied URL).
+ *
+ * `available()` is the account SERVICE fact. `getCallbackOrigin()` is the
+ * separate browser-callback capability: `undefined` means the Host listener is
+ * missing or not bound, and the UI must state that instead of starting a flow
+ * that cannot complete.
+ */
+export interface AccountConfig {
+  available(): boolean
+  getState(): Promise<AccountView>
+  getProfile(client: AccountClientMetadata): Promise<AccountProfileOutcome>
+  getBalance(client: AccountClientMetadata): Promise<AccountBalanceOutcome>
+  /** Subscribe with a COMPLETE initial state; ending the signal never cancels
+   * an in-flight browser attempt. */
+  watch(signal: AbortSignal): AsyncIterable<AccountView>
+  getCallbackOrigin(): string | undefined
+  /** Start (or join) a browser attempt against the Host's own callback origin
+   * and the fixed `web` login source. */
+  startSignIn(client: AccountClientMetadata): Promise<AccountView>
+  cancelSignIn(id: string): Promise<AccountView>
+  signOut(client: AccountClientMetadata): Promise<AccountView>
+  /** Whether a running Agent's latest bound request used the account provider
+   * (the official sign-out risk fact). Read-only: the Host's signed-out
+   * listener owns the actual cancellation. */
+  hasRunningAccountTasks(): boolean
+}
 
 /** The config assembly — one narrow sub-interface per config domain.
  * Consumers depend on the sub-interface they use, never on the whole
@@ -573,6 +799,8 @@ export interface ConfigPort {
   readonly credentials: CredentialConfig
   /** Provider authorization flows. */
   readonly authorization: AuthorizationConfig
+  /** DeepSeek Account (browser sign-in, profile/balance, sign-out). */
+  readonly account: AccountConfig
   /** Permission presets (names/default/apply). */
   readonly permissions: PermissionConfig
   /** The saved default agent preset. */
@@ -581,4 +809,6 @@ export interface ConfigPort {
   readonly subagentModelSelection: SubagentModelSelectionConfig
   /** The official Web provider selection + Search/Fetch API options. */
   readonly web: WebProviderConfig
+  /** The profile-wide built-in visual tools (Chart + SVG) availability switch. */
+  readonly visualTools: VisualToolsConfig
 }

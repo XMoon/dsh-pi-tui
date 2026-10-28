@@ -12,7 +12,7 @@
  * switch takes the exact host path — the raw commands service never leaks
  * past this adapter.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/config-direct
  */
 
@@ -31,10 +31,11 @@ import {
   type AuthorizationPrompt,
 } from '@deepseek-ai/dsh-authorization'
 import {
-  credentialOptionsFor,
+  getPath,
   providerOptionsFor,
   type ProviderCatalogEntry,
   type ProviderOption,
+  providerProfileProjectionOf,
 } from '../../domain/catalog/provider.ts'
 import { cancellationError } from '../process/tasks.ts'
 import { safeErrorMessage } from '../process/errors.ts'
@@ -46,6 +47,12 @@ import {
 } from '../../domain/footer/command-trust.ts'
 import { parseFooterCustomItems, type FooterCustomItemsParseResult } from '../../domain/footer/custom-items.ts'
 import type {
+  AccountBalanceOutcome,
+  AccountClientMetadata,
+  AccountConfig,
+  AccountProfile,
+  AccountProfileOutcome,
+  AccountView,
   AuthorizationConfig,
   AuthorizationFlowEvent,
   AuthorizationFlowTarget,
@@ -58,14 +65,23 @@ import type {
   FooterCustomItemsRaw,
   PermissionConfig,
   PresetDefaultConfig,
+  ProviderConfigGuide,
+  ProviderCatalogSnapshot,
   ProviderProfileConfig,
+  ProviderProfileFacts,
   SubagentAllowedModelRoute,
   SubagentModelSelectionConfig,
   TuiSettingsConfig,
+  VisualToolsConfig,
+  VisualToolsState,
   WebProviderConfig,
   WebProviderSettings,
   ConfigReadiness,
 } from '../config-port.ts'
+import {
+  VISUAL_TOOLS_STATUS_SERVICE,
+  type VisualToolsRuntimeStatus,
+} from '../../domain/visual/runtime-status.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -112,7 +128,7 @@ export interface ApprovalServiceLike {
 
 /** The structural commands service surface (permission application only). */
 export interface CommandsServiceLike {
-  execute(agent: unknown, line: string, args: readonly unknown[], signal?: AbortSignal): Promise<unknown>
+  execute(agent: unknown, line: string, args: readonly unknown[], signal: AbortSignal): Promise<unknown>
 }
 
 /** The structural agent-presets service surface (the registry default). */
@@ -135,10 +151,12 @@ export class DirectConfigPort implements ConfigPort {
   readonly providers: ProviderProfileConfig
   readonly credentials: CredentialConfig
   readonly authorization: AuthorizationConfig
+  readonly account: AccountConfig
   readonly permissions: PermissionConfig
   readonly presetDefault: PresetDefaultConfig
   readonly subagentModelSelection: SubagentModelSelectionConfig
   readonly web: WebProviderConfig
+  readonly visualTools: VisualToolsConfig
 
   constructor(
     ctx: HostContextLike,
@@ -151,10 +169,12 @@ export class DirectConfigPort implements ConfigPort {
     this.providers = new DirectProviderProfileConfig(ctx)
     this.credentials = new DirectCredentialConfig(ctx)
     this.authorization = new DirectAuthorizationConfig(ctx)
+    this.account = new DirectAccountConfig(ctx)
     this.permissions = new DirectPermissionConfig(ctx, agentFor)
     this.presetDefault = new DirectPresetDefaultConfig(ctx)
     this.subagentModelSelection = new DirectSubagentModelSelectionConfig(ctx)
     this.web = new DirectWebProviderConfig(ctx)
+    this.visualTools = new DirectVisualToolsConfig(ctx)
   }
 }
 
@@ -327,6 +347,53 @@ export function credentialOptionOf(option: ProviderOption): CredentialProviderOp
   }
 }
 
+/** Project one settings profile value onto the detached Models facts. Only
+ * strings/booleans survive; the route's display label is the directory's own
+ * name, never a Client guess. */
+function providerFactsOf(route: string, fallbackLabel: string, profile: unknown): ProviderProfileFacts {
+  if (typeof profile !== 'object' || profile === null || Array.isArray(profile)) {
+    // A primitive/absent profile is still a real configuration fact; there are
+    // no structured fields to project.
+    return {
+      route,
+      configured: profile !== undefined,
+      displayName: fallbackLabel,
+      models: [],
+    }
+  }
+  const record = profile as Record<string, unknown>
+  const models = Array.isArray(record.models)
+    ? record.models.flatMap(entry => {
+        if (typeof entry === 'string') return [entry]
+        if (typeof entry === 'object' && entry !== null && typeof (entry as { id?: unknown }).id === 'string') {
+          return [(entry as { id: string }).id]
+        }
+        return []
+      })
+    : []
+  return {
+    route,
+    configured: true,
+    ...(typeof record.api === 'string' && record.api !== '' ? { api: record.api } : {}),
+    ...(typeof record.baseURL === 'string' && record.baseURL !== '' ? { baseURL: record.baseURL } : {}),
+    displayName: typeof record.displayName === 'string' && record.displayName !== '' ? record.displayName : fallbackLabel,
+    models,
+    ...(typeof record.apiKeyEnv === 'string' && record.apiKeyEnv !== '' ? { apiKeyEnv: record.apiKeyEnv } : {}),
+  }
+}
+
+/**
+ * The detached profile facts of one option. The deepseek official builtin is
+ * the adapter itself: it has no provider-profile slot, but the route is
+ * ALWAYS addressable (the same rule the single-route read applies).
+ */
+function providerFactsFor(option: CredentialProviderOption, raw: unknown): ProviderProfileFacts {
+  if (option.route === 'deepseek-official' && raw === undefined) {
+    return { route: option.route, configured: true, displayName: option.label, models: [] }
+  }
+  return providerFactsOf(option.route, option.label, raw)
+}
+
 export class DirectProviderProfileConfig implements ProviderProfileConfig {
   private readonly ctx: HostContextLike
 
@@ -364,6 +431,22 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     }
   }
 
+  /**
+   * The llm-pi-ai section, detached, with the read FAILURE reported (the
+   * fail-soft reader hides it, which is right for a display degradation but
+   * wrong for an authoritative read).
+   */
+  private readProviderSection(): { readonly value: unknown; readonly failure?: string } {
+    const settings = this.settings()
+    if (settings === undefined) return { value: undefined }
+    try {
+      const descriptor = (settings.describe() ?? []).find(entry => entry.ns === 'llm-pi-ai')
+      return { value: detachedSection(descriptor?.value) }
+    } catch (error) {
+      return { value: undefined, failure: safeErrorMessage(error) }
+    }
+  }
+
   /** The llm-pi-ai `providers` dict (route → apiKeyEnv), detached. */
   private readPiAiProvidersInternal(): Record<string, { apiKeyEnv?: string } | undefined> | undefined {
     const section = this.readSectionInternal('llm-pi-ai') as
@@ -382,6 +465,94 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     return out
   }
 
+  /**
+   * The ONE settings read of a provider snapshot: every namespace
+   * descriptor, indexed by namespace. `settings.describe()` returns ALL
+   * namespaces, so ONE call per snapshot replaces one call per provider
+   * route (the old per-route read amplified a large `llm-pi-ai` section
+   * into hundreds of reads and deep copies).
+   */
+  private readDescriptors(): { readonly byNs: ReadonlyMap<string, SettingsDescriptorLike>; readonly failure?: string } {
+    const settings = this.settings()
+    if (settings === undefined) return { byNs: new Map() }
+    try {
+      const byNs = new Map<string, SettingsDescriptorLike>()
+      for (const descriptor of settings.describe() ?? []) byNs.set(descriptor.ns, descriptor)
+      return { byNs }
+    } catch (error) {
+      // A THROWING settings read is a FAILED read: reporting it (instead of
+      // degrading to "no profiles") keeps a broken read from rendering as
+      // "no providers configured".
+      return { byNs: new Map(), failure: safeErrorMessage(error) }
+    }
+  }
+
+  /**
+   * The ONE provider snapshot of a directory: the settings are read ONCE
+   * and each namespace the directory names is detached ONCE, so every route
+   * is projected from that single read. The pure merge stays in
+   * domain/catalog/provider.ts; this adapter only wires the reads and maps
+   * the schema facts onto the semantic `canProvisionProfile` flag (never a
+   * namespace or path across the port).
+   */
+  private catalogFromDirectory(entries: readonly ProviderCatalogEntry[]): ProviderCatalogSnapshot {
+    const { byNs, failure } = this.readDescriptors()
+    if (failure !== undefined) return { options: [], profiles: [], failure }
+    const sections = new Map<string, unknown>()
+    for (const ns of new Set(entries.map(entry => entry.settingsNs))) {
+      const descriptor = byNs.get(ns)
+      if (descriptor === undefined) continue
+      const value = detachedSection(descriptor.value)
+      if (value !== undefined) sections.set(ns, value)
+    }
+    const profileOf = (entry: ProviderCatalogEntry): unknown => {
+      const section = sections.get(entry.settingsNs)
+      if (section === undefined) return undefined
+      return entry.settingsPath.length === 0 ? section : getPath(section, entry.settingsPath)
+    }
+    const rawProfiles = new Map<string, unknown>()
+    for (const entry of entries) {
+      if (entry.provider.length === 0 || entry.settingsNs.length === 0) continue
+      rawProfiles.set(entry.provider, profileOf(entry))
+    }
+    const options = providerOptionsFor(entries, entry => providerProfileProjectionOf(profileOf(entry)))
+      .map(option => credentialOptionOf(option))
+    const profiles = options.map(option => providerFactsFor(option, rawProfiles.get(option.route)))
+    return { options, profiles }
+  }
+
+  /**
+   * The settings-only fallback (no llm directory): the conventional
+   * llm-pi-ai `providers` slot is the only profile location.
+   *
+   * The section is read ONCE and both the options and the profile facts come
+   * from that one read. Every profile route stays a provider — a keyless
+   * profile (no `apiKeyEnv`) is still a CONFIGURED provider; the presence of
+   * a key is not the membership authority.
+   */
+  private settingsOnlyCatalog(): ProviderCatalogSnapshot {
+    // The section read is REPORTED here: a failed settings read must not
+    // look like "this installation has no other provider".
+    const read = this.readProviderSection()
+    if (read.failure !== undefined) return { options: [], profiles: [], failure: read.failure }
+    const section = read.value as
+      | { providers?: Record<string, unknown> }
+      | undefined
+    const declared = section?.providers
+    const entries: ProviderCatalogEntry[] = declared === undefined
+      ? []
+      : Object.keys(declared).map(route => ({
+          provider: route,
+          displayName: route,
+          settingsNs: 'llm-pi-ai',
+          settingsPath: ['providers', route],
+        }))
+    const options = providerOptionsFor(entries, entry => providerProfileProjectionOf(declared?.[entry.provider]))
+      .map(option => credentialOptionOf(option))
+    const profiles = options.map(option => providerFactsFor(option, declared?.[option.route]))
+    return { options, profiles }
+  }
+
   /** The merged /login option list as the port's CLIENT DTOs: the llm
    * configurable-provider directory over its PER-ENTRY sections when the
    * llm service is present, the settings-only fallback otherwise. The
@@ -390,42 +561,104 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
    * `canProvisionProfile` flag (never a namespace or path across the
    * port). */
   listCredentialOptions(): readonly CredentialProviderOption[] {
-    const readSection = (ns: string): unknown => this.readSectionInternal(ns)
     const llm = this.llm()
     if (llm !== undefined) {
+      let entries: readonly ProviderCatalogEntry[]
       try {
-        return providerOptionsFor(llm.listConfigurableProviders(), readSection)
-          .map(option => credentialOptionOf(option))
+        entries = llm.listConfigurableProviders()
       } catch {
         // A throwing directory read degrades to the settings-only fallback.
+        return this.settingsOnlyCatalog().options
+      }
+      const catalog = this.catalogFromDirectory(entries)
+      if (catalog.failure === undefined) return catalog.options
+      // The SETTINGS read failed. The Models page reports that failure; the
+      // /login and /logout parser stays fail-soft — but only for the facts
+      // it actually knows: the routes' credential references come from the
+      // profile, so a DERIVED reference would be a guess that can point at
+      // another provider's key. Only the builtin (whose reference is a
+      // constant) stays addressable, and an explicitly typed reference still
+      // resolves.
+      return providerOptionsFor([], () => undefined).map(option => credentialOptionOf(option))
+    }
+    const catalog = this.settingsOnlyCatalog()
+    if (catalog.failure === undefined) return catalog.options
+    // A failed settings read: only the builtin target (a constant
+    // reference) stays addressable for the /login and /logout resolver.
+    return providerOptionsFor([], () => undefined).map(option => credentialOptionOf(option))
+  }
+
+  /**
+   * The ONE provider snapshot the Models page reads: the directory and the
+   * settings are read ONCE, and every route's profile facts come from that
+   * one read. A FAILED read is reported (`failure`), never presented as an
+   * empty catalog.
+   */
+  readCatalog(): ProviderCatalogSnapshot {
+    const llm = this.llm()
+    if (llm === undefined) return this.settingsOnlyCatalog()
+    let entries: readonly ProviderCatalogEntry[]
+    try {
+      entries = llm.listConfigurableProviders()
+    } catch (error) {
+      return { options: [], profiles: [], failure: safeErrorMessage(error) }
+    }
+    return this.catalogFromDirectory(entries)
+  }
+
+  readProfile(route: string): ProviderProfileFacts {
+    // The deepseek official builtin is the adapter itself: there is no
+    // provider-profile slot, but the route is always addressable.
+    if (route === 'deepseek-official') {
+      return { route, configured: true, displayName: 'deepseek official', models: [] }
+    }
+    const llm = this.llm()
+    if (llm !== undefined) {
+      let entry: ProviderCatalogEntry | undefined
+      try {
+        entry = llm.listConfigurableProviders().find(candidate => candidate.provider === route)
+      } catch {
+        entry = undefined
+      }
+      if (entry !== undefined) {
+        const section = this.readSectionInternal(entry.settingsNs)
+        const profile = entry.settingsPath.length === 0 ? section : getPath(section, entry.settingsPath)
+        return providerFactsOf(route, entry.displayName, profile)
       }
     }
-    const settingsOnly = credentialOptionsFor(this.readPiAiProvidersInternal())
-    return settingsOnly.map((option, index) => {
-      const route = index === 0 ? 'deepseek-official' : option.label
-      return {
-        ...option,
-        route,
-        configured: true,
-        declared: false,
-        namesCredential: true,
-        group: 'configured' as const,
-        // The flag is computed through the SAME rule the llm-absent write
-        // branch applies (the conventional `providers.<route>` slot): a
-        // hostile providers key that fails the route pattern (or the
-        // builtin) is never advertised as writable.
-        canProvisionProfile: isKeylessProfileSlot('llm-pi-ai', ['providers', route], route),
-      }
-    })
+    // The settings-only fallback (no llm directory): the conventional
+    // llm-pi-ai providers slot is the only profile location.
+    const section = this.readSectionInternal('llm-pi-ai') as
+      | { providers?: Record<string, unknown> }
+      | undefined
+    return providerFactsOf(route, route, section?.providers?.[route])
+  }
+
+  configGuide(): ProviderConfigGuide {
+    // The launcher's own profile context names the EXACT patch file it
+    // applies last; without one no path is guessed (custom/programmatic
+    // compositions have no durable profile file).
+    const profile = this.ctx.get('profileContext') as { patchPath?: unknown } | undefined
+    return typeof profile?.patchPath === 'string' && profile.patchPath !== ''
+      ? { profilePatchPath: profile.patchPath }
+      : {}
   }
 
   async writeProfile(route: string, profile: Record<string, unknown>): Promise<void> {
     const settings = this.settings()
     if (settings === undefined) throw new Error('settings service unavailable')
     if (!PROVIDER_ROUTE_PATTERN.test(route)) throw new Error('invalid provider route')
+    // The create is CONDITIONAL: it writes the profile of a NEW route. ONE
+    // read decides both the route's absence and the revision the write is
+    // checked against, so a profile configured in between is refused by the
+    // Host's revision guard instead of being overwritten.
+    const descriptor = readSettingsDescriptor(settings, 'llm-pi-ai')
+    if (getPath(descriptor?.value, ['providers', route]) !== undefined) {
+      throw new Error(`provider route "${route}" already exists`)
+    }
     await mutateSettings(settings, 'llm-pi-ai', [
       { op: 'set', path: ['providers', route], value: profile },
-    ])
+    ], descriptor?.revision)
   }
 
   async writeKeylessProfile(route: string): Promise<{ kind: 'written' } | { kind: 'skipped'; reason: string }> {
@@ -458,9 +691,16 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     // conventional llm-pi-ai slot apply.
     const llm = this.llm()
     if (llm === undefined) {
+      // ONE current read: the route's profile presence AND the revision the
+      // write is checked against. A profile that appeared in the meantime is
+      // NOT overwritten — the write is skipped and the caller re-reads.
+      const descriptor = readSettingsDescriptor(settings, 'llm-pi-ai')
+      if (getPath(descriptor?.value, ['providers', route]) !== undefined) {
+        return { kind: 'skipped', reason: `provider route "${route}" already has a profile` }
+      }
       await mutateSettings(settings, 'llm-pi-ai', [
         { op: 'set', path: ['providers', route], value: {} },
-      ])
+      ], descriptor?.revision)
       return { kind: 'written' }
     }
     const directoryEntry = llm.listConfigurableProviders().find(candidate => candidate.provider === route)
@@ -479,9 +719,16 @@ export class DirectProviderProfileConfig implements ProviderProfileConfig {
     if (!validLayout) {
       return { kind: 'skipped', reason: `hostile or malformed directory entry for ${route}` }
     }
+    // ONE current read (see the conventional slot above): the write never
+    // overwrites a profile that exists now, and the revision fences a
+    // concurrent change between the check and the write.
+    const descriptor = readSettingsDescriptor(settings, directoryEntry.settingsNs)
+    if (getPath(descriptor?.value, path) !== undefined) {
+      return { kind: 'skipped', reason: `provider route "${route}" already has a profile` }
+    }
     await mutateSettings(settings, directoryEntry.settingsNs, [
       { op: 'set', path, value: {} },
-    ])
+    ], descriptor?.revision)
     return { kind: 'written' }
   }
 }
@@ -493,8 +740,11 @@ async function mutateSettings(
   settings: SettingsServiceLike,
   ns: string,
   ops: readonly { op: 'set'; path: readonly string[]; value: unknown }[],
+  expectedRevision?: number,
 ): Promise<unknown> {
-  const revision = readSettingsDescriptor(settings, ns)?.revision
+  // The revision the CALLER decided on, when it has one: the Host's
+  // revision guard then refuses a write whose namespace changed in between.
+  const revision = expectedRevision ?? readSettingsDescriptor(settings, ns)?.revision
   return settings.mutate(ns, ops, revision)
 }
 
@@ -624,6 +874,12 @@ export function authorizationTargets(entries: readonly AuthorizationEntry[]): Au
   }))
 }
 
+/** Read an abort signal without control-flow narrowing (the caller can abort
+ * between the synchronous pre-dispatch check and attempt installation). */
+function callerAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+}
+
 /** The Direct authorization config (`ctx.authorization` behind the config
  * port's AuthorizationConfig). The upstream interaction model (notify/prompt
  * callbacks) is bridged into the port's EVENT model: the adapter owns the
@@ -649,6 +905,10 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     key: CredentialKey
     settlement: Promise<void>
     disposeCallerAbortListener: () => void
+    /** The terminal event for this attempt has been emitted exactly once. */
+    settled: boolean
+    /** A forced caller/page teardown owns prompt cleanup for this attempt. */
+    forced: boolean
   }>()
 
   constructor(ctx: HostContextLike) {
@@ -712,7 +972,10 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // never settles cannot retain the attempt/controller/listener either
     // — repeated aborted logins leave nothing behind.
     const withdrawOnCallerAbort = (): void => {
-      this.finalizeAttempt(attemptId)
+      // Forced page/runner teardown: there is no prompt UI left to answer.
+      // Reject the bridges as lifecycle cleanup so the Host flow can settle;
+      // the page is already gone, so no false terminal is painted.
+      this.cancelAttempt(attemptId, true)
     }
     const disposeCallerAbortListener = (): void => {
       request.signal?.removeEventListener('abort', withdrawOnCallerAbort)
@@ -730,14 +993,29 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     if (request.signal !== undefined) {
       request.signal.addEventListener('abort', withdrawOnCallerAbort, { once: true })
     }
+    // Install the attempt record BEFORE begin(): the provider can emit a
+    // prompt synchronously from begin(), and the bridge must be able to see
+    // the attempt and its forced-teardown state. The settlement promise is
+    // replaced immediately after begin() returns the flow promise.
+    this.attempts.set(attemptId, {
+      controller,
+      key,
+      settlement: Promise.resolve(),
+      disposeCallerAbortListener,
+      settled: false,
+      forced: false,
+    })
+    // A caller can abort between the listener installation and this record;
+    // the event found no attempt then. Mark the record forced now so any
+    // synchronous prompt is rejected as surface-disposed.
+    if (callerAborted(request.signal)) this.cancelAttempt(attemptId, true)
     let flow: ReturnType<AuthorizationServiceLike['begin']>
     try {
       flow = authorization.begin({ key, method: request.method, interaction, signal })
     } catch (error) {
       // A SYNCHRONOUS begin failure (a wire backend throwing before its
-      // first await): no attempt exists yet, but the caller-abort listener
-      // must still be disposed — a leaked listener on the long-lived
-      // runner signal would accumulate across logins (review finding).
+      // first await): remove the placeholder and the caller-abort listener.
+      this.attempts.delete(attemptId)
       disposeCallerAbortListener()
       return Promise.reject(error)
     }
@@ -748,23 +1026,33 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     // caller abort): a late upstream settlement after the finalization
     // only emits (the command already unsubscribed — a listener-less emit
     // is a no-op) and removes nothing twice.
+    const settleUpstream = (
+      outcome: { status: 'authorized' | 'cancelled' | 'failed'; code?: string; message?: string },
+    ): void => {
+      const attempt = this.attempts.get(attemptId)
+      if (attempt === undefined || attempt.settled) return
+      attempt.settled = true
+      this.finalizeAttempt(attemptId)
+      this.emit({
+        kind: 'settled',
+        attemptId,
+        status: outcome.status,
+        ...(outcome.code === undefined ? {} : { code: outcome.code }),
+        ...(outcome.message === undefined ? {} : { message: outcome.message }),
+      })
+    }
     const settlement = flow.then(
-      (outcome) => {
-        this.finalizeAttempt(attemptId)
-        this.emit({ kind: 'settled', attemptId, status: outcome.status })
-      },
+      outcome => settleUpstream(outcome),
       (error: unknown) => {
-        this.finalizeAttempt(attemptId)
-        this.emit({
-          kind: 'settled',
-          attemptId,
+        settleUpstream({
           status: 'failed',
           code: (error as { code?: unknown } | null)?.code as string | undefined,
           message: safeErrorMessage(error),
         })
       },
     )
-    this.attempts.set(attemptId, { controller, key, settlement, disposeCallerAbortListener })
+    const record = this.attempts.get(attemptId)
+    if (record !== undefined) record.settlement = settlement
     return Promise.resolve({ kind: 'started', attemptId })
   }
 
@@ -784,8 +1072,33 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
   }
 
   cancel(attemptId: string): Promise<void> {
-    this.finalizeAttempt(attemptId)
+    this.cancelAttempt(attemptId)
     return Promise.resolve()
+  }
+
+  /** Request cancellation without tearing down prompts or forging a terminal
+   *  outcome. A pending prompt is not proof that the provider avoided
+   *  `commit()`: prompt() and commit() are independent, and the official
+   *  service suppresses abort while committing. Keep the prompt answerable and
+   *  let `settleUpstream` withdraw/reject it and emit the one authoritative
+   *  outcome. */
+  private cancelAttempt(attemptId: string, forcePrompts = false): void {
+    const attempt = this.attempts.get(attemptId)
+    if (attempt === undefined || attempt.settled) return
+    // Record the forced intent BEFORE dispatching abort: a provider abort
+    // listener can synchronously call prompt(), and bridgePrompt() must
+    // already see the dead surface. Abort still precedes bridge rejection.
+    if (forcePrompts) {
+      attempt.forced = true
+      attempt.controller.abort()
+      this.rejectAttemptPrompts(attemptId, 'authorization surface disposed')
+      attempt.disposeCallerAbortListener()
+      return
+    }
+    // Ordinary cancel only requests Host withdrawal. KEEP the caller-abort
+    // listener alive: a later forced page teardown must still be able to
+    // release a prompt the Host could not withdraw during its commit.
+    attempt.controller.abort()
   }
 
   /** The ONE idempotent local-finalization path for an attempt: rejects
@@ -807,6 +1120,12 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
 
   /** Bridge one upstream prompt into an event + a pending answer promise. */
   private bridgePrompt(attemptId: string, prompt: AuthorizationPrompt): Promise<string> {
+    const attempt = this.attempts.get(attemptId)
+    if (attempt === undefined || attempt.forced) {
+      // The page is gone (or its teardown already won): no UI can answer this
+      // prompt. Reject as a withdrawal/surface disposal, never a human decline.
+      return Promise.reject(cancellationError('authorization surface disposed'))
+    }
     return new Promise<string>((resolve, reject) => {
       const promptId = randomUUID()
       // The pending entry carries the abort-listener REMOVAL so every
@@ -867,17 +1186,13 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
     })
   }
 
-  private rejectAttemptPrompts(attemptId: string): void {
+  private rejectAttemptPrompts(attemptId: string, reason = 'authorization attempt settled'): void {
     for (const [promptId, pending] of this.pendingPrompts) {
       if (pending.attemptId !== attemptId) continue
       this.pendingPrompts.delete(promptId)
       pending.cleanup()
-      pending.reject(cancellationError('authorization attempt settled'))
-      // The client UI must close EVEN IF the upstream flow never settles
-      // (a cancel aborts the controller, but a flow that ignores its
-      // signal would otherwise leave the prompt UI open forever): the
-      // withdrawal event closes exactly the prompt it names (review
-      // finding).
+      pending.reject(cancellationError(reason))
+      // The Host has settled; close the prompt and release any flow await.
       this.emit({ kind: 'prompt-withdrawn', attemptId, promptId })
     }
   }
@@ -892,6 +1207,207 @@ export class DirectAuthorizationConfig implements AuthorizationConfig {
       }
     }
   }
+}
+
+/** The structural DeepSeek Account host service (the official
+ * `DeepSeekAccount` abstract class's public surface). */
+export interface DeepSeekAccountServiceLike {
+  getState(): Promise<unknown>
+  getProfile(client: AccountClientMetadata): Promise<unknown>
+  getBalance(client: AccountClientMetadata): Promise<unknown>
+  watch(signal: AbortSignal, includeIdentityChanges?: boolean): AsyncIterable<unknown>
+  startSignIn(client: AccountClientMetadata, callbackOrigin: string, loginSource: 'web' | 'desktop'): Promise<unknown>
+  cancelSignIn(id: string): Promise<unknown>
+  signOut(client: AccountClientMetadata): Promise<unknown>
+}
+
+/** The structural Host webserver surface the account adapter needs. */
+export interface WebServerServiceLike {
+  getOrigin(): string
+}
+
+/** The Direct DeepSeek Account adapter (`ctx.deepseekAccount` + the official
+ * `ctx.webServer` callback listener). Every DTO is a detached copy: no token,
+ * grant payload, PKCE value, PlatformSession or service object crosses the
+ * port. The callback origin is ALWAYS the Host listener's own bound loopback
+ * root — a Client never supplies one. */
+export class DirectAccountConfig implements AccountConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  private account(): DeepSeekAccountServiceLike | undefined {
+    return this.ctx.get('deepseekAccount') as DeepSeekAccountServiceLike | undefined
+  }
+
+  available(): boolean {
+    return this.account() !== undefined
+  }
+
+  async getState(): Promise<AccountView> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    return accountViewOf(await account.getState())
+  }
+
+  async getProfile(client: AccountClientMetadata): Promise<AccountProfileOutcome> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    const outcome = await account.getProfile({ ...client })
+    if (outcome === null) return null
+    const value = outcome as { status?: unknown; value?: unknown }
+    if (value.status !== 'ready') return { status: 'failed' }
+    return { status: 'ready', value: accountProfileOf(value.value) }
+  }
+
+  async getBalance(client: AccountClientMetadata): Promise<AccountBalanceOutcome> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    const outcome = await account.getBalance({ ...client })
+    if (outcome === null) return null
+    const value = outcome as { status?: unknown; value?: unknown; bonusWallets?: unknown }
+    if (value.status !== 'ready') return { status: 'failed' }
+    return {
+      status: 'ready',
+      value: walletListOf(value.value),
+      bonusWallets: walletListOf(value.bonusWallets),
+    }
+  }
+
+  watch(signal: AbortSignal): AsyncIterable<AccountView> {
+    const account = this.account()
+    if (account === undefined) {
+      // No service: an EMPTY subscription rather than a fabricated state.
+      return (async function* empty(): AsyncGenerator<AccountView> {})()
+    }
+    const source = account.watch(signal)
+    return (async function* projected(): AsyncGenerator<AccountView> {
+      const iterator = source[Symbol.asyncIterator]()
+      try {
+        for (;;) {
+          const next = await iterator.next()
+          if (next.done === true) return
+          yield accountViewOf(next.value)
+        }
+      } finally {
+        // Ending the signal is the only cancellation (never cancelSignIn):
+        // the official iterator owns its own listener release.
+        await iterator.return?.(undefined)
+      }
+    })()
+  }
+
+  getCallbackOrigin(): string | undefined {
+    const webServer = this.ctx.get('webServer') as WebServerServiceLike | undefined
+    if (webServer === undefined) return undefined
+    let origin: string
+    try {
+      origin = webServer.getOrigin()
+    } catch {
+      // Not bound (or not URL-expressible): the capability is unavailable.
+      return undefined
+    }
+    let url: URL
+    try {
+      url = new URL(origin)
+    } catch {
+      return undefined
+    }
+    // The account callback contract is a browser-accessible LOOPBACK HTTP
+    // origin without a path/query/fragment. Anything else is refused rather
+    // than forwarded to the Host.
+    if (url.protocol !== 'http:' || url.pathname !== '/' || url.search !== '' || url.hash !== '') return undefined
+    if (!isLoopbackUrlHost(url.hostname)) return undefined
+    return url.origin
+  }
+
+  async startSignIn(client: AccountClientMetadata): Promise<AccountView> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    const callbackOrigin = this.getCallbackOrigin()
+    if (callbackOrigin === undefined) throw new Error('the Host browser callback listener is unavailable')
+    // `web` is the only login source a TUI may present (never Desktop).
+    return accountViewOf(await account.startSignIn({ ...client }, callbackOrigin, 'web'))
+  }
+
+  async cancelSignIn(id: string): Promise<AccountView> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    return accountViewOf(await account.cancelSignIn(id))
+  }
+
+  async signOut(client: AccountClientMetadata): Promise<AccountView> {
+    const account = this.account()
+    if (account === undefined) throw new Error('DeepSeek Account service unavailable')
+    return accountViewOf(await account.signOut({ ...client }))
+  }
+
+  hasRunningAccountTasks(): boolean {
+    // Mirrors the official `isRunningAccountTask` predicate: a running Agent
+    // whose latest bound request used the account provider. The predicate is
+    // kept structural so this adapter never imports (or duplicates) a Host
+    // package; the Host's own signed-out listener owns the actual cancel.
+    const agents = this.ctx.get('agents') as { list?(): readonly unknown[] } | undefined
+    if (typeof agents?.list !== 'function') return false
+    return agents.list().some(candidate => {
+      const agent = candidate as {
+        readonly status?: unknown
+        readonly session?: { requestContext?(): unknown }
+      }
+      if (agent.status !== 'running') return false
+      const context = agent.session?.requestContext?.()
+      return typeof context === 'object' && context !== null
+        && (context as { provider?: unknown }).provider === 'deepseek-account'
+    })
+  }
+}
+
+/** Whether one URL hostname is exactly the loopback authority the official
+ *  `loginOrigin` accepts (a broader 127/8 address would be rejected by the
+ *  provider, so the adapter must not advertise it). */
+function isLoopbackUrlHost(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+}
+
+/** A detached account state copy (no Host record is aliased). */
+function accountViewOf(value: unknown): AccountView {
+  const view = value as AccountView
+  const attempt = view.attempt
+  return {
+    status: view.status,
+    links: { usageUrl: view.links.usageUrl, topUpUrl: view.links.topUpUrl },
+    attempt: attempt === null
+      ? null
+      : {
+          id: attempt.id,
+          phase: attempt.phase,
+          ...(attempt.authorizeUrl === undefined ? {} : { authorizeUrl: attempt.authorizeUrl }),
+          ...(attempt.expiresAt === undefined ? {} : { expiresAt: attempt.expiresAt }),
+          ...(attempt.errorCode === undefined ? {} : { errorCode: attempt.errorCode }),
+        },
+  }
+}
+
+/** A detached profile copy. */
+function accountProfileOf(value: unknown): AccountProfile {
+  const profile = value as AccountProfile
+  return {
+    id: profile.id,
+    name: profile.name,
+    contact: profile.contact,
+    ...(profile.avatarUrl === undefined ? {} : { avatarUrl: profile.avatarUrl }),
+  }
+}
+
+/** A detached wallet list with the decimal strings retained verbatim. */
+function walletListOf(value: unknown): readonly import('../config-port.ts').AccountWallet[] {
+  if (!Array.isArray(value)) return []
+  return value.map(entry => {
+    const wallet = entry as { currency: string; balance: string }
+    return { currency: wallet.currency, balance: wallet.balance }
+  })
 }
 
 /** The Direct permission config (`ctx.permissionPresets` +
@@ -929,7 +1445,10 @@ export class DirectPermissionConfig implements PermissionConfig {
 
   async setDefaultPreset(name: string): Promise<void> {
     const settings = this.settings()
-    if (settings === undefined) return
+    // A missing settings service is an EXPLICIT failure, never a silent no-op:
+    // reporting success here would let the Settings UI claim a Verified write
+    // that never reached the Host (same rule as this file's other writers).
+    if (settings === undefined) throw new Error('settings service unavailable')
     await mutateSettings(settings, 'permission', [
       { op: 'set', path: ['defaultPreset'], value: name },
     ])
@@ -959,7 +1478,7 @@ export class DirectPermissionConfig implements PermissionConfig {
   async applyPermissionPreset(
     sessionId: string,
     presetId: string,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<{ kind: 'applied' } | { kind: 'unavailable'; cause: 'commands' | 'permission' }> {
     const commands = this.ctx.get('commands') as CommandsServiceLike | undefined
     if (commands === undefined) return { kind: 'unavailable', cause: 'commands' }
@@ -1046,21 +1565,23 @@ export class DirectSubagentModelSelectionConfig implements SubagentModelSelectio
 
   get(): { enabled: boolean; allowedModels: readonly SubagentAllowedModelRoute[] } {
     const selection = this.selection()
+    // No official service mounted at all: this is the shipped default, and
+    // `available()` already refuses to offer the rows (a caller that still asks
+    // gets the honest absence of a section, not a fabricated saved value).
     if (selection === undefined) return { enabled: false, allowedModels: [] }
-    try {
-      const current = selection.current()
-      return {
-        enabled: current.enabled === true,
-        allowedModels: (current.allowedModels ?? []).flatMap(route => {
-          const candidate = route as { provider?: unknown; model?: unknown }
-          return typeof candidate?.provider === 'string' && typeof candidate?.model === 'string'
-            ? [{ provider: candidate.provider, model: candidate.model }]
-            : []
-        }),
-      }
-    } catch {
-      // A failing official read reports the shipped default (off, empty).
-      return { enabled: false, allowedModels: [] }
+    // A THROWING official read is UNREADABLE, never `{enabled:false, []}`: the
+    // shipped default is not the stored value, and handing it to a writer would
+    // let `enabled:false` + an empty list overwrite routes the Host still holds.
+    // The read therefore fails loud and every writer/verifier must handle it.
+    const current = selection.current()
+    return {
+      enabled: current.enabled === true,
+      allowedModels: (current.allowedModels ?? []).flatMap(route => {
+        const candidate = route as { provider?: unknown; model?: unknown }
+        return typeof candidate?.provider === 'string' && typeof candidate?.model === 'string'
+          ? [{ provider: candidate.provider, model: candidate.model }]
+          : []
+      }),
     }
   }
 
@@ -1271,5 +1792,71 @@ function assertSearchApiBaseURL(url: string): void {
   }
   if (/\/(?:search|fetch)$/u.test(parsed.pathname)) {
     throw new Error('the Search/Fetch API endpoint is the API base: drop the trailing /search or /fetch action')
+  }
+}
+
+/** The official profile entry id of the Host row that owns the built-in
+ *  visual tools (its Loader row id is also its Settings namespace). */
+const VISUAL_TOOLS_NS = 'pi-tui-visual-tools'
+
+/**
+ * The Direct visual-tools switch: the `pi-tui-visual-tools` form section's
+ * effective `enabled` value plus the owning Host row's live registration
+ * status. The write is a revision-checked path mutation of the exact
+ * `enabled` field — never a whole-section replace, so an unrelated or
+ * unknown field is never pinned into the USER layer.
+ *
+ * The status service is the row's own fact, not a second enable state: a
+ * Remote backend has no equivalent wire and reports `applied: undefined`
+ * instead of inferring success from the committed configuration.
+ */
+class DirectVisualToolsConfig implements VisualToolsConfig {
+  private readonly ctx: HostContextLike
+
+  constructor(ctx: HostContextLike) {
+    this.ctx = ctx
+  }
+
+  read(): VisualToolsState | undefined {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    const descriptor = readSettingsDescriptor(settings, VISUAL_TOOLS_NS)
+    if (descriptor === undefined) return undefined
+    const value = formValueOf(descriptor)
+    const enabled = value?.enabled
+    // A missing or non-boolean effective value is NOT the schema default:
+    // report the section as unreadable instead of inventing `true`.
+    if (typeof enabled !== 'boolean') return undefined
+    const revision = descriptor.revision
+    // Without the read revision the decision cannot be submitted conditionally;
+    // report the section unreadable rather than allowing a silent overwrite.
+    if (typeof revision !== 'number') return undefined
+    const user = descriptor.user
+    const userSection = typeof user === 'object' && user !== null && !Array.isArray(user)
+      ? user as Record<string, unknown>
+      : undefined
+    const status = this.ctx.get(VISUAL_TOOLS_STATUS_SERVICE) as VisualToolsRuntimeStatus | undefined
+    const applied = status === undefined || typeof status.applied !== 'function'
+      ? undefined
+      : status.applied()
+    return {
+      enabled,
+      revision,
+      userOverridden: userSection?.enabled !== undefined,
+      applied,
+    }
+  }
+
+  async setEnabled(enabled: boolean, expectedRevision: number): Promise<void> {
+    const settings = this.ctx.get('settings') as SettingsServiceLike | undefined
+    if (settings === undefined) throw new Error('the Host settings service is unavailable')
+    if (readSettingsDescriptor(settings, VISUAL_TOOLS_NS) === undefined) {
+      throw new Error(`the "pi-tui-visual-tools" Host settings section is not mounted`)
+    }
+    // Submit the revision the USER's decision was read at — never a revision
+    // observed at write time, which would turn an external edit into a silent
+    // overwrite.
+    await mutateSettings(settings, VISUAL_TOOLS_NS, [
+      { op: 'set', path: ['enabled'], value: enabled },
+    ], expectedRevision)
   }
 }

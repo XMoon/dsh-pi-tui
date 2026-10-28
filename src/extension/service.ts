@@ -937,33 +937,46 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     const selectableValue = ThemeRegistry.selectableValue(stableOwner, contribution.id)
     const handle = this.themes.register(contribution, owner, stableOwner)
     this.trackRegistryHealth('theme', contribution.id, owner)
+    // ONE release per registration (the same one-shot cleanup contract as
+    // registerSetting): the explicit handle release, the fiber effect
+    // cleanup and the failed-effect rollback all share this function, so a
+    // repeated or LATE release of an OLD handle can never remove a
+    // same-id replacement's registry record, its health entry or fire an
+    // extra unload notification.
+    //
+    // ORDER: `released` is committed FIRST (a registry dispose may notify
+    // listeners synchronously), then the health record is dropped BEFORE
+    // the registry record — the registry's disposal callbacks may
+    // synchronously re-register the same id, and that replacement's health
+    // must be tracked AFTER the old untrack (never deleted by it).
+    let released = false
+    const cleanup = (): void => {
+      if (released) return
+      released = true
+      this.untrackRegistryHealth('theme', contribution.id, owner)
+      handle.dispose()
+      // The selected-theme fallback contract: when the unloaded theme is
+      // the one currently applied, the HOST must restore the builtin
+      // palette — the service does not know the selection, so the
+      // runner's hook (setThemeUnloadedHook) is asked with the
+      // SOURCE-QUALIFIED selectable value (the same identity the runner
+      // records when it applies the palette) (the review's P2: the old
+      // code only removed the record and repainted, leaving the dead
+      // plugin's palette on screen until the user switched). The hook
+      // rides the ONE cleanup: a repeated old release notifies nobody.
+      this.themeUnloadedHook?.({ selectableValue, name: contribution.name })
+    }
     let dispose: () => void
     try {
-      dispose = caller.fiber.effect(() => () => {
-        handle.dispose()
-        this.untrackRegistryHealth('theme', contribution.id, owner)
-        // The selected-theme fallback contract: when the unloaded theme is
-        // the one currently applied, the HOST must restore the builtin
-        // palette — the service does not know the selection, so the
-        // runner's hook (setThemeUnloadedHook) is asked with the
-        // SOURCE-QUALIFIED selectable value (the same identity the runner
-        // records when it applies the palette) (the review's P2: the old
-        // code only removed the record and repainted, leaving the dead
-        // plugin's palette on screen until the user switched).
-        this.themeUnloadedHook?.({ selectableValue, name: contribution.name })
-      }, 'piTuiExtensions.registerTheme()')
+      dispose = caller.fiber.effect(() => cleanup, 'piTuiExtensions.registerTheme()')
     } catch (error) {
-      handle.dispose()
-      this.untrackRegistryHealth('theme', contribution.id, owner)
-      this.themeUnloadedHook?.({ selectableValue, name: contribution.name })
+      cleanup()
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
-        handle.dispose()
-        this.untrackRegistryHealth('theme', contribution.id, owner)
-        this.themeUnloadedHook?.({ selectableValue, name: contribution.name })
+        cleanup()
         dispose()
       },
     }
@@ -1038,22 +1051,27 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.autocomplete.register(contribution, owner)
     this.trackRegistryHealth('autocomplete', contribution.id, owner)
+    // ONE release per registration (see registerTheme for the ordering
+    // derivation: `released` first, then the health untrack BEFORE the
+    // registry record's disposal).
+    let released = false
+    const cleanup = (): void => {
+      if (released) return
+      released = true
+      this.untrackRegistryHealth('autocomplete', contribution.id, owner)
+      handle.dispose()
+    }
     let dispose: () => void
     try {
-      dispose = caller.fiber.effect(() => () => {
-        handle.dispose()
-        this.untrackRegistryHealth('autocomplete', contribution.id, owner)
-      }, 'piTuiExtensions.registerAutocomplete()')
+      dispose = caller.fiber.effect(() => cleanup, 'piTuiExtensions.registerAutocomplete()')
     } catch (error) {
-      handle.dispose()
-      this.untrackRegistryHealth('autocomplete', contribution.id, owner)
+      cleanup()
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
-        handle.dispose()
-        this.untrackRegistryHealth('autocomplete', contribution.id, owner)
+        cleanup()
         dispose()
       },
     }
@@ -1069,23 +1087,30 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.settings.register(contribution, owner)
     this.trackRegistryHealth('setting', contribution.id, owner)
-    let dispose: () => void
-    try {
-      dispose = caller.fiber.effect(() => () => {
-        handle.dispose()
-        this.untrackRegistryHealth('setting', contribution.id, owner)
-      }, 'piTuiExtensions.registerSetting()')
-    } catch (error) {
+    // ONE release per registration. The explicit handle release and the fiber
+    // effect cleanup share this function, so a repeated old-handle release
+    // cannot run the (slot, owner, id)-keyed health untrack a SECOND time: a
+    // same-fiber, same-id re-registration owns a NEW record and a NEW health
+    // entry, and the old record's release must never remove it.
+    let released = false
+    const cleanup = (): void => {
+      if (released) return
+      released = true
       handle.dispose()
       this.untrackRegistryHealth('setting', contribution.id, owner)
+    }
+    let dispose: () => void
+    try {
+      dispose = caller.fiber.effect(() => cleanup, 'piTuiExtensions.registerSetting()')
+    } catch (error) {
+      cleanup()
       throw error
     }
     return {
       id: handle.id,
       setValue: (value: string) => handle.setValue(value),
       dispose: () => {
-        handle.dispose()
-        this.untrackRegistryHealth('setting', contribution.id, owner)
+        cleanup()
         dispose()
       },
     }
@@ -1104,22 +1129,30 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.keybindings.register(contribution, owner)
     this.trackRegistryHealth('keybinding', contribution.id, owner)
+    // ONE release per registration. The ORDER is load-bearing here:
+    // KeybindingRegistry.dispose() synchronously notifies its listeners, and
+    // a listener may re-register the same id inside that notification — so
+    // the health untrack MUST run before the registry disposal, and
+    // `released` MUST be committed before either (a repeated old release is
+    // then a no-op for the replacement).
+    let released = false
+    const cleanup = (): void => {
+      if (released) return
+      released = true
+      this.untrackRegistryHealth('keybinding', contribution.id, owner)
+      handle.dispose()
+    }
     let dispose: () => void
     try {
-      dispose = caller.fiber.effect(() => () => {
-        handle.dispose()
-        this.untrackRegistryHealth('keybinding', contribution.id, owner)
-      }, 'piTuiExtensions.registerKeybinding()')
+      dispose = caller.fiber.effect(() => cleanup, 'piTuiExtensions.registerKeybinding()')
     } catch (error) {
-      handle.dispose()
-      this.untrackRegistryHealth('keybinding', contribution.id, owner)
+      cleanup()
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
-        handle.dispose()
-        this.untrackRegistryHealth('keybinding', contribution.id, owner)
+        cleanup()
         dispose()
       },
     }
@@ -1136,24 +1169,28 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.renderers.registerMessageRenderer(contribution, owner)
     // P1-08: the renderer registry is NOT the ledger — track its health
-    // slot explicitly so /status can observe failed/recovered states.
-    this.ledger.trackHealth('transcript.message.renderer', contribution.id, owner)
+    // slot explicitly so the Plugin Manager diagnostics can observe failed/recovered states.
+    this.trackRegistryHealth('transcript.message.renderer', contribution.id, owner)
+    // ONE release per registration (see registerTheme for the ordering
+    // derivation).
+    let released = false
+    const cleanup = (): void => {
+      if (released) return
+      released = true
+      this.untrackRegistryHealth('transcript.message.renderer', contribution.id, owner)
+      handle.dispose()
+    }
     let dispose: () => void
     try {
-      dispose = caller.fiber.effect(() => () => {
-        handle.dispose()
-        this.ledger.untrackHealth('transcript.message.renderer', contribution.id, owner)
-      }, 'piTuiExtensions.registerMessageRenderer()')
+      dispose = caller.fiber.effect(() => cleanup, 'piTuiExtensions.registerMessageRenderer()')
     } catch (error) {
-      handle.dispose()
-      this.ledger.untrackHealth('transcript.message.renderer', contribution.id, owner)
+      cleanup()
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
-        handle.dispose()
-        this.ledger.untrackHealth('transcript.message.renderer', contribution.id, owner)
+        cleanup()
         dispose()
       },
     }
@@ -1169,23 +1206,26 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.renderers.registerToolRenderer(contribution, owner)
     // P1-08: track the renderer's health slot (see registerMessageRenderer).
-    this.ledger.trackHealth('transcript.tool.renderer', contribution.id, owner)
+    this.trackRegistryHealth('transcript.tool.renderer', contribution.id, owner)
+    // ONE release per registration (see registerMessageRenderer).
+    let released = false
+    const cleanup = (): void => {
+      if (released) return
+      released = true
+      this.untrackRegistryHealth('transcript.tool.renderer', contribution.id, owner)
+      handle.dispose()
+    }
     let dispose: () => void
     try {
-      dispose = caller.fiber.effect(() => () => {
-        handle.dispose()
-        this.ledger.untrackHealth('transcript.tool.renderer', contribution.id, owner)
-      }, 'piTuiExtensions.registerToolRenderer()')
+      dispose = caller.fiber.effect(() => cleanup, 'piTuiExtensions.registerToolRenderer()')
     } catch (error) {
-      handle.dispose()
-      this.ledger.untrackHealth('transcript.tool.renderer', contribution.id, owner)
+      cleanup()
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
-        handle.dispose()
-        this.ledger.untrackHealth('transcript.tool.renderer', contribution.id, owner)
+        cleanup()
         dispose()
       },
     }
@@ -1273,22 +1313,28 @@ export class PiTuiExtensionServiceImpl extends Service implements PiTuiExtension
     this.recordOwnerEntry(owner, caller.fiber)
     const handle = this.editors.register(contribution, owner)
     this.trackRegistryHealth('editor', contribution.id, owner)
+    // ONE release per registration (see registerTheme for the ordering
+    // derivation). The editor registry's handle already carries a
+    // record-identity guard; this cleanup additionally guarantees the
+    // (slot, owner, id)-keyed health untrack runs at most once.
+    let released = false
+    const cleanup = (): void => {
+      if (released) return
+      released = true
+      this.untrackRegistryHealth('editor', contribution.id, owner)
+      handle.dispose()
+    }
     let dispose: () => void
     try {
-      dispose = caller.fiber.effect(() => () => {
-        handle.dispose()
-        this.untrackRegistryHealth('editor', contribution.id, owner)
-      }, 'piTuiExtensions.registerEditor()')
+      dispose = caller.fiber.effect(() => cleanup, 'piTuiExtensions.registerEditor()')
     } catch (error) {
-      handle.dispose()
-      this.untrackRegistryHealth('editor', contribution.id, owner)
+      cleanup()
       throw error
     }
     return {
       id: handle.id,
       dispose: () => {
-        handle.dispose()
-        this.untrackRegistryHealth('editor', contribution.id, owner)
+        cleanup()
         dispose()
       },
     }

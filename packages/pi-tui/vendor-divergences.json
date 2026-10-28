@@ -977,7 +977,7 @@
     "packages/pi-tui/test/dispose-lifecycle.test.ts: MouseRegion dispose forwarding — owned child disposed exactly once, wrapped Loader timer cleared",
     "test/model-picker.test.ts: ModelPicker ownership-safe external dispose — dispose latches without close/apply/navigation, and a late write settlement after teardown makes no close/open decision",
     "test/subagent-model-menu.test.ts: SubagentModelAllowlistPicker ownership-safe external dispose — dispose latches, and a write settling after the submenu closed converges the outer row through the summarize seam without a late toast",
-    "test/advanced-interactive.test.ts: an approval-preserving fullscreen swap replaces (and disposes) the replaced approval frame — ownedApprovalFramesForTest stays 1 per swap and returns 0 after settle",
+    "test/advanced-interactive.test.ts: an approval-preserving fullscreen swap re-projects the SAME approval seat frame; settling releases/disposes the sheet once and leaves no frame behind",
     "test/runner-viewer-task-integration.test.ts: switching sessions tears down the Job status viewer with its Task Browser (the tracked child closer)"
    ],
    "upstream": {
@@ -5662,9 +5662,9 @@
      "audited": true,
      "items": [
       "src/tui-app.ts showOverlayOnHost() mounts EVERY managed overlay with initialFocus: false; the broker commits the logical graph first and performs the single physical focus transition afterwards, so a plugin onFocus that mounts another overlay cannot observe a partial graph.",
-      "src/overlay-broker.ts showPhysical()/focusPhysical() pass preserveOrder (and preserveFocus on show) for INTERNAL restores: close-released children, a Question / Save Location settle, and the fullscreen rebind owner restore.",
+      "src/overlay-broker.ts showPhysical()/focusPhysical() pass preserveOrder (and preserveFocus on show) for INTERNAL restores: close-released children, a Question / Save Location settle, an Approval suspension resume, and the fullscreen rebind owner restore.",
       "src/tui-app.ts rebindOverlayRaw() mounts every fullscreen rebind with initialFocus: false so a capturing entry does not auto-focus during the swap.",
-      "src/tui-app.ts renderApprovalDialog() mounts the approval as a remountable managed node and registers a rebind callback that re-creates the surface for the same logical node (the replaced frame is disposed).",
+      "src/tui/panels/approval-dialog.ts creates a non-owning ApprovalSheetFrame in the shared editor seat; ApprovalRuntime projects/releases it through TuiApp's seat arbitration (no managed overlay node, remount or rebind).",
       "src/overlay-broker.ts focus() skips its post-focus re-derivation when the node forwarded a caller-supplied unfocus target, so the explicit target is never overridden by the seat fallback."
      ],
      "notes": "Explicit user show()/focus() keep the upstream promoting behavior; the host passes the preserve options only from its internal restore / rebind paths."
@@ -5683,7 +5683,7 @@
       "A nonCapturing HUD restored with preserveOrder keeps its position above the focused overlay.",
       "A rebind with initialFocus:false never auto-focuses, so a blurred overlay records no extra onFocus/onBlur across a screen swap.",
       "Default (no options) setHidden(false)/focus() and showOverlay keep the upstream promoting + auto-focusing behavior.",
-      "An approval is a REMOUNTABLE managed node: a fullscreen swap rebinds the same logical node (fresh surface) so its suppressed children are never revealed/focused, and the replaced approval frame is disposed. Guarded by the approval focus-count + ownedApprovalFramesForTest regression."
+      "An approval is a blocking editor-seat frame, not a managed overlay node: it suspends managed roots through the broker's modal suspension, and a fullscreen swap re-projects the SAME frame (no rebind/dispose). Guarded by the approval frame identity/focus-count and seat-projection regressions."
      ],
      "notes": "Guarded by packages/pi-tui/test/overlay-non-capturing.test.ts (the fork seam) plus the broker / advanced-interactive / extension-focus-seat host regressions."
     }
@@ -5700,7 +5700,7 @@
     "test/advanced-interactive.test.ts: an internal restore never fabricates focus transitions (child close)",
     "test/advanced-interactive.test.ts: an internal restore never fabricates focus transitions (question / save / fullscreen)",
     "packages/pi-tui/test/overlay-non-capturing.test.ts: initialFocus and preserveFocus suppress the implicit keyboard transitions (X056)",
-    "test/advanced-interactive.test.ts: an approval-preserving fullscreen swap never fabricates focus transitions on the overlay beneath it (focus/blur counts + one live approval frame per swap)",
+    "test/advanced-interactive.test.ts: an approval-preserving fullscreen swap re-projects the SAME seat frame and never fabricates focus transitions on the overlay beneath it (focus/blur counts + frame identity)",
     "test/advanced-interactive.test.ts: a plugin onFocus that mounts another overlay cannot double-adopt a child (forest invariant)",
     "test/overlay-broker.test.ts: a nested mount during the mount focus keeps the logical front order",
     "test/advanced-interactive.test.ts: a nested nonCapturing HUD mounted from onFocus keeps the logical front order",
@@ -6256,10 +6256,8 @@
     }
    },
    "tests": [
-    "packages/pi-tui/test/settings-list.test.ts: a chip is kept whole and the rest dropped whole (no `[curre`, no dangling separator) at 60/45/15/14 cells; a label wider than its column is clipped with `…` and the chip survives at 40 and 120 cells; a label wider than its column is clamped even without parts; `currentValue`/`values` still cycle while the slot paints the parts; a wide -> narrow -> wide resize reflows both chips back",
-    "test/preset-command.test.ts: the real `/preset` overlay paints both chips whole and no retired prose marker; the 120/67/66/59/58/57/56/52/48/44-column matrix (one whole chip, no half chip, no separator, no row wider than the terminal); a wide -> narrow -> wide resize restores both chips and a click on the long-name row at the narrow geometry still selects THAT row",
-    "test/surface-row-grant.test.ts: the Theme submenu chip keeps `textMuted` in both selection states; the chip survives 120/48/44 columns with an over-wide plugin theme name (label clipped, no overflow)",
-    "test/theme-picker.test.ts: the identity matcher follows the painted prefix of an over-wide label; the `file:`/plugin identity marker is unaffected"
+    "packages/pi-tui/test/settings-list.test.ts: `keeps a state chip whole and drops the rest whole, never leaving a dangling separator` (no `[curre` and no dangling separator at 60/45/15/14 cells); `reserves one whole chip by clipping a label wider than its column (no row overflow)` (the chip survives at 40 and 120 cells); `clamps a label wider than its column even without value parts`; `leaves currentValue and the values cycle untouched (the parts are a display fact)`; `reflows both chips back after a wide → narrow → wide resize (no cached width)`",
+    "test/app/preset-command.test.ts: `the preset picker paints BOTH state chips whole and no retired prose marker (real overlay frame)`; `the preset state chips stay WHOLE at every supported frame width (real overlay frames)` (the 120/67/66/59/58/57/56/52/48/44-column matrix: one whole chip, no half chip, no separator, no row wider than the terminal); `a wide → narrow → wide resize restores both chips and keeps the row clickable` (a click on the long-name row at the narrow geometry still selects THAT row)"
    ],
    "upstream": {
     "equivalence": "NO",
@@ -6360,7 +6358,7 @@
     }
    },
    "tests": [
-    "packages/pi-tui/test/editor-task-quick-boundary.test.ts: live-frame and hard/soft-wrap boundary witnesses; transient history/autocomplete/jump/paste gates; stale-width guard; native Down preservation; jump arm/no-match completion/control abort reason; and known-fact consumption and raw snapshot/map edge equivalence without a second map build; test/task-quick-b4b-interaction.test.ts: zero same-layout input composes/map builds, rewrap and resize correction, width-4 clamp, and coalesced same-turn payloads"
+    "packages/pi-tui/test/editor-task-quick-boundary.test.ts: live-frame and hard/soft-wrap boundary witnesses; transient history/autocomplete/jump/paste gates; stale-width guard; native Down preservation; jump arm/no-match completion/control abort reason; and known-fact consumption and raw snapshot/map edge equivalence without a second map build; test/app/task-quick-interaction.test.ts: zero same-layout input composes/map builds, rewrap and resize correction, width-4 clamp, and coalesced same-turn payloads"
    ],
    "upstream": {
     "equivalence": "NO",
@@ -6407,7 +6405,7 @@
    "files": [
     "src/components/settings-list.ts"
    ],
-   "why": "The host abbreviates a long row NAME (head…tail around one `…`) so the label column can hold a name that would otherwise be clipped to its head — two same-prefix names would otherwise paint identically while Enter still runs different ids. The list's own search, however, filters on `item.label` ONLY, so the abbreviation made a keyword from the MIDDLE of the name unfindable: the Theme submenu runs with `enableSearch: true` and /preset and /skill use the same list, and the description never participates in search. The host cannot repair this through the public surface: one string is both painted and searched, and no call-site shaping can be the abbreviation for the column and the complete name for the filter. Upstream has neither the abbreviation need nor the split.",
+   "why": "The host abbreviates a long row NAME (head…tail around one `…`) so the label column can hold a name that would otherwise be clipped to its head — two same-prefix names would otherwise paint identically while Enter still runs different ids. The list's own search, however, filters on `item.label` ONLY, so the abbreviation made a keyword from the MIDDLE of the name unfindable: the SettingsList rows that abbreviate for the column — today `/preset` and `/skill` — run with `enableSearch: true`, and the description never participates in search. The Theme submenu was the third such row the external review reported, but it belongs to the retired legacy settings editor's trigger scenario; today's live consumers are `/preset` and `/skill`, plus the fork's default label-only fallback for every caller that declares no `searchText`. The host cannot repair this through the public surface: one string is both painted and searched, and no call-site shaping can be the abbreviation for the column and the complete name for the filter. Upstream has neither the abbreviation need nor the split.",
    "changedSurface": [
     "`SettingItem.searchText?: string` — an optional search basis for a row whose painted `label` is not what the user should be able to type.",
     "`SettingsList.applyFilter()` filters on `item.searchText ?? item.label`; absent `searchText` the label is the search basis byte-for-byte as before."
@@ -6454,10 +6452,9 @@
     }
    },
    "tests": [
-    "packages/pi-tui/test/settings-list.test.ts: a row painting an abbreviation (`Classic Dark…l Edition v9`) is still found by a middle keyword (`quasar`) declared in `searchText`; a row with no `searchText` keeps the historical label-only basis (the same query answers `No matching settings`), which is also the mutation witness for the split",
-    "test/command-catalog.test.ts: the real `/skill` picker answers a middle keyword of a long skill name through the real search input, and a row hands the COMPLETE name as `searchText` while its label stays the 34-cell abbreviation",
-    "test/preset-command.test.ts: the real `/preset` overlay answers a middle keyword of a long preset name; the 44-column regressions keep the abbreviation and the whole-ID labeling intact",
-    "test/surface-row-grant.test.ts: the real Theme submenu (the case the external review reported) answers `quasar` for `Classic Dark quasar Special Edition v9`, and the two long same-prefix theme names still paint apart at 44 columns"
+    "packages/pi-tui/test/settings-list.test.ts: `filters on searchText when the painted label is an abbreviation` (a row painting `Classic Dark…l Edition v9` is still found by the middle keyword `quasar` declared in `searchText`); `keeps the label as the search basis when no searchText is declared` (the same query answers `No matching settings`), which is also the mutation witness for the split",
+    "test/app/command-catalog.test.ts: `the /skill search still finds a keyword the label abbreviation cut away (PR #309 review)` — driven through the real search input of the live `/skill` picker, whose row hands the COMPLETE name as `searchText` while its label stays the 34-cell abbreviation (the same test asserts that field on the captured row)",
+    "test/app/preset-command.test.ts: `/preset search still finds a keyword the label abbreviation cut away (PR #309 review)` — driven through the real search input of the live `/preset` overlay, whose rows declare the abbreviation's source name as `searchText`"
    ],
    "upstream": {
     "equivalence": "NO",
@@ -6490,7 +6487,714 @@
      "behavioral",
      "tests"
     ],
-    "notes": "Introduced in PR #309 (rollout PR5b) after the external review found the pre-abbreviated label had broken the search contract on the Theme submenu, /preset and /skill. Scope checked against every SettingsList caller (the three abbreviated-name rows declare `searchText`; every other caller declares none and inherits the label basis), the fork's own render path (the field is filter-only), and the real pickers' search inputs."
+    "notes": "Introduced in PR #309 (rollout PR5b) after the external review found the pre-abbreviated label had broken the search contract on three rows; the Theme submenu is the retired legacy settings editor's historical trigger scenario, and today's live consumers are `/preset` and `/skill`. Scope checked against every SettingsList caller (the abbreviated-name rows declare `searchText`; every other caller declares none and inherits the label basis), the fork's own render path (the field is filter-only), and the real pickers' search inputs."
+   }
+  },
+  "X064": {
+   "title": "Narrow Editor seams for the scoped submit bridge and the real Undo-history lifetime of draft images",
+   "status": "ACTIVE",
+   "category": [
+    "HARD_HOST_API"
+   ],
+   "risk": "MEDIUM",
+   "files": [
+    "src/components/editor.ts",
+    "src/undo-stack.ts"
+   ],
+   "why": "The composer preview must keep a draft image's bytes alive exactly as long as the HOST EDITOR's real Undo history can still restore its canonical placeholder, and it must carry the submitted images across the synchronous submit clear until the existing business owner takes its own attachment reservation. Three facts live only inside the fork Editor: (a) submitValue()/undoStack are private, so the host cannot bracket the clear + synchronous onSubmit dispatch; (b) setText('') pushes an undo snapshot, so a host clear that does NOT retire the history needs its own seam; (c) nothing can inspect which snapshots reference an image, so a consumer-only design guessed from backend acceptance/settlement and leaked or released the wrong retention. The Owner explicitly authorized this minimal fork exception (A) after external findings established the consumer-only lifecycle could not stay consistent; the scope stayed limited to these narrow seams (no generic UndoStack API, no Editor rewrite).",
+   "changedSurface": [
+    "`public onBeforeSubmitClear?: (text: string) => (() => void) | undefined` — called by submitValue() with the expanded submitted value BEFORE the clear. The host reserves submission-time resources and returns a ONE-SHOT release; submitValue() runs it in a `finally` after `clearDraftAfterSubmit()` + the synchronous `onSubmit(value)` dispatch (success and throw). A throwing hook aborts the submit before any clear.",
+    "`public onUndoHistoryRetired?: () => void` — fired by clearDraftAfterSubmit() AFTER `undoStack.clear()` and BEFORE `onChange('')`. It is the only signal that the editor's real undo history is gone; prompt history (`clearHistory()`) and `setText()` never fire it.",
+    "`public replaceTextUndoable(text, cursor): void` — replaces the whole document as ONE real undoable edit: cancels autocomplete/history browsing, pushes the pre-edit snapshot, installs the text/cursor while keeping surviving paste entries, and fires onChange. The host uses it for the composer preview image removal so a following Undo restores exactly the removed occurrence (setTextAndCursor() deliberately records nothing).",
+    "`public undoImagePlaceholders(): ReadonlySet<string>` — the canonical draft-image placeholders (`[image #<id> (<w>×<h>)]`) referenced by SOME current undo snapshot, in raw document lines or stored paste bodies. Maintained incrementally on push/pop/clear/trim. The paste-body helper cache is bounded (8 entries) and only stores bodies containing a canonical placeholder, so historical/ordinary large pastes are never retained by it.",
+    "`private submitValue(): void` — computes the submitted value, calls onBeforeSubmitClear() (pre-clear), delegates the clear to clearDraftAfterSubmit(), fires onSubmit(value), and releases the bridge in a `finally`.",
+    "`public clearDraftAfterSubmit(): void` — clears the draft, paste registry and undoStack exactly like submitValue() (without firing onSubmit), resets the undo image-reference observation and its paste cache, fires onUndoHistoryRetired(), then onChange('').",
+    "`public retireDraftImageFromUndo(placeholder: string): void` — trims the placeholder occurrence from every undo snapshot whose raw text or stored paste body contains it, preserving the rest of the snapshot (including newer still-retained images) and clamping the snapshot cursor; the observation drops the placeholder.",
+    "`public transformSnapshots(transform)` on the internal UndoStack — narrow primitive used only by the Editor method above; UndoStack is not exported from the package entry."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "`UndoStack.transformSnapshots()` is called only by Editor.retireDraftImageFromUndo(); no vendored component or other caller consumes it.",
+      "submitValue() keeps its exact observable input/submit contract: the same expanded submitted value, the same clear, onChange('') before onSubmit(value); the only addition is the pre-clear hook and its scoped release around that synchronous sequence.",
+      "replaceTextUndoable() reuses the same install/prune step as setTextAndCursor() but adds the real edit semantics (snapshot + onChange); it does not introduce a second undo stack or a host-side edit ledger.",
+      "The undo image-reference bookkeeping reads only the Editor's own snapshot containers; its bounded cache holds at most eight image-bearing paste bodies and never a full paste-body history."
+     ],
+     "notes": "The UndoStack method is an internal primitive; the Editor is the only caller. The observation and retirement methods operate on the Editor's own snapshots."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "`TuiEditor extends Editor` (src/tui/interaction/tui-editor.ts) is the only host subclass and exposes the seams to the host through the structural SeatEditor adapter.",
+      "No other fork subclass exists; a replacement/plugin editor that does not extend this Editor simply does not provide the seams, and the host gates the preview-removal control on their presence instead of extending the public plugin API."
+     ],
+     "notes": "The structural edge is the intended contract; the new methods are additive public members on the already-exported Editor class."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "`src/tui-app.ts` wires `onBeforeSubmitClear` to the scoped bridge reservation and lets the fork's `finally` release it; Ctrl+Enter/plugin `submitDraft` acquires the same bridge around its own clear + synchronous dispatch. No host-side reservation array, in-flight counter, clear generation or accepted-settlement release exists.",
+      "`src/tui-app.ts` registers the host editor as the Store's ONLY undo-lease owner and releases that owner on the real `onUndoHistoryRetired`; it reconciles the leases from `undoImagePlaceholders()` after host-editor mutations (onChange, the setTextAndCursor preview removal, and seat handoff). The Store never guesses the owner from the current seat.",
+      "`DraftImageStore` calls the registered owner's `retireDraftImageFromUndo()` when the bounded undo-retention budget evicts a retained image, BEFORE dropping its bytes; submission pins and live expanded-draft occurrences are never evicted.",
+      "A replacement editor without the undo-retirement seam keeps the preview display-only (no `x`); a seat switch never retires another editor's snapshots."
+     ],
+     "notes": "The host consumes the narrow seams; the fork owns no submission, retention or budget policy."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "The two new methods are additive public members of the vendored Editor class. The package entry (`src/index.ts`) already exports Editor; no new export, no entry-graph change and no generic UndoStack export is added.",
+      "Third-party editors are not required to implement them; the host gates the preview-removal control on the structural capability instead of extending the public plugin API."
+     ],
+     "notes": "Additive only; no existing member is repurposed or removed."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "The submit bridge is scoped to ONE synchronous Editor→app→business dispatch: acquired before the clear, released in the fork's (or host's) `finally` even when onSubmit throws; a throwing hook aborts before any clear and a double release is impossible.",
+      "`onUndoHistoryRetired` fires exactly at a real undo-history retirement (after `undoStack.clear()`, before onChange('')), never for prompt recall or a programmatic setText.",
+      "`replaceTextUndoable()` records one snapshot; Undo restores exactly the pre-edit document (including the removed image occurrence) and surviving paste entries keep their content; unchanged text records no extra undo step.",
+      "`undoImagePlaceholders()` reports only canonical placeholders referenced by current snapshots (raw text or paste bodies); it is empty before any image-bearing snapshot, drops popped snapshots and retired placeholders, and ignores hand-edited/non-canonical text. Its paste cache is bounded and image-only.",
+      "Ordinary typing, paste, undo and Enter-submit behavior is unchanged; the seams add no routing, submit or retention policy."
+     ],
+     "notes": "The seams answer the bridge and undo-retention lifetime questions only."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/editor.test.ts: submitValue reserves before the clear and releases after the synchronous dispatch; a throwing hook aborts before any clear; a throwing onSubmit still releases exactly once; onUndoHistoryRetired fires after the undo clear and before onChange (Enter + the host clear seam) and never for clearHistory/setText; replaceTextUndoable records one real edit (Undo restores the removed text, surviving paste entries keep their content, unchanged text records nothing); undoImagePlaceholders reports canonical raw-text and paste-body references, ignores hand-edited tokens, drops popped/retired placeholders, and its paste cache is bounded, image-only and recomputed on a miss.",
+    "test/client/draft-image-preview-tui.test.ts: the app/store lifecycle matrix (Enter/Ctrl+Enter bridge, x→Undo→x lease idempotency, x immediately after insertion is undoable, successful Ctrl+S steer retires the history and cannot resurrect a consumed image, failed steer restores real bytes, bounded retention eviction through the owner, live-vs-retention classification, seat handoff, session switch, dispose).",
+    "test/client/draft-image-submit-lifecycle.test.ts: the REAL Editor→TuiApp→SubmissionController→bindSubmissionRuntime→preparePrompt→writer path for nine pinned images (success), accelerated submit, async writer rejection and deferred session-create failure (restore before release)."
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+    },
+    "relevantFiles": [
+     "packages/tui/src/components/editor.ts",
+     "packages/tui/src/undo-stack.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream's Editor keeps submitValue()/undoStack private, has no pre-clear scoped reservation seam, no undo-history-retired notification, and no way to observe or trim image-referencing undo snapshots. The fork adds exactly those narrow seams without changing ordinary input, submit, paste or undo behavior."
+   },
+   "retirement": {
+    "conditions": [
+     "Upstream exposes an equivalent public pre-clear hook whose returned release brackets the synchronous submit dispatch.",
+     "And upstream exposes a real undo-history-retirement notification plus a narrow image-reference observation/trim seam (or the host no longer needs undo-driven image retention)."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-24",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Introduced under the Owner's explicit A authorization (2026-10-24) to unify Enter/Ctrl+Enter/submitDraft/Ctrl+S submission clearing and to tie image retention to the editor's REAL undo history. The host registers the editor owner and bridges actual mutations; the store owns bytes, budget and leases. The fork seam itself only exposes the submit/undo-edit facts."
+   }
+  },
+  "X065": {
+   "title": "Public export of the Kitty placement metadata registrar",
+   "status": "ACTIVE",
+   "category": [
+    "HARD_HOST_API"
+   ],
+   "risk": "LOW",
+   "files": [
+    "src/index.ts"
+   ],
+   "why": "The host Kitty Graphics Core owns image ids, placements and retirement, and paints through its own a=p anchors. The vendored layout engine crops a kitty placement at the viewport edges and when scrolling into its middle, but it resolves that geometry through a private id-keyed table that only the fork own Image.render()/renderImage() could write. Without a public writer, every managed placement was invisible to the cropping pass: a Native image straddling a viewport boundary could overdraw the rows below it, and scrolling into its middle could not show the remaining part. The Owner explicitly authorized this one-line export (APPROVED_MINIMAL_FORK_EXPORT) after the regression was reproduced with a control comparison against the legacy Image; the internal algorithm, layout engine and image pipeline are deliberately untouched, and no reader is exported.",
+   "changedSurface": [
+    "`registerKittyImageMetadata(metadata: KittyImageMetadata): void` and `type KittyImageMetadata` are re-exported from the package index (no implementation change: the function and type already existed in `terminal-image.ts`)."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "`registerKittyImageMetadata()` writes only the private `kittyImageMetadata` map plus a monotonic `kittyTransmissionGeneration`; it performs no terminal IO and holds no other state.",
+      "Its reader `getKittyImageMetadata()` stays unexported, so a consumer can register geometry but cannot read the table or forge another id row without knowing that id.",
+      "The map is capped at 1000 entries (oldest evicted), so a long-lived registrar cannot grow it without bound."
+     ],
+     "notes": "The registrar is an existing internal primitive with a single private table; the export adds no state and no terminal IO."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "The only caller is `src/tui/graphics/native-image.ts` (`NativeKittyImage.render`), which registers its own placement geometry once per changed geometry key.",
+      "`prepareKittyScreen()` in the alt screen begins to recognise the managed `a=p` rows through the same table; the host verified behaviour (scoped placement removal, Core-owned retirement) is unchanged."
+     ],
+     "notes": "The host is the only caller: NativeKittyImage registers its own placement geometry once per changed geometry key."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "No behaviour changes unless a consumer calls the registrar: the export is a re-export of an existing function.",
+      "A registered id changes only the layout engine cropping answer for that id placement row; nothing else reads the table."
+     ],
+     "notes": "The only observable change is that the layout cropping pass can now resolve a managed placement id; upload and retirement authority stay with the Core."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "No structural inheritance seam is touched: the export does not add fields, hooks or editor/extension surfaces."
+     ],
+     "notes": "No structural inheritance edge is affected; the export is a plain function/type re-export."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "The stable/advanced extension API is unchanged; `@xmoon76/dsh-pi-tui/extensions` does not re-export the registrar.",
+      "It reaches third-party code only through the private `@xmoon76/pi-tui` bundle, exactly like the other terminal-image helpers."
+     ],
+     "notes": "Additive only: the extension entries do not re-export the registrar and no existing member is repurposed."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/terminal-image.test.ts: the existing registrar/reader round-trip and the metadata-driven crop assertions still pass unchanged (the export adds no behaviour).",
+    "test/tui/kitty-native-protocol.test.ts: the managed anchor keeps its `c`/`r`/`i` controls, so the registered row and the painted row cannot disagree.",
+    "test/integration/kitty-native-screen.test.ts: the managed placement on a real TuiMainScreen/TuiAltScreen keeps the Core as the only upload/retirement authority after registration."
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+    },
+    "notes": "Upstream keeps the registrar internal to its image component; a host that owns its own graphics lifecycle has no way to register geometry.",
+    "relevantFiles": [
+     "src/terminal-image.ts",
+     "src/components/image.ts",
+     "src/layout.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream keeps `registerKittyImageMetadata` module-private; the fork exports it so a host that owns the Kitty lifecycle can keep the layout cropping pass working for placements it creates itself."
+   },
+   "retirement": {
+    "conditions": [
+     "Upstream exposes a public seam that lets a consumer register or pass placement geometry for an id it owns, and the fork cropping pass consumes it."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-27",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Introduced for Image-7A PR1 after an external review proved the cropping regression by comparing the managed component against the legacy Image in the same module graph."
+   }
+  },
+  "X066": {
+   "title": "Exception-safe TuiBase.teardown so a failing cleanup write cannot strand the terminal",
+   "status": "ACTIVE",
+   "category": [
+    "BUGFIX_MISSING_UPSTREAM"
+   ],
+   "risk": "MEDIUM",
+   "files": [
+    "src/tui.ts"
+   ],
+   "why": "TuiBase.stop() ran its four teardown steps linearly: the screen hook (beforeTerminalStop), cursor restore, physical terminal release, then afterTerminalStop, which is where the alternate screen writes its ?1049l exit. A throwing hook aborted the rest, leaving the terminal in raw mode with the cursor hidden and the alternate screen active. That was latent upstream, but the host now has a real reachable trigger: the Kitty graphics facade deliberately throws when a cleanup write fails (Terminal.write is an offer, not an ACK), and the alternate screen emits its global image release from beforeTerminalStop. The Owner approved APPROVED_MINIMAL_FORK_STOP_HARDENING after the failure was reproduced with a real TuiAltScreen + the production facade: the error propagated and terminal.stop(), showCursor() and ?1049l were all skipped. The fix is confined to the shared stop lifecycle: every step is still attempted, the FIRST failure is rethrown so a later recovery failure cannot mask the cause, and a recovery-only failure is never reported as success. No host fallback escape writing, no second stop state machine, no change to the Kitty Core deletion policy.",
+   "changedSurface": [
+    "`TuiBase.stop()` executes each teardown step through a collecting `attempt()` and throws the first recorded failure after all steps ran. The normal-path order (beforeTerminalStop -> showCursor -> terminal.stop -> afterTerminalStop) is unchanged and no public member is added."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "`beforeTerminalStop`/`afterTerminalStop` are the only hook seams; the change calls them in the same order and with the same options object.",
+      "No other TuiBase member changes, and no terminal writes are added."
+     ],
+     "notes": "The hardening is local to stop(); it introduces no state and no ordering change on the success path."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "Both screen subclasses override the hooks and inherit the new sequencing; the alternate screen still exits the alternate buffer from afterTerminalStop."
+     ],
+     "notes": "The structural contract (hook order, options identity) is preserved; only failure handling changed."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "The host facade can now throw from a cleanup write without leaving the terminal unrestored; the host adds no fallback teardown of its own."
+     ],
+     "notes": "The host relies on the fork owning the teardown order; it does not duplicate it."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "No extension-visible surface changes: stop() keeps its signature and its error behaviour only becomes stricter (a previously masked failure now propagates)."
+     ],
+     "notes": "Additive in robustness only; no member repurposed or removed."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "Success path is byte-identical; the failure path performs the previously skipped steps and surfaces the first cause."
+     ],
+     "notes": "The only behavioural change is that teardown completes under failure."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/stop-exception-safety.test.ts: each step still runs when an earlier one throws, the first failure wins, a recovery-only failure is reported, and the success path keeps its order.",
+    "test/integration/kitty-native-screen.test.ts: a real TuiAltScreen whose global cleanup write fails still calls showCursor/terminal.stop, still emits ?1049l, keeps the original error and leaves the Core ownership uncommitted (both preserveScreen modes); a normal main-screen stop is unaffected."
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+    },
+    "relevantFiles": [
+     "src/tui.ts",
+     "src/tui-alt-screen.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream stop() aborts on a throwing teardown step; the fork attempts every step and rethrows the first failure, so terminal restoration is best-effort even when a cleanup write fails."
+   },
+   "retirement": {
+    "conditions": [
+     "Upstream stop() attempts all teardown steps after a step throws and rethrows the first failure."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-27",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Introduced for Image-7A PR1 after an external review proved the terminal was left unrestored when the Kitty cleanup write failed."
+   }
+  },
+  "X067": {
+   "title": "Preserve a clipped managed virtual Kitty placement anchor on the first visible placeholder row",
+   "status": "ACTIVE",
+   "category": [
+    "BUGFIX_MISSING_UPSTREAM"
+   ],
+   "risk": "MEDIUM",
+   "files": [
+    "src/layout.ts",
+    "src/terminal-image.ts"
+   ],
+   "why": "The host's tmux virtual image backend creates ONE Kitty virtual placement anchor on the image's first source row and paints the rest of the image as real U+10EEEE placeholder cells. Upstream layout.ts clips a box's source lines to the viewport before the alternate-screen writer (and therefore the host's KittyTerminalFacade) sees them. When the image first becomes visible with its first row already above the viewport, only the later placeholder rows reach the facade: no upload, no prototype and no pixels, and the visible cells are pure placeholder text. The Owner approved this bounded fork seam after a real TuiAltScreen + ScrollView reproduction showed zero a=t/a=p bytes on the first visible frame and after a public-API audit found no current-frame pre-write visibility seam. A host-owned zero-width provenance marker (a private APC carrying the already-allocated image/placement ids, emitted only after the Core handle exists) identifies the managed anchor. The layout keeps the EXACT existing anchor APC from a marker-bearing source line and prefixes it to the first actually visible placeholder row of the same image block only when the marker, the adjacent anchor and the placeholder row identity all agree; it invents no id, geometry, row or state. A foreign virtual image with no marker is never relocated, and every output path strips the marker before the real terminal. Native metadata cropping, the host Core/facade ownership, text/foreign protocols and the image ids all stay unchanged.",
+   "changedSurface": [
+    "`terminal-image.ts` adds stateless helpers: `getManagedKittyVirtualMarker(line)` parses the private marker at a source line start and returns its exact bytes plus the already-allocated image/placement ids; `getKittyVirtualPlacementAnchor(line)` parses only an exact `a=p,U=1,q=2` anchor with positive 1..297 i/p/c/r controls and returns the exact source APC substring; `isKittyVirtualPlaceholderLine()` and `matchesKittyVirtualPlaceholderIdentity()` are pure checks on real U+10EEEE cells and their existing id/placement colors. None touches the Native metadata table, capabilities or terminal IO.",
+    "`layout.ts`'s `paintBox()` strips a valid marker from painted source lines, throws on a malformed marker or a marker/anchor id mismatch, and at most scans the 297 source lines immediately above a box's first visible row. It relocates only when the nearest preceding marker-bearing anchor has a block reaching the visible range and the first visible placeholder row's existing identity colors match the anchor. The original anchor line stays clipped; no anchor is emitted when the original anchor row is visible, the image is fully invisible, the row is foreign/unmarked, or the line already carries a Native image.",
+    "The host `TmuxKittyImage` emits the marker only with a live Core handle; `KittyTerminalFacade` strips complete or split markers before every write (Main, Alt replay and cross-write holdback), and the marker never becomes a second ownership/registry authority."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "The new helpers are pure string functions in `terminal-image.ts`; they add no mutable state, cache, timer or geometry model.",
+      "`layout.ts` uses only its existing `box.lines`, `box.rect`, `box.clip`, `box.lineOffset` and visible row range; the source anchor sequence is reused byte-for-byte and no new placement is synthesized.",
+      "The scan is bounded to 297 rows above the first visible source row (the host component's own maximum image-row count), so painting a viewport never scans the whole transcript or scrollback.",
+      "Native metadata registration/`cropKittyImageLine` and the existing scroll recovery branch are not read or changed by the seam."
+     ],
+     "notes": "The seam observes the current layout frame's own source lines and clip; it keeps no cross-frame shadow state."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "`Component` receives no new method or parameter; the component API and every subclass/override stay unchanged.",
+      "`LayoutBox` gains no field; only `paintBox()`'s local processing changes.",
+      "`TuiAltScreen`, `TuiMainScreen`, `TuiBase`, `ScrollView` and all other fork files are untouched."
+     ],
+     "notes": "No structural seam is added or repurposed; the existing layout source/clip facts remain authoritative."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "The host `TmuxKittyImage` is the only producer of a marked anchor: it creates the marker from the same Core handle ids only after `register()` succeeded, and fallback/revoked/budget paths emit no marker.",
+      "`KittyTerminalFacade` removes markers from the text stream (including a marker split across writes) before Kitty parsing; the marker is not a Kitty command and never reaches the terminal on Main, Alt replay or any other write path.",
+      "The host `KittyTerminalFacade` still owns transmission insertion, admission, DCS wrapping and placement registration; the marker only authorizes the fork layout to move the existing anchor and grants no upload/delete/admission authority.",
+      "No additional Core, residency ledger, image id or admission decision is created; the existing RFL-001/003 behavior is unaffected."
+     ],
+     "notes": "Host ownership and wire construction are unchanged; the fork only preserves the host's existing anchor across its own clipping."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "`src/index.ts` does not export either helper; the extension tiers and public component contract are unchanged.",
+      "No public component method, option or event is added."
+     ],
+     "notes": "The helper is module-internal to the vendored package, consumed only by `layout.ts`."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "Normal visible-anchor frames strip the marker and are otherwise byte-identical; the seam returns nothing when the anchor row is visible.",
+      "A complete foreign virtual anchor+grid without the private marker is never relocated, even if it has valid U+10EEEE cells and the same control shape; a managed marker plus a mismatched anchor id fails fast.",
+      "Clipped Native `a=T` images, text, OSC and non-placeholder rows are untouched; the moved APC is zero-width and horizontal clipping/visible width are unchanged.",
+      "The relocation occurs in the current frame before the screen writer, never as a second-frame repair or a terminal-side PUA scan."
+     ],
+     "notes": "The only behavioural change is preserving an existing managed virtual anchor for the first visible frame."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/layout.test.ts: a marked clipped anchor is relocated once onto the first visible placeholder row with the exact bytes; a visible marked anchor is not duplicated and its marker is stripped; a complete unmarked foreign virtual image is never moved; a managed/foreign adjacent pair moves only the managed anchor; marker/anchor id mismatch and malformed markers fail fast; identity-color mismatch, bare anchors, fully invisible images and the 297-row boundary are covered.",
+    "test/integration/kitty-tmux-screen.test.ts: a real TuiAltScreen + ScrollView first mounts the TmuxKittyImage while already mid-content; the first visible frame carries a=t before exactly one a=p,U=1 and real placeholder cells; Main first paint strips the marker through the facade; a complete foreign virtual image stays unrelocated; the marker never leaks across every split byte; the same image component's revoked fallback plus a queued retirement still writes.",
+    "External E3 evidence (repo-external): the real-Screen first-middle path in a real Kitty 0.41.1 + tmux 3.5a window, with outer raw, stage offsets, a screenshot of pixels on the first visible frame and zero provenance-marker bytes in terminal/outer/pane streams."
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+    },
+    "relevantFiles": [
+     "src/layout.ts",
+     "src/terminal-image.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream layout clips the virtual placement anchor row with the rest of the box and has no current-frame visibility or provenance seam; the fork recognizes the host's private marker, keeps the exact anchor sequence and prefixes it to the first visible placeholder row of the same block only when the marker, anchor and cell identity agree, while unmarked foreign virtual images are untouched."
+   },
+   "retirement": {
+    "conditions": [
+     "Upstream layout preserves a managed Unicode-placeholder placement anchor across vertical clipping, or upstream exposes an equivalent current-frame pre-write visibility/placement seam that the host can consume without this divergence."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-27",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Introduced for Image-7B-A RFL-002 after the Owner authorized the bounded fork seam, then extended under the RFL-004 Owner ruling with a private provenance marker so foreign virtual images are never relocated. The real first-visible-middle reproduction had zero graphics bytes before the seam and shows pixels after it; the marker never reaches the terminal."
+   }
+  },
+  "X068": {
+   "title": "Opt-in text selection inside an overlay's painted content rectangle",
+   "status": "ACTIVE",
+   "category": [
+    "LOCAL_UX"
+   ],
+   "risk": "MEDIUM",
+   "files": [
+    "src/tui.ts",
+    "src/tui-alt-screen.ts"
+   ],
+   "why": "Upstream owns text selection only in the alternate screen's BACKGROUND viewport: TuiAltScreen keeps selectionAnchor/selectionFocus, paints them in applySelection(), reads painted rows through getSelectionSourceLine() and copies via copyTextToClipboard(), and a capturing overlay that does not consume a press is a hard modal barrier (the press clears the background selection and returns). The Delivered files browser is a capturing modal whose body is the user's file paths, descriptions and file-preview text, and the Owner requires selecting that text with drag, double-click and triple-click and copying it. A host-only implementation cannot reach those owners: the selection anchor/focus, the highlight painter, the word segmenter and the clipboard path all live inside TuiAltScreen, and the host must not add a second selection truth, its own terminal mouse listener, its own clipboard implementation or a widened modal that lets the transcript behind the frame be selected. The seam is therefore one optional OverlayOptions field plus a region latch inside the existing selection implementation; every overlay without the option keeps the upstream opaque-modal behavior byte-for-byte.",
+   "changedSurface": [
+    "OverlayOptions.textSelectionInsets?: { top, right, bottom, left } — opt-in: an unconsumed press inside the LAST PAINTED placement minus these chrome insets starts the alternate screen's existing text selection, clipped to that rectangle. Absent means the original opaque modal.",
+    "TuiBase.overlayTextSelectionRegionAt(x, y): the topmost painted, still-visible overlay that opted in, resolved from renderedOverlayLayouts only, refused when either inner dimension is < 1.",
+    "TuiBase.isOverlayTextSelectionRegionLive(region): the captured entry is still mounted and visible, its painted placement is identical, and no other visible overlay holds a higher focus order. The focus-order test is the pre-paint authority: a newer modal already owns the pointer in the window between its mount and the frame that draws it, so a release there must not copy a range it now covers.",
+    "TuiAltScreen.overlaySelectionOrigin: a discardable latch (entry + half-open rect + placement) that bounds and revalidates the ONE existing selection range — never a second selection, list or cache.",
+    "TuiAltScreen press/drag/release: an unconsumed opt-in press starts the gesture; while that gesture is active it owns the pointer (a drag outside the frame maps to the nearest region cell, and never reaches background components, the scrollbar, the jump-to-end label or the modal barrier); word/line granularity and the OSC 8 arming path are clipped or skipped.",
+    "TuiAltScreen.applySelection() clips highlight rows and columns to the captured rectangle, and getOverlaySelectionText() copies exactly those painted cells with real spaces/indentation preserved (the transcript trimEnd/1-3-cell indent rule of X024 is NOT applied).",
+    "Every lifecycle clear drops the latch: clearTextSelection() (resetTextSelection, host content/screen replacement), stop/start, focus-out, the scrollbar press, a stale region on any gesture event, and the render-time liveness check after overlays are re-composited.",
+    "TuiAltScreen.resetTextSelection({ preserveClickHistory }) — the host repaint of an overlay's OWN content drops the range but keeps the multi-click window; without it the first click's own disclosure repaint would turn every double-click into two single clicks. The default (no options) still drops the click history exactly as upstream #9311 requires.",
+    "Host: src/tui-app.ts routes the ONE Delivered files modal's mount, fullscreen remount and resize rebind through deliveredFilesOverlayOptions(); the panel repaint path and closeDeliveredFiles() call the alt screen's resetTextSelection()."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "The region readers live in TuiBase, which already owns overlayStack/renderedOverlayLayouts/isOverlayVisible, so the alternate screen reads painted overlay geometry without new public accessors or a second copy of the stack.",
+      "handleSelectionMouseEvent keeps ONE protocol parser and ONE anchor/focus pair: overlay gestures reuse getSelectionPoint, getWordSelection, getLineSelection, getClickCount, updateSelectionFocus, updateSelectionAutoScroll, applySelection and copyTextToClipboard, and only add a clamp.",
+      "withMouseDispatchContext isolation, the X018 press-time dispatch snapshot and the X018 click synthesis are unchanged; an overlay-origin gesture never synthesizes a component click into a background element."
+     ],
+     "notes": "All new state is one discardable field and one optional option field; no selection list, no durable cache, no new listener."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "The predicates are protected members of TuiBase, so TuiMainScreen and TuiAltScreen inherit them without exposing overlay entries or options through a new public API.",
+      "TuiMainScreen has no application-owned text selection, so the option is inert there (guarded by packages/pi-tui/test/overlay-options.test.ts)."
+     ],
+     "notes": "OverlayStackEntry is exported as a TYPE only for the latch's identity field; it carries no runtime value and is not re-exported from the package entry."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "src/tui-app.ts injects { top: 1, right: 2, bottom: 1, left: 2 } — the ResponsiveOverlayFrame's real chrome (1 border row each side; 2 columns = 1 border + 1 padding) — from ONE constant in src/tui/deliverables/overlay-size.ts, for the initial mount, the fullscreen remount and the resize rebind.",
+      "No other host overlay (transcript search, model picker, task browser, settings, question/approval, plugin manager, history search) receives the option; the X058 viewportPassthrough box in particular keeps its own contract.",
+      "The panel's requestRender callback (its own content changes) and closeDeliveredFiles() reset the screen selection, so a repaint or a close can never leave a highlight or copy text from the previous frame."
+     ],
+     "notes": "The option is a literal object and is inert on the main screen."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "OverlayOptions is a public fork type; the new field is optional and additive, so existing consumers compile and behave unchanged.",
+      "The extension-facing TuiOverlayOptions surface is deliberately NOT widened: plugins cannot opt in.",
+      "The root package's public entry does not re-export the new field, so the emitted declaration graph is unchanged."
+     ],
+     "notes": "Absent option = upstream behavior."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "Opted-in overlay, unconsumed press inside the content rectangle: drag/release select and copy exactly the painted cells inside that rectangle; a drag outside it is clamped, and the transcript behind the modal is neither selectable nor copyable.",
+      "A component that consumes the press (a footer button, a row's Details verb, the filter Input) keeps its gesture and its synthesized click; no selection starts.",
+      "Double-click still selects a word (the fork's own segmenter, `/` and `-` kept as joiners) and triple-click the visible content row, both clipped to the rectangle.",
+      "The selection dies on: overlay hide/close, a moved placement (resize, reflow, remount), a newer visible overlay above it, a screen swap, focus-out, stop, and a host content replacement.",
+      "An overlay WITHOUT the option keeps the exact upstream block: an unconsumed press selects nothing, copies nothing and never touches the background."
+     ],
+     "notes": "Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X068 group) and the host deliverables-panel/fullscreen regressions."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/tui-alt-screen.test.ts: X068 — selects only the visible overlay text (content spaces preserved), keeps drag and copy inside the content rectangle, does not start a selection without the opt-in, lets a consuming component keep its press and click, selects a word on double-click and the row on triple-click, never copies the frame chrome or the covered background, drops the selection when a newer overlay covers it, drops it when the placement moves, clears it through resetTextSelection, paints the highlight only inside the rectangle, refuses a release that arrives before the covering frame is painted, retires a COMPLETED (already released) selection on focus-out, on stop and on hide-before-the-next-paint through the public read/copy sink while a completed background selection keeps its upstream behavior, and the preserveClickHistory repaint path keeps the multi-click window",
+    "packages/pi-tui/test/overlay-options.test.ts: X068 — the option is optional, and it is inert on the regular main screen",
+    "test/tui/delivered-files-panel.test.ts: a Files body press is unconsumed while every button press stays owned by the panel",
+    "test/tui/deliverables.test.ts: the real application chain — the painted modal, a real SGR drag, the alternate screen's selection, the injected clipboard sink — copies the overlay's own text and never the transcript behind it"
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+    },
+    "relevantFiles": [
+     "src/tui.ts",
+     "src/tui-alt-screen.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream has no overlay-level text selection: a capturing overlay that does not consume a press is an opaque modal barrier and the alternate screen's selection can only address the background viewport. The fork adds one optional opt-in consulted only on the press that no component consumed, plus a region latch that clips the EXISTING selection and copy paths to the overlay's last-painted content rectangle. With the option absent, every pointer, selection, click and copy path is unchanged."
+   },
+   "retirement": {
+    "conditions": [
+     "Retire when upstream exposes an equivalent way to select and copy text inside an overlay's painted content rectangle (or the Delivered files browser stops needing pointer text selection), then run the X068 fork group and the host deliverables regressions."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-27",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Owner-authorized necessary fork support for Delivered files PR B (overlay text selection). Confirmed against the pinned v1.1.0 tree that no existing OverlayOptions field or public member can select overlay content, whereas the selection anchor/focus, highlight painter, word segmenter, painted-row reader and clipboard path all live inside TuiAltScreen."
+   }
+  },
+  "X069": {
+   "title": "Tern PiTui terminal capability detection",
+   "status": "ACTIVE",
+   "category": [
+    "BUGFIX_MISSING_UPSTREAM"
+   ],
+   "risk": "LOW",
+   "files": [
+    "src/terminal-image.ts"
+   ],
+   "why": "The Tern terminal pane speaks the Kitty graphics protocol, but upstream v1.1.0 has no TERM_PROGRAM=tern branch in its ONE capability detector. Classifying Tern only at the host layer would split the answer: the main screen and TuiApp would paint managed Kitty images while TuiAltScreen's own imageProtocol (read from getCapabilities().images) stayed null/iterm2, so alt-screen image redraw/clear policy would have no protocol. The host cannot fix this through the existing public surface because getCapabilities() is process-wide and TuiAltScreen reads it directly; the minimal correct owner is the fork's existing terminal-capability branch.",
+   "changedSurface": [
+    "detectCapabilitiesFromEnvironment: TERM_PROGRAM=tern joins the existing known Kitty-capable terminal branch and returns { images: 'kitty', trueColor: true, hyperlinks: true }.",
+    "The branch stays after the existing tmux, screen and Herdr pre-emptions, so those transport/forwarding rules are unchanged and Tern cannot reopen images through them.",
+    "PI_IMAGE_PROTOCOL=none/0 still removes images and PI_IMAGE_PROTOCOL=iterm2 still overrides the detected protocol; getCapabilities() caching and setCapabilityOverrides are untouched."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "detectCapabilitiesFromEnvironment is the single capability map consumed by detectCapabilities()/getCapabilities(); the change adds one terminal identity branch and no second cache or override path.",
+      "The existing KITTY_WINDOW_ID/kitty branch is reused, so the returned capability object keeps the same shape and all downstream readers are unchanged."
+     ],
+     "notes": "No new state, no new export and no new detection subsystem."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "TuiAltScreen.beforeTerminalStart assigns imageProtocol from getCapabilities().images; the shared detector is what keeps the main screen, alternate screen and host on one Tern answer.",
+      "TuiMainScreen receives the same process-wide capability indirectly through the managed factory and components."
+     ],
+     "notes": "The fix deliberately lives in the shared detector rather than a host-side setCapabilities call so no screen sees a divergent value."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "src/tui/graphics/native-image.ts admits the Direct Native path only when getCapabilities().images === 'kitty'; the Tern PiTui fallback uses the same managed Core/Facade path.",
+      "src/tui/graphics/image-capability.ts falls back to getCapabilities().images only when no managed graphics handle exists; Tern's answer flows through unchanged.",
+      "The TSP renderer path is owned by renderer selection and does not read this capability while the SDK session owns the tty, so the two Tern paths stay mutually exclusive."
+     ],
+     "notes": "No host import, API or behavior is introduced by this fork record; the host consumes the existing capability answer."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "No public entry or extension type changes: TerminalCapabilities and getCapabilities() keep their existing shape."
+     ],
+     "notes": "Additive detection only."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "TERM_PROGRAM=tern outside tmux/screen/Herdr detects images:'kitty' with truecolor and hyperlinks.",
+      "TMUX or a tmux*/screen* TERM still returns images:null before the Tern branch.",
+      "PI_IMAGE_PROTOCOL=none/0 returns images:null for Tern; PI_IMAGE_PROTOCOL=iterm2 returns images:'iterm2'."
+     ],
+     "notes": "Guarded by packages/pi-tui/test/terminal-image.test.ts (X069 group)."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/terminal-image.test.ts: X069 — TERM_PROGRAM=tern detects { images: 'kitty', trueColor: true, hyperlinks: true }, tmux/screen do not reopen Tern images, and PI_IMAGE_PROTOCOL none/0/iterm2 stays authoritative."
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+    },
+    "relevantFiles": [
+     "src/terminal-image.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream v1.1.0 classifies Kitty, Ghostty, WezTerm and Warp as Kitty-capable but has no TERM_PROGRAM=tern branch, so a Tern PiTui fallback would detect images:null. The fork adds exactly one identity branch after the existing tmux/screen/Herdr pre-emptions, producing the same capability object as the other known Kitty terminals; all other detection rules and overrides are unchanged."
+   },
+   "retirement": {
+    "conditions": [
+     "Retire when upstream detects TERM_PROGRAM=tern as a Kitty-capable terminal (or exposes an equivalent capability source), then run the X069 guarding test and the host Tern PiTui fallback regressions."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-28",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Owner-approved Image-7C protocol-capability unification: Tern PiTui needs the fork's single capability owner to report Kitty because the alternate screen reads getCapabilities().images directly. Confirmed against the pinned v1.1.0 tree that no existing branch matches TERM_PROGRAM=tern and that a host-only override would split the main/alt capability answer."
+   }
+  },
+  "X070": {
+   "title": "Alt Screen per-instance image protocol override for managed Native Kitty",
+   "status": "ACTIVE",
+   "category": [
+    "HARD_HOST_API"
+   ],
+   "risk": "MEDIUM",
+   "files": [
+    "src/tui-alt-screen.ts"
+   ],
+   "why": "Image-7C admits a managed Native Kitty handle for a Zellij pane when its live a=q answer is OK, even when the fork's static getCapabilities().images is null or iterm2. TuiAltScreen latches getCapabilities().images at beforeTerminalStart() and uses that single field for its differential image cleanup and stop release. With a null static value it never emits the required placement delete; with iterm2 it uses the whole-screen 2J branch. Both paths would leave a managed Kitty placement behind after an image is removed or moved in fullscreen. The host cannot correct this through the existing public surface without mutating the process-wide capability cache, which would affect unrelated consumers; the fork's Alt Screen owns the protocol latch, so the minimal correct seam is one optional per-instance override.",
+   "changedSurface": [
+    "TuiAltScreenOptions.imageProtocolOverride?: ImageProtocol — optional per-instance protocol selection.",
+    "TuiAltScreen.beforeTerminalStart() uses imageProtocolOverride when supplied, otherwise the existing getCapabilities().images answer; the global capability cache is never mutated.",
+    "The existing iTerm2 suppression/restore lifecycle still runs from the actual getCapabilities() answer: an iterm2 process capability is temporarily changed to images:null for the Alt lifetime and restored at stop even when the instance override is kitty.",
+    "No option means byte-for-byte upstream protocol behavior; the tmux virtual and legacy iTerm2 paths keep their existing protocol selection."
+   ],
+   "dependencies": {
+    "vendorInternal": {
+     "audited": true,
+     "items": [
+      "imageProtocol is a private TuiAltScreen field read by doRender's differential clear/redraw branch and beforeTerminalStop's deleteKittyImages(); it is set once in beforeTerminalStart(). The override changes only that assignment.",
+      "uploadedKittyImages and prepareKittyScreen remain the same single image-placement cache; no second protocol state is introduced."
+     ],
+     "notes": "One readonly option field plus the existing latch assignment; no new render or deletion path."
+    },
+    "inheritanceStructural": {
+     "audited": true,
+     "items": [
+      "TuiBase.start() calls beforeTerminalStart() synchronously before installing the terminal input listener, so the override is latched before any render or input can refer to it.",
+      "TuiMainScreen has no imageProtocol latch and is unaffected."
+     ],
+     "notes": "The option is inert on every non-Alt screen and absent from TuiMainScreen."
+    },
+    "host": {
+     "audited": true,
+     "items": [
+      "src/tui-app.ts passes imageProtocolOverride: this.altScreenImageProtocol to the fullscreen transcript Alt screen, the Job workspace Alt screen and the Settings/Image workspace lease Alt screen.",
+      "altScreenImageProtocol returns 'kitty' only when the one managed graphics handle is mode 'native' (Direct or Zellij, including a pending Zellij admission); it returns undefined for tmux-virtual and no-graphics terminals.",
+      "Whether managed pixels may actually be painted remains graphics.canPaint(); the option only selects the Alt clear/redraw/release strategy."
+     ],
+     "notes": "The host passes a literal protocol value from its single managed graphics owner; it never mutates getCapabilities()."
+    },
+    "publicExtension": {
+     "audited": true,
+     "items": [
+      "TuiAltScreenOptions is a public fork type; the new field is optional and additive, so existing consumers compile and behave unchanged.",
+      "No new class, export or extension-facing surface is added, and the root entry does not re-export the option."
+     ],
+     "notes": "Absent option = existing behavior."
+    },
+    "behavioral": {
+     "audited": true,
+     "items": [
+      "With imageProtocolOverride 'kitty', an image-anchor change uses the Kitty placement-delete path (deleteAllKittyPlacements) and Alt stop uses the Kitty global remove path that the facade scopes to its own ids; no 2J branch and no global delete reaches the physical terminal.",
+      "Without the option, null/iterm2/kitty behavior is unchanged.",
+      "When the process capability is iterm2, the existing temporary images:null suppression and stop restore still occur even with a kitty instance override."
+     ],
+     "notes": "Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X070 group) and the host Zellij delayed-OK integration cases."
+    }
+   },
+   "tests": [
+    "packages/pi-tui/test/tui-alt-screen.test.ts: X070 — a kitty instance override emits Kitty placement cleanup while the iTerm2 global suppression/restore still runs; no override keeps the static null behavior and never touches the process capability.",
+    "test/integration/kitty-zellij-screen.test.ts: a delayed Zellij OK with fork images null/iterm2 enters Alt first, then paints; Alt image removal emits an own-id placement delete, Alt stop releases the own id, no global delete/2J/foreign id is emitted, repeated Main↔Alt entries stay managed, and a denied live query stays payload-free."
+   ],
+   "upstream": {
+    "equivalence": "NO",
+    "checkedAgainst": {
+     "repo": "earendil-works/pi",
+     "baselineRef": "abe508e1b89912adde45528136c3221eb69acdd7",
+     "referenceRef": "abe508e1b89912adde45528136c3221eb69acdd7"
+    },
+    "relevantFiles": [
+     "src/tui-alt-screen.ts"
+    ],
+    "relevantIssues": [],
+    "semanticDelta": "Upstream TuiAltScreen always derives imageProtocol from the process-wide getCapabilities().images snapshot and has no per-instance protocol option. The fork adds one optional readonly override used only for the instance's clear/redraw/release strategy, while preserving the existing global iTerm2 suppression/restore lifecycle and all default behavior."
+   },
+   "retirement": {
+    "conditions": [
+     "Retire when upstream exposes an equivalent per-instance image protocol option or a managed-graphics protocol seam on TuiAltScreen, then run the X070 fork group and the host Zellij delayed-OK integration cases."
+    ],
+    "replacementMapping": [],
+    "evidence": []
+   },
+   "audit": {
+    "lastAuditedAt": "2026-10-28",
+    "scope": [
+     "vendor-internal",
+     "inheritance-structural",
+     "host",
+     "public-extension",
+     "behavioral",
+     "tests"
+    ],
+    "notes": "Owner-approved RFL-001 scope extension after a real Alt ghost-placement defect: Zellij live OK can exceed the static fork capability, so the Alt screen needs an instance-level protocol value from the one managed graphics handle. Confirmed against the pinned v1.1.0 tree that TuiAltScreen has no such option and that host-only global cache mutation would affect unrelated consumers."
    }
   }
  }

@@ -1,0 +1,201 @@
+import assert from 'node:assert/strict'
+import { readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import test from 'node:test'
+import { parse as parseYaml } from 'yaml'
+import { join } from 'node:path'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { depsPlan } from '../../scripts/ci-deps.mjs'
+
+import {
+  candidateTarball as npmVerifyCandidateTarball,
+  npmVerificationEnvironment,
+  pinNpmDshDependencies,
+} from '../../scripts/dsh-npm-verify.mjs'
+import { resolveDshVersion } from '../../scripts/dsh-client-family-compat.mjs'
+
+test('npm verification pins the public registry and isolated user config', () => {
+  const environment = npmVerificationEnvironment('/tmp/dsh-npm-verify-test.npmrc', {
+    npm_config_registry: 'https://registry.example.invalid/',
+    NPM_CONFIG_REGISTRY: 'https://registry.example.invalid/',
+    npm_config_userconfig: '/home/user/.npmrc',
+    NPM_CONFIG_USERCONFIG: '/home/user/.npmrc',
+    DSH_TEST_SENTINEL: 'preserved',
+  })
+  assert.equal(environment.npm_config_registry, 'https://registry.npmjs.org/')
+  assert.equal(environment.NPM_CONFIG_REGISTRY, 'https://registry.npmjs.org/')
+  assert.equal(environment.npm_config_userconfig, '/tmp/dsh-npm-verify-test.npmrc')
+  assert.equal(environment.NPM_CONFIG_USERCONFIG, '/tmp/dsh-npm-verify-test.npmrc')
+  assert.equal(environment.DSH_TEST_SENTINEL, 'preserved')
+})
+
+test('an explicit npm DSH override rewrites only DSH development packages', (t) => {
+  const life = testLifecycle(t)
+  const workspace = life.tempDir('dsh-npm-pin-test-')
+  writeFileSync(join(workspace, 'package.json'), JSON.stringify({
+    devDependencies: {
+      '@deepseek-ai/dsh': '0.1.5-rc.1',
+      '@deepseek-ai/dsh-agent': '0.1.5-rc.1',
+      typescript: '5.0.0',
+    },
+    peerDependencies: { '@deepseek-ai/dsh-agent': '>=0.1.5-rc.1' },
+  }))
+
+  pinNpmDshDependencies(workspace, '0.1.5-rc.2')
+
+  const packageJson = JSON.parse(readFileSync(join(workspace, 'package.json'), 'utf8'))
+  assert.deepEqual(packageJson.devDependencies, {
+    '@deepseek-ai/dsh': '0.1.5-rc.2',
+    '@deepseek-ai/dsh-agent': '0.1.5-rc.2',
+    typescript: '5.0.0',
+  })
+  assert.equal(packageJson.peerDependencies['@deepseek-ai/dsh-agent'], '>=0.1.5-rc.1')
+})
+
+test('npm dependency pinning rewrites only DSH development packages and writes no override', (t) => {
+  const life = testLifecycle(t)
+  const workspace = life.tempDir('dsh-npm-exact-family-test-')
+  writeFileSync(join(workspace, 'package.json'), JSON.stringify({
+    devDependencies: {
+      '@deepseek-ai/dsh-agent': '0.1.5-rc.1',
+      typescript: '5.0.0',
+    },
+  }))
+  const originalWorkspace = 'packages:\n  - packages/*\n'
+  writeFileSync(join(workspace, 'pnpm-workspace.yaml'), originalWorkspace)
+
+  pinNpmDshDependencies(workspace, '0.1.6-rc.2')
+
+  const packageJson = JSON.parse(readFileSync(join(workspace, 'package.json'), 'utf8'))
+  assert.equal(packageJson.devDependencies['@deepseek-ai/dsh-agent'], '0.1.6-rc.2')
+  assert.equal(packageJson.pnpm, undefined)
+  // The exact-family pin is the shared distribution primitive's job, not this
+  // top-level rewrite: no second `overrides:` writer may exist.
+  assert.equal(readFileSync(join(workspace, 'pnpm-workspace.yaml'), 'utf8'), originalWorkspace)
+})
+
+test('client-family compatibility follows package.json and accepts only explicit alternate targets', () => {
+  const packageJson = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'))
+  const declaredVersion = packageJson.devDependencies['@deepseek-ai/dsh-agent']
+  assert.equal(resolveDshVersion([]), declaredVersion)
+  assert.equal(resolveDshVersion(['--', '--dsh-version', '0.1.5-rc.2']), '0.1.5-rc.2')
+
+  const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  assert.doesNotMatch(workflow, /0\.1\.5-rc\.[12]/u)
+})
+
+test('every CI job that installs npm dependencies pins the public registry', () => {
+  // The registry pin exists to defeat a local/org mirror: a runner with an
+  // `.npmrc` pointing elsewhere would resolve a different DSH family and every
+  // job would still be green. The accelerated DAG moved the npm preparation
+  // into ONE script (`scripts/ci-deps.mjs`), so this gate now checks both
+  // halves: the shared plan pins the registry, and every install that still
+  // runs inline says which jobs are allowed to own one.
+  const workflow = parseYaml(readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8'))
+
+  const inlineInstalls = []
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    for (const step of job.steps ?? []) {
+      if (typeof step.run !== 'string') continue
+      if (!/pnpm install --frozen-lockfile/u.test(step.run)) continue
+      inlineInstalls.push({ job: name, run: step.run })
+    }
+  }
+  // A SET, not a count: a new inline install in another job must be a reviewed
+  // decision (and a job that switches to the shared preparation updates this
+  // list deliberately), while a silently added sixth one fails here.
+  assert.deepEqual(
+    inlineInstalls.map(entry => entry.job).sort(),
+    ['compat-smoke', 'ecosystem-compat', 'official-preset-assembly', 'runtime-boundary', 'source-checks'],
+  )
+
+  // Every inline install except the runtime-boundary workspace install uses
+  // the isolated npmrc, and every one of those sets all four variables.
+  for (const { job, run } of inlineInstalls) {
+    if (job === 'runtime-boundary') {
+      // Documented: this job installs the WORKSPACE for a `semver` import and
+      // drives the harness in a separate isolated directory.
+      assert.doesNotMatch(run, /dsh-npmrc/u)
+      continue
+    }
+    assert.match(run, /printf 'registry=https:\/\/registry\.npmjs\.org\/\\n' > "\$RUNNER_TEMP\/dsh-npmrc"/u, job)
+    assert.match(run, /NPM_CONFIG_REGISTRY=https:\/\/registry\.npmjs\.org\//u, job)
+    assert.match(run, /npm_config_registry=https:\/\/registry\.npmjs\.org\//u, job)
+    assert.match(run, /NPM_CONFIG_USERCONFIG="\$RUNNER_TEMP\/dsh-npmrc"/u, job)
+    assert.match(run, /npm_config_userconfig="\$RUNNER_TEMP\/dsh-npmrc"/u, job)
+  }
+  // The shared preparation is the OTHER owner of the same decision, and its
+  // plan is asserted directly rather than by reading the workflow text.
+  assert.equal(depsPlan({ mode: 'npm', workspace: '/w' }).env.NPM_CONFIG_REGISTRY, 'https://registry.npmjs.org/')
+  // No job-level environment override: `NPM_CONFIG_REGISTRY:` would win over
+  // the step environment and quietly re-point every install.
+  assert.doesNotMatch(readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8'), /NPM_CONFIG_(?:REGISTRY|USERCONFIG):/u)
+})
+
+test('CI source preparation and publication have explicit time and registry boundaries', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  assert.match(workflow, /prepare-dsh-source:[\s\S]*?timeout-minutes: 135/u)
+  assert.match(workflow, /npm publish [^\n]*--registry=https:\/\/registry\.npmjs\.org\//u)
+  assert.match(workflow, /echo "NPM_CONFIG_USERCONFIG=\$RUNNER_TEMP\/dsh-publish-npmrc"/u)
+  assert.match(workflow, /echo "npm_config_userconfig=\$RUNNER_TEMP\/dsh-publish-npmrc"/u)
+  assert.doesNotMatch(workflow, /NPM_CONFIG_(?:REGISTRY|USERCONFIG):/u)
+  assert.ok(workflow.includes("printf 'registry=https://registry.npmjs.org/\\n' > \"$RUNNER_TEMP/dsh-publish-npmrc\""))
+  assert.match(workflow, /client-family-compat:[\s\S]*?compat:dsh:client-family/u)
+  assert.match(workflow, /publish:[\s\S]*?needs\.client-family-compat\.result == 'success'/u)
+})
+
+test('official preset assembly follows the selected Source/npm distribution lane', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  const officialStart = workflow.indexOf('  official-preset-assembly:')
+  const runtimeStart = workflow.indexOf('  runtime-boundary:', officialStart)
+  assert.ok(officialStart >= 0 && runtimeStart > officialStart, 'official preset job boundaries must exist')
+  const official = workflow.slice(officialStart, runtimeStart)
+  assert.match(official, /if \[ "\$DSH_MODE" = source \]; then/u)
+  assert.match(official, /official-presets-smoke\.mjs "\$\{TARBALLS\[0\]\}" --distribution "\$DSH_SOURCE_ARTIFACT"/u)
+  assert.match(official, /else\n\s+node scripts\/official-presets-smoke\.mjs "\$\{TARBALLS\[0\]\}"/u)
+})
+
+test('Source Mode matrix uses a clean distribution-aware fresh install; the pi2dsh gate runs in both modes', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8')
+  const compatStart = workflow.indexOf('  compat-smoke:')
+  const ecosystemStart = workflow.indexOf('  # Test the EXACT packed artifact against the published pi2dsh bridge', compatStart)
+  assert.ok(compatStart >= 0 && ecosystemStart > compatStart, 'workflow job boundaries must exist')
+  const compat = workflow.slice(compatStart, ecosystemStart)
+  assert.match(compat, /Download DSH source pack/u)
+  assert.match(compat, /--dsh-distribution "\$DSH_SOURCE_ARTIFACT"/u)
+  assert.doesNotMatch(compat, /TARBALL_SMOKE_SKIP_INSTALL=1/u)
+  assert.doesNotMatch(compat, /Prepare DSH dependency environment/u)
+
+  const officialStart = workflow.indexOf('  official-preset-assembly:')
+  const ecosystem = workflow.slice(ecosystemStart, officialStart)
+  // The published pi2dsh bridge is validated at the pairing the ecosystem
+  // manifest declares — an external consumer pairing, not this checkout's DSH
+  // target — so the gate runs in BOTH modes: the smoke installs the published
+  // DSH and pi2dsh from the registry, and a failing peer declaration stays an
+  // ECOSYSTEM_CONTRACT_BLOCKER.
+  assert.match(ecosystem, /if: \$\{\{ always\(\) && needs\.dsh-context\.result == 'success' && needs\.qualify\.result == 'success' && \(needs\.dsh-context\.outputs\.mode == 'npm' \|\| needs\.prepare-dsh-source\.result == 'success'\) \}\}/u)
+  assert.doesNotMatch(ecosystem, /if: \$\{\{ false \}\}/u)
+  assert.doesNotMatch(ecosystem, /DISABLED/u)
+  assert.doesNotMatch(ecosystem, /RE-ENABLE PROCEDURE/u)
+  // BOTH modes reach it: in npm mode the skipped source pack is tolerated, in
+  // source mode the pack must have succeeded. A bare `mode == 'npm'` gate —
+  // which is what this assertion used to look for — would drop the gate from
+  // the next line entirely.
+  assert.match(ecosystem, /needs\.qualify\.result == 'success'/u)
+  assert.match(ecosystem, /needs\.dsh-context\.outputs\.mode == 'npm' \|\| needs\.prepare-dsh-source\.result == 'success'/u)
+  assert.doesNotMatch(ecosystem, /Download DSH source pack/u)
+  assert.doesNotMatch(ecosystem, /Source mode ecosystem status/u)
+  // The publish job must wait for the ecosystem gate.
+  const publish = workflow.slice(workflow.indexOf('  publish:'))
+  assert.match(publish, /if:.*ecosystem-compat\.result == 'success'/u)
+  assert.match(publish, /^\s+- ecosystem-compat$/mu)
+})
+
+test('npm verification rejects a symlinked candidate tarball', (t) => {
+  const life = testLifecycle(t)
+  const directory = life.tempDir('dsh-npm-candidate-test-')
+  const target = join(directory, 'external.tgz')
+  const candidate = join(directory, 'xmoon76-dsh-pi-tui-0.4.0.tgz')
+  writeFileSync(target, 'not a tarball')
+  symlinkSync(target, candidate)
+  assert.throws(() => npmVerifyCandidateTarball(directory), /expected one TUI candidate/u)
+})

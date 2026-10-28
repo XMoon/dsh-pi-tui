@@ -199,7 +199,7 @@ export function loadHistoryFile(file: string): string[] {
 
 /**
  * Project the editor ↑/↓ recall for ONE session identity (session-scoped
- * history, the recall-scope contract in docs/input-history.md):
+ * history, the recall-scope contract in docs/architecture/input-history.md):
  *
  * - `sessionId === undefined` (fresh / deferred start, no live session):
  *   the ENTIRE cwd file is the recall pool (the historical behavior — v1

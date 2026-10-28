@@ -25,7 +25,7 @@
  * weighted rate, and the display precision policy: it never selects a route,
  * folds an event, reads a Session, or holds a sample ring. The Host reducer
  * (`src/app/host/performance-projection.ts`) owns every sample; the Direct /
- * Remote carriers, `/status`, and the footer all read this one contract.
+ * Remote carriers, the About report, and the footer all read this one contract.
  *
  * @module @xmoon76/dsh-pi-tui/domain/status/performance-view
  */

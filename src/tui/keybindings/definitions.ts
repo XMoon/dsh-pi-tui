@@ -97,7 +97,7 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     defaultKeys: ['ctrl+c', 'ctrl+d'],
     // Key-neutral on purpose: the description shows in /keybindings and
     // must not hard-code a physical chord (a remap must not make it a
-    // lie — see the copy-convention in docs/keybinding-architecture.md).
+    // lie — see the copy-convention in docs/architecture/keybindings.md).
     description: 'Quit the TUI (keyboard exit requires a same-key second press; the default clear-draft and forward-delete editor behaviors are preserved)',
     category: 'Agent',
     scope: 'global',
@@ -172,6 +172,30 @@ export const APP_KEYBINDINGS: Record<AppKeybindingId, AppKeybindingDefinition> =
     // surface); registered so the user may bind it (plan §3.2).
     defaultKeys: [],
     description: 'Toggle fullscreen mode',
+    category: 'Transcript',
+    scope: 'global',
+    configurable: true,
+  },
+  'app.visual.selectNext': {
+    id: 'app.visual.selectNext',
+    defaultKeys: ['alt+v'],
+    description: 'Select the next published visual',
+    category: 'Transcript',
+    scope: 'global',
+    configurable: true,
+  },
+  'app.visual.copySelected': {
+    id: 'app.visual.copySelected',
+    defaultKeys: ['alt+c'],
+    description: 'Copy the selected published visual',
+    category: 'Transcript',
+    scope: 'global',
+    configurable: true,
+  },
+  'app.visual.openSelected': {
+    id: 'app.visual.openSelected',
+    defaultKeys: ['alt+o'],
+    description: 'Open the selected SVG visual in the viewer',
     category: 'Transcript',
     scope: 'global',
     configurable: true,
@@ -541,6 +565,11 @@ export const VIEWER_BLOCKED_PARENT_ACTIONS: ReadonlySet<AppKeybindingId> = new S
   'app.input.dequeue',
   'app.permission.cycle',
   'app.transcript.search',
+  // PR2.5: the published-visual actions target the PARENT transcript; a
+  // subagent viewer must consume them instead of copying/opening the parent.
+  'app.visual.selectNext',
+  'app.visual.copySelected',
+  'app.visual.openSelected',
   'app.exit.request',
   'app.editor.external',
   'app.todo.toggle',

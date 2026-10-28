@@ -44,10 +44,13 @@ import type { RemoteInteractionRuntimeSource } from '../../runtime/remote/intera
 import { RemoteInteractionPort } from '../../runtime/remote/interaction-remote.ts'
 import type { RemotePluginManagerSource } from '../../runtime/remote/plugin-manager-remote.ts'
 import { RemotePluginManagerPort } from '../../runtime/remote/plugin-manager-remote.ts'
+import { RemoteDeliveredFileReadPort } from '../../runtime/remote/deliverables-remote.ts'
+import type { RemoteWorkspaceFilesNamespace } from '../../runtime/remote/deliverables-remote.ts'
 import type { RemoteJobObservationSource } from '../../runtime/remote/job-observation-remote.ts'
 import { RemoteJobObservationPort } from '../../runtime/remote/job-observation-remote.ts'
 import type { PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
 import type { JobObservationPort } from '../../runtime/job-observation-port.ts'
+import type { DeliveredFileReadPort } from '../../runtime/deliverables-port.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import { RemoteSessionReader } from '../../runtime/remote/session-reader-remote.ts'
 import { RemotePendingInputReader } from '../../runtime/remote/pending-input-reader-remote.ts'
@@ -81,6 +84,9 @@ export interface RemoteM3ASemantics {
   /** The selected-Job observation port (P1-B): the already-proven Remote
    *  adapter over the shared `IJobs` service. */
   readonly jobObservation: JobObservationPort
+  /** The delivered-file READ port (Delivered files PR2): the generated
+   *  `workspaceFiles` namespace, generation-fenced. */
+  readonly deliveredFileRead: DeliveredFileReadPort
   /** Drop adapter-owned caches/subscriptions. Runs BEFORE the Client
    *  Context disposal (`RemoteClientRuntime.dispose()`). */
   dispose(): void
@@ -129,6 +135,9 @@ export interface RemoteM3ARuntimeSource {
     readonly userQuestions: RemoteInteractionRuntimeSource['remote']['userQuestions']
     /** The Plugin Manager namespace + its forwarded install events. */
     readonly pluginManager: RemotePluginManagerSource['pluginManager']
+    /** The official generated `workspaceFiles` namespace (Delivered files
+     *  PR2): bounded Host file reads for the preview. */
+    readonly workspaceFiles: RemoteWorkspaceFilesNamespace | undefined
     /** The forwarded-event seat shared by every adapter: the intersection of
      *  the event declarations each one subscribes to (the real generated
      *  `$on` is one generic method and satisfies the whole intersection). */
@@ -198,6 +207,7 @@ export function createRemoteM3ASemantics(
       generation,
     ),
     jobObservation: new RemoteJobObservationPort(runtime.jobs),
+    deliveredFileRead: new RemoteDeliveredFileReadPort(remote.workspaceFiles, generation),
     dispose(): void {
       if (disposed) return
       disposed = true

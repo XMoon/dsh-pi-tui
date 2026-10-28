@@ -3,7 +3,7 @@
  * platform policy the TuiApp events and the command surface consume.
  *
  * Locality: these are CLIENT-local capabilities by contract (plan A5b-5 /
- * docs/client-server-coupling.md) — the terminal clipboard, the OSC 52
+ * docs/architecture/host-client.md) — the terminal clipboard, the OSC 52
  * sink and the external editor all belong to the user's own terminal, not
  * to the Host session. They therefore get NO invented Host semantic port;
  * they stay here and reach the rest of the application as one narrow owner

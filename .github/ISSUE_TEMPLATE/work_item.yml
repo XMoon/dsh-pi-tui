@@ -1,0 +1,94 @@
+name: Work item
+description: An implementation or ownership task in the standard work-item structure
+title: ""
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The standard structure for a work item. Keep it short: this issue is
+        the deliverable's contract, not a project log.
+
+        Rules that make this structure work:
+        - One obligation per issue. If the work splits, the parts are
+          sub-issues; if it needs a dependency, record it under **Dependencies**
+          rather than relying on the parent relation.
+        - A deferred item states its re-entry trigger. A closed item states its
+          evidence.
+        - Do not turn a `NOT_VERIFIED` boundary or an accepted exclusion into
+          a TODO row.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: The problem, and the facts that are already verified.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: >
+        What this issue must complete, and what it explicitly does not
+        include. Use a "- Not:" line for the exclusions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: >
+        Observable completion conditions, plus the positive and negative
+        verification each one needs.
+      placeholder: |
+        - [ ] A one-shot Host user-shell carrier is qualified: per-command start, authoritative per-command exit, one-shot cancel.
+        - [ ] A sandbox variant exists and its boundary is tested.
+        - [ ] A security review of the carrier is recorded.
+    validations:
+      required: true
+
+  - type: input
+    id: blocked
+    attributes:
+      label: Blocked by
+      description: >
+        The issues that must close first. Leave empty if there is no
+        dependency.
+      placeholder: "#353"
+    validations:
+      required: false
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >
+        PR links, test files, CI runs. Fill this in as the work lands.
+      placeholder: |
+        PR: #...
+        Tests / CI: ...
+    validations:
+      required: false
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: Status
+      options:
+        - OPEN
+        - BLOCKED
+        - DEFERRED
+        - DONE
+    validations:
+      required: true
+
+  - type: input
+    id: owner
+    attributes:
+      label: Owner / next trigger
+      description: >
+        Who owns the next action, and the condition under which it starts.
+    validations:
+      required: false

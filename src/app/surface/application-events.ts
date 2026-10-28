@@ -424,6 +424,15 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     )
   }
 
+  /**
+   * Image UX PR3-A: the ONE clipboard-paste FIFO of this application-events
+   * instance. Ctrl+V intents are chained here so a slow OS probe (A) settles
+   * read+commit BEFORE a later intent (B) even starts its probe; the tail is
+   * always resolved, so a failed A never blocks B (ownership of each intent's
+   * failure stays with its own `runOwned`).
+   */
+  let clipboardPasteTail: Promise<void> = Promise.resolve()
+
   const surfaceEvents: TuiAppEvents = {
     // ONE submission entry: the request (the Enter gesture, the accelerated
     // chord, or the explicit queue action) rides along — the boundary resolves
@@ -440,43 +449,83 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // Ctrl+V (plan M3): probe the clipboard ONCE per paste — an image lands as
     // a draft placeholder, plain text as an editor insert, unsupported/empty
     // silently (a text paste must never error).
+    //
+    // Image UX PR3-A: every intent is queued on the ONE per-instance FIFO tail
+    // and commits into the composer it captured. The intent capture below is
+    // SYNCHRONOUS: the exact composer OBJECT (never a re-read seat), the
+    // ownership generation and the session id at trigger time. `generation` is
+    // the ownership fence — the session id only rides along as the owned-task
+    // diagnostic identity, so a same-id NEW generation is still rejected.
     onClipboardPaste: () => {
-      // The clipboard probe is ASYNC: capture the session identity and discard
-      // the result if the user switched sessions meanwhile — a late paste must
-      // never stage into the NEW session's draft (round-5 finding 2).
-      const pasteGeneration = deps.lifecycle.generation()
-      deps.lifecycle.runOwned('clipboard paste', () => deps.client.readClipboardImage().then((result) => {
-        if (deps.lifecycle.isCleanedUp() || deps.lifecycle.generation() !== pasteGeneration) return
-        if (result.kind === 'image') {
-          // Attach-time prune (review finding 2): placeholders deleted or
-          // Ctrl+C-cleared since the last attach must not hold their bytes until
-          // the store fills up.
-          pruneUnreferencedDraftAttachments(deps.surface.app.getDraft(), deps.drafts.images, deps.drafts.files)
-          const limits = deps.imageLimits()
-          if (limits !== undefined) {
-            checkImageLimits(
-              { mediaType: result.mediaType, width: result.width, height: result.height },
-              result.bytes.byteLength,
-              limits,
-            )
-          }
-          const draft = deps.drafts.images.add({
-            bytes: result.bytes,
-            mediaType: result.mediaType,
-            width: result.width,
-            height: result.height,
-            source: { type: 'clipboard' },
-          })
-          deps.surface.app.insertIntoEditor(`${draft.placeholder} `)
-          deps.surface.app.notify(`attached ${draft.placeholder} — Enter to send`)
-        } else if (result.kind === 'text' && result.text !== '') {
-          deps.surface.app.insertIntoEditor(result.text)
+      const composer = deps.surface.composer
+      const generation = deps.lifecycle.generation()
+      const sessionId = deps.lifecycle.currentSessionId()
+      // The ownership generation is the AUTHORITY of this intent's currency;
+      // the exact composer object pins the seat it may write. The session id is
+      // a supplementary fence (never a substitute for the generation): a
+      // same-id NEW generation is rejected by the generation check alone.
+      const current = (): boolean => !deps.lifecycle.isCleanedUp()
+        && deps.lifecycle.generation() === generation
+        && deps.lifecycle.currentSessionId() === sessionId
+        && deps.surface.composer === composer
+      const work = clipboardPasteTail.then(async () => {
+        // A paste whose ownership already moved (or whose surface died) never
+        // probes the OS clipboard at all.
+        if (!current()) return
+        const result = await deps.client.readClipboardImage()
+        if (!current()) return
+        if (result.kind === 'text') {
+          // An empty clipboard is not an error: nothing is inserted, nothing is
+          // announced. Text goes in at the CURRENT caret — the probe took real
+          // time and the user may have typed or moved meanwhile.
+          if (result.text !== '') composer.insertIntoEditor(result.text)
+          return
         }
-      }), {
-        sessionId: () => deps.lifecycle.liveAgent()?.session.id,
+        if (result.kind === 'unsupported') return
+        // The commit segment below is fully SYNCHRONOUS (no await), so this one
+        // currency read governs the prune, the policy check, the store add and
+        // the editor insert together.
+        //
+        // Attach-time prune (review finding 2): placeholders deleted or
+        // Ctrl+C-cleared since the last attach must not hold their bytes until
+        // the store fills up. The draft comes from the LIVE composer seat.
+        pruneUnreferencedDraftAttachments(composer.getDraft(), deps.drafts.images, deps.drafts.files)
+        const limits = deps.imageLimits()
+        if (limits !== undefined) {
+          checkImageLimits(
+            { mediaType: result.mediaType, width: result.width, height: result.height },
+            result.bytes.byteLength,
+            limits,
+          )
+        }
+        const draft = deps.drafts.images.add({
+          bytes: result.bytes,
+          mediaType: result.mediaType,
+          width: result.width,
+          height: result.height,
+          source: { type: 'clipboard' },
+        })
+        try {
+          composer.insertIntoEditor(`${draft.placeholder} `)
+        } catch (error) {
+          // The add succeeded but the editor refused the token: drop the bytes
+          // ONLY when the live draft really lacks the token, otherwise the
+          // rollback would strand a visible placeholder. The failure itself
+          // keeps its ordinary owned-task classification below.
+          if (!composer.getDraft().includes(draft.placeholder)) deps.drafts.images.remove(draft.id)
+          throw error
+        }
+        composer.notify(`attached ${draft.placeholder} — Enter to send`)
+      })
+      // The FIFO barrier: a failed intent settles its OWN failure through
+      // `runOwned` below and the tail always continues, so B still runs after A.
+      clipboardPasteTail = work.then(() => undefined, () => undefined)
+      deps.lifecycle.runOwned('clipboard paste', () => work, {
+        sessionId: () => sessionId,
         onError: (error) => {
-          if (deps.lifecycle.isCleanedUp()) return
-          deps.surface.app.notify(safeErrorMessage(error), 'error')
+          // The failure is announced only on the seat that started it.
+          if (!current()) return
+          composer.notify(safeErrorMessage(error), 'error')
         },
       })
     },

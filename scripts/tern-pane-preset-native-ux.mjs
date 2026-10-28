@@ -379,11 +379,13 @@ export default async function (h) {
     cardRows(snap).slice(0, 8).map((node) => `${h.descendantsText(node).slice(0, 16)}${JSON.stringify(badgesOf(h, node))}`).join(' | '))
   // The broken declaration is the LAST card: walk the list down to it with real keys.
   const walkedToBroken = await browseTo(h, 'preset:broken-preset')
-  const brokenCard = cardLabeled(h, h.snapshot(), 'Broken preset')
+  // One snapshot supplies BOTH the node and the chains the oracle reads.
+  const brokenSnap = h.snapshot()
+  const brokenCard = cardLabeled(h, brokenSnap, 'Broken preset')
   h.check('boot: a broken card states `Failed to load` in words and keeps its reason readable',
     walkedToBroken && itemOf(frame, 'preset:broken-preset')?.dot === 'error'
     && String(itemOf(frame, 'preset:broken-preset')?.detail).includes('missing-tools')
-    && brokenCard !== undefined && containedXY(h.snapshot().chains, brokenCard)
+    && brokenCard !== undefined && containedXY(brokenSnap.chains, brokenCard)
     && h.descendantsText(brokenCard).includes('Failed to load')
     && h.descendantsText(brokenCard).includes('missing-tools')
     // The walk made it the browse target, so the native `Draft` marker rides the same card.
@@ -429,10 +431,11 @@ export default async function (h) {
   await h.resize(1280, 800)
   await browseTo(h, 'preset:standard')
   const firstFrame = lastFrame(h)
-  const target = cardLabeled(h, h.snapshot(), 'Custom preset 3')
+  const targetSnap = h.snapshot()
+  const target = cardLabeled(h, targetSnap, 'Custom preset 3')
   const targetItem = itemOf(firstFrame, 'preset:custom-3')
   const selectsBefore = rowEvents(h).length
-  const clicked = target === undefined ? false : await h.click(h.snapshot().chains, target)
+  const clicked = target === undefined ? false : await h.click(targetSnap.chains, target)
   const selectEvents = rowEvents(h).slice(selectsBefore)
   snap = h.snapshot()
   h.check('one REAL click on a card the user had NOT highlighted (selected was `standard`) emits exactly one `select` and writes nothing',
@@ -557,10 +560,11 @@ export default async function (h) {
   h.check('the default-preset\'s Set default is DISABLED with its reason on the tooltip (Owner ruling a)',
     actionOf(frame, 'set-default')?.disabled === 'Already the default',
     JSON.stringify(actionOf(frame, 'set-default')))
-  const disabledBtn = paintedFooter(h, h.snapshot()).find((entry) => entry.text === 'Set default')?.node
+  const footerSnap = h.snapshot()
+  const disabledBtn = paintedFooter(h, footerSnap).find((entry) => entry.text === 'Set default')?.node
   h.check('the disabled button keeps the client\'s off marker and the reason attribute, and is still painted',
     disabledBtn !== undefined && hasClass(disabledBtn, 'off') && String(disabledBtn.title) === 'Already the default'
-    && containedXY(h.snapshot().chains, disabledBtn),
+    && containedXY(footerSnap.chains, disabledBtn),
     `cls=${classTokens(disabledBtn ?? snap.nodes[0]).join(' ')} title=${JSON.stringify(String(disabledBtn?.title ?? ''))}`)
   await h.key('g', 500)   // and the forged raw action at that footer id
   await h.sleep(600)
@@ -585,9 +589,10 @@ export default async function (h) {
     `moved=${guided.moved} tries=${guided.tries} scrolls=${JSON.stringify(scrolls(h).slice(-2))}`)
   h.measure('the Guide scroll stall observed (End)', JSON.stringify(guided))
   h.capture('guide-tail-400x600', 'the inline guide at the tail in the minimum pane')
-  const guideTail = textStarting(h.snapshot(), 'Expected output: a summary with references')
+  const tailSnap = h.snapshot()
+  const guideTail = textStarting(tailSnap, 'Expected output: a summary with references')
   h.check('the tail of the guide is really on screen after the scroll',
-    guideTail !== undefined && containedXY(h.snapshot().chains, guideTail),
+    guideTail !== undefined && containedXY(tailSnap.chains, guideTail),
     `tail=${guideTail === undefined ? 'none' : `${String(guideTail.text).slice(0, 40)}@${box(guideTail)}`}`)
 
   // A Custom declaration that reuses a shipped id must NOT borrow the official guide.

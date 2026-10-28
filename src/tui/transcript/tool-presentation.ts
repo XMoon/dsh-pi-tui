@@ -20,6 +20,7 @@ import type {
 import { finalizedBlockFallbackText } from '../../domain/transcript/content-blocks.ts'
 import { fileAttachmentSummary } from '../../domain/media/file-summary.ts'
 import { type IconSemantic } from '../../domain/display/icons.ts'
+import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../domain/visual/tools.ts'
 
 import type { JsonValue } from '../../domain/transcript/types.ts'
 
@@ -84,6 +85,13 @@ const TOOL_TITLES: Record<string, string> = {
   // The skill loader's human title (its presentCall says `Load skill
   // <name>`; the fallback must say the same — plan §7.3/§9.2).
   skill: 'Load skill',
+  // The resident visual tools: the header names the shape, the title
+  // argument is the row's summary (never the chart kind or the raw JSON).
+  // `present_visual` names the explicit publication intent; its summary is the
+  // selected count, never the raw refs.
+  [CHART_TOOL_NAME]: 'Chart',
+  [SVG_TOOL_NAME]: 'SVG',
+  [PRESENT_VISUAL_TOOL_NAME]: 'Present visuals',
 }
 
 /**
@@ -746,6 +754,19 @@ function summarizeToolArgs(name: string, argsRaw: string): string | undefined {
     const skillName = args.name
     return typeof skillName === 'string' && skillName !== '' ? firstLine(skillName) : undefined
   }
+  if (name === CHART_TOOL_NAME || name === SVG_TOOL_NAME) {
+    // The supplied figure title is the row's identity. Falling through to the
+    // generic first-string rule would show the chart `kind` (or an arbitrary
+    // JSON key order) instead.
+    const title = args.title
+    return typeof title === 'string' && title !== '' ? firstLine(title) : undefined
+  }
+  if (name === PRESENT_VISUAL_TOOL_NAME) {
+    // The count is the call's one-line identity; the refs are machine
+    // identities that belong to no header.
+    const count = Array.isArray(args.visuals) ? args.visuals.length : 0
+    return count === 0 ? undefined : `${count} visual${count === 1 ? '' : 's'}`
+  }
   if (name !== 'todo_write') return undefined
   const todos = args.todos
   if (!Array.isArray(todos)) return undefined
@@ -1177,6 +1198,21 @@ export interface ToolPresenter {
   call(name: string, argsRaw: string): ToolCallView | undefined
   /** The completed-call view for one tool result, or undefined. */
   result(name: string, argsRaw: string, result: ToolResultInput): ToolResultView | undefined
+  /**
+   * Whether `call()` returns a view the REGISTERED tool author declared
+   * (`presentCall`), or one the bridge DERIVED from the tool name and the raw
+   * arguments.
+   *
+   * The distinction is a PROVENANCE fact, not a quality judgement: a derived
+   * view repeats the name-keyed guess the bridge already makes for its own
+   * rendering, so it proves nothing about what the string IS. The Host
+   * bridge answers `true` (its views come from the scoped registry); the
+   * Client-derived bridge answers `false` (it never consults a registry, and a
+   * plugin may shadow a built-in name).
+   *
+   * Absent means `false`: an unstated provenance is not a provenance.
+   */
+  readonly callViewIsToolAuthored?: boolean
 }
 
 /**
@@ -1645,6 +1681,9 @@ export interface ToolDefinitionLike {
  */
 export function toolPresenterFrom(get: (name: string) => ToolDefinitionLike | undefined): ToolPresenter {
   return {
+    // Every view this bridge returns comes from the REGISTERED definition the
+    // scoped lookup resolved, so it is tool-authored by construction.
+    callViewIsToolAuthored: true,
     call(name, argsRaw) {
       const definition = get(name)
       if (definition?.presentCall === undefined) return undefined

@@ -38,7 +38,7 @@ dsh --profile pi-tui
 > `@deepseek-ai/dsh@alpha` 指向 `0.2.1-alpha.5`，而 `@xmoon76/dsh-pi-tui@next`
 > 仍指向 `0.5.2-rc.1`（peer floor `>=0.2.0-rc.2`，npm semver 不接受不同
 > major.minor.patch tuple 的 prerelease）。请以下方版本对应表和
-> [兼容性文档](docs/dsh-compatibility.md) 的精确配对为准；稳定版 `0.5.3` 发布在
+> [兼容性指南](docs/guides/dsh-compatibility.md) 的通用匹配原则为准；稳定版 `0.5.4` 发布在
 > `@latest` 而不是 `@next`，因此这两个移动 channel 上没有可安装的兼容组合。
 > 本 checkout 的精确验证请使用 `pnpm compat:dsh:npm`。
 
@@ -49,7 +49,7 @@ build/test/package 路径：
 pnpm compat:dsh:npm
 ```
 
-具体的稳定版最低版本、next 兼容范围和回退路径见[兼容性文档](docs/dsh-compatibility.md)。
+具体的稳定版最低版本、next 兼容范围和回退路径见[兼容性指南](docs/guides/dsh-compatibility.md)。
 
 ### 环境要求
 
@@ -60,25 +60,28 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.5.3`（stable / `@latest`） | `dsh-v0.2.1-rc.2` | 当前已发布稳定版；最低与精确验证目标均为 0.2.1-rc.2 family |
+| `0.5.4`（stable / `@latest`） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 当前稳定版；最低 DSH 版本为 0.2.1-rc.2，本仓库当前 checkout 的精确验证目标为 0.2.1-rc.4 |
+| `0.5.3`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
 | `0.5.1`（stable，历史） | `dsh-v0.2.0-rc.2` | 上一稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
 | `0.5.2-rc.1`（next 通道预览，已发布） | `dsh-v0.2.0-rc.2` | 上一轮 next 预览：已发布到 npm `next` 通道（2026-10-17）；整套 peer floor 仍是 `>=0.2.0-rc.2`，不覆盖 0.2.1-rc.2 |
-| `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.3` |
+| `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.4` |
 | `0.5.0`（stable，历史） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 上一稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
 | `0.4.9`（stable，历史） | `dsh-v0.1.7-rc.2` | 上一稳定版；0.1.7-rc.2 runtime 的兼容 TUI |
 | `0.4.8`（stable，历史） | `dsh-v0.1.7-rc.1` | 上一稳定版；0.1.7-rc.1 runtime 的兼容 TUI |
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `@next` 预发布线混装。`0.5.3` 是当前已发布稳定版：它的最低 DSH
-版本（peer floor）与精确验证目标都是 `0.2.1-rc.2` family。中间的
+不要把稳定线与 `@next` 预发布线混装。`0.5.4` 是当前稳定版：它的最低 DSH
+版本（peer floor）仍是 `0.2.1-rc.2` family，本仓库当前 checkout 的精确验证目标
+是 `0.2.1-rc.4`。已发布的 `0.5.3` 是上一稳定版，同样可与 `0.2.1-rc.2`、
+`0.2.1-rc.3`、`0.2.1-rc.4` 配对使用。中间的
 `dsh-v0.2.1-rc.1` 没有配对 TUI，`0.5.2-rc.1` 是上一轮已发布到 npm `next` 通道的
-预览身份（配对 0.2.0-rc.2；它不覆盖 0.2.1-rc.2，因此新的稳定线使用 `0.5.3`
-身份）。上一稳定版 `0.5.1` 继续配对 0.2.0-rc.2：它把整个 DSH peer floor 提升到
-`>=0.2.0-rc.2`（Question 生命周期消费 rc.2 才发布的公开契约）。更早的 `0.5.0`
+预览身份（配对 0.2.0-rc.2；它不覆盖 0.2.1-rc.2）。上一稳定版 `0.5.1` 继续配对
+0.2.0-rc.2：它把整个 DSH peer floor 提升到 `>=0.2.0-rc.2`（Question 生命周期消费
+rc.2 才发布的公开契约）。更早的 `0.5.0`
 保持 `>=0.1.7-rc.2` floor 不变（精确验证目标 0.2.0-rc.1）；旧 runtime 会在正常的
-不兼容边界以非零状态失败，请按上表安装配对的 TUI 线。完整的历史兼容矩阵和
-fallback 命令见[兼容性文档](docs/dsh-compatibility.md)；要查看 `@next` 的最新集成
+不兼容边界以非零状态失败，请按上表安装配对的 TUI 线。上方的版本对应表是已发布
+线的摘要；通用版本匹配原则与回退/诊断流程见[兼容性指南](docs/guides/dsh-compatibility.md)；要查看 `@next` 的最新集成
 状态，请看 [next 分支 README](https://github.com/XMoon/dsh-pi-tui/blob/next/README.md)。
 
 新的 Agent preset 使用当前 roster 中选定的 id。DSH 允许合法的自定义
@@ -124,7 +127,12 @@ dsh --profile pi-tui --session <session-id>
 * Transcript 全文搜索
 * 长会话历史折叠
 * Context、Token、模型和运行状态显示
+* 全屏 Settings 工作区：About 状态、Models / Account、Agent 与动态 Extensions
 * Approval 与 `ask_user_question` 交互
+* 图片：终端能力准入、JPEG/WebP 预览、草稿图片与只读查看器
+* 图表/SVG 工具、`present_visual` 发布与最终回答内联显示
+* 交付文件尾部与 `/deliverables` 浏览器
+* 实验性 TSP renderer：原生工具卡、Work Hub、图片与已发布图
 * Plan Review
 * Todo / Goal 状态展示
 * 可读的终端窗口标题
@@ -133,6 +141,8 @@ dsh --profile pi-tui --session <session-id>
 * Compaction / prune 后不会出现重复的幽灵 Tool Card
 
 `Ctrl+O` 控制工具和系统详情，并在普通模式与全屏非 Focus 下展开/收起超长用户 Prompt;全屏 Focus 下它整体展开最近几个 Thought root 或全部收起，超长用户 Prompt 改用点击提示行（或搜索命中）展开、`Ctrl+O` 收回。`Alt+T` 单独控制 Thinking。
+
+工具审批显示在编辑器座位：完整 Reason/Arguments 在可滚动正文中阅读（不再只显示前六行），`y` 允许一次、`n` 拒绝、`Esc`/`Ctrl+C` 取消、`c` 复制原始参数、`e` 展开；全屏可点击实际绘制的 Allow once / Reject / Cancel 并滚轮滚动正文，普通模式保持键盘。窄窗口显示真实精简内容或 `Resize to inspect more`，不会画出被裁掉的决定。
 
 ### Conversation display
 
@@ -191,7 +201,7 @@ Rewind 会从选中的历史 User Turn 创建新的 Child Session，并把对应
 
 Task Center 的 `ACTIVE` / `TRACKED` 是展示范围：`ACTIVE` 只显示当前活动项，`TRACKED` 显示当前跟踪源（Job Registry / Subagent catalog）仍列出的全部项；`TRACKED` 不是 Session 执行历史。DSH `0.1.7` 会在普通前台 `bash` / `pwsh` 执行期间临时注册 Job，使其可以在 Task Center 中观察和停止；如果命令在前台等待内完成，DSH 会移除该临时记录，最终结果仍保留在 Transcript 的 tool card 中。显式 `run_in_background: true` 或被提升为后台的 Job 在完成后，只要 Job Registry 继续保留其记录，就仍可在 `TRACKED` 中查看。
 
-`/plugins` 打开当前 profile 的全屏 Plugin Manager：目录固定为 TUI & Extensions / Official DSH / Third-party / Experimental（实验组最后），窄屏单栏、宽屏双栏，可搜索、筛选、查看来源与状态，并从官方目录执行安装、启用/禁用与删除；结果以 Host 实际返回的版本、重启要求和错误为准。正在提供当前界面的 `dsh-pi-tui` 只读且不可从自身界面禁用或移除。`/settings` 的顶级 `Plugins` 分类原地打开同一页面，返回时保留 Settings 的分类、滚动与选择。
+`/plugins` 是 `/settings → Plugins` 的深链：两者使用同一个 Settings 全屏 lease 与同一个 Plugin Manager 页面，不再有独立的插件全屏界面，也不会新建或切换 Session。目录固定为 TUI & Extensions / Official DSH / Third-party / Experimental（实验组最后），可搜索、筛选、查看来源与状态，并从官方目录执行安装、启用/禁用与删除；结果以 Host 实际返回的版本、重启要求和错误为准。≥120 列且能留出至少 6 行真实业务正文时同屏显示 `类别 | 插件列表 | 详情`；76–119 列按键盘焦点显示 `类别 | 列表` 或 `列表 | 详情`（`列表 | 详情` 同样要求至少 6 行真实业务正文，不足则退化为单栏），<76 列单栏；安装、危险确认与 Diagnostics 始终占满整宽，以免压缩风险文案。顶部身份/元数据/分隔线/面栏和最后一行操作栏由 Settings 统一绘制，插件只占业务正文。正在提供当前界面的 `dsh-pi-tui` 只读且不可从自身界面禁用或移除。从 Settings 的 `Plugins` 分类预览或 `/plugins` 进入都保留同一个页面实例与后台安装请求：Esc 从列表回到 Settings 分类，再按一次 Esc 关闭。页面内按 `d` 打开只读的 **Diagnostics**：按 owner 分组显示 extension 贡献的 `active/failed/shadowed` 状态与完整 `lastError`、各 registry 计数、实际 capabilities，以及无法证明 Loader entry 归属的贡献（单列 `Unassociated extension contributions`）；`c` 复制所选事实、`C` 复制全部、`r` 重新读取、Esc 返回。Diagnostics 只读 extension ledger，不把 Host 包安装状态或安装日志混入其中；`copy` 仍只证明已发送，不证明操作系统剪贴板已收到。
 
 Experimental 组的 14 个官方 rc.2 实验包在 Detail 中给出固定的终端可用面与限制/风险说明（Web-only、Host-only、B04 的 WEB_ONLY/Host 行未挂载（Owner 已接受）、B13/B14 的已验证 one-shot/provider 边界等），这些说明只随精确官方包身份出现，不随启用状态伪装成 Host 能力通过；升级指引按 Host 事实区分「随 DSH 发行升级」「profile 包先 Remove 再显式 Install」「官方 on-demand 目标」和「当前 TUI 由外部管理」，不提供原地更新、版本选择器或静默重装。
 
@@ -226,6 +236,19 @@ Footer `↓` 打开的 Quick 窗口默认不占行，只在编辑器最后一个
 中开关并维护 allowlist：开启后**新建** Session 的官方 `subagent` 工具可以按调用
 选择子 Agent 的 provider/model（受 allowlist 限制）。设置在 Session 组合时采样，
 不会改写已在运行的 Session 的工具。
+
+### 交付文件与 `/deliverables`
+
+最终回答中的 `present` 交付文件以紧凑尾部显示：最多四项，每项两行（相对当前显示会话
+工作区的路径 + 描述），超出显示 `+N more · /deliverables`。全屏 AltScreen 的
+Full/Compact/Focus 可直接点击 `Browse all` 与逐文件 `Details`，普通分屏只保留命令入口。
+
+`/deliverables` 打开当前显示会话（含正在查看的子代理）的交付面板，含 Files / Turns /
+Details：`↑↓` 选择、`Enter` 详情、`/` 过滤（文件名、完整 Host 路径与描述）、`T` 切换
+有交付的 Turn、`C` 复制原始 Host 路径、`Esc` 返回/关闭。Details 的 `Enter Preview`
+读取 Host 文本文件的一页 120 行 UTF-8；二进制/文档后缀只显示不可预览而不读字节；文件
+在分页之间变化时从头重启。面板内文字可用鼠标选中复制，面板居中且终端缩放保留当前页、
+筛选、光标与滚动位置。
 
 ### Shell
 
@@ -302,6 +325,9 @@ TUI 使用 DSH 提供的模型和设置服务。
 ```text
 /model
 /settings
+/status
+/deliverables
+/view-image
 /login
 /permission
 /plan
@@ -311,80 +337,54 @@ TUI 使用 DSH 提供的模型和设置服务。
 /statusline
 ```
 
-模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。`/model` 的候选完全来自 Host 的模型目录：rc.2 的 `deepseek-flash` 以精确 `(provider, model)` 身份出现（显示名 `DeepSeek-V4.1-Flash` 不当作 ID），选择后写回官方 Session/global 默认；部署覆盖目录不再提供该 ID 时不会凭空显示。
+模型切换、Reasoning Effort、权限 Preset、Plan 和 Goal 都沿用 DSH 对应的运行时语义。`/model` 的候选完全来自 Host 的模型目录：`deepseek-flash` 以精确 `(provider, model)` 身份出现（显示名 `DeepSeek-V4.1-Flash` 不当作 ID），选择后写回官方 Session/global 默认；部署覆盖目录不再提供该 ID 时不会凭空显示。
 
-`/settings` 打开一个真正的全屏工作区，三栏 / 两栏 / 单栏只是同一套
-`分类 → 设置行 → 详情` 三层的投影：宽屏同时显示三栏，中屏按当前层显示
-`分类 + 设置行` 或 `设置行 + 详情`，窄屏只显示当前层。所有宽度上 `Right` 只前进一层，
-`Left` 返回一层（在最外层无效）；`Enter` 遵循相同层级，`Esc`/`Backspace` 逐级返回，
-最外层关闭工作区。`Tab`/`Shift+Tab` 不承担导航，底部操作栏始终固定在最后一行。多栏编辑态仍
-保留 `[Details]` 焦点标识；只有标题会占掉唯一内容行时才让位。
-它展示 Appearance / Display 的真实事实：主题的 source-qualified 原始值与友好名称、
-Icon style、Transcript display 的运行时当前值与持久偏好、Thinking detail 的当前运行
-态，以及每个条目的配置来源 Scope 与 backend 就绪状态；`R` 重新读取、`C` 复制所选行的
-原始值；浏览、选择与复制本身都不写入配置。
+`/settings` 与 `/status` 打开同一个全屏设置工作区，默认落在 About。宽/中屏为分类栏
++ 内容栏，窄屏（<76 列）直接显示 About；一级分类固定为 About / Models / Account /
+Agent / Appearance / Conversation / Input & Terminal / Tools / Plugins，只有扩展设置
+注册表存在行时才追加 Extensions。`Tab`/`Shift+Tab` 在区域间移动焦点，`Right`/`Enter`
+进入下一层，`Left`/`Esc`/`Backspace` 逐层返回，最外层关闭；底部操作栏固定在最后一行。
 
-其中**「Configured theme」和「Transcript display」两行可以直接修改**：在 L1 设置行按
-`Right` 或 `Enter`，或点击 `[Change…]` / 可见的 Detail 内容，即可在同一 L2 详情中打开
-候选选择；当前值与 Runtime / Persisted 事实留在同一详情事实区，并与候选列表独立滚动。`Up`/`Down`/`Home`/`End`
-移动候选，`PgUp`/`PgDn` 和事实区上的滚轮只滚动详情事实，候选区滚轮独立滚动候选；
-选择期间可按 `C` 复制仍未更改的原始值，但仅当动作栏实际绘出 `c copy`，它不会提交候选。
-`Enter` 或点击 `[Confirm]` 明确确认，`Left`/`Esc`/`Backspace` 或 `[Cancel]` 取消并直接回到
-L1，零写入。L2 浏览/已结算时，`Enter` 可重新打开可写行的选择；pending 写入时不触发新选择。若当前候选身份已滚出可见区域，第一次 `Enter` 只将其重新显示，之后才能确认；
-44×8 短屏在长身份需要空间时先省略可选的 `Choose value` 标题；若仍不足，再将事实区压到只保留旧 `Value` 的一行。只有完整身份、`Confirm` 与 `Enter confirm` 同屏可见时才能确认，超过剩余容量仍拒绝写入。只有实际绘制出来的
-按钮与候选行可以点击。确认后走既有的串行整文档写入路径落盘，再从权威来源重读目标字段核对：
-详情里分别显示运行态（`Runtime`，如当前 palette）与持久偏好（`Persisted`），并显示
-`Saving…` / `Verified` / `Not saved · 原因` / `Commit accepted · verification unavailable` /
-`Outcome unknown · 原因`，只有写入完成、backend `ready` 且权威回读一致才显示 Verified；
-被拒绝的写入会先重读权威：仍停留在请求起点值才报 Not saved，出现第三个值、已是目标值或无法读取
-则如实报 Outcome unknown；写返回成功但权威可读地不一致同样按失败显示，而不是
-"verification unavailable"。backend 不 ready 时主题不会被应用或写入；显示预设可以先在本机生效，
-此时会明确说明未能保存，而不是假装保存成功。插件主题在确认时再次按 source-qualified 身份解析，
-已卸载的插件主题标记为 unavailable 并拒绝确认，不会退化成同名文件主题。Icon style 与
-Thinking detail 仍是只读行。旧的完整设置编辑器仍然可用：`Other settings` → `Open existing settings…`
-会先关闭工作区并恢复原界面，再打开原有编辑器，Theme、Plugin Manager、键位、权限与扩展设置的写入路径全部不变。
+About 显示 TUI/DSH 版本、后端、当前会话身份、整会话统计、TTFB/吞吐与 Context 占用；
+`c` 复制选中事实的原始值，`C` 复制完整报告，`r` 刷新。旧 `/status` 页面已删除，扩展
+诊断移到 `Settings → Plugins` 的 `Diagnostics`（`d`）。
 
-`/settings` 的 `Other settings` 里新增 `Web Search / Fetch`：选择后先关闭工作区，再打开原有编辑器
-的 Web 段并定位到第一项。段内可切换搜索 Provider（`Messages`，官方默认，或独立计费的
-`DeepSeek Search API`）、Fetch Provider（`HTTP`，官方默认，或 `DeepSeek Fetch API`），设置 Search API
-结果数（1–50，快选 5/10/20/50）、`Share Original Question`（官方默认为开启；每次新的 Search API
-调用附带最多 128 字符的触发人类问题 `ori_question`，不发送完整历史或系统提示词）与 API endpoint
-base（必须显式确认 https 地址；凭据与查询会发往该地址）。两套 API 都是独立的 opt-in 收费
-provider：登录或普通 Messages 套餐不保证覆盖其费用，默认的 `Messages`/`HTTP` 组合也不会调用收费
-API。Web 配置是 base profile 所有的设置，不是 Bxx Optional Bundle；安装或启用任何其他 Bundle
-都不会改变这两个 provider。
-`[current]` 只在官方写入与权威回读一致后移动，失败显示 `Not saved`；选择对下一次搜索/获取生效，
-运行中的操作不会被追溯切换。DeepSeek API key 只显示是否配置与来源层，配置/清除复用现有遮蔽
-`/login DEEPSEEK_API_KEY` / `/logout DEEPSEEK_API_KEY`（先关闭设置界面再执行）。Esc 从 Web 段返回
-同一 `Web Search / Fetch` 行；从 `Open existing settings…` 进入的旧路径仍返回会话。Remote 后端显示
-不可用，不发任何 Host 命名空间。
+Models 列出 Host provider 目录、API key 是否存在（不是连通性测试）、provider 详情、
+遮蔽输入/清除确认、Add Provider 向导与 provider 原生登录；首页只列已配置 provider，
+未配置的进入 Add Provider 可选目录。Account 显示登录状态、浏览器授权 URL、SSH 隧道
+提示、独立钱包、取消当前尝试、刷新与二次确认 sign out。`/login`、`/logout` 直接打开
+对应页面深链。DeepSeek Account 登录走官方 Host `host-webserver` 的 `127.0.0.1:0`
+回环 `/oauth/callback`，TUI 不接触 token/grant，`--help` 不监听端口。
 
-`/settings` 中的 `Icon style` 可切换 TUI 结构图标的风格:`Emoji`(默认,
-彩色)、`Symbols`(紧凑的单格终端符号)、`Minimal`(隐藏装饰性图标,只
-保留状态/交互标记);切换立即生效并持久化。
+Settings 内可直接编辑：Appearance（Icon style、Status line mode）、Conversation
+（Transcript detail、Thinking detail、Progress updates、Response style、Submit while
+busy、Git attribution）、Input & Terminal（Home/End 键、Fullscreen、滚轮行数、通知、
+Terminal progress、Footer 布局、Keyboard shortcuts）、Agent（审批策略、默认权限、
+子代理模型白名单/选择、用户 shell 沙箱）、Tools（Web Search / Fetch、Visual tools）
+与 Extensions（按插件分组的动态设置）。所有写入需显式确认，按权威回读显示 `Verified` /
+`Not saved` / `Outcome unknown`；`Fullscreen` 在正常退出 Settings 后切屏。`/footer`、
+`/statusline`、裸 `/keybindings` 和 `/plugins` 都是同一工作区内深链；旧主设置编辑器与
+独立插件全屏页已移除。
 
-`/settings` 中的 `Terminal progress` 控制原生终端状态上报,共四档:
-`9;4+7501`(默认,同时上报 OSC 9;4 进度条与 OSC 7501 语义状态)、
-`9;4`(只保留进度条兼容协议)、`7501`(只上报语义状态:运行中 / 等待审批 /
-等待回答 / 完成 / 出错)、`Off`(清除并停止上报)。切换立即生效;完成与出错
-只在一次真实运行的最后一个 turn 结果被证实后上报,中断或取消会回到空闲。
-旧的 `On` 配置读作默认双协议。
+`Settings → Tools` 的 **Visual tools** 开关（默认 On）对应整个 Host profile 的
+`pi-tui-visual-tools.enabled`，一处开关同时管理 `dsh_pi_tui_chart`、`dsh_pi_tui_svg`
+与 `present_visual`。关闭后新模型请求不再看到三个工具，历史结果仍可显示、复制、搜索与
+导出；Direct 会核对 Host 注册状态后显示 Verified，Remote 只如实显示配置已保存。
 
-终端兼容性说明:不认识 OSC 7501 的终端会直接忽略它——目前 Ghostty 的 GUI
-只显示 OSC 9;4 进度条、不显示 7501 语义状态,这是预期行为,不代表上报失败。
-在 tmux 等终端复用器里,未知 OSC 可能不会被转发到外层终端(本功能有意不实现
-tmux 的 DCS passthrough,也不修改复用器设置);需要跨复用器保留状态时请直接
-使用支持它的外层终端。此外,OSC 7501 的语义状态只作用于当前 Main Agent。
+`Settings → Tools → Web Search / Fetch` 是同一工作区内的专页：搜索/获取 provider、
+结果数、`Share Original Question`、HTTPS endpoint 与只读 API key 引用；每个值只有明确
+Enter 确认才写入，并显示 Host 权威回读结果。两套 API 是独立计费 provider，默认
+Messages/HTTP 不调用收费 API。
 
-本项目的 Remote(实验性、自有 Host 组合)同样上报这套状态:Host 侧由本扩展自带的
-私有状态流提供,并与 Direct 共用同一份区间判定。**未安装本项目 Host 扩展的第三方
-DSH Host 不支持**这套上报(它没有对应的事件源)。
-
-其他插件注册到 `ctx.commands` 的 Slash Command 也会被自动发现。
+`Extensions` 按注册 owner 分组分页：`Tab`/`Shift+Tab` 切组，方向键/Home/End/翻页/滚轮
+组内移动；条目进入原生 Detail/Choice，只有显式 Confirm 才写入运行中的插件，`Verified`
+以实时回读为准，同名 HMR 重注册不继承旧状态。扩展设置不写 TUI 设置文档或 Host profile。
 
 ### Footer 自定义
 
-`/footer` 提供交互式 Footer 编辑器。你可以组合内置状态条目，调整左右位置、顺序、Style、Tone、Prefix/Suffix 和 Importance，也可以创建自己的 Footer 条目。
+`/footer` 在同一个 Settings 全屏工作区中提供 Footer 编辑器（Appearance → Configure footer
+layout）。你可以组合内置状态条目，调整左右位置、顺序、Style、Tone、Prefix/Suffix 和
+Importance，也可以创建自己的 Footer 条目。
 
 支持四类条目：
 
@@ -399,10 +399,25 @@ DSH Host 不支持**这套上报(它没有对应的事件源)。
 
 完整的 `/footer` 使用方法、Custom Text / Command、YAML 配置、安全模型和排错说明见：
 
-- [Footer 自定义完整指南](docs/footer-customization.md)
-- [Extension API（插件作者）](docs/extension-api.md)
+- [Footer 自定义完整指南](docs/guides/footer.md)
+- [Extension API（插件作者）](docs/extensions/stable.md)
 
 `/statusline` 是 `/footer` 的别名。
+
+### 图片
+
+Ctrl+V 会读取系统剪贴板：剪贴板里是图片时得到规范占位符 `[image #N (宽×高)]` 并在输入框上方一行显示草稿缩略图（窗口过矮时客户端会把这一行隐藏，输入与发送不受影响，状态行仍报出真实草稿数），是文字时插在当前光标处。`/image` 与 `/attach` 也可以把图片或普通文件加入当前草稿；同一个占位符出现多次会显示多个位置，但只读取、上传一次。
+
+用户消息、助手消息和工具结果里的图片都按原始顺序显示在各自的卡片中：一行身份信息（名称、像素尺寸、字节数）加一张图片。PiTUI 的查看器见下；实验性 TSP renderer 的查看与缩放由 Tern 客户端提供（相邻图片导航取决于客户端版本与能力）。图片读取失败、格式不支持或超出单张 16 MiB 限制时，卡片会显示身份与真实原因，不会显示伪造的图片。在原生 Kitty 终端中，Transcript 缩略图、输入框上方的草稿预览卡以及从图片打开的全屏查看页都会先在后台把 JPEG/WebP 转换成受限的 PNG 再显示像素（WebP 只取第一帧、按 EXIF 方向摆正、最长边不超过 768 像素；身份行与查看页仍使用原始名称、尺寸、格式与字节数；草稿卡只处理当前最后一张有权限显示的本地图片）。折叠的缩略图不会触发转换；转换中或失败时只显示文字（失败为 `Preview unavailable`），只有真正画出像素的正文才能点击。全屏查看页展示的是同一份受限缩略图，不提供高清原图浏览；PNG、iTerm2、GIF、窄屏与不支持图形的终端行为不变。
+
+全屏图片信息行最右 3 格 `[-]`/`[+]` 只折叠该图片；点击图片正文打开只读查看器。`/view-image` 列出当前已挂载 transcript window 的图片，`Enter` 查看、`Esc back` 返回原列表。
+
+### TSP renderer（实验性）
+
+设置 `DSH_PI_TUI_RENDERER=tsp` 后启用实验性 Tern TSP renderer：支持原生工具卡、
+Preparing 行、PTC 子调用、Work Hub（`/tasks`、`/subagents`）、图片粘贴与历史图片，
+以及已发布图表/SVG 的原生显示与 Copy。默认 renderer 仍是 PiTui；TSP 不支持的
+Settings / Plugins 页面会明确拒绝。
 
 ## 常用按键
 
@@ -422,6 +437,9 @@ DSH Host 不支持**这套上报(它没有对应的事件源)。
 | `Ctrl+End`    | 全屏时跳到最新 Transcript 输出；离开 live tail 时底部显示可点击的 `↓ Latest` |
 | `Ctrl+O`      | 展开 / 折叠工具和系统详情；普通与全屏非 Focus 下展开/收起超长用户 Prompt；全屏 Focus 下整体切换 Thought root（超长用户 Prompt 用点击/搜索展开） |
 | `Alt+T`       | 展开 / 折叠 Thinking       |
+| `Alt+V`       | 选择 / 循环当前窗口的已发布图表或 SVG |
+| `Alt+C`       | 复制选中的图表 / SVG          |
+| `Alt+O`       | 打开选中的 SVG             |
 | `Ctrl+G`      | 使用 `$VISUAL`/`$EDITOR` 编辑输入 |
 | `Ctrl+V`      | 粘贴图片                   |
 | `Tab`         | 补全斜杠命令与文件路径           |
@@ -472,8 +490,8 @@ keybindings:
   可编辑 Keyboard Shortcuts Editor:按类别分组,搜索 action ID/描述/当前键和
   默认键,并标记 customized、conflict、Unbound、Disabled 和 fixed 状态。
   独立的 Leader key 行还可设置全局 leader key。
-- `/settings` 只有一个 `Keyboard shortcuts` 入口,打开与 `/keybindings` 相同的
-  编辑器和持久化控制器。
+- `/settings` 的 Input & Terminal 只有一个 `Keyboard shortcuts…` 入口，打开与裸
+  `/keybindings` 相同的同 lease 全屏页与同一持久化控制器（不再是 88 列 overlay）。
 - 录制器读取真实终端按键,通过 `parseKey` 规范化为 `KeyId`;保存前会拒绝
   无法匹配、吞输入、终端歧义或已知冲突的按键。普通录制器按 `Esc` 立即取消;
   Host interrupt action 的 direct recorder 使用短暂双击窗口:一次 `Esc` 取消,
@@ -622,12 +640,11 @@ export function apply(ctx: Context): void {
 
 详细文档：
 
-* [Extension API](docs/extension-api.md)
-* [Extension tiers](docs/extension-tiers.md)
-* [Advanced API](docs/extension-advanced.md)
-* [Unstable API](docs/extension-unstable.md)
-* [Plugin authoring](docs/plugin-authoring.md)
-* [Capability matrix](docs/extension-capability-matrix.md)
+* [Extension API](docs/extensions/stable.md)
+* [Extension tiers](docs/extensions/tiers.md)
+* [Advanced API](docs/extensions/advanced.md)
+* [Unstable API](docs/extensions/unstable.md)
+* [Plugin authoring](docs/extensions/authoring.md)
 
 ## 开发
 
@@ -682,7 +699,7 @@ symlink 写入发布 package。
 
 ### CI 验证策略
 
-CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。Source Mode 从 `test/compat/dsh-source.json` 读取 source target 并验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界；npm Mode 则使用 checkout 的 `package.json`/冻结 lockfile 中声明的 DSH 版本运行 registry lane。对于尚未发布的 source family，已发布 `pi2dsh` 的生态检查会明确标记为 skipped。详细流程见 [`docs/dsh-compatibility.md`](docs/dsh-compatibility.md)。
+CI 对 push 到 `next` 以及目标为 `next` 的 PR 遵循跟踪的 `test/compat/dsh-mode.json` 策略；`main` 和所有 tag 使用 npm Mode。Source Mode 从 `test/compat/dsh-source.json` 读取 source target 并验证完整的官方 DSH tarball family、TUI 预设和旧 runtime 边界；npm Mode 则使用 checkout 的 `package.json`/冻结 lockfile 中声明的 DSH 版本运行 registry lane。已发布 `pi2dsh` 的生态检查在两种模式下都运行，并且始终针对已发布生态（从 registry 安装已发布的 DSH 与 pi2dsh），遇到 source pack 会明确跳过而不是伪装成通过。详细流程见 [`docs/guides/dsh-compatibility.md`](docs/guides/dsh-compatibility.md)。
 
 ## 项目结构
 
@@ -711,15 +728,13 @@ packages/pi-tui/AGENTS.md
 
 | 文档                                                     | 内容                           |
 | ------------------------------------------------------ | ---------------------------- |
-| [docs/README.md](docs/README.md)                       | 文档索引                         |
-| [docs/architecture.md](docs/architecture.md)           | 架构和模块职责                      |
-| [docs/input-history.md](docs/input-history.md)         | 输入历史                         |
-| [docs/surface-decisions.md](docs/surface-decisions.md) | TUI 交互设计决策                   |
-| [docs/concurrency.md](docs/concurrency.md)             | Session 并发                   |
-| [docs/failure-model.md](docs/failure-model.md)         | Async failure / cancellation |
-| [docs/perf-baseline.md](docs/perf-baseline.md)         | 性能基线                         |
-| [docs/local-development.md](docs/local-development.md) | 本地开发环境与 worktree 约定       |
-| [docs/extension-api.md](docs/extension-api.md)         | Extension API                |
+| [docs/README.md](docs/README.md)                             | 文档政策与完整索引               |
+| [docs/architecture/overview.md](docs/architecture/overview.md) | 架构、分层与依赖方向           |
+| [docs/architecture/host-client.md](docs/architecture/host-client.md) | Host/Client 边界与当前性契约 |
+| [docs/architecture/surface-behavior.md](docs/architecture/surface-behavior.md) | 工作区/任务/插件界面行为 |
+| [docs/guides/development.md](docs/guides/development.md)     | 本地开发、worktree 与性能重跑方法 |
+| [docs/extensions/stable.md](docs/extensions/stable.md)       | Extension API                |
+| [docs/guides/code-review.md](docs/guides/code-review.md)     | 仓库评审检查点               |
 | [AGENTS.md](AGENTS.md)                                 | Contributor operating manual |
 
 ## Changelog

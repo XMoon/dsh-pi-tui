@@ -28,7 +28,24 @@ export function index(roots) {
   return { nodes, chains }
 }
 
-export const ancestorsOf = (chains, node) => (chains.get(node) ?? []).slice(0, -1)
+/**
+ * Every ancestor of `node`, from the ROOT down to its parent.
+ *
+ * FAIL CLOSED: `chains` is built by {@link index} around ONE snapshot, and a node
+ * from a DIFFERENT snapshot is not in it. Returning an empty list there would
+ * read as "this node has no clipping ancestor" — every clipped node in a stale
+ * snapshot would then look visible and clickable, which is precisely the false
+ * pass this oracle exists to prevent. A node the map does not know is a caller
+ * bug (mixing two snapshots), so it throws instead.
+ */
+export const ancestorsOf = (chains, node) => {
+  const chain = chains.get(node)
+  if (chain === undefined) {
+    throw new TypeError('this node is not part of the snapshot these chains index: '
+      + 'take the node AND the chains from the SAME snapshot() call')
+  }
+  return chain.slice(0, -1)
+}
 
 const edge = (box, axis) => (axis === 'x' ? box[0] : box[1])
 const extent = (box, axis) => (axis === 'x' ? box[2] : box[3])
@@ -53,6 +70,36 @@ function surviving(chains, node, axis) {
 
 /** The surviving span on `axis` (`'x'` unless asked otherwise). */
 export const visibleSpan = (chains, node, axis = 'x') => surviving(chains, node, axis).span
+
+/**
+ * The node's own rect along `axis`, and the part of it that survives every
+ * clipping ancestor. Unlike {@link containedXY} this reports the NUMBERS, so a
+ * caller can require the whole extent to be visible rather than "contained by
+ * some ancestor" — a node can sit inside every recorded ancestor box and still
+ * be scrolled or laid out outside the visible pane.
+ */
+export function visibleBox(chains, node) {
+  const box = rect(node)
+  const x = surviving(chains, node, 'x')
+  const y = surviving(chains, node, 'y')
+  return {
+    rect: box,
+    start: { x: x.start, y: y.start },
+    span: { x: x.span, y: y.span },
+  }
+}
+
+/**
+ * Whether the node's ENTIRE rect survives clipping on both axes — i.e. the user
+ * can see all of it, not merely part of it. `true` requires a positive size and
+ * a surviving span that matches the node's own extent within rounding slack.
+ */
+export function fullyVisible(chains, node, slack = 0.5) {
+  const { rect: box, span } = visibleBox(chains, node)
+  const [width, height] = [box[2], box[3]]
+  if (!(width > 0) || !(height > 0)) return false
+  return span.x >= width - slack && span.y >= height - slack
+}
 
 /** Every clipping ancestor on `axis` contains this node (0.5px rounding slack). */
 const within = (chains, node, axis) => {

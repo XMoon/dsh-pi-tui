@@ -1,0 +1,404 @@
+/**
+ * Unit tests for the Image UX PR5 inline attachment grammar and the
+ * position-scoped path-argument classifier: the FIRST line's leading command
+ * token stays the legacy slash-command seat, every other declared command
+ * token is the inline attachment seat, and nothing else (URLs, `/usr/bin`,
+ * `weird/image`, ordinary paths) is a seat at all.
+ * @module @xmoon76/dsh-pi-tui/inline-attachment-grammar.test
+ */
+
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import {
+  INLINE_ATTACHMENT_ACTIONS,
+  candidatePath,
+  splitTokenRemainder,
+  applyInlineAttachmentAction,
+  applyInlineAttachmentPath,
+  isInlineAttachmentAction,
+  isInlineAttachmentPath,
+  unquoteCandidateValue,
+} from '../../src/tui/interaction/autocomplete/inline-attachment.ts'
+import {
+  classifyFileCompletionContext,
+  pathArgumentSeat,
+} from '../../src/tui/file-completion/context.ts'
+import { FILE_ARGUMENT_COMMANDS } from '../../src/domain/file-completion/path-argument-commands.ts'
+
+const COMMANDS = FILE_ARGUMENT_COMMANDS
+const classify = (text: string, line = 0) => classifyFileCompletionContext(text, COMMANDS, { line })
+
+test('a mid-body command token on the FIRST line is an INLINE seat', () => {
+  const seat = classify('帮我看看 /image ./shots/err')
+  assert.equal(seat.kind, 'path-argument')
+  if (seat.kind !== 'path-argument') return
+  assert.equal(seat.command, 'image')
+  assert.equal(seat.query, './shots/err')
+  assert.equal(seat.leading, false, 'a mid-body token is never the legacy command seat')
+  assert.equal(seat.commandStart, '帮我看看 '.length)
+})
+
+test("the FIRST line's LEADING command token is the legacy command seat", () => {
+  const seat = classify('/image ./shots/err')
+  assert.equal(seat.kind, 'path-argument')
+  if (seat.kind !== 'path-argument') return
+  assert.equal(seat.leading, true, 'line 0 leading keeps the slash-command policy')
+  // Indentation is still the leading command seat (the fork accepts it).
+  const indented = classify('   /attach ./logs/a.log')
+  assert.equal(indented.kind, 'path-argument')
+  if (indented.kind !== 'path-argument') return
+  assert.equal(indented.leading, true)
+})
+
+test("a later line's leading command token is an INLINE seat", () => {
+  const seat = classify('/attach ./logs/service.log', 2)
+  assert.equal(seat.kind, 'path-argument')
+  if (seat.kind !== 'path-argument') return
+  assert.equal(seat.leading, false, 'only the FIRST logical line is the command seat')
+  assert.equal(seat.command, 'attach')
+})
+
+test('non-seats stay closed: path segments, URLs, shell and ordinary paths', () => {
+  // A `/` glued to a word is never a token boundary.
+  assert.equal(classify('weird/image /x').kind, 'none')
+  assert.equal(classify('https://host.example/image /x').kind, 'none')
+  assert.equal(classify('x/image /x').kind, 'none')
+  // A declared NAME only: `/usr/bin` is a path, not `usr`.
+  assert.equal(classify('/usr/bin /x').kind, 'none')
+  assert.equal(classify('see /usr/bin').kind, 'none')
+  // The command name with NO separator yet is the command-name/action seat,
+  // never a path argument (the inline `/name` dropdown owns it).
+  assert.equal(classify('hi /image').kind, 'none')
+  // Ordinary paths and prose.
+  assert.equal(classify('ordinary ./path').kind, 'none')
+  assert.equal(classify('hello /tmp/foo').kind, 'none')
+  // An undeclared command is not a file seat.
+  assert.equal(classify('hello /other foo').kind, 'none')
+})
+
+test('the LAST declared token wins, so an earlier one is not a stale seat', () => {
+  const seat = classify('hi /image ./a.png /attach ./b')
+  assert.equal(seat.kind, 'path-argument')
+  if (seat.kind !== 'path-argument') return
+  assert.equal(seat.command, 'attach')
+  assert.equal(seat.query, './b')
+})
+
+test('a multi-space separator belongs to the argument (fork apply parity)', () => {
+  const seat = classify('/image    file')
+  assert.equal(seat.kind, 'path-argument')
+  if (seat.kind !== 'path-argument') return
+  assert.equal(seat.query, '   file', 'the leftover separator stays part of the replaced range')
+})
+
+test('an `@` mention is never claimed by a declared command seat', () => {
+  const mention = classify('hi @src/fo')
+  assert.equal(mention.kind, 'mention')
+  // But a declared command argument DOES own the position (the Client-local
+  // path is what `/image` means, never a Host mention).
+  const argument = classify('hi /image @src/fo')
+  assert.equal(argument.kind, 'path-argument')
+})
+
+test('pathArgumentSeat and the classifier agree (ONE authority)', () => {
+  for (const text of ['/image a', 'hi /attach b', 'hi /image', 'weird/image /x', 'hi @a']) {
+    const seat = pathArgumentSeat(text, COMMANDS)
+    const context = classify(text)
+    assert.equal(context.kind === 'path-argument', seat !== undefined, `agreement for ${JSON.stringify(text)}`)
+  }
+})
+
+test('the fixed action list is exactly the declared attachment commands', () => {
+  assert.deepEqual(INLINE_ATTACHMENT_ACTIONS.map(action => action.name), ['image', 'attach'])
+  for (const action of INLINE_ATTACHMENT_ACTIONS) {
+    assert.ok(COMMANDS.has(action.name), `${action.name} must be a declared file-argument command`)
+  }
+})
+
+test('accepting an action inserts the token and opens the argument seat', () => {
+  // `hi /ima` → `hi /image ` with the cursor at the argument's first column.
+  const applied = applyInlineAttachmentAction('hi /ima', 3, 7, 'image')
+  assert.equal(applied.line, 'hi /image ')
+  assert.equal(applied.cursorCol, 10)
+  const seat = classify(applied.line.slice(0, applied.cursorCol))
+  assert.equal(seat.kind, 'path-argument', 'the inserted separator opens the argument seat')
+  if (seat.kind !== 'path-argument') return
+  assert.equal(seat.query, '', 'an empty argument is the cwd listing (allowEmpty)')
+  // A trailing separator after the cursor is kept, never doubled.
+  const kept = applyInlineAttachmentAction('hi /ima world', 3, 7, 'image')
+  assert.equal(kept.line, 'hi /image world')
+  assert.equal(classify(kept.line.slice(0, kept.cursorCol)).kind, 'path-argument',
+    'the existing separator makes the position an argument seat immediately')
+})
+
+test('accepting a path replaces only the argument span and reports the fragment', () => {
+  const line = '看看 /image ./sh/err 为什么'
+  const caret = line.indexOf('./sh/err') + './sh/err'.length
+  const seat = pathArgumentSeat(line.slice(0, caret), COMMANDS)
+  assert.ok(seat !== undefined)
+  const applied = applyInlineAttachmentPath(line, seat, caret, 0, './shots/err.png')
+  // The prefix, the selected value and the SUFFIX all survive.
+  assert.equal(applied.line, '看看 /image ./shots/err.png 为什么')
+  assert.equal(applied.cursorCol, '看看 /image ./shots/err.png'.length)
+  // The reported span covers the whole inline fragment (command token through
+  // the accepted value) — what the canonical placeholder will replace.
+  assert.equal(applied.span.line, 0)
+  assert.equal(applied.span.start, '看看 '.length)
+  assert.equal(applied.span.end, '看看 /image ./shots/err.png'.length)
+  assert.equal(applied.line.slice(applied.span.start, applied.span.end), '/image ./shots/err.png')
+})
+
+test('a directory value keeps its separator and stays a live argument seat', () => {
+  const line = 'hi /image sub'
+  const seat = pathArgumentSeat(line.slice(0, 'hi /image sub'.length), COMMANDS)
+  assert.ok(seat !== undefined)
+  // A directory CONTINUES the seat, so the accept must not terminate it.
+  const applied = applyInlineAttachmentPath(line, seat, 'hi /image sub'.length, 0, 'sub/', false)
+  assert.equal(applied.line, 'hi /image sub/')
+  assert.equal(classify(applied.line.slice(0, applied.cursorCol)).kind, 'path-argument')
+})
+
+test('row markers identify actions and paths structurally, never by label', () => {
+  const action = {
+    value: 'image', label: 'image', description: 'Insert local image',
+    inlineAttachment: 'action' as const, command: 'image',
+  }
+  const path = {
+    value: 'a.png', label: 'a.png', description: undefined,
+    inlineAttachment: 'path' as const, command: 'image', directory: false,
+  }
+  assert.equal(isInlineAttachmentAction(action), true)
+  assert.equal(isInlineAttachmentPath(action), false)
+  assert.equal(isInlineAttachmentPath(path), true)
+  assert.equal(isInlineAttachmentAction(path), false)
+  // A plain skill row (same value as the action!) is NOT an action: identity
+  // comes from the marker, never from the name.
+  const skill = { value: 'image', label: 'image', description: 'A skill named image' }
+  assert.equal(isInlineAttachmentAction(skill), false)
+  assert.equal(isInlineAttachmentPath(skill), false)
+})
+
+test('a fully quoted candidate value is unquoted; anything else stays verbatim', () => {
+  assert.equal(unquoteCandidateValue('"my file.png"'), 'my file.png')
+  assert.equal(unquoteCandidateValue('"sub dir/"'), 'sub dir/')
+  assert.equal(unquoteCandidateValue('plain.png'), 'plain.png')
+  assert.equal(unquoteCandidateValue('"unclosed'), '"unclosed')
+  assert.equal(unquoteCandidateValue(''), '')
+})
+
+test('a SHELL document never yields an attachment seat (the shell plane owns it)', () => {
+  // The shell bridge owns `!`/`!!` arguments; a literal `/image <path>` there
+  // is a shell WORD, not a Client-local attachment site. Classifying it as a
+  // path argument would let attachment candidates (and their apply) rewrite a
+  // shell command line.
+  for (const line of ['!echo /image ./foo', '!!echo /attach ./bar', '/image ./foo']) {
+    assert.equal(classifyFileCompletionContext(line, COMMANDS, { line: 0, shell: true }).kind, 'none',
+      `a shell document must not expose a path-argument seat: ${JSON.stringify(line)}`)
+  }
+  // The SAME text in an ordinary PROMPT document is the attachment seat: the
+  // classifier takes the shell fact from its caller (the caller owns the
+  // input mode and the literal wire form), so it never guesses.
+  assert.equal(classify('echo /image ./foo').kind, 'path-argument', 'ordinary prompt prose is the seat')
+  assert.equal(
+    classifyFileCompletionContext('!echo /image ./foo', COMMANDS, { line: 0, shell: true }).kind,
+    'none',
+    'a prompt-mode buffer holding the literal `!` wire form is classified as shell by its caller',
+  )
+})
+
+test('the read path never inherits the editor replacement spacing', () => {
+  // The Client-local path engine prefixes the argument's leading separator run
+  // back onto a candidate so the accepted TEXT preserves the user's spacing.
+  // That text is an editor replacement, never a filesystem path.
+  assert.equal(candidatePath('   shot.png'), 'shot.png', 'an injected multi-space run is not part of the name')
+  assert.equal(candidatePath('\tshot.png'), 'shot.png', 'a tab separator is not part of the name')
+  assert.equal(candidatePath('shot.png'), 'shot.png', 'an unspaced value is unchanged')
+  // A quoted value keeps the quote contract, applied AFTER the spacing is gone.
+  assert.equal(candidatePath('   "my file.png"'), 'my file.png')
+  assert.equal(candidatePath(' '), '', 'a spacing-only value has no path')
+  // A directory continuation value keeps its own trailing separator (it is the
+  // editor text for the NEXT seat, and directories are never read).
+  assert.equal(candidatePath('   sub/'), 'sub/')
+})
+
+test('a quoted token does not let its own `/name` text become a second command', () => {
+  // The quoted run is PATH CONTENT: the outer `/image` stays the only command.
+  const unclosed = classify('look /image "my /attach file.png')
+  assert.equal(unclosed.kind, 'path-argument')
+  if (unclosed.kind !== 'path-argument') return
+  assert.equal(unclosed.command, 'image', 'the outer command owns the quoted argument')
+  assert.equal(unclosed.argument, '"my /attach file.png')
+  // The legacy first-line seat behaves the same way.
+  const leading = classify('/image "my /attach file.png')
+  assert.equal(leading.kind, 'path-argument')
+  if (leading.kind !== 'path-argument') return
+  assert.equal(leading.command, 'image')
+  assert.equal(leading.leading, true)
+  // A CLOSED quoted run is skipped, and a real command after it still wins.
+  const closed = classify('look /image "a /attach b" /attach c')
+  assert.equal(closed.kind, 'path-argument')
+  if (closed.kind !== 'path-argument') return
+  assert.equal(closed.command, 'attach', 'a command outside the quotes is still a command')
+  assert.equal(closed.argument, 'c')
+})
+
+test('a candidate closing quote is consumed with the token it closes', () => {
+  const line = 'look /image "sho" now'
+  const cursorCol = line.indexOf('sho') + 3
+  const seat = pathArgumentSeat(line.slice(0, cursorCol), COMMANDS)
+  assert.ok(seat !== undefined)
+  const applied = applyInlineAttachmentPath(line, seat, cursorCol, 0, '"shot.png"')
+  // No stranded quote: value and the user's closing quote become ONE token.
+  assert.equal(applied.line, 'look /image "shot.png" now')
+  // The reported fragment is exactly what the canonical placeholder replaces;
+  // the terminator space is part of the accepted TEXT, never of the fragment.
+  assert.equal(applied.line.slice(applied.span.start, applied.span.end), '/image "shot.png"')
+  // An UNQUOTED candidate never eats a following quote (it did not open it).
+  // An UNQUOTED token did not open that quote, so the quote is NOT its closing
+  // fragment: it may start a new quoted value or be part of a legal filename.
+  // Without lexical proof it is preserved as prose rather than deleted.
+  // The seat must genuinely be UNQUOTED for that claim (the quoted seat above
+  // owns a closing quote and consumes it).
+  const unquotedLine = 'look /image shot" now'
+  const unquotedCursor = 'look /image shot'.length
+  const unquotedSeat = pathArgumentSeat(unquotedLine.slice(0, unquotedCursor), COMMANDS)
+  assert.ok(unquotedSeat !== undefined)
+  assert.equal(unquotedSeat.argument, 'shot', 'the seat is unquoted')
+  const plain = applyInlineAttachmentPath(unquotedLine, unquotedSeat, unquotedCursor, 0, 'shot.png')
+  assert.equal(plain.line, 'look /image shot.png now',
+    'a terminal accept ends the token with ONE separator and leaves no stray quote fragment')
+})
+
+test('the token remainder follows the PATH grammar, not an ASCII allowlist', () => {
+  // A legal CJK basename with the cursor in the middle: `件.png` is still the
+  // SAME token, so it is consumed instead of duplicated after a space.
+  const cjk = '请看 /image 文件.png'
+  const cjkCursor = cjk.indexOf('文件.png') + 1
+  const cjkSeat = pathArgumentSeat(cjk.slice(0, cjkCursor), COMMANDS)
+  assert.ok(cjkSeat !== undefined)
+  const cjkApplied = applyInlineAttachmentPath(cjk, cjkSeat, cjkCursor, 0, '文件.png')
+  assert.equal(cjkApplied.line, '请看 /image 文件.png ', 'the CJK remainder is consumed, not re-emitted')
+  // A quoted basename may contain spaces; the remainder runs to the quote.
+  const quoted = '请看 /image "my shot.png" 为什么失败'
+  const quotedCursor = quoted.indexOf('my shot') + 3
+  const quotedSeat = pathArgumentSeat(quoted.slice(0, quotedCursor), COMMANDS)
+  assert.ok(quotedSeat !== undefined)
+  const quotedApplied = applyInlineAttachmentPath(quoted, quotedSeat, quotedCursor, 0, '"my shot.png"')
+  assert.equal(quotedApplied.line, '请看 /image "my shot.png" 为什么失败',
+    'a quoted token keeps its spaces and closes exactly once')
+  // The SINGLE boundary authority, stated directly. An unquoted token runs to
+  // the next separator but ONLY when the caret is already inside it; a quoted
+  // token runs to its closing quote, so spaces inside stay part of the name.
+  assert.deepEqual(splitTokenRemainder('件.png', false, true), { consumed: '件.png', suffix: '' })
+  assert.deepEqual(splitTokenRemainder('件.png', false, false),
+    { consumed: '', suffix: '件.png' }, 'at an EMPTY seat nothing is consumed')
+  assert.deepEqual(splitTokenRemainder('为什么连接失败', false, false),
+    { consumed: '', suffix: '为什么连接失败' }, 'prose after an empty seat is preserved whole')
+  assert.deepEqual(splitTokenRemainder('t" 为什么', true, true), { consumed: 't"', suffix: ' 为什么' })
+  assert.deepEqual(splitTokenRemainder(' name.png" 为什么', true, true),
+    { consumed: ' name.png"', suffix: ' 为什么' }, 'quoted spaces belong to the token')
+  assert.deepEqual(splitTokenRemainder('age world', false, true),
+    { consumed: 'age', suffix: ' world' }, 'the unquoted remainder stops at the separator')
+})
+
+test('an existing separator after the query tail is never doubled', () => {
+  // Cursor INSIDE the command token: `hi /im|age world`. The `age` is the query
+  // remainder and is consumed; the existing space after it is kept once.
+  assert.deepEqual(applyInlineAttachmentAction('hi /image world', 3, 'hi /im'.length, 'image'),
+    { line: 'hi /image world', cursorCol: 'hi /image '.length })
+  // Several existing separators keep their own count (never one more).
+  assert.deepEqual(applyInlineAttachmentAction('hi /im   world', 3, 'hi /im'.length, 'image'),
+    { line: 'hi /image   world', cursorCol: 'hi /image '.length })
+  // No separator after the token: exactly one is inserted.
+  assert.deepEqual(applyInlineAttachmentAction('hi /ima', 3, 'hi /ima'.length, 'image'),
+    { line: 'hi /image ', cursorCol: 'hi /image '.length })
+})
+
+test('prose that merely LOOKS like a filename suffix is never consumed', () => {
+  // The reported P1: the accepted name `shot.png` ends with `png`, and the
+  // user's own prose right after an EMPTY argument seat starts with `png`.
+  // Suffix matching must never delete it.
+  const line = '请看 /image png为什么连接失败'
+  const cursorCol = '请看 /image '.length
+  const seat = pathArgumentSeat(line.slice(0, cursorCol), COMMANDS)
+  assert.ok(seat !== undefined)
+  assert.equal(seat.argument, '', 'the seat is the EMPTY argument position')
+  const applied = applyInlineAttachmentPath(line, seat, cursorCol, 0, 'shot.png')
+  assert.equal(applied.line, '请看 /image shot.png png为什么连接失败',
+    'the user-authored prose survives even though it matches the candidate suffix')
+  // The SAME text with the caret ONE COLUMN FURTHER (inside a token) must behave
+  // differently: the token remainder is consumed. This is what distinguishes
+  // "prose at the empty seat" from "caret inside the token".
+  const insideSeat = pathArgumentSeat(line.slice(0, cursorCol + 1), COMMANDS)
+  assert.ok(insideSeat !== undefined)
+  assert.equal(insideSeat.argument, 'p', 'the seat now holds one character of the token')
+  const inside = applyInlineAttachmentPath(line, insideSeat, cursorCol + 1, 0, 'shot.png')
+  // Inside a token the accept replaces the whole token — up to the separator the
+  // user supplied. Text glued to the token without a separator is therefore part
+  // of the token BY CONTRACT (the accepted value always terminates it with one
+  // space), which is why the documented way to continue prose is to type the
+  // separating space: `请看 /image | 为什么…`.
+  assert.equal(inside.line, '请看 /image shot.png ',
+    'a caret inside the token replaces that token; prose needs its own separator')
+  // A real mid-token caret still consumes its own remainder.
+  const mid = '请看 /image 文件.png'
+  const midCursor = mid.indexOf('文件.png') + 1
+  const midSeat = pathArgumentSeat(mid.slice(0, midCursor), COMMANDS)
+  assert.ok(midSeat !== undefined)
+  assert.equal(applyInlineAttachmentPath(mid, midSeat, midCursor, 0, '文件.png').line,
+    '请看 /image 文件.png ', 'a caret inside the token still consumes that token')
+})
+
+test('a bare path segment is never a declared attachment command', () => {
+  // `/image/foo` and `/attach/foo` are PATH SEGMENTS: the command name must be
+  // followed by a real whitespace separator, never by `/`.
+  for (const text of ['hello /image/foo', '/image/foo', 'hello /attach/foo', '/attach/foo']) {
+    assert.equal(classify(text).kind, 'none', `${JSON.stringify(text)} must not be an attachment seat`)
+  }
+  // The command WITH a whitespace separator still is one.
+  assert.equal(classify('hello /image foo').kind, 'path-argument')
+  assert.equal(classify('/attach foo').kind, 'path-argument')
+})
+
+test('a Unicode whitespace inside a filename is NOT a token separator', () => {
+  // The path argument's own separator set rejects only an ASCII space and tab
+  // when unquoted, so U+3000 is a legal FILENAME character. Treating it as a
+  // separator stopped mid-name and duplicated the tail.
+  const name = '文\u3000件.png'
+  const line = `请看 /image ${name}`
+  const cursorCol = '请看 /image 文'.length
+  const seat = pathArgumentSeat(line.slice(0, cursorCol), COMMANDS)
+  assert.ok(seat !== undefined)
+  assert.equal(seat.argument, '文', 'the seat holds only the typed prefix')
+  const applied = applyInlineAttachmentPath(line, seat, cursorCol, 0, name)
+  assert.equal(applied.line, `请看 /image ${name} `,
+    'the whole U+3000 name is one token, terminated once')
+  // The ASCII separator still terminates (the documented boundary).
+  assert.deepEqual(splitTokenRemainder('件.png 为什么', false, true),
+    { consumed: '件.png', suffix: ' 为什么' })
+  // And a LEADING U+3000 is a filename character too, not an empty seat.
+  assert.deepEqual(splitTokenRemainder('\u3000件.png', false, true),
+    { consumed: '\u3000件.png', suffix: '' })
+})
+
+test('a directory accept preserves the closing quote that bounds the prose', () => {
+  // Cursor INSIDE the quoted path, with the user's own closing quote and prose
+  // already on the right. A directory keeps the seat open, so that quote is the
+  // boundary that must survive — otherwise the prose would enter the token.
+  const line = 'look /image "my dir/" prose'
+  const cursorCol = 'look /image "my'.length
+  const seat = pathArgumentSeat(line.slice(0, cursorCol), COMMANDS)
+  assert.ok(seat !== undefined)
+  const continued = applyInlineAttachmentPath(line, seat, cursorCol, 0, '"my dir/', false)
+  assert.equal(continued.line, 'look /image "my dir/" prose',
+    'the closing quote and prose survive a directory continue')
+  // Without a closing quote on the right nothing changes.
+  const open = 'look /image "my dir/child'
+  const openSeat = pathArgumentSeat(open.slice(0, cursorCol), COMMANDS)
+  assert.ok(openSeat !== undefined)
+  assert.equal(applyInlineAttachmentPath(open, openSeat, cursorCol, 0, '"my dir/', false).line,
+    'look /image "my dir/', 'an unclosed tail stays unclosed')
+  // A FILE accept still replaces the whole quoted token.
+  assert.equal(applyInlineAttachmentPath(line, seat, cursorCol, 0, '"my dir/f.png"', true).line,
+    'look /image "my dir/f.png" prose', 'a file accept closes the token and keeps the prose')
+})

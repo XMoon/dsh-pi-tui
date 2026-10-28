@@ -7,6 +7,171 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-29
+
+### Installation and version pairing
+
+This release validates against the published DSH `0.2.1-rc.4` and keeps the
+minimum at `0.2.1-rc.2`. Installing DSH requires explicitly allowing its native
+install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.4
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.4
+dsh --profile pi-tui
+```
+
+The published `0.5.3` remains compatible with `0.2.1-rc.2`, `0.2.1-rc.3` and
+`0.2.1-rc.4`. Older DSH releases keep their pairings unchanged:
+`@deepseek-ai/dsh@0.2.0-rc.2` uses `@xmoon76/dsh-pi-tui@0.5.1` or
+`@xmoon76/dsh-pi-tui@0.5.2-rc.1`; `@deepseek-ai/dsh@0.2.0-rc.1` (including
+`0.1.7-rc.2`) uses `@xmoon76/dsh-pi-tui@0.5.0`, and
+`@deepseek-ai/dsh@0.1.7-rc.1` uses `@xmoon76/dsh-pi-tui@0.4.8`.
+
+### Changed
+
+- **Settings is now the single full-screen workspace.** `/settings` and
+  `/status` open the same workspace and land on the About home. Wide and medium
+  terminals show a category rail beside the content; narrow terminals (under 76
+  columns) show About directly. The fixed categories are About / Models /
+  Account / Agent / Appearance / Conversation / Input & Terminal / Tools /
+  Plugins, with Extensions appended only while the extension settings registry
+  has rows. `Tab`/`Shift+Tab` move between regions and `←`/`Esc` step back.
+  Every page shares one header, status line and bottom action bar; `/plugins`,
+  `/footer`, `/statusline` and bare `/keybindings` are deep links into the same
+  workspace. About shows versions, backend, the captured session identity,
+  whole-session statistics, TTFB/throughput and Context occupancy, with `c` to
+  copy the selected fact, `C` for the full report and `r` to refresh. The legacy
+  main settings editor, the standalone plugin screen and the old `/status` page
+  are gone, and configuration rows no longer have per-row copy buttons.
+
+- **Images in tmux now attempt admission automatically.** A tmux server that
+  meets the strict conditions no longer needs an explicit environment variable;
+  `PI_TUI_TMUX_KITTY_IMAGES=0` or `PI_IMAGE_PROTOCOL=none/0` still disables the
+  capability. No tmux configuration is modified automatically.
+
+### Added
+
+- **Models and Account workspaces.** Models lists the Host provider catalog,
+  API-key presence (not a connectivity test), provider details, a masked editor,
+  clear confirmations, the Add Provider wizard and provider-native sign-in. The
+  home lists only configured providers; missing ones live in the Add Provider
+  catalog, and the catalog and credentials are read once after the first frame
+  so a large catalog never blocks the keyboard. Account shows sign-in state, the
+  browser authorization URL, SSH tunnel guidance, independent wallets, exact
+  attempt cancellation, refresh and a confirmed sign-out. DeepSeek Account
+  sign-in uses the official `host-webserver` loopback callback on
+  `127.0.0.1:0`; the TUI never receives a token or grant, `--help` opens no
+  port, and `/login` / `/logout` open the matching page deep link.
+
+- **Settings now edits every configuration field in place.** Appearance: Icon
+  style and Status line mode. Conversation: Transcript detail, Thinking detail,
+  Progress updates, Response style, Submit while busy and Git attribution.
+  Input & Terminal: Home/End keys, Fullscreen, wheel lines, notifications,
+  Terminal progress, Footer layout and Keyboard shortcuts. Agent: approval
+  policy, default permission, subagent model allowlist and selection, and user
+  shell sandbox. Tools: Web Search / Fetch and Visual tools. Extensions:
+  dynamic settings grouped by plugin. Every write needs explicit confirmation
+  and reports `Verified`, `Not saved` or `Outcome unknown` from the
+  authoritative read-back; a saved `Fullscreen` preference applies after
+  Settings closes normally.
+
+- **Approvals now use a blocking action sheet in the editor seat.** The full
+  Reason/Arguments body is readable in one scrollable area (no six-line
+  argument preview). `y` allows once, `n` rejects, `Esc`/`Ctrl+C` cancels, `c`
+  copies the raw arguments and `e` expands. Fullscreen can click the actually
+  painted Allow once / Reject / Cancel actions and wheel the body; regular mode
+  stays keyboard-only. Short viewports show the real compact payload or
+  `Resize to inspect more`, never a cropped decision.
+
+- **Terminal images are admitted by real capability.** Direct Kitty, Ghostty,
+  WezTerm, Warp, Tern and terminals explicitly set to `PI_IMAGE_PROTOCOL=kitty`
+  share one managed image lifecycle. A Zellij pane queries its current pane's
+  live capability; tmux automatically attempts Unicode placeholders after
+  `allow-passthrough=all`, the live identity checks and the single display
+  client check pass, and an unknown terminal must return a matching
+  `e=T,U=1;OK`. No reply, a plain `OK`, an error or a timeout stays text-only and
+  never falls back to the legacy escape path. tmux Control Mode clients do not
+  count as display clients. `PI_IMAGE_PROTOCOL=none/0` and
+  `PI_TUI_TMUX_KITTY_IMAGES=0` still disable images; an older terminal that
+  genuinely supports U1 may set `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1`.
+
+- **Kitty terminals support JPEG/WebP with draft and viewer previews.**
+  Transcript thumbnails, the draft preview card and the fullscreen viewer share
+  one bounded PNG derivative (WebP first frame, EXIF orientation, longest side
+  768 pixels); the identity row keeps the original name, dimensions, format and
+  byte count. The last draft image renders as a bounded card, fullscreen `x`
+  deletes only that placeholder and `Ctrl+-` undoes it. The fullscreen info row
+  `[-]`/`[+]` folds only that image, and clicking its body opens the read-only
+  viewer. A new `/view-image` lists the current window's images; `Enter` views
+  one and `Esc back` returns to the same list.
+
+- **Ctrl+V, `/attach` and `/image` target the live editor and support inline
+  completion.** Consecutive pastes commit in trigger order; text is inserted at
+  the caret without sending or overwriting, and images get canonical
+  placeholders. If the session, owner or editor seat changes, the old result
+  never reaches the new draft. `/attach`, `/image` and Ctrl+V share the editor
+  seat, draft store and Client cwd/file limits, and the TSP renderer can run
+  them too. Typing `/ima` or `/att` anywhere in the body opens an inline
+  dropdown; choosing a file replaces only the current fragment, keeps the
+  surrounding text, never sends the draft, and one Undo restores the path text.
+
+- **Delivered-files tail and the `/deliverables` panel.** A final answer's
+  `present` files render as a compact tail of at most four files, two rows each
+  (path relative to the current display subject's workspace plus description);
+  beyond four it ends in `+N more · /deliverables`, and fullscreen can click
+  `Browse all` and per-file `Details`. `/deliverables` has Files/Turns/Details
+  with `↑↓`, `Enter`, `/` filtering, `T` to switch Turn, `C` to copy the raw
+  Host path and `Esc` to go back or close. Details reads one 120-line page of
+  Host text, never reads bytes for binary/document suffixes, and restarts from
+  the beginning when the file changes. Panel text is mouse-selectable, the panel
+  is centered, and a resize keeps its state.
+
+- **Chart/SVG tools, the Visual tools switch and publication.** The resident
+  `dsh_pi_tui_chart` (bars/spark, 2–12 labelled values and an optional unit) and
+  `dsh_pi_tui_svg` (self-contained static SVG from a restricted safe subset)
+  draw inside the existing Tool Card natively on Tern or with exact values,
+  description or a bounded raster PNG elsewhere. `Settings → Tools → Visual
+  tools` (default On) switches `dsh_pi_tui_chart`, `dsh_pi_tui_svg` and
+  `present_visual` together. The model may publish 1–8 successful charts/SVGs
+  from earlier steps of this session with `visual-ref-v1:sv1_…`; publication
+  adds no session event, and figures appear in place or in order before the
+  delivered files, at most once per ref. PiTUI offers `Copy Data`,
+  `View`/`Copy SVG`, `Alt+V`/`Alt+C`/`Alt+O` and a fullscreen SVG reader;
+  `/copy` copies the visible display body without a consumed marker line.
+
+- **The experimental TSP renderer supports native tool cards, Work Hub, images
+  and published figures.** Tool heads use the tool's declared kind
+  (path/pattern), `run_code` children render as a `Child calls · N` tree,
+  streaming arguments show a `Preparing <Tool>…` row, and tool-result images
+  render natively in block order. `/tasks` and `/subagents` open the Work Hub
+  (Needs attention / Subagents / Jobs); `Enter`/`View details` opens the
+  read-only Work Details reader and `Back` returns to the same selection.
+  Ctrl+V images, Dock draft thumbnails and historical images keep their order;
+  published charts/SVGs render in place with a real `Copy` button and
+  `Alt+V`/`Alt+C` select and copy.
+
+### Fixed
+
+- **Hot reload no longer exits a running TUI.** A re-mounted startup row used to
+  mistake "the launcher was already ready" for "the TUI never mounted" and end
+  the process with `required TUI surface did not mount`. Only a row that really
+  witnessed that startup now makes the verdict; a cold start with a missing TUI
+  still exits non-zero with guidance.
+
+- **Shift+Tab no longer fails to switch permission presets.** The official
+  `/permission` command used to receive an `undefined` signal and throw
+  `Cannot read properties of undefined (reading 'aborted')`, leaving the preset
+  unchanged. The existing lifecycle AbortSignal is now used on Direct and
+  Remote alike.
+
+- **Releasing an old extension handle no longer deletes a newer registration.**
+  The six Stable registration slots — theme, autocomplete, keybinding, message
+  renderer, tool renderer and editor — now release exactly once. Explicit
+  `dispose()`, plugin Fiber unload and failed-registration rollback share one
+  one-shot cleanup, so a newer registration, its health record and the theme
+  unload notification are unaffected by an old handle.
+
 ## [0.5.3] - 2026-10-20
 
 ### Install and version pairing
@@ -1914,7 +2079,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3
 [0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1
 [0.5.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.0...v0.5.1

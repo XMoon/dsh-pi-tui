@@ -1,0 +1,529 @@
+/**
+ * PR-D: the pure TSP projection of the two visual tool results.
+ *
+ * The mapper is a pure function: the chart draws only when the pane
+ * negotiated the `chart` kind, the SVG image node appears only for a prepared
+ * `ready` state, and the machine line is never displayed. No session, loader
+ * or SDK is involved.
+ * @module @xmoon76/dsh-pi-tui/tern-tsp-visual-facts.test
+ */
+
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { TranscriptToolMessage } from '../../src/domain/transcript/types.ts'
+import { textOf } from '../../src/domain/transcript/folder.ts'
+import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
+import { isPostTurnReplayEvidence, markPostTurnReplayEvidence } from '../../src/domain/transcript/semantics.ts'
+import { chartContentBlocks, chartFactFromArgs } from '../../src/domain/visual/chart.ts'
+import { svgContentBlocks, svgFactFromArgs } from '../../src/domain/visual/svg.ts'
+import { projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import {
+  TranscriptNodeKeys,
+  disclosureKeyForToggle,
+  transcriptView,
+  type ToolSvgState,
+} from '../../src/tui/tsp/transcript-view.ts'
+
+const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
+  + '<rect width="64" height="32" fill="#3b82f6"/></svg>'
+
+interface NodeLike {
+  readonly kind: string
+  readonly props: Record<string, unknown>
+  readonly children: readonly NodeLike[]
+}
+
+function collect(view: { children: readonly unknown[] }): NodeLike[] {
+  const out: NodeLike[] = []
+  const walk = (node: NodeLike): void => {
+    out.push(node)
+    for (const child of node.children) walk(child)
+  }
+  for (const child of view.children) walk(child as NodeLike)
+  return out
+}
+
+function toolRow(name: string, args: unknown, blocks: readonly ContentBlock[], overrides: Partial<TranscriptToolMessage> = {}): TranscriptToolMessage {
+  return {
+    kind: 'tool',
+    turn: 1,
+    name,
+    args: JSON.stringify(args),
+    result: textOf(blocks),
+    status: 'ok',
+    resultBlocks: blocks,
+    callId: 'call-1',
+    ...overrides,
+  }
+}
+
+function renderMany(messages: readonly TranscriptToolMessage[], options: {
+  chartKindsSupported?: boolean
+  toolSvgStates?: ReadonlyMap<TranscriptToolMessage, ToolSvgState>
+  expandedToolKeys?: ReadonlySet<string>
+} = {}): NodeLike[] {
+  const view = transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys(), options)
+  return collect(view as unknown as { children: readonly unknown[] })
+}
+
+function render(message: TranscriptToolMessage, options: {
+  chartKindsSupported?: boolean
+  toolSvgStates?: ReadonlyMap<TranscriptToolMessage, ToolSvgState>
+  expandedToolKeys?: ReadonlySet<string>
+  scopePrefix?: string
+} = {}): NodeLike[] {
+  const view = transcriptView(projectTranscriptStructure([message]), new TranscriptNodeKeys(), options)
+  return collect(view as unknown as { children: readonly unknown[] })
+}
+
+function chartMessage(): TranscriptToolMessage {
+  const args = {
+    kind: 'bars' as const,
+    title: 'Request latency',
+    unit: 'ms',
+    series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+  }
+  return toolRow('dsh_pi_tui_chart', args, chartContentBlocks(chartFactFromArgs(args)))
+}
+
+function svgMessage(): TranscriptToolMessage {
+  const args = { title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }
+  return toolRow('dsh_pi_tui_svg', args, svgContentBlocks(svgFactFromArgs(args)))
+}
+
+test('a negotiated chart kind emits one native chart plus the exact value rows', () => {
+  const nodes = render(chartMessage(), { chartKindsSupported: true })
+  const chart = nodes.find(node => node.kind === 'chart')
+  assert.ok(chart !== undefined, `chart node missing: ${nodes.map(n => n.kind).join(',')}`)
+  assert.equal(chart.props.kind, 'bars')
+  assert.equal(chart.props.summary, 'Request latency (ms)')
+  assert.deepEqual(chart.props.series, [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }])
+  const text = JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text))
+  assert.match(text, /p50 {2}42 ms/u)
+  assert.match(text, /2 supplied values/u)
+  assert.doesNotMatch(JSON.stringify(nodes), /visual-v1:/u, 'the machine line is never a displayed node')
+})
+
+test('without the chart kind the same row emits text only', () => {
+  const nodes = render(chartMessage(), { chartKindsSupported: false })
+  assert.equal(nodes.some(node => node.kind === 'chart'), false)
+  const text = JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text))
+  assert.match(text, /p50 {2}42 ms/u)
+})
+
+test('a replaced chart content renders the replacement and no chart node', () => {
+  const nodes = render(toolRow('dsh_pi_tui_chart', {}, [{ type: 'text', text: 'REPLACED by policy' }]), { chartKindsSupported: true })
+  assert.equal(nodes.some(node => node.kind === 'chart'), false)
+  assert.match(JSON.stringify(nodes), /REPLACED by policy/u)
+})
+
+test('a ready SVG state emits the native image with the title alt and the description', () => {
+  const message = svgMessage()
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'ready',
+    blobId: 'a'.repeat(64),
+    request: () => 'a'.repeat(64),
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+  }]])
+  const nodes = render(message, { toolSvgStates: states })
+  const image = nodes.find(node => node.kind === 'image')
+  assert.ok(image !== undefined, `image node missing: ${nodes.map(n => n.kind).join(',')}`)
+  assert.equal(image.props.blob, 'a'.repeat(64))
+  assert.equal(image.props.alt, 'Service topology')
+  assert.match(JSON.stringify(nodes), /Gateway -> App -> Database/u)
+  assert.doesNotMatch(JSON.stringify(nodes), /visual-v1:/u)
+})
+
+test('an unauthorized SVG row keeps the text and explains the absence', () => {
+  const message = svgMessage()
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, { state: 'invalid', reason: 'SVG result credential is missing' }]])
+  const nodes = render(message, { toolSvgStates: states })
+  assert.equal(nodes.some(node => node.kind === 'image'), false)
+  assert.match(JSON.stringify(nodes), /Drawing unavailable/u)
+  assert.match(JSON.stringify(nodes), /Gateway -> App -> Database/u)
+})
+
+test('a pane without native image/blob capability emits no image node', () => {
+  const message = svgMessage()
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'unsupported',
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+  }]])
+  const nodes = render(message, { toolSvgStates: states })
+  assert.equal(nodes.some(node => node.kind === 'image'), false)
+  assert.match(JSON.stringify(nodes), /Native SVG display unavailable/u)
+})
+
+test('the no-chart text path carries the FINAL fact title', () => {
+  const nodes = render(chartMessage(), { chartKindsSupported: false })
+  assert.match(JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text)), /Request latency \(ms\)/u)
+})
+
+test('a blocked/error chart result never emits a chart node', () => {
+  const message = chartMessage()
+  const nodes = render({ ...message, status: 'error' }, { chartKindsSupported: true })
+  assert.equal(nodes.some(node => node.kind === 'chart'), false)
+  assert.match(JSON.stringify(nodes), /Request latency/u)
+})
+
+test('a blocked/error SVG result never emits an image node even with a ready state', () => {
+  const message = svgMessage()
+  const blocked: TranscriptToolMessage = { ...message, status: 'error' }
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[blocked, {
+    state: 'ready', blobId: 'b'.repeat(64), request: () => 'b'.repeat(64),
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+  }]])
+  const nodes = render(blocked, { toolSvgStates: states })
+  assert.equal(nodes.some(node => node.kind === 'image'), false)
+  assert.match(JSON.stringify(nodes), /Gateway -> App -> Database/u)
+})
+
+test('a PTC SVG child exposes its admitted source node (not only a promise)', () => {
+  const child = svgMessage()
+  child.subCallId = 'call-1:ptc:2'
+  const parent: TranscriptToolMessage = {
+    kind: 'tool', turn: 1, name: 'run_code', args: '{}', result: 'parent', status: 'ok',
+    callId: 'call-parent', resultBlocks: [{ type: 'text', text: 'parent' }], subCalls: [child],
+  }
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[child, {
+    state: 'ready', blobId: 'c'.repeat(64), request: () => 'c'.repeat(64),
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+  }]])
+  const nodes = render(parent, { toolSvgStates: states })
+  const codeText = JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text))
+  assert.match(codeText, /<svg/u, `the child source node is present: ${codeText}`)
+  assert.equal(nodes.some(node => node.kind === 'image'), true)
+})
+
+test('a PTC child carries its own chart node and never the parent result', () => {
+  const child = chartMessage()
+  child.subCallId = 'call-1:ptc:1'
+  const parent: TranscriptToolMessage = {
+    kind: 'tool',
+    turn: 1,
+    name: 'run_code',
+    args: '{}',
+    result: 'parent result',
+    status: 'ok',
+    callId: 'call-parent',
+    resultBlocks: [{ type: 'text', text: 'parent result' }],
+    subCalls: [child],
+  }
+  const nodes = render(parent, { chartKindsSupported: true })
+  assert.equal(nodes.filter(node => node.kind === 'chart').length, 1, 'exactly one child chart node')
+  assert.match(JSON.stringify(nodes), /p50 {2}42 ms/u)
+})
+
+
+test('a real durable PTC dispatch folds and projects the nested SVG source/image', () => {
+  const args = { title: 'PTC topology', description: 'Nested gateway', svg: SVG_SOURCE }
+  const fact = svgFactFromArgs(args)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'code-1', name: 'run_code', arguments: '{}' } },
+    { type: 'tool/ptc-dispatch-start', seq: 2, time: 1, data: {
+      rootCallId: 'code-1', parentCallId: 'code-1', subCallId: 'code-1:code:1',
+      name: 'dsh_pi_tui_svg', arguments: args,
+    } },
+    { type: 'tool/ptc-dispatch', seq: 3, time: 1, data: {
+      rootCallId: 'code-1', parentCallId: 'code-1', subCallId: 'code-1:code:1',
+      name: 'dsh_pi_tui_svg', arguments: args, isError: false, content: svgContentBlocks(fact),
+    } },
+    { type: 'tool/result', seq: 4, time: 1, data: {
+      turn: 0, step: 0,
+      message: { id: 'msg-1', role: 'tool', toolCallId: 'code-1', content: [{ type: 'text', text: '(no output)' }], source: { kind: 'tool', callId: 'code-1' } },
+    } },
+  ] as never)
+  const parent = folder.messages()[0] as TranscriptToolMessage
+  assert.equal(parent.subCalls?.[0]?.name, 'dsh_pi_tui_svg')
+  const child = parent.subCalls![0]!
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[child, {
+    state: 'ready', blobId: 'd'.repeat(64), request: () => 'd'.repeat(64), fact, source: SVG_SOURCE,
+  }]])
+  const nodes = render(parent, { toolSvgStates: states })
+  assert.equal(nodes.some(node => node.kind === 'image'), true)
+  assert.match(JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text)), /<svg/u)
+  assert.match(JSON.stringify(nodes), /Nested gateway/u)
+})
+
+
+test('a no-image PTC SVG child still exposes the admitted source text', () => {
+  const args = { title: 'PTC topology', description: 'Nested gateway', svg: SVG_SOURCE }
+  const fact = svgFactFromArgs(args)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'tool/call', seq: 1, time: 1, data: { turn: 0, step: 0, callId: 'code-2', name: 'run_code', arguments: '{}' } },
+    { type: 'tool/ptc-dispatch-start', seq: 2, time: 1, data: {
+      rootCallId: 'code-2', parentCallId: 'code-2', subCallId: 'code-2:code:1',
+      name: 'dsh_pi_tui_svg', arguments: args,
+    } },
+    { type: 'tool/ptc-dispatch', seq: 3, time: 1, data: {
+      rootCallId: 'code-2', parentCallId: 'code-2', subCallId: 'code-2:code:1',
+      name: 'dsh_pi_tui_svg', arguments: args, isError: false, content: svgContentBlocks(fact),
+    } },
+    { type: 'tool/result', seq: 4, time: 1, data: {
+      turn: 0, step: 0,
+      message: { id: 'msg-2', role: 'tool', toolCallId: 'code-2', content: [{ type: 'text', text: '(no output)' }], source: { kind: 'tool', callId: 'code-2' } },
+    } },
+  ] as never)
+  const parent = folder.messages()[0] as TranscriptToolMessage
+  const child = parent.subCalls![0]!
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[child, { state: 'unsupported', fact, source: SVG_SOURCE }]])
+  const nodes = render(parent, { toolSvgStates: states })
+  assert.equal(nodes.some(node => node.kind === 'image'), false)
+  assert.match(JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text)), /<svg/u)
+  assert.match(JSON.stringify(nodes), /Native SVG display unavailable/u)
+})
+
+
+test('a legal visual-v1: title keeps the chart credential in the TSP projection', () => {
+  const args = {
+    kind: 'bars' as const,
+    title: 'visual-v1: CPU usage',
+    unit: 'ms',
+    series: [{ label: 'p50', value: 42 }, { label: 'p99', value: 70 }],
+  }
+  const fact = chartFactFromArgs(args)
+  assert.ok(fact !== undefined)
+  const nodes = render(toolRow('dsh_pi_tui_chart', args, chartContentBlocks(fact)), { chartKindsSupported: true })
+  const chart = nodes.find(node => node.kind === 'chart')
+  assert.ok(chart !== undefined)
+  assert.equal(chart.props.summary, 'visual-v1: CPU usage (ms)')
+  const text = JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text))
+  assert.match(text, /42 ms/u)
+  assert.doesNotMatch(JSON.stringify(nodes), /visual-v1:\{"type"/u)
+})
+
+test('a legal visual-v1: title/description keeps the SVG credential in the TSP projection', () => {
+  const args = { title: 'visual-v1: topology', description: 'visual-v1: Gateway', svg: SVG_SOURCE }
+  const fact = svgFactFromArgs(args)
+  assert.ok(fact !== undefined)
+  const message = toolRow('dsh_pi_tui_svg', args, svgContentBlocks(fact))
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'ready',
+    blobId: 'e'.repeat(64),
+    request: () => 'e'.repeat(64),
+    fact,
+    source: SVG_SOURCE,
+  }]])
+  const nodes = render(message, { toolSvgStates: states })
+  const image = nodes.find(node => node.kind === 'image')
+  assert.ok(image !== undefined)
+  assert.equal(image.props.alt, 'visual-v1: topology')
+  const text = JSON.stringify(nodes.filter(node => node.kind === 'code').map(node => node.props.text))
+  assert.match(text, /visual-v1: Gateway/u)
+})
+
+
+test('the TSP SVG image requests its blob only when the image node is projected', () => {
+  const message = svgMessage()
+  let requests = 0
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'ready',
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+    request: () => { requests += 1; return '9'.repeat(64) },
+  }]])
+  assert.equal(requests, 0, 'authorization alone must not send the blob')
+  const nodes = render(message, { toolSvgStates: states })
+  assert.equal(requests, 1)
+  const image = nodes.find(node => node.kind === 'image')
+  assert.ok(image !== undefined)
+  assert.equal(image.props.blob, '9'.repeat(64))
+  const blocked: TranscriptToolMessage = { ...message, status: 'error' }
+  const blockedStates = new Map<TranscriptToolMessage, ToolSvgState>([[blocked, {
+    state: 'ready',
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+    request: () => { throw new Error('the blocked row must not request its blob') },
+  }]])
+  render(blocked, { toolSvgStates: blockedStates })
+})
+
+
+test('a ready SVG card starts collapsed and requests its blob only when expanded', () => {
+  const message = svgMessage()
+  let requests = 0
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'ready',
+    fact: svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE }),
+    source: SVG_SOURCE,
+    request: () => { requests += 1; return '9'.repeat(64) },
+  }]])
+  const collapsed = render(message, { toolSvgStates: states, expandedToolKeys: new Set() })
+  assert.equal(collapsed.some(node => node.kind === 'image'), false)
+  assert.equal(requests, 0, 'a collapsed card must not request the blob')
+  assert.equal(collapsed.find(node => node.kind === 'tool')?.props.collapsed, true)
+  const expanded = render(message, { toolSvgStates: states, expandedToolKeys: new Set(['msg-1']) })
+  assert.equal(requests, 1)
+  const image = expanded.find(node => node.kind === 'image')
+  assert.equal(image?.props.blob, '9'.repeat(64))
+  assert.equal(expanded.find(node => node.kind === 'tool')?.props.collapsed, false)
+})
+
+
+test('PTC child expansion identity is scoped to its parent card', () => {
+  const subCallId = 'reused-parent:code:1'
+  const firstArgs = { title: 'Figure 1', description: 'figure one', svg: SVG_SOURCE }
+  const secondArgs = { title: 'Figure 2', description: 'figure two', svg: SVG_SOURCE.replace('#3b82f6', '#ef4444') }
+  const firstFact = svgFactFromArgs(firstArgs)
+  const secondFact = svgFactFromArgs(secondArgs)
+  assert.ok(firstFact !== undefined && secondFact !== undefined)
+  const childA = toolRow('dsh_pi_tui_svg', firstArgs, svgContentBlocks(firstFact), { subCallId })
+  const childB = toolRow('dsh_pi_tui_svg', secondArgs, svgContentBlocks(secondFact), { subCallId, turn: 2 })
+  const parent = (turn: number, child: TranscriptToolMessage): TranscriptToolMessage => ({
+    kind: 'tool',
+    turn,
+    name: 'run_code',
+    args: '{}',
+    result: 'parent',
+    status: 'ok',
+    callId: 'reused-parent',
+    resultBlocks: [{ type: 'text', text: 'parent' }],
+    subCalls: [child],
+  })
+  const parentA = parent(1, childA)
+  const parentB = parent(2, childB)
+  let requestsA = 0
+  let requestsB = 0
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([
+    [childA, { state: 'ready', fact: firstFact, source: firstArgs.svg, request: () => { requestsA += 1; return 'a'.repeat(64) } }],
+    [childB, { state: 'ready', fact: secondFact, source: secondArgs.svg, request: () => { requestsB += 1; return 'b'.repeat(64) } }],
+  ])
+  const nodes = renderMany([parentA, parentB], {
+    toolSvgStates: states,
+    // The parent card keys are msg-1 / msg-2; only the FIRST parent's child is
+    // expanded. The disclosure path is parent-scoped; the SDK child key stays
+    // the existing sub-<subCallId> B2 identity.
+    expandedToolKeys: new Set([`msg-1/sub-${subCallId}`]),
+  })
+  const images = nodes.filter(node => node.kind === 'image')
+  assert.equal(images.length, 1)
+  assert.equal(images[0]?.props.alt, 'Figure 1')
+  assert.equal(requestsA, 1)
+  assert.equal(requestsB, 0, "the sibling parent's child must stay collapsed and blob-free")
+  const childTools = nodes.filter(node => node.kind === 'tool' && typeof node.props.key === 'string' && String(node.props.key).startsWith('sub-'))
+  assert.equal(childTools.length, 2)
+  assert.equal(childTools[0]?.props.key, `sub-${subCallId}`, 'the B2 SDK child node key is unchanged')
+  assert.equal(childTools[0]?.props.collapsed, false)
+  assert.equal(childTools[1]?.props.key, `sub-${subCallId}`)
+  assert.equal(childTools[1]?.props.collapsed, true)
+})
+
+
+test('a stale toggle from an old projection scope is ignored', () => {
+  // Current s1 scope: the top-level card and its parent-scoped child path.
+  assert.equal(disclosureKeyForToggle('root.s1-block.msg-1', 'msg-1', 's1-'), 'msg-1')
+  assert.equal(disclosureKeyForToggle('root.s1-block.msg-1.sub-abc', 'sub-abc', 's1-'), 'msg-1/sub-abc')
+  // A late s0 event with the same msg-N must not expand the new projection.
+  assert.equal(disclosureKeyForToggle('root.s0-block.msg-1', 'msg-1', 's1-'), undefined)
+  assert.equal(disclosureKeyForToggle('root.s0-block.msg-1.sub-abc', 'sub-abc', 's1-'), undefined)
+  assert.equal(disclosureKeyForToggle('root.s0-block.msg-1', 'msg-1', ''), undefined)
+})
+
+test('disclosure identity handles Work, standalone and dotted PTC keys', () => {
+  assert.equal(disclosureKeyForToggle('main.s1-work-msg-1.msg-2', 'msg-2', 's1-'), 'msg-2')
+  assert.equal(disclosureKeyForToggle('main.s1-msg-2', 's1-msg-2', 's1-'), 'msg-2')
+  assert.equal(
+    disclosureKeyForToggle('main.s1-work-msg-1.msg-2.sub-call.foo:code:1', 'sub-call.foo:code:1', 's1-'),
+    'msg-2/sub-call.foo:code:1',
+  )
+  assert.equal(
+    disclosureKeyForToggle('main.s1-msg-2.sub-call.foo:code:1', 'sub-call.foo:code:1', 's1-'),
+    'msg-2/sub-call.foo:code:1',
+  )
+  assert.equal(disclosureKeyForToggle('main.s1-work-msg-1.msg-2.sub-a.sub-b', 'sub-b', 's1-'), 'msg-2/sub-a/sub-b')
+  assert.equal(disclosureKeyForToggle('main.s0-work-msg-1.msg-2', 'msg-2', 's1-'), undefined)
+  assert.equal(disclosureKeyForToggle('main.s0-msg-2', 's0-msg-2', 's1-'), undefined)
+  assert.equal(disclosureKeyForToggle('main.s1-msg-2', 's1-msg-2', ''), undefined)
+})
+
+test('a standalone SVG card is disclosed by its scoped msg key', () => {
+  const message = svgMessage()
+  markPostTurnReplayEvidence(message)
+  const fact = svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App -> Database', svg: SVG_SOURCE })
+  assert.ok(fact !== undefined)
+  let requests = 0
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'ready',
+    fact,
+    source: SVG_SOURCE,
+    request: () => { requests += 1; return '7'.repeat(64) },
+  }]])
+  const expanded = render(message, {
+    scopePrefix: 's1-',
+    toolSvgStates: states,
+    expandedToolKeys: new Set(['msg-1']),
+  })
+  assert.equal(requests, 1)
+  const image = expanded.find(node => node.kind === 'image')
+  assert.equal(image?.props.blob, '7'.repeat(64))
+  const tool = expanded.find(node => node.kind === 'tool')
+  assert.equal(tool?.props.key, 's1-msg-1', 'the standalone SDK key keeps the scope prefix')
+  assert.equal(tool?.props.collapsed, false)
+  const collapsed = render(message, {
+    scopePrefix: 's1-',
+    toolSvgStates: states,
+    expandedToolKeys: new Set(),
+  })
+  assert.equal(collapsed.some(node => node.kind === 'image'), false)
+  assert.equal(collapsed.find(node => node.kind === 'tool')?.props.collapsed, true)
+  assert.equal(requests, 1, 'the collapsed standalone card does not request the blob')
+})
+
+
+test('a real post-turn standalone SVG card resolves its scoped disclosure', () => {
+  const args = { title: 'Standalone', description: 'late figure', svg: SVG_SOURCE }
+  const fact = svgFactFromArgs(args)
+  assert.ok(fact !== undefined)
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'turn/start', seq: 1, time: 1, data: { turn: 1 } },
+    { type: 'step/start', seq: 2, time: 1, data: { turn: 1, step: 0 } },
+    { type: 'turn/end', seq: 3, time: 1, data: { turn: 1, reason: { kind: 'completed' } } },
+    { type: 'tool/call', seq: 4, time: 1, data: { turn: 1, step: 0, callId: 'late-svg', name: 'dsh_pi_tui_svg', arguments: JSON.stringify(args) } },
+    { type: 'tool/result', seq: 5, time: 1, data: {
+      turn: 1, step: 0,
+      message: {
+        id: 'late-svg-result', role: 'tool', toolCallId: 'late-svg',
+        content: svgContentBlocks(fact), source: { kind: 'tool', callId: 'late-svg' },
+      },
+    } },
+  ] as never)
+  const messages = folder.messages()
+  const message = messages[0]
+  assert.ok(message !== undefined && message.kind === 'tool')
+  assert.equal(isPostTurnReplayEvidence(message), true)
+  let requests = 0
+  const states = new Map<TranscriptToolMessage, ToolSvgState>([[message, {
+    state: 'ready',
+    fact,
+    source: SVG_SOURCE,
+    request: () => { requests += 1; return '8'.repeat(64) },
+  }]])
+  const view = transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys(), {
+    scopePrefix: 's1-',
+    toolSvgStates: states,
+    expandedToolKeys: new Set(['msg-1']),
+  })
+  const nodes = collect(view as unknown as { children: readonly unknown[] })
+  const tool = nodes.find(node => node.kind === 'tool')
+  assert.equal(tool?.props.key, 's1-msg-1', 'the standalone SDK key stays scoped')
+  assert.equal(tool?.props.collapsed, false)
+  assert.equal(nodes.some(node => node.kind === 'image'), true)
+  assert.equal(requests, 1)
+  const collapsedView = transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys(), {
+    scopePrefix: 's1-',
+    toolSvgStates: states,
+    expandedToolKeys: new Set(),
+  })
+  const collapsed = collect(collapsedView as unknown as { children: readonly unknown[] })
+  assert.equal(collapsed.some(node => node.kind === 'image'), false)
+  assert.equal(collapsed.find(node => node.kind === 'tool')?.props.collapsed, true)
+  assert.equal(requests, 1, 'the collapsed standalone card does not request the blob')
+})

@@ -340,9 +340,21 @@ async function main() {
       ['vendored pi-tui typecheck', ['typecheck:fork']],
       ['vendored pi-tui tests', ['test:fork']],
       ['TUI build', ['build']],
-      ['TUI bundle typecheck', ['typecheck:bundle']],
-      ['TUI unit tests', ['test:bundle']],
-      ['documentation tests', ['test:docs']],
+      // The PRODUCT suite runs inside `prepack` (the packaging safety gate
+      // must stay self-contained), so running `test:bundle` here would run
+      // the whole product suite TWICE against the same workspace and the same
+      // dependency graph. The TOOLING suite is not part of `prepack`, so it
+      // still needs its own run here.
+      //
+      // `typecheck:bundle` is part of `prepack` too, so it runs there
+      // exactly once — an explicit run here would repeat it against the
+      // same workspace and the same dependency graph.
+      ['TUI tooling tests', ['test:tooling']],
+      ['tmux terminal tooling tests', ['test:tmux']],
+      // `gate:pi-surface-compat` is the re-vendor HARD GATE. It overlaps the
+      // product suite's own glob, but the independent entry is deliberately
+      // kept: a re-vendor contract must not depend on the product suite's
+      // discovery staying unchanged.
       ['Pi surface compatibility gate', ['gate:pi-surface-compat']],
       ['TUI candidate build and pack', ['pack:release']],
     ]) await run(PNPM_COMMAND, args, workspace, label, sourcePnpmEnv)
@@ -373,7 +385,7 @@ async function main() {
       ], workspace, 'official DSH preset matrix', sourcePnpmEnv)
       await run(process.execPath, [join(workspace, 'scripts', 'dsh-runtime-boundary-smoke.mjs'), candidate], workspace, 'old DSH boundary', sourcePnpmEnv)
     }
-    console.log('pi2dsh Gate B is DISABLED in CI (the published pi2dsh@0.24.0 bridge is runtime-incompatible with the alpha.4 baseline); re-enable per the ecosystem-compat job comment when a compatible pi2dsh release lands')
+    console.log('pi2dsh Gate B runs in the ecosystem-compat CI job (both modes; published DSH + pi2dsh from the registry)')
     console.log(`DSH Source Compatibility: CODE COMPLETE candidate ${basename(candidate)}`)
   } finally {
     if (root !== undefined) {

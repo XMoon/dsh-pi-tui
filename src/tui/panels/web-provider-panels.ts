@@ -16,7 +16,8 @@
  * @module @xmoon76/dsh-pi-tui/tui/panels/web-provider-panels
  */
 
-import { Input, matchesKey, truncateToWidth, type Component } from '@xmoon76/pi-tui'
+import { Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from '@xmoon76/pi-tui'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { color } from '../theme/runtime.ts'
 
 /**
@@ -67,6 +68,12 @@ export class WebEndpointPanel implements Component {
   private readonly save: (url: string) => Promise<void>
   private readonly requestRender: () => void
   private readonly runTask: WebPanelTaskRunner
+  /** The total line budget the HOST grants this panel (its semantic hint
+   *  included). `undefined` = the legacy submenu grant: every line paints. */
+  private maxRows: number | undefined
+  /** Whether the LAST render painted the complete trust disclosure: only then
+   *  may a Confirm be dispatched. */
+  private confirmEnabled = false
   private state:
     | { readonly kind: 'hint' | 'saving' }
     | { readonly kind: 'error'; readonly verdict: 'not-saved' | 'outcome-unknown'; readonly message: string }
@@ -101,6 +108,17 @@ export class WebEndpointPanel implements Component {
     this.done(undefined)
   }
 
+  /**
+   * The host's row-budget seam: the granted lines INCLUDE this panel's own
+   * semantic hint line, which is the last line of `render()`. The mandatory
+   * facts (the draft input and the external-send warning) always survive; a
+   * short grant drops the title, the official base and the status line instead
+   * of painting half a sentence with a different meaning.
+   */
+  setMaxRows(rows: number): void {
+    this.maxRows = Math.max(1, Math.floor(rows))
+  }
+
   handleInput(data: string): void {
     if (this.settled) return
     if (matchesKey(data, 'escape')) {
@@ -120,26 +138,111 @@ export class WebEndpointPanel implements Component {
 
   invalidate(): void {}
 
+  /**
+   * The complete trust disclosure. It is deliberately SHORT enough to wrap into
+   * three whole lines at the 44-column floor while still stating all three
+   * load-bearing facts: a trusted https base, the API key AND query are sent
+   * there, and the URL shape is not a trust check. The page's read-only Detail
+   * carries the longer explanation.
+   */
+  private static readonly TRUST_WARNING =
+    'Only confirm a trusted https base: it receives the API key and the query. The URL shape is not a trust check.'
+
   render(width: number): string[] {
-    return [
-      row(color.textStrong('Search / Fetch API Endpoint'), width),
-      ...this.input.render(width),
-      row(this.statusLine(), width),
-      row(`${color.textDim('Changing this sends the DeepSeek API credential and the query to a different endpoint; both the Search and Fetch APIs use it. Only a trusted https base should be confirmed.')}`, width),
-      row(`${color.textDim('Official base: ')}${color.text('https://api.deepseek.com/v1/tools')}${color.textDim('; /search and /fetch are appended.')}`, width),
-      row(color.textDim('Enter confirm · Esc cancel'), width),
-    ]
+    const title = row(color.textStrong('Search / Fetch API Endpoint'), width)
+    const draft = this.input.render(width).map(line => row(line, width))
+    const savingLine = this.state.kind === 'saving' ? row(this.statusLine(width), width) : undefined
+    const errorLine = this.state.kind === 'error' ? row(this.statusLine(width), width) : undefined
+    const warning = wrapTextWithAnsi(WebEndpointPanel.TRUST_WARNING, Math.max(1, width - 2))
+      .map(line => row(color.textDim(line), width))
+    const base = wrapTextWithAnsi(
+      `Official base: https://api.deepseek.com/v1/tools; /search and /fetch are appended.`,
+      Math.max(1, width - 2),
+    ).map(line => row(line.startsWith('Official base:')
+      ? `${color.textDim('Official base: ')}${color.text(line.slice('Official base: '.length))}`
+      : color.textDim(line), width))
+    const hint = row(color.textDim('Enter confirm · Esc cancel'), width)
+    if (this.maxRows === undefined) {
+      // The legacy submenu grant is unbounded: keep the full presentation.
+      this.confirmEnabled = true
+      return [title, ...draft, row(this.statusLine(width), width), ...warning, ...base, hint]
+    }
+    const bodyBudget = Math.max(0, this.maxRows - 1)
+    // The disclosure is MANDATORY: a Confirm may only exist while it is fully
+    // painted. A dispatched write shows `Saving…` in the bar (it can never be
+    // cancelled); an error keeps the confirm hint when its verdict fits in the
+    // body, so the draft can be corrected and re-submitted.
+    const mandatory = draft.length + warning.length
+    this.confirmEnabled = mandatory <= bodyBudget
+    const optional = new Set<string>()
+    if (this.confirmEnabled) {
+      let spare = bodyBudget - mandatory
+      const take = (lines: readonly string[]): void => {
+        if (spare <= 0) return
+        for (const line of lines) {
+          if (spare <= 0) return
+          optional.add(line)
+          spare -= 1
+        }
+      }
+      // Display order is title → draft → warning → error → base → idle hint; the
+      // PRIORITY order below only decides which optional lines survive.
+      if (errorLine !== undefined) take([errorLine])
+      take([title])
+      take(base)
+      if (savingLine === undefined && errorLine === undefined) take([row(this.statusLine(width), width)])
+    }
+    const body: string[] = []
+    const pushOptional = (line: string): void => { if (optional.has(line)) body.push(line) }
+    pushOptional(title)
+    body.push(...draft, ...warning)
+    if (errorLine !== undefined) pushOptional(errorLine)
+    for (const line of base) pushOptional(line)
+    const idleLine = savingLine === undefined && errorLine === undefined
+      ? row(this.statusLine(width), width)
+      : undefined
+    if (idleLine !== undefined) pushOptional(idleLine)
+    const bar = !this.confirmEnabled
+      ? this.tooShortBar(width)
+      : savingLine ?? (errorLine !== undefined && !optional.has(errorLine) ? errorLine : hint)
+    return [...body.slice(0, bodyBudget), bar]
   }
 
-  private statusLine(): string {
+  /**
+   * The bar of a grant too short for the complete trust disclosure. It must not
+   * read like a cancel affordance once a write is DISPATCHED (Esc only closes
+   * this panel; the Host mutation keeps settling in the command owner), so the
+   * live state word leads and only the idle draft says `Esc cancel`.
+   */
+  private tooShortBar(width: number): string {
+    const enlarge = 'enlarge for the warning'
+    if (this.state.kind === 'saving') return row(color.textDim(`Saving… · ${enlarge}`), width)
+    if (this.state.kind === 'error') {
+      return row(`${verdictWord(this.state.verdict)}${color.textDim(` · ${enlarge}`)}`, width)
+    }
+    return row(color.textDim(`Esc cancel · ${enlarge}`), width)
+  }
+
+  private statusLine(width: number): string {
     if (this.state.kind === 'saving') return color.textDim('Saving…')
     if (this.state.kind === 'error') {
-      return `${verdictWord(this.state.verdict)}${color.textDim(` · ${this.state.message}`)}`
+      // The reason is HOST-origin: sanitize it at this display boundary so a
+      // hostile error can never emit terminal-control instructions.
+      return `${verdictWord(this.state.verdict)}${color.textDim(` · ${sanitizedPhysicalLine(this.state.message)}`)}`
     }
-    return color.textDim('Confirm only a trusted https URL: the saved endpoint receives the credential.')
+    // The idle hint drops WHOLE: a narrow grant keeps the actionable half
+    // instead of painting a truncated sentence.
+    const hint = ['Confirm only a trusted https URL: the saved endpoint receives the credential.',
+      'Confirm only a trusted https URL.', 'Trusted https only.']
+      .find(text => visibleWidth(text) <= width - 2) ?? ''
+    return color.textDim(hint)
   }
 
   private async submit(): Promise<void> {
+    // A Confirm whose mandatory trust disclosure is not fully painted is
+    // refused (the bar states how to reveal it): the human never confirms an
+    // external-send target blind.
+    if (!this.confirmEnabled) return
     if (this.settled || this.state.kind === 'saving') return
     const url = this.input.getValue().trim()
     this.state = { kind: 'saving' }

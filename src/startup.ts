@@ -8,7 +8,7 @@
 
 import { Command } from 'commander'
 import { readFileSync, realpathSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
 import compatMatrix from './dsh-compat-matrix.json' with { type: 'json' }
@@ -27,6 +27,37 @@ import compatMatrix from './dsh-compat-matrix.json' with { type: 'json' }
 // runner's shared `versionAtLeast` was retired (TS8-F2), so this startup-local
 // comparator is the only one and is exercised through the compatibility gate
 // (`harnessCompatEntryFor`) by the startup tests.
+
+/** Launcher-provided process role. The M4-A0 host-only entry sets `host`:
+ * that process composes the production Host rows gated on `tuiStartup` but
+ * deliberately mounts no TUI surface, so this row must not deliver the
+ * TUI-surface verdict (which would exit a healthy Host). Any other value
+ * (including unset) keeps the production TUI startup contract unchanged. */
+const PROCESS_ROLE_ENV = 'DSH_PI_TUI_ROLE'
+
+/** The Host entry's own executable path, written by the entry itself. */
+const HOST_ENTRY_ENV = 'DSH_PI_TUI_HOST_ENTRY'
+
+/**
+ * True only for the real M4-A0 Host entry, never for a regular CLI that merely
+ * inherited the role string. The role alone is not authoritative: the marker
+ * must name the running main module, and that module must be the internal
+ * `local-host.mjs` artifact. This prevents `DSH_PI_TUI_ROLE=host dsh --profile
+ * pi-tui` (or a child CLI spawned by a Host) from bypassing the Direct
+ * TUI-surface verdict.
+ */
+function isHostOnlyRole(): boolean {
+  if (process.env[PROCESS_ROLE_ENV] !== 'host') return false
+  const declaredEntry = process.env[HOST_ENTRY_ENV]
+  const mainEntry = process.argv[1]
+  if (declaredEntry === undefined || declaredEntry === '' || mainEntry === undefined) return false
+  try {
+    const mainReal = realpathSync(mainEntry)
+    return basename(mainReal) === 'local-host.mjs' && realpathSync(declaredEntry) === mainReal
+  } catch {
+    return false
+  }
+}
 
 /** The installed dsh version, resolved from the launcher's real path. */
 function installedDshVersion(): string | undefined {
@@ -105,7 +136,8 @@ export const inject = ['cmdlineArgs']
  * bundle's own version cannot be read, so the message stays truthful.
  *
  * The current line has a minimum of the published npm release
- * dsh-v0.2.1-rc.2. The recovery guidance names the recommended published
+ * dsh-v0.2.1-rc.2 and a recommended upgrade target of the newer
+ * dsh-v0.2.1-rc.4. The recovery guidance names the recommended published
  * upgrade target — which may be NEWER than the floor — and allows its native
  * install scripts. The already-published 0.5.0 line keeps its own
  * rc.1-era contract and remains the compatible fallback for a
@@ -321,12 +353,56 @@ export function apply(ctx: Context): void {
     // having mounted, print the actionable error and exit nonzero. `--help`
     // never reaches this action, and a fatal launcher boot never calls
     // `onReady`, so this cannot mask a real boot failure.
+    //
+    // The handshake judges ONE startup — the one this row registered it for.
+    // The launcher's readiness contract runs a listener registered AFTER
+    // readiness was committed SYNCHRONOUSLY, inside `onReady` itself, and a
+    // listener registered BEFORE the commit runs later, at commit time. That
+    // difference is the only signal this row has about whether it witnessed a
+    // startup at all.
+    //
+    // It matters at runtime: HMR's recomposition replaces this row when the
+    // linked bundle's files changed, and the replacement is applied long after
+    // the launcher committed readiness. The re-applied row therefore observed
+    // NO startup — it cannot judge the one that already happened — but the
+    // synchronous callback used to look exactly like a committed startup
+    // without a TUI, so it exited the running application. The re-applied row
+    // therefore delivers NO verdict: its readiness callback has already run
+    // by the time the row can act, and nothing re-arms it.
+    //
+    // The consequence is deliberate and bounded: a runtime replacement that
+    // never restores the TUI is NOT reported by this handshake. The launcher
+    // owns that outcome (DSH's HMR reports the failed replacement itself and
+    // the profile's own diagnostics carry it); this row only owns the verdict
+    // for a startup it witnessed, which is the cold start.
     let surfaceMounted = false
-    ctx.get('appReady')?.onReady(() => {
-      if (surfaceMounted) return
-      process.stderr.write(`\n${surfaceNotMountedMessage()}\n\n`)
-      ctx.get('appExit')?.(1)
-    })
+    const ready = ctx.get('appReady')
+    if (!isHostOnlyRole() && ready !== undefined) {
+      // The launcher's readiness contract, observed from inside this row:
+      // a listener registered BEFORE the commit runs LATER, so `onReady`
+      // returns before the callback fires; a listener registered AFTER the
+      // commit runs INSIDE `onReady`, so the callback has already fired by
+      // the time it returns. `registrationReturned` is therefore true exactly
+      // when the callback was DEFERRED — the only case in which this row
+      // witnessed a startup and may deliver a verdict about it.
+      let registrationReturned = false
+      const cancel = ready.onReady(() => {
+        // A callback that ran INSIDE `onReady` means the launcher committed
+        // readiness before this row existed. This row witnessed no startup
+        // and owns no startup verdict: the running application keeps running.
+        if (!registrationReturned) return
+        if (surfaceMounted) return
+        process.stderr.write(`\n${surfaceNotMountedMessage()}\n\n`)
+        ctx.get('appExit')?.(1)
+      })
+      registrationReturned = true
+      // The listener is owned by this row. The launcher clears its listener
+      // set when it commits readiness, so a listener that already ran cannot
+      // outlive the commit; this binding therefore covers the OTHER path —
+      // the row is unloaded BEFORE the commit, so the registration must be
+      // cancelled instead of judging a startup the row never witnessed.
+      ctx.effect(() => () => { cancel() }, 'tui-startup readiness handshake')
+    }
     const options = program.opts<{ session?: string; preset?: string }>()
     ctx.provide(TUI_STARTUP_SERVICE, {
       ...(options.session !== undefined ? { sessionId: options.session } : {}),

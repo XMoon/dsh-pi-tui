@@ -1,6 +1,6 @@
 /**
  * Shared frame assertions for the design-language governance tests
- * (`docs/tui-design-language.md` §8 responsive ladder + §11.3.2 frame
+ * (`docs/architecture/design-language.md` §8 responsive ladder + §11.3.2 frame
  * invariants).
  *
  * These are deliberately four narrow helpers over a REAL painted frame: the
@@ -40,11 +40,17 @@ const frameText = (rows: readonly string[]): string =>
  * away." Asserts the last physical row carries the expected bar text, is really
  * painted (its first cell has an RGB foreground), and that no blank trailing row
  * pushed the bar up.
+ *
+ * `firstCell` is the column the bar STARTS at. The caller supplies its
+ * surface's own inset: a full-width bar starts at column 0 (the Settings
+ * workspace's single bar), while a surface that paints its bar inside an inset
+ * passes that first cell.
  */
 export function assertBarIsLastRow(
   rows: readonly string[],
   readColor: (row: number, col: number) => number | undefined,
   expectedBarText: string,
+  firstCell = 0,
 ): void {
   assert.ok(rows.length > 0, 'a frame must paint at least the pinned action bar')
   const last = rows.length - 1
@@ -52,7 +58,7 @@ export function assertBarIsLastRow(
   assert.notEqual(bar.trim(), '', `the physical last row must be the action bar, not a blank row:\n${frameText(rows)}`)
   assert.ok(bar.includes(expectedBarText),
     `the physical last row must carry ${JSON.stringify(expectedBarText)}:\n${frameText(rows)}`)
-  assert.notEqual(readColor(last, 0), undefined,
+  assert.notEqual(readColor(last, firstCell), undefined,
     `the action bar's first cell must be really painted (not a phantom plain row):\n${frameText(rows)}`)
 }
 

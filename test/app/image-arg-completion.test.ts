@@ -1,0 +1,215 @@
+/**
+ * Headless tests for the REAL /image + /attach argument-completion wiring:
+ * the registerTuiCommands → installCompletions → MentionProvider chain must end
+ * with a working completion menu down in the editor (the natural-typing and
+ * Tab flows), exactly like the @ mention menu. The unit tests in
+ * autocomplete-provider.test.ts cover suggestPathArgument in isolation; this file drives
+ * the installed completion surface through the real command registration so
+ * a broken mapping (e.g. getArgumentCompletions dropped on the way into
+ * setCommandCompletions) cannot regress silently.
+ * @module @xmoon76/dsh-pi-tui/image-arg-completion.test
+ */
+
+import assert from 'node:assert/strict'
+import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
+import { createClientCommandRegistry } from '../../src/app/command/client-command-registry.ts'
+import { parseCommand } from '@deepseek-ai/dsh-commands'
+import { afterEach, test } from 'node:test'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
+import { registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
+import { createDiag } from '../../src/runtime/process/diagnostics.ts'
+import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
+import { TuiApp } from '../../src/tui-app.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { sessionScopeFacts } from '../support/session-scope-facts.ts'
+import { DirectCatalogPort } from '../../src/runtime/direct/catalog-direct.ts'
+import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
+import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
+import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
+import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+
+
+/** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
+ * is disposed after each test — the process slot (the vendored fork
+ * keybindings are process-global) is released only by the FINAL dispose,
+ * never by stop() (see src/tui/process-slot.ts). */
+const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+afterEach(() => {
+  disposeStartedApps()
+})
+
+/** A fake commands service whose list() returns the registered defs (the
+ * real dsh service answers commands.list(undefined) with the global layer —
+ * the merge the runner's installCompletions consumes). */
+function fakeCommands(): { commands: { register: (def: { name: string; handler?: unknown; description?: string; input?: { hint?: string } }) => () => void; list: () => { name: string; description?: string; input?: { hint?: string } }[] } } {
+  const defs: { name: string; handler?: unknown; description?: string; input?: { hint?: string } }[] = []
+  const commands = {
+    register: (def: { name: string; handler?: unknown; description?: string; input?: { hint?: string } }): (() => void) => {
+      defs.push(def)
+      return () => {}
+    },
+    list: () => [...defs],
+  }
+  return { commands }
+}
+
+/** A sessionless runner + a workspace with image-named fixtures; the TUI
+ * commands are registered through the real entry (registerTuiCommands). */
+function setup(life: TestLifecycle): { vt: VirtualTerminal; app: TuiApp } {
+  const root = life.tempDir('dsh-image-arg-')
+  const vt = new VirtualTerminal(100, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  life.defer(() => app.stop())
+  const ctx = new Context()
+  const { commands } = fakeCommands()
+  ctx.provide('commands', commands as never)
+  mkdirSync(join(root, 'subdir'))
+  writeFileSync(join(root, 'shot.png'), 'x')
+  writeFileSync(join(root, 'notes.txt'), 'x')
+  writeFileSync(join(root, 'subdir', 'deep.png'), 'x')
+  const store = new DraftImageStore()
+  const runner: TuiCommandRunner = {
+    deliveredFilesSnapshot: () => undefined,
+    ctx,
+    app,
+    diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
+    get defaultIntentOutcome() { return undefined },
+    ...sessionScopeFacts(() => undefined, () => 0),
+    currentSessionId: undefined,
+    ensureSession: async () => {},
+    get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
+    defaultSelection: () => undefined,
+    defaultIntent: undefined,
+    setDefaultIntent: () => {},
+    defaultIntentRecord: undefined,
+    settleIntent: () => {},
+    tuiSettings: undefined,
+    applyFooterSettings: () => {},
+    agents: {} as never,
+    sessionReader: {
+      list: async () => [],
+      search: async () => ({ items: [], hasMore: false }),
+      projectionBatch: async () => new Map(), blank: () => undefined, measureContext: () => undefined,
+      turnOutline: () => undefined,
+      sessionStatus: () => undefined,
+    },
+    catalog: new DirectCatalogPort(ctx as never, () => undefined),
+    config: new DirectConfigPort(ctx as never, undefined, () => undefined),
+    commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
+    clientCommands: createClientCommandRegistry(parseCommand),
+    hostFile: new DirectHostFilePort(() => undefined),
+    hostShellCompletion: true,
+    transcriptExportAvailable: true,
+    interaction: {
+      questions: {
+        onRequest: () => true,
+        subscribe: () => undefined,
+        snapshot: () => undefined,
+        claimTimedWait: async () => undefined,
+        answerContinued: async () => 'not-continued' as const,
+      },
+      onApprovalRequest: () => {},
+      setApprovalPolicy: () => true,
+    },
+    sessionWriter: {
+      prompt: async () => ({ kind: 'committed' as const, value: undefined }),
+      updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+      cancel: async () => ({ kind: 'committed' as const, value: undefined }),
+      rename: async (_sessionId: string, title: string) => ({ kind: 'committed' as const, value: { title } }),
+      refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
+    },
+    cwd: root,
+    sessionCwd: () => root,
+    imageStore: store,
+    copyToClipboard: async () => true,
+    imageLimits: () => undefined,
+    insertIntoEditor: (text) => app.insertIntoEditor(text),
+    prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
+    signal: new AbortController().signal,
+    switchSession: async () => undefined,
+    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+      await steps.prepare?.()
+      return { ok: true, next: await steps.create() }
+    },
+    currentPreset: () => undefined,
+    pendingPreset: undefined,
+    effectivePresetId: undefined,
+    awaitPendingDefaultWrite: async () => {},
+    trackDefaultWrite: () => {},
+    setModelSelectionPending: () => {},
+    reconcileDefaultIntent: () => {},
+    sessionBlank: () => undefined,
+    refreshStatus: () => {},
+    progressUpdatesState: { mode: 'milestones' }, responseStyleState: { style: 'default' }, gitAttributionState: { mode: 'off' },
+    focusEnabled: () => false,
+    setFocusMode: () => {},
+    setNotificationMode: () => {}, currentNotificationMode: () => 'unfocused', currentNotificationMethod: () => 'auto',
+    setTerminalProgressMode: () => {}, setNotificationMethod: () => {},
+    updateWelcomeCard: () => {},
+    openJobView: () => {},
+    openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
+    openRewindPicker: () => {},
+    sessionTransitionPending: () => false,
+    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => task(),
+    withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
+    enterView: async () => {},
+    requestExit: () => {},
+    extensions: undefined,
+    exit: () => {},
+  }
+  registerTuiCommandsWithDirectSeams(runner)
+  return { vt, app }
+}
+
+/** Poll the viewport until the dropdown row appears (asserts on failure). */
+async function waitForDropdownRow(vt: VirtualTerminal, needle: string, label: string): Promise<string> {
+  const deadline = Date.now() + 2000
+  for (;;) {
+    const view = vt.getViewport().join('\n')
+    if (view.includes(needle)) return view
+    if (Date.now() > deadline) {
+      assert.fail(`${label}: dropdown row ${JSON.stringify(needle)} never appeared:\n${view}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+}
+
+test('the installed /image completion answers natural typing with a menu', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = setup(life)
+  await vt.waitForRender()
+  vt.sendInput('/image sh')
+  const view = await waitForDropdownRow(vt, 'shot.png', 'natural typing')
+  // The menu row renders exactly like the @ mention menu: one full display
+  // path, with no duplicated basename + path description column.
+  assert.ok(view.includes('shot.png'), 'the candidate row is visible')
+  assert.equal(view.split('shot.png').length - 1, 1, 'the candidate path must appear once')
+  assert.ok(!app.getDraft().includes('shot.png'), 'typing alone must not apply anything')
+})
+
+test('the installed /attach completion shares the local path chain', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = setup(life)
+  await vt.waitForRender()
+  vt.sendInput('/attach no')
+  const view = await waitForDropdownRow(vt, 'notes.txt', 'attach natural typing')
+  assert.ok(view.includes('notes.txt'), 'generic files are offered by /attach')
+  assert.equal(view.split('notes.txt').length - 1, 1, 'the /attach candidate path must appear once')
+  assert.ok(!app.getDraft().includes('notes.txt'), 'typing alone must not apply anything')
+})
+
+test('Tab on an empty /image argument lists the workspace through the real chain', async (t) => {
+  const life = testLifecycle(t)
+  const { vt, app } = setup(life)
+  await vt.waitForRender()
+  vt.sendInput('/image ')
+  await vt.waitForRender()
+  vt.sendInput('\t')
+  const view = await waitForDropdownRow(vt, 'subdir/', 'Tab on an empty argument')
+  assert.ok(view.includes('notes.txt'), 'files are listed alongside directories')
+})

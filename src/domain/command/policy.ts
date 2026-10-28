@@ -42,6 +42,17 @@ export const SESSIONLESS_COMMANDS = new Set([
   // other-agent muscle memory) — it rides the same ownership sets, so it
   // executes locally, never steers, and works before any session exists.
   'statusline',
+  // `/status` is the approved alias of `/settings` (same handler/focus): it
+  // is sessionless exactly like its primary, and stays in LOCAL_COMMANDS.
+  'status',
+  // `/view-image` (Image UX PR2) lists the CURRENT mounted transcript window
+  // and opens the Client-local read-only Viewer: it never needs a Session and
+  // must not create one on a first-boot invocation.
+  'view-image',
+  // `/deliverables` (Delivered files PR1) browses the CURRENT display subject's
+  // delivered files. With no session it must answer "No delivered files"
+  // directly instead of creating a Session just to say so.
+  'deliverables',
 ])
 
 /**
@@ -72,9 +83,15 @@ export const LOCAL_COMMANDS = new Set([
   'model', 'new', 'preset', 'plugins', 'quit', 'reload', 'rename', 'resume', 'rewind',
   'search', 'sessions', 'settings', 'skill', 'status', 'subagents', 'tasks',
   'title', 'transcript', 'yolo',
-  // `/statusline` — the approved alias of `/footer` (see its registration
-  // comment: the near-synonym rule stays, this pairing is an explicit
-  // alias, and `/status` keeps priority matching).
+  // Image UX PR2: `/view-image` is a Client-local transcript presentation
+  // command (mounted window → PiTui picker/Viewer), never a Host/model line.
+  'view-image',
+  // Delivered files PR1: `/deliverables` is a Client-local transcript
+  // presentation command (selected Folder → PiTui overlay), never a Host line.
+  'deliverables',
+  // `/statusline` — the approved alias of `/footer`; `/status` is the
+  // `/settings` alias (see the registration comments: both pairings are
+  // explicit aliases, and the near-synonym rule stays for NEW commands).
   'statusline',
 ])
 

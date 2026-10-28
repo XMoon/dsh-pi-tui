@@ -10,7 +10,7 @@
     "RESERVED candidate release identity this checkout carries while a promotion line is",
     "being developed and qualified — reservation starts that release line but does not by",
     "itself freeze product scope, and the value becomes an ordinary published fact once",
-    "the corresponding release tag is published (see docs/releasing.md). There is deliberately no second",
+    "the corresponding release tag is published (see docs/guides/releasing.md). There is deliberately no second",
     "candidate matrix.",
     "`floor` is the catch-all below the oldest row. `current` describes the line this",
     "checkout ships: the release line whose identity it reserves (`since`, kept equal to",
@@ -27,11 +27,11 @@
     "not by itself qualify every such prerelease."
   ],
   "current": {
-    "since": "0.5.3",
+    "since": "0.5.4",
     "requires": "DeepSeek Harness 0.2.1-rc.2 or later",
-    "upgradeDsh": "0.2.1-rc.2",
-    "upgradeCommand": "npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.2",
-    "guidance": "This 0.5.3 release requires the published DeepSeek Harness 0.2.1-rc.2 family; see docs/dsh-compatibility.md for the pairing table."
+    "upgradeDsh": "0.2.1-rc.4",
+    "upgradeCommand": "npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.4",
+    "guidance": "The published 0.5.4 release requires DeepSeek Harness 0.2.1-rc.2 or later; this checkout validates that runtime floor and targets 0.2.1-rc.4. See README.en.md for the DSH/TUI pairing table, and docs/guides/dsh-compatibility.md for compatibility/recovery rules."
   },
   "floor": {
     "below": "0.1.0-rc.8",
@@ -156,9 +156,11 @@
     },
     {
       "dshFrom": "0.2.1-rc.2",
-      "tui": "0.5.3",
+      "tui": "0.5.4",
       "versions": [
-        "0.2.1-rc.2"
+        "0.2.1-rc.2",
+        "0.2.1-rc.3",
+        "0.2.1-rc.4"
       ]
     }
   ]

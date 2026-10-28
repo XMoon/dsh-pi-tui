@@ -1,0 +1,113 @@
+name: Qualification task
+description: Verify a claim, reconcile a ledger, or record a stage disposition
+title: "[Qualification]: "
+labels: ["kind:qualification"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for work whose deliverable is **evidence**, not a feature:
+        verifying a claim, reconciling a status ledger, or recording a stage
+        disposition.
+
+        A qualification issue closes on a witness — a test run, a CI job, a
+        real-Host observation — or on an explicitly scoped disposition
+        (`NOT_VERIFIED`, `WEB_ONLY`, `HOST_ONLY`, `DEFERRED_WITH_OWNER`) that
+        names its re-entry trigger.
+
+        If you refer to a short code from a plan, a ledger or a gate, say which
+        effort it belongs to and what it designates. A code on its own is not
+        readable, and it does not mean the same thing in the next effort.
+
+  - type: textarea
+    id: claim
+    attributes:
+      label: Claim under qualification
+      description: >
+        The specific statement this issue proves or disproves. Be precise
+        enough that "not verified" is a meaningful outcome.
+      placeholder: >
+        The Remote branch publishes the same terminal status state and the
+        main-progress projection as the Direct branch.
+    validations:
+      required: true
+
+  - type: input
+    id: scope
+    attributes:
+      label: Scope and limits
+      description: >
+        What this does NOT cover. Name the limits explicitly — a limit that is
+        written down is a disposition; a limit that is implied becomes a
+        silent gap later.
+      placeholder: >
+        Not verified for an arbitrary third-party DSH Host; real GUI
+        terminals are excluded.
+    validations:
+      required: true
+
+  - type: textarea
+    id: method
+    attributes:
+      label: Method
+      description: >
+        How the claim is checked: the suites, lanes, or real-Host observation
+        that produce the witness. Name the level of proof you reach — the
+        qualification depth is defined in
+        `docs/architecture/host-client.md`.
+      placeholder: >
+        Run the named suites against the current tree, then either close with
+        the scope that was actually proven, or keep it Direct-only and name
+        the exact failing boundary.
+    validations:
+      required: true
+
+  - type: textarea
+    id: negative
+    attributes:
+      label: Negative control
+      description: >
+        The check that would show the claim is false. A positive witness
+        alone does not qualify a claim.
+    validations:
+      required: false
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: >
+        Links, run IDs, commit SHAs, or pasted output. Fill this in as the
+        qualification runs.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: disposition
+    attributes:
+      label: Disposition
+      description: >
+        The outcome. `DEFERRED_WITH_OWNER` and `NOT_VERIFIED` are legitimate
+        results — but they must carry a re-entry trigger below.
+      options:
+        - Open (qualification in progress)
+        - Verified — claim holds
+        - Not verified — claim not established
+        - Verified with a bounded scope
+        - Deferred with owner
+        - Not planned
+    validations:
+      required: false
+
+  - type: input
+    id: trigger
+    attributes:
+      label: Re-entry trigger
+      description: >
+        Required for a deferred or not-verified outcome: the condition under
+        which this re-enters work, and who owns it.
+      placeholder: >
+        Trigger before any work puts this surface on the Remote branch. Owner:
+        the Remote qualification contract owner.
+    validations:
+      required: false

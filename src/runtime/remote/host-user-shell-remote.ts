@@ -5,7 +5,7 @@
  * interactive PTY — screen-stream output, no deterministic per-command start,
  * no authoritative per-command exit status, no one-shot cancel, no sandbox
  * variant — so the carrier qualification concludes CARRIER_GAP (U11a/U11b,
- * docs/client-server-migration.md "User `!` / `!!` shell under a wire
+ * docs/architecture/host-client.md "User `!` / `!!` shell under a wire
  * backend").
  *
  * This adapter therefore executes NOTHING: `availability.supported` is false

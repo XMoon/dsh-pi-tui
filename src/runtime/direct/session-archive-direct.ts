@@ -12,7 +12,7 @@
  * produced bytes to a Client-selected destination. A future Remote adapter
  * maps the same port onto the official `GET/HEAD /api/session.export` stream.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/session-archive-direct
  */
 

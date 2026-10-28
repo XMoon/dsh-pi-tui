@@ -13,7 +13,7 @@
  *
  *  - this script copies the exported asset bytes verbatim (no edits, no
  *    local semantic divergence);
- *  - test/dsh-preset-parity.test.mjs fails on any byte drift between the
+ *  - test/tooling/dsh-preset-parity.test.mjs fails on any byte drift between the
  *    mirror and the installed official package;
  *  - the mirror must never be hand-edited (see generated/dsh-presets/README.md).
  *
@@ -44,7 +44,7 @@ patch assets exported by \`${OFFICIAL_PACKAGE}\` (see
 
 **DO NOT EDIT.** dsh-pi-tui does not own the shipped preset definitions:
 \`pnpm build\` regenerates the mirror from the official package, and
-\`test/dsh-preset-parity.test.mjs\` fails the suite on any byte drift.
+\`test/tooling/dsh-preset-parity.test.mjs\` fails the suite on any byte drift.
 
 This mirror exists only because DSH 0.1.7's (through 0.1.7-rc.2)
 \`dsh.bundle.patch\` resolves bundle-package-relative paths and cannot

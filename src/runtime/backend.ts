@@ -6,7 +6,7 @@
  * later milestones (M2/M3) behind the SAME port interfaces — never a second
  * feature semantics.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/backend
  */
 
@@ -25,6 +25,7 @@ import type { HostCommandPort } from './host-command-port.ts'
 import type { PluginManagerPort } from './plugin-manager-port.ts'
 import type { JobObservationPort } from './job-observation-port.ts'
 import type { HostUserShellPort } from './host-user-shell-port.ts'
+import type { DeliveredFileReadPort } from './deliverables-port.ts'
 
 /** The transport backends the TUI can run on. `direct` remains the
  * production/default; `remote` is the experimental M3-3B assembly that can be
@@ -71,6 +72,11 @@ export interface Backend {
    * backend's execution authority — Direct serves the in-process Host
    * adapter; Remote serves the truthful-unavailable adapter (CARRIER_GAP). */
   readonly hostUserShell: HostUserShellPort
+  /** The delivered-file READ port (Delivered files PR2): bounded Host
+   * `stat`/`read` for one declared file, under the Session-derived workspace
+   * scope. Direct reads the official Host service in-process; Remote calls the
+   * official generated `workspaceFiles` namespace. */
+  readonly deliveredFileRead: DeliveredFileReadPort
 }
 
 /** Assemble the Direct backend: in-process adapters over `ctx.*` services.
@@ -91,6 +97,7 @@ export function createDirectBackend(
   pluginManager: PluginManagerPort,
   jobObservation: JobObservationPort,
   hostUserShell: HostUserShellPort,
+  deliveredFileRead: DeliveredFileReadPort,
 ): Backend {
   return {
     kind: 'direct',
@@ -109,5 +116,6 @@ export function createDirectBackend(
     pluginManager,
     jobObservation,
     hostUserShell,
+    deliveredFileRead,
   }
 }

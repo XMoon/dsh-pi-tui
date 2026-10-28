@@ -36,6 +36,54 @@
       name: '@xmoon76/dsh-pi-tui/performance-host'
       inject: [tuiStartup, sessionProjections]
 
+    # Workspace file service (the OFFICIAL `@deepseek-ai/dsh-api-workspace-files`):
+    # the ONE Host owner of the `workspaceFiles` Remote namespace the delivered-
+    # files preview reads through — bounded `stat`/`read` under the Session's
+    # header-derived workspace scope, with the composed filesystem's own read
+    # access. Mounted here because dsh-base does not ship it; the row is
+    # registered EXACTLY ONCE per Host graph and reused by the in-process Remote
+    # Host (never remounted by a Client). Gated on `tuiStartup`, so
+    # `dsh --profile pi-tui --help` still mounts no Host file surface.
+    - id: workspace-files
+      name: '@deepseek-ai/dsh-api-workspace-files'
+      inject: [tuiStartup]
+
+    # Visual tools: three Host tool definitions — the two generators
+    # (`dsh_pi_tui_chart`, `dsh_pi_tui_svg`) and the publication tool
+    # (`present_visual`) — on the official `ctx.tools` registry. The row owns the
+    # profile-wide `enabled` volatile Config (default On) and keeps the GROUP
+    # registered only while it is on: `/settings → Tools → Visual tools` writes
+    # that value, and the Loader commits it live (no restart / row remount).
+    # The row itself is deliberately NOT gated on `tuiStartup`, a renderer, a
+    # Tern hello, a client capability or a session: the same Host profile (and
+    # the in-process Remote Host built on it) serves every Client. `tools` is
+    # the registry the row owns; `agents` supplies the executing Agent/Session
+    # identity, `sessionQuery` reads the committed log through one caller-owned
+    # observation lease, and `sessionProjections` supplies the authoritative
+    # `turnBoundary` fold the publisher fences on (the same seam the official
+    # `present` and `agent-instructions` rows read). The result contract carries
+    # no `presentationMeta` — the final durable content is the drawing's
+    # admission source.
+    - id: pi-tui-visual-tools
+      name: '@xmoon76/dsh-pi-tui/visual-tools'
+      inject: [tools, agents, sessionQuery, sessionProjections]
+
+    # The OFFICIAL Host browser-callback listener for DeepSeek Account sign-in.
+    # The account provider registers `/oauth/callback` on this instance while an
+    # attempt is waiting for the browser; it is mounted here because the dsh-base
+    # layer ships the account provider but not the webserver. `host: 127.0.0.1`
+    # plus `port: 0` keeps the listener on a private loopback interface with an
+    # OS-assigned port (the stable `webserver` id lets a profile patch override
+    # the configuration without introducing a second service). `tuiStartup`
+    # gates the row on the same command-line admission as the TUI runner, so
+    # `dsh --profile pi-tui --help` never opens a socket.
+    - id: webserver
+      name: '@deepseek-ai/dsh-host-webserver'
+      inject: [tuiStartup]
+      config:
+        host: 127.0.0.1
+        port: 0
+
     - id: tui-app
       name: '@xmoon76/dsh-pi-tui'
       # `workspaceRegistry` is injected, not merely looked up: D2.4 Direct fork
@@ -52,7 +100,11 @@
       # surface must not mount without its performance authority, so a profile
       # that disables the `pi-tui-performance-host` row fails loudly here
       # instead of silently falling back to a Client-side estimate.
-      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady]
+      # `deepseekAccount` and `webServer` are the DeepSeek Account authority and
+      # its browser callback listener: the surface must not mount before both
+      # are published, otherwise the Account page could start a sign-in the
+      # Host cannot complete.
+      inject: [tuiStartup, piTuiExtensions, authorization, workspaceRegistry, pluginManager, jobController, piTuiPerformanceReady, deepseekAccount, webServer]
       config:
         sessionId: ''
 
@@ -76,7 +128,7 @@
     # it also performs the official one-time history bootstrap that groups
     # stored Session headers by canonical cwd into durable workspace records —
     # an upstream migration, not a TUI invention, and the reason the row is
-    # documented in docs/client-server-coupling.md.
+    # documented in docs/architecture/host-client.md.
     - id: workspace
       name: '@deepseek-ai/dsh-workspace'
 

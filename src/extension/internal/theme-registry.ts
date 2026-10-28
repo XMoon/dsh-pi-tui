@@ -217,7 +217,7 @@ export class ThemeRegistry {
       .sort((left, right) => left.localeCompare(right))
   }
 
-  /** The display NAMES (sorted — diagnostics, /status counts; never a
+  /** The display NAMES (sorted — diagnostics counts; never a
    * selection identity). */
   names(): string[] {
     return [...this.records.values()]
@@ -259,7 +259,7 @@ export class ThemeRegistry {
     return record === undefined ? undefined : ThemeRegistry.selectableValueOf(record)
   }
 
-  /** Whether any theme is live (health /status). */
+  /** Whether any theme is live (Plugin Manager diagnostics). */
   hasAny(): boolean {
     for (const record of this.records.values()) {
       if (!record.disposed) return true
@@ -267,7 +267,7 @@ export class ThemeRegistry {
     return false
   }
 
-  /** An immutable snapshot (diagnostics + /status). */
+  /** An immutable snapshot (Plugin Manager diagnostics). */
   snapshot(): TuiThemeRegistrySnapshot {
     const themes = [...this.records.values()]
       .filter(record => !record.disposed)

@@ -286,7 +286,46 @@ export const INTAKE_SAFETY_MAX_BYTES = 64 * 1024 * 1024
  *   draft store's remaining resident budget); the smallest of all caps
  *   wins. Undefined = no extra cap.
  */
+/**
+ * The intake READ seam: the real filesystem read is the default; a test
+ * injects its own to make the read WINDOW deterministic (hold the read,
+ * exercise a stale-input fence while it is genuinely in flight, then
+ * release). Mirrors the shell completion bridge's runner seam.
+ */
+export type ImageRead = (
+  rawPath: string,
+  cwd: string,
+  limits: ImageLimitsLike | undefined,
+  extraSafetyCap?: number,
+) => Promise<ImageFileIntake>
+
+let imageRead: ImageRead = async (rawPath, cwd, limits, extraSafetyCap) =>
+  readImageFileUninjected(rawPath, cwd, limits, extraSafetyCap)
+
+/** Test seam: replace the read (restore by passing `undefined`). */
+export function setImageReadForTest(read: ImageRead | undefined): void {
+  imageRead = read ?? (async (rawPath, cwd, limits, extraSafetyCap) =>
+    readImageFileUninjected(rawPath, cwd, limits, extraSafetyCap))
+}
+
+/**
+ * Read + validate one image file into a draft-ready buffer.
+ * @param rawPath - the user-supplied path (absolute, `~` or cwd-relative).
+ * @param cwd - the Client cwd used to resolve a relative path.
+ * @param limits - the deployment's image policy (the ONLY limit source).
+ * @param extraSafetyCap - an additional byte cap (the store's remaining budget).
+ */
 export async function readImageFile(
+  rawPath: string,
+  cwd: string,
+  limits: ImageLimitsLike | undefined,
+  extraSafetyCap?: number,
+): Promise<ImageFileIntake> {
+  return imageRead(rawPath, cwd, limits, extraSafetyCap)
+}
+
+/** The uninjected production read (the test seam's delegate target). */
+export async function readImageFileUninjected(
   rawPath: string,
   cwd: string,
   limits: ImageLimitsLike | undefined,

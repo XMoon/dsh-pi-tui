@@ -24,9 +24,11 @@
  * whose ENTIRE outcome is carried by the existing business owner (Session
  * runtime, SessionWriter, permission writer, credential port, clipboard
  * policy) and needs no PiTui pane. Native Model, Preset and Session Browser
- * commands are admitted only when their mounted presenters are available;
- * every other TUI builtin is refused. `/logout` is the ONE input-shaped
- * member: only its explicit-target form is admitted (see the predicate).
+ * commands are admitted only when their mounted presenters are available, and
+ * the Task Center family (`/tasks` + `/subagents`) only when the mounted
+ * renderer's ONE Task Center capability is present; every other TUI builtin is
+ * refused. `/logout` is the ONE input-shaped member: only its explicit-target
+ * form is admitted (see the predicate).
  * @module @xmoon76/dsh-pi-tui/app/command/tsp-capability
  */
 
@@ -48,6 +50,11 @@ import type { CommandLineClassification } from '../../domain/command/policy.ts'
 export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set([
   'exit', 'quit',
   'new', 'fork', 'title', 'rename', 'copy', 'yolo',
+  // Image UX PR3-B2: the Client-local attachment intake. Both commands are
+  // fully executable on the TSP renderer — they read the Client cwd, stage into
+  // the existing draft stores and commit the canonical token into the mounted
+  // composer, which the TSP renderer supplies. No PiTui pane is involved.
+  'attach', 'image',
 ])
 
 /**
@@ -58,6 +65,22 @@ export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set([
  * visible owner there. This set is the B2-A notice scope: it is derived from the
  * admitted set above plus the argument-shaped `/logout`, and it is deliberately
  * NOT a routing authority — the classifier and the gate above own that.
+ *
+ * The scope is ERROR-ONLY: its one production consumer publishes a returned
+ * `CommandResult` solely when `kind === 'error'` and the text is non-empty
+ * (`app/submission/controller.ts`, the card-less Client-registry branch). A
+ * successful result is never announced from here.
+ *
+ * Image UX PR3-B2: `/attach` and `/image` therefore stay IN this set. Their
+ * synchronous `CommandResult.error` branches (a bare command, a malformed
+ * argument, an unavailable draft composer) run no intake at all, so this notice
+ * is their ONLY visible outcome on a renderer without a command card; dropping
+ * them here would silently swallow a real refusal. Their asynchronous intake is
+ * unaffected: every outcome message (and every failure) is owned by the mounted
+ * composer. A success is announced only after the intake reached its own commit
+ * point — an image's bytes staged, or a generic regular file's metadata draft
+ * staged from a bounded signature probe (its content streams at submit time) —
+ * AND the canonical token was inserted.
  */
 export const TSP_B2A_RESULT_NOTICE_COMMANDS: ReadonlySet<string> = new Set([
   ...TSP_SUPPORTED_TUI_BUILTINS,
@@ -79,6 +102,14 @@ export interface TspBuiltinPickers {
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
+  /**
+   * B3-A3: the mounted renderer's ONE Task Center reachability truth
+   * (`SurfaceDisplaySeam.supportsTaskCenter`). The `/tasks` + `/subagents`
+   * family runs the EXISTING registered handler into the EXISTING
+   * `TaskRuntime`, so this is a capability of that one display seam — never a
+   * second renderer state.
+   */
+  readonly taskCenter?: boolean
 }
 
 /**
@@ -135,6 +166,14 @@ export function tspBuiltinAvailability(
     // handler's own resolver; bare `/logout` (and whitespace-only) needs the
     // credential picker and is refused BEFORE any credential read or mutation.
     return rawInput.trim().length > 0 ? { kind: 'available' } : { kind: 'unsupported' }
+  }
+  if (name === 'tasks' || name === 'subagents') {
+    // B3-A3: the ONE Task Center family. `/subagents` is the registered alias
+    // of `/tasks`, so both ride the same admission and reach the SAME
+    // registered handler. The display seam's `supportsTaskCenter` is the only
+    // capability read: no other picker stands in for it, and an unnegotiated
+    // pane refuses the command instead of mounting an unreadable Hub.
+    return pickers.taskCenter === true ? { kind: 'available' } : { kind: 'unsupported' }
   }
   return (name === 'model' && pickers.modelPicker === true)
     || (name === 'preset' && pickers.presetPicker === true)

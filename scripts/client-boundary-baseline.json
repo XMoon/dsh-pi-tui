@@ -69,6 +69,7 @@
   ],
   "runtime/direct/config-direct.ts": [
     "agentPresets",
+    "agents",
     "approval",
     "authorization",
     "commands",
@@ -76,6 +77,11 @@
     "llm",
     "permissionPresets",
     "settings"
+  ],
+  "runtime/direct/deliverables-direct.ts": [
+    "sandboxPolicy",
+    "sessionPersistence",
+    "sessions"
   ],
   "runtime/direct/host-command-direct.ts": [
     "commands"

@@ -64,6 +64,12 @@ export interface AppActionHost {
   openHistorySearch(): boolean
   /** Dismiss settled user-shell cards. */
   dismissSettledShell(): boolean
+  /** Select the next published visual of the current transcript window. */
+  selectNextVisual(): boolean
+  /** Copy the selected published visual's exact payload. */
+  copySelectedVisual(): boolean
+  /** Open the selected published SVG in the leased viewer. */
+  openSelectedVisual(): boolean
 }
 
 /** The semantic action → Host method router. */
@@ -129,6 +135,12 @@ export class AppActionDispatcher {
         return this.host.openHistorySearch()
       case 'app.shell.dismissSettled':
         return this.host.dismissSettledShell()
+      case 'app.visual.selectNext':
+        return this.host.selectNextVisual()
+      case 'app.visual.copySelected':
+        return this.host.copySelectedVisual()
+      case 'app.visual.openSelected':
+        return this.host.openSelectedVisual()
       // Reserved session/model actions have no host wiring yet (plan §3.2):
       // resolving one is a no-op (the key is consumed — the user bound it
       // deliberately, and a silent fall-through would be surprising).

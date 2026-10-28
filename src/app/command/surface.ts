@@ -38,9 +38,11 @@ import type { SessionRuntime as ApplicationSessionRuntime } from '../session/run
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from './catalog-refresh.ts'
 import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
 import type { ClientCommandRegistry } from './client-command-registry.ts'
+import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
 import { titleRefusalNoticeOwner, titleSuccessNoticeVisible } from './tsp-capability.ts'
+import type { DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
 import { copyToClipboard } from '../../client/clipboard/copy.ts'
 import { isFocusDisplayPreset, type DisplayState } from '../../domain/display/preset.ts'
 import { draftHasImages } from '../../client/media/draft-attachments.ts'
@@ -53,6 +55,7 @@ import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
 import type { ModelPresentation } from './model-presentation.ts'
 import type { PresetPresentation } from './preset-presentation.ts'
 import type { SessionBrowserPresentation } from './session-browser-presentation.ts'
+import type { NotificationMethod, NotificationMode } from '../../domain/notification/settings.ts'
 
 /** The catalog capability slice the command surface subscribes to. */
 export interface CommandCatalogCapability {
@@ -217,10 +220,29 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly surface: {
     setNotificationMode(mode: string): void
     setNotificationMethod(method: string): void
+    /** The mode the ONE completion controller really applies (read-only). */
+    currentNotificationMode(): NotificationMode
+    /** The delivery method that controller really applies (read-only). */
+    currentNotificationMethod(): NotificationMethod
     setTerminalProgressMode(mode: string): void
     openJobView(jobId: string): void
     /** B4-B: the Full Task Center only — the quick modal is retired. */
     openTasksBrowser(viewMode: 'full'): void
+    /**
+     * Image UX PR3-B: the LIVE mounted composer of the current renderer (the
+     * draft seat the `/attach` `/image` intake commits into). Read at call
+     * time — the mount happens after registration, so this is a getter. On the
+     * PiTui branch it is the mounted `TuiApp`; a non-PiTui renderer supplies
+     * its own port.
+     */
+    composer(): SubmissionComposerPort
+    /**
+     * Delivered files (PR1 / M2): the on-demand catalog of the CURRENT display
+     * subject's delivered Turns. A functional read capability — the command
+     * layer never receives the `TranscriptFolder`/runtime object, so no command
+     * can re-project, mutate or window the transcript through it.
+     */
+    deliveredFilesSnapshot(): DeliveredFilesSnapshot | undefined
   }
   /** The semantic backend port slices the runner exposes unchanged. */
   readonly backend: {
@@ -257,9 +279,16 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   /** The status owner seams the runner delegates to. */
   readonly status: {
     forceContextMeasurement(): number | undefined
+    forceContextMeasurementResult(): import('../../domain/status/context-measurement.ts').ContextMeasureResult
     sessionCwd(): string
     refresh(): void
     updateWelcomeCard(): void
+    /**
+     * C3 (owner ruling on RFL-A-017): the ONE session-scope invalidation
+     * trigger — the SessionOwnershipCore's payload-less owner/generation
+     * notification forwarded unchanged (no alternate observer, no polling).
+     */
+    subscribeSessionScopeInvalidation(listener: () => void): () => void
   }
   /** The settings owner seams the runner delegates to. */
   readonly settings: {
@@ -289,10 +318,10 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     recordError(ref: ExtensionHealthRef, error: unknown): void
     clearError(ref: ExtensionHealthRef): void
   }
-  /** The profile-wide Plugin Manager controller (never session-owned). */
+  /** The profile-wide Plugin Manager controller (never session-owned): its ONE
+   *  embedded page belongs to the Settings workspace lease. */
   readonly pluginManager: {
-    open(): void
-    page(done: () => void): ReturnType<TuiCommandRunner['createPluginManagerPage']>
+    page(onYieldNavigation: () => void): ReturnType<TuiCommandRunner['createPluginManagerPage']>
   }
   /** The shared client clipboard delivery policy. */
   readonly client: {
@@ -707,6 +736,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             pituiPresentation: deps.app() !== undefined,
             backendKind: deps.backend.kind,
           }),
+          // Image UX PR3-B: the LIVE composer getter of the mounted renderer.
+          // Deliberately not cached — the mount (and any seat replacement) is
+          // read at command time, exactly like `deps.app`.
+          composer: () => deps.surface.composer(),
         },
       )
       // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
@@ -752,7 +785,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         // capability-gated cold path (standing key → global → degraded
         // global with a notice), never an Agent probe: probes emit
         // durable session events in this deployment (see
-        // docs/surface-catalog.md).
+        // docs/architecture/surface-catalog.md).
         readStanding: (presetId, readSignal) =>
           deps.catalog.skills.standing(presetId, deps.clientCwd, readSignal),
         // §2.2/§16 final-install fence: the Remote target's admission
@@ -943,6 +976,8 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // the panel persists the raw string through the config port.
       setNotificationMode: (mode) => deps.surface.setNotificationMode(mode),
       setNotificationMethod: (method) => deps.surface.setNotificationMethod(method),
+      currentNotificationMode: () => deps.surface.currentNotificationMode(),
+      currentNotificationMethod: () => deps.surface.currentNotificationMethod(),
       setTerminalProgressMode: (mode) => deps.surface.setTerminalProgressMode(mode),
       ensureSession: () => deps.session.ensureSession(),
       get selected() { return deps.model.selected },
@@ -971,13 +1006,19 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // the title batches, the context measurement and the export read go
       // through the port, never ctx directly.
       sessionReader: deps.backend.sessionReader,
-      // PR D2: the /status explicit force — measure NOW through the
+      // PR D2: the explicit About/status force — measure NOW through the
       // coordinator (mark dirty + semantic reader), repaint the footer
       // cheaply, and return the fresh (or last-good) value for the panel.
       // Panel and footer share ONE cached measurement: no duplicate reads
       // against the coordinator's cache, no stale footer after an explicit
       // status (round-8 finding).
       forceContextMeasurement: () => deps.status.forceContextMeasurement(),
+      // C3: the SAME force with its observation (one coordinator measurement,
+      // no duplicated force) and the narrow status-invalidation trigger (the
+      // composition's StatusStore subscription, forwarded unchanged).
+      forceContextMeasurementResult: () => deps.status.forceContextMeasurementResult(),
+      backendKind: deps.backend.kind,
+      subscribeSessionScopeInvalidation: (listener) => deps.status.subscribeSessionScopeInvalidation(listener),
       // The session WRITE port (D2.1): ordinary prompts, Ctrl+S batch
       // delivery, exact queue removal, cancel and title ops go through the port.
       sessionWriter: deps.backend.sessionWriter,
@@ -1063,7 +1104,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         // apply is transport-neutral (ConfigPort → the official
         // /permission path); a Remote session must reach it without any
         // in-process Agent resolution.
-        const outcome = await deps.backend.config.permissions.applyPermissionPreset(scope.sessionId, presetId, presetSignal)
+        // The official `/permission` command requires a live signal: an
+        // explicit per-operation one is preferred, otherwise this command
+        // surface's own lifetime signal applies (never an orphan controller).
+        const outcome = await deps.backend.config.permissions.applyPermissionPreset(
+          scope.sessionId,
+          presetId,
+          presetSignal ?? deps.signal,
+        )
         // The operation WAS dispatched. Losing the surface after the fact must NOT
         // erase what the port settled (`src/runtime/write-outcome.ts`: ownership and
         // settlement are independent axes) — the caller may not claim "not applied".
@@ -1100,18 +1148,21 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       sessionBlank: deps.presets.blank,
       // PR D2: the command surface's generic refresh is UI-only (a
       // measurement-triggering command uses refreshContextMeasurement or
-      // the /status port call directly).
+      // the context-force port call directly).
       refreshStatus: () => deps.status.refresh(),
       updateWelcomeCard: () => deps.status.updateWelcomeCard(),
       openJobView: (jobId) => deps.surface.openJobView(jobId),
       // The zero-arg runner callback (commands.ts) is the `/tasks` surface:
       // it opens the FULL browser explicitly.
       openTasksBrowser: () => deps.surface.openTasksBrowser('full'),
+      // Delivered files (PR1 / M2): the functional read capability the
+      // `/deliverables` handler forwards to the mounted surface; no Folder or
+      // runtime object crosses this seam.
+      deliveredFilesSnapshot: () => deps.surface.deliveredFilesSnapshot(),
       openRewindPicker: deps.openRewindPicker,
       // `/plugins` opens the profile-wide Plugin Manager panel (P1-A). It is
       // NOT session-owned: it never creates or switches a Session.
-      openPluginManager: () => deps.pluginManager.open(),
-      createPluginManagerPage: (done) => deps.pluginManager.page(done),
+      createPluginManagerPage: (onYieldNavigation) => deps.pluginManager.page(onYieldNavigation),
       // The attachment-intake UX fence: the ONE production reader of the
       // transition gate. Staging an attachment while a transition is in flight
       // (quiesce → commit) would inject a draft into a session about to be

@@ -1,20 +1,23 @@
 /**
- * The surface ↔ Plugin Manager lifecycle glue (S4-D1).
+ * The surface ↔ Plugin Manager lifecycle glue (S4-D1 / PR2).
  *
- * This owner holds the ONE `PluginManagerController` per surface, its
- * token-owned `PluginManagerHostRegistry` and both presentation entries
- * (`/plugins` = direct root page, `Settings → Plugins` = in-place page). It is
- * exactly the wiring the aggregate used to inline: the controller itself lives
- * in `app/plugin-manager/**` and is NOT reimplemented here, and the concrete
- * terminal page is selected by the COMPOSITION zone and injected as a narrow
- * factory — this application owner imports no `tui/**` path at all.
+ * This owner holds the ONE `PluginManagerController` per surface and the
+ * token-owned `PluginManagerHostRegistry` fencing the ONE embedded page hosted
+ * by the `Settings → Plugins` workspace. It is exactly the wiring the aggregate
+ * used to inline: the controller itself lives in `app/plugin-manager/**` and is
+ * NOT reimplemented here, and the concrete terminal page is selected by the
+ * COMPOSITION zone and injected as a narrow factory — this application owner
+ * imports no `tui/**` path at all.
  *
  * Preserved rules:
  *
  * - one controller lifetime per surface: the controller OUTLIVES the page
- *   (opening/closing/reopening the page never constructs a second controller);
- * - one active host claim at a time: the registry distinguishes a normal close
- *   from an external Settings teardown, and a stale/unclaimed release is inert;
+ *   (yielding the keyboard to Categories, or closing Settings, never constructs
+ *   a second controller);
+ * - one active host claim at a time: the Settings root claims the controller
+ *   when it mounts the page and releases it exactly once in `onDispose`; a
+ *   focus yield never releases, and a stale token can never release a newer
+ *   claim;
  * - the extension observation projection is the shared runtime's OWN health
  *   records — never a second inventory or manager;
  * - `dispose()` releases only the controller's install-event subscription (it
@@ -30,23 +33,34 @@ import type { TuiApp } from '../../tui-app.ts'
 import type { PluginManagerPort } from '../../runtime/plugin-manager-port.ts'
 import { PluginManagerController } from '../plugin-manager/controller.ts'
 import { PluginManagerHostRegistry, type PluginManagerHostClaim } from '../plugin-manager/host-registry.ts'
-import { observeTuiExtensions } from '../plugin-manager/extension-inventory.ts'
+import {
+  describeTuiExtensionDiagnostics,
+  observeTuiExtensions,
+  type TuiExtensionDiagnostics,
+} from '../plugin-manager/extension-inventory.ts'
 import type { SurfaceExtensionService } from './extension-runtime.ts'
 
-/** The presentation capabilities the composition zone injects. */
+/**
+ * The presentation capabilities the composition zone injects. The page lays
+ * itself out inside its GRANTED viewport (the Settings root sets it per frame),
+ * so it never reads the physical terminal size, and the App notice is painted
+ * once by the Settings root — never forwarded here as a second notice store.
+ */
 export interface PluginManagerWorkspacePanelDeps {
-  /** The live terminal row budget. */
-  readonly rows: () => number
-  /** The live terminal column budget. */
-  readonly columns: () => number
   /** Repaint the hosting screen. */
   readonly requestRender: () => void
-  /** The ONE app-owned transient notice. */
-  readonly notice: () => { readonly text: string; readonly kind: 'info' | 'error' } | undefined
   /** Copy exact text through the Client-local clipboard owner. */
   readonly onCopy: (text: string) => void
-  /** Release the owner on an EXTERNAL teardown (never a normal close). */
-  readonly onDispose?: () => void
+  /** Read the CURRENT extension diagnostics on an explicit page read/refresh.
+   *  `undefined` means the extension service is not attached (render
+   *  Unavailable, never an empty healthy report). */
+  readonly diagnostics: () => TuiExtensionDiagnostics | undefined
+  /** The Settings root's navigation yield: the page reports the intent (Esc /
+   *  Left / Shift+Tab at the list root) and the ROOT commits the focus change.
+   *  It never closes the page or releases the owner. */
+  readonly onYieldNavigation: () => void
+  /** Release the owner once, on a REAL teardown (never a navigation yield). */
+  readonly onDispose: () => void
 }
 
 /**
@@ -59,12 +73,15 @@ export type PluginManagerPanelFactory = (
   deps: PluginManagerWorkspacePanelDeps,
 ) => Component
 
-/** The Plugin Manager owner: the controller/page wiring for both entries. */
+/** The Plugin Manager owner: the ONE controller and its embedded page. */
 export interface SurfacePluginManager {
-  /** The `/plugins` direct root (a second open is a no-op). */
-  open(): void
-  /** The lazy `Settings → Plugins` page factory (same controller/page). */
-  page(done: () => void): Component | undefined
+  /**
+   * Build the `Settings → Plugins` page for the CURRENT Settings lease. A
+   * second request while a page still owns the controller returns `undefined`
+   * instead of nesting a second owner. The page is created lazily: opening
+   * Settings alone never calls this and therefore never reads the inventory.
+   */
+  page(onYieldNavigation: () => void): Component | undefined
 }
 
 /** The acquisition inputs of the Plugin Manager owner; one cohesive lifetime. */
@@ -85,14 +102,10 @@ export interface PluginManagerRuntimeOptions {
 
 /** The surface Plugin Manager owner `createSurfaceRuntime()` consumes. */
 export interface PluginManagerRuntime {
-  /** Acquire the ONE controller/page owner for both entries. */
+  /** Acquire the ONE controller/page owner. */
   attach(deps: PluginManagerAttachDeps): SurfacePluginManager
   /** Release the controller's install-event subscription (idempotent, early position). */
   dispose(): void
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
 }
 
 /** Create the surface Plugin Manager owner. */
@@ -101,16 +114,14 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
 
   return {
     attach(deps) {
-      // ONE controller/page for both entries (`/plugins` and
-      // `Settings → Plugins`). The port is the narrow semantic adapter; the
-      // presentation classification reads only the shared extension runtime's
-      // own health records — never a second inventory or a second manager. The
-      // token-owned registry distinguishes a normal close from an external
-      // teardown (see its module header).
+      // ONE controller for the ONE embedded page. The port is the narrow
+      // semantic adapter; the presentation classification reads only the shared
+      // extension runtime's own health records — never a second inventory or a
+      // second manager. The token-owned registry fences the single page owner
+      // (see its module header).
       const hosts = new PluginManagerHostRegistry()
       const controller = new PluginManagerController(deps.port, {
         requestRender: () => { if (hosts.isOpen()) options.mounted().requestRender() },
-        requestClose: () => hosts.closeActive(),
         notify: (message, kind) => options.mounted().notify(message, kind),
         isOpen: () => hosts.isOpen(),
         diag: deps.diag,
@@ -124,42 +135,53 @@ export function createPluginManagerRuntime(options: PluginManagerRuntimeOptions)
         },
       })
       pluginManagerController = controller
-      const panelDeps = (onDispose: () => void): PluginManagerWorkspacePanelDeps => ({
-        rows: () => options.mounted().workspaceRows(),
-        columns: () => options.mounted().workspaceColumns(),
+      const panelDeps = (
+        claim: PluginManagerHostClaim,
+        onYieldNavigation: () => void,
+      ): PluginManagerWorkspacePanelDeps => ({
         requestRender: () => options.mounted().requestRender(),
-        notice: () => options.mounted().workspaceNotice(),
         onCopy: text => options.mounted().copyWorkspaceText(text),
-        onDispose,
+        diagnostics: () => {
+          const extensionService = options.service()
+          if (extensionService === undefined) return undefined
+          return describeTuiExtensionDiagnostics(
+            {
+              healthSnapshot: () => extensionService._ledger().healthSnapshot(),
+              ownerEntryIds: () => extensionService._ownerEntryIds(),
+            },
+            extensionService,
+            extensionService.api().capabilities,
+          )
+        },
+        onYieldNavigation,
+        onDispose: () => { claim.release() },
       })
-      const open = (): void => {
-        // A second open is a no-op: the page is already the active surface.
-        if (hosts.isOpen()) return
-        let close: () => void = () => {}
-        const claim = hosts.claim(() => close())
+      const page = (onYieldNavigation: () => void): Component | undefined => {
+        // The Settings root hosts exactly ONE page: a still-living page keeps
+        // its claim (and its query/selection/scroll) instead of nesting a
+        // second owner.
+        if (hosts.isOpen()) return undefined
+        let claim: PluginManagerHostClaim | undefined
         let panel: Component | undefined
         try {
-          panel = options.createPanel(controller, panelDeps(() => claim.releaseExternally()))
-          close = options.mounted().openPluginManagerWorkspace(panel, () => claim.releaseExternally())
-          controller.open('direct-command')
+          // Claim BEFORE any synchronous callback can observe the new page.
+          claim = hosts.claim()
+          panel = options.createPanel(controller, panelDeps(claim, onYieldNavigation))
         } catch (error) {
-          // A refused lease (blocking modal/Job/transition) never leaves a
-          // phantom owner or a half-built page behind.
-          claim.releaseExternally()
+          // A failed factory never leaves a phantom owner or a half-built page
+          // behind; the error stays the caller's (no fabricated success).
+          claim?.release()
           panel?.dispose?.()
-          options.mounted().notify(`could not open the plugin manager: ${errorMessage(error)}`, 'error')
+          throw error
         }
-      }
-      const page = (done: () => void): Component | undefined => {
-        let claim: PluginManagerHostClaim | undefined
-        const panel = options.createPanel(controller, panelDeps(() => claim?.releaseExternally()))
-        // The Settings parent may dispose this page WITHOUT calling `done` (the
-        // fork's lifecycle contract): release only the OWNER.
-        claim = hosts.claim(() => claim?.closeNormally(), done)
-        controller.open('settings-entry')
+        // ONE read per successful page creation. A re-mount (the Settings root
+        // disposes the page on a category change or a close) therefore starts a
+        // NEW read and advances the Controller's read generation, which the
+        // page's own currentness fence uses to refuse older gestures.
+        controller.open()
         return panel
       }
-      return { open, page }
+      return { page }
     },
     dispose() {
       // Release the Plugin Manager install-event subscription. This never

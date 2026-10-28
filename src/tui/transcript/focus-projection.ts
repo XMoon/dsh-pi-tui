@@ -22,11 +22,9 @@
  */
 
 import {
-  assistantBlocksVisibleNow,
   assistantCommittedBeforeSteer,
-  assistantLatestStepOf,
-  assistantStepOf,
 } from '../../domain/transcript/folder.ts'
+import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { isSurfacedContext, isSurfacedInteractionTool } from '../../domain/transcript/semantics.ts'
 import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } from './context-structure.ts'
@@ -245,7 +243,7 @@ export function projectFocus(
     // The final assistant is decided ONCE from the exact last assistant
     // row (shared by the expanded and collapsed branches — one semantic,
     // never two drifting copies).
-    const final = finalAssistantSelection(activity, group)
+    const final = eligibleFinalAssistant(activity, group)
     const isCommittedAnswer = (member: TranscriptMessage): boolean =>
       activity !== undefined && assistantCommittedBeforeSteer(activity, member)
     if (expanded) {
@@ -424,20 +422,6 @@ export function focusExpandedTailStructure(group: readonly TranscriptMessage[], 
   return projectTranscriptStructure(group.slice(boundary))
 }
 
-/** Find the Assistant entry that owns the structural latest step. A late
- * durable message can append after newer process evidence, so physical array
- * order is not a reliable final-answer identity. */
-function assistantForStep(
-  group: readonly TranscriptMessage[],
-  step: number,
-): Extract<TranscriptMessage, { kind: 'assistant' }> | undefined {
-  for (let index = group.length - 1; index >= 0; index -= 1) {
-    const member = group[index]
-    if (member?.kind === 'assistant' && assistantStepOf(member) === step) return member
-  }
-  return undefined
-}
-
 /** Rows that remain visible outside the collapsed Thought as persistent
  * input/context boundaries. The semantic class stays Context for injected
  * rows; this predicate only controls disclosure behavior. A SETTLED
@@ -560,41 +544,4 @@ export function focusThoughtLeadBoundary(group: readonly TranscriptMessage[]): n
     end += 1
   }
   return end
-}
-
-/** Whether one Assistant entry has semantic/finalized content or an explicit
- * delivered-file tail. Pending display-only open-opaque rows remain transcript
- * evidence but cannot become a completed/max-token final; finalized generic
- * blocks stay eligible. */
-function assistantRenderable(assistant: Extract<TranscriptMessage, { kind: 'assistant' }>): boolean {
-  if (assistant.displayBlocks?.some(block => block.kind === 'open-opaque') === true) return false
-  if (assistant.deliverables !== undefined && assistant.deliverables.length > 0) return true
-  if (assistant.content !== undefined) return assistantBlocksVisibleNow(assistant.content)
-  return assistant.text.trim() !== ''
-}
-
-/** The turn's final assistant selection: only after the authoritative
- * turn/end, only for a reason the system presents output (completed /
- * max-tokens), and only when the Assistant owning the structural latest step
- * has semantic/finalized content or explicit delivered files. An empty or
- * pending latest step without either yields NO final — never an earlier assistant
- * (review fix). The max-tokens final carries
- * the truncated marker (plan §13.8). */
-function finalAssistantSelection(
-  activity: TurnActivity | undefined,
-  group: readonly TranscriptMessage[],
-): { message: Extract<TranscriptMessage, { kind: 'assistant' }>; truncated: boolean } | undefined {
-  if (activity === undefined || !activity.completed) return undefined
-  const reason = activity.reason?.kind
-  if (reason !== 'completed' && reason !== 'max-tokens') return undefined
-  // The exact authoritative assistant may be retained internally but hidden
-  // from the normal transcript projection; never fall back to an earlier row.
-  const latestStep = assistantLatestStepOf(activity)
-  if (activity.lastAssistantVisible === false || latestStep === undefined) return undefined
-  const last = assistantForStep(group, latestStep)
-  // Interrupted prefixes and display-only pending rows are process evidence,
-  // never a completed/max-token final answer, even when a malformed log reports
-  // a successful reason.
-  if (last === undefined || last.interrupted === true || !assistantRenderable(last)) return undefined
-  return { message: last, truncated: reason === 'max-tokens' }
 }

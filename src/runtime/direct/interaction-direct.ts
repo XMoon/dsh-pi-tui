@@ -27,7 +27,7 @@
  * from the official ApprovalRequest (which carries a same-process Agent) onto
  * the transport-neutral ApprovalRequestLike.
  *
- * Full contract: docs/client-server-migration.md + docs/client-server-coupling.md.
+ * Full contract: docs/architecture/host-client.md + docs/architecture/host-client.md.
  * @module @xmoon76/dsh-pi-tui/runtime/direct/interaction-direct
  */
 

@@ -1224,6 +1224,19 @@ export class TranscriptFolder {
     return this.activityByTurn.get(turn)
   }
 
+  /**
+   * The committed `seq` of the official `assistant/message` that SETTLED one
+   * `(turn, step)`, or undefined when the current fold never applied it (a
+   * late post-turn message is rejected before this sidecar is written).
+   *
+   * One read-only view of the existing settlement sidecar: `/copy` uses it to
+   * prove that the latest official durable message and the final Assistant row
+   * it reads are the SAME step. No second index and no fold change.
+   */
+  assistantSettlementSeq(turn: number, step: number): number | undefined {
+    return this.assistantSettlementSeqs.get(stepKey(turn, step))
+  }
+
   /** The Focus activities of every known turn (read-only views). Returned
    * BY REFERENCE — no per-repaint copy, so the cost stays O(1) no matter
    * how long the session is (the projection only touches the windowed

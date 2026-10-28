@@ -45,9 +45,6 @@ import {
   type PluginManagerSectionView,
 } from './model.ts'
 
-/** Which host opened the shared surface (navigation wording differs only). */
-export type PluginManagerEntryHost = 'direct-command' | 'settings-entry'
-
 /** The exact confirmation target classes. `remove` keeps the D1 behavior; the
  *  two Auto kinds are the B03 safety gate (no other overlay/manager). */
 export type PluginConfirmationKind = 'remove' | 'auto-disable-bundle' | 'auto-disable-row'
@@ -86,8 +83,6 @@ export interface PluginInstallView {
 export interface PluginManagerControllerHooks {
   /** Repaint an open panel (no-op when closed). */
   requestRender(): void
-  /** Ask the owning host to close the surface (`/plugins` root or Settings). */
-  requestClose(): void
   /** Report an out-of-panel notice (a settled install while closed). */
   notify(message: string, kind: 'info' | 'error'): void
   /** Whether the panel is currently open. */
@@ -179,11 +174,15 @@ export class PluginManagerController {
   /** The exact notice text of the last failed inventory read, so a later
    * successful read can clear it without clobbering an operation message. */
   private refreshErrorMessage: string | undefined
-  private entryHost: PluginManagerEntryHost = 'direct-command'
   private confirming: PluginConfirmation | undefined
   private busyValue: string | undefined
   private message: string | undefined
   private readEpoch = 0
+  /** Monotonic count of REAL semantic transitions (a read started, a phase or
+   *  notice or status or model change). It exists so a UI gesture fence can see
+   *  "the Controller changed and changed back" — the same phase value can return
+   *  (installing -> applying -> installing) while no comparable value differs. */
+  private semanticTransitions = 0
   private mutationToken = 0
   private install: ActiveInstall | undefined
   private installEpoch = 0
@@ -212,10 +211,9 @@ export class PluginManagerController {
     runDetached(label, task, { diag: this.hooks.diag })
   }
 
-  /** Open the shared surface from one host: read once. */
-  open(host: PluginManagerEntryHost): void {
+  /** Mount the ONE embedded page: read the official inventory once. */
+  open(): void {
     if (this.disposed) return
-    this.entryHost = host
     this.confirming = undefined
     this.message = undefined
     this.run('plugin manager read', () => this.read())
@@ -271,6 +269,36 @@ export class PluginManagerController {
     return this.modelValue.cards.find(candidate => candidate.value === value)
   }
 
+  /**
+   * The monotonic inventory-read generation. It advances when ANY read starts
+   * (an explicit refresh or a Host invalidation), before the new facts land, so
+   * a painted action can tell "the Host asked me to re-read" from "the re-read
+   * returned the same facts" — §3.4 requires a press held across a Host
+   * invalidate to be refused even when the inventory is byte-identical.
+   */
+  readGeneration(): number {
+    return this.readEpoch
+  }
+
+  /** See {@link semanticTransitions}: monotonic, never reset, pure read. */
+  semanticTransitionsCount(): number {
+    return this.semanticTransitions
+  }
+
+  /** Advance the monotonic transition count. Called by every write that really
+   *  changes what the page presents; a bare repaint request does not. */
+  private touchSemantic(): void {
+    this.semanticTransitions += 1
+  }
+
+  /** The ONE presentation notification: every Controller write that changes what
+   *  the page presents ends here, so the monotonic transition count is advanced
+   *  exactly once per real change (this class never requests a bare repaint). */
+  private notifyChanged(): void {
+    this.touchSemantic()
+    this.hooks.requestRender()
+  }
+
   /** The load/error state for the panel's empty frame. */
   status(): { readonly state: 'loading' | 'ready' | 'error'; readonly error?: string } {
     return { state: this.state, ...(this.error === undefined ? {} : { error: this.error }) }
@@ -284,22 +312,12 @@ export class PluginManagerController {
   /** Explain a refused/disabled affordance without touching Host state. */
   explain(message: string): void {
     this.message = message
-    this.hooks.requestRender()
-  }
-
-  /** The host that opened the surface. */
-  host(): PluginManagerEntryHost {
-    return this.entryHost
+    this.notifyChanged()
   }
 
   /** The card currently marked busy by an in-flight mutation. */
   busy(): string | undefined {
     return this.busyValue
-  }
-
-  /** Ask the owning host to close the surface (normal user close). */
-  requestClose(): void {
-    this.hooks.requestClose()
   }
 
   // ── install view ─────────────────────────────────────────────────────────
@@ -385,7 +403,7 @@ export class PluginManagerController {
     const active = this.install
     if (active?.phase === 'unknown') {
       this.message = 'the previous install outcome is unknown; check its status before starting a new install'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return false
     }
     if (active !== undefined && active.phase !== 'done' && active.phase !== 'failed') {
@@ -403,7 +421,7 @@ export class PluginManagerController {
       log: [],
     }
     this.message = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
     return true
   }
 
@@ -418,19 +436,19 @@ export class PluginManagerController {
     if (active !== undefined
       && (active.phase === 'done' || active.phase === 'failed' || active.phase === 'unknown')) {
       this.message = 'an install result is still open; reopen it, then use New install to replace it'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return false
     }
     if (this.hasDispatchedInstall()) return false
     const card = this.card(value)
     if (card === undefined) {
       this.message = 'the inventory changed; refresh and try again'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return false
     }
     if (card.availability !== 'missing' || !card.canInstall || card.installTarget === undefined) {
       this.message = card.installBlockedReason ?? `${card.name} has no official install target`
-      this.hooks.requestRender()
+      this.notifyChanged()
       return false
     }
     this.install?.inspectAbort?.abort()
@@ -456,14 +474,14 @@ export class PluginManagerController {
     const trimmed = spec.trim()
     if (trimmed === '') {
       active.message = 'Enter a package spec first'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return
     }
     // A custom registry is real external input: validate the boundary before
     // dispatching, and never let the Host receive a malformed URL.
     if (registry !== null && !/^https?:\/\/\S+$/i.test(registry)) {
       active.message = 'registry must be an http(s) URL'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return
     }
     // A user-edited spec is no longer the official catalog target: drop the
@@ -482,7 +500,7 @@ export class PluginManagerController {
     active.phase = 'inspecting'
     active.message = undefined
     active.inspection = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
     this.run('plugin manager inspect', () => this.performInspect(trimmed, registry, epoch, abort))
   }
 
@@ -497,7 +515,7 @@ export class PluginManagerController {
       current.message = inspection.status === 'refused'
         ? `refused: ${inspection.problem} — ${inspection.reason}`
         : undefined
-      this.hooks.requestRender()
+      this.notifyChanged()
     } catch (error) {
       if (this.disposed || this.installEpoch !== epoch) return
       const current = this.install
@@ -509,7 +527,7 @@ export class PluginManagerController {
         // never present them as this generation's accepted confirmation.
         ? 'the inspection result arrived after its currentness context was superseded; inspect again'
         : `inspect failed: ${errorMessage(error)}`
-      this.hooks.requestRender()
+      this.notifyChanged()
     }
   }
 
@@ -522,7 +540,7 @@ export class PluginManagerController {
     this.installEpoch += 1
     active.phase = 'editing'
     active.message = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
   }
 
   /** Dispatch the official install after an accepted inspection. */
@@ -532,7 +550,7 @@ export class PluginManagerController {
     if (active.inspection?.status !== 'accepted') return
     active.phase = 'starting'
     active.message = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
     const requestId = active.requestId
     this.run('plugin manager install', () => this.performInstall(requestId))
   }
@@ -573,7 +591,7 @@ export class PluginManagerController {
       current.phase = 'unknown'
       current.message = `install outcome unknown: ${errorMessage(error)} — check the inventory below; not retried automatically`
       this.run('plugin manager read', () => this.read())
-      this.hooks.requestRender()
+      this.notifyChanged()
       if (!this.hooks.isOpen()) this.hooks.notify('plugin install outcome unknown; inventory refreshed', 'error')
       return
     }
@@ -588,7 +606,7 @@ export class PluginManagerController {
     if (active.phase !== 'installing' && active.phase !== 'starting') return
     active.phase = 'cancelling'
     active.message = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
     this.run('plugin manager cancel install', () => this.performCancel(active.requestId))
   }
 
@@ -612,7 +630,7 @@ export class PluginManagerController {
         current.message = 'the installation already settled; check the installation status'
         this.run('plugin manager read', () => this.read())
       }
-      this.hooks.requestRender()
+      this.notifyChanged()
     } catch (error) {
       if (this.disposed) return
       const current = this.install
@@ -628,7 +646,7 @@ export class PluginManagerController {
         current.phase = 'installing'
         current.message = `cancel failed: ${errorMessage(error)}`
       }
-      this.hooks.requestRender()
+      this.notifyChanged()
     }
   }
 
@@ -640,7 +658,7 @@ export class PluginManagerController {
       this.installEpoch += 1
       this.install.phase = 'editing'
     }
-    this.hooks.requestRender()
+    this.notifyChanged()
   }
 
   /**
@@ -661,7 +679,7 @@ export class PluginManagerController {
     active.log = []
     active.outcome = undefined
     active.message = `approved build scripts for ${pending.join(', ')}; installing again`
-    this.hooks.requestRender()
+    this.notifyChanged()
     this.run('plugin manager install', () => this.performInstall(requestId))
   }
 
@@ -675,7 +693,7 @@ export class PluginManagerController {
     if (active === undefined) return
     const requestId = active.requestId
     active.message = 'checking the official installation status…'
-    this.hooks.requestRender()
+    this.notifyChanged()
     this.run('plugin manager reconcile install', () => this.performReconcile(requestId))
   }
 
@@ -691,7 +709,7 @@ export class PluginManagerController {
         const current = this.install
         if (current !== undefined && current.requestId === requestId) {
           current.message = `installation status check failed: ${errorMessage(error)}`
-          this.hooks.requestRender()
+          this.notifyChanged()
         }
       }
     }
@@ -706,7 +724,7 @@ export class PluginManagerController {
       ? 'the status check belongs to a superseded currentness context; the authoritative inventory reread below decides the outcome'
       : 'no active Host request carries this id; inventory reread below'
     this.run('plugin manager read', () => this.read())
-    this.hooks.requestRender()
+    this.notifyChanged()
   }
 
   // ── mutations ────────────────────────────────────────────────────────────
@@ -721,17 +739,17 @@ export class PluginManagerController {
   private refuseWhileMutating(): boolean {
     if (this.busyValue !== undefined) {
       this.message = 'another plugin change is still in progress; wait for it to settle'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return true
     }
     if (this.state === 'loading') {
       this.message = 'the plugin inventory is refreshing; wait for it to settle'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return true
     }
     if (this.state === 'error') {
       this.message = 'the plugin inventory is stale after a failed refresh; refresh before changing plugins'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return true
     }
     return false
@@ -750,7 +768,7 @@ export class PluginManagerController {
       await this.read()
     } finally {
       if (!this.disposed && token === this.mutationToken) this.busyValue = undefined
-      this.hooks.requestRender()
+      this.notifyChanged()
     }
   }
 
@@ -777,7 +795,7 @@ export class PluginManagerController {
     const card = this.card(value)
     if (card === undefined) {
       this.message = 'the plugin inventory changed; refresh and try again'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return
     }
     // Defense in depth: a direct semantic caller that bypassed the synchronous
@@ -791,18 +809,18 @@ export class PluginManagerController {
       this.message = card.canInstall
         ? `${card.name} is not installed; use Install… from its detail`
         : card.installBlockedReason ?? `${card.name} is not installed`
-      this.hooks.requestRender()
+      this.notifyChanged()
       return
     }
     if (!card.canToggle) {
       this.message = card.toggleBlockedReason ?? `cannot change ${card.name}`
-      this.hooks.requestRender()
+      this.notifyChanged()
       return
     }
     const token = ++this.mutationToken
     this.busyValue = card.value
     this.message = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
     try {
       const change = card.target === 'bundle'
         ? await this.port.setBundleEnabled(card.name, !card.enabled)
@@ -841,20 +859,20 @@ export class PluginManagerController {
     }
     if (card === undefined || row === undefined) {
       this.message = 'the plugin inventory changed; refresh and try again'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return
     }
     if (!row.canToggle) {
       this.message = row.selfProtected
         ? `${entryId} is controlled by the Current TUI composition and cannot be changed from here`
         : `cannot change ${entryId}: ${row.readOnlyReason ?? 'not addressable'}`
-      this.hooks.requestRender()
+      this.notifyChanged()
       return
     }
     const token = ++this.mutationToken
     this.busyValue = rowToggleValueBusy(entryId)
     this.message = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
     try {
       const change = await this.port.setPluginEnabled(entryId, !row.enabled)
       if (this.disposed || token !== this.mutationToken) return
@@ -873,12 +891,12 @@ export class PluginManagerController {
     if (card === undefined || card.target !== 'bundle') return false
     if (!card.canRemove) {
       this.message = card.removeBlockedReason ?? `cannot remove ${card.name}`
-      this.hooks.requestRender()
+      this.notifyChanged()
       return false
     }
     this.confirming = { kind: 'remove', value: card.value, name: card.name, epoch: this.readEpoch }
     this.message = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
     return true
   }
 
@@ -895,7 +913,7 @@ export class PluginManagerController {
     if (entryId === undefined) {
       if (card.target !== 'bundle' || !card.canToggle) {
         this.message = card.toggleBlockedReason ?? `cannot disable ${card.name}`
-        this.hooks.requestRender()
+        this.notifyChanged()
         return false
       }
       this.confirming = { kind: 'auto-disable-bundle', value: card.value, name: card.name, epoch: this.readEpoch }
@@ -905,7 +923,7 @@ export class PluginManagerController {
         this.message = row?.selfProtected === true
           ? `${entryId} is controlled by the Current TUI composition and cannot be changed from here`
           : `cannot disable ${entryId}: ${row?.readOnlyReason ?? 'not addressable'}`
-        this.hooks.requestRender()
+        this.notifyChanged()
         return false
       }
       const exactEntryId = row.entryId
@@ -918,7 +936,7 @@ export class PluginManagerController {
       }
     }
     this.message = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
     return true
   }
 
@@ -950,7 +968,7 @@ export class PluginManagerController {
   cancelConfirmation(): void {
     if (this.confirming === undefined) return
     this.confirming = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
   }
 
   /** D1-compatible removal cancel: only a `remove` confirmation is cancelled. */
@@ -988,7 +1006,7 @@ export class PluginManagerController {
     if (!stillProven) {
       this.confirming = undefined
       this.message = 'Auto Review changed since the confirmation opened; nothing was changed'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return
     }
     const token = ++this.mutationToken
@@ -997,7 +1015,7 @@ export class PluginManagerController {
       : confirmation.value
     this.confirming = undefined
     this.message = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
     try {
       const change = confirmation.kind === 'auto-disable-bundle'
         ? await this.port.setBundleEnabled(confirmation.name, false)
@@ -1021,14 +1039,14 @@ export class PluginManagerController {
       this.message = card?.isSelf === true
         ? selfRefusal(confirmation.name, card.role)
         : 'the bundle changed since the confirmation opened; nothing was removed'
-      this.hooks.requestRender()
+      this.notifyChanged()
       return
     }
     const token = ++this.mutationToken
     this.busyValue = confirmation.value
     this.confirming = undefined
     this.message = undefined
-    this.hooks.requestRender()
+    this.notifyChanged()
     try {
       const change = await this.port.removeBundle(confirmation.name)
       if (this.disposed || token !== this.mutationToken) return
@@ -1077,7 +1095,7 @@ export class PluginManagerController {
     // after it started nor clear a newer failure.
     const epoch = ++this.readEpoch
     this.state = 'loading'
-    this.hooks.requestRender()
+    this.notifyChanged()
     try {
       const snapshot = await this.port.snapshot()
       if (this.disposed || epoch !== this.readEpoch) return
@@ -1089,7 +1107,7 @@ export class PluginManagerController {
       // caller just set).
       if (this.message === this.refreshErrorMessage) this.message = undefined
       this.refreshErrorMessage = undefined
-      this.hooks.requestRender()
+      this.notifyChanged()
     } catch (error) {
       if (this.disposed || epoch !== this.readEpoch) return
       // A failed refresh keeps the last good snapshot.
@@ -1097,7 +1115,7 @@ export class PluginManagerController {
       this.error = errorMessage(error)
       this.refreshErrorMessage = `refresh failed: ${this.error}`
       this.message = this.refreshErrorMessage
-      this.hooks.requestRender()
+      this.notifyChanged()
     }
   }
 
@@ -1115,7 +1133,7 @@ export class PluginManagerController {
       current.phase = 'done'
       current.message = changeSummary(outcome)
     }
-    this.hooks.requestRender()
+    this.notifyChanged()
     this.run('plugin manager read', () => this.read())
     if (!this.hooks.isOpen()) {
       this.hooks.notify(
@@ -1137,25 +1155,33 @@ export class PluginManagerController {
       if (event.phase.attempt !== undefined) {
         active.message = `installing from ${event.phase.attempt.registry ?? 'pnpm default'} (${event.phase.attempt.index}/${event.phase.attempt.total})`
       }
-      this.hooks.requestRender()
+      this.notifyChanged()
       return
     }
     if (event.log.requestId !== active.requestId) return
-    this.appendLog(active, event.log.stream, event.log.text)
-    this.hooks.requestRender()
+    if (!this.appendLog(active, event.log.stream, event.log.text)) return
+    this.notifyChanged()
   }
 
-  private appendLog(active: ActiveInstall, stream: 'stdout' | 'stderr', text: string): void {
-    if (text === '') return
+  /** Append one Host log chunk. Returns whether the bounded log really changed:
+   *  an empty/blank chunk is NOT a presentation change, so the caller must not
+   *  notify (a no-op notification would advance the monotonic transition count
+   *  and revoke a legitimate held gesture). */
+  private appendLog(active: ActiveInstall, stream: 'stdout' | 'stderr', text: string): boolean {
+    if (text === '') return false
+    let appended = false
     for (const line of text.split('\n')) {
       if (line === '') continue
       active.log.push(stream === 'stderr' ? `! ${line}` : line)
+      appended = true
     }
+    if (!appended) return false
     if (active.log.length > LOG_MAX_LINES) active.log.splice(0, active.log.length - LOG_MAX_LINES)
     let total = active.log.reduce((sum, line) => sum + line.length + 1, 0)
     while (total > LOG_MAX_CHARS && active.log.length > 1) {
       total -= (active.log.shift()!.length + 1)
     }
+    return true
   }
 }
 
