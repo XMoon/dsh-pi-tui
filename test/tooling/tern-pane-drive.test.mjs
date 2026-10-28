@@ -32,6 +32,10 @@ const driver = joinPath(repo, 'scripts', 'tern-pane-drive.mjs')
  */
 function writeFakeTern(dir) {
   const log = joinPath(dir, 'calls.log')
+  // The holder INSTALLS its release handler and only THEN writes this fixture's
+  // startup witness: the test waits for the witness before it may send SIGUSR1,
+  // so the signal can never race the holder's own startup.
+  const holderScript = `const { writeFileSync } = require('node:fs'); process.on('SIGUSR1', () => process.exit(0)); writeFileSync(${JSON.stringify(joinPath(dir, 'holder-ready'))}, ''); setInterval(() => {}, 1 << 30)`
   const script = `import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -80,7 +84,7 @@ if (args[0] === 'serve') {
   // The holder's PID and start time are recorded BEFORE the serve record, so a
   // test that sees the record can already reach the holder by its identity.
   if (process.env.FAKE_STDIO_HOLD === '1') {
-    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30); process.on("SIGUSR1", () => process.exit(0))'], { stdio: 'inherit' })
+    const holder = spawn(process.execPath, ['-e', ${JSON.stringify(holderScript)}], { stdio: 'inherit' })
     writeFileSync(join(${JSON.stringify(join(log, '..'))}, 'holder.pid'), String(holder.pid) + ' ' + startTimeOfPid(holder.pid))
   }
   recordPid('serve')
@@ -410,6 +414,9 @@ test('the headless driver does not exit while its serve process still holds stdi
   const holder = readHolderIdentity(dir)
   assert.ok(holder !== undefined, `the fixture recorded the holder identity: ${JSON.stringify(holder)}`)
   assert.equal(isExecuting(holder), true, `the stdio holder is executing before the driver is signalled: ${JSON.stringify(holder)}`)
+  // The holder installs its SIGUSR1 handler BEFORE writing this startup witness:
+  // waiting for it removes the release-signal race with the holder's own start.
+  await waitForFileLine(joinPath(dir, 'holder-ready'), /^$/u, 20_000)
 
   child.kill('SIGTERM')
   // reason: a bounded observation of a NEGATIVE fact — the teardown must not finish while the child holds stdio.

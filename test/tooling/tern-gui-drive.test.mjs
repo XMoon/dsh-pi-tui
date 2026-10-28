@@ -39,6 +39,7 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
   killStillExecuting, readPidRecords, waitForNoExecuting, waitForPidRecords,
 } from '../support/pid-records.ts'
+import { waitForFileLine } from '../support/wait-for-file.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repo = joinPath(here, '../..')
@@ -53,6 +54,10 @@ const driver = joinPath(repo, 'scripts', 'tern-gui-drive.mjs')
  */
 function writeFakeTern(dir) {
   const log = joinPath(dir, 'calls.log')
+  // The holder INSTALLS its release handler and only THEN writes this fixture's
+  // startup witness: the test waits for the witness before it may send SIGUSR1,
+  // so the signal can never race the holder's own startup.
+  const holderScript = `const { writeFileSync } = require('node:fs'); process.on('SIGUSR1', () => process.exit(0)); writeFileSync(${JSON.stringify(joinPath(dir, 'holder-ready'))}, ''); setInterval(() => {}, 1 << 30)`
   const script = `import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -87,7 +92,7 @@ if (args[0] === 'daemon') {
   // grandchild's PID is recorded BEFORE the daemon's own record, so a test that
   // sees the record can already reach the holder.
   if (process.env.FAKE_STDIO_HOLD === '1') {
-    const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30); process.on("SIGUSR1", () => process.exit(0))'], { stdio: 'inherit' })
+    const holder = spawn(process.execPath, ['-e', ${JSON.stringify(holderScript)}], { stdio: 'inherit' })
     // The holder's identity, not a bare PID: the test-owned cleanup must never
     // signal a different process that reused the number.
     writeFileSync(${JSON.stringify(join(log, '..'))} + '/holder.pid', String(holder.pid) + ' ' + startTimeOfPid(holder.pid))
@@ -762,6 +767,9 @@ test('the driver does not exit while its daemon still holds stdio open', async (
 
   const records = await waitForPidRecords(pidsFile, 2, 30_000)
   const holderPid = Number(readFileSync(joinPath(dir, 'holder.pid'), 'utf8').trim().split(/\s+/u)[0])
+  // The holder installs its SIGUSR1 handler BEFORE writing this startup witness:
+  // waiting for it removes the release-signal race with the holder's own start.
+  await waitForFileLine(joinPath(dir, 'holder-ready'), /^$/u, 20_000)
 
   child.kill('SIGTERM')
   // reason: a bounded observation of a NEGATIVE fact — the teardown must not finish while the child holds stdio.
