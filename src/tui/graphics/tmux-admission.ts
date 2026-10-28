@@ -2,8 +2,8 @@
  * Strict admission for the tmux virtual Kitty backend (Image-7B-A).
  *
  * A tmux pane forwards a Kitty graphics APC to the outer terminal only when
- * the pane's `allow-passthrough` option is `all` AND the single attached client
- * is a trustworthy transport topology. Neither fact can be inferred from the
+ * the pane's `allow-passthrough` option is `all` AND the single ordinary display
+ * client is a trustworthy transport topology. Neither fact can be inferred from the
  * TUI's own environment: `TERM_PROGRAM`, `KITTY_WINDOW_ID` and
  * `PI_IMAGE_PROTOCOL` are inherited by the pane and say nothing about which
  * client is attached NOW. This module therefore asks the real tmux server,
@@ -46,7 +46,7 @@ const PROBE_MAX_OUTPUT_BYTES = 64 * 1024
 /** The short real-probe cache used by the component render path. */
 const PROBE_CACHE_TTL_MS = 250
 
-/** The immutable identity of the ONE attached tmux client a handle may use. */
+/** The immutable identity of the ONE ordinary display tmux client a handle may use. */
 export interface TmuxKittyIdentity {
   readonly paneId: string
   readonly sessionName: string
@@ -58,6 +58,37 @@ export interface TmuxKittyIdentity {
 
 function nonEmpty(value: string | undefined): value is string {
   return value !== undefined && value !== ''
+}
+
+/** One `list-clients` record that is an ordinary display terminal. */
+interface TmuxDisplayClient {
+  readonly name: string
+  readonly tty: string
+  readonly session: string
+  readonly termname: string
+  readonly termtype: string
+}
+
+/**
+ * Classify every raw `list-clients` record. The server's live
+ * `#{client_control_mode}` is the ONLY control-connection authority: `1`
+ * explicitly excludes a Control Mode client, `0` is an ordinary display client.
+ * Any other value, a missing column or a malformed record fails the whole
+ * report closed; a control connection is never inferred from its name or TTY.
+ */
+function parseDisplayClients(report: string): TmuxDisplayClient[] | undefined {
+  const displayClients: TmuxDisplayClient[] = []
+  for (const line of report.split('\n')) {
+    const fields = line.split('\t')
+    if (fields.length !== 6) return undefined
+    const [name, tty, session, termname, termtype, controlMode] = fields as [
+      string, string, string, string, string, string,
+    ]
+    if (controlMode === '1') continue
+    if (controlMode !== '0') return undefined
+    displayClients.push({ name, tty, session, termname, termtype })
+  }
+  return displayClients
 }
 
 /**
@@ -161,8 +192,11 @@ function sameIdentity(left: TmuxKittyIdentity, right: TmuxKittyIdentity): boolea
  *     opt-out;
  *  3. the real pane option `allow-passthrough` is exactly `all`;
  *  4. the real pane session name is non-empty;
- *  5. the whole server has exactly ONE attached client, whose session matches
- *     the pane and whose tty/name are non-empty.
+ *  5. the whole server has exactly ONE ordinary display client
+ *     (`client_control_mode=0`), whose session matches the pane and whose
+ *     tty/name are non-empty. Explicit Control Mode clients
+ *     (`client_control_mode=1`) are excluded from that count and may coexist;
+ *     any other/missing control value or malformed record fails closed.
  *
  * The client's terminal name/type are recorded for the U1 evidence decision,
  * but an unknown renderer is NOT rejected here: it may proceed to the live
@@ -181,22 +215,25 @@ export function probeTmuxKittyIdentity(env: NodeJS.ProcessEnv = process.env): Tm
   const sessionName = runTmux(['display-message', '-p', '-t', paneId, '#{session_name}'], env)
   if (!nonEmpty(sessionName)) return undefined
 
-  const clients = runTmux([
+  const report = runTmux([
     'list-clients',
     '-F',
-    '#{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}',
+    '#{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}\t#{client_control_mode}',
   ], env)
-  if (!nonEmpty(clients)) return undefined
-  const lines = clients.split('\n')
-  if (lines.length !== 1) return undefined
-  const fields = lines[0]!.split('\t')
-  if (fields.length !== 5) return undefined
-  const [clientName, clientTty, clientSession, clientTermname, clientTermtype] = fields as [
-    string, string, string, string, string,
-  ]
-  if (!nonEmpty(clientName) || !nonEmpty(clientTty)) return undefined
-  if (clientSession !== sessionName) return undefined
-  const identity = { paneId, sessionName, clientName, clientTty, clientTermname, clientTermtype }
+  if (!nonEmpty(report)) return undefined
+  const displayClients = parseDisplayClients(report)
+  if (displayClients === undefined || displayClients.length !== 1) return undefined
+  const client = displayClients[0]!
+  if (!nonEmpty(client.name) || !nonEmpty(client.tty)) return undefined
+  if (client.session !== sessionName) return undefined
+  const identity = {
+    paneId,
+    sessionName,
+    clientName: client.name,
+    clientTty: client.tty,
+    clientTermname: client.termname,
+    clientTermtype: client.termtype,
+  }
   if (isMultiplexerClient(identity)) return undefined
 
   return identity
@@ -210,7 +247,9 @@ export function probeTmuxKittyIdentity(env: NodeJS.ProcessEnv = process.env): Tm
  * per cell row. `isAllowed(true)` bypasses that cache and is used by the facade
  * before a physical write that carries a managed command. Once any probe fails
  * or the six identity fields change, `revoked` latches and nothing can grant
- * again. A client change inside the 250 ms window is not detected atomically;
+ * again. A Control Mode client is not one of those identity fields: its join,
+ * exit or change never revokes; only the ordinary display client binding can.
+ * A client change inside the 250 ms window is not detected atomically;
  * that is the documented hot-migration boundary, not an acknowledgement.
  * When a U1 feature gate is present, pending state is checked after the live
  * identity check: pending is not an identity failure, but a client change while

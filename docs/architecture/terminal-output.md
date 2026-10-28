@@ -261,8 +261,13 @@ the live server, identity, hard-off or revoke checks.
   backend asks the real tmux server (`show-options … allow-passthrough`,
   `display-message … '#{session_name}'`, `list-clients …`) with fixed argv, no
   shell, a 500 ms timeout and a bounded reply. It requires the pane option to be
-  exactly `all`, exactly one attached client whose session is the pane's, and a
-  non-empty client name/tty. An unknown renderer is not rejected at this server
+  exactly `all` and exactly one ordinary display TTY client whose session is the
+  pane's and whose name/tty are non-empty. The live `#{client_control_mode}`
+  column is the only control-connection authority: explicit Control Mode
+  clients (`1`) may coexist with that one display client, are never counted as
+  display clients, and their join, exit or change never revokes the handle.
+  A missing or non-`0`/`1` control value, or any malformed record, fails closed.
+  An unknown renderer is not rejected at this server
   boundary. The live client report itself may be known pre-feature-query U1
   evidence: a real XTVERSION program of `kitty` or `ghostty` in
   `client_termtype` is sufficient; `client_termname` is only a transport hint
@@ -277,11 +282,12 @@ the live server, identity, hard-off or revoke checks.
   client identity is still current. Pane environment (`TMUX`,
   `TMUX_PANE`, `TERM`) is necessary context only: inherited
   `TERM_PROGRAM`/`KITTY_WINDOW_ID` never grant admission. Option
-  `on`/`off`, no client, mixed clients, a live outer tmux/screen client, a
-  nested multiplexer or any query failure fails closed before image work. The
+  `on`/`off`, no ordinary display client, two ordinary display clients, a live
+  outer tmux/screen client, a nested multiplexer or any query failure fails
+  closed before image work. The
   backend never writes tmux configuration: `allow-passthrough=all` and the
-  single attached client are user-provided preconditions, and no option is ever
-  set for the user.
+  single ordinary display client are user-provided preconditions, and no option
+  is ever set for the user.
 - **Revocation is one-way.** Any real probe failure or change to the six
   identity fields latches the handle revoked for the rest of the process. The
   component then paints the text fallback, and the facade refuses an entire

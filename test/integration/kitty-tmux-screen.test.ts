@@ -277,6 +277,10 @@ test('the factory refuses to create a handle unless the live server admits it', 
     { name: 'invalid opt-in value', mutate: (cli) => { cli.env.PI_TUI_TMUX_KITTY_IMAGES = 'true' } },
     { name: 'passthrough on', mutate: (cli) => cli.setReply('show-options', { text: 'on\n' }) },
     { name: 'no client', mutate: (cli) => cli.setReply('list-clients', { text: '' }) },
+    {
+      name: 'only a Control Mode client',
+      mutate: (cli) => cli.setReply('list-clients', { text: 'client-3383511\t\twork\tunknown\t\t1\n' }),
+    },
   ]
   for (const entry of cases) {
     const cli = createFakeTmuxCli(t)
@@ -303,7 +307,7 @@ test('an unset opt-in creates the factory handle through the same real probe', (
     assert.deepEqual(cli.calls().slice(0, 3), [
       'show-options -Apqv -t %7 allow-passthrough',
       'display-message -p -t %7 #{session_name}',
-      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}',
+      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}\t#{client_control_mode}',
     ], 'the factory ran the fixed real-server probe')
     const image = imageOf(graphics, source(), fallbackOptions())
     class Root implements Component {
@@ -335,10 +339,112 @@ test('an unset opt-in creates the factory handle through the same real probe', (
   }
 })
 
+test('a Control Mode client next to the one Kitty display client admits and paints the virtual grid', (t) => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const cli = createFakeTmuxCli(t)
+  cli.setReply('list-clients', {
+    text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n'
+      + 'client-3383511\t\twork\tunknown\t\t1\n',
+  })
+  const terminal = new RecordingTerminal()
+  try {
+    // The raw six-column server report is the only input: the real probe and
+    // the real factory must classify the Control Mode client out of the count.
+    assert.deepEqual(probeTmuxKittyIdentity(cli.env), {
+      paneId: '%7',
+      sessionName: 'work',
+      clientName: 'main',
+      clientTty: '/dev/pts/12',
+      clientTermname: 'xterm-kitty',
+      clientTermtype: 'kitty(0.41.1)',
+    })
+    assert.deepEqual(cli.calls().slice(0, 3), [
+      'show-options -Apqv -t %7 allow-passthrough',
+      'display-message -p -t %7 #{session_name}',
+      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}\t#{client_control_mode}',
+    ], 'the probe asked for the control-mode column with fixed argv')
+    const graphics = createTmuxKittyGraphics(terminal, {}, cli.env)
+    assert.ok(graphics, 'the real factory admits the display client despite the Control Mode connection')
+    try {
+      assert.equal(graphics.mode, 'tmux-virtual')
+      assert.equal(graphics.canPaint(), true)
+      const image = imageOf(graphics, source(), fallbackOptions())
+      class Root implements Component {
+        render(width: number): string[] {
+          return ['head', ...image.render(width), 'tail']
+        }
+        invalidate(): void {
+          image.invalidate()
+        }
+      }
+      const screen = new TuiMainScreen(graphics.terminal)
+      screen.addChild(new Root())
+      screen.start()
+      terminal.writes.length = 0
+      screen.renderNow()
+      const scan = scanOuter(terminal.text)
+      assertNoUnwrappedGraphics(scan)
+      assert.equal(scan.commands.filter((command) => command.controls.a === 't').length, 1)
+      assert.equal(scan.commands.filter((command) => command.controls.a === 'p' && command.controls.U === '1').length, 1)
+      assert.ok(count(scan.text, P) > 0, 'the placeholder grid reached the physical sink')
+      screen.stop()
+    } finally {
+      graphics.dispose()
+    }
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('tmux virtual: a Control Mode client joining or leaving never revokes the existing display handle', (t) => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    h.graphics.terminal.write(image.render(80).join('\r\n'))
+    assert.ok(h.terminal.text.includes(P), 'fixture: the initial frame painted')
+    const display = 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n'
+    const control = 'client-3383511\t\twork\tunknown\t\t1\n'
+
+    h.terminal.writes.length = 0
+    h.cli.setReply('list-clients', { text: display + control })
+    image.invalidate()
+    h.graphics.terminal.write(image.render(80).join('\r\n'))
+    assert.ok(h.terminal.text.includes(P), 'the SAME Core paints after a Control Mode client joins')
+
+    h.terminal.writes.length = 0
+    h.cli.setReply('list-clients', { text: display })
+    image.invalidate()
+    h.graphics.terminal.write(image.render(80).join('\r\n'))
+    assert.ok(h.terminal.text.includes(P), 'and after the Control Mode client leaves')
+  } finally {
+    h.dispose()
+  }
+})
+
+test('tmux virtual: a second ordinary display client revokes before the old image writes', (t) => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const h = harness(t)
+  try {
+    const image = imageOf(h.graphics, source(), fallbackOptions())
+    const rows = image.render(80)
+    h.cli.setReply('list-clients', {
+      text: 'main\t/dev/pts/12\twork\txterm-kitty\tkitty(0.41.1)\t0\n'
+        + 'other\t/dev/pts/13\twork\txterm-kitty\tkitty(0.41.1)\t0\n'
+        + 'client-3383511\t\twork\tunknown\t\t1\n',
+    })
+    assert.throws(() => h.graphics.terminal.write(rows.join('\r\n')), TmuxGraphicsRevokedError,
+      'a second ordinary display client revokes the handle')
+    assert.equal(h.terminal.text, '', 'no byte of the old image may reach the new client')
+  } finally {
+    h.dispose()
+  }
+})
+
 test('an unknown tmux client paints text until the live U1 feature reply then paints one virtual Core', async (t) => {
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   const cli = createFakeTmuxCli(t)
-  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
   const terminal = new RecordingTerminal()
   let repaints = 0
   const graphics = createTmuxKittyGraphics(terminal, {}, cli.env, () => { repaints += 1 })
@@ -387,7 +493,7 @@ test('an unknown tmux client paints text until the live U1 feature reply then pa
 test('a base OK from an unknown tmux client leaves the real screen text-only', async (t) => {
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   const cli = createFakeTmuxCli(t)
-  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
   const terminal = new RecordingTerminal()
   const graphics = createTmuxKittyGraphics(terminal, {}, cli.env)
   assert.ok(graphics)
@@ -424,7 +530,7 @@ test('a base OK from an unknown tmux client leaves the real screen text-only', a
 test('a real TuiApp reads and paints an unknown tmux client only after the live U1 feature reply', async (t) => {
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   const cli = createFakeTmuxCli(t)
-  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
   useTmuxEnvironment(t, cli)
   const terminal = new RecordingTerminal()
   const media = countingImageLoader()
@@ -486,7 +592,7 @@ test('a real TuiApp reads and paints an unknown tmux client only after the live 
 test('a real TuiApp with an unknown tmux client keeps a base-OK failure text-only with zero reads', async (t) => {
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   const cli = createFakeTmuxCli(t)
-  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\n' })
+  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\twezterm 20240203\t0\n' })
   useTmuxEnvironment(t, cli)
   const terminal = new RecordingTerminal()
   const media = countingImageLoader()
