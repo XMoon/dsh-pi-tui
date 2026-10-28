@@ -136,6 +136,30 @@ function shardIndexOf(directory, total) {
 }
 
 /**
+ * A run attempt as a positive integer, or null when the value is not one.
+ *
+ * `GITHUB_RUN_ATTEMPT` reaches `runner-spec.json` as a string, while a
+ * synthetic or future record may carry a JSON number; both are the same
+ * attempt. Everything else — `0`, a negative number, a fraction, an empty
+ * string, a missing field or a non-numeric value — is not an attempt and must
+ * never be compared as one.
+ *
+ * A workflow re-run keeps the same run id and the same commit and only
+ * advances this number, so it is the EXECUTION GENERATION: a bounded
+ * comparison over `1..currentAttempt`, not equality and not "any value".
+ *
+ * @param {unknown} value - the recorded or expected attempt.
+ * @returns {number|null} the attempt, or null when it is not a positive integer.
+ */
+function parseRunAttempt(value) {
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value > 0 ? value : null
+  }
+  if (typeof value !== 'string' || !/^[1-9]\d*$/u.test(value)) return null
+  return Number(value)
+}
+
+/**
  * A recorded file path in the TEST-root form the discovery rule uses.
  *
  * The reporter records the path relative to the repository root, because
@@ -296,6 +320,17 @@ export function verifyShards({
   const failures = []
   const acceptedSkipPatternsOrNone = acceptedSkips === undefined ? null : acceptedSkips
 
+  // The execution generation this aggregate is proving. A re-run of the same
+  // workflow keeps the run id and the commit and only advances the attempt, so
+  // the shard records must be in `1..currentAttempt`; a future attempt belongs
+  // to a run that has not happened yet and is rejected. The expectation itself
+  // is validated: an unusable value must fail the proof, not silently disable
+  // the check.
+  const expectedAttempt = expectedRunAttempt === null ? null : parseRunAttempt(expectedRunAttempt)
+  if (expectedRunAttempt !== null && expectedAttempt === null) {
+    failures.push(`the expected run attempt ${JSON.stringify(expectedRunAttempt)} is not a positive integer: the execution generation cannot be checked`)
+  }
+
   // The lane's own file list, resolved by the SAME discovery rule the
   // runner uses. This is the authority the shards are compared against.
   const lane = LANES[LANE]
@@ -341,12 +376,25 @@ export function verifyShards({
   for (const group of groups.values()) {
     const { version, directories } = group
     const seenFiles = new Map()
+    // The shard SLOT each directory claims, inside this Node version's
+    // partition. Two directories naming the same slot would mean one shard
+    // measured twice and another not at all — a partition is a set of
+    // DISTINCT slots, not merely `total` directories.
+    const seenSlots = new Map()
     // The version's own counts are filled in after its shards are counted.
     if (directories.length !== total) {
       failures.push(`expected ${total} shard directories for Node ${version}, found ${directories.length}: ${directories.join(', ')}`)
     }
     for (const shardDirectory of directories) {
     const directory = basename(shardDirectory)
+    const slot = shardIndexOf(directory, total)
+    if (slot !== null) {
+      if (seenSlots.has(slot)) {
+        failures.push(`the shard slot ${slot} is claimed by two directories (${seenSlots.get(slot)} and ${directory}): a partition has distinct slots`)
+      } else {
+        seenSlots.set(slot, directory)
+      }
+    }
     const cases = readShardCases(shardDirectory)
     const spec = readShardSpec(shardDirectory)
     if (cases.length === 0) {
@@ -480,14 +528,19 @@ export function verifyShards({
           failures.push(`the shard ${directory} belongs to run ${spec.runId}, not ${expectedRunId}`)
         }
       }
-      if (expectedRunAttempt !== null) {
+      if (expectedAttempt !== null) {
         // A re-run of the same workflow has the same run id and the same
-        // commit, and only the attempt tells them apart. An artifact from
-        // an earlier attempt must not be counted towards this one.
-        if (spec.runAttempt === undefined || spec.runAttempt === null || spec.runAttempt === '') {
-          failures.push(`the shard ${directory} recorded no run attempt: its identity is unknown`)
-        } else if (String(spec.runAttempt) !== String(expectedRunAttempt)) {
-          failures.push(`the shard ${directory} belongs to attempt ${spec.runAttempt}, not ${expectedRunAttempt}`)
+        // commit, and only the attempt tells them apart. An artifact from an
+        // EARLIER attempt is still valid evidence when the shard itself was
+        // not re-run: a partial re-run of failed jobs keeps the successful
+        // shards of the previous attempt, so the bounded range is what makes
+        // the recovered aggregate possible. A FUTURE attempt cannot belong to
+        // this run, and an unusable value is not an attempt at all.
+        const recordedAttempt = parseRunAttempt(spec.runAttempt)
+        if (recordedAttempt === null) {
+          failures.push(`the shard ${directory} recorded no valid run attempt (${JSON.stringify(spec.runAttempt)}): a positive integer is required`)
+        } else if (recordedAttempt > expectedAttempt) {
+          failures.push(`the shard ${directory} belongs to attempt ${recordedAttempt}, which is newer than this run's attempt ${expectedAttempt}`)
         }
       }
     }
@@ -518,9 +571,8 @@ export function verifyShards({
     if (applied === null) {
       failures.push(`the shard ${directory} recorded no effective parameters: what it actually ran is unknown`)
     } else {
-      const expectedShard = shardIndexOf(directory, total)
-      if (expectedShard !== null && applied.shard !== expectedShard) {
-        failures.push(`the shard ${directory} ran the shard ${applied.shard}, not ${expectedShard}`)
+      if (slot !== null && applied.shard !== slot) {
+        failures.push(`the shard ${directory} ran the shard ${applied.shard}, not ${slot}`)
       }
       if (expectedConcurrency === 'default') {
         if (applied.testConcurrency !== null) {
@@ -540,6 +592,10 @@ export function verifyShards({
       cancelled: cancelled.length,
       sha: spec?.sha ?? null,
       runId: spec?.runId ?? null,
+      // The EXECUTION GENERATION this shard was produced by. A partial re-run
+      // legitimately leaves a mix of attempts in one aggregate, so the report
+      // shows each shard's attempt instead of a single run-level number.
+      runAttempt: spec?.runAttempt ?? null,
       applied: applied === null ? null : {
         shard: applied.shard,
         testConcurrency: applied.testConcurrency,
@@ -585,6 +641,10 @@ export function verifyShards({
     skipPolicy: acceptedSkipPatternsOrNone === null
       ? null
       : { acceptedClasses: acceptedSkipPatternsOrNone.length, enforced: true },
+    // The distinct attempts this partition was produced by. A normal run has
+    // one; a partial re-run of failed jobs legitimately has several, and the
+    // report says so instead of hiding the generation the evidence came from.
+    runAttempts: [...new Set(shards.map(shard => shard.runAttempt).filter(attempt => attempt !== null))],
     shards,
     versions,
     failures,
@@ -601,8 +661,13 @@ function report(aggregate, outIndex, outPath) {
   console.log(`files             ${aggregate.observedFileCount}/${aggregate.expectedFileCount}`)
   console.log(`cases             ${aggregate.totalCases}`)
   console.log(`skipped           ${aggregate.totalSkipped}`)
+  // The execution generations the evidence came from. A partial re-run keeps
+  // the successful shards of an earlier attempt, so a mixed list is expected
+  // and must be visible in the report instead of being read as one attempt.
+  const attempts = aggregate.runAttempts ?? []
+  console.log(`attempts          ${attempts.length === 0 ? '(none recorded)' : attempts.join(', ')}${attempts.length > 1 ? ' (mixed by partial re-run)' : ''}`)
   for (const shard of aggregate.shards) {
-    console.log(`  ${shard.shard}: files=${shard.fileCount} cases=${shard.caseCount} skipped=${shard.skipped} failed=${shard.failed} wall=${shard.wallClockSeconds}s`)
+    console.log(`  ${shard.shard}: attempt=${shard.runAttempt ?? '(none)'} files=${shard.fileCount} cases=${shard.caseCount} skipped=${shard.skipped} failed=${shard.failed} wall=${shard.wallClockSeconds}s`)
   }
 
   if (aggregate.failures.length > 0) {

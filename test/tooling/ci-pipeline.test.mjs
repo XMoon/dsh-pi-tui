@@ -104,12 +104,14 @@ test('a fully successful source run qualifies with the source mode-statuses', ()
   assert.deepEqual(decision.failures, [])
 })
 
-test('SKIPPED is not success for a required phase', () => {
-  const phases = phasesAt('success')
-  phases[0] = { name: phases[0].name, result: 'skipped' }
-  const decision = verdict({ role: 'qualify', mode: 'npm', phases })
-  assert.equal(decision.ok, false)
-  assert.match(decision.failures.join('\n'), /is 'skipped', not 'success'/u)
+test('SKIPPED, FAILED and CANCELLED are not success for a required phase', () => {
+  for (const result of ['skipped', 'failure', 'cancelled']) {
+    const phases = phasesAt('success')
+    phases[0] = { name: phases[0].name, result }
+    const decision = verdict({ role: 'qualify', mode: 'npm', phases })
+    assert.equal(decision.ok, false, `'${result}' must not qualify`)
+    assert.match(decision.failures.join('\n'), new RegExp(`is '${result}', not 'success'`, 'u'))
+  }
 })
 
 test('an ABSENT phase is a failure, not a pass', () => {
@@ -309,9 +311,9 @@ test('the shard job passes BOTH the partition and the resolved concurrency', () 
 
 test('every job that can be SKIPPED by mode states the mode it needs', () => {
   // `always()` suppresses the implicit success requirement. The reporting jobs
-  // are the two whose STEPS re-check the graph, so they are exempt here — and
-  // both are asserted to delegate to a script below.
-  const reporting = new Set(['aggregate', 'summary'])
+  // are the ones whose STEPS re-check the graph, so they are exempt here — and
+  // all three are asserted to delegate to a script below.
+  const reporting = new Set(['aggregate', 'summary', 'qualified'])
   const jobs = workflow().jobs
   for (const [name, job] of Object.entries(jobs)) {
     if (typeof job.if !== 'string') continue
@@ -331,15 +333,123 @@ test('every job that can be SKIPPED by mode states the mode it needs', () => {
     'the aggregate must refuse a shard matrix that did not succeed')
   assert.match(jobs.summary.steps.find(step => typeof step.run === 'string' && step.run.includes('ci-verdict')).run,
     /ci-verdict\.mjs summary/u)
+  // The qualification job runs on a failed graph too, so its whole check is
+  // the script — not the job-level condition.
+  assert.match(jobs.qualified.steps.find(step => typeof step.run === 'string' && step.run.includes('ci-verdict')).run,
+    /ci-verdict\.mjs qualify/u)
 })
 
-test('the two mode-dependent jobs are required with their EXACT status', () => {
+test('the two mode-dependent jobs stay in the qualification verdict with their EXACT status', () => {
   // Source needs the pinned distribution built; npm needs the npm-only
   // client-family gate. Accepting "not failed" would let a source run qualify
   // with no dependency graph, and an npm run qualify with a dropped check.
-  const condition = workflow().jobs.qualified.if
-  assert.match(condition, /needs\.dsh-context\.outputs\.mode == 'npm' && needs\['prepare-dsh-source'\]\.result == 'skipped' && needs\['client-family-compat'\]\.result == 'success'/u)
-  assert.match(condition, /needs\.dsh-context\.outputs\.mode == 'source' && needs\['prepare-dsh-source'\]\.result == 'success' && needs\['client-family-compat'\]\.result == 'skipped'/u)
+  //
+  // The policy now lives in `ci-verdict` (the job must RUN on failure instead
+  // of being skipped by a job-level condition), but it is still the same exact
+  // pair, and the job still waits for both jobs.
+  assert.deepEqual(MODE_STATUS.npm, {
+    'prepare-dsh-source': 'skipped',
+    'client-family-compat': 'success',
+  })
+  assert.deepEqual(MODE_STATUS.source, {
+    'prepare-dsh-source': 'success',
+    'client-family-compat': 'skipped',
+  })
+  const job = workflow().jobs.qualified
+  assert.deepEqual(
+    new Set(needsOf(job)),
+    new Set([...REQUIRED_PHASES, ...Object.keys(MODE_STATUS.npm)]),
+    'the qualified job must still wait for every verdict phase, including both mode-dependent jobs',
+  )
+  const verdictStep = job.steps.find(step => typeof step.run === 'string' && step.run.includes('ci-verdict.mjs qualify'))
+  assert.ok(verdictStep, 'the qualified job must delegate its verdict to ci-verdict')
+  const listed = [...verdictStep.run.matchAll(/--phase "([^"=]+)=/gu)].map(match => match[1])
+  assert.deepEqual(
+    new Set(listed),
+    new Set([...REQUIRED_PHASES, ...Object.keys(MODE_STATUS.npm)]),
+    'the verdict must be given every phase the script requires, including both mode-dependent jobs',
+  )
+  assert.match(verdictStep.run, /--mode "\$DSH_MODE"/u)
+  assert.match(verdictStep.env.DSH_MODE, /outputs\.mode/u,
+    'the verdict must receive the mode the run resolved, not a default')
+})
+
+test('the qualified job RUNS on a failed graph, and the verdict gates before any download or upload', () => {
+  const job = workflow().jobs.qualified
+  assert.match(job.if, /always\(\)/u,
+    'a skipped qualification both hides the missing proof and cannot be re-run by "Re-run failed jobs"')
+  assert.doesNotMatch(job.if, /needs\./u,
+    'a needs-status gate would skip the job before the verdict can fail it')
+
+  const steps = job.steps
+  const verdictIndex = steps.findIndex(step => typeof step.run === 'string' && /ci-verdict\.mjs qualify/u.test(step.run))
+  const downloadIndex = steps.findIndex(step => step.uses === 'actions/download-artifact@v8' && step.with?.name === 'dsh-pi-tui-provisional')
+  const uploadIndex = steps.findIndex(step => step.uses === 'actions/upload-artifact@v7' && step.with?.name === 'dsh-pi-tui-tarball')
+  assert.ok(verdictIndex >= 0, 'the qualification verdict must exist')
+  assert.ok(downloadIndex > verdictIndex,
+    'a failed verdict must stop the job before it looks for a candidate that does not exist')
+  assert.ok(uploadIndex > downloadIndex,
+    'the publishable artifact must only be uploaded after the candidate was downloaded and re-proved')
+
+  // GitHub runs a step after a failure only when its `if` says so. The verdict
+  // is a real gate only if nothing after it is unconditional-by-condition.
+  for (const step of steps) {
+    assert.equal(step['continue-on-error'], undefined, `${step.name}: no qualification step may continue on error`)
+  }
+  for (const step of steps.slice(verdictIndex + 1)) {
+    assert.equal(step.if, undefined, `${step.name}: no step may be scheduled to run after a failed verdict`)
+  }
+})
+
+test('every artifact upload REPLACES its name so a partial re-run can recover', () => {
+  // "Re-run failed jobs" re-executes a producer while the successful jobs keep
+  // the artifact they already uploaded. A same-name upload without `overwrite`
+  // fails on the name (or leaves the old artifact for a consumer to read), so
+  // every producer must replace its own artifact.
+  const uploads = []
+  for (const [jobName, job] of Object.entries(workflow().jobs)) {
+    for (const step of job.steps ?? []) {
+      if (step.uses === 'actions/upload-artifact@v7') uploads.push({ jobName, step })
+    }
+  }
+  assert.ok(uploads.length >= 12, 'every artifact producer in the workflow must be covered')
+  for (const { jobName, step } of uploads) {
+    assert.equal(step.with?.overwrite, true,
+      `${jobName}/${step.with?.name ?? '(unnamed)'} must overwrite a same-name artifact on a re-run`)
+  }
+
+  // The shard artifact is identified by its SLOT, never by the attempt: an
+  // attempt or run suffix would leave the previous artifact in place and give
+  // the aggregate two directories for one shard.
+  const shardUpload = workflow().jobs['product-shard'].steps.find(step => step.uses === 'actions/upload-artifact@v7')
+  assert.equal(shardUpload.with.name, 'product-shard-${{ matrix.shard }}-node24')
+  assert.doesNotMatch(shardUpload.with.name, /attempt/u,
+    'an attempt in the artifact name would defeat the stable download pattern')
+  assert.equal(shardUpload.if, 'always()', 'a failed shard must still upload its diagnosis')
+  assert.equal(shardUpload.with['if-no-files-found'], 'warn',
+    'a failed shard with no files must not turn its upload step into a different failure')
+})
+
+test('a SUCCESSFUL shard must produce complete diagnostics before uploading', () => {
+  // `if-no-files-found: warn` on the always() upload cannot distinguish "this
+  // shard succeeded and wrote evidence" from "this shard succeeded and wrote
+  // nothing". A success-path check is the gate that stops a stale same-name
+  // artifact from standing in for a shard that never recorded its run.
+  const steps = workflow().jobs['product-shard'].steps
+  const runIndex = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('run-test-lane.mjs'))
+  const checkIndex = steps.findIndex(step => typeof step.run === 'string' && step.run.includes('diagnostics/cases.jsonl'))
+  const uploadIndex = steps.findIndex(step => step.uses === 'actions/upload-artifact@v7')
+  assert.ok(runIndex >= 0, 'the shard run step must exist')
+  assert.ok(checkIndex >= 0, 'the success path must check the shard diagnostics')
+  assert.ok(uploadIndex >= 0, 'the shard upload step must exist')
+  assert.ok(runIndex < checkIndex && checkIndex < uploadIndex,
+    'the completeness check must sit between the run and the upload')
+  const check = steps[checkIndex]
+  assert.equal(check.if, 'success()',
+    'the completeness check is a success-path gate; a failed shard still uploads its partial diagnosis')
+  for (const file of ['cases.jsonl', 'runner-spec.json', 'effective-params.json']) {
+    assert.ok(check.run.includes(file), `the success path must require ${file}`)
+  }
 })
 
 test('the accelerated DAG is the ONLY product-lane path, on every event', () => {
