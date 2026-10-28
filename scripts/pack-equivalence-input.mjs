@@ -415,7 +415,7 @@ export function packagingEvidenceSensitivePaths(changedPaths) {
  * actually compared the two packages.
  *
  * @param {object} comparison - the `compare-tarballs.mjs` report.
- * @param {{designation: string, run: string, commit: string, note: string}} provenance - where the proof came from.
+ * @param {{designation: string, run: string, commit: string}} provenance - where the proof came from.
  * @returns {object} the baseline document.
  */
 export function baselineFromComparison(comparison, provenance) {
@@ -444,7 +444,6 @@ export function baselineFromComparison(comparison, provenance) {
     manifestDifferences: [],
     run: provenance.run,
     commit: provenance.commit,
-    note: provenance.note,
     ...(mode === 'source'
       ? { sourceSha: binding.sourceSha, sourceVersion: binding.sourceVersion }
       : {}),
@@ -521,8 +520,6 @@ function main() {
       sourceDirectory: valueOf(args, '--source-distribution'),
       run: valueOf(args, '--run') ?? '(unrecorded run)',
       commit: valueOf(args, '--commit') ?? '(unrecorded commit)',
-      note: proofForMode(recorded, mode)?.note
-        ?? 'Recorded from a REAL ordinary-vs-lifecycle-free comparison of the exact inputs digested above. Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof.',
     })
     writeFileSync(out, `${JSON.stringify(document, null, 2)}\n`)
     console.log(`baseline candidate written to ${out} (digest ${document.digest})`)

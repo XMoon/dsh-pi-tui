@@ -390,6 +390,58 @@ test('a baseline candidate is authored ONLY from a comparison that proved equiva
   assert.equal(cli(['--check', good, '--mode', 'npm', '--node', '24', '--platform', 'Linux']).status, 0)
 })
 
+test('a re-authored proof drops the stale note instead of inheriting it', (t) => {
+  // PR #442 recorded a new comparison (run/commit/entryCount 46) but kept the
+  // previous proof's note, which still described PR #397 and 40 entries. The
+  // structured fields carry the evidence; a free-text note must not be copied
+  // into a proof it does not describe.
+  const dir = scratch(t)
+  const identity = packagingInputDigest()
+  const node = process.versions.node.split('.')[0]
+  const baseline = join(dir, 'old-baseline.json')
+  writeFileSync(baseline, `${JSON.stringify({
+    digest: identity.digest,
+    inputs: identity.inputs,
+    proofs: {
+      npm: trustedProof({
+        node,
+        platform: process.platform,
+        entryCount: 40,
+        note: 'Recorded from the PR #397 CI comparison: a REAL ordinary-vs-lifecycle-free pack of the exact inputs digested above (40 entries each, no differing file, no manifest difference).',
+      }),
+    },
+  }, null, 2)}\n`)
+
+  // A historical record that still carries a note remains valid evidence: the
+  // note is descriptive, not part of the validity decision.
+  const historical = cli(['--check', baseline, '--mode', 'npm', '--node', node, '--platform', process.platform])
+  assert.equal(historical.status, 0, historical.stdout)
+
+  const comparison = join(dir, 'comparison.json')
+  writeFileSync(comparison, `${JSON.stringify({
+    entryCountA: 46, entryCountB: 46, entriesEqual: true,
+    onlyInA: [], onlyInB: [], differingFiles: [], manifestDifferences: [], equivalent: true,
+  })}\n`)
+  const out = join(dir, 'baseline.json')
+  const authored = cli([
+    '--baseline', baseline, '--comparison', comparison, '--out', out,
+    '--run', 'https://github.com/XMoon/dsh-pi-tui/actions/runs/40629959654',
+    '--commit', '71afd2d63c895457cb73554c91da6630cf37c111',
+    '--mode', 'npm', '--node', node, '--platform', process.platform,
+  ])
+  assert.equal(authored.status, 0, authored.stderr)
+  const candidate = JSON.parse(readFileSync(out, 'utf8'))
+  assert.equal(candidate.proofs.npm.note, undefined,
+    'a re-authored proof must not inherit the previous note')
+  assert.equal(candidate.proofs.npm.entryCount, 46)
+  assert.equal(candidate.proofs.npm.run, 'https://github.com/XMoon/dsh-pi-tui/actions/runs/40629959654')
+  assert.equal(candidate.proofs.npm.commit, '71afd2d63c895457cb73554c91da6630cf37c111')
+  assert.equal(
+    cli(['--check', out, '--mode', 'npm', '--node', node, '--platform', process.platform]).status,
+    0,
+  )
+})
+
 test('a hand-written equivalent:true is not evidence and must not skip the proof', (t) => {
   // The whole point of separating "digest matches" from "evidence exists": a
   // developer (or an agent) can type a matching digest and this flag, but
