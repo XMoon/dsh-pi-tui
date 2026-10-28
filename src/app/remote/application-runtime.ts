@@ -32,7 +32,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ClientUiStartupFacts, SelectedApplicationRuntime } from '../application-runtime.ts'
 import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
-import { mergeCause } from './host-runtime.ts'
+import { mergeCause } from './dispose-cause.ts'
 import {
   createExperimentalRemoteRuntime,
   createRemoteBackendRuntime,

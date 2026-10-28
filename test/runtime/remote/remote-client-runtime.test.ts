@@ -63,7 +63,8 @@ import {
   OFFICIAL_CLIENT_BUNDLES,
   type RemoteClientRuntime,
 } from '../../../src/app/remote/client-runtime.ts'
-import { createRemoteHostRuntime, mergeCause, type RemoteHostRuntime } from '../../../src/app/remote/host-runtime.ts'
+import { createRemoteHostRuntime, type RemoteHostRuntime } from '../../../src/app/remote/host-runtime.ts'
+import { mergeCause } from '../../../src/app/remote/dispose-cause.ts'
 import type { ExperimentalRemoteRuntime } from '../../../src/app/remote/runtime.ts'
 import { testLifecycle, type TestLifecycle } from '../../support/temp-lifecycle.ts'
 

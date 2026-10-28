@@ -33,52 +33,8 @@ import { PiTuiFileReferenceHostService, type FileReferencesServiceLike, type Liv
 import { PiTuiTerminalProgressHostService, type LiveAgentLike as TerminalProgressLiveAgentLike } from './terminal-progress-host.ts'
 import * as performanceHost from '../host/performance-host.ts'
 import { PI_TUI_HOST_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
-
-/**
- * Host services the ordinary Host Context must already expose before any M3
- * row mounts. The check fails fast with
- * the missing service named instead of parking the runtime.
- */
-const HOST_PREREQUISITE_SERVICES = [
-  'credentials',
-  // The rc.2 user-questions service: `@deepseek-ai/dsh-base` already mounts
-  // `id: user-questions -> @deepseek-ai/dsh-user-questions`, and this bundle
-  // layers ON TOP of that base without disabling it, so the M3 composition
-  // must REUSE the existing service (its TypertRemoteService binding publishes
-  // the `userQuestions` namespace and registers the `userQuestions` Session
-  // projection every Client reads). Mounting a second one would double-register
-  // the namespace and duplicate the projection unit.
-  'userQuestions',
-  'typert',
-  'typertGateway',
-  'agents',
-  'agentDefaultModel',
-  'attachments',
-  'commands',
-  // The OFFICIAL `@`-file reference provider (the TUI composition mounts the
-  // `file-reference-local` row): the private `piTuiFileReferences` bare route
-  // delegates to it, so a Host without it could not serve a bare Session `@`
-  // query at all. Required rather than silently degraded.
-  'fileReferences',
-  'fs',
-  // 0.2.1-rc.2's SessionController nests the official skill catalog, whose inject
-  // requires the real `workingDirectory` owner: without it the `skills/list`
-  // Remote never registers (the failure surfaces as a bare HTTP 404). The
-  // official dsh-base layer mounts this row, so a Host missing it is a
-  // composition error, not a degradable state.
-  'workingDirectory',
-  'llm',
-  'sessions',
-  'sessionProjections',
-  'sessionQuery',
-  'workspaceRegistry',
-  'jobController',
-  // The official Host file service the delivered-files preview reads through.
-  // The bundle mounts it exactly once (its `cordis.patch.yml` row); a Host
-  // without it cannot serve the preview at all, so this is a composition error
-  // rather than a degradable state.
-  'workspaceFiles',
-] as const
+import { mergeCause } from './dispose-cause.ts'
+import { assertRemoteHostPrerequisites } from './host-prerequisites.ts'
 
 /**
  * Fixed private base URL used only to construct valid `Request` objects for
@@ -121,37 +77,8 @@ export interface RemoteHostRuntime {
 
 async function* emptyUplink(): AsyncIterable<unknown> {}
 
-/**
- * Attach one secondary failure to `failure`'s cause chain without losing an
- * existing cause: when the failure already carries a cause, both aggregate
- * into a single `AggregateError`. Shared by the three composition owners so
- * cleanup failures never mask the original construction/readiness error.
- * A `undefined` secondary is a no-op (nothing to attach).
- */
-export function mergeCause(failure: Error, secondary: unknown): Error {
-  if (secondary === undefined) return failure
-  const existingCause = (failure as { cause?: unknown }).cause
-  ;(failure as { cause?: unknown }).cause = existingCause === undefined
-    ? secondary
-    : new AggregateError([existingCause, secondary], 'remote composition: aggregated failure causes')
-  return failure
-}
-
 function firstError(errors: readonly unknown[]): Error {
   return errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
-}
-
-/**
- * Fail fast when the ordinary Host lacks one of the required base services.
- * Reads via the reflect store so the diagnostic can name the missing key
- * without depending on any one service's shape.
- */
-function assertHostPrerequisites(hostContext: Context): void {
-  for (const service of HOST_PREREQUISITE_SERVICES) {
-    if (hostContext.reflect.get(service) === undefined) {
-      throw new Error(`remote host runtime: the Host Context is missing the required "${service}" service`)
-    }
-  }
 }
 
 /** Build the in-process carrier over the Host connection + gateway seams.
@@ -196,7 +123,7 @@ export async function createRemoteHostRuntime(
   hostContext: Context,
   options: { readonly diag?: RemoteHostDiagnostics } = {},
 ): Promise<RemoteHostRuntime> {
-  assertHostPrerequisites(hostContext)
+  assertRemoteHostPrerequisites(hostContext)
   // An unknown upstream `turn/end.reason.kind` must never be dropped silently
   // and must never crash the Host: absent an injected channel the row reports
   // through this Host's own logger.

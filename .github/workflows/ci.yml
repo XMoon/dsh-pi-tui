@@ -922,12 +922,16 @@ jobs:
         if: env.DSH_MODE == 'npm'
         run: pnpm smoke:startup-strictness -- "$CANDIDATE"
 
+      - name: M4-A0 split-process bootstrap
+        if: env.DSH_MODE == 'npm'
+        run: pnpm smoke:m4-a0-process -- "$CANDIDATE"
+
       # A step that does not apply must SAY so. A silent skip in a
       # qualification is indistinguishable from a gate that ran and passed.
       - name: Record the npm-only smoke on a source run
         if: env.DSH_MODE == 'source'
         run: |
-          echo 'NOT_APPLICABLE: the startup strictness smoke is npm-only; Source Mode is qualified by its own lanes'
+          echo 'NOT_APPLICABLE: the startup strictness and M4-A0 process smokes are npm-only; Source Mode is qualified by its own lanes'
 
       # The digest is checked AGAIN, after the smokes, against the value the
       # pack job recorded: a candidate replaced between the smokes and the

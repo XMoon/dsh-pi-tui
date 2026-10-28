@@ -43,7 +43,8 @@ import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
 import workspaceFilesRemote from '@deepseek-ai/dsh-api-workspace-files/remote'
 import { PI_TUI_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
-import { mergeCause, type InProcessHostCarrier } from './host-runtime.ts'
+import { mergeCause } from './dispose-cause.ts'
+import type { InProcessHostCarrier } from './host-runtime.ts'
 
 type TypertClientModule = typeof typertRegistryClient
 type ConnectionClientModule = typeof import('@deepseek-ai/dsh-client-connection/client')

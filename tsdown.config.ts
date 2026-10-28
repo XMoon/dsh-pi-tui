@@ -18,7 +18,7 @@ import { defineConfig } from 'tsdown'
 // `@xmoon76/dsh-pi-tui/performance-host`. The root source ledger is closed, so
 // the flat DIST name comes from this object entry, never from a new
 // `src/*.ts` module (AGENTS.md "Source module placement").
-export default defineConfig({
+const bundleConfig = defineConfig({
   entry: [
     './src/index.ts',
     './src/startup.ts',
@@ -40,3 +40,24 @@ export default defineConfig({
     onlyBundle: ['@xmoon76/pi-tui'],
   },
 })
+
+// M4-A0 process entries: internal qualification artifacts (no package export,
+// no bin). They are separate builds because they are standalone Node programs,
+// not Loader plugins, and deliberately ship no `.d.mts` surface. The thin
+// launchers import their real work through `import()` after the official
+// launcher has installed the runtime package-resolution interception.
+const processEntryConfig = defineConfig({
+  entry: {
+    'local-host': './src/app/remote-process/local-host-entry.ts',
+    'local-client': './src/app/remote-process/local-client-entry.ts',
+  },
+  format: ['esm'],
+  outDir: 'dist',
+  clean: false,
+  dts: false,
+  deps: {
+    onlyBundle: ['@xmoon76/pi-tui'],
+  },
+})
+
+export default [bundleConfig, processEntryConfig]
