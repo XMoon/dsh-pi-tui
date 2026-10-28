@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 69
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 53, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 70
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 54, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -161,6 +161,7 @@
 | X066 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X067 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X068 | ACTIVE | MEDIUM | LOCAL_UX | NO |
+| X069 | ACTIVE | LOW | BUGFIX_MISSING_UPSTREAM | NO |
 
 ## Divergences
 
@@ -5829,3 +5830,82 @@ Upstream owns text selection only in the alternate screen's BACKGROUND viewport:
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Owner-authorized necessary fork support for Delivered files PR B (overlay text selection). Confirmed against the pinned v1.1.0 tree that no existing OverlayOptions field or public member can select overlay content, whereas the selection anchor/focus, highlight painter, word segmenter, painted-row reader and clipboard path all live inside TuiAltScreen.
+
+### X069 — Tern PiTui terminal capability detection
+
+- Status: `ACTIVE`
+- Category: `BUGFIX_MISSING_UPSTREAM`
+- Risk: `LOW`
+- Files: `src/terminal-image.ts`
+- Last audited: `2026-10-28`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+The Tern terminal pane speaks the Kitty graphics protocol, but upstream v1.1.0 has no TERM_PROGRAM=tern branch in its ONE capability detector. Classifying Tern only at the host layer would split the answer: the main screen and TuiApp would paint managed Kitty images while TuiAltScreen's own imageProtocol (read from getCapabilities().images) stayed null/iterm2, so alt-screen image redraw/clear policy would have no protocol. The host cannot fix this through the existing public surface because getCapabilities() is process-wide and TuiAltScreen reads it directly; the minimal correct owner is the fork's existing terminal-capability branch.
+
+#### Changed surface
+
+- detectCapabilitiesFromEnvironment: TERM_PROGRAM=tern joins the existing known Kitty-capable terminal branch and returns { images: 'kitty', trueColor: true, hyperlinks: true }.
+- The branch stays after the existing tmux, screen and Herdr pre-emptions, so those transport/forwarding rules are unchanged and Tern cannot reopen images through them.
+- PI_IMAGE_PROTOCOL=none/0 still removes images and PI_IMAGE_PROTOCOL=iterm2 still overrides the detected protocol; getCapabilities() caching and setCapabilityOverrides are untouched.
+
+#### Dependency map
+
+**Vendor internal**
+- detectCapabilitiesFromEnvironment is the single capability map consumed by detectCapabilities()/getCapabilities(); the change adds one terminal identity branch and no second cache or override path.
+- The existing KITTY_WINDOW_ID/kitty branch is reused, so the returned capability object keeps the same shape and all downstream readers are unchanged.
+- Audit note: No new state, no new export and no new detection subsystem.
+
+**Inheritance / structural**
+- TuiAltScreen.beforeTerminalStart assigns imageProtocol from getCapabilities().images; the shared detector is what keeps the main screen, alternate screen and host on one Tern answer.
+- TuiMainScreen receives the same process-wide capability indirectly through the managed factory and components.
+- Audit note: The fix deliberately lives in the shared detector rather than a host-side setCapabilities call so no screen sees a divergent value.
+
+**Host**
+- src/tui/graphics/native-image.ts admits the Direct Native path only when getCapabilities().images === 'kitty'; the Tern PiTui fallback uses the same managed Core/Facade path.
+- src/tui/graphics/image-capability.ts falls back to getCapabilities().images only when no managed graphics handle exists; Tern's answer flows through unchanged.
+- The TSP renderer path is owned by renderer selection and does not read this capability while the SDK session owns the tty, so the two Tern paths stay mutually exclusive.
+- Audit note: No host import, API or behavior is introduced by this fork record; the host consumes the existing capability answer.
+
+**Public / extension**
+- No public entry or extension type changes: TerminalCapabilities and getCapabilities() keep their existing shape.
+- Audit note: Additive detection only.
+
+**Behavioral coupling**
+- TERM_PROGRAM=tern outside tmux/screen/Herdr detects images:'kitty' with truecolor and hyperlinks.
+- TMUX or a tmux*/screen* TERM still returns images:null before the Tern branch.
+- PI_IMAGE_PROTOCOL=none/0 returns images:null for Tern; PI_IMAGE_PROTOCOL=iterm2 returns images:'iterm2'.
+- Audit note: Guarded by packages/pi-tui/test/terminal-image.test.ts (X069 group).
+
+#### Guarding tests
+
+- packages/pi-tui/test/terminal-image.test.ts: X069 — TERM_PROGRAM=tern detects { images: 'kitty', trueColor: true, hyperlinks: true }, tmux/screen do not reopen Tern images, and PI_IMAGE_PROTOCOL none/0/iterm2 stays authoritative.
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- src/terminal-image.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream v1.1.0 classifies Kitty, Ghostty, WezTerm and Warp as Kitty-capable but has no TERM_PROGRAM=tern branch, so a Tern PiTui fallback would detect images:null. The fork adds exactly one identity branch after the existing tmux/screen/Herdr pre-emptions, producing the same capability object as the other known Kitty terminals; all other detection rules and overrides are unchanged.
+
+#### Retirement conditions
+
+- Retire when upstream detects TERM_PROGRAM=tern as a Kitty-capable terminal (or exposes an equivalent capability source), then run the X069 guarding test and the host Tern PiTui fallback regressions.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Owner-approved Image-7C protocol-capability unification: Tern PiTui needs the fork's single capability owner to report Kitty because the alternate screen reads getCapabilities().images directly. Confirmed against the pinned v1.1.0 tree that no existing branch matches TERM_PROGRAM=tern and that a host-only override would split the main/alt capability answer.

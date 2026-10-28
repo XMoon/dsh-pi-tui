@@ -9,12 +9,19 @@
 
 ### 新增
 
+- **支持 Kitty 图形协议的直连终端不再需要品牌白名单，Zellij 各宿主按当前窗格能力显示图片。**
+  Kitty、Ghostty、WezTerm、Warp、Tern 以及其他由 `PI_IMAGE_PROTOCOL=kitty` 明确启用 Kitty
+  协议的直连终端，都使用同一套受管图片生命周期显示转录、草稿与查看器中的 PNG/JPEG/WebP。
+  Zellij 窗格不再按宿主品牌预判，而是在真实输入监听安装后向当前窗格发送一次能力查询，只有
+  匹配的 `OK` 才显示图片；失败、超时或拒绝时保持纯文字，且不会退回旧的转义图片路径。Tern 的
+  普通 PiTui 路径按 Kitty 能力显示图片；已连接的 TSP 渲染器继续使用 SDK 原生图片与 blob
+  通道，不会同时创建终端图片句柄。`PI_IMAGE_PROTOCOL=none`（或 `0`）仍在任何图片读取、
+  转换或上传之前关闭该能力。
 - **Ghostty 中运行的 Zellij 窗格现在也能显示真实图片像素。**
   当 Ghostty 宿主内的 Zellij 窗格通过一次真实能力查询确认支持 Kitty 图形协议时，转录、草稿、
   图片查看器与已授权的 SVG 预览会使用与直连 Kitty/Ghostty 相同的受管生命周期显示真实图片。
   查询完成前、查询被拒绝或超时都保持纯文字，不会退回旧的转义图片路径；`PI_IMAGE_PROTOCOL=none`
-  （或 `0`）会在任何图片读取、转换或上传之前关闭该能力。WezTerm 宿主下的 Zellij 与其他未知宿主
-  仍然不受支持，只显示文字。
+  （或 `0`）会在任何图片读取、转换或上传之前关闭该能力。
 - **Ghostty 直连终端的图片现在使用与 Kitty 相同的受管原生图片生命周期。**
   Ghostty（`TERM_PROGRAM=ghostty`）直接连接、未经过 tmux/Zellij/screen 等复用器时，
   转录、草稿与图片查看器中的 PNG/JPEG/WebP 都会显示真实像素；已授权的 SVG 预览也按现有

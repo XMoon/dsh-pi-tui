@@ -1,5 +1,7 @@
 /**
- * Image-7C-3 — Ghostty-host Zellij admission, probe input and Native writer.
+ * Image-7C-3 — Zellij admission, probe input and Native writer (generalized
+ * by Image-7C from a Ghostty-host-only candidate to a live-pane capability
+ * query on every host).
  *
  * These cases own the Zellij-specific production boundary: the environment
  * candidate, the one-way live-pane admission and the facade subclass that
@@ -24,7 +26,7 @@ import {
 } from '@xmoon76/pi-tui'
 import {
   ZELLIJ_PROBE_TIMEOUT_MS,
-  candidateGhosttyZellij,
+  candidateZellijKitty,
   createZellijKittyGraphics,
   zellijProbeWire,
 } from '../../src/tui/graphics/zellij-image.ts'
@@ -89,7 +91,7 @@ class RecordingTerminal implements Terminal {
   setProgressState(_state: TerminalProgressState): void {}
 }
 
-/** The real Ghostty-host Zellij pane environment (one explicit sandbox object). */
+/** One explicit Zellij pane environment; host hints are overridden per case. */
 function zellijEnvironment(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   return {
     TERM: 'xterm-256color',
@@ -139,61 +141,61 @@ afterEach(() => {
   resetCapabilitiesCache()
 })
 
-test('the fixed candidate matrix admits only Ghostty-host Zellij panes and never queries early', () => {
-  for (const term of ['xterm-ghostty', 'xterm-256color', 'custom-term', undefined]) {
-    const environment = zellijEnvironment({ TERM: term })
-    assert.equal(candidateGhosttyZellij(environment), true, `TERM=${term ?? 'unset'} is not an identity fact`)
-    const terminal = new RecordingTerminal()
-    const graphics = createZellijKittyGraphics(terminal, {}, environment, () => {})
-    assert.ok(graphics, `TERM=${term ?? 'unset'} creates the candidate factory`)
-    assert.equal(terminal.writes.length, 0, 'the factory never writes before the real input listener starts')
-    graphics.dispose()
+test('every Zellij host and static capability class creates a pending handle and queries only after start', () => {
+  const hosts: ReadonlyArray<readonly [string, Record<string, string | undefined>]> = [
+    ['Ghostty host', { TERM_PROGRAM: 'ghostty' }],
+    ['WezTerm host', { TERM_PROGRAM: 'wezterm', WEZTERM_PANE: '7' }],
+    ['Kitty host', { TERM_PROGRAM: 'kitty' }],
+    ['Warp host', { TERM_PROGRAM: 'warpterminal', WARP_SESSION_ID: 'warp-1' }],
+    ['Tern host', { TERM_PROGRAM: 'tern' }],
+    ['unknown host', { TERM_PROGRAM: 'some-future-terminal' }],
+    ['no host hint', {}],
+    ['tmux-named TERM without a tmux session', { TERM: 'tmux-256color' }],
+  ]
+  for (const [hostName, hint] of hosts) {
+    for (const marker of ['0', '1'] as const) {
+      for (const capability of ['kitty', 'iterm2', null] as const) {
+        resetCapabilitiesCache()
+        setCapabilities({ images: capability, trueColor: true, hyperlinks: false })
+        const environment = zellijEnvironment({ ...hint, ZELLIJ: marker, ZELLIJ_SESSION_NAME: undefined })
+        const label = `${hostName} ZELLIJ=${marker} fork images=${capability ?? 'null'}`
+        assert.equal(candidateZellijKitty(environment), true, `${label}: the live pane is the admission authority`)
+        const terminal = new RecordingTerminal()
+        const graphics = createZellijKittyGraphics(terminal, {}, environment, () => {})
+        assert.ok(graphics, `${label}: the candidate factory exists`)
+        assert.equal(terminal.writes.length, 0, `${label}: zero bytes before start`)
+        graphics.terminal.start(() => {}, () => {})
+        assert.equal((terminal.text.match(/a=q,/g) ?? []).length, 1, `${label}: exactly one live query after start`)
+        assert.equal(
+          terminal.text.includes('a=t') || terminal.text.includes('a=p'),
+          false,
+          `${label}: no image work before the live answer`,
+        )
+        graphics.dispose()
+      }
+    }
   }
 })
 
-test('every non-candidate environment creates no handle and runs no query or image work', () => {
-  const cases: ReadonlyArray<{ name: string; environment: NodeJS.ProcessEnv; capability?: 'kitty' | 'iterm2' | null }> = [
+test('hard off and explicit nested multiplexers create no handle and write no query', () => {
+  const cases: ReadonlyArray<{ name: string; environment: NodeJS.ProcessEnv }> = [
     { name: 'ZELLIJ unset', environment: zellijEnvironment({ ZELLIJ: undefined }) },
-    { name: 'ZELLIJ=1', environment: zellijEnvironment({ ZELLIJ: '1' }) },
     { name: 'ZELLIJ empty', environment: zellijEnvironment({ ZELLIJ: '' }) },
-    { name: 'session missing', environment: zellijEnvironment({ ZELLIJ_SESSION_NAME: undefined }) },
-    { name: 'session empty', environment: zellijEnvironment({ ZELLIJ_SESSION_NAME: '' }) },
-    { name: 'TERM_PROGRAM missing', environment: zellijEnvironment({ TERM_PROGRAM: undefined }) },
-    { name: 'TERM_PROGRAM=wezterm', environment: zellijEnvironment({ TERM_PROGRAM: 'wezterm' }) },
-    { name: 'TERM_PROGRAM=herdr', environment: zellijEnvironment({ TERM_PROGRAM: 'herdr' }) },
-    { name: 'lone GHOSTTY_RESOURCES_DIR', environment: zellijEnvironment({ TERM_PROGRAM: undefined, GHOSTTY_RESOURCES_DIR: '/usr/share/ghostty' }) },
-    { name: 'WEZTERM_PANE inherited', environment: zellijEnvironment({ WEZTERM_PANE: '7' }) },
-    { name: 'WARP_SESSION_ID inherited', environment: zellijEnvironment({ WARP_SESSION_ID: 'warp-1' }) },
-    { name: 'WARP_TERMINAL_SESSION_UUID inherited', environment: zellijEnvironment({ WARP_TERMINAL_SESSION_UUID: 'warp-uuid' }) },
     { name: 'TMUX nested', environment: zellijEnvironment({ TMUX: '/tmp/tmux,1,0' }) },
     { name: 'STY nested', environment: zellijEnvironment({ STY: 'screen-1' }) },
-    { name: 'TERM=tmux-256color', environment: zellijEnvironment({ TERM: 'tmux-256color' }) },
-    { name: 'TERM=screen-256color', environment: zellijEnvironment({ TERM: 'screen-256color' }) },
-    { name: 'fork images=null', environment: zellijEnvironment(), capability: null },
-    { name: 'fork images=iterm2', environment: zellijEnvironment(), capability: 'iterm2' },
     { name: 'PI_IMAGE_PROTOCOL=none', environment: zellijEnvironment({ PI_IMAGE_PROTOCOL: 'none' }) },
     { name: 'PI_IMAGE_PROTOCOL=0', environment: zellijEnvironment({ PI_IMAGE_PROTOCOL: '0' }) },
     { name: 'PI_IMAGE_PROTOCOL=iterm2', environment: zellijEnvironment({ PI_IMAGE_PROTOCOL: 'iterm2' }) },
-    {
-      name: 'PI_IMAGE_PROTOCOL=kitty on a WezTerm host',
-      environment: zellijEnvironment({ TERM_PROGRAM: 'wezterm', PI_IMAGE_PROTOCOL: 'kitty' }),
-    },
   ]
   for (const entry of cases) {
-    if (entry.capability !== undefined) {
-      resetCapabilitiesCache()
-      setCapabilities({ images: entry.capability, trueColor: true, hyperlinks: false })
-    }
     const terminal = new RecordingTerminal()
-    assert.equal(candidateGhosttyZellij(entry.environment), false, entry.name)
+    assert.equal(candidateZellijKitty(entry.environment), false, entry.name)
     assert.equal(
       createZellijKittyGraphics(terminal, {}, entry.environment, () => {}),
       undefined,
       `${entry.name}: no Core/facade/handle`,
     )
     assert.equal(terminal.writes.length, 0, `${entry.name}: no probe write`)
-    resetCapabilitiesCache()
-    setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
   }
 })
 

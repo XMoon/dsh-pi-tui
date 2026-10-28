@@ -419,7 +419,7 @@ test('TuiApp routes the real main screen through the managed facade', async () =
 
 
 /**
- * Image-7C-2 — the direct Ghostty product path.
+ * Image-7C-2/7C — the Direct Native product path.
  *
  * These cases set the REAL process environment and let the fork's own
  * `detectCapabilities()` classify it: no `setCapabilities` shortcut is used,
@@ -430,11 +430,14 @@ test('TuiApp routes the real main screen through the managed facade', async () =
  * cases: Image-7C-1 owns that transport's live-server admission, and the native
  * factory is evaluated BEFORE that fallback either way.
  */
-const GHOSTTY_ENV_KEYS = [
+const NATIVE_ENV_KEYS = [
   'TERM',
   'TERM_PROGRAM',
   'KITTY_WINDOW_ID',
   'GHOSTTY_RESOURCES_DIR',
+  'WEZTERM_PANE',
+  'WARP_SESSION_ID',
+  'WARP_TERMINAL_SESSION_UUID',
   'TMUX',
   'ZELLIJ',
   'STY',
@@ -445,7 +448,7 @@ const GHOSTTY_ENV_KEYS = [
 /** Apply EXACTLY one environment through the real detection path; returns its restorer. */
 function applyGhosttyEnvironment(environment: Record<string, string | undefined>): () => void {
   const saved = new Map<string, string | undefined>()
-  for (const key of GHOSTTY_ENV_KEYS) {
+  for (const key of NATIVE_ENV_KEYS) {
     saved.set(key, process.env[key])
     delete process.env[key]
   }
@@ -626,6 +629,109 @@ test('direct Ghostty reaches the Native Core through the real environment and Tu
   }
 })
 
+test('direct WezTerm, Warp and Tern fallback paint through the real TuiApp Native path', async (t) => {
+  const apps = createAppLifecycleGuard<TuiApp>()
+  t.after(() => apps.disposeAll())
+  const hosts = [
+    { name: 'WezTerm', environment: { TERM_PROGRAM: 'wezterm', WEZTERM_PANE: '4' } },
+    { name: 'Warp', environment: { TERM_PROGRAM: 'warpterminal', WARP_SESSION_ID: 'warp-1' } },
+    { name: 'Tern PiTui fallback', environment: { TERM_PROGRAM: 'tern' } },
+  ] as const
+  for (const [index, host] of hosts.entries()) {
+    await t.test(host.name, async () => {
+      const restore = applyGhosttyEnvironment({
+        ...host.environment,
+        TERM: 'xterm-256color',
+        PI_TUI_TMUX_KITTY_IMAGES: '0',
+      })
+      try {
+        assert.equal(getCapabilities().images, 'kitty', `${host.name}: the fork really detects the Kitty capability`)
+        const { loader, reads, conversions } = countingLoader()
+        const vt = new VirtualTerminal(100, 30)
+        const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+          imageLoader: loader,
+          imageTheme: { fallbackColor: (text: string) => text },
+        })
+        app.start()
+        apps.started.add(app)
+        try {
+          const graphics = (app as unknown as { graphics: KittyGraphics | undefined }).graphics
+          assert.ok(graphics, `${host.name}: the production composition created the managed handle`)
+          assert.equal(graphics.mode, 'native', `${host.name}: the native transport, not tmux-virtual`)
+          assert.equal(graphics.canPaint(), true)
+          assert.equal((app as unknown as { terminal: unknown }).terminal, graphics.terminal,
+            `${host.name}: the ONE facade is the terminal both screens write through`)
+
+          const ref = ghosttyImageRef(`att-direct-${index}`, `wire-${index}.png`)
+          app.setTranscript(transcriptOfImage(ref).messages())
+          await untilFact(() => loader.get(ref).state === 'ready', `${host.name}: the real durable PNG read`)
+          await settleApp(app, vt)
+
+          const text = vt.writes.join('')
+          assert.equal(reads.get(ref.attachmentId), 1, `${host.name}: the attachment was read once`)
+          assert.equal(conversions.count, 0, `${host.name}: a PNG needs no derived conversion`)
+          assert.equal(text.includes('a=T,'), false, `${host.name}: no legacy combined transmit+place form`)
+          assert.equal(text.includes('\x1bPtmux;'), false, `${host.name}: no tmux passthrough`)
+          assert.equal(text.includes(',U=1'), false, `${host.name}: no virtual placeholder flag`)
+          assert.equal(text.includes(KITTY_VIRTUAL_PLACEHOLDER), false, `${host.name}: no virtual placeholder cell`)
+          const uploads = apcs(text).filter((entry) => entry.a === 't')
+          const placements = apcs(text).filter((entry) => entry.a === 'p')
+          assert.equal(uploads.length, 1, `${host.name}: one managed upload`)
+          assert.equal(placements.length, 1, `${host.name}: one managed placement`)
+          assert.ok(text.indexOf('a=t,f=100') < text.indexOf('a=p,'), `${host.name}: upload precedes placement`)
+          assert.equal(placements[0]!.i, uploads[0]!.i, `${host.name}: the placement names the uploaded image`)
+        } finally {
+          app.dispose()
+          apps.started.delete(app)
+        }
+      } finally {
+        restore()
+      }
+    })
+  }
+})
+
+test('a ZELLIJ session routes TuiApp to the Zellij query factory, never the Direct path', async (t) => {
+  const apps = createAppLifecycleGuard<TuiApp>()
+  t.after(() => apps.disposeAll())
+  const restore = applyGhosttyEnvironment({
+    TERM_PROGRAM: 'ghostty',
+    TERM: 'xterm-256color',
+    ZELLIJ: '1',
+    PI_TUI_TMUX_KITTY_IMAGES: '0',
+  })
+  try {
+    assert.equal(getCapabilities().images, 'kitty', 'the inherited host capability is not the admission fact')
+    const { loader, reads } = countingLoader()
+    const vt = new VirtualTerminal(100, 30)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+      imageLoader: loader,
+      imageTheme: { fallbackColor: (text: string) => text },
+    })
+    app.start()
+    apps.started.add(app)
+    try {
+      const graphics = (app as unknown as { graphics: KittyGraphics | undefined }).graphics
+      assert.ok(graphics, 'the Zellij factory created one pending handle')
+      assert.equal(graphics.mode, 'native')
+      assert.equal(graphics.canPaint(), false, 'the pending admission paints no pixels')
+      assert.equal((vt.writes.join('').match(/a=q,i=\d+/g) ?? []).length, 1, 'one live query after the real input listener')
+      const ref = ghosttyImageRef('att-zellij-route', 'routed.png')
+      app.setTranscript(transcriptOfImage(ref).messages())
+      await settleApp(app, vt)
+      const wire = vt.writes.join('')
+      assert.equal(reads.get(ref.attachmentId), undefined, 'no payload read while the probe is pending')
+      assert.equal(wire.includes('a=t,f=100') || wire.includes('a=p,'), false, 'no managed image before the OK')
+      assert.equal(wire.includes('a=T,'), false, 'no legacy image before the OK')
+    } finally {
+      app.dispose()
+      apps.started.delete(app)
+    }
+  } finally {
+    restore()
+  }
+})
+
 test('PI_IMAGE_PROTOCOL=none closes the real Ghostty path before any read or APC', async (t) => {
   const apps = createAppLifecycleGuard<TuiApp>()
   t.after(() => apps.disposeAll())
@@ -670,20 +776,23 @@ test('PI_IMAGE_PROTOCOL=none closes the real Ghostty path before any read or APC
   }
 })
 
-test('the same TuiApp composition creates no managed native handle for rejected topologies', async (t) => {
+test('the same TuiApp composition keeps explicit multiplexer transports out of the Direct path', async (t) => {
   const apps = createAppLifecycleGuard<TuiApp>()
   t.after(() => apps.disposeAll())
   const cases = [
-    { label: 'a lone TERM=xterm-ghostty', environment: { TERM: 'xterm-ghostty' }, capability: 'kitty' },
-    { label: 'a lone GHOSTTY_RESOURCES_DIR', environment: { GHOSTTY_RESOURCES_DIR: '/usr/share/ghostty' }, capability: 'kitty' },
-    {
-      label: 'Ghostty under Zellij',
-      environment: { TERM_PROGRAM: 'ghostty', TERM: 'xterm-256color', ZELLIJ: '1' },
-      capability: 'kitty',
-    },
     {
       label: 'Ghostty under tmux',
       environment: { TERM_PROGRAM: 'ghostty', TERM: 'xterm-256color', TMUX: '/tmp/tmux-1000/default,1,0' },
+      capability: null,
+    },
+    {
+      label: 'a tmux-named TERM without a direct pane',
+      environment: { TERM_PROGRAM: 'ghostty', TERM: 'tmux-256color' },
+      capability: null,
+    },
+    {
+      label: 'a screen-named TERM without a direct pane',
+      environment: { TERM_PROGRAM: 'ghostty', TERM: 'screen-256color' },
       capability: null,
     },
   ] as const
@@ -706,6 +815,7 @@ test('the same TuiApp composition creates no managed native handle for rejected 
         app.setTranscript(transcriptOfImage(ref).messages())
         await settleApp(app, vt)
         const text = vt.writes.join('')
+        assert.equal(/a=q,i=\d+/.test(text), false, `${entry.label}: no Zellij probe may run`)
         assert.equal(text.includes('a=t,f=100'), false, `${entry.label}: no managed transmission`)
         assert.equal(text.includes('a=p,'), false, `${entry.label}: no managed placement`)
       } finally {

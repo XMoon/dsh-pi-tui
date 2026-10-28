@@ -1,5 +1,6 @@
 /**
- * Image-7C-3 — the real Ghostty-host Zellij product composition (E2).
+ * Image-7C-3 — the real Zellij product composition (E2), generalized by
+ * Image-7C from Ghostty-host-only to every host whose live pane answers OK.
  *
  * The cases build the ONE production `TuiApp` over a real `ProcessTerminal`
  * substitute (`VirtualTerminal` as the physical sink), let the fork's own
@@ -63,6 +64,7 @@ const ENV_KEYS = [
   'TERM_PROGRAM_VERSION',
   'GHOSTTY_RESOURCES_DIR',
   'KITTY_WINDOW_ID',
+  'ITERM_SESSION_ID',
   'TMUX',
   'TMUX_PANE',
   'ZELLIJ',
@@ -174,7 +176,7 @@ function product(t: { after(fn: () => void): void }, environment = zellijEnviron
   })
   app.start()
   const graphics = (app as unknown as { graphics: KittyGraphics | undefined }).graphics
-  assert.ok(graphics, 'the real Ghostty-host Zellij environment must create the managed handle')
+  assert.ok(graphics, 'the real Zellij environment must create the managed handle')
   return {
     terminal,
     app,
@@ -619,18 +621,111 @@ test('the live handle keeps one id through bare 2J/3J, scopes deletes and recove
   }
 })
 
-test('every non-candidate Zellij topology is text-only and never uses a legacy image path', async (t) => {
+test('every Zellij host and static capability class gets one live query, then paints after its actual OK', async (t) => {
   const cases: ReadonlyArray<{ name: string; environment: Record<string, string | undefined> }> = [
-    { name: 'WezTerm-host Zellij', environment: zellijEnvironment({ TERM_PROGRAM: 'wezterm' }) },
-    { name: 'ZELLIJ=1', environment: zellijEnvironment({ ZELLIJ: '1' }) },
+    { name: 'WezTerm-host Zellij', environment: zellijEnvironment({ TERM_PROGRAM: 'wezterm', WEZTERM_PANE: '4' }) },
+    { name: 'Kitty-host Zellij, ZELLIJ=1', environment: zellijEnvironment({ TERM_PROGRAM: 'kitty', ZELLIJ: '1' }) },
+    { name: 'Warp-host Zellij', environment: zellijEnvironment({ TERM_PROGRAM: 'warpterminal', WARP_SESSION_ID: 'warp-1' }) },
+    { name: 'Tern-host Zellij', environment: zellijEnvironment({ TERM_PROGRAM: 'tern' }) },
+    { name: 'unknown host, fork images=null', environment: zellijEnvironment({ TERM_PROGRAM: undefined, TERM: 'xterm-256color' }) },
+    { name: 'iTerm2 host, fork images=iterm2', environment: zellijEnvironment({ TERM_PROGRAM: 'iterm.app', TERM: 'xterm-256color', ITERM_SESSION_ID: 'iterm-1' }) },
     { name: 'missing session name', environment: zellijEnvironment({ ZELLIJ_SESSION_NAME: undefined }) },
-    { name: 'missing Ghostty hint', environment: zellijEnvironment({ TERM_PROGRAM: undefined, GHOSTTY_RESOURCES_DIR: '/usr/share/ghostty' }) },
+  ]
+  for (const [index, entry] of cases.entries()) {
+    await t.test(entry.name, async (st) => {
+      const h = started(product(st, entry.environment))
+      const vt = h.terminal
+      try {
+        assert.equal((vt.writes.join('').match(/a=q,i=\d+/g) ?? []).length, 1,
+          `${entry.name}: exactly one live query after the real input listener`)
+        assert.equal(h.graphics.canPaint(), false, `${entry.name}: probing starts text-only`)
+        const ref = imageRef(`att-zellij-host-${index}`, 'host.png', 'image/png')
+        h.app.setTranscript(transcriptOf(ref).messages())
+        h.app.requestRender()
+        await vt.waitForRender()
+        assert.equal(h.reads.get(ref.attachmentId), undefined, `${entry.name}: no payload byte before the OK`)
+        assert.equal(h.conversions(), 0, `${entry.name}: no conversion before the OK`)
+        assert.equal(vt.writes.join('').includes('a=t,f=100'), false, `${entry.name}: no upload before the OK`)
+
+        vt.sendInput(probeReply(vt))
+        await until(() => h.graphics.canPaint(), `${entry.name}: the live OK admission`)
+        await until(() => h.reads.get(ref.attachmentId) === 1, `${entry.name}: the real read after admission`)
+        await settle(h.app, vt)
+        const wire = vt.writes.join('')
+        assert.ok(hasManagedWire(wire), `${entry.name}: the managed transmission and placement reached the screen`)
+        assert.equal(wire.includes('a=T,'), false, `${entry.name}: no legacy combined form`)
+        assert.equal(wire.includes('\x1b]1337;File='), false, `${entry.name}: no iTerm2 image sequence`)
+        assert.equal(wire.includes('\x1bPtmux;'), false, `${entry.name}: no tmux DCS`)
+        assert.equal(wire.includes(PLACEHOLDER), false, `${entry.name}: no virtual placeholder`)
+      } finally {
+        h.app.dispose()
+        apps.started.delete(h.app)
+      }
+    })
+  }
+})
+
+test('a Zellij live OK keeps Main and Alt managed when the fork capability is null or iterm2', async (t) => {
+  const cases = [
+    {
+      name: 'fork images=null',
+      environment: zellijEnvironment({ TERM_PROGRAM: undefined, TERM: 'xterm-256color' }),
+      capability: null,
+    },
+    {
+      name: 'fork images=iterm2',
+      environment: zellijEnvironment({ TERM_PROGRAM: 'iterm.app', TERM: 'xterm-256color', ITERM_SESSION_ID: 'iterm-2' }),
+      capability: 'iterm2',
+    },
+  ] as const
+  for (const entry of cases) {
+    await t.test(entry.name, async (st) => {
+      const h = started(product(st, entry.environment))
+      const vt = h.terminal
+      try {
+        assert.equal(getCapabilities().images, entry.capability, `${entry.name}: the fork capability fact`)
+        vt.sendInput(probeReply(vt))
+        await until(() => h.graphics.canPaint(), `${entry.name}: the live OK admission`)
+        const ref = imageRef(`att-zellij-main-alt-${entry.name}`, 'main-alt.png', 'image/png')
+        h.app.setTranscript(transcriptOf(ref).messages())
+        await until(() => h.reads.get(ref.attachmentId) === 1, `${entry.name}: the real read`)
+        await settle(h.app, vt)
+        const mainWire = vt.writes.join('')
+        assert.ok(hasManagedWire(mainWire), `${entry.name}: Main paints the managed image`)
+        assert.equal(mainWire.includes('\x1b]1337;File='), false, `${entry.name}: no iTerm2 image on Main`)
+
+        vt.writes.length = 0
+        h.app.setFullscreen(true)
+        await settle(h.app, vt)
+        const altWire = vt.writes.join('')
+        assert.ok(hasManagedWire(altWire), `${entry.name}: Alt re-transmits and re-places through the managed facade`)
+        assert.equal(altWire.includes('\x1b]1337;File='), false, `${entry.name}: no iTerm2 image on Alt`)
+        assert.equal(altWire.includes('d=A') || altWire.includes('d=a'), false, `${entry.name}: no global image delete`)
+        assert.equal(altWire.includes(PLACEHOLDER), false, `${entry.name}: no virtual placeholder`)
+
+        vt.writes.length = 0
+        h.app.setFullscreen(false)
+        await settle(h.app, vt)
+        assert.ok(hasManagedWire(vt.writes.join('')), `${entry.name}: Main restores the image after the Alt switch`)
+        assert.equal(vt.writes.join('').includes('\x1b]1337;File='), false, `${entry.name}: no iTerm2 fallback after the switch`)
+      } finally {
+        h.app.dispose()
+        apps.started.delete(h.app)
+      }
+    })
+  }
+})
+
+test('explicit Zellij hard-off and nested multiplexers stay text-only and never use a legacy image path', async (t) => {
+  const cases: ReadonlyArray<{ name: string; environment: Record<string, string | undefined> }> = [
+    { name: 'ZELLIJ empty', environment: zellijEnvironment({ ZELLIJ: '', TERM_PROGRAM: undefined, TERM: 'xterm-256color' }) },
     { name: 'tmux nested', environment: zellijEnvironment({ TMUX: '/tmp/tmux,1,0' }) },
+    { name: 'screen nested', environment: zellijEnvironment({ STY: 'screen-1' }) },
     { name: 'PI_IMAGE_PROTOCOL=none', environment: zellijEnvironment({ PI_IMAGE_PROTOCOL: 'none' }) },
     { name: 'PI_IMAGE_PROTOCOL=0', environment: zellijEnvironment({ PI_IMAGE_PROTOCOL: '0' }) },
     {
-      name: 'PI_IMAGE_PROTOCOL=kitty masquerade on WezTerm host',
-      environment: zellijEnvironment({ TERM_PROGRAM: 'wezterm', PI_IMAGE_PROTOCOL: 'kitty' }),
+      name: 'PI_IMAGE_PROTOCOL=iterm2',
+      environment: zellijEnvironment({ PI_IMAGE_PROTOCOL: 'iterm2' }),
     },
   ]
   for (const [index, entry] of cases.entries()) {
