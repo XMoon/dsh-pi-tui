@@ -532,7 +532,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.flashes.dispose();
 		this.altScreenActive = true;
 		const capabilities = getCapabilities();
-		this.imageProtocol = this.imageProtocolOverride ?? capabilities.images;
+		this.imageProtocol = this.imageProtocolOverride !== undefined ? this.imageProtocolOverride : capabilities.images;
 		this.uploadedKittyImages.clear();
 		if (capabilities.images === "iterm2") {
 			this.savedCapabilities = capabilities;

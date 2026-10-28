@@ -1833,15 +1833,25 @@ async function until(predicate: () => boolean, label: string): Promise<void> {
   assert.fail(`timed out waiting for ${label}`)
 }
 
-/** Every Kitty f=100 image header the TUI actually wrote. */
-function writtenKittyHeaders(vt: VirtualTerminal): string[] {
-  const headers: string[] = []
+/** Every Kitty APC control header the TUI actually wrote. */
+function writtenKittyControls(vt: VirtualTerminal): string[] {
+  const controls: string[] = []
   for (const chunk of vt.writes) {
     for (const match of chunk.matchAll(/\x1b_G([^;\x1b]*);[^\x1b]*\x1b\\/g)) {
-      if (match[1]!.includes('f=100')) headers.push(match[1]!)
+      controls.push(match[1]!)
     }
   }
-  return headers
+  return controls
+}
+
+/** The managed placement anchors (`a=p`) that carry the painted geometry. */
+function writtenKittyPlacements(vt: VirtualTerminal): string[] {
+  return writtenKittyControls(vt).filter(controls => controls.startsWith('a=p,'))
+}
+
+/** The image id one managed Kitty control header names. */
+function kittyImageId(controls: string): string | undefined {
+  return /(?:^|,)i=(\d+)/.exec(controls)?.[1]
 }
 
 test('a real JPEG draft card paints real Kitty pixels above the editor (Image-6B)', async () => {
@@ -1851,10 +1861,10 @@ test('a real JPEG draft card paints real Kitty pixels above the editor (Image-6B
   const { vt, app } = startApp(100, 32, store)
   const image = addRealImage(store, SAMPLE_JPEG, 'image/jpeg', 120, 80, 'photo.jpg')
   await vt.waitForRender()
-  assert.equal(writtenKittyHeaders(vt).length, 0, 'fixture: no pixel placement before the draft')
+  assert.equal(writtenKittyPlacements(vt).length, 0, 'fixture: no pixel placement before the draft')
 
   app.setDraft(`${image.placeholder} compare`)
-  await until(() => writtenKittyHeaders(vt).length === 1, 'the draft Kitty placement')
+  await until(() => writtenKittyPlacements(vt).length === 1, 'the draft Kitty placement')
   const view = await viewport(vt)
   const identityRow = view.split('\n').findIndex(line => line.includes('#1/1 · 120×80 · 968 B'))
   assert.notEqual(identityRow, -1, `the draft identity uses the ORIGINAL JPEG dimensions:\n${view}`)
@@ -1862,7 +1872,10 @@ test('a real JPEG draft card paints real Kitty pixels above the editor (Image-6B
   assert.ok(identityRow < draftRow, 'the preview band sits above the editor draft')
   assert.ok(!stripAnsi(view).includes('Preview unavailable'), 'the ready JPEG card is not unavailable')
   assert.ok(!vt.writes.join('').includes('\x1b]1337;File='), 'no iTerm2 sequence on a Kitty terminal')
-  const header = writtenKittyHeaders(vt)[0]!
+  const uploads = writtenKittyControls(vt).filter(controls => controls.startsWith('a=t,f=100'))
+  assert.equal(uploads.length, 1, 'one managed Kitty upload')
+  const header = writtenKittyPlacements(vt)[0]!
+  assert.equal(kittyImageId(header), kittyImageId(uploads[0]!), 'the placement names the uploaded image')
   assert.ok(Number(/(?:^|,)c=(\d+)/.exec(header)![1]) <= 44, `the draft card never exceeds 44 cells: ${header}`)
   assert.ok(Number(/(?:^|,)r=(\d+)/.exec(header)![1]) <= 3, `the draft card never exceeds 3 rows: ${header}`)
   app.stop()
@@ -1875,10 +1888,13 @@ test('a real WebP draft card uses the 22×3 split slot and keeps its original id
   const { vt, app } = startApp(60, 32, store)
   const image = addRealImage(store, SAMPLE_WEBP, 'image/webp', 120, 80, 'graphic.webp')
   app.setDraft(image.placeholder)
-  await until(() => writtenKittyHeaders(vt).length === 1, 'the split-width WebP placement')
+  await until(() => writtenKittyPlacements(vt).length === 1, 'the split-width WebP placement')
   const view = await viewport(vt)
   assert.ok(view.includes('#1/1 · 120×80 · 138 B'), `the original WebP identity:\n${view}`)
-  const header = writtenKittyHeaders(vt)[0]!
+  const uploads = writtenKittyControls(vt).filter(controls => controls.startsWith('a=t,f=100'))
+  assert.equal(uploads.length, 1, 'one managed Kitty upload')
+  const header = writtenKittyPlacements(vt)[0]!
+  assert.equal(kittyImageId(header), kittyImageId(uploads[0]!), 'the placement names the uploaded image')
   assert.ok(Number(/(?:^|,)c=(\d+)/.exec(header)![1]) <= 22, `the split card never exceeds 22 cells: ${header}`)
   assert.ok(Number(/(?:^|,)r=(\d+)/.exec(header)![1]) <= 3, `the split card never exceeds 3 rows: ${header}`)
   app.stop()
@@ -1891,7 +1907,7 @@ test('a session switch drops the local JPEG derivative and the next paint re-der
   const { vt, app } = startApp(100, 32, store)
   const image = addRealImage(store, SAMPLE_JPEG, 'image/jpeg', 120, 80, 'photo.jpg')
   app.setDraft(image.placeholder)
-  await until(() => writtenKittyHeaders(vt).length === 1, 'the first derivative')
+  await until(() => writtenKittyPlacements(vt).length === 1, 'the first derivative')
   const preview = (app as unknown as {
     draftImagePreview: {
       draftGeneration: number
@@ -1916,7 +1932,7 @@ test('a session switch drops the local JPEG derivative and the next paint re-der
   await vt.waitForRender()
   const view = await viewport(vt)
   assert.ok(view.includes('#1/1 · 120×80 · 968 B'), `the identity survives the switch:\n${view}`)
-  assert.ok(writtenKittyHeaders(vt).length >= 2, 'the new session paints a fresh real PNG placement')
+  assert.ok(writtenKittyPlacements(vt).length >= 2, 'the new session paints a fresh real PNG placement')
   app.stop()
 })
 
@@ -1930,7 +1946,7 @@ test('x → Undo on a real JPEG keeps the ORIGINAL encoded bytes for submission 
   app.insertIntoEditor(image.placeholder)
   vt.sendInput(' hello')
   await vt.waitForRender()
-  await until(() => writtenKittyHeaders(vt).length >= 1, 'the derived card before the removal')
+  await until(() => writtenKittyPlacements(vt).length >= 1, 'the derived card before the removal')
   app.setFullscreen(true)
   await vt.waitForRender()
   const labelRow = await rowOf(vt, '#1/1 · 120×80', 'preview identity')
