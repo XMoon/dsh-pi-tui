@@ -212,9 +212,10 @@ export function probeTmuxKittyIdentity(env: NodeJS.ProcessEnv = process.env): Tm
  * or the six identity fields change, `revoked` latches and nothing can grant
  * again. A client change inside the 250 ms window is not detected atomically;
  * that is the documented hot-migration boundary, not an acknowledgement.
- * When a U1 feature gate is present it is consulted only AFTER the live identity
- * check: pending/denied feature state is not an identity failure, but a client
- * change during that state still revokes the handle.
+ * When a U1 feature gate is present, pending state is checked after the live
+ * identity check: pending is not an identity failure, but a client change while
+ * pending still revokes the handle. A permanent feature denial short-circuits
+ * before any further tmux probe because that handle can never paint again.
  */
 export class TmuxKittyAdmission {
   private readonly initial: TmuxKittyIdentity
@@ -244,8 +245,9 @@ export class TmuxKittyAdmission {
     if (this.placeholderDenied?.() === true) return false
     if (!this.isIdentityAllowed(force)) return false
     // The U1 feature probe owns its own pending/probing/allowed/denied state.
-    // Pending/denied is not an identity failure, but the identity probe above
-    // still observes and latches a live client change during that state.
+    // Pending is not an identity failure, but the identity probe above still
+    // observes and latches a live client change while pending; denied already
+    // returned above and starts no further tmux query.
     return this.placeholderAllowed === undefined || this.placeholderAllowed()
   }
 
