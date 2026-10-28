@@ -708,11 +708,122 @@ test('a Zellij live OK keeps Main and Alt managed when the fork capability is nu
         await settle(h.app, vt)
         assert.ok(hasManagedWire(vt.writes.join('')), `${entry.name}: Main restores the image after the Alt switch`)
         assert.equal(vt.writes.join('').includes('\x1b]1337;File='), false, `${entry.name}: no iTerm2 fallback after the switch`)
+
+        for (const cycle of [1, 2] as const) {
+          vt.writes.length = 0
+          h.app.setFullscreen(true)
+          await settle(h.app, vt)
+          assert.ok(hasManagedWire(vt.writes.join('')), `${entry.name}: Alt entry ${cycle} repaints the managed image`)
+          assert.equal(vt.writes.join('').includes('d=A'), false, `${entry.name}: Alt entry ${cycle} has no global delete`)
+          assert.equal((h.app as unknown as { graphics: unknown }).graphics, h.graphics,
+            `${entry.name}: Alt entry ${cycle} keeps the ONE graphics handle`)
+          vt.writes.length = 0
+          h.app.setFullscreen(false)
+          await settle(h.app, vt)
+        }
       } finally {
         h.app.dispose()
         apps.started.delete(h.app)
       }
     })
+  }
+})
+
+test('a delayed Zellij OK pre-arms the Alt cleanup protocol and releases only own placements', async (t) => {
+  const cases = [
+    {
+      name: 'fork images=null',
+      environment: zellijEnvironment({ TERM_PROGRAM: undefined, TERM: 'xterm-256color' }),
+      capability: null,
+    },
+    {
+      name: 'fork images=iterm2',
+      environment: zellijEnvironment({ TERM_PROGRAM: 'iterm.app', TERM: 'xterm-256color', ITERM_SESSION_ID: 'iterm-3' }),
+      capability: 'iterm2',
+    },
+  ] as const
+  for (const entry of cases) {
+    await t.test(entry.name, async (st) => {
+      const h = started(product(st, entry.environment))
+      const vt = h.terminal
+      try {
+        const reply = probeReply(vt)
+        h.app.setFullscreen(true)
+        assert.equal(h.graphics.canPaint(), false, `${entry.name}: the Alt screen starts before the live answer`)
+
+        const ref = imageRef(`att-zellij-delayed-${entry.name}`, 'delayed.png', 'image/png')
+        h.app.setTranscript(transcriptOf(ref).messages())
+        h.app.requestRender()
+        await vt.waitForRender()
+        assert.equal(h.reads.get(ref.attachmentId), undefined, `${entry.name}: pending Alt never reads a payload`)
+        assert.equal(vt.writes.join('').includes('a=t,f=100'), false, `${entry.name}: pending Alt emits no image`)
+
+        vt.sendInput(reply)
+        await until(() => h.graphics.canPaint(), `${entry.name}: the delayed live OK admission`)
+        await until(() => h.reads.get(ref.attachmentId) === 1, `${entry.name}: the real read after admission`)
+        await settle(h.app, vt)
+        const shown = vt.writes.join('')
+        assert.ok(hasManagedWire(shown), `${entry.name}: the admitted Alt paints the managed image`)
+        const shownImageId = apcs(shown).filter(entry => entry.controls.a === 'p').at(-1)?.controls.i
+        assert.ok(shownImageId, `${entry.name}: the Alt placement names an image id`)
+
+        vt.writes.length = 0
+        h.app.setTranscript([])
+        await settle(h.app, vt)
+        const removal = vt.writes.join('')
+        assert.ok(removal.includes(`a=d,d=i,i=${shownImageId}`), `${entry.name}: Alt removal removes the own placement`)
+        assert.equal(/a=d,d=A|a=d,d=a/.test(removal), false, `${entry.name}: Alt removal never sends a global delete`)
+        assert.equal(removal.includes('\x1b[2J'), false, `${entry.name}: Alt removal never uses the iTerm2 clear`)
+        for (const command of apcs(removal)) {
+          if (command.controls.a === 'd') assert.equal(command.controls.i, shownImageId, `${entry.name}: no foreign delete`)
+        }
+
+        const secondRef = imageRef(`att-zellij-delayed-${entry.name}-2`, 'delayed-2.png', 'image/png')
+        vt.writes.length = 0
+        h.app.setTranscript(transcriptOf(secondRef).messages())
+        await settle(h.app, vt)
+        const restoredImageId = apcs(vt.writes.join('')).filter(entry => entry.controls.a === 'p').at(-1)?.controls.i
+        assert.ok(restoredImageId, `${entry.name}: the Alt re-place names an image id`)
+
+        vt.writes.length = 0
+        h.app.setFullscreen(false)
+        await settle(h.app, vt)
+        const stop = vt.writes.join('')
+        assert.ok(stop.includes(`a=d,d=I,i=${restoredImageId}`), `${entry.name}: Alt stop releases the own managed id`)
+        assert.equal(/a=d,d=A|a=d,d=a/.test(stop), false, `${entry.name}: Alt stop never sends a global delete`)
+        assert.equal(getCapabilities().images, entry.capability, `${entry.name}: the static capability is restored`)
+      } finally {
+        h.app.dispose()
+        apps.started.delete(h.app)
+      }
+    })
+  }
+})
+
+test('a denied Zellij live query inside Alt stays payload-free and emits no image work', async (t) => {
+  const h = started(product(t, zellijEnvironment({ TERM_PROGRAM: undefined, TERM: 'xterm-256color' })))
+  const vt = h.terminal
+  try {
+    const reply = probeReply(vt)
+    h.app.setFullscreen(true)
+    await settle(h.app, vt)
+    const ref = imageRef('att-zellij-denied-alt', 'denied.png', 'image/png')
+    vt.writes.length = 0
+    h.app.setTranscript(transcriptOf(ref).messages())
+    await settle(h.app, vt)
+    assert.equal(h.reads.get(ref.attachmentId), undefined, 'a pending Alt never reads')
+    vt.sendInput(`\x1b_Gi=${reply.match(/i=(\d+)/)?.[1]};ENOTSUPPORTED:disabled\x1b\\`)
+    await new Promise(resolve => setTimeout(resolve, 30))
+    await settle(h.app, vt)
+    assert.equal(h.graphics.canPaint(), false, 'the live rejection is permanent')
+    const wire = vt.writes.join('')
+    assert.equal(h.reads.get(ref.attachmentId), undefined, 'no read after the live rejection')
+    assert.equal(wire.includes('a=t,f=100') || wire.includes('a=p,'), false, 'no managed image after the live rejection')
+    assert.equal(wire.includes('a=T,'), false, 'no legacy image after the live rejection')
+    assert.equal(/a=d,d=A|a=d,d=a/.test(wire), false, 'no global delete after the live rejection')
+  } finally {
+    h.app.dispose()
+    apps.started.delete(h.app)
   }
 })
 

@@ -49,6 +49,7 @@ import {
   type SlashCommand,
   type Terminal,
   type TerminalProgressState,
+  type ImageProtocol,
   type TuiInputListenerResult,
   type KeyId,
   type TuiMouseEvent,
@@ -2869,6 +2870,18 @@ export class TuiApp {
    * `Image`/text path.
    */
   private readonly graphics: KittyGraphics | undefined
+  /**
+   * The image protocol every Alt Screen must use for this app's managed Native
+   * route. A Zellij live `OK` can admit the Kitty transport while the fork's
+   * static capability is still `null`/`iterm2`; the Alt screen's clear/redraw
+   * and release strategy must follow the MANAGED transport, while whether
+   * pixels may be painted stays `graphics.canPaint()`. `undefined` keeps the
+   * fork's existing static capability (including legacy iTerm2 and the tmux
+   * virtual path).
+   */
+  private get altScreenImageProtocol(): ImageProtocol | undefined {
+    return this.graphics?.mode === 'native' ? 'kitty' : undefined
+  }
   /** The extension surface host (M2), when the runner attached one. */
   private readonly extensionHost: SurfaceHost | undefined
   /** The unified status projection store (M0): the footer's single input.
@@ -8006,6 +8019,7 @@ export class TuiApp {
       // click reaches us through its onCellClick callback so cards can be
       // expanded individually, exactly like a web disclosure row.
       const alt = new TuiAltScreen(this.terminal, undefined, undefined, {
+        imageProtocolOverride: this.altScreenImageProtocol,
         // The fullscreen mouse-wheel step (Client preference): the fork
         // reads it at construction, so a change while fullscreen is
         // active applies on the next re-entry.
@@ -24210,6 +24224,7 @@ export class TuiApp {
       focusComponent: (component) => screen.setFocus(component),
     })
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
+      imageProtocolOverride: this.altScreenImageProtocol,
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,
@@ -24513,6 +24528,7 @@ export class TuiApp {
     const returnFocus = returnScreen.getFocusedComponent()
     const token: object = {}
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
+      imageProtocolOverride: this.altScreenImageProtocol,
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,

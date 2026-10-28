@@ -629,13 +629,14 @@ test('direct Ghostty reaches the Native Core through the real environment and Tu
   }
 })
 
-test('direct WezTerm, Warp and Tern fallback paint through the real TuiApp Native path', async (t) => {
+test('direct WezTerm, Warp, Tern fallback and explicit Kitty override paint through the real TuiApp Native path', async (t) => {
   const apps = createAppLifecycleGuard<TuiApp>()
   t.after(() => apps.disposeAll())
   const hosts = [
     { name: 'WezTerm', environment: { TERM_PROGRAM: 'wezterm', WEZTERM_PANE: '4' } },
     { name: 'Warp', environment: { TERM_PROGRAM: 'warpterminal', WARP_SESSION_ID: 'warp-1' } },
     { name: 'Tern PiTui fallback', environment: { TERM_PROGRAM: 'tern' } },
+    { name: 'unknown terminal with PI_IMAGE_PROTOCOL=kitty', environment: { PI_IMAGE_PROTOCOL: 'kitty' } },
   ] as const
   for (const [index, host] of hosts.entries()) {
     await t.test(host.name, async () => {

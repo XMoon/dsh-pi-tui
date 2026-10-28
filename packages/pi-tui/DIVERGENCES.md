@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 70
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 54, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 71
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 55, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -162,6 +162,7 @@
 | X067 | ACTIVE | MEDIUM | BUGFIX_MISSING_UPSTREAM | NO |
 | X068 | ACTIVE | MEDIUM | LOCAL_UX | NO |
 | X069 | ACTIVE | LOW | BUGFIX_MISSING_UPSTREAM | NO |
+| X070 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 
 ## Divergences
 
@@ -5909,3 +5910,85 @@ The Tern terminal pane speaks the Kitty graphics protocol, but upstream v1.1.0 h
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Owner-approved Image-7C protocol-capability unification: Tern PiTui needs the fork's single capability owner to report Kitty because the alternate screen reads getCapabilities().images directly. Confirmed against the pinned v1.1.0 tree that no existing branch matches TERM_PROGRAM=tern and that a host-only override would split the main/alt capability answer.
+
+### X070 — Alt Screen per-instance image protocol override for managed Native Kitty
+
+- Status: `ACTIVE`
+- Category: `HARD_HOST_API`
+- Risk: `MEDIUM`
+- Files: `src/tui-alt-screen.ts`
+- Last audited: `2026-10-28`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+Image-7C admits a managed Native Kitty handle for a Zellij pane when its live a=q answer is OK, even when the fork's static getCapabilities().images is null or iterm2. TuiAltScreen latches getCapabilities().images at beforeTerminalStart() and uses that single field for its differential image cleanup and stop release. With a null static value it never emits the required placement delete; with iterm2 it uses the whole-screen 2J branch. Both paths would leave a managed Kitty placement behind after an image is removed or moved in fullscreen. The host cannot correct this through the existing public surface without mutating the process-wide capability cache, which would affect unrelated consumers; the fork's Alt Screen owns the protocol latch, so the minimal correct seam is one optional per-instance override.
+
+#### Changed surface
+
+- TuiAltScreenOptions.imageProtocolOverride?: ImageProtocol — optional per-instance protocol selection.
+- TuiAltScreen.beforeTerminalStart() uses imageProtocolOverride when supplied, otherwise the existing getCapabilities().images answer; the global capability cache is never mutated.
+- The existing iTerm2 suppression/restore lifecycle still runs from the actual getCapabilities() answer: an iterm2 process capability is temporarily changed to images:null for the Alt lifetime and restored at stop even when the instance override is kitty.
+- No option means byte-for-byte upstream protocol behavior; the tmux virtual and legacy iTerm2 paths keep their existing protocol selection.
+
+#### Dependency map
+
+**Vendor internal**
+- imageProtocol is a private TuiAltScreen field read by doRender's differential clear/redraw branch and beforeTerminalStop's deleteKittyImages(); it is set once in beforeTerminalStart(). The override changes only that assignment.
+- uploadedKittyImages and prepareKittyScreen remain the same single image-placement cache; no second protocol state is introduced.
+- Audit note: One readonly option field plus the existing latch assignment; no new render or deletion path.
+
+**Inheritance / structural**
+- TuiBase.start() calls beforeTerminalStart() synchronously before installing the terminal input listener, so the override is latched before any render or input can refer to it.
+- TuiMainScreen has no imageProtocol latch and is unaffected.
+- Audit note: The option is inert on every non-Alt screen and absent from TuiMainScreen.
+
+**Host**
+- src/tui-app.ts passes imageProtocolOverride: this.altScreenImageProtocol to the fullscreen transcript Alt screen, the Job workspace Alt screen and the Settings/Image workspace lease Alt screen.
+- altScreenImageProtocol returns 'kitty' only when the one managed graphics handle is mode 'native' (Direct or Zellij, including a pending Zellij admission); it returns undefined for tmux-virtual and no-graphics terminals.
+- Whether managed pixels may actually be painted remains graphics.canPaint(); the option only selects the Alt clear/redraw/release strategy.
+- Audit note: The host passes a literal protocol value from its single managed graphics owner; it never mutates getCapabilities().
+
+**Public / extension**
+- TuiAltScreenOptions is a public fork type; the new field is optional and additive, so existing consumers compile and behave unchanged.
+- No new class, export or extension-facing surface is added, and the root entry does not re-export the option.
+- Audit note: Absent option = existing behavior.
+
+**Behavioral coupling**
+- With imageProtocolOverride 'kitty', an image-anchor change uses the Kitty placement-delete path (deleteAllKittyPlacements) and Alt stop uses the Kitty global remove path that the facade scopes to its own ids; no 2J branch and no global delete reaches the physical terminal.
+- Without the option, null/iterm2/kitty behavior is unchanged.
+- When the process capability is iterm2, the existing temporary images:null suppression and stop restore still occur even with a kitty instance override.
+- Audit note: Guarded by packages/pi-tui/test/tui-alt-screen.test.ts (X070 group) and the host Zellij delayed-OK integration cases.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-alt-screen.test.ts: X070 — a kitty instance override emits Kitty placement cleanup while the iTerm2 global suppression/restore still runs; no override keeps the static null behavior and never touches the process capability.
+- test/integration/kitty-zellij-screen.test.ts: a delayed Zellij OK with fork images null/iterm2 enters Alt first, then paints; Alt image removal emits an own-id placement delete, Alt stop releases the own id, no global delete/2J/foreign id is emitted, repeated Main↔Alt entries stay managed, and a denied live query stays payload-free.
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- src/tui-alt-screen.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream TuiAltScreen always derives imageProtocol from the process-wide getCapabilities().images snapshot and has no per-instance protocol option. The fork adds one optional readonly override used only for the instance's clear/redraw/release strategy, while preserving the existing global iTerm2 suppression/restore lifecycle and all default behavior.
+
+#### Retirement conditions
+
+- Retire when upstream exposes an equivalent per-instance image protocol option or a managed-graphics protocol seam on TuiAltScreen, then run the X070 fork group and the host Zellij delayed-OK integration cases.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Owner-approved RFL-001 scope extension after a real Alt ghost-placement defect: Zellij live OK can exceed the static fork capability, so the Alt screen needs an instance-level protocol value from the one managed graphics handle. Confirmed against the pinned v1.1.0 tree that TuiAltScreen has no such option and that host-only global cache mutation would affect unrelated consumers.

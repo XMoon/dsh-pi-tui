@@ -31,7 +31,7 @@ import { connect as sdkConnect, concatBytes } from '@stencil-hq/tern'
 import type { Op } from '@stencil-hq/tern'
 import type { ConnectOptions, Session, TermInput, TermOutput } from '@stencil-hq/tern'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
-import { getCapabilities, resetCapabilitiesCache } from '@xmoon76/pi-tui'
+import { getCapabilities, resetCapabilitiesCache, setCapabilityOverrides } from '@xmoon76/pi-tui'
 import type { RoutedSessionEvent } from '../../src/app/surface/event-routing.ts'
 import type { SurfaceEventRoutingSource } from '../../src/app/surface/event-routing.ts'
 import {
@@ -51,6 +51,23 @@ import { waitUntil } from '../support/tsp-runner-harness.ts'
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
 const SESSION_ID = 'session-pr3a-sel'
+
+/** Every environment fact the fork capability detector or a multiplexer path reads. */
+const CAPABILITY_ENV_KEYS = [
+  'TERM',
+  'TERM_PROGRAM',
+  'KITTY_WINDOW_ID',
+  'GHOSTTY_RESOURCES_DIR',
+  'ITERM_SESSION_ID',
+  'TMUX',
+  'ZELLIJ',
+  'STY',
+  'WEZTERM_PANE',
+  'WARP_SESSION_ID',
+  'WARP_TERMINAL_SESSION_UUID',
+  'PI_IMAGE_PROTOCOL',
+  'PI_TUI_TMUX_KITTY_IMAGES',
+] as const
 
 // ── The scripted Tern pane (same shape PR2 used) ────────────────────────────
 
@@ -391,8 +408,13 @@ test('A-02: SDK connect null falls back to the PiTui mount (opt-in present)', as
   })
   assert.equal(renderer, undefined, 'the selection seam yields no renderer mount on null')
 
-  const savedTermProgram = process.env.TERM_PROGRAM
+  const savedEnvironment = new Map<string, string | undefined>()
+  for (const key of CAPABILITY_ENV_KEYS) {
+    savedEnvironment.set(key, process.env[key])
+    delete process.env[key]
+  }
   process.env.TERM_PROGRAM = 'tern'
+  setCapabilityOverrides({})
   resetCapabilitiesCache()
   const harness = mountHarness()
   try {
@@ -416,8 +438,11 @@ test('A-02: SDK connect null falls back to the PiTui mount (opt-in present)', as
     const wire = tern.output.text()
     assert.ok(!wire.includes('\u001b_tsp;o;') && !wire.includes('\u001b_tsp;f;'), 'no TSP surface opened or framed after the declined probe')
   } finally {
-    if (savedTermProgram === undefined) delete process.env.TERM_PROGRAM
-    else process.env.TERM_PROGRAM = savedTermProgram
+    for (const [key, value] of savedEnvironment) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    setCapabilityOverrides({})
     resetCapabilitiesCache()
     await harness.dispose()
   }

@@ -20,6 +20,7 @@ import { VStack } from "../src/components/v-stack.ts";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "../src/keybindings.ts";
 import {
 	encodeKitty,
+	getCapabilities,
 	hyperlink,
 	registerKittyImageMetadata,
 	resetCapabilitiesCache,
@@ -4355,6 +4356,79 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 			"the transcript behind the modal must never join the highlight",
 		);
 		tui.stop();
+	});
+
+	describe("image protocol override (X070)", () => {
+		class KittyAnchor {
+			show = true;
+			private readonly imageId: number;
+			constructor(imageId = 777) {
+				this.imageId = imageId;
+			}
+			render(): string[] {
+				return this.show
+					? [`\x1b_Ga=p,i=${this.imageId},p=1,c=2,r=2,q=2;\x1b\\`, "", "tail"]
+					: ["text", "", "tail"];
+			}
+			invalidate(): void {}
+		}
+
+		function writes(terminal: RecordingTerminal): string {
+			return terminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => (event.type === "write" ? event.data : ""))
+				.join("");
+		}
+
+		it("uses the instance Kitty protocol while preserving iTerm2 suppression and restore", async () => {
+			setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
+			registerKittyImageMetadata({ imageId: 777, columns: 2, rows: 2, widthPx: 10, heightPx: 10 });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const anchor = new KittyAnchor();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, { imageProtocolOverride: "kitty" });
+				tui.addChild(anchor);
+				tui.start();
+				await terminal.waitForRender();
+				assert.strictEqual(getCapabilities().images, null, "the existing iTerm2 global suppression still runs");
+
+				terminal.events.length = 0;
+				anchor.show = false;
+				tui.renderNow();
+				const wire = writes(terminal);
+				assert.ok(wire.includes("\x1b_Ga=d,d=a,q=2\x1b\\"), "Kitty placement cleanup is emitted");
+				assert.ok(!wire.includes("\x1b[2J"), "the iTerm2 whole-screen branch is not used");
+
+				tui.stop();
+				assert.strictEqual(getCapabilities().images, "iterm2", "the existing iTerm2 restore lifecycle still runs");
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("keeps the static capability behavior when no override is passed", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			registerKittyImageMetadata({ imageId: 778, columns: 2, rows: 2, widthPx: 10, heightPx: 10 });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const anchor = new KittyAnchor(778);
+				const tui = new TuiAltScreen(terminal);
+				tui.addChild(anchor);
+				tui.start();
+				await terminal.waitForRender();
+
+				terminal.events.length = 0;
+				anchor.show = false;
+				tui.renderNow();
+				const wire = writes(terminal);
+				assert.ok(!wire.includes("\x1b_Ga=d,d=a,q=2\x1b\\"), "no Kitty cleanup without the override");
+				assert.ok(!wire.includes("\x1b[2J"), "no iTerm2 clear without an iTerm2 capability");
+				tui.stop();
+				assert.strictEqual(getCapabilities().images, null, "the process capability is untouched");
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
 	});
 });
 });
