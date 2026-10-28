@@ -35,7 +35,7 @@ import * as builtinsPlugin from '../../builtins.ts'
 import { PI_TUI_EXTENSIONS_SERVICE, type PiTuiExtensionService } from '../../extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../../startup.ts'
 import type { ClientUiStartupFacts } from '../application-runtime.ts'
-import { mergeCause } from './host-runtime.ts'
+import { mergeCause } from './dispose-cause.ts'
 
 /** The composed Client UI subtree. Not exported from the package root. */
 export interface RemoteClientUiRuntime {

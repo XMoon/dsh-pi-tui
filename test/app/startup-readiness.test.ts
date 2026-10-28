@@ -22,8 +22,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import { apply as applyStartup, TUI_STARTUP_SERVICE } from '../../src/startup.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 /** The launcher's readiness signal, modelled exactly as DSH's
  * `apps/cli/src/profile-boot.ts` implements it. */
@@ -257,4 +260,77 @@ test('the launcher clears its listeners at the commit, so a committed listener c
   }
   assert.deepEqual(exitCodes, [], 'a mounted surface must not exit')
   assert.deepEqual(stderr.lines, [])
+})
+
+// ── the M4-A0 Host-only role ────────────────────────────────────────────────
+
+test('a host-only process provides tuiStartup but does not deliver the TUI-surface verdict', (t) => {
+  // A Host-only process (the M4-A0 local-host entry) composes the production
+  // Host rows gated on `tuiStartup` but never mounts a TUI surface. The launcher
+  // role fact suppresses only the TUI-surface verdict; the parsed startup facts
+  // stay available to the Host rows.
+  const previousRole = process.env.DSH_PI_TUI_ROLE
+  const previousEntry = process.env.DSH_PI_TUI_HOST_ENTRY
+  const previousArgv1 = process.argv[1]
+  const dir = testLifecycle(t).tempDir('m4a0-host-role-')
+  const entry = join(dir, 'local-host.mjs')
+  writeFileSync(entry, '')
+  process.env.DSH_PI_TUI_ROLE = 'host'
+  process.env.DSH_PI_TUI_HOST_ENTRY = entry
+  process.argv[1] = entry
+  const readiness = new LauncherReadiness()
+  const exitCodes: number[] = []
+  const stderr = captureStderr()
+  try {
+    const ctx = mountStartup(readiness, exitCodes)
+    assert.notEqual(ctx.get(TUI_STARTUP_SERVICE), undefined, 'the Host rows still need the startup facts')
+    readiness.commit()
+  } finally {
+    stderr.restore()
+    if (previousRole === undefined) delete process.env.DSH_PI_TUI_ROLE
+    else process.env.DSH_PI_TUI_ROLE = previousRole
+    if (previousEntry === undefined) delete process.env.DSH_PI_TUI_HOST_ENTRY
+    else process.env.DSH_PI_TUI_HOST_ENTRY = previousEntry
+    if (previousArgv1 !== undefined) process.argv[1] = previousArgv1
+  }
+  assert.deepEqual(exitCodes, [], 'a Host-only process must not exit for its absent TUI surface')
+  assert.deepEqual(stderr.lines, [])
+})
+
+test('an ordinary CLI that merely inherits the host role string still delivers the missing-surface verdict', () => {
+  const previousRole = process.env.DSH_PI_TUI_ROLE
+  const previousEntry = process.env.DSH_PI_TUI_HOST_ENTRY
+  process.env.DSH_PI_TUI_ROLE = 'host'
+  delete process.env.DSH_PI_TUI_HOST_ENTRY
+  const readiness = new LauncherReadiness()
+  const exitCodes: number[] = []
+  const stderr = captureStderr()
+  try {
+    mountStartup(readiness, exitCodes)
+    readiness.commit()
+  } finally {
+    stderr.restore()
+    if (previousRole === undefined) delete process.env.DSH_PI_TUI_ROLE
+    else process.env.DSH_PI_TUI_ROLE = previousRole
+    if (previousEntry === undefined) delete process.env.DSH_PI_TUI_HOST_ENTRY
+    else process.env.DSH_PI_TUI_HOST_ENTRY = previousEntry
+  }
+  assert.deepEqual(exitCodes, [1], 'the role string alone is not Host-entry admission')
+})
+
+test('the host-only role leaves the ordinary missing-surface verdict unchanged', () => {
+  const previous = process.env.DSH_PI_TUI_ROLE
+  delete process.env.DSH_PI_TUI_ROLE
+  const readiness = new LauncherReadiness()
+  const exitCodes: number[] = []
+  const stderr = captureStderr()
+  try {
+    mountStartup(readiness, exitCodes)
+    readiness.commit()
+  } finally {
+    stderr.restore()
+    if (previous === undefined) delete process.env.DSH_PI_TUI_ROLE
+    else process.env.DSH_PI_TUI_ROLE = previous
+  }
+  assert.deepEqual(exitCodes, [1], 'an ordinary TUI startup without a surface still fails')
 })

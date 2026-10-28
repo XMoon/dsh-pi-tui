@@ -8,7 +8,7 @@
 
 import { Command } from 'commander'
 import { readFileSync, realpathSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
 import compatMatrix from './dsh-compat-matrix.json' with { type: 'json' }
@@ -27,6 +27,37 @@ import compatMatrix from './dsh-compat-matrix.json' with { type: 'json' }
 // runner's shared `versionAtLeast` was retired (TS8-F2), so this startup-local
 // comparator is the only one and is exercised through the compatibility gate
 // (`harnessCompatEntryFor`) by the startup tests.
+
+/** Launcher-provided process role. The M4-A0 host-only entry sets `host`:
+ * that process composes the production Host rows gated on `tuiStartup` but
+ * deliberately mounts no TUI surface, so this row must not deliver the
+ * TUI-surface verdict (which would exit a healthy Host). Any other value
+ * (including unset) keeps the production TUI startup contract unchanged. */
+const PROCESS_ROLE_ENV = 'DSH_PI_TUI_ROLE'
+
+/** The Host entry's own executable path, written by the entry itself. */
+const HOST_ENTRY_ENV = 'DSH_PI_TUI_HOST_ENTRY'
+
+/**
+ * True only for the real M4-A0 Host entry, never for a regular CLI that merely
+ * inherited the role string. The role alone is not authoritative: the marker
+ * must name the running main module, and that module must be the internal
+ * `local-host.mjs` artifact. This prevents `DSH_PI_TUI_ROLE=host dsh --profile
+ * pi-tui` (or a child CLI spawned by a Host) from bypassing the Direct
+ * TUI-surface verdict.
+ */
+function isHostOnlyRole(): boolean {
+  if (process.env[PROCESS_ROLE_ENV] !== 'host') return false
+  const declaredEntry = process.env[HOST_ENTRY_ENV]
+  const mainEntry = process.argv[1]
+  if (declaredEntry === undefined || declaredEntry === '' || mainEntry === undefined) return false
+  try {
+    const mainReal = realpathSync(mainEntry)
+    return basename(mainReal) === 'local-host.mjs' && realpathSync(declaredEntry) === mainReal
+  } catch {
+    return false
+  }
+}
 
 /** The installed dsh version, resolved from the launcher's real path. */
 function installedDshVersion(): string | undefined {
@@ -346,7 +377,7 @@ export function apply(ctx: Context): void {
     // for a startup it witnessed, which is the cold start.
     let surfaceMounted = false
     const ready = ctx.get('appReady')
-    if (ready !== undefined) {
+    if (!isHostOnlyRole() && ready !== undefined) {
       // The launcher's readiness contract, observed from inside this row:
       // a listener registered BEFORE the commit runs LATER, so `onReady`
       // returns before the callback fires; a listener registered AFTER the
