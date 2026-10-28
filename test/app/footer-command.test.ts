@@ -31,6 +31,7 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import { selectSettingsCategory } from '../support/settings-rail.ts'
+import { waitForFrame } from '../support/frame-wait.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -1025,9 +1026,15 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   ctx.provide('commands', commands.service as never)
   ctx.provide('settings', { describe: () => [{ ns: 'tui-app', user: {} }] } as never)
   const doc = { footer: 'default' as string, footerLayout: undefined as unknown }
+  // The failed write is observed at ITS entry and at ITS settlement: a silence
+  // window proves neither. The mock records the document before it rejects.
+  const replaced: Array<Record<string, unknown>> = []
   const failingSettings: TuiSettingsLike = {
     get: () => ({ theme: 'auto', iconStyle: 'emoji', footer: doc.footer, footerLayout: doc.footerLayout, fullscreen: 'on', busyEnter: 'queue', localShellSandbox: 'bypass', homeEndKeys: 'viewport', wheelScrollLines: '1', notificationMode: 'unfocused', terminalProgress: 'on', notificationMethod: 'auto' }),
-    replace: () => { throw new Error('write failed') },
+    replace: (next) => {
+      replaced.push(next as unknown as Record<string, unknown>)
+      throw new Error('write failed')
+    },
   }
   const applied: Array<{ footer: string }> = []
   const runner: TuiCommandRunner = {
@@ -1109,12 +1116,25 @@ test('/settings footer change is PERSIST-FIRST: a failed write keeps the old lay
   vt.sendInput('\x1b[B') // default -> compact
   await vt.waitForRender()
   vt.sendInput('\r') // explicit Confirm
-  const deadline = Date.now() + 400
-  while (applied.length === 0 && Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, 10))
-  }
+  // The failure must be a real SETTLEMENT, not a silence window: the row's
+  // Detail paints the refused outcome, and only then may the absence
+  // assertions run (a Confirm the panel never accepted would also leave
+  // `applied` empty).
+  await waitForFrame(
+    () => vt.getViewport().join('\n'),
+    frame => frame.includes('Not saved') && frame.includes('write failed'),
+    () => vt.waitForRender(),
+    'the failed footer write must settle as Not saved',
+  )
+  assert.equal(replaced.length, 1,
+    `exactly one persist-first write reached replace(): ${JSON.stringify(replaced)}`)
+  assert.equal(replaced[0]!.footer, 'compact', 'the write carried the chosen mode')
+  assert.equal(replaced[0]!.footerFallbackMode, 'compact', 'the write carried the restart fallback')
   assert.equal(applied.length, 0, 'a failed settings write must not apply the footer layout')
   assert.equal(app.getFooterMode(), 'default', 'the old layout must stay active')
+  assert.equal(doc.footer, 'default', 'the old document value must stay')
+  assert.equal((doc as { footerFallbackMode?: unknown }).footerFallbackMode, undefined,
+    'the failed write must not write the fallback metadata')
   app.stop()
 })
 

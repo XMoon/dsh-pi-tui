@@ -77,32 +77,49 @@ export function readPidRecords(file: string): PidRecord[] {
 /**
  * Wait until the fixture has recorded `count` processes.
  *
- * The FILE EVENT is the signal; `deadlineMs` only bounds a fixture that never
- * writes, so a broken fixture fails with a real message instead of hanging.
+ * The FILE CONTENT is the authority; a file event only notifies a re-read.
+ * `deadlineMs` bounds a fixture that never writes, so a broken fixture fails
+ * with a real message instead of hanging.
+ *
+ * The first read and the watcher registration are two separate steps, so a
+ * record written between them emits an event nobody was listening for. The
+ * check therefore runs ONCE AFTER `watch()` is armed as well: the registration
+ * window cannot lose a wakeup, while every later notification is still a real
+ * event. The same `settled` guard makes the timer, an event and the
+ * post-registration read settle at MOST once.
  */
 export function waitForPidRecords(file: string, count: number, deadlineMs: number): Promise<PidRecord[]> {
   return new Promise((resolve, reject) => {
-    const initial = readPidRecords(file)
-    if (initial.length >= count) {
-      resolve(initial)
-      return
-    }
     let watcher: FSWatcher | undefined
-    // reason: a bounded deadline around a file event, not a settle window — the
-    // fixture writes its record synchronously at startup.
-    const timer = setTimeout(() => {
-      watcher?.close()
-      reject(new Error(`the fixture wrote ${readPidRecords(file).length} PID record(s) within ${deadlineMs}ms`))
-    }, deadlineMs)
-    // Watch the DIRECTORY: watching the log path before it exists throws ENOENT.
-    watcher = watch(dirname(file), { persistent: false }, (_event, name) => {
-      if (name !== undefined && String(name) !== basename(file)) return
+    let settled = false
+    /** Read the CURRENT file content; settle only when it satisfies `count`. */
+    const checkRecords = (): void => {
+      if (settled) return
       const records = readPidRecords(file)
       if (records.length < count) return
+      settled = true
       clearTimeout(timer)
       watcher?.close()
       resolve(records)
+    }
+    // reason: a bounded deadline around a file event, not a settle window — the
+    // fixture writes its record synchronously at startup.
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      watcher?.close()
+      reject(new Error(`the fixture wrote ${readPidRecords(file).length} PID record(s) within ${deadlineMs}ms`))
+    }, deadlineMs)
+    checkRecords()
+    if (settled) return
+    // Watch the DIRECTORY: watching the log path before it exists throws ENOENT.
+    watcher = watch(dirname(file), { persistent: false }, (_event, name) => {
+      if (name !== undefined && String(name) !== basename(file)) return
+      checkRecords()
     })
+    // Close the registration window: a record written after the first read but
+    // before the watcher was armed produced no event this wait can see.
+    checkRecords()
   })
 }
 

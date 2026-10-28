@@ -2628,7 +2628,12 @@ export class ModelsWorkspacePage implements Component {
         }
         return 'handled'
       }
+      // The embedded flow mutates its own draft/navigation state but owns no
+      // painter: this page is the physical owner, so it must schedule the
+      // frame that shows the typed mask and the next phase. Without this the
+      // visible form stayed empty while the real value advanced.
       this.question.flow.handleInput(data)
+      this.requestRender()
       return 'handled'
     }
     if (this.modelPicker !== undefined) {

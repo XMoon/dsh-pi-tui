@@ -345,6 +345,73 @@ const key = async (h: Harness, data: string): Promise<void> => {
   await h.vt.waitForRender()
 }
 
+/**
+ * Wait for one painted stage of the held `/login` write.
+ *
+ * A key that a fence drops (not holds) is lost for good, so every Enter below
+ * is sent only after the frame proves the action it needs is really on screen.
+ */
+async function waitForHeldWriteStage(
+  h: Harness,
+  predicate: (frame: string) => boolean,
+  stage: string,
+): Promise<void> {
+  try {
+    await waitForFrame(h.view, predicate, () => h.vt.waitForRender(), stage)
+  } catch (error) {
+    throw new Error(`${(error as Error).message}\ncalls: ${h.calls.join(', ')}`)
+  }
+}
+
+/**
+ * Drive `/login deepseek-official` from its real painted reference page to the
+ * Host writer entry: the actionable Configure action, the masked form, the
+ * typed mask, the review page and the final submit are each gated on the frame
+ * that grants the next key, and the Host call is the positive witness that the
+ * submit was accepted. The held gate then keeps the Host write in flight.
+ */
+async function submitHeldOfficialKey(h: Harness): Promise<void> {
+  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
+  await waitForHeldWriteStage(
+    h,
+    frame => /Stored\s+(?:Configured|Not set)/u.test(frame) && frame.includes('> Configure API Key…'),
+    'the official reference page with an actionable Configure API Key',
+  )
+  await key(h, '\r') // open the masked form
+  await waitForHeldWriteStage(
+    h,
+    frame => frame.includes('Enter the API key') && frame.includes('Enter continue'),
+    'the masked API-key form with its Enter continue grant',
+  )
+  // Type through the real editor one key at a time (the same route the other
+  // masked-form cases use): a single multi-character chunk is not how a user
+  // types a secret, and the mask must follow the editor's own value.
+  for (const character of 'sk-held') await key(h, character)
+  await waitForHeldWriteStage(
+    h,
+    frame => /•{7}/u.test(frame) && !frame.includes('sk-held'),
+    'the masked field painting the typed key without exposing it',
+  )
+  await key(h, '\r') // review
+  await waitForHeldWriteStage(
+    h,
+    frame => frame.includes('Review your answer before submit') && frame.includes('↵ submit')
+      && !frame.includes('sk-held'),
+    'the review page with its submit command',
+  )
+  await key(h, '\r') // submit
+  // A painted frame alone does not prove the pending mutation started: the fake
+  // records the call BEFORE it awaits the held gate, so this is the Host write's
+  // real entry point for THIS reference.
+  await waitForCall(h, call => call === 'set:DEEPSEEK_API_KEY',
+    'the held API-key write must start before the rail click')
+  await waitForHeldWriteStage(
+    h,
+    frame => frame.includes('saving — the Host has not confirmed yet'),
+    'the reference page reporting the pending Host write',
+  )
+}
+
 test('/login acme deeplinks to the provider detail inside the Settings lease', async () => {
   const h = open()
   await h.vt.waitForRender()
@@ -573,53 +640,49 @@ test('the category rail cannot abandon a pending API-key write (pending mutation
   const h = open()
   await h.vt.waitForRender()
   const release = h.holdNextSetReference()
-  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
-  await h.vt.waitForRender()
-  await key(h, '\r') // open masked form
-  await key(h, 'sk-held')
-  await key(h, '\r') // review
-  await key(h, '\r') // submit (setReference is held open)
-  await waitForCall(h, call => call.startsWith('set:'), 'the held API-key write must start before the rail click')
-  await h.vt.waitForRender()
+  try {
+    await submitHeldOfficialKey(h)
 
-  const accountRow = railEntryRow(h, 'Account')
-  await click(h, accountRow, 2)
-  assert.match(h.rows()[0]!, /Settings · Models/u, 'pending mutation wins over category navigation')
-  assert.doesNotMatch(h.view(), /^> Account/mu, 'the rail did not select the Account category')
-
-  release()
-  for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
-  h.close()
+    const accountRow = railEntryRow(h, 'Account')
+    await click(h, accountRow, 2)
+    assert.match(h.rows()[0]!, /Settings · Models/u, 'pending mutation wins over category navigation')
+    assert.doesNotMatch(h.view(), /^> Account/mu, 'the rail did not select the Account category')
+    assert.deepEqual(h.calls.filter(call => call.startsWith('set:')), ['set:DEEPSEEK_API_KEY'],
+      'the held write is the ONE Host mutation of this reference')
+  } finally {
+    release()
+    for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
+    h.close()
+  }
 })
 
 test('a pending Host mutation owns the page: the rail click cannot take the keyboard away from it', async () => {
   const h = open()
   await h.vt.waitForRender()
   const release = h.holdNextSetReference()
-  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
-  await h.vt.waitForRender()
-  await key(h, '\r') // open the masked form
-  await key(h, 'sk-held')
-  await key(h, '\r') // review
-  await key(h, '\r') // submit (the write is held open)
-  await h.vt.waitForRender()
-  assert.match(h.rows()[0]!, /Settings · Models/u, 'the content owns the keyboard')
+  try {
+    await submitHeldOfficialKey(h)
+    assert.match(h.rows()[0]!, /Settings · Models/u, 'the content owns the keyboard')
 
-  // A click on the ALREADY selected category must not take the keyboard away
-  // from the page that owns the pending write: the rail would otherwise be a
-  // way around the page's own refusal.
-  const modelsRow = railEntryRow(h, 'Models')
-  await click(h, modelsRow, 2)
-  assert.match(h.rows()[0]!, /Settings · Models/u, 'the focus stayed with the page that owns the pending write')
-  assert.doesNotMatch(h.rows()[0]!, /Settings · Categories/u, 'the rail did not take the keyboard')
+    // A click on the ALREADY selected category must not take the keyboard away
+    // from the page that owns the pending write: the rail would otherwise be a
+    // way around the page's own refusal.
+    const modelsRow = railEntryRow(h, 'Models')
+    await click(h, modelsRow, 2)
+    assert.match(h.rows()[0]!, /Settings · Models/u, 'the focus stayed with the page that owns the pending write')
+    assert.doesNotMatch(h.rows()[0]!, /Settings · Categories/u, 'the rail did not take the keyboard')
 
-  // The page's own Esc refuses the pending write, and the workspace stays open.
-  await key(h, '\u001b')
-  assert.match(h.view(), /Settings ·/u, 'the workspace is not closed while the write is pending')
-  assert.match(h.view(), /in flight/u, 'the page states that the write is still in flight')
-  release()
-  for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
-  h.close()
+    // The page's own Esc refuses the pending write, and the workspace stays open.
+    await key(h, '\u001b')
+    assert.match(h.view(), /Settings ·/u, 'the workspace is not closed while the write is pending')
+    assert.match(h.view(), /in flight/u, 'the page states that the write is still in flight')
+    assert.deepEqual(h.calls.filter(call => call.startsWith('set:')), ['set:DEEPSEEK_API_KEY'],
+      'the held write is the ONE Host mutation of this reference')
+  } finally {
+    release()
+    for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
+    h.close()
+  }
 })
 
 test('a pending Account operation keeps the keyboard: the painted Back action does not leave the page', async () => {
@@ -805,23 +868,20 @@ test('a rail selection is refused while the page owns a pending Host mutation', 
   const h = open()
   await h.vt.waitForRender()
   const release = h.holdNextSetReference()
-  ;(h as unknown as { invoke(line: string): unknown }).invoke('/login deepseek-official')
-  await h.vt.waitForRender()
-  await key(h, '\r') // open the masked form
-  await key(h, 'sk-held')
-  await key(h, '\r') // review
-  await key(h, '\r') // submit (the write is held open)
-  await waitForCall(h, call => call.startsWith('set:'), 'the held API-key write must start before the rail click')
-  await h.vt.waitForRender()
+  try {
+    await submitHeldOfficialKey(h)
 
-  const accountRow = railRow(h, 'Account')
-  await click(h, accountRow, 1)
-  assert.match(h.rows()[0]!, /Settings · Models/u, 'the pending mutation owns the page')
-  assert.doesNotMatch(h.view(), /Settings · Account/u, 'the rail refused the category change')
-
-  release()
-  for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
-  h.close()
+    const accountRow = railRow(h, 'Account')
+    await click(h, accountRow, 1)
+    assert.match(h.rows()[0]!, /Settings · Models/u, 'the pending mutation owns the page')
+    assert.doesNotMatch(h.view(), /Settings · Account/u, 'the rail refused the category change')
+    assert.deepEqual(h.calls.filter(call => call.startsWith('set:')), ['set:DEEPSEEK_API_KEY'],
+      'the held write is the ONE Host mutation of this reference')
+  } finally {
+    release()
+    for (let index = 0; index < 20; index += 1) await new Promise<void>(resolve => setImmediate(resolve))
+    h.close()
+  }
 })
 
 test('a cross-owner gesture does nothing: a rail press released in the content column', async () => {
