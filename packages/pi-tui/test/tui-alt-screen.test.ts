@@ -4429,6 +4429,30 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 				resetCapabilitiesCache();
 			}
 		});
+
+		it("honors an explicit null override instead of falling back to the static capability", async () => {
+			setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false });
+			registerKittyImageMetadata({ imageId: 779, columns: 2, rows: 2, widthPx: 10, heightPx: 10 });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const anchor = new KittyAnchor(779);
+				const tui = new TuiAltScreen(terminal, undefined, undefined, { imageProtocolOverride: null });
+				tui.addChild(anchor);
+				tui.start();
+				await terminal.waitForRender();
+
+				terminal.events.length = 0;
+				anchor.show = false;
+				tui.renderNow();
+				const wire = writes(terminal);
+				assert.ok(!wire.includes("\x1b_Ga=d,d=a,q=2\x1b\\"), "explicit null suppresses the Kitty cleanup");
+				assert.ok(!wire.includes("\x1b[2J"), "explicit null keeps the text-only branch");
+				tui.stop();
+				assert.strictEqual(getCapabilities().images, "kitty", "the process capability is untouched");
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
 	});
 });
 });

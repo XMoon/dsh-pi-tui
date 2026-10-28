@@ -652,7 +652,7 @@ test('an OPEN opaque assistant image block reserves its rank, so a later image k
     mountedImageOccurrences(): { imageIndex: number; ref: { name?: string } }[]
   }
   const occurrences = internals.mountedImageOccurrences()
-  assert.equal(occurrences.length, 1, `only the CLOSED image is a candidate:\n${JSON.stringify(occurrences)}`)
+  assert.equal(occurrences.length, 1, `only the CLOSED image is a candidate:\n${occurrences.map(o => `${o.imageIndex}:${o.ref.name ?? '?'}`).join(', ')}`)
   assert.equal(occurrences[0]!.imageIndex, 1,
     'the open opaque image block reserved ordinal 0, so the real image is occurrence 1')
   assert.equal(occurrences[0]!.ref.name, 'shot.png')
@@ -707,7 +707,7 @@ test('a Tool card generic-presenter image reaches the Viewer and the picker by i
   assert.ok(expanded.includes('🖼️ second.png'), `the tool image is mounted:\n${expanded}`)
   const occurrences = internals.mountedImageOccurrences()
   assert.ok(occurrences.some(o => o.ref.name === 'second.png' && o.imageIndex === 0),
-    `the tool image is a real occurrence at its source ordinal:\n${JSON.stringify(occurrences)}`)
+    `the tool image is a real occurrence at its source ordinal:\n${occurrences.map(o => `${o.imageIndex}:${o.ref.name ?? '?'}`).join(', ')}`)
   // The picker lists it.
   const listInternals = app as unknown as { openTranscriptImagePicker(): void }
   listInternals.openTranscriptImagePicker()
