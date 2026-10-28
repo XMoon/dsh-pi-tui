@@ -9,8 +9,8 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createAppLifecycleGuard } from '../support/app-lifecycle-guard.ts'
-import { afterEach, test } from 'node:test'
-import { resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
+import { afterEach, beforeEach, test } from 'node:test'
+import { resetCapabilitiesCache, setCapabilities, setCapabilityOverrides, visibleWidth } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { consumeDraftAttachments, pruneUnreferencedDraftAttachments } from '../../src/client/media/draft-attachments.ts'
@@ -19,9 +19,39 @@ import { preparePrompt } from '../../src/app/submission/prepared-prompt.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { currentPalette } from '../../src/tui/theme/runtime.ts'
 
+/** Every environment fact the fork capability detector or a multiplexer path reads. */
+const CAPABILITY_ENV_KEYS = [
+  'TERM',
+  'TERM_PROGRAM',
+  'KITTY_WINDOW_ID',
+  'GHOSTTY_RESOURCES_DIR',
+  'ITERM_SESSION_ID',
+  'TMUX',
+  'ZELLIJ',
+  'STY',
+  'WEZTERM_PANE',
+  'WARP_SESSION_ID',
+  'WARP_TERMINAL_SESSION_UUID',
+  'PI_IMAGE_PROTOCOL',
+  'PI_TUI_TMUX_KITTY_IMAGES',
+] as const
+
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
+let savedCapabilityEnvironment: Array<[string, string | undefined]> = []
+beforeEach(() => {
+  savedCapabilityEnvironment = CAPABILITY_ENV_KEYS.map(key => [key, process.env[key]])
+  for (const key of CAPABILITY_ENV_KEYS) delete process.env[key]
+  setCapabilityOverrides({})
+  resetCapabilitiesCache()
+})
 afterEach(() => {
   disposeStartedApps()
+  for (const [key, value] of savedCapabilityEnvironment) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  setCapabilityOverrides({})
+  resetCapabilitiesCache()
 })
 
 function pngBytes(): Buffer {
@@ -1875,7 +1905,11 @@ test('a real JPEG draft card paints real Kitty pixels above the editor (Image-6B
   const uploads = writtenKittyControls(vt).filter(controls => controls.startsWith('a=t,f=100'))
   assert.equal(uploads.length, 1, 'one managed Kitty upload')
   const header = writtenKittyPlacements(vt)[0]!
-  assert.equal(kittyImageId(header), kittyImageId(uploads[0]!), 'the placement names the uploaded image')
+  const uploadId = kittyImageId(uploads[0]!)
+  const placementId = kittyImageId(header)
+  assert.ok(uploadId, 'the upload names an image id')
+  assert.ok(placementId, 'the placement names an image id')
+  assert.equal(placementId, uploadId, 'the placement names the uploaded image')
   assert.ok(Number(/(?:^|,)c=(\d+)/.exec(header)![1]) <= 44, `the draft card never exceeds 44 cells: ${header}`)
   assert.ok(Number(/(?:^|,)r=(\d+)/.exec(header)![1]) <= 3, `the draft card never exceeds 3 rows: ${header}`)
   app.stop()
@@ -1894,7 +1928,11 @@ test('a real WebP draft card uses the 22×3 split slot and keeps its original id
   const uploads = writtenKittyControls(vt).filter(controls => controls.startsWith('a=t,f=100'))
   assert.equal(uploads.length, 1, 'one managed Kitty upload')
   const header = writtenKittyPlacements(vt)[0]!
-  assert.equal(kittyImageId(header), kittyImageId(uploads[0]!), 'the placement names the uploaded image')
+  const uploadId = kittyImageId(uploads[0]!)
+  const placementId = kittyImageId(header)
+  assert.ok(uploadId, 'the upload names an image id')
+  assert.ok(placementId, 'the placement names an image id')
+  assert.equal(placementId, uploadId, 'the placement names the uploaded image')
   assert.ok(Number(/(?:^|,)c=(\d+)/.exec(header)![1]) <= 22, `the split card never exceeds 22 cells: ${header}`)
   assert.ok(Number(/(?:^|,)r=(\d+)/.exec(header)![1]) <= 3, `the split card never exceeds 3 rows: ${header}`)
   app.stop()
