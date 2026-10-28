@@ -219,14 +219,20 @@ retirement and the resident budget.
   real Kitty terminal directly attached (no multiplexer); Kitty-compatible
   terminals, iTerm2 and unknown terminals keep the legacy `Image`/text fallback,
   and no environment override can force admission. The tmux virtual path is a
-  separate strict opt-in with its own live-server admission (below); both paths
-  fail closed.
+  separate strict automatic admission with its own live-server probe (below);
+  both paths fail closed.
 
-### tmux virtual backend (experimental, opt-in)
+### tmux virtual backend (strict automatic admission)
 
 This is a second transport, never a second owner: one `KittyGraphicsCore` in
-`placementMode: 'tmux-virtual'` behind the same `KittyTerminalFacade`. It is off
-by default and only the exact `PI_TUI_TMUX_KITTY_IMAGES=1` opt-in may attempt it.
+`placementMode: 'tmux-virtual'` behind the same `KittyTerminalFacade`. With
+`PI_TUI_TMUX_KITTY_IMAGES` unset, the backend attempts the live-server admission
+automatically; the exact value `1` is the equivalent explicit attempt for users
+who already configured it, and it never forces admission. `0` and every other
+value disable the backend before any admission query runs. `PI_IMAGE_PROTOCOL=none`
+remains the global image opt-out and wins over the automatic attempt; the
+`0`/`iterm2` protocol values are also refused by this admission. Admission is
+always the live server's answer, never the pane's environment.
 
 - **Admission is a live server fact, not pane environment.** The backend asks
   the real tmux server (`show-options … allow-passthrough`, `display-message …
@@ -237,7 +243,10 @@ by default and only the exact `PI_TUI_TMUX_KITTY_IMAGES=1` opt-in may attempt it
   Pane environment (`TMUX`, `TMUX_PANE`, `TERM`) is necessary context only:
   inherited `TERM_PROGRAM`/`KITTY_WINDOW_ID` never grant admission, and option
   `on`/`off`, no client, mixed clients, a non-Kitty client, a nested multiplexer
-  or any query failure fails closed before image work.
+  or any query failure fails closed before image work. The backend never writes
+  tmux configuration: `allow-passthrough=all` and the single attached Kitty
+  client are user-provided preconditions, and no option is ever set for the
+  user.
 - **Revocation is one-way.** Any real probe failure or change to the six
   identity fields latches the handle revoked for the rest of the process. The
   component then paints the text fallback, and the facade refuses an entire

@@ -299,6 +299,8 @@
   以及未关联 Loader entry 的贡献移到 Plugin Manager 的 `Diagnostics` 页（`/plugins` 或
   `Settings → Plugins`，按 `d`），Host 包安装状态与安装日志保持独立。旧的独立 `/status`
   页面已删除。
+- **tmux 中的图片现在会自动显示，无需显式设置环境变量。**
+  在满足 `allow-passthrough=all` 与唯一 Kitty 客户端等严格条件的 tmux 中，图片现在无需显式设置环境变量即可自动显示；`PI_TUI_TMUX_KITTY_IMAGES=0` 或 `PI_IMAGE_PROTOCOL=none` 可关闭。不会自动修改 tmux 配置。
 
 ### 修复
 

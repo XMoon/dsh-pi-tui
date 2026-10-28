@@ -18,7 +18,12 @@
 
 import { execFileSync } from 'node:child_process'
 
-/** The environment variable that alone authorizes the experimental backend. */
+/**
+ * The environment variable that gates the tmux virtual backend. Leaving it unset
+ * allows the automatic admission attempt; the exact value `1` is the equivalent
+ * explicit attempt for users who already configured it. `0` and every other
+ * value deny the backend before any tmux query runs.
+ */
 export const TMUX_KITTY_IMAGES_ENV = 'PI_TUI_TMUX_KITTY_IMAGES'
 
 /** Every tmux query is bounded: a hung server may not stall a TUI frame. */
@@ -48,7 +53,8 @@ function nonEmpty(value: string | undefined): value is string {
  * decides the live binding.
  */
 function environmentAdmits(env: NodeJS.ProcessEnv): boolean {
-  if (env[TMUX_KITTY_IMAGES_ENV] !== '1') return false
+  const optIn = env[TMUX_KITTY_IMAGES_ENV]
+  if (optIn !== undefined && optIn !== '1') return false
   if (!nonEmpty(env.TMUX) || !nonEmpty(env.TMUX_PANE)) return false
   if (env.ZELLIJ !== undefined || env.STY !== undefined) return false
   if (!(env.TERM ?? '').startsWith('tmux')) return false
@@ -91,8 +97,9 @@ function sameIdentity(left: TmuxKittyIdentity, right: TmuxKittyIdentity): boolea
 /**
  * Probe the ONE trusted tmux + Kitty topology, or return undefined.
  *
- * Production order (fixed by the Image-7B-A plan):
- *  1. exact opt-in (`PI_TUI_TMUX_KITTY_IMAGES === '1'`);
+ * Production order (fixed by the Image-7B-A plan, extended by Image-7C-1):
+ *  1. the opt-in is ABSENT (automatic attempt) or exactly `1` (explicit
+ *     attempt); `0` and every other value deny before any query runs;
  *  2. a tmux pane environment, not a nested multiplexer, with no protocol
  *     opt-out;
  *  3. the real pane option `allow-passthrough` is exactly `all`;

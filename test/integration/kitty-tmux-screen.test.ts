@@ -177,7 +177,8 @@ function fallbackOptions(): NativeKittyImageOptions {
 test('the factory refuses to create a handle unless the live server admits it', (t) => {
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   const cases: ReadonlyArray<{ name: string; mutate: (cli: FakeTmuxCli) => void }> = [
-    { name: 'opt-in absent', mutate: (cli) => { delete cli.env.PI_TUI_TMUX_KITTY_IMAGES } },
+    { name: 'explicit opt-out 0', mutate: (cli) => { cli.env.PI_TUI_TMUX_KITTY_IMAGES = '0' } },
+    { name: 'invalid opt-in value', mutate: (cli) => { cli.env.PI_TUI_TMUX_KITTY_IMAGES = 'true' } },
     { name: 'passthrough on', mutate: (cli) => cli.setReply('show-options', { text: 'on\n' }) },
     { name: 'no client', mutate: (cli) => cli.setReply('list-clients', { text: '' }) },
     { name: 'non-Kitty client', mutate: (cli) => cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\ttmux-256color\t\n' }) },
@@ -192,6 +193,50 @@ test('the factory refuses to create a handle unless the live server admits it', 
     } finally {
       cli.dispose()
     }
+  }
+})
+
+test('an unset opt-in creates the factory handle through the same real probe', (t) => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const cli = createFakeTmuxCli(t)
+  delete cli.env.PI_TUI_TMUX_KITTY_IMAGES
+  const terminal = new RecordingTerminal()
+  const graphics = createTmuxKittyGraphics(terminal, {}, cli.env)
+  assert.ok(graphics, 'the automatic attempt created the ONE managed handle')
+  try {
+    assert.equal(graphics.mode, 'tmux-virtual')
+    assert.deepEqual(cli.calls().slice(0, 3), [
+      'show-options -Apqv -t %7 allow-passthrough',
+      'display-message -p -t %7 #{session_name}',
+      'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}',
+    ], 'the factory ran the fixed real-server probe')
+    const image = imageOf(graphics, source(), fallbackOptions())
+    class Root implements Component {
+      render(width: number): string[] {
+        return ['head', ...image.render(width), 'tail']
+      }
+      invalidate(): void {
+        image.invalidate()
+      }
+    }
+    const screen = new TuiMainScreen(graphics.terminal)
+    screen.addChild(new Root())
+    screen.start()
+    terminal.writes.length = 0
+    screen.renderNow()
+
+    const scan = scanOuter(terminal.text)
+    assertNoUnwrappedGraphics(scan)
+    assert.equal(scan.commands.filter((command) => command.controls.a === 't').length, 1,
+      'the payload was uploaded through the automatic handle')
+    assert.equal(scan.commands.filter((command) => command.controls.a === 'p').length, 1)
+    assert.ok(count(scan.text, P) > 0, 'placeholder cells reached the physical sink')
+    assert.equal(terminal.text.includes('pi:tmux-image'), false, 'the anchor marker never reaches the terminal')
+    assert.equal(terminal.text.includes('pi:tmux-grid'), false, 'the grid marker never reaches the terminal')
+    screen.stop()
+  } finally {
+    graphics.dispose()
+    cli.dispose()
   }
 })
 

@@ -57,7 +57,19 @@ afterEach(() => {
  */
 function useTmuxEnvironment(t: TestContext, cli: FakeTmuxCli): void {
   const saved = new Map<string, string | undefined>()
-  for (const key of [...Object.keys(cli.env), 'KITTY_WINDOW_ID', 'TERM_PROGRAM', 'ZELLIJ', 'STY', 'PI_IMAGE_PROTOCOL']) {
+  // A key may be both part of the scripted pane env and one of the fixed pane
+  // facts below; dedupe it so the FIRST observation is the ambient value the
+  // `t.after` hook must restore (a second visit would save the fixture value).
+  const keys = new Set([
+    ...Object.keys(cli.env),
+    'PI_TUI_TMUX_KITTY_IMAGES',
+    'KITTY_WINDOW_ID',
+    'TERM_PROGRAM',
+    'ZELLIJ',
+    'STY',
+    'PI_IMAGE_PROTOCOL',
+  ])
+  for (const key of keys) {
     saved.set(key, process.env[key])
     const value = cli.env[key]
     if (value === undefined) delete process.env[key]
@@ -277,15 +289,40 @@ interface ProductHarness {
 /** Build the REAL product composition on the scripted server. */
 function product(
   t: TestContext,
-  options: { optIn?: boolean; sink?: 'recording' | 'virtual' } = {},
+  options: { tmuxSetting?: 'unset' | '0' | 'invalid'; sink?: 'recording' | 'virtual' } = {},
+): ProductHarness {
+  const cli = createFakeTmuxCli(t)
+  switch (options.tmuxSetting) {
+    case undefined:
+      break
+    case 'unset':
+      delete cli.env.PI_TUI_TMUX_KITTY_IMAGES
+      break
+    case '0':
+      cli.env.PI_TUI_TMUX_KITTY_IMAGES = '0'
+      break
+    case 'invalid':
+      cli.env.PI_TUI_TMUX_KITTY_IMAGES = 'true'
+      break
+  }
+  return productWithCli(t, cli, options.sink)
+}
+
+/**
+ * The same real composition over an ALREADY scripted server. Used by the global
+ * image opt-out case, which has to set `PI_IMAGE_PROTOCOL` in the fixture
+ * environment BEFORE the production composition reads it.
+ */
+function productWithCli(
+  t: TestContext,
+  cli: FakeTmuxCli,
+  sink?: 'recording' | 'virtual',
 ): ProductHarness {
   // A tmux pane detects no inline protocol at all — the exact production
   // condition this backend exists for. The admission may therefore only come
   // from the live server probe.
   resetCapabilitiesCache()
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
-  const cli = createFakeTmuxCli(t)
-  if (options.optIn === false) delete cli.env.PI_TUI_TMUX_KITTY_IMAGES
   useTmuxEnvironment(t, cli)
 
   const reads = new Map<string, number>()
@@ -301,7 +338,7 @@ function product(
       return convertKittyThumbnail(input, mediaType)
     },
   )
-  const terminal: SinkTerminal = options.sink === 'virtual'
+  const terminal: SinkTerminal = sink === 'virtual'
     ? virtualSink()
     : recordingSink()
   let svgRasterCalls = 0
@@ -348,6 +385,47 @@ function pngRef(attachmentId: string, name: string): ImageAttachmentRefLike {
   }
 }
 
+test('the scripted pane environment restores the real ambient values exactly', async (t) => {
+  const optIn = 'PI_TUI_TMUX_KITTY_IMAGES'
+  const protocol = 'PI_IMAGE_PROTOCOL'
+  const ambientOptIn = process.env[optIn]
+  const ambientProtocol = process.env[protocol]
+  t.after(() => {
+    if (ambientOptIn === undefined) delete process.env[optIn]
+    else process.env[optIn] = ambientOptIn
+    if (ambientProtocol === undefined) delete process.env[protocol]
+    else process.env[protocol] = ambientProtocol
+  })
+
+  delete process.env[optIn]
+  await t.test('a previously absent opt-in is absent again', async (inner) => {
+    const h = product(inner, { tmuxSetting: '0' })
+    assert.equal(process.env[optIn], '0', 'the fixture env is live during the case')
+    assert.equal(h.graphics, undefined)
+  })
+  assert.equal(process.env[optIn], undefined, 'an absent variable must not be left behind')
+
+  process.env[optIn] = 'ambient-sentinel'
+  await t.test('a pre-existing opt-in regains its own value', async (inner) => {
+    const h = product(inner, { tmuxSetting: 'invalid' })
+    assert.equal(process.env[optIn], 'true', 'the fixture env is live during the case')
+    assert.equal(h.graphics, undefined)
+  })
+  assert.equal(process.env[optIn], 'ambient-sentinel', 'a pre-existing value must be restored')
+  delete process.env[optIn]
+
+  process.env[protocol] = 'ambient-protocol'
+  await t.test('a pre-existing protocol value regains its own value', async (inner) => {
+    const cli = createFakeTmuxCli(inner)
+    delete cli.env[optIn]
+    cli.env[protocol] = 'none'
+    const h = productWithCli(inner, cli)
+    assert.equal(process.env[protocol], 'none', 'the fixture protocol is live during the case')
+    assert.equal(h.graphics, undefined)
+  })
+  assert.equal(process.env[protocol], 'ambient-protocol', 'the protocol variable must be restored')
+})
+
 test('the real composition root admits the tmux virtual handle where the fork detects no protocol', (t) => {
   const h = product(t)
   assert.ok(h.graphics, 'the production composition created a managed handle')
@@ -359,11 +437,12 @@ test('the real composition root admits the tmux virtual handle where the fork de
   assert.equal(h.graphics.terminal.columns, h.terminal.columns, 'the facade reports the real geometry')
 })
 
-test('without the opt-in there is no handle and the transcript performs no read, APC or PUA', async (t) => {
-  const h = product(t, { optIn: false })
-  assert.equal(h.graphics, undefined, 'no opt-in means no managed handle')
+test('explicit 0 disables the managed handle without read/conversion/APC/PUA', async (t) => {
+  const h = product(t, { tmuxSetting: '0' })
+  assert.equal(h.graphics, undefined, 'the explicit opt-out means no managed handle')
+  assert.deepEqual(h.cli.calls(), [], 'the opt-out never spawns a tmux admission query')
 
-  const ref = pngRef('att-noopt', 'noopt.png')
+  const ref = pngRef('att-optout', 'optout.png')
   const folder = new TranscriptFolder()
   folder.apply([userMessage([{ type: 'image', attachment: ref }], 1)])
   h.app.setTranscript(folder.messages())
@@ -376,6 +455,84 @@ test('without the opt-in there is no handle and the transcript performs no read,
   assert.equal(h.reads.get(ref.attachmentId), undefined, 'the refused surface read no payload bytes')
   assert.equal(h.conversions(), 0, 'the refused surface ran no conversion')
   assert.ok(/\u{1F5BC}/u.test(painted), 'the constant identity row is still painted as text')
+})
+
+test('an unset opt-in admits the automatic handle and paints real pixels end to end', async (t) => {
+  const h = product(t, { tmuxSetting: 'unset' })
+  assert.ok(h.graphics, 'the default (unset) environment attempts admission')
+  assert.equal(h.graphics.mode, 'tmux-virtual', 'the automatic attempt selected the tmux transport')
+  assert.equal(h.graphics.canPaint(), true, 'the live server admitted exactly one Kitty client')
+  assert.equal(effectiveImageProtocol(h.graphics), 'kitty', 'the product classifier admits this frame')
+  assert.equal((h.app as unknown as { terminal: unknown }).terminal, h.graphics.terminal,
+    'the ONE facade is the terminal both screens write through')
+  assert.deepEqual(h.cli.calls().slice(0, 3), [
+    'show-options -Apqv -t %7 allow-passthrough',
+    'display-message -p -t %7 #{session_name}',
+    'list-clients -F #{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}',
+  ], 'the automatic product admission ran the fixed real-server probe')
+
+  const ref = pngRef('att-auto', 'auto.png')
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage([{ type: 'image', attachment: ref }], 1)])
+  h.app.setTranscript(folder.messages())
+  await until(() => h.loader.get(ref).state === 'ready', 'the automatic transcript PNG read')
+  await settle(h.app)
+
+  const text = h.terminal.writes.join('')
+  assert.equal(unwrappedApc(text), false, 'every managed command travelled inside its own DCS')
+  assert.ok(transmissions(text).length >= 1, 'the automatic handle transmitted the payload')
+  assert.ok(placements(text).length >= 1, 'the automatic handle placed the image')
+  assert.ok(text.includes(PLACEHOLDER), 'the placeholder grid reached the sink')
+  assert.equal(text.includes('pi:tmux-image'), false, 'the private anchor marker never reaches the terminal')
+  assert.equal(text.includes('pi:tmux-grid'), false, 'the private grid marker never reaches the terminal')
+  assert.equal(h.reads.get(ref.attachmentId), 1, 'the durable attachment was read exactly once')
+})
+
+test('an invalid opt-in value behaves exactly like 0, with no probe and no image work', async (t) => {
+  const h = product(t, { tmuxSetting: 'invalid' })
+  assert.equal(h.graphics, undefined, 'a misspelled opt-in must not fall into automatic admission')
+  assert.deepEqual(h.cli.calls(), [], 'an invalid value never spawns a tmux admission query')
+
+  const ref = pngRef('att-invalid', 'invalid.png')
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage([{ type: 'image', attachment: ref }], 1)])
+  h.app.setTranscript(folder.messages())
+  await settle(h.app)
+
+  const painted = h.terminal.writes.join('')
+  assert.equal(painted.includes('\x1b_G'), false, 'no Kitty APC was written')
+  assert.equal(painted.includes(PLACEHOLDER), false, 'no placeholder grid was written')
+  assert.equal(transmissions(painted).length, 0, 'no managed transmission')
+  assert.equal(h.reads.get(ref.attachmentId), undefined, 'the refused surface read no payload bytes')
+  assert.equal(h.conversions(), 0, 'the refused surface ran no conversion')
+  assert.ok(/\u{1F5BC}/u.test(painted), 'the constant identity row is still painted as text')
+})
+
+test('PI_IMAGE_PROTOCOL=none wins over the unset automatic attempt', async (t) => {
+  const cli = createFakeTmuxCli(t)
+  delete cli.env.PI_TUI_TMUX_KITTY_IMAGES
+  // The global image opt-out is set in the ISOLATED fixture environment: the
+  // production composition reads `process.env`, and the helper copies exactly
+  // this value into the test process.
+  cli.env.PI_IMAGE_PROTOCOL = 'none'
+  const h = productWithCli(t, cli)
+  assert.equal(process.env.PI_IMAGE_PROTOCOL, 'none', 'the production process really saw the off flag')
+  assert.equal(h.graphics, undefined, 'the global opt-out forbids the automatic handle')
+  assert.deepEqual(h.cli.calls(), [], 'the global opt-out never probes the tmux server')
+
+  const ref = pngRef('att-none', 'none.png')
+  const folder = new TranscriptFolder()
+  folder.apply([userMessage([{ type: 'image', attachment: ref }], 1)])
+  h.app.setTranscript(folder.messages())
+  await settle(h.app)
+
+  const painted = h.terminal.writes.join('')
+  assert.equal(painted.includes('\x1b_G'), false, 'no Kitty APC was written')
+  assert.equal(painted.includes(PLACEHOLDER), false, 'no placeholder grid was written')
+  assert.equal(transmissions(painted).length, 0, 'no managed transmission')
+  assert.equal(h.reads.get(ref.attachmentId), undefined, 'no image payload byte was read')
+  assert.equal(h.conversions(), 0, 'no image conversion ran')
+  assert.ok(/\u{1F5BC}/u.test(painted), 'plain text and the identity row still paint')
 })
 
 test('one Core paints the transcript body, and its click body is the REAL painted footprint', async (t) => {
