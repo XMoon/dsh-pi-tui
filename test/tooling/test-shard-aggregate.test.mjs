@@ -375,10 +375,16 @@ test('a shard from a FUTURE attempt fails the aggregate', (t) => {
 })
 
 test('an INVALID recorded attempt fails the aggregate, even when it is bounded', (t) => {
-  // Only a POSITIVE INTEGER is an attempt. `0`, a negative number, a fraction,
-  // an empty string and a non-numeric value are all unusable identities: a
-  // comparison that coerces them would accept them as "not future".
-  for (const recorded of [0, -1, 1.5, '0', '-1', '1.5', 'two', '']) {
+  // Only a POSITIVE SAFE INTEGER is an attempt. `0`, a negative number, a
+  // fraction, an empty string and a non-numeric value are all unusable
+  // identities: a comparison that coerces them would accept them as "not
+  // future". A number beyond `Number.MAX_SAFE_INTEGER` is unusable too — the
+  // bounded comparison could not be exact (2^53 and 2^53 + 1 round to the same
+  // double, and a long digit string becomes Infinity).
+  for (const recorded of [
+    0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1,
+    '0', '-1', '1.5', 'two', '', '9007199254740993', '9'.repeat(400),
+  ]) {
     const life = testLifecycle(t)
     const root = life.tempDir('dsh-shard-attempt-invalid-')
     writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
@@ -401,7 +407,7 @@ test('an INVALID recorded attempt fails the aggregate, even when it is bounded',
 })
 
 test('an INVALID expected attempt fails the aggregate instead of disabling the check', (t) => {
-  for (const expected of ['0', '-1', '1.5', 'two', '']) {
+  for (const expected of ['0', '-1', '1.5', 'two', '', '9007199254740993', '9'.repeat(400)]) {
     const life = testLifecycle(t)
     const root = life.tempDir('dsh-shard-attempt-expectation-')
     writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })

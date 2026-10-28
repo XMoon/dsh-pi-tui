@@ -386,6 +386,12 @@ test('the qualified job RUNS on a failed graph, and the verdict gates before any
   const downloadIndex = steps.findIndex(step => step.uses === 'actions/download-artifact@v8' && step.with?.name === 'dsh-pi-tui-provisional')
   const uploadIndex = steps.findIndex(step => step.uses === 'actions/upload-artifact@v7' && step.with?.name === 'dsh-pi-tui-tarball')
   assert.ok(verdictIndex >= 0, 'the qualification verdict must exist')
+  // The verdict is the FIRST executable step: checkout/setup only prepare the
+  // runner, and nothing may read, digest or upload a candidate before the
+  // proof exists.
+  const runSteps = steps.filter(step => typeof step.run === 'string')
+  assert.equal(runSteps[0], steps[verdictIndex],
+    'the verdict must be the first scripted step of the qualification job')
   assert.ok(downloadIndex > verdictIndex,
     'a failed verdict must stop the job before it looks for a candidate that does not exist')
   assert.ok(uploadIndex > downloadIndex,

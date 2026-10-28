@@ -142,21 +142,26 @@ function shardIndexOf(directory, total) {
  * synthetic or future record may carry a JSON number; both are the same
  * attempt. Everything else — `0`, a negative number, a fraction, an empty
  * string, a missing field or a non-numeric value — is not an attempt and must
- * never be compared as one.
+ * never be compared as one. The value must also be a SAFE integer: a number
+ * beyond `Number.MAX_SAFE_INTEGER` cannot be compared exactly (`2^53` and
+ * `2^53 + 1` round to the same double, and a long digit string becomes
+ * `Infinity`), so accepting it would turn the bounded future-attempt check
+ * into a comparison of rounded values.
  *
  * A workflow re-run keeps the same run id and the same commit and only
  * advances this number, so it is the EXECUTION GENERATION: a bounded
  * comparison over `1..currentAttempt`, not equality and not "any value".
  *
  * @param {unknown} value - the recorded or expected attempt.
- * @returns {number|null} the attempt, or null when it is not a positive integer.
+ * @returns {number|null} the attempt, or null when it is not a positive safe integer.
  */
 function parseRunAttempt(value) {
   if (typeof value === 'number') {
-    return Number.isInteger(value) && value > 0 ? value : null
+    return Number.isSafeInteger(value) && value > 0 ? value : null
   }
   if (typeof value !== 'string' || !/^[1-9]\d*$/u.test(value)) return null
-  return Number(value)
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : null
 }
 
 /**
