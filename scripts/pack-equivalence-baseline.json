@@ -1,16 +1,16 @@
 {
-  "digest": "d7a9d6d13a3f13b5cc74d60448b8f2a99b5e42cf22dd1b870698c8b3be42e9d1",
+  "digest": "63009580e94330623fcf1a912ab0cf11f9daa09dae17f5d3e154e92e5fbfa1ab",
   "inputs": [
     {
       "path": "package.json",
       "present": true,
-      "sha256": "6957b3883f21eec617f4d0f3874c1352f90c791dcd2d43b96443a966cc58eadb",
+      "sha256": "1f4be5dbd54f8a00a0085f472b6ca1b8263a067ed52c750cb301156fcc593f12",
       "why": "the manifest decides what is packed and how it is rewritten"
     },
     {
       "path": "tsdown.config.ts",
       "present": true,
-      "sha256": "b407469012a125a235f9bf9dab9041f6cda9b3aa7a963dad3f58b6e12cf8d932",
+      "sha256": "f2423f9f27b8d04322b3da04999ac123c51b09239e7bfb1df91e3531180c52f7",
       "why": "the bundle build decides the payload files"
     },
     {
@@ -56,11 +56,11 @@
       "mode": "npm",
       "node": "24",
       "platform": "Linux",
-      "entryCount": 40,
+      "entryCount": 46,
       "differingFiles": [],
       "manifestDifferences": [],
-      "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/40440651260",
-      "commit": "51b0e9d73a314960313f79f3e0d54ca741eeda16",
+      "run": "https://github.com/XMoon/dsh-pi-tui/actions/runs/40621901028",
+      "commit": "ad1906964c5bf599ac0cffbdee2fdfad4403c4cd",
       "note": "Recorded from the PR #397 CI comparison: a REAL ordinary-vs-lifecycle-free pack of the exact inputs digested above (40 entries each, no differing file, no manifest difference). Reopened by any change to a digested input (including the protocol and its operands), to the proof MODE/NODE/PLATFORM, or by a missing/false proof."
     }
   }
