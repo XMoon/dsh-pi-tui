@@ -1,12 +1,12 @@
 /**
  * M4-A0 split-process smoke wiring guard.
  *
- * The real OS qualification lives in `scripts/m4-a0-process-smoke.mjs` and is
+ * The real OS qualification lives in `scripts/split-process-smoke.mjs` and is
  * driven by the CI Build-and-pack job. This tooling test keeps that lane
  * discoverable and prevents the script/CI/package wiring from silently rotting
  * while the heavy installation path stays out of the ordinary product lane.
  *
- * @module m4-a0-process-smoke-wiring.test
+ * @module split-process-smoke-wiring.test
  */
 
 import assert from 'node:assert/strict'
@@ -15,18 +15,18 @@ import { readFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { statusMatches } from '../../scripts/m4-a0-process-smoke.mjs'
+import { statusMatches } from '../../scripts/split-process-smoke.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const SCRIPT = join(ROOT, 'scripts', 'm4-a0-process-smoke.mjs')
+const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
 
-test('the M4-A0 process smoke is a package script and a CI Build-and-pack step', () => {
+test('the split-process smoke is a package script and a CI Build-and-pack step', () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
-  assert.equal(pkg.scripts?.['smoke:m4-a0-process'], 'node scripts/m4-a0-process-smoke.mjs')
+  assert.equal(pkg.scripts?.['smoke:split-process'], 'node scripts/split-process-smoke.mjs')
   const ci = readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')
-  assert.match(ci, /M4-A0 split-process bootstrap/u)
-  assert.match(ci, /pnpm smoke:m4-a0-process -- "\$CANDIDATE"/u)
-  assert.match(ci, /NOT_APPLICABLE: the startup strictness and M4-A0 process smokes are npm-only/u)
+  assert.match(ci, /Host\/Client split-process bootstrap/u)
+  assert.match(ci, /pnpm smoke:split-process -- "\$CANDIDATE"/u)
+  assert.match(ci, /NOT_APPLICABLE: the startup strictness and split-process smokes are npm-only/u)
 })
 
 test('the process smoke script parses as ESM', () => {

@@ -25,9 +25,18 @@ import {
 } from '../../src/app/remote/host-prerequisites.ts'
 
 test('the Host-only overlay disables the TUI runner and the Client UI rows only', () => {
-  const disabled = [...HOST_ONLY_PATCH.matchAll(/^- id: (\S+)$/gmu)].map(match => match[1])
+  // The value matters as much as the id: matching only `- id:` lets a broken
+  // `disabled: false` silently leave a Client UI row mounted.
+  const disabled = [...HOST_ONLY_PATCH.matchAll(/^- id: (\S+)\n  disabled: true$/gmu)].map(match => match[1])
   assert.deepEqual(disabled, ['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins'])
+  assert.equal((HOST_ONLY_PATCH.match(/disabled: true/gu) ?? []).length, 3)
   assert.doesNotMatch(HOST_ONLY_PATCH, /id: tui-startup/u, 'Host rows gated on tuiStartup must keep their provider')
+
+  // Negative control: if any one disabled value is broken, this same assertion
+  // no longer sees all three rows.
+  const broken = HOST_ONLY_PATCH.replace('disabled: true', 'disabled: false')
+  const stillDisabled = [...broken.matchAll(/^- id: (\S+)\n  disabled: true$/gmu)].map(match => match[1])
+  assert.notDeepEqual(stillDisabled, ['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins'])
 })
 
 test('the shared Host prerequisite gate names the first missing service', () => {

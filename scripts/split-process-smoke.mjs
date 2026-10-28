@@ -10,8 +10,8 @@
  * failure paths (missing profile, missing post-boot chunk) with a cleanup
  * record emitted by the owning entry.
  *
- * Usage: node scripts/m4-a0-process-smoke.mjs [path-to-candidate.tgz]
- *        pnpm smoke:m4-a0-process -- [path-to-candidate.tgz]
+ * Usage: node scripts/split-process-smoke.mjs [path-to-candidate.tgz]
+ *        pnpm smoke:split-process -- [path-to-candidate.tgz]
  *
  * This is a packaging qualification lane, not a unit test; it is wired into
  * the npm-mode CI `Build and pack` job next to the startup-strictness smoke.
@@ -48,9 +48,9 @@ class EntryProcess {
       cwd: options.cwd,
       env: {
         ...options.env,
-        M4_DSH_ANCHOR: options.anchor,
-        M4_PROFILE: options.profile,
-        M4_SCRATCH: join(options.scratch, `${role}-${++sequence}`),
+        SPLIT_PROCESS_DSH_ANCHOR: options.anchor,
+        SPLIT_PROCESS_PROFILE: options.profile,
+        SPLIT_PROCESS_SCRATCH: join(options.scratch, `${role}-${++sequence}`),
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
@@ -173,7 +173,7 @@ async function main() {
   validateCandidateTarball(tarball)
   const targetDshVersion = npmDshVersion()
   const distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
-  const workDir = mkdtempSync(join(tmpdir(), 'dsh-m4-a0-'))
+  const workDir = mkdtempSync(join(tmpdir(), 'dsh-split-process-'))
   const home = join(workDir, 'home')
   const dshHome = join(workDir, 'dsh-home')
   const harnessDir = join(workDir, 'harness')
@@ -186,7 +186,7 @@ async function main() {
   const env = isolatedEnvironment(workDir, home, dshHome, join(workDir, 'evidence.json'))
   try {
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
-      name: 'dsh-m4-a0-harness',
+      name: 'dsh-split-process-harness',
       private: true,
       type: 'module',
       dependencies: { '@deepseek-ai/dsh': targetDshVersion },
@@ -204,16 +204,29 @@ async function main() {
     const entries = entryPaths(profilePackage)
     const base = { cwd: profileDir, env, anchor: realpathSync(join(harnessDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json')), profile: 'pi-tui', scratch }
 
-    // F2 negative control: the role string alone is not Host-entry admission.
+    // Negative control: the role string alone is not Host-entry admission.
     // A regular CLI that merely inherits DSH_PI_TUI_ROLE=host must still fail
-    // loudly when its profile cannot mount the requested TUI surface.
-    writeFileSync(join(profileDir, 'cordis.patch.yml'), '- id: tui-app\n  disabled: true\n')
-    const roleOnlyEnv = { ...env, DSH_PI_TUI_ROLE: 'host' }
-    delete roleOnlyEnv.DSH_PI_TUI_HOST_ENTRY
-    const roleOnly = runDsh(dsh, ['--profile', 'pi-tui'], profileDir, roleOnlyEnv, 120_000)
-    const roleOnlyOutput = `${roleOnly.stdout ?? ''}\n${roleOnly.stderr ?? ''}`
-    assert(roleOnly.status !== 0, 'an inherited DSH_PI_TUI_ROLE=host must not turn a missing TUI into success')
-    assert(roleOnlyOutput.includes('required TUI surface did not mount'), 'inherited role hid the missing-surface verdict')
+    // loudly when its profile cannot mount the requested TUI surface. The
+    // profile patch is temporary and is restored BEFORE the Host-only positive
+    // test, so the overlay is the only tui-app-disable source there.
+    const profilePatchPath = join(profileDir, 'cordis.patch.yml')
+    const previousProfilePatch = existsSync(profilePatchPath) ? readFileSync(profilePatchPath, 'utf8') : undefined
+    try {
+      writeFileSync(profilePatchPath, '- id: tui-app\n  disabled: true\n')
+      const roleOnlyEnv = { ...env, DSH_PI_TUI_ROLE: 'host' }
+      delete roleOnlyEnv.DSH_PI_TUI_HOST_ENTRY
+      const roleOnly = runDsh(dsh, ['--profile', 'pi-tui'], profileDir, roleOnlyEnv, 120_000)
+      const roleOnlyOutput = `${roleOnly.stdout ?? ''}\n${roleOnly.stderr ?? ''}`
+      assert(roleOnly.status !== 0, 'an inherited DSH_PI_TUI_ROLE=host must not turn a missing TUI into success')
+      assert(roleOnlyOutput.includes('required TUI surface did not mount'), 'inherited role hid the missing-surface verdict')
+    } finally {
+      if (previousProfilePatch === undefined) rmSync(profilePatchPath, { force: true })
+      else writeFileSync(profilePatchPath, previousProfilePatch)
+    }
+    assert(
+      previousProfilePatch === undefined ? !existsSync(profilePatchPath) : readFileSync(profilePatchPath, 'utf8') === previousProfilePatch,
+      'the temporary tui-app disable must be restored before the Host-only positive test',
+    )
 
     const host = new EntryProcess('host', entries.host, base)
     const hostReady = await ready(host)
@@ -273,21 +286,21 @@ async function main() {
     assert(missingClientChunk.records.some(record => record.m4a0 === 'cleanup'), 'missing client chunk did not emit cleanup record')
     assert(!alive(missingClientChunk.child.pid), 'missing client chunk left a live process')
 
-    console.log(`M4-A0 process smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}`)
+    console.log(`split-process bootstrap smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}`)
   } finally {
     // A failed assertion must not leave a live Host/Client probe behind; each
     // entry is its own process group leader (`detached: true`).
     for (const run of activeProcesses) {
       try { process.kill(-run.child.pid, 'SIGKILL') } catch { /* already gone */ }
     }
-    if (process.env.M4_A0_SMOKE_KEEP !== '1') rmSync(workDir, { recursive: true, force: true })
-    else console.error(`preserved M4-A0 smoke environment: ${workDir}`)
+    if (process.env.SPLIT_PROCESS_SMOKE_KEEP !== '1') rmSync(workDir, { recursive: true, force: true })
+    else console.error(`preserved split-process smoke environment: ${workDir}`)
   }
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => {
-    console.error(`M4_A0_PROCESS_SMOKE_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
+    console.error(`SPLIT_PROCESS_SMOKE_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
     process.exitCode = 1
   })
 }
