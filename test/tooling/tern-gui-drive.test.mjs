@@ -37,7 +37,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join, join as joinPath } from 'node:path'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import {
-  killStillExecuting, readPidRecords, startTimeOf, waitForNoExecuting, waitForPidRecords,
+  killStillExecuting, readPidRecords, waitForNoExecuting, waitForPidRecords,
 } from '../support/pid-records.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -69,6 +69,12 @@ const startTime = () => {
   } catch { return '-' }
 }
 const recordPid = (kind) => appendFileSync(${JSON.stringify(log)}.replace('calls.log', 'pids.log'), kind + ' ' + process.pid + ' ' + startTime() + '\\n')
+const startTimeOfPid = (pid) => {
+  try {
+    const stat = readFileSync('/proc/' + pid + '/stat', 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? '-'
+  } catch { return '-' }
+}
 if (args[0] === '--version') { process.stdout.write('tern 0.0.0-fake\\n'); process.exit(0) }
 // The private daemon: record its socket so a test can prove that two runs do
 // NOT share one, then stay alive like the real daemon does.
@@ -82,7 +88,9 @@ if (args[0] === 'daemon') {
   // sees the record can already reach the holder.
   if (process.env.FAKE_STDIO_HOLD === '1') {
     const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30); process.on("SIGUSR1", () => process.exit(0))'], { stdio: 'inherit' })
-    writeFileSync(${JSON.stringify(join(log, '..'))} + '/holder.pid', String(holder.pid))
+    // The holder's identity, not a bare PID: the test-owned cleanup must never
+    // signal a different process that reused the number.
+    writeFileSync(${JSON.stringify(join(log, '..'))} + '/holder.pid', String(holder.pid) + ' ' + startTimeOfPid(holder.pid))
   }
   // The IDENTITY comes BEFORE the socket line: a socket record must always be
   // attributable to a recorded daemon, or a test-owned cleanup cannot prove the
@@ -235,9 +243,31 @@ function runDriver(fake, extraEnv = {}, dir) {
   return { dir, out, result }
 }
 
+/** Read the stdio holder's recorded PID + start-time pair, if one was written. */
+function readHolderIdentity(dir) {
+  const holderFile = joinPath(dir, 'holder.pid')
+  if (!existsSync(holderFile)) return undefined
+  const [rawPid, rawStart] = readFileSync(holderFile, 'utf8').trim().split(/\s+/u)
+  const pid = Number(rawPid)
+  if (!Number.isInteger(pid) || pid <= 0) return undefined
+  return { kind: 'holder', pid, startTime: rawStart === undefined || rawStart === '-' ? undefined : rawStart }
+}
+
 /**
- * Register the test's OWN teardown for THIS fixture: stop the helpers it
- * recorded, then remove the private daemon socket directories they used.
+ * Stop the stdio holder from its recorded identity. Registered before the PID
+ * wait / synchronous spawn, so a failed wait still ends the holder.
+ */
+function deferHolderCleanup(life, dir) {
+  life.defer(() => {
+    const holder = readHolderIdentity(dir)
+    if (holder !== undefined) killStillExecuting([holder])
+  })
+}
+
+/**
+ * Register the test's OWN teardown for THIS fixture: stop the stdio holder,
+ * stop the helpers the run recorded, then remove the private daemon socket
+ * directories they used.
  *
  * The fake daemon/window are long-lived by contract, so a case that fails
  * before the driver's own teardown must still stop them. The records are read
@@ -260,10 +290,15 @@ async function cleanUpRecordedHelpers(dir) {
   const sockets = existsSync(socketsFile)
     ? readFileSync(socketsFile, 'utf8').trim().split('\n').filter(Boolean)
     : []
+  // The stdio holder is a grandchild, not a driver child: the early cleanup
+  // still stops it from its identity pair, never from a bare PID.
+  const holder = readHolderIdentity(dir)
+  if (holder !== undefined) killStillExecuting([holder])
   killStillExecuting(records)
   // A stop request is not termination evidence: confirm the recorded helpers
-  // no longer execute before deleting a directory one of them may still use.
-  const survivors = await waitForNoExecuting(records, 5_000)
+  // (and the holder, when present) no longer execute before deleting a
+  // directory one of them may still use.
+  const survivors = await waitForNoExecuting(holder === undefined ? records : [...records, holder], 5_000)
   if (survivors.length > 0 || sockets.length > daemons.length) {
     throw new Error('the test-owned helper cleanup cannot prove every daemon socket stopped '
       + `(survivors: ${JSON.stringify(survivors)}, daemon records: ${daemons.length}, `
@@ -623,6 +658,18 @@ async function assertSignalTearDown(t, prefix, signal) {
   // startup; this only bounds a broken fake, it is not a settle window.
   const records = await waitForPidRecords(pidsFile, 2, 30_000)
   assert.equal(records.length >= 2, true, `the driver started its helpers: ${JSON.stringify(records)}`)
+  // The daemon writes its IDENTITY before its socket line (so cleanup can
+  // attribute the socket), so the PID barrier alone no longer proves the socket
+  // log exists. The run-start witness is written after both facts: wait for
+  // THAT, never for a clock.
+  const daemonWitness = joinPath(out, 'daemon-started')
+  const witnessDeadline = Date.now() + 30_000
+  while (!existsSync(daemonWitness)) {
+    if (Date.now() > witnessDeadline) {
+      assert.fail(`the daemon did not record its startup witness: ${daemonWitness}`)
+    }
+    await new Promise((resolve) => setImmediate(resolve))
+  }
   const sockets = readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim().split('\n').filter(Boolean)
   assert.equal(sockets.length, 1, 'the driver started one private daemon')
 
@@ -699,12 +746,13 @@ test('the driver does not exit while its daemon still holds stdio open', async (
     stdio: 'ignore',
   })
   life.defer(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } })
+  // Registered before the PID wait, so a failed wait still ends the holder;
+  // registered after the driver kill, so reverse order ends the holder FIRST
+  // and releases the daemon's stdio before the driver/helper cleanup runs.
+  deferHolderCleanup(life, dir)
 
   const records = await waitForPidRecords(pidsFile, 2, 30_000)
-  const holderPid = Number(readFileSync(joinPath(dir, 'holder.pid'), 'utf8'))
-  // Registered LAST, so the reverse-order teardown ends the holder FIRST: the
-  // daemon's stdio pipe is released before the driver/helper cleanup runs.
-  life.defer(() => { killStillExecuting([{ kind: 'holder', pid: holderPid, startTime: startTimeOf(holderPid) }]) })
+  const holderPid = Number(readFileSync(joinPath(dir, 'holder.pid'), 'utf8').trim().split(/\s+/u)[0])
 
   let exitedEarly = false
   const exited = new Promise((resolve) => child.on('exit', (code, signal) => {
@@ -733,6 +781,9 @@ test('a helper that never reaches close is reported and its socket directory is 
   const dir = life.tempDir('tern-gui-timeout-')
   const fake = writeFakeTern(dir)
   deferHelperCleanup(life, dir)
+  // Registered before the synchronous spawn: if the run leaves a holder behind,
+  // its identity file is read at teardown even when this test fails early.
+  deferHolderCleanup(life, dir)
   const flow = joinPath(dir, 'flow.mjs')
   writeFileSync(flow, CHECKED_FLOW)
   const out = joinPath(dir, 'out')
@@ -742,8 +793,6 @@ test('a helper that never reaches close is reported and its socket directory is 
     encoding: 'utf8',
     env: { ...process.env, TERN_BIN: fake.file, DISPLAY: ':0', FAKE_STDIO_HOLD: '1' },
   })
-  const holderPid = Number(readFileSync(joinPath(dir, 'holder.pid'), 'utf8'))
-  life.defer(() => killStillExecuting([{ kind: 'holder', pid: holderPid, startTime: startTimeOf(holderPid) }]))
   const socket = readFileSync(joinPath(dir, 'daemon-sockets.log'), 'utf8').trim()
   const daemonDir = dirname(socket)
 
