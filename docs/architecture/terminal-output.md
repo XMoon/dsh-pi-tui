@@ -264,9 +264,10 @@ the live server, identity, hard-off or revoke checks.
   exactly `all`, exactly one attached client whose session is the pane's, and a
   non-empty client name/tty. An unknown renderer is not rejected at this server
   boundary. The live client report itself may be known pre-feature-query U1
-  evidence: Kitty is `client_termname = xterm-kitty` with a Kitty
-  `client_termtype`, and Ghostty is `xterm-ghostty` with a `ghostty …`
-  terminal-type reply. Otherwise the backend sends exactly one per-handle
+  evidence: a real XTVERSION program of `kitty` or `ghostty` in
+  `client_termtype` is sufficient; `client_termname` is only a transport hint
+  and may be a generic `xterm-256color` fallback, never an additional brand
+  condition. Otherwise the backend sends exactly one per-handle
   DCS-wrapped Kitty `a=q,i=<random>,e=T,U=1` query after the real input listener is
   installed; only a reply with the same id, `e=T`, `U=1` and `OK` admits. A base
   Kitty `a=q` `OK` without `e`/`U` is not U1 evidence, and this transport never

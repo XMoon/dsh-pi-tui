@@ -76,6 +76,11 @@ export class TmuxKittyFeatureProbe {
     return this.state === 'allowed'
   }
 
+  /** Whether the U1 capability proof is permanently denied for this handle. */
+  get denied(): boolean {
+    return this.state === 'denied'
+  }
+
   /** Whether the screen currently has the facade's input listener mounted. */
   get inputListening(): boolean {
     return this.inputActive && !this.disposed
