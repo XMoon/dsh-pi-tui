@@ -51,7 +51,11 @@ const SAMPLE_PNG = readFileSync(new URL('../fixtures/images/transcript-sample.pn
 const SAMPLE_JPEG = readFileSync(new URL('../fixtures/images/transcript-sample.jpg', import.meta.url))
 const SAMPLE_WEBP = readFileSync(new URL('../fixtures/images/transcript-sample.webp', import.meta.url))
 const PLACEHOLDER = '\u{10EEEE}'
-const PROBE_REPLY = '\x1b_Gi=2147483647;OK\x1b\\'
+function probeReply(vt: VirtualTerminal, payload = 'OK'): string {
+  const match = /a=q,i=(\d+)/.exec(vt.writes.join(''))
+  assert.ok(match, 'the real TuiApp sent a probe query')
+  return `\x1b_Gi=${match[1]};${payload}\x1b\\`
+}
 
 const ENV_KEYS = [
   'TERM',
@@ -253,7 +257,7 @@ test('the real TuiApp stays text-only until the live OK, then paints one Native 
     assert.equal(effectiveImageProtocol(h.graphics), null)
     assert.equal((h.app as unknown as { terminal: unknown }).terminal, h.graphics.terminal,
       'the ONE facade is the terminal both screens write through')
-    const query = (vt.writes.join('').match(/a=q,i=2147483647/g) ?? []).length
+    const query = (vt.writes.join('').match(/a=q,i=\d+/g) ?? []).length
     assert.equal(query, 1, 'exactly one live-pane query after the real input listener was installed')
 
     const ref = imageRef('att-zellij-png', 'zellij.png', 'image/png')
@@ -267,7 +271,7 @@ test('the real TuiApp stays text-only until the live OK, then paints one Native 
     const pendingView = vt.getScrollBuffer().join('\n')
     assert.ok(pendingView.includes('🖼️ zellij.png'), `the text identity row is painted:\n${pendingView}`)
 
-    vt.sendInput(PROBE_REPLY)
+    vt.sendInput(probeReply(vt))
     await until(() => h.graphics.canPaint(), 'the live OK admission')
     await until(() => h.reads.get(ref.attachmentId) === 1, 'the real PNG read after admission')
     await settle(h.app, vt)
@@ -325,7 +329,7 @@ test('JPEG and WebP transcript images read once each and convert through the liv
   const h = started(product(t))
   const vt = h.terminal
   try {
-    vt.sendInput(PROBE_REPLY)
+    vt.sendInput(probeReply(vt))
     await until(() => h.graphics.canPaint(), 'the live OK admission')
     for (const [mediaType, id, name] of [
       ['image/jpeg', 'att-zellij-jpeg', 'jpeg.jpg'],
@@ -374,7 +378,7 @@ test('the draft preview paints through the live handle and undo restores the ima
   const h = started(product(t))
   const vt = h.terminal
   try {
-    vt.sendInput(PROBE_REPLY)
+    vt.sendInput(probeReply(vt))
     await until(() => h.graphics.canPaint(), 'the live OK admission')
     const image = h.store.add({
       bytes: SAMPLE_PNG,
@@ -416,7 +420,7 @@ test('a published SVG uses the app raster loader for Preview and paints raw text
   const h = started(product(t))
   const vt = h.terminal
   try {
-    vt.sendInput(PROBE_REPLY)
+    vt.sendInput(probeReply(vt))
     await until(() => h.graphics.canPaint(), 'the live OK admission')
     const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
       + '<rect width="64" height="32" fill="#3b82f6"/></svg>'
@@ -520,7 +524,7 @@ test('the live handle keeps one id through bare 2J/3J, scopes deletes and recove
   const h = started(product(t))
   const vt = h.terminal
   try {
-    vt.sendInput(PROBE_REPLY)
+    vt.sendInput(probeReply(vt))
     await until(() => h.graphics.canPaint(), 'the live OK admission')
     h.app.stop()
     const graphics = h.graphics
@@ -647,7 +651,7 @@ test('every non-candidate Zellij topology is text-only and never uses a legacy i
         app.setTranscript(transcriptOf(ref).messages())
         await settle(app, terminal)
         const wire = terminal.writes.join('')
-        assert.equal(wire.includes('a=q,i=2147483647'), false, `${entry.name}: no probe may run`)
+        assert.equal(/a=q,i=\d+/.test(wire), false, `${entry.name}: no probe may run`)
         assert.equal(media.reads.get(ref.attachmentId), undefined, `${entry.name}: no payload read`)
         assert.equal(media.conversions(), 0, `${entry.name}: no conversion`)
         assert.equal(wire.includes('a=t,f=100') || wire.includes('a=p,') || wire.includes('a=T,'),
@@ -700,7 +704,7 @@ test('an ENOTSUPPORTED reply leaves the real TuiApp text-only with no read or ma
   const h = started(product(t))
   const vt = h.terminal
   try {
-    vt.sendInput('\x1b_Gi=2147483647;ENOTSUPPORTED:disabled\x1b\\')
+    vt.sendInput(probeReply(vt, 'ENOTSUPPORTED:disabled'))
     await new Promise(resolve => setTimeout(resolve, 30))
     assert.equal(h.graphics.canPaint(), false, 'the live rejection is permanent')
     const ref = imageRef('att-rejected', 'rejected.png', 'image/png')
