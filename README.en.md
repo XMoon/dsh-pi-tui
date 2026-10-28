@@ -64,7 +64,7 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.3` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3` | Current published stable line; the peer floor stays 0.2.1-rc.2, while this checkout's exact validation target has moved to 0.2.1-rc.3 |
+| `0.5.3` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Current published stable line; the peer floor stays 0.2.1-rc.2, and this checkout's exact validation target is 0.2.1-rc.4 (the published 0.5.3 passes the official preset assembly on it) |
 | `0.5.1` (stable, previous) | `dsh-v0.2.0-rc.2` | Previous stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
 | `0.5.2-rc.1` (published next-channel preview) | `dsh-v0.2.0-rc.2` | Previous next preview: published to the npm `next` dist-tag on 2026-10-17; its whole peer floor stays `>=0.2.0-rc.2`, so it does not cover 0.2.1-rc.2 |
 | `dsh-v0.2.1-rc.1` (no paired TUI) | none | No released TUI in this matrix claims that intermediate release; never reuse `0.5.3` for it |
@@ -76,10 +76,11 @@ next compatibility range, and fallback paths.
 
 Do not mix the stable and `@next` prerelease lines. `0.5.3` is the current
 published stable release: its minimum DSH version (peer floor) stays the
-`0.2.1-rc.2` family, and the published `0.5.3` has also been qualified
-against the newer `dsh-v0.2.1-rc.3` target (the official preset assembly passes
-on rc.3). This checkout's exact validation target has moved to `0.2.1-rc.3`,
-which does not change the published `0.5.3` identity or its floor. The intermediate
+`0.2.1-rc.2` family. The unmodified npm `@xmoon76/dsh-pi-tui@0.5.3` package
+passes the official preset assembly against `@deepseek-ai/dsh@0.2.1-rc.4`,
+after the earlier `dsh-v0.2.1-rc.3` pairing. This checkout's exact validation
+target is `0.2.1-rc.4`, which does not change the published `0.5.3` identity
+or its floor and requires no new TUI release. The intermediate
 `dsh-v0.2.1-rc.1` has no paired TUI, and `0.5.2-rc.1` is the previous preview
 published to the npm `next` channel (its pairing, 0.2.0-rc.2, stays in the table
 above; it does not cover 0.2.1-rc.2, which is why the new stable line uses the

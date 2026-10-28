@@ -60,7 +60,7 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.5.3`（stable / `@latest`） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3` | 当前已发布稳定版；peer floor 仍是 0.2.1-rc.2，本仓库当前 checkout 的精确验证目标已前移到 0.2.1-rc.3 |
+| `0.5.3`（stable / `@latest`） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 当前已发布稳定版；peer floor 仍是 0.2.1-rc.2，本仓库当前 checkout 的精确验证目标为 0.2.1-rc.4（已发布的 0.5.3 已在该版本通过官方 preset assembly） |
 | `0.5.1`（stable，历史） | `dsh-v0.2.0-rc.2` | 上一稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
 | `0.5.2-rc.1`（next 通道预览，已发布） | `dsh-v0.2.0-rc.2` | 上一轮 next 预览：已发布到 npm `next` 通道（2026-10-17）；整套 peer floor 仍是 `>=0.2.0-rc.2`，不覆盖 0.2.1-rc.2 |
 | `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.3` |
@@ -71,10 +71,11 @@ pnpm compat:dsh:npm
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
 不要把稳定线与 `@next` 预发布线混装。`0.5.3` 是当前已发布稳定版：它的最低 DSH
-版本（peer floor）仍是 `0.2.1-rc.2` family，而已发布的 `0.5.3` 与后续的
-`0.2.1-rc.3` 也已实测配对（官方 preset assembly 在 rc.3 下通过）；本仓库当前
-checkout 的精确验证目标前移到 `0.2.1-rc.3`，这不改变 `0.5.3` 已发布包的身份与
-floor。中间的
+版本（peer floor）仍是 `0.2.1-rc.2` family；使用原封不动的 npm
+`@xmoon76/dsh-pi-tui@0.5.3` 搭配 `@deepseek-ai/dsh@0.2.1-rc.4` 已通过官方 preset
+assembly，此前与 `0.2.1-rc.3` 的配合同样通过。本仓库当前 checkout 的精确验证目标
+是 `0.2.1-rc.4`，这不改变 `0.5.3` 已发布包的身份与 floor，也无需发布新的 TUI
+版本。中间的
 `dsh-v0.2.1-rc.1` 没有配对 TUI，`0.5.2-rc.1` 是上一轮已发布到 npm `next` 通道的
 预览身份（配对 0.2.0-rc.2；它不覆盖 0.2.1-rc.2，因此新的稳定线使用 `0.5.3`
 身份）。上一稳定版 `0.5.1` 继续配对 0.2.0-rc.2：它把整个 DSH peer floor 提升到
