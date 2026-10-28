@@ -276,6 +276,19 @@ a regression, and the fast path must never be assumed. `scripts/ci-verdict.mjs`
 is the final gate: every required job must be exactly `success`, and the two
 mode-dependent jobs must show the status their mode requires.
 
+A failed run is recovered without re-testing the jobs that already passed:
+GitHub's "Re-run failed jobs" (`gh run rerun <RUN_ID> --failed`) keeps the
+successful jobs and their artifacts of the same run and re-executes only the
+failed jobs and their dependents. The shard aggregate accepts that legal mix of
+attempts when the run id, checked-out SHA, shard slots, file partition and
+applied parameters still match; a future attempt, a different run or SHA, or
+any failed, missing or unusable evidence still fails closed. Every artifact
+keeps a stable name and is uploaded with overwrite, so a re-executed producer
+replaces its own artifact while the jobs that were not re-run keep theirs. The
+qualification job is not skipped when an upstream phase fails: it runs the
+verdict first and fails, so a recovered partial re-run reaches the same strict
+gate instead of being excluded from it.
+
 For CI-equivalent dependency resolution, especially after dependency changes,
 run the frozen install before the verification gate:
 

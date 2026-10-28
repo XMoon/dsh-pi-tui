@@ -207,10 +207,13 @@ test('a case with NO outcome fails the aggregate', (t) => {
 test('a shard from a DIFFERENT run fails the aggregate', (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-shard-gate-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-1', {
+    files: ['app/one.test.ts', 'app/two.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+  })
   writeShard(root, 'shard-2', {
     files: ['tui/three.test.ts'],
-    spec: { sha: 'sha-OTHER', runId: 'run-OTHER' },
+    spec: { sha: 'sha-OTHER', runId: 'run-OTHER', runAttempt: '2' },
   })
   const aggregate = verifyShards({
     shardsRoot: root,
@@ -218,6 +221,9 @@ test('a shard from a DIFFERENT run fails the aggregate', (t) => {
     expectedFiles: EXPECTED,
     expectedSha: 'sha-1',
     expectedRunId: 'run-1',
+    // The attempt is within the allowed range, so only the run identity can
+    // reject this evidence. A bounded attempt must never rescue a foreign run.
+    expectedRunAttempt: '2',
   })
   assert.ok(aggregate.failures.length > 0, 'a foreign shard must fail the aggregate')
   assert.match(aggregate.failures.join('\n'), /ran against sha-OTHER/u)
@@ -316,15 +322,21 @@ test('the recorded REPOSITORY-root path is compared against the TEST-root path',
   assert.equal(aggregate.observedFileCount, EXPECTED.size)
 })
 
-test('a shard from an EARLIER attempt fails the aggregate', (t) => {
-  // A re-run of the same workflow has the same run id and the same commit;
-  // only the attempt tells them apart.
+test('a MIXED-attempt partition of the SAME run is accepted', (t) => {
+  // GitHub's "Re-run failed jobs" keeps the successful shards of the previous
+  // attempt and re-executes only the failed job. The recovered aggregate is
+  // therefore a LEGAL mix of attempts of the same run and commit. Requiring
+  // equality would make recovery impossible without re-running every shard;
+  // ignoring the attempt would accept evidence from a future run.
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-shard-gate-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-1', {
+    files: ['app/one.test.ts', 'app/two.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+  })
   writeShard(root, 'shard-2', {
     files: ['tui/three.test.ts'],
-    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '2' },
   })
   const aggregate = verifyShards({
     shardsRoot: root,
@@ -334,8 +346,75 @@ test('a shard from an EARLIER attempt fails the aggregate', (t) => {
     expectedRunId: 'run-1',
     expectedRunAttempt: '2',
   })
-  assert.ok(aggregate.failures.length > 0, 'an earlier attempt must fail the aggregate')
-  assert.match(aggregate.failures.join('\n'), /belongs to attempt 1, not 2/u)
+  assert.deepEqual(aggregate.failures, [], JSON.stringify(aggregate.failures, null, 2))
+  assert.deepEqual(aggregate.runAttempts, ['1', '2'],
+    'the report must show the mixed execution generations')
+  assert.deepEqual(aggregate.shards.map(shard => shard.runAttempt), ['1', '2'])
+})
+
+test('a shard from a FUTURE attempt fails the aggregate', (t) => {
+  // attempt 3 cannot belong to a run that is currently at attempt 2: the
+  // evidence would come from a re-run that has not started yet.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-gate-')
+  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '3' },
+  })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedSha: 'sha-1',
+    expectedRunId: 'run-1',
+    expectedRunAttempt: '2',
+  })
+  assert.ok(aggregate.failures.length > 0, 'a future attempt must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /newer than this run's attempt 2/u)
+})
+
+test('an INVALID recorded attempt fails the aggregate, even when it is bounded', (t) => {
+  // Only a POSITIVE INTEGER is an attempt. `0`, a negative number, a fraction,
+  // an empty string and a non-numeric value are all unusable identities: a
+  // comparison that coerces them would accept them as "not future".
+  for (const recorded of [0, -1, 1.5, '0', '-1', '1.5', 'two', '']) {
+    const life = testLifecycle(t)
+    const root = life.tempDir('dsh-shard-attempt-invalid-')
+    writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+    writeShard(root, 'shard-2', {
+      files: ['tui/three.test.ts'],
+      spec: { sha: 'sha-1', runId: 'run-1', runAttempt: recorded },
+    })
+    const aggregate = verifyShards({
+      shardsRoot: root,
+      total: 2,
+      expectedFiles: EXPECTED,
+      expectedSha: 'sha-1',
+      expectedRunId: 'run-1',
+      expectedRunAttempt: '2',
+    })
+    assert.ok(aggregate.failures.length > 0, `attempt ${JSON.stringify(recorded)} must fail the aggregate`)
+    assert.match(aggregate.failures.join('\n'), /recorded no valid run attempt/u,
+      `attempt ${JSON.stringify(recorded)} must be rejected as unusable`)
+  }
+})
+
+test('an INVALID expected attempt fails the aggregate instead of disabling the check', (t) => {
+  for (const expected of ['0', '-1', '1.5', 'two', '']) {
+    const life = testLifecycle(t)
+    const root = life.tempDir('dsh-shard-attempt-expectation-')
+    writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+    writeShard(root, 'shard-2', { files: ['tui/three.test.ts'] })
+    const aggregate = verifyShards({
+      shardsRoot: root,
+      total: 2,
+      expectedFiles: EXPECTED,
+      expectedRunAttempt: expected,
+    })
+    assert.ok(aggregate.failures.length > 0, `expected attempt ${JSON.stringify(expected)} must fail`)
+    assert.match(aggregate.failures.join('\n'), /expected run attempt .* is not a positive integer/u)
+  }
 })
 
 test('a shard that records NO attempt fails the aggregate when one is expected', (t) => {
@@ -355,20 +434,62 @@ test('a shard that records NO attempt fails the aggregate when one is expected',
     expectedRunAttempt: '2',
   })
   assert.ok(aggregate.failures.length > 0, 'a missing attempt must fail the aggregate')
-  assert.match(aggregate.failures.join('\n'), /recorded no run attempt/u)
+  assert.match(aggregate.failures.join('\n'), /recorded no valid run attempt/u)
+})
+
+test('a FAILED case from the CURRENT attempt still fails the recovered aggregate', (t) => {
+  // The bounded attempt is an IDENTITY check, not a tolerance: a shard whose
+  // cases failed is rejected even when its attempt is the latest one.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-gate-')
+  writeShard(root, 'shard-1', {
+    files: ['app/one.test.ts', 'app/two.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '2' },
+  })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '2' },
+    results: { 'tui/three.test.ts': 'fail' },
+  })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedSha: 'sha-1',
+    expectedRunId: 'run-1',
+    expectedRunAttempt: '2',
+  })
+  assert.ok(aggregate.failures.length > 0, 'a failed case must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /failing case/u)
+})
+
+test('two directories claiming the SAME shard slot fail the aggregate', (t) => {
+  // Distinct directory names can still carry the same `shard-<n>` suffix.
+  // Counting two directories for a two-shard lane is not a partition: one
+  // slot would be measured twice and another not at all.
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-slot-')
+  writeShard(root, 'shard-1-node24', { files: ['app/one.test.ts'] })
+  writeShard(root, 'prototype-shard-1-node24', { files: ['app/two.test.ts', 'tui/three.test.ts'] })
+  const aggregate = verifyShards({ shardsRoot: root, total: 2, expectedFiles: EXPECTED })
+  assert.ok(aggregate.failures.length > 0, 'a duplicated shard slot must fail the aggregate')
+  assert.match(aggregate.failures.join('\n'), /shard slot 1\/2 is claimed by two directories/u)
 })
 
 test('the CLI reads the run attempt from the environment', (t) => {
   const life = testLifecycle(t)
   const root = life.tempDir('dsh-shard-cli-')
-  writeShard(root, 'shard-1', { files: ['app/one.test.ts', 'app/two.test.ts'] })
+  writeShard(root, 'shard-1', {
+    files: ['app/one.test.ts', 'app/two.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+  })
   writeShard(root, 'shard-2', {
     files: ['tui/three.test.ts'],
-    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '2' },
   })
   const expectedFiles = join(root, 'expected-files.txt')
   writeFileSync(expectedFiles, [...EXPECTED].join('\n'))
-  const run = spawnSync(process.execPath, [
+  const cli = () => spawnSync(process.execPath, [
     join(ROOT, 'scripts', 'verify-shards.mjs'),
     '--shards', root,
     '--total', '2',
@@ -384,8 +505,118 @@ test('the CLI reads the run attempt from the environment', (t) => {
       DSH_EXPECTED_RUN_ATTEMPT: '2',
     },
   })
-  assert.notEqual(run.status, 0, 'the CLI must fail on a foreign attempt')
-  assert.match(run.stderr, /belongs to attempt 1, not 2/u)
+  const recovered = cli()
+  assert.equal(recovered.status, 0, recovered.stderr)
+  assert.match(recovered.stdout, /attempts\s+1, 2 \(mixed by partial re-run\)/u,
+    'the report must make the mixed execution generations visible')
+
+  // The same CLI, the same run, but the shard's attempt is now in the future.
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '3' },
+  })
+  const foreign = cli()
+  assert.notEqual(foreign.status, 0, 'the CLI must fail on a future attempt')
+  assert.match(foreign.stderr, /newer than this run's attempt 2/u)
+})
+
+test('the SAME run id with a DIFFERENT SHA fails the aggregate', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-sha-')
+  writeShard(root, 'shard-1', {
+    files: ['app/one.test.ts', 'app/two.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+  })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    spec: { sha: 'sha-OTHER', runId: 'run-1', runAttempt: '2' },
+  })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedSha: 'sha-1',
+    expectedRunId: 'run-1',
+    expectedRunAttempt: '2',
+  })
+  assert.ok(aggregate.failures.length > 0, 'a different checkout must fail even under the same run id')
+  assert.match(aggregate.failures.join('\n'), /ran against sha-OTHER/u)
+  assert.doesNotMatch(aggregate.failures.join('\n'), /belongs to run/u,
+    'the failure must be the SHA mismatch, not a run-id mismatch')
+})
+
+test('the SAME SHA from a DIFFERENT run fails the aggregate', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-run-')
+  writeShard(root, 'shard-1', {
+    files: ['app/one.test.ts', 'app/two.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+  })
+  writeShard(root, 'shard-2', {
+    files: ['tui/three.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-OTHER', runAttempt: '2' },
+  })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedSha: 'sha-1',
+    expectedRunId: 'run-1',
+    expectedRunAttempt: '2',
+  })
+  assert.ok(aggregate.failures.length > 0, 'a different run must fail even on the same commit')
+  assert.match(aggregate.failures.join('\n'), /belongs to run run-OTHER/u)
+  assert.doesNotMatch(aggregate.failures.join('\n'), /ran against/u,
+    'the failure must be the run-id mismatch, not a SHA mismatch')
+})
+
+test('an EARLIER attempt with a failed case, cancelled case, todo or no spec is still rejected', (t) => {
+  // The bounded attempt is NOT a tolerance for broken evidence: a shard from
+  // an accepted earlier attempt still has to prove every case and record its
+  // runner specification. Only the ATTEMPT IDENTITY is bounded; the proof is
+  // not.
+  for (const result of ['fail', 'cancelled', 'todo', undefined]) {
+    const life = testLifecycle(t)
+    const root = life.tempDir('dsh-shard-old-attempt-')
+    writeShard(root, 'shard-1', {
+      files: ['app/one.test.ts', 'app/two.test.ts'],
+      spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+    })
+    writeShard(root, 'shard-2', {
+      files: ['tui/three.test.ts'],
+      spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+      results: { 'tui/three.test.ts': result },
+    })
+    const aggregate = verifyShards({
+      shardsRoot: root,
+      total: 2,
+      expectedFiles: EXPECTED,
+      expectedSha: 'sha-1',
+      expectedRunId: 'run-1',
+      expectedRunAttempt: '2',
+    })
+    assert.ok(aggregate.failures.length > 0, `an earlier attempt with result ${String(result)} must fail`)
+    assert.match(aggregate.failures.join('\n'), /outcome is not accepted/u,
+      `an earlier attempt must not excuse the ${String(result)} case`)
+  }
+
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-shard-old-attempt-spec-')
+  writeShard(root, 'shard-1', {
+    files: ['app/one.test.ts', 'app/two.test.ts'],
+    spec: { sha: 'sha-1', runId: 'run-1', runAttempt: '1' },
+  })
+  writeShard(root, 'shard-2', { files: ['tui/three.test.ts'], spec: null })
+  const aggregate = verifyShards({
+    shardsRoot: root,
+    total: 2,
+    expectedFiles: EXPECTED,
+    expectedSha: 'sha-1',
+    expectedRunId: 'run-1',
+    expectedRunAttempt: '2',
+  })
+  assert.ok(aggregate.failures.length > 0, 'an earlier attempt without a runner spec must fail')
+  assert.match(aggregate.failures.join('\n'), /recorded no runner specification/u)
 })
 
 test('a case whose result is MISSING fails the aggregate', (t) => {

@@ -20,6 +20,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
+# PARTIAL RE-RUNS. GitHub's "Re-run failed jobs" re-executes only the failed
+# jobs (and their downstream dependents) of the SAME run: the successful jobs
+# and their artifacts are kept, so one recovered aggregate can mix an earlier
+# attempt's shard evidence with a newer attempt's. Every artifact therefore
+# keeps a STABLE name and uploads with `overwrite: true`: a re-executed
+# producer replaces its own artifact instead of failing on the name, and the
+# downstream jobs still see one artifact per name. Nothing here trusts an
+# artifact id or a name alone — the aggregate re-proves run id, checkout SHA,
+# bounded attempts, partition and applied parameters from the CONTENT.
+
 jobs:
   # ---------------------------------------------------------------------------
   # Resolve the DSH dependency lane once. The resolver is unit-tested and keeps
@@ -146,6 +156,7 @@ jobs:
           name: dsh-source-pack
           path: ${{ runner.temp }}/dsh-source-pack
           if-no-files-found: error
+          overwrite: true
           retention-days: 3
 
   # ---------------------------------------------------------------------------
@@ -458,6 +469,7 @@ jobs:
             generated
             build-digest.json
           if-no-files-found: error
+          overwrite: true
           retention-days: 3
 
   # ---------------------------------------------------------------------------
@@ -600,6 +612,24 @@ jobs:
             --wall-clock-seconds "$((end - start))" \
             --out diagnostics/runner-spec.json
 
+      - name: Require this shard's diagnostics
+        # A SUCCESSFUL shard that produced no provenance must not be able to
+        # let the aggregate reuse a stale same-name artifact from an earlier
+        # attempt: all three files are what prove THIS attempt ran its shard.
+        # A FAILED shard is exempt on purpose — its partial records are the
+        # diagnosis the aggregate needs, and the matrix result already rejects
+        # it. `success()` is GitHub's default for a step; it is written out so
+        # the success-only scope is explicit next to the always() upload.
+        if: success()
+        run: |
+          set -euo pipefail
+          for file in diagnostics/cases.jsonl diagnostics/runner-spec.json diagnostics/effective-params.json; do
+            if [ ! -f "$file" ]; then
+              echo "the shard succeeded without $file: its evidence is incomplete" >&2
+              exit 1
+            fi
+          done
+
       - name: Upload this shard's records
         # A failed test run must still deliver its RECORDS: the aggregate is
         # what decides, and an aggregate with no records cannot tell "the
@@ -610,6 +640,11 @@ jobs:
           name: product-shard-${{ matrix.shard }}-node24
           path: diagnostics
           if-no-files-found: warn
+          # The SHARD SLOT, never the attempt, is the artifact identity: a
+          # re-run of this shard replaces this name, while the shards that were
+          # not re-run keep their earlier artifact. An attempt suffix would
+          # leave two directories for one slot in the aggregate.
+          overwrite: true
           retention-days: 3
 
   # ---------------------------------------------------------------------------
@@ -711,6 +746,7 @@ jobs:
           name: dsh-pi-tui-aggregate
           path: aggregate.json
           if-no-files-found: warn
+          overwrite: true
           retention-days: 3
 
   # ---------------------------------------------------------------------------
@@ -801,6 +837,7 @@ jobs:
           name: dsh-pi-tui-candidate
           path: ${{ steps.pack.outputs.tarball }}
           if-no-files-found: error
+          overwrite: true
           retention-days: 3
 
   # ---------------------------------------------------------------------------
@@ -956,6 +993,7 @@ jobs:
           name: dsh-pi-tui-provisional
           path: ${{ env.CANDIDATE }}
           if-no-files-found: error
+          overwrite: true
           retention-days: 3
 
   # ---------------------------------------------------------------------------
@@ -1167,6 +1205,7 @@ jobs:
             packaging-inputs.json
             packs/pack-equivalence.json
           if-no-files-found: warn
+          overwrite: true
           retention-days: 7
 
       # The proof is uploaded ABOVE, before this gate can fail, so a developer
@@ -1201,6 +1240,7 @@ jobs:
           name: dsh-pi-tui-pack-equivalence-candidate-${{ needs.dsh-context.outputs.mode }}
           path: pack-equivalence-baseline.candidate.json
           if-no-files-found: warn
+          overwrite: true
           retention-days: 7
 
       # The gate that makes "update the baseline in the SAME PR" enforceable.
@@ -1277,12 +1317,15 @@ jobs:
       - official-preset-assembly
       - runtime-boundary
       - security-audit
-    # `always()` suppresses the implicit success check, so EVERY need is named
-    # here AND re-checked by `ci-verdict` below. The two mode-dependent jobs are
-    # checked EXACTLY: in source mode the pinned pack must have succeeded and
-    # the npm-only client-family gate must be skipped; in npm mode the reverse.
-    # `skipped` is never accepted for a job that must prove something.
-    if: ${{ always() && needs.dsh-context.result == 'success' && needs.build.result == 'success' && needs.typecheck.result == 'success' && needs.product-shard.result == 'success' && needs.aggregate.result == 'success' && needs.candidate.result == 'success' && needs.qualify.result == 'success' && needs.equivalence.result == 'success' && needs.source-checks.result == 'success' && needs['compat-smoke'].result == 'success' && needs['ecosystem-compat'].result == 'success' && needs['official-preset-assembly'].result == 'success' && needs['runtime-boundary'].result == 'success' && needs['security-audit'].result == 'success' && ((needs.dsh-context.outputs.mode == 'npm' && needs['prepare-dsh-source'].result == 'skipped' && needs['client-family-compat'].result == 'success') || (needs.dsh-context.outputs.mode == 'source' && needs['prepare-dsh-source'].result == 'success' && needs['client-family-compat'].result == 'skipped')) }}
+    # This job deliberately has NO `needs.*.result` condition. A job-level gate
+    # would make it `skipped` whenever any upstream phase failed — and a
+    # skipped job both hides WHICH proof is missing and cannot be re-executed by
+    # "Re-run failed jobs". Instead it always RUNS and fails loudly through
+    # `ci-verdict` below, which is the single authority over every required and
+    # mode-dependent phase. The verdict runs before any candidate is downloaded
+    # or uploaded, so a failed qualification never reads a candidate that does
+    # not exist and never produces the publishable artifact.
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -1297,6 +1340,36 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+
+      # The verdict over the WHOLE graph, from the results this job received.
+      # It runs FIRST: a missing, failed or skipped upstream phase must fail
+      # THIS job before any candidate is downloaded, so the failure is the
+      # verdict's and the publishable artifact is never produced. `ci-verdict`
+      # is the single authority — this job deliberately duplicates no status
+      # list in shell.
+      - name: Require every upstream phase to have SUCCEEDED
+        env:
+          DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+        run: |
+          set -euo pipefail
+          node scripts/ci-verdict.mjs qualify \
+            --mode "$DSH_MODE" \
+            --phase "dsh-context=${{ needs.dsh-context.result }}" \
+            --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
+            --phase "client-family-compat=${{ needs['client-family-compat'].result }}" \
+            --phase "build=${{ needs.build.result }}" \
+            --phase "typecheck=${{ needs.typecheck.result }}" \
+            --phase "product-shard=${{ needs.product-shard.result }}" \
+            --phase "aggregate=${{ needs.aggregate.result }}" \
+            --phase "candidate=${{ needs.candidate.result }}" \
+            --phase "qualify=${{ needs.qualify.result }}" \
+            --phase "equivalence=${{ needs.equivalence.result }}" \
+            --phase "source-checks=${{ needs['source-checks'].result }}" \
+            --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
+            --phase "ecosystem-compat=${{ needs['ecosystem-compat'].result }}" \
+            --phase "official-preset-assembly=${{ needs['official-preset-assembly'].result }}" \
+            --phase "runtime-boundary=${{ needs['runtime-boundary'].result }}" \
+            --phase "security-audit=${{ needs['security-audit'].result }}"
 
       - name: Download the provisional candidate
         uses: actions/download-artifact@v8
@@ -1327,40 +1400,13 @@ jobs:
           echo "QUALIFIED_TARBALL=${TARBALLS[0]}" >> "$GITHUB_ENV"
           echo "qualified $ACTUAL as $(basename "${TARBALLS[0]}")"
 
-      # The verdict over the WHOLE graph, from the results this job received.
-      # The `if:` above already names every need; this re-states the same rule
-      # in a form that prints a table and that tests can drive, so a phase that
-      # silently stopped reported cannot be mistaken for a pass.
-      - name: Require every upstream phase to have SUCCEEDED
-        env:
-          DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
-        run: |
-          set -euo pipefail
-          node scripts/ci-verdict.mjs qualify \
-            --mode "$DSH_MODE" \
-            --phase "dsh-context=${{ needs.dsh-context.result }}" \
-            --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
-            --phase "client-family-compat=${{ needs['client-family-compat'].result }}" \
-            --phase "build=${{ needs.build.result }}" \
-            --phase "typecheck=${{ needs.typecheck.result }}" \
-            --phase "product-shard=${{ needs.product-shard.result }}" \
-            --phase "aggregate=${{ needs.aggregate.result }}" \
-            --phase "candidate=${{ needs.candidate.result }}" \
-            --phase "qualify=${{ needs.qualify.result }}" \
-            --phase "equivalence=${{ needs.equivalence.result }}" \
-            --phase "source-checks=${{ needs['source-checks'].result }}" \
-            --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
-            --phase "ecosystem-compat=${{ needs['ecosystem-compat'].result }}" \
-            --phase "official-preset-assembly=${{ needs['official-preset-assembly'].result }}" \
-            --phase "runtime-boundary=${{ needs['runtime-boundary'].result }}" \
-            --phase "security-audit=${{ needs['security-audit'].result }}"
-
       - name: Upload the QUALIFIED artifact
         uses: actions/upload-artifact@v7
         with:
           name: dsh-pi-tui-tarball
           path: ${{ env.QUALIFIED_TARBALL }}
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   # ---------------------------------------------------------------------------
@@ -1455,6 +1501,7 @@ jobs:
           name: dsh-pi-tui-pipeline-summary
           path: pipeline-summary.txt
           if-no-files-found: warn
+          overwrite: true
           retention-days: 3
 
   # ---------------------------------------------------------------------------
@@ -1666,6 +1713,7 @@ jobs:
           name: pi2dsh-compat-debug
           path: pi2dsh-compat-debug
           if-no-files-found: warn
+          overwrite: true
           retention-days: 14
 
   # ---------------------------------------------------------------------------
@@ -1919,6 +1967,7 @@ jobs:
           name: dsh-pi-tui-release-notes
           path: release-notes.md
           if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   # ---------------------------------------------------------------------------
