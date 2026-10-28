@@ -263,6 +263,22 @@ test('a synchronous probe reply is handled after probing and timer installation'
   graphics.dispose()
 })
 
+test('a stop between the live OK and the queued notification drops only that notification', async () => {
+  const { graphics, terminal, allowed } = admittedFactory()
+  graphics.terminal.start(() => {}, () => {})
+  terminal.sendInput(PROBE_REPLY)
+  graphics.terminal.stop()
+  await Promise.resolve()
+  assert.equal(graphics.canPaint(), true, 'the one-way admission survives a normal screen stop')
+  assert.equal(allowed(), 0, 'the queued notification is dropped while the screen is stopped')
+
+  graphics.terminal.start(() => {}, () => {})
+  assert.equal(graphics.canPaint(), true, 'restart keeps the SAME allowed admission')
+  assert.equal((terminal.text.match(/a=q,/g) ?? []).length, 1, 'restart never re-sends the query')
+  assert.equal(allowed(), 0, 'no stale notification is replayed after restart')
+  graphics.dispose()
+})
+
 test('a throwing probe write denies immediately and preserves the real failure', () => {
   const terminal = new RecordingTerminal()
   terminal.failWhen = (data) => data.includes('a=q,')

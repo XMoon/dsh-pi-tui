@@ -480,17 +480,29 @@ test('a published SVG uses the app raster loader for Preview and paints raw text
       visualFigureHandles: Map<unknown, Map<string, unknown>>
     }).visualFigureHandles.values()].flatMap(byRef => [...byRef.values()])
     assert.equal(handles.length, 1, 'exactly one published visual handle')
+    vt.writes.length = 0
     const beforeViewer = h.rasterCalls()
     ;(h.app as unknown as { openSvgViewer(handle: unknown): void }).openSvgViewer(handles[0])
     await settle(h.app, vt)
     const viewerWire = vt.writes.join('')
-    assert.ok(hasManagedWire(viewerWire), 'the SVG Preview painted through the live handle')
+    const viewerApcs = apcs(viewerWire)
+    assert.ok(viewerApcs.some(entry => entry.controls.a === 'p'),
+      'the SVG Preview painted its OWN placement in the Viewer-only wire segment')
+    assert.equal(viewerWire.includes('a=T,'), false, 'the SVG Viewer never used the legacy form')
     assert.ok(h.rasterCalls() > beforeViewer, 'the Viewer derived its own width variant')
+
+    vt.writes.length = 0
     vt.sendInput('\t')
     await settle(h.app, vt)
+    const sourceWire = vt.writes.join('')
     const sourceView = vt.getViewport().join('\n')
     assert.ok(sourceView.includes('<svg') && sourceView.includes('<rect'), `the Source page shows raw SVG:\n${sourceView}`)
     assert.equal(sourceView.includes(PLACEHOLDER), false, 'the Source page paints no image cells')
+    const sourceImageCommands = apcs(sourceWire).filter(entry =>
+      entry.controls.a === 't' || entry.controls.a === 'p' || entry.controls.a === 'T')
+    assert.deepEqual(sourceImageCommands, [],
+      'the Source-only wire segment carries no image transmission or placement APC')
+    assert.equal(sourceWire.includes('a=T,'), false, 'the Source page never used the legacy image form')
     const beforeSource = h.rasterCalls()
     vt.sendInput('\t')
     await settle(h.app, vt)
