@@ -959,16 +959,12 @@ jobs:
         if: env.DSH_MODE == 'npm'
         run: pnpm smoke:startup-strictness -- "$CANDIDATE"
 
-      - name: Host/Client split-process bootstrap
-        if: env.DSH_MODE == 'npm'
-        run: pnpm smoke:split-process -- "$CANDIDATE"
-
       # A step that does not apply must SAY so. A silent skip in a
       # qualification is indistinguishable from a gate that ran and passed.
       - name: Record the npm-only smoke on a source run
         if: env.DSH_MODE == 'source'
         run: |
-          echo 'NOT_APPLICABLE: the startup strictness and split-process smokes are npm-only; Source Mode is qualified by its own lanes'
+          echo 'NOT_APPLICABLE: the startup strictness smoke is npm-only; the Host/Client split-process job is also npm-only and is skipped in this mode; Source Mode is qualified by its own lanes'
 
       # The digest is checked AGAIN, after the smokes, against the value the
       # pack job recorded: a candidate replaced between the smokes and the
@@ -995,6 +991,97 @@ jobs:
           if-no-files-found: error
           overwrite: true
           retention-days: 3
+
+  # ---------------------------------------------------------------------------
+  # THE SPLIT-PROCESS QUALIFICATION, as its own job.
+  #
+  # Its real-OS probe takes ~5 minutes and used to serialize the tail of
+  # `qualify` after the postpack smokes. It only needs the candidate artifact,
+  # so it runs in parallel with `qualify`, the pack-equivalence proof and the
+  # product shards. `qualified` still refuses publication unless this job
+  # succeeded, and the digest is re-proven before and after the run so the
+  # probe can never qualify a tarball other than the one every other gate saw.
+  #
+  # The smoke is npm-only (Source Mode qualifies through its own lanes); in
+  # source mode this job is skipped and `ci-verdict` requires exactly that
+  # `skipped`, never a silent success.
+  # ---------------------------------------------------------------------------
+  split-process:
+    name: Host/Client split-process bootstrap
+    needs:
+      - dsh-context
+      - candidate
+    if: ${{ needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DSH_MODE: ${{ needs.dsh-context.outputs.mode }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Prepare DSH dependency environment
+        env:
+          DSH_MODE_RESOLVED: ${{ needs.dsh-context.outputs.mode }}
+        run: |
+          set -euo pipefail
+          node scripts/ci-deps.mjs \
+            --mode "$DSH_MODE_RESOLVED" \
+            --distribution "$RUNNER_TEMP/dsh-source-pack" \
+            --workspace "$GITHUB_WORKSPACE"
+
+      - name: Download the candidate
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-candidate
+          path: candidate
+
+      - name: Prove the candidate is the tarball the pack job produced
+        env:
+          EXPECTED_SHA256: ${{ needs.candidate.outputs.sha256 }}
+          EXPECTED_TARBALL: ${{ needs.candidate.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(find candidate -maxdepth 1 -type f -name 'xmoon76-dsh-pi-tui-*.tgz' -print | sort)
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one downloaded tarball, found ${#TARBALLS[@]}" >&2
+            exit 1
+          fi
+          ACTUAL="$(sha256sum "${TARBALLS[0]}" | cut -d' ' -f1)"
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "the downloaded tarball is $ACTUAL, not the produced $EXPECTED_SHA256" >&2
+            exit 1
+          fi
+          if [ "$(basename "${TARBALLS[0]}")" != "$EXPECTED_TARBALL" ]; then
+            echo "the downloaded tarball is $(basename "${TARBALLS[0]}"), not $EXPECTED_TARBALL" >&2
+            exit 1
+          fi
+          echo "CANDIDATE=${TARBALLS[0]}" >> "$GITHUB_ENV"
+          echo "the candidate is the produced tarball ($ACTUAL)"
+
+      - name: Host/Client split-process bootstrap
+        run: pnpm smoke:split-process -- "$CANDIDATE"
+
+      - name: Re-prove the candidate was not replaced during qualification
+        env:
+          EXPECTED_SHA256: ${{ needs.candidate.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          ACTUAL="$(sha256sum "$CANDIDATE" | cut -d' ' -f1)"
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "the candidate changed during qualification: $ACTUAL, not $EXPECTED_SHA256" >&2
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------------
   # THE PACK EQUIVALENCE PROOF, and WHEN it has to run again.
@@ -1309,6 +1396,7 @@ jobs:
       - aggregate
       - candidate
       - qualify
+      - split-process
       - equivalence
       - source-checks
       - client-family-compat
@@ -1363,6 +1451,7 @@ jobs:
             --phase "aggregate=${{ needs.aggregate.result }}" \
             --phase "candidate=${{ needs.candidate.result }}" \
             --phase "qualify=${{ needs.qualify.result }}" \
+            --phase "split-process=${{ needs['split-process'].result }}" \
             --phase "equivalence=${{ needs.equivalence.result }}" \
             --phase "source-checks=${{ needs['source-checks'].result }}" \
             --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
@@ -1427,6 +1516,7 @@ jobs:
       - aggregate
       - candidate
       - qualify
+      - split-process
       - equivalence
       - qualified
       - source-checks
@@ -1480,6 +1570,7 @@ jobs:
             --phase "aggregate=${{ needs.aggregate.result }}" \
             --phase "candidate=${{ needs.candidate.result }}" \
             --phase "qualify=${{ needs.qualify.result }}" \
+            --phase "split-process=${{ needs['split-process'].result }}" \
             --phase "equivalence=${{ needs.equivalence.result }}" \
             --phase "source-checks=${{ needs['source-checks'].result }}" \
             --phase "compat-smoke=${{ needs['compat-smoke'].result }}" \
