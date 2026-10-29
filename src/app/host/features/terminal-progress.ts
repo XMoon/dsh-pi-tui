@@ -1,6 +1,6 @@
 /**
- * The private `piTuiTerminalProgress` Host service (plan R2 §6): the additive
- * Cordis row the Remote Host composition mounts, owning
+ * The private `piTuiTerminalProgress` Host service (plan R2 §6): one of the two
+ * internal business rows the built-in PiTui Host Runtime mounts, owning
  *
  * ```text
  * the Host-side shared interval fold instance (ONE per live Agent)
@@ -27,15 +27,17 @@
  * `reason.kind` is reported through the injected diagnostics reporter and fails
  * closed to `idle`.
  *
- * LAYER NOTE: this row lives in `app/remote/**` (the composition owns it and
- * its lifetime); the shared classification stays in `domain/**`.
+ * LAYER NOTE: this row lives in `app/host/features/**` (the built-in Host
+ * Runtime owns it and its lifetime); the shared classification stays in
+ * `domain/**`.
  *
  * The Typert CONTRIBUTION (the descriptor the Gateway dispatches on) is owned
- * by the composition, not by this row: rc.2 admits exactly one contribution per
- * package identity, so all of this package's private invocations are registered
- * together in `runtime/remote/pi-tui-remote-contribution.ts`.
+ * by the built-in Host Runtime, not by this row: rc.2 admits exactly one
+ * contribution per package identity, so all of this package's private
+ * invocations are registered together in
+ * `runtime/remote/pi-tui-remote-contribution.ts`.
  *
- * @module @xmoon76/dsh-pi-tui/app/remote/terminal-progress-host
+ * @module @xmoon76/dsh-pi-tui/app/host/features/terminal-progress
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -44,15 +46,16 @@ import {
   createTerminalProgressInterval,
   type IntervalProgress,
   type TerminalProgressInterval,
-} from '../../domain/terminal-progress/interval.ts'
-import type { TerminalProgressOutcome } from '../../domain/terminal-progress/settings.ts'
+} from '../../../domain/terminal-progress/interval.ts'
+import type { TerminalProgressOutcome } from '../../../domain/terminal-progress/settings.ts'
 import {
   PI_TUI_TERMINAL_PROGRESS_NAMESPACE,
   type PiTuiTerminalProgressFrame,
-} from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
+} from '../../../runtime/remote/pi-tui-terminal-progress-contract.ts'
 
 /**
- * The Host facts the row needs from its composition. Structural on purpose:
+ * The Host facts the row needs from the built-in Host Runtime. Structural on
+ * purpose:
  * the row must not import a Host Agent package (the boundary gate counts even
  * type-only Host imports), and the Agent object itself never crosses the wire.
  */
@@ -172,14 +175,14 @@ class FrameQueue {
 }
 
 /**
- * The Host endpoint of the private stream. One instance per Remote Host
- * composition; the descriptors and the subscriptions leave with the fiber.
+ * The Host endpoint of the private stream. One instance per built-in Host
+ * Runtime; the descriptors and the subscriptions leave with the fiber.
  */
 export class PiTuiTerminalProgressHostService extends TypertRemoteService {
   /** The Typert registry owns the explicit invocation definition. */
   static readonly inject = ['typert']
-  /** The narrow Host facts the composition resolved (explicit field: the
-   *  strip-only TS loader rejects parameter properties). */
+  /** The narrow Host facts the built-in Host Runtime resolved (explicit field:
+   *  the strip-only TS loader rejects parameter properties). */
   private readonly deps: PiTuiTerminalProgressHostDeps
   /** One opaque identity per Host plugin instance: a Host restart, a new
    *  composition or a re-mounted fiber all invalidate older frames. */
@@ -192,12 +195,12 @@ export class PiTuiTerminalProgressHostService extends TypertRemoteService {
 
   /**
    * @param ctx - the Host context this row is mounted in.
-   * @param deps - the narrow Host facts the composition resolved.
+   * @param deps - the narrow Host facts the built-in Host Runtime resolved.
    */
   constructor(ctx: Context, deps: PiTuiTerminalProgressHostDeps) {
     super(ctx, PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
     this.deps = deps
-    // The Typert contribution is owned by the composition (one contribution per
+    // The Typert contribution is owned by the built-in Host Runtime (one per
     // package identity; see runtime/remote/pi-tui-remote-contribution.ts).
     // `global: true` is the official Cordis option that skips the scope filter:
     // the row must observe the session/agent events of the REAL main Agent (and

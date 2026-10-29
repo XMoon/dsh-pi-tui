@@ -68,9 +68,11 @@ Host service resolution belongs to:
 
 `src/app/host/**` is the bundle's permanent Host plane: it registers with
 explicit `inject` and `ctx.reflect.get`, and consumers read only semantic DTOs or
-port values. The Remote graph is ONE `RemoteHostRuntime` + ONE official Client
-Context + ONE semantic assembly + ONE owner registry, reached only through the
-single dynamic edge `src/runtime/backend-loader.ts` →
+port values. `src/app/host/pi-tui-host-runtime.ts` is the ONE built-in Host
+Runtime Loader row; `src/app/host/features/**` are its two internal business
+modules, not independent plugins. The Remote graph is ONE `RemoteHostRuntime` +
+ONE official Client Context + ONE semantic assembly + ONE owner registry,
+reached only through the single dynamic edge `src/runtime/backend-loader.ts` →
 `src/app/remote/runtime.ts`. Base/profile-owned Host services are reused, never
 remounted; optional generated Remotes are mounted by their feature Client owner
 without duplicating core namespace or authority.
@@ -153,6 +155,33 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   later migration step, and no business mutation is replayed across a transport
   reconnect. The protocol guarantees only a reconnect to the same Host; a Host
   crash is not a graceful migration.
+
+### Host composition and the built-in PiTui runtime
+
+The Host Profile's Loader is the only Host composition authority: one
+`runProfile()` creates the Host Context, and every Host service row is owned by
+that Loader. The Host-only overlay disables the TUI surface rows, keeps the B1
+Connection and API-remotes rows, and adds exactly the official Session-serving
+rows plus ONE built-in `@xmoon76/dsh-pi-tui/host-runtime` row. That built-in row
+owns the package's ONE private Typert contribution and its two private business
+services (`piTuiFileReferences`, `piTuiTerminalProgress`); the feature modules
+are not independent Loader rows, configurable plugins or package subpaths. The
+row publishes `piTuiHostReady` only after both service bindings are live.
+
+`performance-host` remains an independent Host projection row, and
+`visual-tools` remains an independent Loader row; neither is absorbed into the
+built-in runtime. `src/app/remote/host-runtime.ts` is only the legacy in-process
+test composition for the old L5 fixtures: it mounts the M3-only official
+additive rows and verifies the built-in runtime's readiness gates, but it never
+mounts the private contribution/services or the Performance projection and is
+not the production Host graph.
+
+The Host-only readiness audit requires every official Session-serving row and
+the built-in row to be ACTIVE, checks the official and private Typert
+`serviceKey`/`namespace` bindings, and requires both `piTuiHostReady` and
+`piTuiPerformanceReady` before it publishes the authenticated B1 identity. A
+missing row, artifact, binding or readiness gate fails Host startup before any
+identity is published.
 
 ## Direct/Remote semantic equivalence
 
@@ -398,7 +427,7 @@ Exactly ONE adapter owns the main-Agent terminal outcome on each branch:
   `turn/start`/`turn/end` in `src/app/surface/event-routing.ts`.
 - **Remote** hands the outcome to this bundle's OWN Host composition
   (`mainProgressAuthority: 'host-snapshot'`):
-  `src/app/remote/terminal-progress-host.ts` observes durable turn boundaries
+  `src/app/host/features/terminal-progress.ts` observes durable turn boundaries
   and live Agent status edges in true synchronous order, fences them by the
   exact live Agent object and the exact `agent.session` object, classifies with
   the shared `src/domain/terminal-progress/interval.ts` fold, and serves one

@@ -27,6 +27,10 @@ const bundleConfig = defineConfig({
     './src/extension/advanced.ts',
     './src/extension/unstable.ts',
     { 'performance-host': './src/app/host/performance-host.ts' },
+    // M4-B2-HF: the ONE built-in PiTui Host Runtime Loader entry. Internal Host
+    // composition surface, not a user-installable business plugin; the two
+    // private business services stay internal modules.
+    { 'host-runtime': './src/app/host/pi-tui-host-runtime.ts' },
     // PR-D: the Host-plane visual tool row. Nested source module + flat dist
     // entry, exactly the performance-host precedent; the root ledger stays
     // closed at seven stable entries.

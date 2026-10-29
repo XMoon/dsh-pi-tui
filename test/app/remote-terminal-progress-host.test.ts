@@ -1,6 +1,6 @@
 /**
  * L3 contract of the Remote terminal-progress Host row
- * (`app/remote/terminal-progress-host.ts`).
+ * (`app/host/features/terminal-progress.ts`).
  *
  * The row is mounted over a REAL Cordis Context and a REAL Typert registry, and
  * every frame is produced by REAL event dispatch (`ctx.emit`): the Agent/Session
@@ -29,7 +29,7 @@ import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import {
   PiTuiTerminalProgressHostService,
   type LiveAgentLike,
-} from '../../src/app/remote/terminal-progress-host.ts'
+} from '../../src/app/host/features/terminal-progress.ts'
 import type { PiTuiTerminalProgressFrame } from '../../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
 
 const SESSION_ID = 'l3-main-session'

@@ -50,6 +50,10 @@ function candidateFiles() {
     // mirror the REAL published entry set (the tarball smoke imports every
     // public subpath), including the plugin name the row is loaded by.
     'dist/performance-host.mjs': "export const name = 'pi-tui-performance-host'\n",
+    // M4-B2-HF: the ONE built-in PiTui Host Runtime Loader entry.
+    'dist/host-runtime.mjs': "export const name = 'pi-tui-host-runtime'\n"
+      + "export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory']\n"
+      + "export async function apply() {}\n",
     // The REAL published row surface, including the two tool names it has
     // exported since it shipped (the tarball smoke asserts them).
     'dist/visual-tools.mjs': "export const name = 'pi-tui-visual-tools'\n"
@@ -64,6 +68,9 @@ function candidateFiles() {
     'dist/extension/advanced.d.mts': 'export declare const ADVANCED_API_LEVEL: 1\n',
     'dist/extension/unstable.d.mts': 'export declare const UNSTABLE_API_LEVEL: 1\n',
     'dist/performance-host.d.mts': 'export declare const name: string\n',
+    'dist/host-runtime.d.mts': 'export declare const name: string\n'
+      + 'export declare const inject: string[]\n'
+      + 'export declare function apply(ctx: unknown): Promise<void>\n',
     'dist/visual-tools.d.mts': 'export declare const name: string\n'
       + 'export declare const inject: string[]\n'
       + 'export declare const CHART_TOOL_NAME: string\n'
@@ -126,6 +133,7 @@ function makeFixture(life, { includePresets = true, candidatePeers = { [DSH_CLI]
       './builtins': './dist/builtins.mjs',
       './performance-host': './dist/performance-host.mjs',
       './visual-tools': './dist/visual-tools.mjs',
+      './host-runtime': './dist/host-runtime.mjs',
     },
     peerDependencies: candidatePeers,
     // The smoke asserts the packed manifest restates the repo matrix floor, so

@@ -1274,7 +1274,7 @@ fabricates matches).
   official behavior.
 
 Authority: `src/runtime/direct/file-completion/host-discovery.ts`,
-`src/app/remote/pi-tui-file-reference-host.ts` and the private
+`src/app/host/features/file-reference.ts` and the private
 `piTuiFileReferences` contract. Proof: `test/client/host-file-port.test.ts`,
 `test/runtime/remote/remote-host-file-port.test.ts`.
 

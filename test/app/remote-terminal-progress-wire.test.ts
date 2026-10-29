@@ -1,6 +1,6 @@
 /**
  * R2 L5 real-wire suite for the private `piTuiTerminalProgress` stream: the
- * PRODUCTION Host row (`app/remote/terminal-progress-host.ts`), the PRODUCTION
+ * PRODUCTION Host row (`app/host/features/terminal-progress.ts`), the PRODUCTION
  * Client source (`app/remote/terminal-progress-source.ts`) and the real
  * in-process carrier — no test-local stream endpoint, no fake Gateway.
  *
@@ -18,9 +18,11 @@
  * PRODUCTION PREREQUISITES REPRODUCED
  * - the real rc.2 Host Context of `createRemoteApplicationHostFixture` (real
  *   AgentLoop harness, Typert registry, Gateway, AgentRegistry, sessions, jobs)
- * - `createRemoteHostRuntime(host.ctx)` (the package's ONE private contribution
- *   plus the production terminal-progress Host row) and
- *   `createRemoteClientRuntime({ carrier })`
+ * - `createRemoteApplicationHostFixture` mounts the built-in PiTui Host Runtime
+ *   (the package's ONE private contribution plus the production
+ *   terminal-progress Host row) exactly once; `createRemoteHostRuntime(host.ctx)`
+ *   adds only the M3-only official additive rows and
+ *   `createRemoteClientRuntime({ carrier })`.
  * - the production `createRemoteTerminalProgressSource` over the real client
  *   `remote` face + `connection.generation` + retained-binding accessor
  * - the production AgentLoop of the harness: `turn/start`, `turn/end` and
@@ -132,17 +134,6 @@ class AbortableAdapter extends LlmAdapter {
 
 // ── the mounted production wire graph ──────────────────────────────────────
 
-/** The diagnostics channel `createRemoteHostRuntime` reports unknown kinds through. */
-interface DiagProbe {
-  readonly warnings: Array<{ message: string; fields: Record<string, unknown> | undefined }>
-  readonly diag: { warn(message: string, fields?: Record<string, unknown>): void }
-}
-
-function diagProbe(): DiagProbe {
-  const warnings: DiagProbe['warnings'] = []
-  return { warnings, diag: { warn: (message, fields) => { warnings.push({ message, fields }) } } }
-}
-
 interface ProductionWire {
   readonly host: Awaited<ReturnType<typeof createRemoteApplicationHostFixture>>
   readonly hostRuntime: RemoteHostRuntime
@@ -169,14 +160,12 @@ function watchCarrier(hostRuntime: RemoteHostRuntime): string[] {
 async function mountProductionWire(
   life: TestLifecycle,
   presetId: string,
-  options: { readonly llmAdapter?: LlmAdapter; readonly diag?: DiagProbe } = {},
+  options: { readonly llmAdapter?: LlmAdapter } = {},
 ): Promise<ProductionWire> {
   const host = await createRemoteApplicationHostFixture(life, presetId, {
     ...(options.llmAdapter === undefined ? {} : { llmAdapter: options.llmAdapter }),
   })
-  const hostRuntime = await createRemoteHostRuntime(host.ctx, {
-    ...(options.diag === undefined ? {} : { diag: options.diag.diag }),
-  })
+  const hostRuntime = await createRemoteHostRuntime(host.ctx)
   const carrierOpenEndpoints = watchCarrier(hostRuntime)
   const client = await createRemoteClientRuntime({ carrier: hostRuntime.carrier })
   const source = createRemoteTerminalProgressSource({
@@ -359,7 +348,7 @@ test('break cancellation reaches the production Host row and releases its subscr
 /** Installed only for the disposal proof: any real WebSocket construction is a failure. */
 let webSocketConstructions = 0
 
-test('Host fiber disposal withdraws the descriptor and closes live watchers (in-process only)', async (t) => {
+test('disposing the M3 additive Host fiber keeps the fixture-owned private descriptor and closes live watchers', async (t) => {
   const life = testLifecycle(t)
   const wire = await mountProductionWire(life, 'r2-wire-dispose', { llmAdapter: new AbortableAdapter() })
   const disposedSession = 'r2-wire-dispose-live'
@@ -391,18 +380,15 @@ test('Host fiber disposal withdraws the descriptor and closes live watchers (in-
         'the live Host fiber serves its strict terminal-progress descriptor')
 
       await wire.hostRuntime.dispose()
-      // The strict descriptor is really WITHDRAWN, not merely unreachable. The
-      // Host Typert registry belongs to the fixture (the disposed runtime only
-      // owned the contribution), so it still reports the endpoint's history:
-      // `get` is gone because the contribution disposer withdrew it, while
-      // `hasSeen` stays true because it existed. A disposer that never ran
-      // leaves `get` defined; a registration that never happened leaves
-      // `hasSeen` false — either way this pair fails, so the Peer-death refusal
-      // below cannot mask a broken descriptor withdrawal.
-      assert.equal(localRegistry.get(endpoint), undefined,
-        'the disposed Host fiber withdrew its strict terminal-progress descriptor')
+      // The private contribution belongs to the built-in PiTui Host Runtime
+      // mounted by the fixture root, NOT to this M3-only additive composition:
+      // disposing the additive fiber must leave the strict descriptor
+      // registered. The built-in runtime's own fiber-disposal proof lives in
+      // test/app/pi-tui-host-runtime.test.ts.
+      assert.notEqual(localRegistry.get(endpoint), undefined,
+        'the fixture-owned built-in Runtime keeps serving the strict terminal-progress descriptor')
       assert.equal(localRegistry.hasSeen(endpoint), true,
-        'that endpoint really was registered and then withdrawn (not never-registered)')
+        'the strict terminal-progress descriptor was really registered')
       // Disposal ends the live watcher instead of leaving it hanging. 0.2.1-rc.2
       // ties the owner Peer to the Host Connection fiber, so the iterated
       // stream now TERMINATES WITH the official cancellation failure rather

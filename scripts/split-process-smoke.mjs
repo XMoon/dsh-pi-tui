@@ -21,6 +21,11 @@
  *   T18 installed package shape and Direct `--help` remain unchanged
  *   T19 signal admission precedes publication; repeated same signals stay idempotent (no ready)
  *   T20 an early forced exit removes the Host-created scratch before profile boot
+ *   T21 the official Session-serving rows + ONE built-in Host Runtime row are ACTIVE
+ *   T22/T23/T24 a real Client PID proves official session/list, private PiFile RPC
+ *                and the private terminal-progress snapshot over the authenticated link
+ *   T25 repeated probes register no duplicate descriptor; Client exit keeps the same Host
+ *   T26 missing runtime artifact / required official row / Cookie fail closed, no Ready
  *
  * Usage: node scripts/split-process-smoke.mjs [path-to-candidate.tgz]
  *        pnpm smoke:split-process -- [path-to-candidate.tgz]
@@ -594,6 +599,7 @@ async function main() {
     const mutationMode = process.env.SPLIT_PROCESS_SMOKE_MUTATION
     const tuiMutationPatch = join(workDir, 'mutation-tui-enabled.patch.yml')
     const connectionMutationPatch = join(workDir, 'mutation-connection-disabled.patch.yml')
+    const sessionControllerMutationPatch = join(workDir, 't26-session-controller-disabled.patch.yml')
     const mutationEnv = mutationMode === 'tui-enabled'
       ? { SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch }
       : mutationMode === 'connection-disabled'
@@ -654,6 +660,52 @@ async function main() {
     assert(!connectionMutation.records.some(record => record.m4a0 === 'ready'), 'T01 mutation: Connection row disabled emitted ready')
     trace('mutation-connection-disabled', { exit: connectionMutationExit.code, readyEmitted: false, error: String(connectionMutationFailure.error).slice(0, 160) })
 
+    // T26a: the installed package must carry the built-in Host Runtime artifact.
+    // Missing it must fail the Host startup with no Ready and no Host identity.
+    const runRoot = join(dshHome, 'run', 'dsh-pi-tui')
+    const hasPublishedIdentity = () => existsSync(runRoot)
+      && readdirSync(runRoot, { recursive: true }).some(name => String(name).endsWith('instance.json'))
+    const hostRuntimeModule = join(profilePackage, 'dist', 'host-runtime.mjs')
+    assert(existsSync(hostRuntimeModule), 'T26 the installed candidate has no built-in Host Runtime artifact')
+    renameSync(hostRuntimeModule, `${hostRuntimeModule}.missing`)
+    let runtimeMissingFailure
+    let runtimeMissingExit
+    try {
+      const missingRuntime = new EntryProcess('host', entries.host, base)
+      runtimeMissingFailure = await missingRuntime.waitFor(record => record.m4a0 === 'failure', 'T26 missing Host Runtime artifact', 120_000)
+      runtimeMissingExit = await missingRuntime.waitForExit(60_000)
+      assert(runtimeMissingExit.code === 1, `T26 missing Runtime artifact exit was ${JSON.stringify(runtimeMissingExit)}`)
+      assert(!missingRuntime.records.some(record => record.m4a0 === 'ready'), 'T26 missing Runtime artifact emitted ready')
+      assert(!hasPublishedIdentity(), 'T26 missing Runtime artifact published a Host identity')
+    } finally {
+      renameSync(`${hostRuntimeModule}.missing`, hostRuntimeModule)
+    }
+    trace('t26-runtime-missing', {
+      exit: runtimeMissingExit?.code,
+      readyEmitted: false,
+      error: String(runtimeMissingFailure?.error ?? '').slice(0, 160),
+    })
+
+    // T26b: one required official Session-serving row disabled after the
+    // overlay must fail the strict owner audit with no Ready.
+    writeFileSync(sessionControllerMutationPatch, '- id: split-host-session-controller\n  disabled: true\n')
+    const missingOfficialRow = new EntryProcess('host', entries.host, {
+      ...base,
+      env: { ...base.env, SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch },
+    })
+    const missingOfficialRowFailure = await missingOfficialRow.waitFor(
+      record => record.m4a0 === 'failure',
+      'T26 missing official Session-serving row',
+      120_000,
+    )
+    const missingOfficialRowExit = await missingOfficialRow.waitForExit(60_000)
+    assert(missingOfficialRowExit.code === 1, `T26 missing official row exit was ${JSON.stringify(missingOfficialRowExit)}`)
+    assert(/sessionController owner row, found 0/u.test(String(missingOfficialRowFailure.error)),
+      `T26 missing official row: unexpected error ${String(missingOfficialRowFailure.error)}`)
+    assert(!missingOfficialRow.records.some(record => record.m4a0 === 'ready'), 'T26 missing official row emitted ready')
+    assert(!hasPublishedIdentity(), 'T26 missing official row published a Host identity')
+    trace('t26-official-row-disabled', { exit: missingOfficialRowExit.code, readyEmitted: false })
+
     // T08: sixteen concurrent Host launch/ensure candidates. The kernel seat is
     // the ONLY winner; every loser exits before creating a Host Context.
     const race = Array.from({ length: 16 }, () => new EntryProcess('host', entries.host, base))
@@ -694,10 +746,68 @@ async function main() {
       assert(hostReady.entries?.find(entry => entry.id === id)?.state === 'absent', `T01 ${id} is not absent`)
     }
     assert(Object.values(hostReady.services ?? {}).every(Boolean), 'T01 not all Host prerequisites reported present')
+    for (const service of [
+      'sessionController',
+      'fileUploads',
+      'settingsController',
+      'piTuiFileReferences',
+      'piTuiTerminalProgress',
+      'piTuiHostReady',
+      'piTuiPerformanceReady',
+    ]) {
+      assert(hostReady.services?.[service] === true, `T21 ${service} is not reported live`)
+    }
     assert(hostReady.webServer?.host === '127.0.0.1' && hostReady.webServer.port > 0, 'T01 loopback webserver not ready')
     assert(hostReady.entries.filter(entry => entry.name === '@deepseek-ai/dsh-client-connection').length === 1, 'T01 duplicate Connection row')
     assert(hostReady.entries.filter(entry => entry.name === '@deepseek-ai/dsh-api-remotes').length === 1, 'T01 duplicate api-remotes row')
     assert(hostReady.entries.filter(entry => entry.id === 'typert-gateway').length === 1, 'T01 duplicate gateway row')
+
+    // T21: the six official Session-serving rows and the ONE built-in PiTui
+    // Host Runtime row are all ACTIVE; pre-existing owners stay exactly one.
+    const t21Rows = {
+      fileUpload: 'split-host-file-upload',
+      sessionStats: 'split-host-session-stats',
+      turnOutline: 'split-host-turn-outline',
+      sessionController: 'split-host-session-controller',
+      settingsController: 'split-host-settings-controller',
+      sessionLogExport: 'split-host-session-log-download',
+      piTuiHostRuntime: 'split-host-pi-tui-runtime',
+    }
+    for (const [owner, id] of Object.entries(t21Rows)) {
+      const owners = hostReady.ownerEntries?.[owner]
+      assert(Array.isArray(owners) && owners.length === 1 && owners[0] === id,
+        `T21 ${owner} owner mismatch: ${JSON.stringify(owners)}`)
+      assert(
+        hostReady.entries.filter(entry => entry.id === id && entry.state === 'active').length === 1,
+        `T21 ${id} is not exactly one active row`,
+      )
+    }
+    assert(
+      hostReady.entries.filter(entry => entry.name === '@xmoon76/dsh-pi-tui/host-runtime').length === 1,
+      'T21 duplicate built-in Host Runtime row',
+    )
+    assert(
+      hostReady.entries.filter(entry => entry.name === '@xmoon76/dsh-pi-tui/performance-host').length === 1,
+      'T21 Performance row missing or duplicated',
+    )
+    assert(
+      hostReady.entries.filter(entry => entry.name === '@xmoon76/dsh-pi-tui/visual-tools').length === 1,
+      'T21 Visual Tools row missing or duplicated',
+    )
+    assert(
+      JSON.stringify(hostReady.ownerEntries?.performance) === JSON.stringify(['pi-tui-performance-host']),
+      'T21 Performance owner mismatch',
+    )
+    assert(
+      JSON.stringify(hostReady.ownerEntries?.visualTools) === JSON.stringify(['pi-tui-visual-tools']),
+      'T21 Visual Tools owner mismatch',
+    )
+    trace('t21', {
+      officialSessionServingRows: 6,
+      builtInHostRuntimeRows: 1,
+      performanceOwners: hostReady.ownerEntries.performance,
+      visualToolOwners: hostReady.ownerEntries.visualTools,
+    })
     const origin = hostReady.localHost.origin
     const scopeDir = join(dshHome, 'run', 'dsh-pi-tui', hostReady.localHost.scopeId)
     const registryPath = join(scopeDir, 'instance.json')
@@ -829,6 +939,49 @@ async function main() {
     assertNoSecret('Client stdout records', JSON.stringify(c1.records), [hostToken, validCookie])
     assertNoSecret('Client stderr', c1.stderr, [hostToken, validCookie])
 
+    // T22/T23/T24: run the real Host RPC proof on the SAME authenticated
+    // Client Context. The probe mounts its two contributions temporarily and
+    // unmounts them; no second Client/Connection/Gateway/Context is created.
+    // Running it twice is also the T25 duplicate-registration check.
+    const runHostFoundationProbe = async (client, label) => {
+      const requestId = `m4b2hf-${label}-${++statusSequence}`
+      client.send({ op: 'qualification-host-foundation', requestId })
+      return await client.waitFor(
+        record => record.m4b2hf === 'host-rpc-proof' && record.requestId === requestId,
+        label,
+        180_000,
+      )
+    }
+    const hostRpcProof = await runHostFoundationProbe(c1, 't22-24')
+    assert(hostRpcProof.hostPid === hostReady.pid, 'T22 probe Host PID mismatch')
+    assert(hostRpcProof.hostInstanceId === hostReady.localHost.instanceId, 'T22 probe Host instance mismatch')
+    assert(hostRpcProof.clientPid === c1Ready.pid, 'T22 probe Client PID mismatch')
+    for (const field of ['officialSessionList', 'privateFileRpc', 'terminalSnapshot', 'cleaned']) {
+      assert(hostRpcProof[field] === true, `T22/T23/T24/T25 ${field} is not proven`)
+    }
+    const repeatedProof = await runHostFoundationProbe(c1, 't25-repeat')
+    assert(repeatedProof.hostPid === hostReady.pid, 'T25 repeat probe Host PID mismatch')
+    assert(repeatedProof.hostInstanceId === hostReady.localHost.instanceId, 'T25 repeat probe Host instance mismatch')
+    assert(repeatedProof.clientPid === c1Ready.pid, 'T25 repeat probe Client PID mismatch')
+    for (const field of ['officialSessionList', 'privateFileRpc', 'terminalSnapshot', 'cleaned']) {
+      assert(repeatedProof[field] === true, `T25 repeat ${field} is not proven`)
+    }
+    trace('t22-t24-host-rpc-proof', {
+      hostPid: hostRpcProof.hostPid,
+      hostInstanceId: hostRpcProof.hostInstanceId,
+      clientPid: hostRpcProof.clientPid,
+      officialSessionList: true,
+      privateFileRpc: 'ok/unavailable',
+      terminalSnapshot: 'snapshot:false:idle',
+      cleaned: true,
+    })
+    trace('t25-repeat-probe', {
+      hostPid: repeatedProof.hostPid,
+      hostInstanceId: repeatedProof.hostInstanceId,
+      clientPid: repeatedProof.clientPid,
+      duplicateRegistration: false,
+    })
+
     // T05: one mux socket per authenticated peer; release invalidates the Peer.
     const muxUrl = new URL('/api/remote.mux', origin)
     muxUrl.protocol = 'ws:'
@@ -858,6 +1011,20 @@ async function main() {
     const hostAfterC1 = await hostStatus(mainHost)
     assertIdentityFields(hostAfterC1.localHost, hostReady.localHost, 'T10 Host after normal Client exit')
     assert(hostAfterC1.rootFiberUid === hostReady.rootFiberUid, 'T10 Host root fiber identity changed')
+    // T25: the Client that ran the probe exited; the same Host PID/instance and
+    // the one built-in Host Runtime owner remain, and later Clients still attach.
+    const t25RuntimeOwners = hostAfterC1.ownerEntries?.piTuiHostRuntime
+    assert(Array.isArray(t25RuntimeOwners) && t25RuntimeOwners.length === 1
+      && t25RuntimeOwners[0] === 'split-host-pi-tui-runtime',
+    `T25 the built-in Host Runtime owner changed after Client exit: ${JSON.stringify(t25RuntimeOwners)}`)
+    assert(hostAfterC1.localHost.instanceId === hostReady.localHost.instanceId,
+      'T25 the Host instance changed after Client exit')
+    trace('t25-client-detach', {
+      hostPid: hostAfterC1.localHost.hostPid,
+      instanceId: hostAfterC1.localHost.instanceId,
+      hostRuntimeOwner: hostAfterC1.ownerEntries.piTuiHostRuntime,
+      hostAlive: alive(hostReady.pid),
+    })
 
     // T02 negative mutation: the Client still authenticates during discovery,
     // then omits its Cookie from the official transport carrier. The Host must
@@ -874,6 +1041,7 @@ async function main() {
     assert(noCookieCleanup !== undefined, 'T02 cookie omission emitted no cleanup outcome')
     assert(alive(hostReady.pid), 'T02 cookie omission killed the Host')
     trace('t02-cookie-mutation', { code: 'HOST_UNRESPONSIVE', cleanup: noCookieCleanup.m4a0, hostAlive: true })
+    trace('t26-no-cookie', { code: 'HOST_UNRESPONSIVE', readyEmitted: false, hostAlive: true })
 
     // T14 startup fatal probe: a fatal that arrives before startLocalTransport
     // returns must reject the startup exactly once, emit no ready, and release

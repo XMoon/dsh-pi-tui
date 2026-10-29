@@ -12,11 +12,12 @@
  *
  * FIXTURE MANIFEST
  * - REAL: `createRemoteApplicationHostFixture`'s rc.2 Host Context (persistence,
- *   storage, credentials, workspace, fs, sessions, jobs, the AgentLoop harness),
- *   `createRemoteHostRuntime(host.ctx)` (the production Remote Host composition,
- *   which mounts the production `pi-tui-performance-host` row),
- *   `createRemoteClientRuntime({ carrier })` (the official in-process Client /
- *   Gateway), the official `ProjectionValueStore` faces, and real
+ *   storage, credentials, workspace, fs, sessions, jobs, the AgentLoop harness)
+ *   with the built-in PiTui Host Runtime and the independent
+ *   `pi-tui-performance-host` row mounted by that fixture,
+ *   `createRemoteHostRuntime(host.ctx)` for the M3-only official additive
+ *   rows and `createRemoteClientRuntime({ carrier })` (the official in-process
+ *   Client / Gateway), the official `ProjectionValueStore` faces, and real
  *   `Session.append` commits that fire the real `session/event` drive.
  * - SYNTHETIC: nothing on this path. No model turn runs, so no LLM stand-in is
  *   involved: the seeded turns are REAL committed durable events (the same

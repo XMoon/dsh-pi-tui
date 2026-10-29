@@ -1,6 +1,6 @@
 /**
  * Contract tests for the private `piTuiFileReferences` Host service
- * (app/remote/pi-tui-file-reference-host.ts), its transport-neutral Host
+ * (app/host/features/file-reference.ts), its transport-neutral Host
  * bridge (runtime/remote/pi-tui-file-reference-host-bridge.ts) and its
  * handwritten Typert descriptor
  * (runtime/remote/pi-tui-file-reference-contract.ts): ONE invocation
@@ -31,7 +31,7 @@ import {
   PiTuiFileReferenceHostService,
   type FileReferencesServiceLike,
   type PiTuiFileReferenceHostDeps,
-} from '../../src/app/remote/pi-tui-file-reference-host.ts'
+} from '../../src/app/host/features/file-reference.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const abort = new AbortController().signal
