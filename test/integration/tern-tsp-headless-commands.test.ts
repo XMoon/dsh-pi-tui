@@ -1384,51 +1384,38 @@ test('a BUSY TSP /new with a genuine Host /new keeps the Host sink', async (t) =
   }
 })
 
-test('a live official Question settles ASK_ABORTED when the /new navigation cancel aborts its owner', async (t) => {
+test('a real ask_user_question tool call settles ASK_ABORTED on the /new navigation cancel', async (t) => {
   const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
-  const fixture = await createDirectTspFixture(life, { deltas: ['NAV-QUESTION'] })
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['the question was cancelled'],
+    // The REAL production tool invocation: the scripted model requests the
+    // official ask-user tool, the production Agent loop executes it with its
+    // OWN tool-call signal, and that tool takes that signal into
+    // `userQuestions.ask` — no test-side signal bridge.
+    scriptedToolCall: {
+      callId: 'call-nav-question',
+      name: 'ask_user_question',
+      arguments: JSON.stringify({
+        questions: [{ id: 'q-nav', question: 'Which target?', options: [{ label: 'alpha' }, { label: 'beta' }] }],
+      }),
+    },
+    officialServices: { askUserTool: true },
+  })
   try {
     await waitForInputDelivery(fixture.pane)
-    // A REAL fresh Session/Agent first: no model turn, so the question below is
-    // the only in-flight Host interaction when /new runs.
-    await submitInput(fixture, '/new')
+    // A real user turn: the model answers with the tool call, the Host executes
+    // it and the official Question request blocks on the TUI answerer.
+    await submitInput(fixture, 'ask me before you continue')
     await waitFor('the Session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
     const oldId = welcomeSessionIds(fixture)[0]!
+    await waitFor('the live official Question form', () => fixture.pane.output.text().includes('Which target?'), 30_000)
     const agents = fixture.ctx.get('agents') as unknown as {
-      get(id: SessionId): {
-        cancel(cause: { kind: 'user' }, options?: { keepInbox?: boolean }): void
-      } | undefined
+      get(id: SessionId): { readonly status: string } | undefined
     }
     const oldAgent = agents.get(SessionId(oldId))
     assert.ok(oldAgent !== undefined, 'the fresh Session has a live Host Agent')
-    // The official ask's cancellation lifetime is the TOOL CALL's signal. This
-    // fixture does not script a model tool call, so model exactly the Agent
-    // loop's part: the REAL Agent.cancel (the one the navigation stop invokes)
-    // aborts the in-flight request signal. Nothing else in the test aborts it.
-    const abort = new AbortController()
-    const originalCancel = oldAgent.cancel
-    oldAgent.cancel = function patchedCancel(
-      this: unknown,
-      cause: { kind: 'user' },
-      options?: { keepInbox?: boolean },
-    ): void {
-      abort.abort()
-      originalCancel.call(this, cause, options)
-    }
-    life.defer(() => { oldAgent.cancel = originalCancel })
-    const questions = fixture.ctx.get('userQuestions') as unknown as {
-      ask(request: unknown): Promise<unknown>
-    }
-    const question = questions.ask({
-      agent: oldAgent,
-      wait: { callId: 'call-nav-question' },
-      questions: [{ id: 'q-nav', question: 'Which target?', options: [{ label: 'alpha' }, { label: 'beta' }] }],
-      signal: abort.signal,
-    }).then(
-      value => ({ kind: 'answered' as const, value }),
-      (error: unknown) => ({ kind: 'rejected' as const, error }),
-    )
-    await waitFor('the official Question form', () => fixture.pane.output.text().includes('Which target?'), 25_000)
+    assert.equal(oldAgent.status, 'running',
+      'the Agent Turn is RUNNING while the tool awaits the human answer')
 
     // The REAL registered /new handler (the live modal owns the keys, so the
     // command plane is the production path to a navigation transition).
@@ -1443,25 +1430,15 @@ test('a live official Question settles ASK_ABORTED when the /new navigation canc
       rawInput: '',
       signal: new AbortController().signal,
     }))
-
-    // The navigation stop really cancelled the owner: the official request
-    // settles with the service's documented abort code, never with an answer.
-    const outcome = await question
-    assert.equal(outcome.kind, 'rejected', 'the navigation cancel must settle the official Question')
-    const code = outcome.kind === 'rejected'
-      ? (outcome.error as { readonly code?: unknown }).code
-      : undefined
-    assert.equal(code, 'ASK_ABORTED',
-      'the settled code is the official abort code, not a fabricated user answer')
-
     await transition
+
+    // The navigation stop cancelled the running owner: the REAL tool call's
+    // signal aborted, the official request settled (the form leaves the seat),
+    // and the cancelled Turn reached its durable terminal boundary.
     await waitFor('the /new child session', () => {
       const ids = welcomeSessionIds(fixture)
       return ids.length === 1 && ids[0] !== oldId
     }, 25_000)
-    // The replaced presentation is withdrawn and the old owner is retired; the
-    // new Session is the live surface. The pane's TEXT history keeps the old
-    // caption, so liveness is read from the modal layer frames (the wire).
     const liveModalCount = (): number => {
       const live = new Set<string>()
       for (const frame of fixture.pane.frames()) {
@@ -1473,9 +1450,21 @@ test('a live official Question settles ASK_ABORTED when the /new navigation canc
       return live.size
     }
     await waitFor('the replaced Question form left the seat', () => liveModalCount() === 0, 25_000)
+    const query = fixture.ctx.get('sessionQuery') as unknown as {
+      observeSession(id: SessionId): Promise<{ events: readonly { type: string; data?: unknown }[] }>
+    }
+    const oldLog = await query.observeSession(SessionId(oldId))
+    const end = oldLog.events.filter(event => event.type === 'turn/end').at(-1)?.data as
+      { reason?: { kind?: string; reason?: { kind?: string } } } | undefined
+    assert.equal(end?.reason?.kind, 'aborted',
+      'the cancelled Turn has the durable aborted terminal result')
+    assert.equal(end?.reason?.reason?.kind, 'user',
+      'the abort cause is the user navigation stop, not a shutdown cancel')
+    // No fabricated answer was ever dispatched: the request died by its own
+    // cancellation lifetime, and the new Session owns the surface.
     const ids = welcomeSessionIds(fixture)
     assert.equal(ids.length, 1)
-    assert.notEqual(ids[0], oldId, 'the fresh Session owns the surface')
+    assert.notEqual(ids[0], oldId)
   } finally {
     await fixture.settle()
   }

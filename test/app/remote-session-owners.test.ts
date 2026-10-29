@@ -567,6 +567,31 @@ test('a DISPATCHED caller cancellation is indeterminate for navigation but keeps
     'a proven business refusal stays rejected for navigation too')
 })
 
+test('a navigation cancel on an unaddressable exact generation is indeterminate, never a silent proceed', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  // A disconnected Connection: the official call cannot be addressed, but that
+  // does NOT prove the Host has no running work of this exact generation. The
+  // control audience keeps its own "not dispatched" settlement; navigation
+  // must fail closed.
+  h.generation.set(undefined)
+  const disconnected = await h.services.retirement.cancelForNavigation(owner)
+  assert.equal(disconnected.kind, 'indeterminate')
+  assert.equal(disconnected.kind === 'indeterminate' ? disconnected.error.code : undefined,
+    'session/cancel-indeterminate')
+  assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'cancelled' },
+    'the control audience still reports a provably not-dispatched call')
+  assert.equal(binding.cancelCalls(), 0, 'neither audience dispatched an official call')
+  h.generation.set({ id: 2 })
+  // A retired/released exact owner reference is the same unaddressable family.
+  await h.services.retirement.retire(owner, 'transition')
+  const released = await h.services.retirement.cancelForNavigation(owner)
+  assert.equal(released.kind, 'indeterminate')
+  assert.equal(binding.cancelCalls(), 0)
+})
+
 test('a control cancel keeps the official write-failure taxonomy', async () => {
   const h = harness()
   const { handle } = retainedHandle(h, 'session-a')

@@ -421,23 +421,20 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * before the freeze can finish during the stop, remove its occurrences and
    * DEFER its local restore to the pending transition (`gate.busy` is true); the
    * body's own settle would restore it, but a stop failure never runs the body.
-   * The restore is attached AFTER the gate promise settled — the gate's own
-   * `active=false` handler is registered first, so an admitted writer that
-   * completed during the frozen stop and deferred late is caught here, while a
-   * writer completing after that observes a non-busy gate and restores itself.
-   * Body failures keep their existing `transitionTo` finally settlement.
+   *
+   * The restore runs in the FIRST rejection reaction on the gate task. The gate
+   * registers its own `active=false` reaction when `run` is called, i.e. BEFORE
+   * this catch, and the next queued task starts from the tail THAT reaction
+   * resolves — so at this point the gate is no longer busy and the next task has
+   * NOT started yet. A writer completing later observes a non-busy gate and
+   * restores itself. Body failures keep their existing `transitionTo` finally
+   * settlement.
    */
-  const runNavigationGate = <T>(task: () => Promise<T> | T): Promise<T> => {
-    let stopFailed = false
-    return core.gate.run(task)
-      .catch((error: unknown): never => {
-        if (error instanceof SessionNavigationStopError) stopFailed = true
-        throw error
-      })
-      .finally(() => {
-        if (stopFailed) deps.surface.settlePendingQueueRecalls(false)
-      })
-  }
+  const runNavigationGate = <T>(task: () => Promise<T> | T): Promise<T> =>
+    core.gate.run(task).catch((error: unknown): never => {
+      if (error instanceof SessionNavigationStopError) deps.surface.settlePendingQueueRecalls(false)
+      throw error
+    })
 
   /**
    * Run ONE user-navigation transaction through the gate + barrier. The stop
@@ -723,17 +720,22 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       if (error.settlement === 'stale') return undefined
       return `${error.message}; the session was not switched`
     }
+    /**
+     * A switch INTO the session already current is a NO-OP: it replaces nothing,
+     * so it must NOT stop the current owner's turn. Evaluated INSIDE the gate,
+     * so a queued intent whose target became current in the meantime skips the
+     * stop too — on BOTH the scoped and the unscoped admission.
+     */
+    const noOpSwitch = (): string | undefined => {
+      if (core.currentSessionId() !== sessionId) return undefined
+      deps.surface.settlePendingQueueRecalls(false)
+      return 'already on this session'
+    }
     if (expectedScope === undefined) {
       core.bumpNavigationEpoch()
       return runNavigationGate(() => {
-        // A switch INTO the session we are already on is a NO-OP: nothing is
-        // being replaced, so it must NOT stop the current owner's turn. Checked
-        // inside the gate, so a queued intent whose target became current in the
-        // meantime skips the stop too.
-        if (core.currentSessionId() === sessionId) {
-          deps.surface.settlePendingQueueRecalls(false)
-          return 'already on this session'
-        }
+        const noOp = noOpSwitch()
+        if (noOp !== undefined) return noOp
         // Capture the owner this queued selection is actually leaving WHEN ITS
         // TURN COMES: every earlier transition already settled, and the capture
         // and the barrier freeze still happen in the SAME synchronous stack.
@@ -745,6 +747,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       // A previous queued transition may have published a new owner while this
       // intent waited. Recheck before this request bumps navigation or opens B.
       if (!deps.isScopeCurrent(expectedScope)) return undefined
+      const noOp = noOpSwitch()
+      if (noOp !== undefined) return noOp
       core.bumpNavigationEpoch()
       return runLocked(expectedScope)
     }).catch(mapStopFailure)
