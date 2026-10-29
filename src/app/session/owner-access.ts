@@ -51,8 +51,16 @@ export interface SessionRetirementReport {
  * Stop gesture); this seam only answers the navigation question without
  * changing that classification.
  */
+export interface NavigationStopReceipt {
+  /** Backend-owned opaque token pinning the EXACT owner generation the one-shot
+   *  stop was addressed to. The runtime passes it back to `whenIdleOrAbort` so
+   *  the quiesce proves it is observing the SAME generation as the stop, never
+   *  a later reconnect/rollover. */
+  readonly token: unknown
+}
+
 export type NavigationCancelSettlement =
-  | { readonly kind: 'committed' }
+  | { readonly kind: 'committed'; readonly receipt?: NavigationStopReceipt }
   | { readonly kind: 'rejected'; readonly detail: string }
   /** Confirmed pre-dispatch: the exact generation could not be addressed (or
    *  the runner is exiting). NEVER permission to switch. */
@@ -77,7 +85,11 @@ export interface SessionOwnerRetirement {
    *  `'unobservable'` is NOT proof of idle and
    *  must never be consumed as one. HOW an abort is reflected onto the owner is
    *  the backend's decision (a backend may cancel it, or merely stop waiting). */
-  whenIdleOrAbort(owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean | 'unobservable'>
+  whenIdleOrAbort(
+    owner: SessionOwnerRef,
+    signal: AbortSignal,
+    receipt?: NavigationStopReceipt,
+  ): Promise<boolean | 'unobservable'>
   /** ONE-SHOT user cancel of this EXACT owner's current work, preserving its
    *  pending inbox (the Busy Esc / Stop semantic). This is deliberately NOT
    *  {@link preCancel}: that one is the synchronous shutdown preparation and

@@ -580,8 +580,12 @@ test('the navigation cancel resolves the dispatch phase without changing the con
   assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'cancelled' })
   assert.equal(binding.cancelCalls(), 0, 'a local fence never dispatches an official call')
   h.generation.set({ id: 2 })
-  // Committed: navigation may proceed.
-  assert.deepEqual(await h.services.retirement.cancelForNavigation(owner), { kind: 'committed' })
+  // Committed: navigation may proceed, and the accepted stop carries the
+  // exact-generation receipt the quiesce must later validate.
+  const committed = await h.services.retirement.cancelForNavigation(owner)
+  assert.equal(committed.kind, 'committed')
+  assert.ok(committed.kind === 'committed' && committed.receipt !== undefined,
+    'the accepted stop pins its generation')
   // A DISPATCHED caller/carrier cancellation: the control audience keeps
   // PR-A's `cancelled`, while navigation learns the call WAS dispatched.
   binding.setCancelResult({ ok: false, error: { code: 'gateway/cancelled', message: 'caller cancelled' } })
@@ -740,4 +744,34 @@ test('whenIdleOrAbort reports unobservable when the binding is replaced with NO 
     'a silent binding replacement must be detected through the retain-count liveness, never an old-face notification')
   assert.equal(binding.session.getSnapshot().running, true, 'the old face never emitted running=false')
   void replacement
+})
+
+test('a navigation stop receipt pins the generation the quiesce must observe', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  const settlement = await h.services.retirement.cancelForNavigation(owner)
+  assert.equal(settlement.kind, 'committed')
+  const receipt = settlement.kind === 'committed' ? settlement.receipt : undefined
+  assert.ok(receipt !== undefined, 'an accepted stop returns its generation receipt')
+  // The stopping generation G1 is gone, but the exact binding object survives:
+  // the quiesce must not capture G2 and use its snapshot.
+  binding.setRunning(true)
+  h.generation.set({ id: 2 })
+  assert.equal(await h.services.retirement.whenIdleOrAbort(owner, fakeSignal(), receipt), 'unobservable',
+    'the quiesce observes the receipt generation, not the live one')
+  // Positive control: with the receipt for the CURRENT generation, an observed
+  // running=false settle is still a real idle proof.
+  const h2 = harness()
+  const second = retainedHandle(h2, 'session-a')
+  const owner2 = h2.ownerOf(second.handle)
+  const binding2 = h2.bindingOf('session-a')!
+  const settlement2 = await h2.services.retirement.cancelForNavigation(owner2)
+  const receipt2 = settlement2.kind === 'committed' ? settlement2.receipt : undefined
+  binding2.setRunning(true)
+  const waiting = h2.services.retirement.whenIdleOrAbort(owner2, fakeSignal(), receipt2)
+  await new Promise(resolve => setImmediate(resolve))
+  binding2.setRunning(false)
+  assert.equal(await waiting, false, 'the same-generation receipt still observes a real idle settle')
 })

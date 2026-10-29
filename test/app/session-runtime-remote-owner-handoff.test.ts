@@ -1903,3 +1903,36 @@ test('a binding rollover after an accepted cancel reports "requested, not confir
   assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
   assert.deepEqual(h.calls.opens, [], 'the target open is NEVER attempted without a confirmed old quiesce')
 })
+
+test('an accepted stop cannot be quiesced against a generation captured after a mid-drain reconnect', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  const binding = h.bindingOf('session-a')!
+  binding.setRunning(true)
+  // A writer admitted before the navigation keeps the drain open while the
+  // accepted cancel (G1 receipt) is followed by a reconnect.
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const writer = h.runtime.withWriter(scope, async () => { await writerGate })
+  const transition = h.runtime.switchSession('session-b', scope)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.core.barrier.inTransition, true)
+  assert.equal(h.core.barrier.activeWriters, 1)
+  assert.equal(binding.cancelCalls(), 1, 'the stop was accepted on G1 before the drain')
+  // Reconnect during the drain: G2 is current, the exact binding object still
+  // exists, and the old face even reports running=false.
+  h.setGeneration({ id: 2 })
+  binding.setRunning(false)
+  releaseWriter()
+  await writer
+  const message = await transition
+  assert.match(String(message), /no longer observable/)
+  assert.match(String(message), /turn stop requested \(not yet confirmed\)/)
+  assert.doesNotMatch(String(message), /old turn stopped \(cannot resume\)/)
+  assert.equal(h.core.currentSessionId(), 'session-a')
+  assert.deepEqual(h.calls.opens, [],
+    'the target is never opened against a generation captured after the accepted stop')
+})

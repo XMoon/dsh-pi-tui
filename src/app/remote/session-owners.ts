@@ -48,6 +48,7 @@ import { classifyRemoteWriteFailure } from '../../runtime/remote/write-failure.t
 import type { RemoteResultLike } from '../../runtime/remote/session-writer-remote.ts'
 import type {
   NavigationCancelSettlement,
+  NavigationStopReceipt,
   SessionOwnerAccess,
   SessionOwnerRetirement,
   SessionRetirementFailure,
@@ -188,6 +189,7 @@ export function createRemoteSessionOwnerServices(
   const cancelExactOwner = async (owner: SessionOwnerRef): Promise<{
     readonly outcome: WriteOutcome<undefined>
     readonly dispatched: boolean
+    readonly receipt?: NavigationStopReceipt
   }> => {
     const notDispatched = (outcome: WriteOutcome<undefined>): { outcome: WriteOutcome<undefined>; dispatched: false } =>
       ({ outcome, dispatched: false })
@@ -223,7 +225,15 @@ export function createRemoteSessionOwnerServices(
         dispatched: true,
       }
     }
-    if (result.ok) return { outcome: { kind: 'committed', value: undefined }, dispatched: true }
+    if (result.ok) {
+      return {
+        outcome: { kind: 'committed', value: undefined },
+        dispatched: true,
+        // Pin the EXACT generation this accepted stop belongs to; the quiesce
+        // must validate against this token, never a generation captured later.
+        receipt: { token: capturedGeneration },
+      }
+    }
     return { outcome: classifyRemoteWriteFailure(result.error), dispatched: true }
   }
 
@@ -243,9 +253,9 @@ export function createRemoteSessionOwnerServices(
    * - a proven business refusal is `rejected`, success `committed`.
    */
   const cancelForNavigation = async (owner: SessionOwnerRef): Promise<NavigationCancelSettlement> => {
-    const { outcome, dispatched } = await cancelExactOwner(owner)
+    const { outcome, dispatched, receipt } = await cancelExactOwner(owner)
     switch (outcome.kind) {
-      case 'committed': return { kind: 'committed' }
+      case 'committed': return { kind: 'committed', ...receipt === undefined ? {} : { receipt } }
       case 'rejected': return { kind: 'rejected', detail: outcome.error.message }
       case 'unsupported': return { kind: 'rejected', detail: outcome.reason }
       case 'cancelled':
@@ -259,13 +269,23 @@ export function createRemoteSessionOwnerServices(
     }
   }
 
-  const whenIdleOrAbort = (owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean | 'unobservable'> => {
+  const whenIdleOrAbort = (
+    owner: SessionOwnerRef,
+    signal: AbortSignal,
+    receipt?: NavigationStopReceipt,
+  ): Promise<boolean | 'unobservable'> => {
     const record = recordOf(owner)
-    // Capture the EXACT Connection generation the wait (and the cancel that
-    // preceded it) belongs to: a later generation must not prove anything
-    // about this one.
-    const capturedGeneration = generation.getSnapshot()
+    // The accepted navigation stop pins its EXACT Connection generation in the
+    // receipt; the quiesce must observe THAT generation, never one captured
+    // after a later reconnect. A missing/foreign receipt generation is not a
+    // proof either.
+    const capturedGeneration = (receipt === undefined ? generation.getSnapshot() : receipt.token) as
+      | ReturnType<typeof generation.getSnapshot>
+      | undefined
     if (capturedGeneration === undefined) return Promise.resolve('unobservable')
+    // If the stop's generation is already no longer the live one, the quiesce
+    // cannot prove anything about it.
+    if (!Object.is(generation.getSnapshot(), capturedGeneration)) return Promise.resolve('unobservable')
     // Borrow the live binding and fence it by exact identity: a replaced or
     // fully retired generation is not observable through the official borrow,
     // and the wait must never observe a NEW same-id generation instead.
