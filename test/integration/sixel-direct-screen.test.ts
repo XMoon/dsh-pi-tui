@@ -894,30 +894,43 @@ test('E2-04: the Viewer grant survives the frozen resize matrix and a Main↔Alt
   await waitViewport(terminal, 'Image · bands.png', 'the initial Viewer')
 
   // The frozen size matrix: every real terminal resize re-grants the Viewer's
-  // body rows. Each step looks at the bytes THIS resize's frame wrote (or the
-  // last committed raster when that frame reused it), never at an older frame
-  // that could accidentally satisfy the new ceiling.
-  let lastCommittedDcs = paintedRasters(terminal).at(-1)!
+  // body rows. Let the resize's fact re-observation settle, then force ONE
+  // current-state frame and judge only the DCS that frame really writes: an
+  // old frame can never satisfy the new ceiling by accident, and a short
+  // window can never hide a later asynchronous body write.
   for (const [cols, rows] of [[120, 40], [80, 24], [44, 12], [40, 8], [40, 2], [20, 1]] as const) {
     terminal.writes.length = 0
     terminal.emitResize(cols, rows)
-    await until(() => stripSgr(terminal.writes.join('')).includes('Esc'), `${cols}x${rows}: the resize frame with chrome`)
+    await until(() => terminal.writes.join('').includes('\x1b[16t'), `${cols}x${rows}: the resize re-observation`)
+    await terminal.flush()
+    await new Promise(resolve => setImmediate(resolve))
+    terminal.writes.length = 0
+    app.requestRender(true)
+    await until(() => stripSgr(terminal.writes.join('')).includes('Esc'), `${cols}x${rows}: the current frame with chrome`)
     await terminal.flush()
     const view = await viewportOf(terminal)
     assert.equal(view.split('\n').length, rows, `${cols}x${rows}: the viewport really changed`)
     assert.ok(stripSgr(view).includes('Esc'), `${cols}x${rows}: the mandatory Esc hint survives`)
+    if (rows > 2) {
+      // The resize re-observes facts asynchronously; keep asking for real
+      // frames until the encoder settlement of the current grant lands.
+      await until(() => {
+        app.requestRender(true)
+        return paintedRasters(terminal).length > 0
+      }, `${cols}x${rows}: the current body raster settle`, 30_000)
+      await terminal.flush()
+    }
     const frameRasters = paintedRasters(terminal)
     if (rows <= 2) {
       assert.equal(frameRasters.length, 0, `${cols}x${rows}: the chrome-only frame writes no body raster`)
       continue
     }
-    assert.ok(frameRasters.length > 0 || lastCommittedDcs !== undefined, `${cols}x${rows}: a raster remains visible`)
-    for (const dcs of frameRasters.length > 0 ? frameRasters : [lastCommittedDcs]) {
+    assert.ok(frameRasters.length > 0, `${cols}x${rows}: the current frame writes its body raster`)
+    for (const dcs of frameRasters) {
       const decoded = decodeSixel(dcs)
       assert.ok(decoded.width <= cols * 10, `${cols}x${rows}: raster width ${decoded.width} fits the grant`)
       assert.ok(decoded.height <= (rows - 2) * 20, `${cols}x${rows}: raster height ${decoded.height} fits body rows`)
     }
-    if (frameRasters.length > 0) lastCommittedDcs = frameRasters.at(-1)!
   }
   assert.equal(reads, 1, 'the resize matrix never re-reads the attachment bytes')
 
@@ -1111,19 +1124,8 @@ test('E2-06: a published Assistant SIXEL figure exposes the committed hit and it
   assert.ok(committed.endRow > committed.startRow)
   assert.ok(committed.endCol > 0)
 
-  // The committed body reaches the fullscreen paint snapshot on the next
-  // frame boundary; wait for that snapshot (the press path reads it), then
-  // resolve the physical rows from the CURRENT viewport.
-  const snapshotHasBody = (): boolean => {
-    const rows = (app as unknown as {
-      fullscreenPaintSnapshot?: { rows: Array<{ visualHits?: Array<{ kind: string }> }> }
-    }).fullscreenPaintSnapshot?.rows ?? []
-    return rows.some(row => (row.visualHits ?? []).some(hit => hit.kind === 'body'))
-  }
-  // The commit's own settle seam marks the row map dirty; request the frame
-  // that publishes it (the same path a real pixel settle uses).
-  ;(app as unknown as { settleThumbnailRender(): void }).settleThumbnailRender()
-  await until(snapshotHasBody, 'the fullscreen paint snapshot to include the committed pixel body')
+  // The production press path reconciles a newly painted body itself; resolve
+  // the physical rows from the current viewport and click.
   const pressView = await viewportOf(terminal)
   const pressTopRow = rowOf(pressView, 'Service topology')
   const pressPixelFirst = pressTopRow + committed.startRow
@@ -1147,9 +1149,7 @@ test('E2-06: a published Assistant SIXEL figure exposes the committed hit and it
   // The FIRST and LAST real pixel cells open the leased Viewer. After each
   // close, wait for the transcript repaint and its refreshed press snapshot.
   for (const x of [1, committed.endCol]) {
-    ;(app as unknown as { settleThumbnailRender(): void }).settleThumbnailRender()
     await waitViewport(terminal, 'Service topology', `the transcript frame before pixel col ${x}`)
-    await until(snapshotHasBody, `the press snapshot before pixel col ${x}`)
     const fresh = await viewportOf(terminal)
     const freshPixelFirst = rowOf(fresh, 'Service topology') + committed.startRow
     terminal.sendInput(`\x1b[<0;${x};${freshPixelFirst}M`)
@@ -1255,9 +1255,10 @@ test('E2-07: the SIXEL SVG Viewer Preview/Source/Copy/resize/release path', asyn
   await waitViewport(terminal, '[Preview]', 'the Preview page before the resize')
   terminal.writes.length = 0
   const beforeResize = rasterWidths.length
+  const beforeResizeRasters = paintedRasters(terminal).length
   terminal.emitResize(80, 24)
   await until(() => rasterWidths.length > beforeResize, 'the resized Viewer variant')
-  const resizeDcs = await nextRaster(terminal, paintedRasters(terminal).length, 'the resized Viewer DCS')
+  const resizeDcs = await nextRaster(terminal, beforeResizeRasters, 'the resized Viewer DCS')
   const resizeDecoded = decodeSixel(resizeDcs)
   assert.ok(resizeDecoded.height <= (24 - 2) * 20, 'the resized raster fits the body grant')
   assert.ok(rasterWidths.at(-1)! < lastWidth, `a narrower grant selects a smaller variant: ${rasterWidths.join(',')}`)
@@ -1267,7 +1268,7 @@ test('E2-07: the SIXEL SVG Viewer Preview/Source/Copy/resize/release path', asyn
   // Esc releases the workspace and its exact variant subscription.
   terminal.writes.length = 0
   terminal.sendInput('\x1b')
-  await waitViewport(terminal, 'Service topology', 'the transcript after the SVG Viewer')
+  await waitViewportGone(terminal, 'SVG · Service topology', 'the SVG Viewer to close')
   assert.ok(viewerUnsubscriptions > 0, 'the Viewer released its variant subscription')
   const widthsAtClose = rasterWidths.length
   await terminal.flush()
@@ -1383,7 +1384,7 @@ test('E2-08: SVG Viewer width variants, page switching, close/reopen and crop st
   await waitViewport(terminal, 'SVG · Service topology', 'the Viewer after restoring geometry')
   terminal.writes.length = 0
   terminal.sendInput('\x1b')
-  await waitViewport(terminal, 'Service topology', 'the transcript after the first Viewer')
+  await waitViewportGone(terminal, 'SVG · Service topology', 'the first SVG Viewer to close')
   await until(() => paintedRasters(terminal).length > 0, 'the transcript thumbnail re-encode')
   assert.ok(viewerUnsubscriptions > 0, 'closing the Viewer releases its variant subscription')
   assert.ok(!terminal.writes.join('').includes('SIXC'), 'no Viewer candidate marker survives the close')
@@ -1397,8 +1398,7 @@ test('E2-08: SVG Viewer width variants, page switching, close/reopen and crop st
   const reopenedDcs = await nextRaster(terminal, 0, 'the reopened Viewer DCS')
   assert.ok(decodeSixel(reopenedDcs).width > 64, 'the reopened Viewer paints its own pixels')
   terminal.sendInput('\x1b')
-  const back = await waitViewport(terminal, 'Service topology', 'the transcript after the reopened Viewer')
-  assert.ok(back.includes('Service topology'), 'the transcript is restored after the reopened Viewer')
+  await waitViewportGone(terminal, 'SVG · Service topology', 'the reopened SVG Viewer to close')
 })
 test('E2-09: a long 24-image transcript fills the registry, then re-encodes old images and the SVG Viewer', async (t) => {
   const pngs: Uint8Array[] = []
@@ -1432,6 +1432,8 @@ test('E2-09: a long 24-image transcript fills the registry, then re-encodes old 
   app.setTranscript([...folder.messages(), ...svgFolder.messages()])
   app.requestRender()
   await waitViewport(terminal, 'Service topology', 'the published SVG after the long image history')
+  const mounted = (app as unknown as { mountedImageOccurrences(): unknown[] }).mountedImageOccurrences()
+  assert.equal(mounted.length, 24, 'all 24 distinct image occurrences are in the mounted window')
 
   /** The green top-band value of every distinct image raster currently encoded. */
   const encodedImageColors = (): Set<number> => {
@@ -1450,7 +1452,8 @@ test('E2-09: a long 24-image transcript fills the registry, then re-encodes old 
   // The visible SVG thumbnail also consumes one of the 16 slots, so 15
   // distinct IMAGE variants + the SVG variant fill the budget exactly.
   await until(() => encodedImageColors().size >= 15, '15 distinct visible image variants', 60_000)
-  assert.ok(encodedImageColors().size <= 16, 'the 16-variant registry cap is preserved')
+  const owner = (app as unknown as { graphics?: { records?: Map<string, unknown> } }).graphics
+  assert.equal(owner?.records?.size, 16, 'the authoritative registry holds exactly its 16-variant budget')
   assert.ok(paintedRasters(terminal).length < 300, `no unbounded retry storm: ${paintedRasters(terminal).length} rasters`)
 
   // Open the OLDEST image through the REAL /view-image LIST journey; its slot

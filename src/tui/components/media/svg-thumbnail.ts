@@ -38,6 +38,8 @@ export type SvgThumbnailTheme = ImageThumbnailTheme
 export interface SvgThumbnailBody {
   readonly rows: number
   readonly endCol: number
+  /** Rows cropped from the top of the source by the Screen's visible window. */
+  readonly cropTopRows?: number
 }
 
 /**
@@ -130,7 +132,12 @@ export class SvgThumbnail implements Component {
   paintedImageBody(width: number): SvgThumbnailBody | undefined {
     if (this.graphics?.mode === 'sixel') {
       const live = this.instance?.paintedBodyAt?.(width)
-      return live === undefined ? undefined : { rows: live.rows, endCol: live.columns }
+      if (live === undefined) return undefined
+      return {
+        rows: live.rows,
+        endCol: live.columns,
+        ...(live.cropTopRows === undefined ? {} : { cropTopRows: live.cropTopRows }),
+      }
     }
     const painted = this.paintedBody
     if (painted === undefined || painted.width !== width) return undefined

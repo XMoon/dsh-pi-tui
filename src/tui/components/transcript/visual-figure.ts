@@ -230,10 +230,18 @@ export class VisualFigureComponent implements Component {
       const live = this.thumbnail.paintedImageBody(width)
       const startRow = this.painted.thumbnailStartRow
       const maxRows = this.painted.thumbnailMaxRows
+      const cropTopRows = live?.cropTopRows ?? 0
       if (live !== undefined && startRow !== undefined && maxRows !== undefined
-        && live.rows > 0 && live.rows <= maxRows
+        && live.rows > 0 && cropTopRows >= 0 && cropTopRows + live.rows <= maxRows
         && live.endCol > 0 && live.endCol <= width) {
-        thumbnailBody = { startRow, endRow: startRow + live.rows, endCol: live.endCol, startCol: 0 }
+        // A top-cropped Screen window starts at the source row it really
+        // shows; the figure-relative start must move by that many rows.
+        thumbnailBody = {
+          startRow: startRow + cropTopRows,
+          endRow: startRow + cropTopRows + live.rows,
+          endCol: live.endCol,
+          startCol: 0,
+        }
       }
     }
     return {
