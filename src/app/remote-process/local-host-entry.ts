@@ -344,6 +344,13 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
   try {
     const scratchDir = mkdtempSync(join(scope.dir, 'host-scratch-'))
     scratchOwner.scratchDir = scratchDir
+    if (process.env.SPLIT_PROCESS_HOST_FORCE_EARLY_EXIT === '1') {
+      // Qualification-only: a forced exit after this process owns its scratch
+      // and before runProfile installs the launcher signal handlers. The
+      // wrapper's synchronous exit mirror must remove the scratch even though
+      // the async finally never runs.
+      process.exit(1)
+    }
     const overlayPath = join(scratchDir, 'host-only.patch.yml')
     writeFileSync(overlayPath, HOST_ONLY_PATCH, { mode: 0o600 })
     const processStartIdentity = readLinuxStarttime()

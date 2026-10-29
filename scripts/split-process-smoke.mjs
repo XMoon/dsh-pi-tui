@@ -20,6 +20,7 @@
  *   T15 a dead Host leaves only a stale candidate; a Client safely starts a new one
  *   T18 installed package shape and Direct `--help` remain unchanged
  *   T19 signal admission precedes publication; repeated same signals stay idempotent (no ready)
+ *   T20 an early forced exit removes the Host-created scratch before profile boot
  *
  * Usage: node scripts/split-process-smoke.mjs [path-to-candidate.tgz]
  *        pnpm smoke:split-process -- [path-to-candidate.tgz]
@@ -1463,6 +1464,37 @@ async function main() {
         cleanupRecords: 1,
         registryRemoved: true,
         launchRemoved: true,
+        scratchRemoved: true,
+        hostSeatFree: true,
+      })
+    }
+
+    // T20: a forced exit after this Host created its scratch and BEFORE
+    // runProfile installs the launcher's signal handlers bypasses the async
+    // finally. The synchronous exit mirror must remove only this process's
+    // own scratch; the Host seat is released by the OS and no profile boots.
+    {
+      const earlyBaselineScratch = new Set(scopeScratchDirs())
+      const earlyExit = new EntryProcess('host', entries.host, {
+        ...base,
+        env: { ...base.env, SPLIT_PROCESS_HOST_FORCE_EARLY_EXIT: '1' },
+      })
+      const earlyExitResult = await earlyExit.waitForExit(30_000)
+      assert(
+        earlyExitResult.code === 1 && earlyExitResult.signal === null,
+        `T20 early forced exit was ${JSON.stringify(earlyExitResult)}`,
+      )
+      assert(!earlyExit.records.some(record => record.m4a0 === 'profile-booted'), 'T20 exited after profile boot')
+      const earlyRemaining = scopeScratchDirs()
+      assert(
+        earlyRemaining.length === earlyBaselineScratch.size
+          && earlyRemaining.every(name => earlyBaselineScratch.has(name)),
+        `T20 early forced exit leaked its own scratch: ${JSON.stringify(earlyRemaining)}`,
+      )
+      await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 10_000)
+      trace('t20-early-exit-scratch', {
+        exit: earlyExitResult.code,
+        profileBooted: false,
         scratchRemoved: true,
         hostSeatFree: true,
       })
