@@ -1246,6 +1246,26 @@ async function main() {
     assert(!missingHostRecords.some(record => record.m4a0 === 'cleanup-failure'), 'T17 missing host chunk falsely reported cleanup failure')
     trace('t17-host-chunk', { phase: 'after-boot', cleanup: 'completed' })
 
+    // RFL-010/F3: a real Client spawn whose Host fails before runProfile must
+    // remove only its own launcher-created scratch. The main Host is already
+    // dead, so ensureLocalHost actually spawns a candidate.
+    const scopeScratchDirs = () => readdirSync(scopeDir).filter(name => name.startsWith('host-scratch-'))
+    const preProfileScratch = scopeScratchDirs().length
+    const preProfile = new EntryProcess('client', entries.client, {
+      ...base,
+      env: { ...base.env, SPLIT_PROCESS_HOST_FORCE_BOOT_FAILURE: 'before-profile' },
+    })
+    const preProfileFailure = await preProfile.waitFor(record => record.m4a0 === 'failure', 'F3 pre-profile Host failure', 120_000)
+    const preProfileExit = await preProfile.waitForExit(30_000)
+    assert(preProfileExit.code === 1, `F3 pre-profile Client exit was ${JSON.stringify(preProfileExit)}`)
+    assert(preProfileFailure.code === 'HOST_START_TIMEOUT', `F3 pre-profile code was ${JSON.stringify(preProfileFailure.code ?? preProfileFailure.error)}`)
+    assert(scopeScratchDirs().length === preProfileScratch, 'an early Host failure left its private scratch behind')
+    assert(
+      readFileSync(join(scopeDir, 'host.log'), 'utf8').includes('qualification forced pre-profile failure'),
+      'the Host did not fail before runProfile as requested',
+    )
+    trace('t15-preprofile-scratch', { before: preProfileScratch, after: scopeScratchDirs().length })
+
     // F1: the stale registry names a real killed-but-unreaped zombie. The
     // Client must classify it dead from /proc state Z + matching starttime and
     // start a replacement through the free kernel seat.
@@ -1261,9 +1281,8 @@ async function main() {
     assert(c6Outcome.host.hostPid !== zombie.pid, 'T15 new Host reused the zombie PID')
     assert(c6Outcome.host.hostStarttime !== hostReady.localHost.hostStarttime, 'T15 new Host reused the dead starttime')
     assert(c6Outcome.host.hostStarttime !== zombie.starttime, 'T15 new Host reused the zombie starttime')
-    const scopeScratchDirs = () => readdirSync(scopeDir).filter(name => name.startsWith('host-scratch-'))
     assert(scopeScratchDirs().length === 1, 'T15 spawned Host scratch is not the one process-owned directory')
-    trace('t15-scratch', { afterSpawn: scopeScratchDirs().length, afterAttach: 1, afterCleanExit: 0 })
+    trace('t15-scratch-spawn', { afterSpawn: scopeScratchDirs().length })
     assertClientHostFacts(c6Outcome.host, readJson(registryPath), 'T15 new Client/registry')
     trackedProcesses.set(c6Outcome.host.hostPid, c6Outcome.host.hostStarttime)
     failpoint('spawned-host')
@@ -1289,6 +1308,7 @@ async function main() {
     assert(c7Outcome.m4a0 === 'ready' && c7Outcome.transport === 'connected', `T15 attach did not connect: ${JSON.stringify(c7Outcome)}`)
     assertClientHostFacts(c7Outcome.host, c6Outcome.host, 'T15 attach')
     assert(scopeScratchDirs().length === 1, 'a new Client erased the active Host overlay scratch')
+    trace('t15-scratch-attach', { afterAttach: scopeScratchDirs().length })
     const c7Exit = await c7.shutdown()
     assert(c7Exit.code === 0, `T15 attach exit was ${JSON.stringify(c7Exit)}`)
     assert(alive(c6Outcome.host.hostPid), 'T15 attach killed the new Host')
@@ -1309,7 +1329,7 @@ async function main() {
     }
     assert(!alive(c6Outcome.host.hostPid), 'T17 spawned Host did not exit')
     assert(scopeScratchDirs().length === 0, 'the clean Host shutdown left a host-scratch directory')
-    trace('t15-scratch', { afterSpawn: 1, afterAttach: 1, afterCleanExit: scopeScratchDirs().length })
+    trace('t15-scratch-clean', { afterCleanExit: scopeScratchDirs().length })
     const scopeSuffix = hostReady.localHost.scopeId.slice(0, 40)
     await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 10_000)
     await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 10_000)

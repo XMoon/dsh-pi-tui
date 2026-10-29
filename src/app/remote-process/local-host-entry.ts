@@ -27,7 +27,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { attachEntryControl, createEntryDiag, writeEntryRecord } from './entry-control.ts'
 import {
@@ -253,11 +253,26 @@ async function publishLocalHost(
 }
 
 /**
+ * Run one Host-only process and always remove the launcher-created scratch
+ * after the process-owned boot/shutdown lifetime ends. A failure anywhere
+ * before the post-boot controller (official-module load, scope construction,
+ * kernel seat, overlay write, starttime read or profile boot) still passes
+ * through this owner-safe finally; a still-running Host keeps its overlay.
+ */
+export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise<void> {
+  try {
+    await runLocalHostEntryOwned(options)
+  } finally {
+    removeOwnedScratch(dirname(options.scratchDir), options.scratchDir)
+  }
+}
+
+/**
  * Run one Host-only process until its launcher requests shutdown. Exported so
  * the process-level qualification harness can document its exact contract; the
  * module's `import.meta.main` block is the only caller in production.
  */
-export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise<void> {
+async function runLocalHostEntryOwned(options: LocalHostEntryOptions): Promise<void> {
   const dsh = await loadOfficialDsh(options.dshAnchor)
   const dshHome = dsh.resolveDshHome()
   const scope = scopeFromInstalledProfile({
@@ -294,6 +309,9 @@ export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise
     const overlayPath = join(options.scratchDir, 'host-only.patch.yml')
     writeFileSync(overlayPath, HOST_ONLY_PATCH, { mode: 0o600 })
     const processStartIdentity = readLinuxStarttime()
+    if (process.env.SPLIT_PROCESS_HOST_FORCE_BOOT_FAILURE === 'before-profile') {
+      throw new Error('local host entry: qualification forced pre-profile failure')
+    }
     // The profile's startup row reads these launcher facts. The identity
     // marker binds the role to THIS executable, so a regular CLI that inherits
     // the role string cannot suppress the TUI-surface verdict (see startup.ts).
