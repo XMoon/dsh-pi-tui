@@ -2713,6 +2713,7 @@ test('two overlapping /new intents admit exactly ONE create; the duplicate is re
     await waitUntil('C publication', () => presentedSessions(owned.pane).at(-1) === sessionC, 15_000)
   } finally {
     releaseCreate()
+    // Bounded fixture teardown (the owned runner is closed, not a timing window).
     await owned.settle()
   }
 })
@@ -2769,6 +2770,7 @@ test('a failed /new releases the in-flight marker, reports the stopped old Turn,
       'the committed retry retires A exactly once')
   } finally {
     releaseIdle.get(sessionA.id)?.()
+    // Bounded fixture teardown (the owned runner is closed, not a timing window).
     await owned.settle()
   }
 })
