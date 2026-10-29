@@ -13,7 +13,12 @@
  * socket for the canonical DSH profile; losing that kernel claim is a clean
  * non-fault exit. After boot it registers one authenticated identity Fetch
  * route, publishes the private launch material, and commits `instance.json`
- * as its last Ready step.
+ * as its last Ready step. Process-lifetime SIGTERM/SIGINT admission is
+ * installed before the registry becomes discoverable: a signal observed while
+ * publication is still in flight is kept as one pending stop intent and runs
+ * the ordinary owner-governed shutdown once the published identity and the
+ * official shutdown owner are both available, never emitting Ready for a
+ * stop-requested Host.
  *
  * The entry is an internal qualification artifact, not a package export or a
  * CLI command: the launcher supplies the DSH installation anchor, profile name
@@ -24,7 +29,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -238,6 +243,19 @@ async function publishLocalHost(
     // the official Connection owner rather than a bare webserver handler.
     await waitForRefusal(`${origin}/api/pi-tui.local-host`)
     writeLocalRecord(scope, identity)
+    // Qualification barrier: hold the process after the registry commit and
+    // before the caller can report Ready, so a launcher can deliver a signal in
+    // the exact publication gap. Production never sets this variable.
+    const barrier = process.env.SPLIT_PROCESS_HOST_PUBLISH_BARRIER
+    if (barrier !== undefined && barrier !== '') {
+      const deadline = Date.now() + 30_000
+      while (!existsSync(barrier)) {
+        if (Date.now() > deadline) {
+          throw new Error('local host entry: the qualification publication barrier was not released')
+        }
+        await new Promise(resolve => setTimeout(resolve, 20))
+      }
+    }
   } catch (error) {
     try {
       await unregister?.()
@@ -327,12 +345,17 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
     if (process.argv[1] !== undefined) {
       process.env.DSH_PI_TUI_HOST_ENTRY = realpathSync(process.argv[1])
     }
+    // Snapshot the process signal listeners so the entry can identify the
+    // launcher-installed CLI shortcut after the official handle exists.
+    const priorSigterm = process.listeners('SIGTERM')
+    const priorSigint = process.listeners('SIGINT')
     handle = await dsh.runProfile({
       environment: dsh.loadLayeredEnv('dsh', process.cwd()),
       profile: options.profile,
       patchFiles: [overlayPath, ...options.extraPatchFiles ?? []],
       args: [],
     })
+    const shutdownOwner = handle.shutdown
     // From here on the Host root exists. EVERY step — first record, the lazy
     // audit import, the audit itself, ready publication and control
     // installation — is owned by the launcher shutdown controller on failure.
@@ -343,18 +366,15 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       const { settleHostEntries, collectHostEntryStatus } = await import('./host-bootstrap.ts')
       await settleHostEntries(handle.ctx)
       const status = collectHostEntryStatus(handle.ctx, { profile: options.profile, processStartIdentity })
-      const published = await publishLocalHost(handle.ctx, scope, processStartIdentity)
-      registration = published
-      const instanceId = published.identity.instanceId
-      // The exit backstop removes only this instance's files; SIGKILL leaves
-      // them for the stale-candidate path to classify.
-      process.once('exit', () => { cleanupOwnedFiles(scope, instanceId) })
-      writeEntryRecord({ m4a0: 'ready', ...status, localHost: published.identity })
-
+      // R1: signal admission is process-lifetime and precedes the discoverable
+      // registry. A signal inside the publication gap becomes ONE pending stop
+      // intent; it cannot default-terminate the process and cannot create a
+      // second Host shutdown owner.
+      let published: PublishedLocalHost | undefined
       let stopping: Promise<void> | undefined
       let resolveStopped: (() => void) | undefined
       const stopped = new Promise<void>(resolve => { resolveStopped = resolve })
-      const stop = (code: number): Promise<void> => {
+      const stop = (code: number, owner: PublishedLocalHost): Promise<void> => {
         if (stopping !== undefined) return stopping
         stopping = (async () => {
           const errors: Array<{ step: string; error: unknown }> = []
@@ -370,16 +390,16 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
             errors.push({ step: 'scratch-remove', error })
           }
           try {
-            await published.unregisterIdentity()
+            await owner.unregisterIdentity()
           } catch (error) {
             errors.push({ step: 'identity-unregister', error })
           }
           try {
-            await handle?.shutdown.shutdown(code)
+            await shutdownOwner.shutdown(code)
           } catch (error) {
             errors.push({ step: 'shutdown', error })
           }
-          cleanupOwnedFiles(scope, instanceId)
+          cleanupOwnedFiles(scope, owner.identity.instanceId)
           if (errors.length > 0) {
             const first = errors[0]
             const primary = first.error instanceof Error ? first.error : new Error(String(first.error))
@@ -393,31 +413,78 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
             })
             process.exitCode = 1
           } else {
+            writeEntryRecord({
+              m4a0: 'cleanup',
+              processRole: 'host',
+              phase: 'shutdown',
+              pid: process.pid,
+              status: 'completed',
+            })
             process.exitCode = code
           }
           resolveStopped?.()
         })()
         return stopping
       }
+      let pendingStop: number | undefined
+      const requestStop = (code: number, signal: 'SIGTERM' | 'SIGINT'): void => {
+        if (pendingStop !== undefined) return
+        pendingStop = code
+        const owner = published
+        writeEntryRecord({
+          m4a0: 'stop-requested',
+          processRole: 'host',
+          pid: process.pid,
+          signal,
+          phase: owner === undefined ? 'publication' : 'running',
+        })
+        if (owner !== undefined) {
+          runDetached(`local host: ${signal} shutdown`, () => stop(code, owner), { diag: createEntryDiag('host') })
+        }
+      }
+      // runProfile installs one CLI signal shortcut per signal (interrupt →
+      // disposal + forced process exit) before the profile tree mounts. This
+      // long-lived entry owns process lifetime and must finish its published
+      // identity and scratch cleanup through the SAME official shutdown
+      // controller, so the launcher shortcut is removed here; the entry's own
+      // handlers become the single process-lifetime admission. The launcher
+      // registers before mounting the tree, so each shortcut is the first
+      // listener added since the pre-boot snapshot; listeners added by mounted
+      // rows later are untouched.
+      const launcherSigterm = process.listeners('SIGTERM').find(listener => !priorSigterm.includes(listener))
+      if (launcherSigterm !== undefined) process.removeListener('SIGTERM', launcherSigterm)
+      const launcherSigint = process.listeners('SIGINT').find(listener => !priorSigint.includes(listener))
+      if (launcherSigint !== undefined) process.removeListener('SIGINT', launcherSigint)
+      process.once('SIGTERM', () => { requestStop(0, 'SIGTERM') })
+      process.once('SIGINT', () => { requestStop(130, 'SIGINT') })
 
-      process.once('SIGTERM', () => {
-        runDetached('local host: SIGTERM shutdown', () => stop(0), { diag: createEntryDiag('host') })
-      })
-      process.once('SIGINT', () => {
-        runDetached('local host: SIGINT shutdown', () => stop(130), { diag: createEntryDiag('host') })
-      })
+      const publishedHost = await publishLocalHost(handle.ctx, scope, processStartIdentity)
+      published = publishedHost
+      registration = publishedHost
+      // The exit backstop removes only this instance's files; SIGKILL leaves
+      // them for the stale-candidate path to classify.
+      process.once('exit', () => { cleanupOwnedFiles(scope, publishedHost.identity.instanceId) })
+      if (pendingStop !== undefined) {
+        // A signal was admitted while the registry was becoming discoverable.
+        // The published identity and the official shutdown owner are now both
+        // available, so run the ordinary owner-governed shutdown WITHOUT ever
+        // advertising Ready.
+        await stop(pendingStop, publishedHost)
+        return
+      }
+      writeEntryRecord({ m4a0: 'ready', ...status, localHost: publishedHost.identity })
       attachEntryControl(async request => {
         if (request.op === 'status') {
           writeEntryRecord({
             m4a0: 'status',
             ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
             ...collectHostEntryStatus(handle!.ctx, { profile: options.profile, processStartIdentity }),
-            localHost: published.identity,
+            localHost: publishedHost.identity,
           })
           return false
         }
         if (request.op === 'shutdown') {
-          await stop(0)
+          await stop(0, publishedHost)
           return true
         }
         writeEntryRecord({ m4a0: 'control-error', error: `local host entry: unknown op ${JSON.stringify(request.op)}` })
@@ -474,7 +541,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         })
       }
       await finishHostFailureCleanup(
-        handle.shutdown,
+        shutdownOwner,
         writeEntryRecord,
         priorCleanupFailure === undefined ? undefined : { priorCleanupFailure },
       )
