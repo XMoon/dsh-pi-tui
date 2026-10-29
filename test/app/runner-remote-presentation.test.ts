@@ -80,6 +80,7 @@ import { dshHome } from '../../src/runtime/process/diagnostics.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
+import { wireNodes } from '../support/tsp-picker-wire.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -238,6 +239,8 @@ export async function mountRemoteRunner(
     beforeRunnerMount?: (presentation: RemoteApplicationOverride['presentation']) => void
     /** Mount the production TSP renderer over the scripted pane instead of PiTui. */
     renderer?: 'pi-tui' | 'tsp'
+    /** Advertise the TSP Session Browser presenter (for /sessions and /resume). */
+    sessionBrowser?: boolean
     /** Advertise native image + blobs when the TSP renderer is selected. */
     nativeImages?: boolean
     /** Advertise the native chart kind when the TSP renderer is selected. */
@@ -268,7 +271,11 @@ export async function mountRemoteRunner(
   const vt = new VirtualTerminal(100, 30)
   let pane: TspPane | undefined
   if (options.renderer === 'tsp') {
-    pane = installTspPane({ nativeImages: options.nativeImages, nativeChart: options.nativeChart })
+    pane = installTspPane({
+      nativeImages: options.nativeImages,
+      nativeChart: options.nativeChart,
+      sessionBrowser: options.sessionBrowser,
+    })
     life.defer(() => pane?.restore())
     process.env.DSH_PI_TUI_RENDERER = 'tsp'
   } else {
@@ -2781,5 +2788,68 @@ test('C3 Remote negative: the sample-less performance/context groups word Unavai
     if (originalEnvWAYLAND === undefined) delete process.env.WAYLAND_DISPLAY
     else process.env.WAYLAND_DISPLAY = originalEnvWAYLAND
     await fixture?.dispose()
+  }
+})
+
+test('a Remote TSP /resume failure is visible once and an indeterminate outcome never restores the command', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'prc-remote-resume-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId('prc-current'), undefined, { cwd: host.anchorDir })
+  await host.harness.create(SessionId('prc-target'), undefined, { cwd: host.anchorDir })
+  const fixture = await mountRemoteRunner(life, {
+    host,
+    presetId,
+    resumeSessionId: 'prc-current',
+    renderer: 'tsp',
+    sessionBrowser: true,
+  })
+  const pane = fixture.pane
+  assert.ok(pane, 'the Remote TSP pane must be mounted')
+  const composerText = (): string | undefined => {
+    const composer = wireNodes({ frames: () => pane.frames() }).find(node => node.id === 'dock.composer')
+    return typeof composer?.p === 'object' && composer.p !== null && typeof (composer.p as { text?: unknown }).text === 'string'
+      ? (composer.p as { text: string }).text
+      : undefined
+  }
+  const clearComposer = async (): Promise<void> => {
+    for (let index = 0; index < (composerText() ?? '').length; index += 1) pane.input.type('\x7f')
+    await waitFor('the composer to clear', () => (composerText() ?? '') === '', 15_000)
+  }
+  const submit = async (line: string): Promise<void> => {
+    pane.input.type(line)
+    await waitFor(`the composer to hold ${line}`, () => composerText() === line, 15_000)
+    pane.input.type('\r')
+  }
+  const lifecycle = fixture.override.selected.backend.sessionLifecycle as unknown as {
+    open: (...args: never[]) => Promise<unknown>
+  }
+  const originalOpen = lifecycle.open
+  life.defer(() => { lifecycle.open = originalOpen })
+  try {
+    lifecycle.open = async () => ({
+      ownership: 'current',
+      outcome: { kind: 'unavailable', message: 'session "prc-target" is lease-held' },
+    })
+    await submit('/resume prc-target')
+    await waitFor('the Remote failure notice', () => pane.output.text().includes('lease-held'), 25_000)
+    assert.equal(pane.output.text().split('lease-held').length - 1, 1,
+      'the card-less Remote route publishes the /resume failure exactly once')
+    assert.equal(composerText(), '/resume prc-target',
+      'a real failure keeps the command draft retryable')
+    await clearComposer()
+
+    lifecycle.open = async () => ({
+      ownership: 'superseded',
+      outcome: { kind: 'opened', handle: { session: { id: 'prc-target' } } },
+    })
+    await submit('/resume prc-target')
+    await waitFor('the Remote indeterminate notice', () => pane.output.text().includes('do not retry automatically'), 25_000)
+    assert.equal(pane.output.text().split('do not retry automatically').length - 1, 1,
+      'the indeterminate result is visible exactly once')
+    assert.equal(composerText(), '',
+      'an indeterminate open is not restored as a retryable command')
+  } finally {
+    lifecycle.open = originalOpen
   }
 })

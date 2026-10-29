@@ -340,7 +340,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             settle({ kind: 'cancelled' })
             return
           }
-          if (!direct) app.notify(sanitizeTerminalText(text), 'error')
+          if (!direct) presentation.notify(sanitizeTerminalText(text), 'error')
           settle({ kind: 'failed', text })
         }
         // The native Browser's `resumePending` is the non-terminal indicator;
@@ -792,15 +792,17 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           controller.abort()
           picker.close()
           app.notify('switching session…', 'info')
-          void switchSessionOutcome(match.id, resumeScope).then(
-            (outcome) => {
+          runOwned('session switch', () => switchSessionOutcome(match.id, resumeScope), {
+            diag: runner.diag,
+            sessionId: () => match.id,
+            onResult: (outcome) => {
               if (outcome.kind === 'committed') settleOnce({ kind: 'switched' })
               else if (outcome.kind === 'cancelled') settleOnce({ kind: 'cancelled' })
               else if (outcome.kind === 'indeterminate') settleOnce({ kind: 'indeterminate', text: outcome.message })
               else settleOnce({ kind: 'refused', text: outcome.message })
             },
-            (error) => settleOnce({ kind: 'refused', text: `session switch failed: ${safeErrorMessage(error)}` }),
-          )
+            onError: (error) => settleOnce({ kind: 'refused', text: `session switch failed: ${safeErrorMessage(error)}` }),
+          })
           return
         }
         settleOnce({ kind: 'picker' })
