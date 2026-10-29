@@ -12,12 +12,13 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
-import { statusMatches } from '../../scripts/split-process-smoke.mjs'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { EntryProcess, statusMatches } from '../../scripts/split-process-smoke.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
@@ -63,6 +64,37 @@ test('a stale or unrelated record cannot satisfy a new status request id', () =>
   assert.equal(statusMatches(stale, 'status-2'), false)
   assert.equal(statusMatches(fresh, 'status-2'), true)
   assert.equal(statusMatches(unrelated, 'status-2'), false)
+})
+
+test('a completed waitForExit does not leave its deadline holding the process', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-process-wait-exit-')
+  const entry = join(dir, 'exit-now.mjs')
+  writeFileSync(entry, 'process.exit(0)\n')
+  const probe = `
+    import { EntryProcess } from ${JSON.stringify(pathToFileURL(SCRIPT).href)}
+    const child = new EntryProcess('probe', ${JSON.stringify(entry)}, {
+      cwd: ${JSON.stringify(dir)},
+      env: { ...process.env },
+      anchor: ${JSON.stringify(join(dir, 'anchor.json'))},
+      profile: 'pi-tui',
+      scratch: ${JSON.stringify(dir)},
+    })
+    const exit = await child.waitForExit(60_000)
+    if (exit.code !== 0 || exit.signal !== null) {
+      console.error('unexpected probe exit:', JSON.stringify(exit))
+      process.exit(1)
+    }
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    encoding: 'utf8',
+    timeout: 15_000,
+  })
+  assert.equal(
+    result.status,
+    0,
+    `the probe did not exit after waitForExit: status=${String(result.status)} signal=${String(result.signal)} ${result.stderr || String(result.error ?? '')}`,
+  )
 })
 
 test('the upgraded smoke carries every B1 gate and the critical negative controls', () => {

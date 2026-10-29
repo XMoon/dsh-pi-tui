@@ -167,8 +167,8 @@ function alive(pid) {
   }
 }
 
-/** One OS entry process with parsed JSON records. */
-class EntryProcess {
+/** One OS entry process with parsed JSON records. Exported for the tooling liveness guard. */
+export class EntryProcess {
   constructor(role, entry, options) {
     this.role = role
     this.records = []
@@ -243,10 +243,15 @@ class EntryProcess {
   }
 
   waitForExit(timeoutMs = 120_000) {
-    return Promise.race([
-      this.exit,
-      sleep(timeoutMs).then(() => { throw new Error(`${this.role}: process did not exit within ${String(timeoutMs)}ms`) }),
-    ])
+    let timer
+    const deadline = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`${this.role}: process did not exit within ${String(timeoutMs)}ms`))
+      }, timeoutMs)
+    })
+    // A pending deadline is a live handle: without clearing it the whole smoke
+    // stays alive until the longest timeout expires even though every child exited.
+    return Promise.race([this.exit, deadline]).finally(() => clearTimeout(timer))
   }
 
   send(request) {
