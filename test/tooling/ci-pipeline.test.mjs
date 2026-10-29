@@ -269,10 +269,15 @@ test('a missing or malformed GITHUB_REF is a failure, never an implicit PR skip'
   assert.match(summaryMissing.stderr, /--ref is required/u)
 })
 
-test('an UNKNOWN mode cannot be qualified', () => {
-  const decision = verdict({ role: 'qualify', mode: 'hybrid', ref: PR_REF, phases: phasesAt('success') })
-  assert.equal(decision.ok, false)
-  assert.match(decision.failures.join('\n'), /not one this verdict knows/u)
+test('an UNKNOWN mode cannot be qualified, including object-prototype names', () => {
+  for (const mode of ['hybrid', 'constructor', 'toString', '__proto__']) {
+    const decision = verdict({ role: 'qualify', mode, ref: PR_REF, phases: phasesAt('success') })
+    assert.equal(decision.ok, false, `mode=${mode} must fail`)
+    assert.match(decision.failures.join('\n'), /not one this verdict knows/u)
+  }
+  const cliResult = cli(['qualify', '--mode', 'constructor', '--ref', PR_REF, ...cliPhases(phasesAt('success'))])
+  assert.equal(cliResult.status, 1)
+  assert.match(cliResult.stderr, /not one this verdict knows/u)
 })
 
 test('the release phases are required only on a release tag', () => {
