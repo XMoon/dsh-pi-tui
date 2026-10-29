@@ -1890,9 +1890,9 @@ test('an interrupted parked steering occurrence survives and is consumed by the 
   assert.ok(view.includes('❯ parked steer A'), `phase A: the accepted steer must be visible:\n${view}`)
   assert.ok(view.includes('steering…'), `phase A: a running steer reads steering…:\n${view}`)
 
-  // Phase B — the turn is Interrupted through the REAL busy-Esc cancel path
-  // (SessionWriter.cancel with keepInbox): the Agent converges to idle while A
-  // stays parked in nextStep with its identity.
+  // Phase B — the turn is Interrupted through the REAL busy-Esc control path
+  // (SessionRuntime.interrupt -> exact-owner cancel with keepInbox): the Agent
+  // converges to idle while A stays parked in nextStep with its identity.
   harness.host.onCancel = () => { harness.host.status = 'idle' }
   mounted.app.setBusy(true)
   vt.sendInput('\x1b')

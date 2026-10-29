@@ -539,9 +539,9 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
       deps.lifecycle.requestExit()
     },
     onCancel: () => {
-      // Esc cancel: abort a running `!` shell command. interruptAgent PRESERVES
-      // the pending queue (web Stop parity) — an interrupt stops the current
-      // thinking, never the queued input.
+      // Esc cancel: abort a running `!` shell command. The session control
+      // interrupt PRESERVES the pending queue (web Stop parity) — an interrupt
+      // stops the current thinking, never the queued input.
       deps.submission.abortLocalShell()
     },
     // Conversation rewind: the TuiApp fires this only when IDLE with an EMPTY

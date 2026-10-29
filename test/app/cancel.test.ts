@@ -1,12 +1,14 @@
 /**
  * Headless tests for Esc cancellation: a SINGLE Esc while the agent is
  * busy fires onCancel at once (pi parity); while idle a fast second Esc
- * fires it; overlays keep their own Esc. The runner-side handler
- * (`interruptAgent`) is covered below — its `keepInbox: true` preserves
- * the pending queue (web Stop parity), so an interrupt never destroys
- * queued input. The conversation-rewind mapping (idle + EMPTY editor +
- * double-Esc → onRewind, fork_rewind plan E01–E11) lives in the second
- * half, including the headless Esc-Esc → picker → select E2E.
+ * fires it; overlays keep their own Esc. The PUBLIC `interruptAgent` helper
+ * is covered below — its `keepInbox: true` preserves the pending queue (web
+ * Stop parity), so an interrupt never destroys queued input. The production
+ * Busy Esc path is the session control admission
+ * (`SessionRuntime.interrupt` -> exact-owner cancel), not this helper. The
+ * conversation-rewind mapping (idle + EMPTY editor + double-Esc → onRewind,
+ * fork_rewind plan E01–E11) lives in the second half, including the headless
+ * Esc-Esc → picker → select E2E.
  * @module @xmoon76/dsh-pi-tui/cancel.test
  */
 
@@ -727,7 +729,7 @@ test('Esc Esc while busy never opens the rewind picker (plan §28 second half)',
   assert.equal(pickerOpened, false, 'no picker while the agent streams')
 })
 
-// ── interruptAgent: the runner-side cancel preserves the queue ────────────
+// ── interruptAgent: the public helper preserves the queue ─────────────────
 
 test('interruptAgent cancels with keepInbox: true (web Stop parity)', async () => {
   const calls: Array<{ cause: unknown; options: unknown }> = []
