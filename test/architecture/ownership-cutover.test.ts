@@ -148,7 +148,7 @@ test('currentness identity comes from the ownership core, never from the Direct 
   // turn) and compares the CORE session id — never the Direct attachment, which
   // the Remote branch does not even have.
   const switchLocked = spanOf(sessionRuntimeSource, 'const switchSession = (sessionId: string, expectedScope?: SessionScope)', 'const switchSessionLocked = async (')
-  assert.ok(switchLocked.includes('if (core.currentSessionId() === sessionId) {'),
+  assert.ok(switchLocked.includes('if (core.currentSessionId() !== sessionId) return undefined'),
     'the switch no-op compares the CORE session id')
   assert.ok(!switchLocked.includes('agentNow('), 'the switch no-op must not read the Direct attachment')
 

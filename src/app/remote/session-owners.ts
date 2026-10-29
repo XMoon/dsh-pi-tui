@@ -176,19 +176,35 @@ export function createRemoteSessionOwnerServices(
    */
   const cancelExactOwner = async (
     owner: SessionOwnerRef,
-    dispatchedCancellation: 'cancelled' | 'indeterminate',
+    audience: 'control' | 'navigation',
   ): Promise<WriteOutcome<undefined>> => {
+    /** A local fence proved the exact call was never dispatched. For the
+     *  control (Esc) audience this is PR-A's `cancelled`; for navigation a
+     *  merely UNADDRESSABLE generation does not prove the Host has no work, so
+     *  it must stay unproven (never a silent "nothing to stop" switch). */
+    const notDispatched = (message: string): WriteOutcome<undefined> => audience === 'navigation'
+      ? {
+          kind: 'indeterminate',
+          error: { code: 'session/cancel-indeterminate', message },
+        }
+      : { kind: 'cancelled' }
     const record = recordOf(owner)
-    if (record.currentWrapper === undefined) return { kind: 'cancelled' }
+    if (record.currentWrapper === undefined) {
+      return notDispatched('the session owner has no retained Client reference, so the Host cancel could not be addressed')
+    }
     const capturedGeneration = generation.getSnapshot()
-    if (capturedGeneration === undefined) return { kind: 'cancelled' }
+    if (capturedGeneration === undefined) {
+      return notDispatched('the Connection generation is unavailable, so the Host cancel could not be addressed')
+    }
     const borrowed = source.binding(record.sessionId)
     if (borrowed === undefined || !Object.is(borrowed, record.bindingIdentity)) {
-      return { kind: 'cancelled' }
+      return notDispatched('the exact Session binding is no longer observable, so the Host cancel could not be addressed')
     }
     // The borrow and the generation re-read are synchronous; a replacement
     // observed here proves the official call was never dispatched.
-    if (!Object.is(capturedGeneration, generation.getSnapshot())) return { kind: 'cancelled' }
+    if (!Object.is(capturedGeneration, generation.getSnapshot())) {
+      return notDispatched('the Connection generation changed before dispatch, so the Host cancel could not be addressed')
+    }
     const result = await borrowed.session.cancel()
     // Post-dispatch identity fence (host-client.md: every Remote async result
     // is generation-bound; a superseded reply is never the current
@@ -209,7 +225,7 @@ export function createRemoteSessionOwnerServices(
     }
     if (result.ok) return { kind: 'committed', value: undefined }
     const failure = classifyRemoteWriteFailure(result.error)
-    if (failure.kind === 'cancelled' && dispatchedCancellation === 'indeterminate') {
+    if (failure.kind === 'cancelled' && audience === 'navigation') {
       // The official call WAS dispatched: a caller/carrier cancellation of its
       // reply does not prove the Host did not execute it. The navigation
       // audience must not treat this as "nothing to stop"; the control (Esc)
@@ -228,12 +244,13 @@ export function createRemoteSessionOwnerServices(
   /** The ONE-SHOT control cancel (Busy Esc / Stop): PR-A's settlement, where
    *  an official caller cancellation stays `cancelled`. */
   const cancel = (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> =>
-    cancelExactOwner(owner, 'cancelled')
+    cancelExactOwner(owner, 'control')
 
-  /** The navigation audience: a dispatched caller/carrier cancellation is
-   *  `indeterminate`, never "provably not dispatched". */
+  /** The navigation audience: BOTH a dispatched caller/carrier cancellation and
+   *  an unaddressable exact generation are `indeterminate`, never "provably
+   *  nothing to stop". */
   const cancelForNavigation = (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> =>
-    cancelExactOwner(owner, 'indeterminate')
+    cancelExactOwner(owner, 'navigation')
 
   const whenIdleOrAbort = (owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean> => {
     const record = recordOf(owner)

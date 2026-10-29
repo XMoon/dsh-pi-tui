@@ -245,16 +245,19 @@ UI intent captures the OLD generation (scope)
 - A stop failure aborts BEFORE the drain and before any child work:
   `rejected` (a proven refusal) and `indeterminate` (dispatched, effect
   unproven) keep the current Session live, create nothing and are never
-  retried. A `cancelled` stop proves the request never left the TUI (the exact
-  owner/binding generation is already unobservable, or the runner is exiting):
-  it is "nothing to stop" and the transition proceeds — the same state makes
-  `whenIdleOrAbort` observe idle. The navigation stop therefore uses
-  `SessionOwnerRetirement.cancelForNavigation`: unlike the control `cancel`
-  (whose official caller-cancellation settlement stays `cancelled` for the
-  user Stop gesture), a DISPATCHED call whose reply is a caller/carrier
-  cancellation is `indeterminate` for navigation — the Host may have executed
-  it, so the navigation aborts instead of creating/switching behind a possibly
-  running old Turn.
+  retried. The navigation stop uses
+  `SessionOwnerRetirement.cancelForNavigation`, whose `cancelled` must prove
+  BOTH that the request never left the TUI AND that no current work of the
+  captured generation remains (the runner is exiting). A merely UNADDRESSABLE
+  exact generation — a disconnected Connection generation, a replaced binding,
+  a released owner reference — does NOT prove the Host stopped: a Remote
+  retained binding can still report `running` while its Connection generation
+  is unavailable, and `whenIdleOrAbort` reads the binding's running state, not
+  the generation, so it makes no "idle" claim in that state. Navigation
+  therefore reports `indeterminate` and aborts. The control `cancel` keeps
+  PR-A's settlement for the user Stop gesture (a dispatched caller/carrier
+  cancellation stays `cancelled` there, and only the control consumer's
+  silence applies).
 - Cancellation is never rolled back. Every failure AFTER an accepted stop says
   that the old Turn is already stopped and cannot be resumed; a failure before
   it (a stale capture) owns no message.

@@ -1761,7 +1761,7 @@ test('the real /new stops a LIVE Question owner instead of parking until it is a
     // This B3 plane is the TUI presentation witness only: it does NOT relay
     // Agent cancellation to the request. The official ASK_ABORTED settlement on
     // the REAL Host service is covered by the Direct TSP integration test
-    // "a live official Question settles ASK_ABORTED ..."; here the question is
+    // "a real ask_user_question tool call settles ASK_ABORTED ..."; here the question is
     // never answered, which is exactly what a navigation that does not DEPEND
     // on the answer must tolerate.
     life.defer(() => { abort.abort() })
