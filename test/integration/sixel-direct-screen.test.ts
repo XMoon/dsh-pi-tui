@@ -336,7 +336,12 @@ test('a TRANSCRIPT image repaints after the async settle, on Main and in the Alt
   assert.ok(altDcs.endsWith('\x1b\\'), 'the alt frame wrote one complete command')
   const anchorAt = altWire.lastIndexOf(altDcs)
   assert.strictEqual(altWire.indexOf('\x1bP', anchorAt + 1), -1, 'exactly one command in that frame')
+  // Exiting fullscreen replays the stopped alt document into the main screen: the
+  // image's safe text, never the internal candidate marker.
+  terminal.writes.length = 0
   app.setFullscreen(false)
+  await tick(200)
+  assert.ok(!terminal.writes.join('').includes('SIXC'), 'no candidate marker reaches Terminal.write')
 })
 
 test('a colour-scheme report re-observes the real background (RFL-005)', async (t) => {

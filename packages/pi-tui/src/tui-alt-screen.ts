@@ -616,7 +616,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.terminal.write(`${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`);
 		} else {
 			const width = Math.max(1, this.terminal.columns);
-			const documentLines = this.render(width).map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
+			const documentLines = this.render(width)
+				.map((line) => line.replace(OSC133_ZONE_PREFIX, ""))
+				// A component emits an inert candidate marker, never a DCS: the stopped
+				// alt screen must replay its safe text, not the internal identity.
+				.map((line) => this.sixelScreen?.candidate(line)?.fallback ?? line);
 			this.lastDocument = this.applyLineResets(documentLines.map((line) => line.replaceAll(CURSOR_MARKER, ""))).map(
 				(line) =>
 					// A SIXEL raster belongs to the alt screen that just ended: replaying
@@ -726,7 +730,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		frame: LayoutFrame,
 		screen: readonly string[],
 		changedRows: readonly boolean[],
-		fullRedraw: boolean,
+		repainted: boolean,
 	): void {
 		const port = this.sixelScreen;
 		if (port === undefined) return;
@@ -742,7 +746,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				dcs: line,
 				cropTopRows: demand.cropTopRows,
 				visibleRows: footprint.rows,
-				emitted: fullRedraw || changedRows[row] !== false,
+				emitted: repainted || changedRows[row] !== false,
 			});
 		}
 		retained.sort((left, right) => right.row - left.row);
@@ -905,8 +909,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// its bytes would report matches on a row with no visible text and reveal a
 		// viewport that cannot show them. The row is kept (as empty) so every other
 		// row's index and every match's row stay aligned. (X074.)
-		const corpus = lines.some((line) => this.sixelFootprint(line) !== undefined)
-			? lines.map((line) => (this.sixelFootprint(line) === undefined ? line : ""))
+		const isEmptyImageRow = (line: string): boolean =>
+			this.sixelFootprint(line) !== undefined || this.sixelScreen?.candidate(line) !== undefined;
+		const corpus = lines.some(isEmptyImageRow)
+			? lines.map((line) => (isEmptyImageRow(line) ? "" : line))
 			: lines;
 		const result = search.index.search(corpus, search.query);
 		const matches = result.matches;
@@ -2565,7 +2571,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		// The final layout is the visibility authority: grant residency to what it
 		// really shows, and recompose ONCE when the grant set changed. (X074.)
-		if (this.sixelScreen !== undefined && nextLayout.sixelDemands.length > 0) {
+		if (this.sixelScreen !== undefined) {
 			if (this.sixelScreen.reconcileVisible(this, nextLayout.sixelDemands)) {
 				nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender(), this.sixelScreen);
 			}
@@ -2590,6 +2596,15 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// (X074). Computed before the line resets because an anchor DCS must never
 		// be normalized, and because a dropped block is plain blank content.
 		const sixelRows = this.prepareSixelRows(screen);
+		// A block that yielded to an overlay/scrollbar paints no pixels: its demand
+		// must not keep a residency slot. The paint already dropped it; reconcile the
+		// filtered set so the owner revokes the grant for the NEXT frame.
+		if (this.sixelScreen !== undefined) {
+			const paintedDemands = nextLayout.sixelDemands.filter((demand) => (sixelRows[demand.physicalRow] ?? 0) > 0);
+			if (paintedDemands.length !== nextLayout.sixelDemands.length) {
+				this.sixelScreen.reconcileVisible(this, paintedDemands);
+			}
+		}
 
 		const cursorPos = this.extractCursorPosition(screen, height);
 		screen = this.applyLineResets(screen).map((line) => {
@@ -2719,7 +2734,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		buffer += END_SYNCHRONIZED_OUTPUT;
 		this.terminal.write(buffer);
-		this.commitSixelFrame(nextLayout, screen, changedRows, fullRedraw);
+		this.commitSixelFrame(nextLayout, screen, changedRows, fullRedraw || sixelNeedRedraw);
 
 		this.previousScreen = screen;
 		this.previousSixelRows = sixelRows;

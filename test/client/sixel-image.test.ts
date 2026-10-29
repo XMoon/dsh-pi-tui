@@ -277,6 +277,9 @@ test('an admitted terminal paints the exact trusted DCS and its REAL footprint',
 
   // An unrelated DCS is NOT trusted, however well formed it looks.
   assert.equal(harness.graphics.screen.footprint('\x1bP0;1;0q"1;1;10;10#1;2;100;0;0!10~\x1b\\'), undefined)
+  // Nor is a text line that merely LOOKS like the old predictable marker: the
+  // token carries a per-owner nonce, so ordinary content cannot be promoted.
+  assert.equal(harness.graphics.screen.candidate('\u2063SIXC:1\u2063'), undefined, 'a forged marker is not a candidate')
 })
 
 test('every missing fact paints text instead, and no geometry query precedes the DA1', async (t) => {
@@ -929,4 +932,30 @@ test('a crop retry keeps its failure count across attempts and then stops (X1)',
   // reason: a NEGATIVE observation window — a further attempt would appear during it.
   await new Promise(resolve => setTimeout(resolve, 300))
   assert.equal(encodes, SIXEL_ENCODE_ATTEMPT_LIMIT, 'the retry budget really fills, then stops')
+})
+
+test('an off-screen occurrence releases its crop record too (registry returns to baseline)', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const png = await pngFromRgba(fill(40, 60, (_x, y) => (y < 20 ? [255, 0, 0, 255] : y < 40 ? [0, 255, 0, 255] : [0, 0, 255, 255])), 40, 60)
+  const image = harness.graphics.image({ pngBase64: png, widthPx: 40, heightPx: 60 }, { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' })
+  paint(harness, image, 40)
+  await waitForRepaint(harness, 'the full encode')
+  // A one-row crop of the second cell row: a distinct retained variant.
+  const before = harness.notifications()
+  paint(harness, image, 40, { top: 1, rows: 1 })
+  await waitUntil(() => harness.notifications() > before, 'the crop variant')
+  const cropDcs = paint(harness, image, 40, { top: 1, rows: 1 })[0]!
+  assert.notEqual(harness.graphics.screen.footprint(cropDcs), undefined, 'the crop is retained while visible')
+  // The occurrence leaves the frame: its full AND crop records must both be
+  // unregistered, or repeated scroll round-trips refill the budget with phantoms.
+  paintFrame(harness, [], 40)
+  assert.equal(harness.graphics.screen.footprint(cropDcs), undefined, 'the crop record was released')
+  // A fresh occurrence with a different source can still be admitted.
+  const other = await pngFromRgba(fill(40, 40, () => [9, 9, 9, 255]), 40, 40)
+  const next = harness.graphics.image({ pngBase64: other, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'fallback' })
+  await waitUntil(() => {
+    paint(harness, next, 40)
+    return next.paintedBodyAt?.(40) !== undefined
+  }, 'a fresh occurrence after the release')
 })

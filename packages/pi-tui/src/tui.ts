@@ -1025,7 +1025,12 @@ export abstract class TuiBase extends Container implements TUI {
 	 * result can never be promoted to a device command.
 	 */
 	protected isRenderableImageLine(line: string): boolean {
-		return isImageLine(line) || this.sixelScreen?.footprint(line) !== undefined;
+		// A candidate marker is an INTERNAL identity, not text: it must never be
+		// normalized, sliced or composited, and an overlay that reaches its row
+		// yields the block. (X072.)
+		return isImageLine(line)
+			|| this.sixelScreen?.footprint(line) !== undefined
+			|| this.sixelScreen?.candidate(line) !== undefined;
 	}
 
 	/** The registered SIXEL footprint of a trusted anchor line, if any (X072). */
@@ -2132,7 +2137,7 @@ export abstract class TuiBase extends Container implements TUI {
 		// as text would emit a corrupted command (X072). An overlay that reaches
 		// this row wins the cell, so this frame paints no pixels on it and the
 		// image's own identity row stays visible above.
-		if (this.sixelScreen?.footprint(baseLine) !== undefined) {
+		if (this.sixelScreen?.footprint(baseLine) !== undefined || this.sixelScreen?.candidate(baseLine) !== undefined) {
 			return compositeTuiLine("", overlayLine, startCol, overlayWidth, totalWidth);
 		}
 		return compositeTuiLine(baseLine, overlayLine, startCol, overlayWidth, totalWidth);

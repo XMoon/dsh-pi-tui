@@ -87,6 +87,14 @@ class CandidateSixelPort implements SixelScreenPort {
 
 	reconcileVisible(_screen: object, demands: readonly SixelVisibleCandidate[]): boolean {
 		this.grants.clear();
+		const demanded = new Set(demands.map((demand) => demand.line));
+		// Stand in for the owner's post-write release: an occurrence the frame no
+		// longer shows loses its raster (a later frame must not replay its DCS).
+		for (const [token, dcs] of [...this.dcsByToken]) {
+			if (demanded.has(token)) continue;
+			this.rasters.delete(dcs);
+			this.dcsByToken.delete(token);
+		}
 		for (const demand of demands) this.grants.set(demand.line, demand.visibleRows);
 		return false;
 	}
@@ -390,4 +398,13 @@ it("keeps native scrollback when a painted image leaves the viewport (X073)", as
 	assert.ok(!wire.includes("\x1b[3J"), "no scrollback clear for a residency-only change");
 	assert.ok(!wire.includes("\x1b[2J"), "no full screen clear for a residency-only change");
 	assert.ok(wire.includes("tail text"), "the real content change is written");
+
+	// A later full render (a width change) must not replay a released record's
+	// DCS: the above-viewport block that lost its grant becomes its own text.
+	terminal.clear();
+	terminal.rows = 10;
+	await frame(screen);
+	const fullWire = terminal.output();
+	assert.ok(!fullWire.includes("many-20"), "a released raster is never replayed by a full render");
+	assert.ok(!fullWire.includes("SIXC"), "no candidate marker reaches the terminal");
 });
