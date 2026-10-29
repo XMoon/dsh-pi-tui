@@ -22,9 +22,6 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import test from 'node:test'
 import { SixelEncoder } from '../../src/client/media/sixel/encode.ts'
 import {
@@ -34,6 +31,7 @@ import {
   type SixelScreenObservation,
 } from '../../src/tui/graphics/sixel-image.ts'
 import type { PixelBody } from '../../src/tui/graphics/native-image.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { decodeSixel, pixelAt } from '../support/sixel-oracle.ts'
 
@@ -137,13 +135,12 @@ interface Harness {
 
 /** Build the owner with the three facts already complete. */
 async function readyHarness(t: test.TestContext, options: { rows?: number; background?: { r: number; g: number; b: number } } = {}): Promise<Harness> {
-  const home = mkdtempSync(join(tmpdir(), 'sixel-image-'))
+  const home = testLifecycle(t).tempDir('sixel-image-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
   t.after(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
   })
   const terminal = new ScriptedSixelTerminal(120, options.rows ?? 24)
   const screen = new ScriptedScreen()
@@ -207,13 +204,12 @@ test('an admitted terminal paints the exact trusted DCS and its REAL footprint',
 })
 
 test('every missing fact paints text instead, and no geometry query precedes the DA1', async (t) => {
-  const home = mkdtempSync(join(tmpdir(), 'sixel-image-'))
+  const home = testLifecycle(t).tempDir('sixel-image-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
   t.after(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
   })
   const png = await TWO_BAND_PNG()
 
@@ -226,6 +222,8 @@ test('every missing fact paints text instead, and no geometry query precedes the
     t.after(() => graphics.dispose())
     graphics.observeScreen(screen, terminal.columns, terminal.rows)
     screen.replyCell(10, 20)
+    // reason: a NEGATIVE observation window — the contract is that NOTHING happens here,
+    // so there is no positive state change to await; the window is the assertion's bound.
     await new Promise(resolve => setTimeout(resolve, 50))
     assert.equal(graphics.canPaint(), false, 'a pending DA1 is not permission')
     const image = graphics.image({ pngBase64: png, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'pending' })
@@ -243,6 +241,8 @@ test('every missing fact paints text instead, and no geometry query precedes the
     t.after(() => graphics.dispose())
     graphics.observeScreen(screen, terminal.columns, terminal.rows)
     terminal.declareSixel(true)
+    // reason: a NEGATIVE observation window — the contract is that NOTHING happens here,
+    // so there is no positive state change to await; the window is the assertion's bound.
     await new Promise(resolve => setTimeout(resolve, 100))
     assert.equal(screen.cellQueries, 1, 'admission triggers exactly one real geometry query')
     assert.equal(graphics.canPaint(), false, 'a default 9x18 cell is not a verified fact')
@@ -260,6 +260,8 @@ test('every missing fact paints text instead, and no geometry query precedes the
     graphics.observeScreen(screen, terminal.columns, terminal.rows)
     terminal.declareSixel(true)
     screen.replyCell(10, 20)
+    // reason: a NEGATIVE observation window — the contract is that NOTHING happens here,
+    // so there is no positive state change to await; the window is the assertion's bound.
     await new Promise(resolve => setTimeout(resolve, 100))
     assert.equal(graphics.canPaint(), false, 'a background observation that timed out is not a guessed black')
     const image = graphics.image({ pngBase64: png, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'pending' })
@@ -354,6 +356,7 @@ test('a superseded crop variant never paints', async (t) => {
   // Exactly ONE variant settled: the superseded request was aborted before it
   // could register a second raster (a second repaint would prove otherwise).
   const settled = harness.notifications()
+  // reason: a NEGATIVE observation window — a late/busy settle must NOT arrive.
   await new Promise(resolve => setTimeout(resolve, 300))
   assert.equal(harness.notifications(), settled, 'the aborted variant must not settle into a raster')
 })
@@ -405,6 +408,7 @@ test('an identical cell reply is the same fact and never restarts the projection
   // verified facts (that would drop every raster and re-encode the transcript).
   harness.screen.replyCell(10, 20)
   harness.screen.replyCell(10, 20)
+  // reason: a NEGATIVE observation window — a late/busy settle must NOT arrive.
   await new Promise(resolve => setTimeout(resolve, 200))
   assert.equal(harness.graphics.canPaint(), true)
   assert.equal(harness.notifications(), settled, 'no readiness change, so no repaint request')
@@ -433,6 +437,7 @@ test('invalidate() repaints the same occurrence without a second encode', async 
   })
   image.invalidate()
   assert.equal(image.render(40)[0], first, 'the ready raster survives an invalidate')
+  // reason: a NEGATIVE observation window — a late/busy settle must NOT arrive.
   await new Promise(resolve => setTimeout(resolve, 300))
   assert.equal(encodes, 0, 'a repaint of the same facts must not re-encode')
 })
@@ -454,6 +459,7 @@ test('dispose drops every raster, aborts the lane and refuses new work', async (
   assert.equal(harness.graphics.screen.footprint(dcs), undefined, 'the trust table is emptied')
   assert.deepEqual(image.render(40), ['fallback'])
   assert.equal(image.paintedBodyAt?.(40), undefined)
+  // reason: a NEGATIVE observation window — a late/busy settle must NOT arrive.
   await new Promise(resolve => setTimeout(resolve, 200))
 })
 
@@ -465,6 +471,7 @@ test('a settle that lands after disposal registers nothing', async (t) => {
   assert.deepEqual(image.render(40), ['fallback'])
   // Dispose while the encode is in flight.
   harness.graphics.dispose()
+  // reason: a NEGATIVE observation window — a late/busy settle must NOT arrive.
   await new Promise(resolve => setTimeout(resolve, 1500))
   assert.deepEqual(image.render(40), ['fallback'], 'a late result never revives a disposed occurrence')
   assert.equal(image.paintedBodyAt?.(40), undefined)
@@ -491,6 +498,7 @@ test('the registry refuses a new raster instead of evicting a painted one', asyn
     for (const image of images) image.render(40)
     return images.filter(image => image.paintedBodyAt?.(40) !== undefined).length >= SIXEL_REGISTRY_MAX_VARIANTS
   }, 'the registry to fill')
+  // reason: a NEGATIVE observation window — a late/busy settle must NOT arrive.
   await new Promise(resolve => setTimeout(resolve, 300))
   const painted = images.map(image => image.render(40)[0]!)
   const ready = painted.filter(line => harness.graphics.screen.footprint(line) !== undefined)

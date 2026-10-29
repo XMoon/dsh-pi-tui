@@ -25,11 +25,11 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { decodeSixel, pixelAt } from '../support/sixel-oracle.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const PACKAGE_ROOT = resolve(import.meta.dirname, '..', '..')
 
@@ -155,8 +155,7 @@ test('the PACKED publish entry paints a draft card through the real SIXEL chain 
     return
   }
 
-  const root = mkdtempSync(join(tmpdir(), 'sixel-packed-'))
-  t.after(() => rmSync(root, { recursive: true, force: true }))
+  const root = testLifecycle(t).tempDir('sixel-packed-')
   // Install the artifact as a consumer would. `--prefer-offline` keeps the run
   // reproducible without a network round trip when the cache is warm.
   const install = spawnSync(
