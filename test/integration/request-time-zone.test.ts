@@ -243,7 +243,10 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
       fixture.pane.input.type('parity question')
       await awaitComposer(fixture, 'parity question')
       fixture.pane.input.type('\r')
-      await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
+      // TSP-7 PR-A retired the dock banner, so the turn is observed through the
+      // AUTHORITATIVE fact: the real model request this submission starts.
+      const modelCallsBefore = fixture.modelCalls()
+      await waitFor('the real model request to start', () => fixture.modelCalls() > modelCallsBefore, 25_000)
       await waitFor('the first settled prompt', () => recorder.calls() === 1, 25_000)
 
       // The busy submission while the turn runs: the ordinary queue placement.

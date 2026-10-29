@@ -296,7 +296,10 @@ for (const busyEnter of ['queue', 'steer'] as const) {
         fixture.pane.input.type('first prompt')
         await awaitComposer(fixture, 'first prompt')
         fixture.pane.input.type('\r')
-        await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
+        // TSP-7 PR-A retired the dock banner: the turn is observed through the
+        // AUTHORITATIVE fact — the real model request this submission starts.
+        const modelCallsBefore = fixture.modelCalls()
+        await waitFor('the real model request to start', () => fixture.modelCalls() > modelCallsBefore, 25_000)
         await waitFor('the first settled prompt', () => recorder.calls() === 1 && promptCalls.length === 1, 25_000)
         assert.equal(promptCalls.length, recorder.calls(), 'the settled records and the count agree (a settled-only recorder)')
         const beforeSettled = recorder.calls()
@@ -399,7 +402,9 @@ test('Esc during a RUNNING turn cancels the turn through the existing path (no e
     fixture.pane.input.type('cancel me')
     await awaitComposer(fixture, 'cancel me')
     fixture.pane.input.type('\r')
-    await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
+    // TSP-7 PR-A retired the dock banner: the running turn is the real request.
+    const modelCallsBefore = fixture.modelCalls()
+    await waitFor('the real model request to start', () => fixture.modelCalls() > modelCallsBefore, 25_000)
     // Escape maps to the EXISTING application cancel path (never an exit).
     // The authoritative observation is the LIVE MODEL REQUEST: the existing
     // cancellation path (Esc → onCancel → UserShell.interrupt → the scoped
@@ -445,7 +450,9 @@ test('a REJECTED session cancel surfaces a renderer-neutral error notice (never 
     fixture.pane.input.type('cancel rejection case')
     await awaitComposer(fixture, 'cancel rejection case')
     fixture.pane.input.type('\r')
-    await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
+    // TSP-7 PR-A retired the dock banner: the running turn is the real request.
+    const modelCallsBefore = fixture.modelCalls()
+    await waitFor('the real model request to start', () => fixture.modelCalls() > modelCallsBefore, 25_000)
     fixture.pane.input.type('\u001b')
     await waitFor('the rejected cancel notice', () =>
       fixture.pane.output.text().includes(rejectionMessage), 25_000)
