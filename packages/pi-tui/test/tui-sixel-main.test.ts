@@ -406,6 +406,10 @@ it("keeps native scrollback when a painted image leaves the viewport (X073)", as
 	const repaint = terminal.output();
 	assert.ok(!repaint.includes("\x1b[3J"), "no scrollback clear on the repaint after a release");
 	assert.ok(!repaint.includes("\x1b[2J"), "no full clear on the repaint after a release");
+	// The released DCS must leave the history cache too: the Screen keeps only the
+	// lightweight fallback, so a long session cannot retain old encoded payloads.
+	const history = (screen as unknown as { previousLines: string[] }).previousLines;
+	assert.ok(!history.some(line => line.includes("many-20")), "the released DCS is not retained in previousLines");
 
 	// A later full render (a width change) must not replay a released record's
 	// DCS: the above-viewport block that lost its grant becomes its own text.
@@ -446,5 +450,32 @@ it("an overlay over a candidate block's body row yields the whole block (X073)",
 	terminal.clear();
 	await frame(screen);
 	assert.ok(terminal.output().includes(sixel("cand")), "the block returns when the overlay is gone");
+	screen.stop();
+});
+
+it("24 images appended one at a time never keep a released DCS in the history cache (X073)", async () => {
+	const terminal = new RecordingTerminal();
+	terminal.rows = 12;
+	const port = new CandidateSixelPort();
+	const screen = new TestableMainScreen(terminal, port);
+	const document = new Document();
+	screen.addChild(document);
+	screen.start();
+	const tokens: string[] = [];
+	for (let index = 0; index < 24; index += 1) {
+		const token = port.registerSource(`image ${index}`, 1);
+		port.bindRaster(token, sixel(`seq-${index}`), { columns: 4, rows: 1 });
+		tokens.push(token);
+		document.lines = [...tokens, "tail"];
+		terminal.clear();
+		await frame(screen);
+		assert.ok(!terminal.output().includes("\x1b[3J"), `append ${index} must not clear native scrollback`);
+		// The history cache may hold only the rasters still in the viewport; every
+		// released payload is swapped to its lightweight fallback, so a long session
+		// cannot accumulate old encoded strings in `previousLines`.
+		const history = (screen as unknown as { previousLines: string[] }).previousLines;
+		const retainedRasters = history.filter((line) => line.includes("\x1bP"));
+		assert.ok(retainedRasters.length <= terminal.rows, `at most one viewport of rasters is retained, got ${retainedRasters.length}`);
+	}
 	screen.stop();
 });
