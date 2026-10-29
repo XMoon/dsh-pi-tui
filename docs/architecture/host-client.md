@@ -171,10 +171,10 @@ row publishes `piTuiHostReady` only after both service bindings are live.
 `performance-host` remains an independent Host projection row, and
 `visual-tools` remains an independent Loader row; neither is absorbed into the
 built-in runtime. `src/app/remote/host-runtime.ts` is only the legacy in-process
-test composition for the old L5 fixtures: it mounts the M3-only official
-additive rows and verifies the built-in runtime's readiness gates, but it never
-mounts the private contribution/services or the Performance projection and is
-not the production Host graph.
+test composition for the old L5 fixtures: it mounts its own additive official
+rows and verifies the built-in runtime's readiness gates, but it never mounts
+the private contribution/services or the Performance projection and is not the
+production Host graph.
 
 The Host-only readiness audit requires every official Session-serving row and
 the built-in row to be ACTIVE, checks the official and private Typert
