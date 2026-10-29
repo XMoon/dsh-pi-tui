@@ -322,7 +322,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       },
       diag: runner.diag,
       sessionId: () => runner.currentSessionId,
-      onResumeIntent: (intent, scope, settle) => {
+      onResumeIntent: (intent, scope, settle, isCurrent) => {
         if (!runner.isSessionScopeCurrent(scope)
           || intent.currentSessionId !== scope.sessionId
           || intent.sessionId === scope.sessionId) {
@@ -331,6 +331,15 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         }
         const direct = intent.source === 'direct'
         const fail = (text: string): void => {
+          // A closed/replaced INTERACTIVE panel must never paint its late
+          // failure into a new Browser context. A DIRECT /resume is a
+          // command-owned settlement (no global notice): its real outcome is
+          // returned to the originating command card even though the picker
+          // has already closed.
+          if (!direct && !isCurrent()) {
+            settle({ kind: 'cancelled' })
+            return
+          }
           if (!direct) app.notify(sanitizeTerminalText(text), 'error')
           settle({ kind: 'failed', text })
         }
@@ -422,6 +431,11 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     if (options.requireQuery === true && invocation.rawInput.trim() === '') {
       return { kind: 'error', text: 'search needs a query' }
     }
+    // `/resume <arg>` captures its source generation SYNCHRONOUSLY, before the
+    // input-first listing await. A navigation that wins during the listing
+    // must leave this intent superseded — it must never fall back to an
+    // unscoped capture at gate time and stop the NEW owner.
+    const resumeScope = options.directMatchQuery === undefined ? undefined : runner.captureSessionScope()
     const presentation = runner.sessionBrowserPresentation
     if (presentation !== undefined) return openNativeSessionBrowser(invocation, options, presentation)
     // The current marker is the live session's id; before the first session
@@ -765,7 +779,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           controller.abort()
           picker.close()
           app.notify('switching session…', 'info')
-          void switchSessionOutcome(match.id).then(
+          void switchSessionOutcome(match.id, resumeScope).then(
             (outcome) => {
               if (outcome.kind === 'committed') settleOnce({ kind: 'switched' })
               else if (outcome.kind === 'cancelled') settleOnce({ kind: 'cancelled' })

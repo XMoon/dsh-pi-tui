@@ -710,6 +710,50 @@ test('A-10: the joined pending presentation (queued + tail) renders in the dock'
   }
 })
 
+test('A-10b: an idle authoritative queue explains the next-prompt wake; local-only/running do not', async () => {
+  const harness = await mountTspHarness()
+  const lastFrame = (wire: string): string => wire.slice(wire.lastIndexOf('_tsp;f;') + 1)
+  try {
+    harness.surface.display.setPendingInputPresentation({
+      queued: [{ id: 'q-parked', text: 'parked queue text', mode: 'followup' }],
+      tail: [],
+      running: false,
+    } as never)
+    await settle()
+    let wire = harness.tern.output.text()
+    const parked = lastFrame(wire)
+    assert.ok(parked.includes('"add","dock.queue-parked-hint"') && parked.includes('waiting for the next prompt — send a message to continue'),
+      `the idle authoritative queue must explain the next-prompt wake:\n${parked}`)
+
+    harness.surface.display.setPendingInputPresentation({
+      queued: [{ id: 'q-local', text: 'local-only text', mode: 'followup', local: true }],
+      tail: [],
+      running: false,
+    } as never)
+    await settle()
+    wire = harness.tern.output.text()
+    const local = lastFrame(wire)
+    assert.ok(local.includes('local-only text'), `the local echo must stay visible:\n${local}`)
+    assert.ok(local.includes('sending…'), `a local echo is still being admitted:\n${local}`)
+    assert.ok(!local.includes('"add","dock.queue-parked-hint"') && !local.includes('waiting for the next prompt'),
+      `a local-only echo has no Host ack and must not be presented as parked:\n${local}`)
+
+    harness.surface.display.setPendingInputPresentation({
+      queued: [{ id: 'q-running', text: 'running queue text', mode: 'followup' }],
+      tail: [],
+      running: true,
+    } as never)
+    await settle()
+    wire = harness.tern.output.text()
+    const running = lastFrame(wire)
+    assert.ok(!running.includes('"add","dock.queue-parked-hint"') && !running.includes('waiting for the next prompt'),
+      `a BUSY queued row is normal queueing, not parked:\n${running}`)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 // ── A-11 (F6): a mounted input-loop failure is FATAL, not a normal exit ─────
 
 test('A-11: a real SDK iterator failure routes the SAME error to the FATAL intent', async () => {

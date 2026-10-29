@@ -85,6 +85,9 @@ interface OpenArm {
   /** The adapter-level supersession contract: release the new reference and
    *  report a superseded open. */
   supersede?: boolean
+  /** Model an open that REACHED the Host and produced a handle, but whose
+   *  local surface was already superseded: the target may be active. */
+  openedSupersede?: boolean
   /** Fail the open with `unavailable` before retaining. */
   fail?: boolean
 }
@@ -203,6 +206,13 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
       if (arm?.supersede === true) {
         wrapper.release()
         return { ownership: 'superseded', outcome: { kind: 'cancelled' } }
+      }
+      if (arm?.openedSupersede === true) {
+        wrapper.release()
+        return {
+          ownership: 'superseded',
+          outcome: { kind: 'opened', handle: { session: { id: request.sessionId }, client: wrapper } },
+        }
       }
       return {
         ownership: 'current',
@@ -1937,6 +1947,23 @@ test('an accepted stop cannot be quiesced against a generation captured after a 
     'the target is never opened against a generation captured after the accepted stop')
 })
 
+test('a stale captured switch scope never opens the target or stops the new owner', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const authority = installScope(h)
+  const staleScope = authority.captureLive()
+  assert.ok(staleScope !== undefined)
+  assert.equal(await h.runtime.switchSession('session-c'), undefined, 'the intervening navigation commits C')
+  const opensBefore = h.calls.opens.length
+  const outcome = await h.runtime.switchSessionOutcome('session-b', staleScope)
+  assert.deepEqual(outcome, {
+    kind: 'superseded', message: 'the session changed before this switch could start',
+  }, 'the old scope is a proven superseded intent')
+  assert.equal(h.calls.opens.length, opensBefore,
+    'the stale intent must not open the target against the new owner')
+  assert.equal(h.core.currentSessionId(), 'session-c', 'the new owner stays current')
+})
+
 test('the tracked switch outcome distinguishes committed, already-current, failed, and superseded', async () => {
   const h = harness()
   h.publishRetained('session-a')
@@ -1952,4 +1979,31 @@ test('the tracked switch outcome distinguishes committed, already-current, faile
   const committed = await h.runtime.switchSessionOutcome('session-d')
   assert.deepEqual(committed, { kind: 'committed', sessionId: 'session-d' })
   assert.equal(h.core.currentSessionId(), 'session-d')
+})
+
+test('a same-id new generation leaves the old captured switch scope superseded', async () => {
+  const h = harness()
+  const first = h.publishRetained('session-a')
+  const authority = installScope(h)
+  const staleScope = authority.captureLive()
+  assert.ok(staleScope !== undefined)
+  await h.services.retirement.retire(first.owner, 'transition')
+  h.publishRetained('session-a')
+  const opensBefore = h.calls.opens.length
+  const outcome = await h.runtime.switchSessionOutcome('session-b', staleScope)
+  assert.equal(outcome.kind, 'superseded',
+    'the old generation must not be treated as the new same-id owner')
+  assert.equal(h.calls.opens.length, opensBefore, 'no target may open against the replacement generation')
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the same-id replacement stays current')
+})
+
+test('a Host-opened target whose local surface was superseded is INDETERMINATE, never a silent failure', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  h.arms.set('session-b', { openedSupersede: true })
+  const outcome = await h.runtime.switchSessionOutcome('session-b')
+  assert.equal(outcome.kind, 'indeterminate',
+    'the target was opened but the local surface was superseded — the operation may have happened')
+  assert.match(outcome.message, /opened but the local surface was superseded/)
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old owner remains current locally')
 })

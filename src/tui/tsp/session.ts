@@ -1868,7 +1868,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // lane (authoritative queued + local echoes) and the ordered conversation
     // tail, exactly as the ONE join produced them.
     for (const item of pending.queued) {
-      lines.push(ui.text({ key: `queue-${item.id}`, text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}`) }))
+      const sending = item.local === true ? ' — sending…' : ''
+      lines.push(ui.text({ key: `queue-${item.id}`, text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}${sending}`) }))
+    }
+    // An IDLE subject with at least one authoritative queued occurrence is the
+    // preserved parked queue: the next real prompt wakes it. A local-only echo
+    // has no Host occurrence yet and never gets this explanation.
+    if (!pending.running && pending.queued.some(item => item.local !== true)) {
+      lines.push(ui.text({
+        key: 'queue-parked-hint',
+        text: 'waiting for the next prompt — send a message to continue',
+      }))
     }
     for (const [index, row] of pending.tail.entries()) {
       lines.push(ui.text({ key: `tail-${index}`, text: sanitizeDisplayText(pendingRowText(row, index)) }))

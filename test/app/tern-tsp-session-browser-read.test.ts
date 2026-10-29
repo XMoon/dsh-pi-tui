@@ -694,3 +694,22 @@ test('a direct resume accepts the intent but the resume settlement carries the r
   settleResume({ kind: 'failed', text: 'session open failed: lease held' })
   assert.deepEqual(await handle.resumeSettlement, { kind: 'failed', text: 'session open failed: lease held' })
 })
+
+test('a failed resume attempt re-enables the panel and each intent settles independently', async () => {
+  const presentation = new PresentationProbe()
+  const settles: Array<(outcome: import('../../src/app/command/session-browser-read.ts').SessionBrowserResumeSettlement) => void> = []
+  const { owner } = ownerFor(presentation, reader({ list: async () => [row('session-target'), row('session-other')] }), {
+    onResumeIntent: (_intent, _scope, settle) => { settles.push(settle) },
+  })
+  const handle = owner.open()
+  assert.deepEqual(await handle.settlement, { kind: 'ready' })
+  const request = presentation.requests[0]!
+  request.onResumeIntent({ sessionId: 'session-target', currentSessionId: 'session-current', source: 'enter' })
+  await waitUntil('first resume accepted', () => presentation.latest()?.resumePending === true, 3_000)
+  settles[0]!({ kind: 'failed', text: 'lease held' })
+  await waitUntil('the failed attempt clears pending', () => presentation.latest()?.resumePending === false, 3_000)
+  request.onResumeIntent({ sessionId: 'session-other', currentSessionId: 'session-current', source: 'enter' })
+  await waitUntil('the retry is accepted', () => presentation.latest()?.resumePending === true, 3_000)
+  settles[1]!({ kind: 'switched', sessionId: 'session-other' })
+  await waitUntil('the retry settles pending', () => presentation.latest()?.resumePending === false, 3_000)
+})
