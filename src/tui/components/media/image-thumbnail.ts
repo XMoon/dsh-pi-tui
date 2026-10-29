@@ -327,6 +327,17 @@ export class ImageThumbnail implements Component {
     // cache: an admitted tmux virtual handle paints pixels where the fork still
     // reports none, and its revocation must miss every cached APC/PUA frame.
     const protocol = effectiveImageProtocol(this.graphics)
+    // A SIXEL raster settles OUTSIDE this frame cache: its readiness epoch and
+    // the verified background change the painted bytes asynchronously, and none
+    // of that is visible in a width/capability key. Caching it would freeze the
+    // first fallback forever (the owner's settle only asks for a repaint), so a
+    // SIXEL occurrence re-derives its frame every paint and the body component
+    // keeps the per-width cache. Every other protocol keeps this cache verbatim.
+    if (protocol === 'sixel') {
+      this.cachedLines = undefined
+      this.cachedKey = undefined
+      return this.renderLines(width)
+    }
     const control = this.controlWanted() ? 'ctl' : 'noctl'
     const key = `${width}:${protocol ?? 'none'}:${this.collapsed() ? 'collapsed' : 'expanded'}:${control}`
     if (this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines

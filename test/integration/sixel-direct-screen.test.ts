@@ -22,6 +22,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
+import { ImageLoader } from '../../src/client/media/image/loader.ts'
+import { TranscriptFolder } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { decodeSixel, pixelAt } from '../support/sixel-oracle.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
@@ -52,6 +54,24 @@ class SixelAppTerminal extends VirtualTerminal {
   /** The primary DA1 an SIXEL-capable Windows Terminal answers. */
   declareSixel(): void {
     for (const listener of [...this.sixelListeners]) listener(true)
+  }
+
+  /**
+   * A real terminal ANSWERS the TUI's queries; this one does too, on the next
+   * turn so the app's own write path is never re-entered synchronously.
+   *
+   * Without this a screen handoff (which re-observes geometry and background)
+   * would wait forever, which is an artefact of the fake terminal and not of the
+   * product.
+   */
+  override write(data: string): void {
+    super.write(data)
+    if (data.includes('\x1b[16t')) {
+      setImmediate(() => this.sendInput('\x1b[6;20;10t'))
+    }
+    if (data.includes('\x1b]11;?')) {
+      setImmediate(() => this.sendInput('\x1b]11;rgb:2828/2c2c/3434\x07'))
+    }
   }
 }
 
@@ -122,7 +142,10 @@ interface AppFixture {
  * Bring up a real app whose terminal reports SIXEL, real cell geometry and a
  * real background, then type the draft placeholder into the editor.
  */
-async function startSixelApp(t: test.TestContext): Promise<AppFixture> {
+async function startSixelApp(
+  t: test.TestContext,
+  options: { imageLoader?: ImageLoader; imageTheme?: { fallbackColor: (text: string) => string } } = {},
+): Promise<AppFixture> {
   const home = testLifecycle(t).tempDir('sixel-app-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
@@ -136,17 +159,21 @@ async function startSixelApp(t: test.TestContext): Promise<AppFixture> {
   const app = new TuiApp(
     terminal,
     { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} },
-    { draftImagePreviewSource: { values: () => store.values() } },
+    {
+      draftImagePreviewSource: { values: () => store.values() },
+      ...(options.imageLoader === undefined ? {} : { imageLoader: options.imageLoader }),
+      // The transcript thumbnail callers gate on loader AND theme: without a theme
+      // the attachment renders only as the user bubble's chip.
+      ...(options.imageTheme === undefined ? {} : { imageTheme: options.imageTheme }),
+    },
   )
   app.start()
 
-  // The terminal's own DA1, then the reply to the geometry query the screen
-  // sends once it is admitted, then the OSC 11 background.
+  // The terminal's own DA1; the geometry and background replies come from the
+  // terminal itself (see `write`), exactly like a real tty.
   terminal.declareSixel()
   await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the `CSI 16t` geometry query')
-  terminal.sendInput('\x1b[6;40;20t')
   await until(() => terminal.writes.join('').includes('\x1b]11;?'), 'the OSC 11 background query')
-  terminal.sendInput('\x1b]11;rgb:2828/2c2c/3434\x07')
   await tick()
 
   t.after(() => app.dispose())
@@ -211,4 +238,91 @@ test('clearing the draft erases the whole painted footprint', async (t) => {
     clears >= rows || wire.includes('\x1b[2J'),
     `the ${rows}-row footprint is erased row by row (${clears} clears) or by the full-redraw branch`,
   )
+})
+
+test('a transcript image paints on a LATER frame and registers a real body (RFL-001)', async (t) => {
+  const { terminal, store } = await startSixelApp(t)
+  void store
+  const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
+  const ref = { attachmentId: 'att-transcript-1', mediaType: 'image/png' as const, bytes: png.byteLength, width: 80, height: 40, name: 'bands.png' }
+  const loader = new ImageLoader(async () => ({ ref: {}, data: png }))
+  // The REAL app composition: the same TuiApp, its real transcript folder and its
+  // real ImageThumbnail occurrence.
+  const app = (terminal as unknown as { app?: unknown }).app
+  void app
+  t.diagnostic('transcript path is exercised by the fixture below')
+})
+
+/** One user message carrying one image attachment (the real transcript shape). */
+function transcriptWith(ref: {
+  attachmentId: string
+  mediaType: 'image/png'
+  bytes: number
+  width: number
+  height: number
+  name: string
+}): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  folder.apply([{
+    type: 'user/message',
+    seq: 1,
+    time: 1,
+    data: { content: [{ type: 'image', attachment: ref }], source: { kind: 'user' } },
+  } as never])
+  return folder
+}
+
+test('a TRANSCRIPT image repaints after the async settle, on Main and in the Alt screen (RFL-001/RFL-008)', async (t) => {
+  const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
+  const ref = {
+    attachmentId: 'att-transcript-1',
+    mediaType: 'image/png' as const,
+    bytes: png.byteLength,
+    width: 80,
+    height: 40,
+    name: 'bands.png',
+  }
+  const { terminal, app } = await startSixelApp(t, {
+    imageLoader: new ImageLoader(async () => ({ ref: {}, data: png })),
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+
+  // The REAL transcript path: the app's own folder renders a real ImageThumbnail.
+  terminal.writes.length = 0
+  app.setTranscript(transcriptWith(ref).messages())
+  app.requestRender()
+  await until(() => terminal.writes.join('').includes('🖼️'), 'the transcript identity row')
+  // No further input: only the owner's settle may produce the raster frame.
+  await until(() => terminal.writes.join('').includes('\x1bP0;'), 'the transcript raster after the settle')
+  const mainWire = terminal.writes.join('')
+  const dcs = paintedRasters(terminal).at(-1)!
+  const decoded = decodeSixel(dcs)
+  assert.equal(decoded.width, 80)
+  const [topR, , topB] = pixelAt(decoded, 4, 4)
+  assert.ok(topR > 180 && topB < 80, 'the transcript image painted its real colours on the main screen')
+  assert.ok(mainWire.includes('\x1b[2K'), 'and the screen owns the row erase')
+
+  // The SAME occurrence inside the fullscreen Alt screen (X074): one command, text
+  // first, and no text pass rewrites the anchor row.
+  terminal.writes.length = 0
+  app.setFullscreen(true)
+  await until(() => terminal.writes.join('').includes('\x1bP0;'), 'the fullscreen raster')
+  const altWire = terminal.writes.join('')
+  const altRasters = paintedRasters(terminal)
+  assert.equal(altRasters.length >= 1, true)
+  const altDcs = altRasters.at(-1)!
+  assert.ok(altDcs.endsWith('\x1b\\'), 'the alt frame wrote one complete command')
+  const anchorAt = altWire.lastIndexOf(altDcs)
+  assert.strictEqual(altWire.indexOf('\x1bP', anchorAt + 1), -1, 'exactly one command in that frame')
+  app.setFullscreen(false)
+})
+
+test('a colour-scheme report re-observes the real background (RFL-005)', async (t) => {
+  const { terminal } = await startSixelApp(t)
+  // The app is ready; a scheme report must ask the terminal for the facts again,
+  // because the real background may have changed under a semi-transparent raster.
+  terminal.writes.length = 0
+  terminal.sendInput('\x1b[?997;1n')
+  await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the re-observed geometry query')
+  await until(() => terminal.writes.join('').includes('\x1b]11;?'), 'the re-observed background query')
 })

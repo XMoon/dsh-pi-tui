@@ -506,3 +506,92 @@ test('the registry refuses a new raster instead of evicting a painted one', asyn
   assert.equal(harness.graphics.screen.footprint(painted[painted.length - 1]!), undefined, 'the over-budget occurrence stays text')
   assert.deepEqual(images[images.length - 1]!.render(40), ['fallback'])
 })
+
+test('a live crop variant is never evicted to make room (RFL-003)', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const png = await pngFromRgba(fill(40, 60, (_x, y) => (y < 20 ? [255, 0, 0, 255] : y < 40 ? [0, 255, 0, 255] : [0, 0, 255, 255])), 40, 60)
+  // Leave room for exactly TWO crop variants: the third one then has to evict.
+  const fulls: PixelBody[] = []
+  for (let index = 0; index < SIXEL_REGISTRY_MAX_VARIANTS - 2; index += 1) {
+    // Both bands differ per occurrence, so two 1-row crops are DIFFERENT strings
+    // (identical crops legitimately share one registry record).
+    const distinct = await pngFromRgba(
+      fill(40, 60, (_x, y) => (y < 20 ? [255, 0, index * 4, 255] : y < 40 ? [index * 4, 255, 0, 255] : [0, 0, 255, 255])),
+      40,
+      60,
+    )
+    fulls.push(harness.graphics.image({ pngBase64: distinct, widthPx: 40, heightPx: 60 }, { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' }))
+  }
+  // Every frame re-renders every mounted occurrence; a settled encode is only
+  // looked up again by a render, so the poll renders them too.
+  await waitUntil(() => {
+    for (const image of fulls) image.render(40)
+    return fulls.every(image => image.paintedBodyAt?.(40) !== undefined)
+  }, 'the registry to fill')
+
+  /** Poll exactly like the layout does: the first call schedules, later ones read. */
+  const cropUntilReady = async (line: string): Promise<string> => {
+    let value: string | undefined
+    await waitUntil(() => {
+      value = harness.graphics.screen.crop(line, 1, 1)
+      return value !== undefined
+    }, 'a crop variant')
+    return value!
+  }
+
+  const firstDcs = fulls[0]!.render(40)[0]!
+  const secondDcs = fulls[1]!.render(40)[0]!
+  assert.notEqual(harness.graphics.screen.footprint(firstDcs), undefined)
+  const firstVariant = await cropUntilReady(firstDcs)
+  const secondVariant = await cropUntilReady(secondDcs)
+  assert.notEqual(firstVariant, secondVariant)
+
+  // Both live crops are pinned: a third one has to evict, and a record the current
+  // frame paints is NOT evictable — so it is refused instead of dropping one.
+  const thirdDcs = fulls[2]!.render(40)[0]!
+  const beforeThird = harness.notifications()
+  assert.equal(harness.graphics.screen.crop(thirdDcs, 1, 1), undefined)
+  // The third crop must NOT settle, so there is no positive signal to await.
+  // reason: a NEGATIVE observation window (the refusal is the absence of a repaint).
+  await new Promise(resolve => setTimeout(resolve, 400))
+  assert.equal(harness.graphics.screen.crop(firstDcs, 1, 1), firstVariant, 'the first live crop survives')
+  assert.equal(harness.graphics.screen.crop(secondDcs, 1, 1), secondVariant, 'the second live crop survives')
+  assert.notEqual(harness.graphics.screen.footprint(firstVariant), undefined, 'and it is still a trusted raster')
+  assert.equal(harness.notifications(), beforeThird, 'a refused crop reports no settle')
+  void png
+})
+
+test('a deterministically unpaintable request is not re-encoded every frame (RFL-006)', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  // A fully transparent picture: the codec paints nothing and the occurrence must
+  // stay text WITHOUT re-tasking the lane on every repaint.
+  const transparent = await pngFromRgba(fill(40, 40, () => [0, 0, 0, 0]), 40, 40)
+  const image = harness.graphics.image({ pngBase64: transparent, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'fallback' })
+
+  const originalEncode = SixelEncoder.prototype.encode
+  let encodes = 0
+  SixelEncoder.prototype.encode = function patched(this: SixelEncoder, request) {
+    encodes += 1
+    return originalEncode.call(this, request)
+  }
+  t.after(() => {
+    SixelEncoder.prototype.encode = originalEncode
+  })
+
+  image.render(40)
+  await waitUntil(() => encodes >= 1, 'the first encode')
+  // Let the settle land, then repaint many times with no input at all. The settle
+  // is the ABSENCE of a raster, so the window is the only observation bound.
+  // reason: a NEGATIVE observation window before the repaint loop.
+  await new Promise(resolve => setTimeout(resolve, 300))
+  const settled = encodes
+  for (let frame = 0; frame < 25; frame += 1) {
+    image.invalidate()
+    assert.deepEqual(image.render(40), ['fallback'], 'a transparent picture stays text')
+  }
+  // reason: a NEGATIVE observation window — a re-encode would appear DURING it.
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(encodes, settled, 'the same unpaintable request is not re-sent on every frame')
+})

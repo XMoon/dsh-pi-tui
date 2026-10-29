@@ -4599,6 +4599,119 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 			}
 		});
 
+		it("never slices a DCS wider than the terminal at the width clamp", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(20, 6);
+				const port = new RecordingSixelPort();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				// The DCS is ~300 visible characters wide in this 20-column screen; a
+				// plain text clamp would cut the terminator off.
+				const dcs = port.register(`${raster("PAD")}${"#0!40~".repeat(40)}`, { columns: 4, rows: 1 });
+				const block: Component = { render: () => [dcs], invalidate: () => {} };
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+
+				const firstFrame = wire(terminal);
+				assert.ok(firstFrame.includes(dcs), "the whole command, including its ST, reaches the terminal");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("yields the anchor row to the jump-to-end indicator instead of wrapping the DCS", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 4);
+				const port = new RecordingSixelPort();
+				const dcs = port.register(raster("IND"), { columns: 4, rows: 1 });
+				const scroll = new ScrollView(
+					{
+						render: () => ["one", "two", "three", "four", "five", "six", dcs],
+						invalidate: () => {},
+					},
+					{ follow: "end", primary: true },
+				);
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+					scrollToEndIndicator: () => "Jump",
+				});
+				tui.setLayoutRoot(scroll);
+				tui.start();
+				await terminal.waitForRender();
+				// Leave the end so the anchor is off screen, then come back: the frame
+				// that re-shows it is the one where the indicator would land on it.
+				scroll.scrollTo(1, { disableFollow: true });
+				await terminal.waitForRender();
+				terminal.events.length = 0;
+				scroll.scrollTo(3, { disableFollow: true });
+				tui.renderNow();
+				await terminal.waitForRender();
+
+				const text = wire(terminal);
+				assert.ok(text.includes(dcs), "the command is painted again, intact");
+				assert.ok(!text.includes("Jump"), "the indicator yields the row rather than splicing the command");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("a selection across a block never wraps its DCS and never copies it", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 10);
+				const port = new RecordingSixelPort();
+				const dcs = port.register(raster("SEL"), { columns: 4, rows: 1 });
+				let copied: string | undefined;
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+					copySelection: async (text) => {
+						copied = text;
+					},
+				});
+				const block: Component = {
+					render: () => ["top", dcs, "bottom", "more"],
+					invalidate: () => {},
+				};
+				tui.addChild(block);
+				tui.installViewportListener();
+				tui.start();
+				await terminal.waitForRender();
+				const initialWire = wire(terminal);
+				assert.ok(initialWire.includes(dcs), "the command was painted intact before the gesture");
+
+				// Press on the row above the raster and drag past it: the range spans the
+				// anchor, which a plain text pass would highlight (and splice).
+				terminal.events.length = 0;
+				terminal.sendInput("\x1b[<0;2;1M");
+				terminal.sendInput("\x1b[<32;2;4M");
+				terminal.sendInput("\x1b[<0;2;4m");
+				await terminal.waitForRender();
+
+				const selectionFrame = wire(terminal);
+				assert.strictEqual(
+					selectionFrame.includes("\x1bP"),
+					false,
+					"the selection pass leaves the anchor row untouched (a splice would re-emit a fragment)",
+				);
+				if (copied !== undefined) {
+					assert.strictEqual(copied.includes("\x1bP"), false, "the copied text never contains the command");
+					assert.strictEqual(copied.includes(dcs), false);
+				}
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
 		it("never replays a SIXEL DCS into the main screen's restored document", async () => {
 			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 			try {
