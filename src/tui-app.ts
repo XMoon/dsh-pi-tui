@@ -2899,7 +2899,11 @@ export class TuiApp {
   private syncSixelObservation(): void {
     const graphics = this.graphics
     if (graphics === undefined || graphics.mode !== 'sixel') return
-    const screen: SixelScreenObservation = this.fullscreen ?? this.tui
+    // The screen that OWNS the terminal answers the facts: a leased Job/Settings
+    // workspace replaces the return surface for the whole lease, so binding the
+    // stopped return screen would query a screen nobody reads from.
+    const screen: SixelScreenObservation =
+      this.workspaceLease?.screen ?? this.jobWorkspace?.screen ?? this.fullscreen ?? this.tui
     graphics.observeScreen(screen, this.terminal.columns, this.terminal.rows)
   }
   /** The extension surface host (M2), when the runner attached one. */
@@ -5091,7 +5095,6 @@ export class TuiApp {
     }
     try {
       this.tui.start()
-      this.syncSixelObservation()
     } catch (error) {
       // A throw must never leak the claimed slot (plan §11).
       if (firstStart && this.processTuiSlotClaimed) {
@@ -5229,11 +5232,9 @@ export class TuiApp {
     this.workspaceLeaseFreezeDepth -= 1
     if (this.fullscreen !== undefined) {
       this.fullscreen.start()
-      this.syncSixelObservation()
       this.fullscreen.requestRender(true)
     } else {
       this.tui.start()
-      this.syncSixelObservation()
       this.tui.requestRender(true)
     }
     // The suspend stopped the active screen (clearing OSC 9;4 + its
@@ -8260,11 +8261,9 @@ export class TuiApp {
       this.projectSeatOccupant()
       alt.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
       this.fullscreen = alt
-      // The alt screen owns the terminal now: re-certify the verified cell and
-      // background facts for THIS screen before any pixel may be painted.
-      this.syncSixelObservation()
-      // The alt screen now owns the terminal input handler: scheme reports
-      // arrive THERE, so re-register the fan-out on both screens.
+      // The alt screen owns the terminal now: re-register the scheme fan-out —
+      // which also re-binds the SIXEL readiness projection to THIS screen, so no
+      // pixel is painted with facts sampled for the previous one. (RFL-011.)
       this.refreshSchemeRegistrations()
     } else {
       this.leaveTerminalPresentation()
@@ -8274,9 +8273,6 @@ export class TuiApp {
       // A latched profiler window must not leak across a fullscreen swap.
       this.resetScrollProfileFrame()
       this.tui.start()
-      // The main screen owns the terminal again: the alt screen's verified facts
-      // do not carry over to a different physical Screen.
-      this.syncSixelObservation()
       // The alt screen's stop cleared the physical progress indicator;
       // re-assert the desired state on the main screen (plan §7).
       this.enterTerminalPresentation()
@@ -25576,6 +25572,12 @@ export class TuiApp {
 
   /** (Re)register the scheme-report fan-out on every screen. */
   private refreshSchemeRegistrations(): void {
+    // Every caller of this function has just changed WHICH screen owns the
+    // terminal (start, fullscreen enter/exit, a workspace lease opening or
+    // closing, a resume). The SIXEL readiness projection must follow the same
+    // ownership, or a restored screen keeps a projection sampled for a screen
+    // that no longer exists. (RFL-011.)
+    this.syncSixelObservation()
     for (const dispose of this.schemeDisposers) dispose()
     this.schemeDisposers = []
     const screens: Array<TuiMainScreen | TuiAltScreen> = [this.tui]

@@ -397,7 +397,9 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     const record = this.records.get(line)
     if (record === undefined) return undefined
     record.useStamp = ++this.useStamp
-    // Only a full raster this owner encoded has a source to re-encode from.
+    // Only a FULL raster has a source to re-encode from: cropping a crop variant
+    // would derive a window from a window.
+    if (record.kind !== 'full') return undefined
     const occurrence = record.owners.values().next().value
     if (occurrence === undefined || this.disposed) return undefined
     const fullRows = occurrence.full.rows
@@ -407,6 +409,13 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     if (cropTopRows === 0 && bounded >= fullRows) return occurrence.full.dcs
     const current = occurrence.crop
     if (current !== undefined && current.cropTopRows === cropTopRows && current.visibleRows === bounded) {
+      if (this.records.get(current.record.dcs) !== current.record) {
+        // The record left the trust table (a shared variant released by its other
+        // owner): fail closed instead of returning a string the Screen no longer
+        // recognises as an image.
+        occurrence.crop = undefined
+        return undefined
+      }
       current.record.useStamp = ++this.useStamp
       return current.record.dcs
     }
@@ -528,8 +537,10 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     const crop = occurrence.crop
     if (crop === undefined) return
     occurrence.crop = undefined
+    // Two occurrences can share one crop raster (identical visible pixels). Only
+    // the LAST owner may unregister it; the other still paints the same bytes.
     crop.record.owners.delete(occurrence)
-    this.unregister(crop.record)
+    if (crop.record.owners.size === 0) this.unregister(crop.record)
   }
 
   // === occurrences ==========================================================

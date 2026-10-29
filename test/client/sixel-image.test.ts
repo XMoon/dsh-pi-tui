@@ -595,3 +595,46 @@ test('a deterministically unpaintable request is not re-encoded every frame (RFL
   await new Promise(resolve => setTimeout(resolve, 300))
   assert.equal(encodes, settled, 'the same unpaintable request is not re-sent on every frame')
 })
+
+test('an unadmittable crop is not re-encoded on every frame (RFL-006 crop branch)', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  // Sixteen pinned fulls: every crop admission is refused for lack of a slot.
+  const fulls: PixelBody[] = []
+  for (let index = 0; index < SIXEL_REGISTRY_MAX_VARIANTS; index += 1) {
+    const distinct = await pngFromRgba(
+      fill(40, 60, (_x, y) => (y < 20 ? [255, 0, index * 4, 255] : y < 40 ? [index * 4, 255, 0, 255] : [0, 0, 255, 255])),
+      40,
+      60,
+    )
+    fulls.push(harness.graphics.image({ pngBase64: distinct, widthPx: 40, heightPx: 60 }, { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' }))
+  }
+  await waitUntil(() => {
+    for (const image of fulls) image.render(40)
+    return fulls.every(image => image.paintedBodyAt?.(40) !== undefined)
+  }, 'the registry to fill')
+  const line = fulls[0]!.render(40)[0]!
+
+  const originalEncode = SixelEncoder.prototype.encode
+  let encodes = 0
+  SixelEncoder.prototype.encode = function patched(this: SixelEncoder, request) {
+    encodes += 1
+    return originalEncode.call(this, request)
+  }
+  t.after(() => {
+    SixelEncoder.prototype.encode = originalEncode
+  })
+
+  // The first request is scheduled and then refused by the budget.
+  assert.equal(harness.graphics.screen.crop(line, 1, 1), undefined)
+  await waitUntil(() => encodes >= 1, 'the first crop encode')
+  // reason: a NEGATIVE observation window — the refusal has no positive signal.
+  await new Promise(resolve => setTimeout(resolve, 300))
+  const settled = encodes
+  for (let frame = 0; frame < 20; frame += 1) {
+    assert.equal(harness.graphics.screen.crop(line, 1, 1), undefined, 'the refused variant keeps painting nothing')
+  }
+  // reason: a NEGATIVE observation window — a retry would appear during it.
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(encodes, settled, 'the refused crop is not re-sent until the trust table changes')
+})

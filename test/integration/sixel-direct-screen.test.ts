@@ -240,18 +240,6 @@ test('clearing the draft erases the whole painted footprint', async (t) => {
   )
 })
 
-test('a transcript image paints on a LATER frame and registers a real body (RFL-001)', async (t) => {
-  const { terminal, store } = await startSixelApp(t)
-  void store
-  const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
-  const ref = { attachmentId: 'att-transcript-1', mediaType: 'image/png' as const, bytes: png.byteLength, width: 80, height: 40, name: 'bands.png' }
-  const loader = new ImageLoader(async () => ({ ref: {}, data: png }))
-  // The REAL app composition: the same TuiApp, its real transcript folder and its
-  // real ImageThumbnail occurrence.
-  const app = (terminal as unknown as { app?: unknown }).app
-  void app
-  t.diagnostic('transcript path is exercised by the fixture below')
-})
 
 /** One user message carrying one image attachment (the real transcript shape). */
 function transcriptWith(ref: {
@@ -325,4 +313,47 @@ test('a colour-scheme report re-observes the real background (RFL-005)', async (
   terminal.sendInput('\x1b[?997;1n')
   await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the re-observed geometry query')
   await until(() => terminal.writes.join('').includes('\x1b]11;?'), 'the re-observed background query')
+})
+
+test('a workspace lease re-binds the owner, and closing it re-certifies the return screen (RFL-011)', async (t) => {
+  const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
+  const ref = {
+    attachmentId: 'att-lease-1',
+    mediaType: 'image/png' as const,
+    bytes: png.byteLength,
+    width: 80,
+    height: 40,
+    name: 'bands.png',
+  }
+  const { terminal, app } = await startSixelApp(t, {
+    imageLoader: new ImageLoader(async () => ({ ref: {}, data: png })),
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  app.setTranscript(transcriptWith(ref).messages())
+  app.requestRender()
+  await until(() => paintedRasters(terminal).length > 0, 'the transcript raster before the lease')
+
+  // A real Settings lease: its screen owns the terminal for the whole lease.
+  terminal.writes.length = 0
+  const handle = app.openSettingsWorkspace(
+    { readSnapshot: () => ({ configReadiness: 'ready' as const, rows: [], capturedAt: 0 }) },
+    { aboutVersionFacts: { tui: 'test-bundle', dsh: undefined } },
+  )
+  await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the lease screen to be re-observed')
+
+  // A scheme report WHILE the workspace owns the terminal must sample the LEASE
+  // screen, not the stopped return screen.
+  terminal.writes.length = 0
+  terminal.sendInput('\x1b[?997;1n')
+  await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the leased screen to re-observe on a scheme report')
+
+  // Closing the lease restores the return screen: it must be re-observed and the
+  // transcript raster must come back without any other input.
+  terminal.writes.length = 0
+  handle.close()
+  await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the return screen to be re-certified')
+  await until(
+    () => paintedRasters(terminal).some(dcs => dcs.includes('"1;1;80;')),
+    'the transcript raster to return on the restored screen',
+  )
 })

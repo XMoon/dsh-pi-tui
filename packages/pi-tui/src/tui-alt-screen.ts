@@ -863,7 +863,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 
 		const shouldRevealSelection = search.selectionMode !== "retain";
-		const result = search.index.search(lines, search.query);
+		// A trusted SIXEL anchor is a device command, not searchable text: indexing
+		// its bytes would report matches on a row with no visible text and reveal a
+		// viewport that cannot show them. The row is kept (as empty) so every other
+		// row's index and every match's row stay aligned. (X074.)
+		const corpus = lines.some((line) => this.sixelFootprint(line) !== undefined)
+			? lines.map((line) => (this.sixelFootprint(line) === undefined ? line : ""))
+			: lines;
+		const result = search.index.search(corpus, search.query);
 		const matches = result.matches;
 		search.matches = matches;
 		if (!result.changed && search.selectionMode === "retain") return false;
