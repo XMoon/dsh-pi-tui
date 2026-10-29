@@ -18,8 +18,10 @@
  *   XML with a local `scrollTop`; the ORIGINAL string is never rewritten, and
  *   `Copy` sends it unchanged.
  *
- * Preview pixels are Kitty-only. Without a usable protocol the page says
- * `Preview unavailable` and Source/Copy stay fully usable.
+ * Preview pixels are available on Kitty and on Direct SIXEL (Image-8 / I8-2B);
+ * iTerm2 keeps the intentional workspace restriction. Without a usable
+ * protocol the page says `Preview unavailable` and Source/Copy stay fully
+ * usable.
  * @module @xmoon76/dsh-pi-tui/tui/components/media/svg-viewer
  */
 
@@ -389,11 +391,13 @@ export class SvgViewerPanel implements Component {
     return rows
   }
 
-  /** Whether this surface may paint real SVG pixels at all. */
+  /** Whether this surface may paint real SVG pixels at all: Kitty and Direct
+   *  SIXEL (the isolated raster lane is Linux-only); iTerm2 stays excluded. */
   private previewSupported(): boolean {
+    const protocol = effectiveImageProtocol(this.input.graphics)
     return this.input.loader !== undefined
       && this.admission.ok
-      && effectiveImageProtocol(this.input.graphics) === 'kitty'
+      && (protocol === 'kitty' || protocol === 'sixel')
       && isolatedSvgRasterSupported()
   }
 
