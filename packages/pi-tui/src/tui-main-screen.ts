@@ -255,6 +255,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		rawLines: readonly string[],
 		height: number,
 		viewportTop: number,
+		width: number,
 		reconcile: boolean,
 	): {
 		lines: string[];
@@ -322,14 +323,19 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				lines[row] = previous;
 				preserved.add(row);
 			} else if (this.previousRawLines[row] === token) {
-				this.previousLines[row] = info.fallback;
-				// The row is TEXT again: drop the cached image/sixel metadata together
-				// with the payload, or the next frame re-records a plain fallback as an
-				// image block (and a full render reserves body rows for it).
+				// The row is TEXT again: apply the SAME physical text contract as any
+				// other row (width clamp + normalization + reset) BEFORE caching it, or a
+				// later full render would write an over-wide fallback and wrap history.
+				let fallback = info.fallback;
+				if (visibleWidth(fallback) > width) fallback = sliceByColumn(fallback, 0, width, true);
+				fallback = normalizeTerminalOutput(fallback) + SEGMENT_RESET;
+				this.previousLines[row] = fallback;
+				// Drop the cached image/sixel metadata together with the payload, or the
+				// next frame re-records a plain fallback as an image block.
 				this.previousLineSixelRows[row] = 0;
 				this.previousLineImageRows[row] = 0;
 				this.previousLineImageIds[row] = [];
-				lines[row] = info.fallback;
+				lines[row] = fallback;
 				preserved.add(row);
 			} else {
 				lines[row] = info.fallback;
@@ -584,12 +590,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// an append, and a resize alike. The projection and every commit use this
 		// one value so a granted row is always a committed row.
 		const frameViewportTop = Math.max(0, rawLines.length - height);
-		let projection = this.projectSixelCandidates(rawLines, height, frameViewportTop, true);
+		let projection = this.projectSixelCandidates(rawLines, height, frameViewportTop, width, true);
 		if (projection.recompose) {
 			// The grant set changed with this frame's demands: the component lines
 			// are unchanged (they are markers), so one more projection is the whole
 			// recomposition. More than one would be a repaint storm.
-			projection = this.projectSixelCandidates(rawLines, height, frameViewportTop, false);
+			projection = this.projectSixelCandidates(rawLines, height, frameViewportTop, width, false);
 		}
 		this.sixelFrameRasters = projection.rasters;
 		const preservedRows = projection.preserved;

@@ -482,3 +482,32 @@ it("24 images appended one at a time never keep a released DCS in the history ca
 	}
 	screen.stop();
 });
+
+it("a released history fallback is width-clamped before a full render can write it (X073)", async () => {
+	const terminal = new RecordingTerminal();
+	terminal.columns = 40;
+	terminal.rows = 12;
+	const port = new CandidateSixelPort();
+	const screen = new TestableMainScreen(terminal, port);
+	const document = new Document();
+	screen.addChild(document);
+	const longName = "x".repeat(60);
+	const token = port.registerSource(longName, 1);
+	port.bindRaster(token, sixel("long"), { columns: 4, rows: 1 });
+	document.lines = [token, "a", "b", "c"];
+	screen.start();
+	await frame(screen);
+	// Push the image above the viewport; its record is released and the history
+	// cache swaps to the fallback (no write).
+	document.lines = [token, "a", "b", "c", ...Array.from({ length: 20 }, (_, index) => `line ${index}`)];
+	await frame(screen);
+	// A REAL change above the viewport forces a same-width full render, which now
+	// writes the cached fallback: it must be clamped like any text row.
+	document.lines = ["changed", ...document.lines.slice(1)];
+	terminal.clear();
+	await frame(screen);
+	const wire = terminal.output();
+	assert.ok(!wire.includes("x".repeat(45)), "the over-wide fallback is truncated to the terminal width");
+	assert.ok(wire.includes("changed"), "the real history change is written");
+	screen.stop();
+});
