@@ -297,7 +297,11 @@ export class ImageThumbnail implements Component {
     // the owner keeps until the next `framePainted`: the component renders before
     // the Screen materializes, so a component-local snapshot would always lag one
     // frame (or clear on every render). (X072/X073.)
-    if (this.instanceKind === 'raw-sixel') {
+    // Both SIXEL kinds read the LAST COMMITTED frame's footprint: the component
+    // render happens before the Screen materializes, so a component-local
+    // snapshot would lag one frame. `preview-sixel` is the derived PNG path for
+    // JPEG/WebP and must behave exactly like the direct PNG path here.
+    if (this.instanceKind === 'raw-sixel' || this.instanceKind === 'preview-sixel') {
       const live = this.instance?.paintedBodyAt?.(width)
       return live === undefined ? undefined : { rows: live.rows, endCol: live.columns }
     }

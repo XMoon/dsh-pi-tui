@@ -24,18 +24,14 @@
  *    disposal through `runDetached` so a worker termination failure is
  *    reported instead of vanishing.
  *
- * Capacity boundary: the registry retains at most
- * {@link SIXEL_REGISTRY_MAX_VARIANTS} encoded rasters and refuses a new one
- * rather than evicting a record a LIVE occurrence still renders. `owners` is
- * component lifetime, not "painted by the current frame", on purpose: evicting a
- * record while its component still emits that DCS would make the Screen treat a
- * raster as untrusted text, and the plan's two-method port has no channel to
- * invalidate the component. A refusal is therefore TERMINAL for that request: only
- * a change to the request's own facts (source, width, cell box, background, epoch)
- * mints a new key and tries again. The honest consequence is that a transcript with more
- * expanded occurrences than the cap shows the over-budget ones as text, even when
- * they are off screen; releasing off-screen records needs a component-visible
- * invalidation channel and is recorded as a follow-up rather than guessed here.
+ * Residency follows the physical frame: the registry retains at most
+ * {@link SIXEL_REGISTRY_MAX_VARIANTS} encoded rasters, the Screen grants the
+ * occurrences its FINAL layout really shows (bottom-up within the budget), and a
+ * committed frame releases every record no longer retained. A component never
+ * emits a DCS: it emits an inert candidate marker, and `materialize()` is the
+ * only token->DCS exit. A frame that really shows more candidates than the
+ * budget settles the excess into text deterministically; a record a frame never
+ * showed cannot pin the registry, so history can no longer starve a new image.
  *
  * The display derivative is never persisted, transmitted or exported: it is a
  * Client-local projection of bytes the existing `ImageLoader` already
@@ -783,6 +779,8 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
       occurrence.full?.owners.delete(occurrence)
     }
     this.occurrences.clear()
+    this.candidates.clear()
+    this.grantOrder = []
     this.records.clear()
     this.retainedBytes = 0
     // The terminal write side is already gone, so the only remaining work is the

@@ -959,3 +959,13 @@ test('an off-screen occurrence releases its crop record too (registry returns to
     return next.paintedBodyAt?.(40) !== undefined
   }, 'a fresh occurrence after the release')
 })
+
+test('dispose clears the candidate registry too (no retained source bytes)', async (t) => {
+  const harness = await readyHarness(t)
+  const png = await TWO_BAND_PNG()
+  const image = harness.graphics.image({ pngBase64: png, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'fallback' })
+  const token = image.render(40)[0]!
+  assert.notEqual(harness.graphics.screen.candidate(token), undefined, 'a bound occurrence is a candidate')
+  harness.graphics.dispose()
+  assert.equal(harness.graphics.screen.candidate(token), undefined, 'dispose drops the candidate table')
+})

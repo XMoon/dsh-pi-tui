@@ -399,6 +399,14 @@ it("keeps native scrollback when a painted image leaves the viewport (X073)", as
 	assert.ok(!wire.includes("\x1b[2J"), "no full screen clear for a residency-only change");
 	assert.ok(wire.includes("tail text"), "the real content change is written");
 
+	// The NEXT ordinary repaint must not turn the released record into
+	// `firstChanged` above the viewport: history is decoupled from residency.
+	terminal.clear();
+	await frame(screen);
+	const repaint = terminal.output();
+	assert.ok(!repaint.includes("\x1b[3J"), "no scrollback clear on the repaint after a release");
+	assert.ok(!repaint.includes("\x1b[2J"), "no full clear on the repaint after a release");
+
 	// A later full render (a width change) must not replay a released record's
 	// DCS: the above-viewport block that lost its grant becomes its own text.
 	terminal.clear();
@@ -407,4 +415,36 @@ it("keeps native scrollback when a painted image leaves the viewport (X073)", as
 	const fullWire = terminal.output();
 	assert.ok(!fullWire.includes("many-20"), "a released raster is never replayed by a full render");
 	assert.ok(!fullWire.includes("SIXC"), "no candidate marker reaches the terminal");
+});
+
+it("an overlay over a candidate block's body row yields the whole block (X073)", async () => {
+	const terminal = new RecordingTerminal();
+	terminal.rows = 12;
+	const port = new CandidateSixelPort();
+	const screen = new TestableMainScreen(terminal, port);
+	const document = new Document();
+	const token = port.registerSource("image", 3);
+	port.bindRaster(token, sixel("cand"), { columns: 4, rows: 3 });
+	document.lines = ["info", token, "", "", "tail"];
+	screen.addChild(document);
+	screen.start();
+	await frame(screen);
+	assert.ok(terminal.output().includes(sixel("cand")), "the candidate paints before the overlay");
+
+	const overlay: Component = { render: () => ["OVERLAY"], invalidate: () => {} };
+	const handle = screen.showOverlay(overlay, { row: 2, col: 0, width: 10 });
+	terminal.clear();
+	await frame(screen);
+	const covered = terminal.output();
+	assert.ok(!covered.includes(sixel("cand")), "a block whose body row an overlay covers paints no DCS");
+	assert.ok(!covered.includes("SIXC"), "and no candidate marker reaches the terminal");
+
+	screen.hideOverlay(handle);
+	// The fake has no encoder: re-arm the same source the way the real owner
+	// re-encodes a released occurrence on its next grant.
+	port.bindRaster(token, sixel("cand"), { columns: 4, rows: 3 });
+	terminal.clear();
+	await frame(screen);
+	assert.ok(terminal.output().includes(sixel("cand")), "the block returns when the overlay is gone");
+	screen.stop();
 });
