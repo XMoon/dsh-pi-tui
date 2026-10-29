@@ -852,8 +852,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // moved, so the message belongs to a stale operation.
           if (result.error.ownership === 'superseded') return undefined
         }
-        // The resume failed: the CURRENT session is still live.
-        return `${result.message}${stopNote(oldOwnerQuiesced)}`
+        // The resume failed: the CURRENT session is still live. The full
+        // official message (including its raw-log path) stays in the
+        // diagnostic log; the NOTICE drops the path so the actionable refusal
+        // plus the old-turn note fit a 44x20 viewport without scrolling the
+        // current Session card away.
+        deps.diag.warn('session switch refused', { sessionId, message: result.message })
+        const displayMessage = result.message.replace(/ \(raw log: [^)]*\)/u, '')
+        return `${displayMessage}${stopNote(oldOwnerQuiesced)}`
       }
       // The switch COMMITTED: staged drafts are per-session UI state — drop the
       // unpinned ones now (never durable attachments). In-flight submissions
