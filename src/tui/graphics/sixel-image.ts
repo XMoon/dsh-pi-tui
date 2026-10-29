@@ -174,7 +174,12 @@ interface Occurrence {
   readonly width: number
   full: RasterRecord
   crop?: { cropTopRows: number; visibleRows: number; record: RasterRecord }
-  pendingCrop?: { cropTopRows: number; visibleRows: number; controller: AbortController }
+  /**
+   * The one in-flight variant request. `attempts` carries the SAME window's failure
+   * count across retries: the retry path clears `failedCrop` (through `releaseCrop`),
+   * so without this the bounded budget would restart at 1 on every attempt.
+   */
+  pendingCrop?: { cropTopRows: number; visibleRows: number; controller: AbortController; attempts: number }
   /** A visible window this source cannot draw.
    *
    * `terminal` means the outcome is final for these facts (a transparent window,
@@ -470,10 +475,16 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     ) {
       return undefined
     }
+    // A retry for the SAME window inherits its failure count; a different window
+    // starts a fresh budget.
+    const carriedAttempts =
+      failed !== undefined && failed.cropTopRows === cropTopRows && failed.visibleRows === bounded
+        ? failed.attempts
+        : 0
     pending?.controller.abort()
     this.releaseCrop(occurrence)
     const controller = new AbortController()
-    occurrence.pendingCrop = { cropTopRows, visibleRows: bounded, controller }
+    occurrence.pendingCrop = { cropTopRows, visibleRows: bounded, controller, attempts: carriedAttempts }
     runDetached(
       'SIXEL crop variant',
       async () => {
@@ -493,17 +504,19 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
         } catch (error) {
           // Settle the token even on failure: a rejected crop must not answer
           // `undefined` forever. A busy lane is retried a bounded number of times.
-          if (occurrence.pendingCrop?.controller === controller) occurrence.pendingCrop = undefined
-          {
-            const attempts = (occurrence.failedCrop?.attempts ?? 0) + 1
-            occurrence.failedCrop = {
-              cropTopRows,
-              visibleRows: bounded,
-              revision: this.admissionRevision,
-              terminal: attempts >= SIXEL_ENCODE_ATTEMPT_LIMIT,
-              kind: 'rejected',
-              attempts,
-            }
+          const task = occurrence.pendingCrop
+          // A SUPERSEDED or cancelled task is not this window's failure: never charge
+          // its error to the window the user is looking at now.
+          if (task === undefined || task.controller !== controller) return
+          occurrence.pendingCrop = undefined
+          const attempts = task.attempts + 1
+          occurrence.failedCrop = {
+            cropTopRows,
+            visibleRows: bounded,
+            revision: this.admissionRevision,
+            terminal: attempts >= SIXEL_ENCODE_ATTEMPT_LIMIT,
+            kind: 'rejected',
+            attempts,
           }
           throw error
         }

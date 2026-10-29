@@ -836,3 +836,38 @@ test('an over-budget occurrence stays text until its own facts change, then retr
   overBudget.render(38)
   await waitUntil(() => attempts >= 1, 'a retry for the changed request')
 })
+
+test('a crop retry keeps its failure count across attempts and then stops (X1)', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const png = await pngFromRgba(fill(40, 60, (_x, y) => (y < 20 ? [255, 0, 0, 255] : y < 40 ? [0, 255, 0, 255] : [0, 0, 255, 255])), 40, 60)
+  const image = harness.graphics.image({ pngBase64: png, widthPx: 40, heightPx: 60 }, { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' })
+  image.render(40)
+  await waitForRepaint(harness, 'the full encode')
+  const full = image.render(40)[0]!
+
+  const originalEncode = SixelEncoder.prototype.encode
+  let encodes = 0
+  SixelEncoder.prototype.encode = function patched() {
+    encodes += 1
+    return Promise.reject(new SixelEncodeRejectedError('The encode request was aborted.'))
+  }
+  t.after(() => {
+    SixelEncoder.prototype.encode = originalEncode
+  })
+
+  // Every attempt fails. The retry path clears the failure record (releaseCrop), so
+  // the count must be carried on the pending request or the budget never fills and
+  // each frame re-tasks the single encoder lane forever.
+  for (let attempt = 1; attempt <= SIXEL_ENCODE_ATTEMPT_LIMIT; attempt += 1) {
+    assert.equal(harness.graphics.screen.crop(full, 1, 1), undefined, `attempt ${attempt} answers nothing`)
+    await waitUntil(() => encodes === attempt, `attempt ${attempt} to reach the lane`)
+    // reason: a bounded window for the failure to settle before the next request.
+    await new Promise(resolve => setTimeout(resolve, 100))
+  }
+  // The budget is spent: a further request is refused WITHOUT touching the lane.
+  for (let frame = 0; frame < 5; frame += 1) harness.graphics.screen.crop(full, 1, 1)
+  // reason: a NEGATIVE observation window — a further attempt would appear during it.
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(encodes, SIXEL_ENCODE_ATTEMPT_LIMIT, 'the retry budget really fills, then stops')
+})
