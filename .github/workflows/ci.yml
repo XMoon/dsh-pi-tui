@@ -1533,6 +1533,7 @@ jobs:
       - security-audit
       - release-context
       - release-metadata
+      - release-packed-check
       - publish
       - release
     if: ${{ always() }}
@@ -1586,6 +1587,7 @@ jobs:
             --phase "qualified=${{ needs.qualified.result }}" \
             --phase "release-context=${{ needs['release-context'].result }}" \
             --phase "release-metadata=${{ needs['release-metadata'].result }}" \
+            --phase "release-packed-check=${{ needs['release-packed-check'].result }}" \
             --phase "publish=${{ needs.publish.result }}" \
             --phase "release=${{ needs.release.result }}" \
             | tee pipeline-summary.txt
@@ -2067,6 +2069,86 @@ jobs:
           retention-days: 14
 
   # ---------------------------------------------------------------------------
+  # F6b — the packed SIXEL release gate.
+  #
+  # The one place this check belongs: on a release tag, against the FINAL tarball
+  # that `publish` will publish, BEFORE publication. It proves the artifact
+  # through the REAL loader: tarball → standalone install → `dsh plugin add` into
+  # an isolated DSH_HOME → the `dsh` CLI under a PTY → `/image` → the Screen's DCS
+  # → decoded pixels. A failure here blocks `publish`.
+  #
+  # It is deliberately NOT a per-PR product-lane case: that lane provisions
+  # neither a packed tarball nor the `dsh` CLI, and a qualification lane must not
+  # carry a skip for a capability it cannot provide.
+  # ---------------------------------------------------------------------------
+  release-packed-check:
+    name: Packed SIXEL release check (F6b)
+    needs:
+      - dsh-context
+      - qualified
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.qualified.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm and Node.js
+        uses: pnpm/setup@v2
+        with:
+          runtime: node@24
+          cache: true
+          install: false
+
+      - name: Install the workspace (npm mode)
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/dsh-npmrc"
+          NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
+            npm_config_registry=https://registry.npmjs.org/ \
+            NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/dsh-npmrc" \
+            npm_config_userconfig="$RUNNER_TEMP/dsh-npmrc" \
+            PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN=false \
+            PNPM_CONFIG_MANAGE_PACKAGE_MANAGER_VERSIONS=false \
+            pnpm install --frozen-lockfile
+          {
+            echo 'NPM_CONFIG_REGISTRY=https://registry.npmjs.org/'
+            echo 'npm_config_registry=https://registry.npmjs.org/'
+            echo "NPM_CONFIG_USERCONFIG=$RUNNER_TEMP/dsh-npmrc"
+            echo "npm_config_userconfig=$RUNNER_TEMP/dsh-npmrc"
+          } >> "$GITHUB_ENV"
+
+      - name: Download the qualified tarball
+        uses: actions/download-artifact@v8
+        with:
+          name: dsh-pi-tui-tarball
+          path: tarball
+
+      - name: Provision the matrix's DSH CLI
+        run: |
+          set -euo pipefail
+          VERSION="$(node --input-type=module -e "import('./scripts/lib/dsh-compat.mjs').then(m => process.stdout.write(m.COMPAT_MATRIX.current.upgradeDsh))")"
+          echo "dsh CLI version: $VERSION"
+          npm install --prefix "$RUNNER_TEMP/dsh-cli" --no-audit --no-fund --loglevel=error "@deepseek-ai/dsh@$VERSION"
+          echo "$RUNNER_TEMP/dsh-cli/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Prove the packed artifact carries the SIXEL chain
+        run: |
+          set -euo pipefail
+          mapfile -t TARBALLS < <(
+            find tarball -maxdepth 1 -type f -name 'xmoon76-dsh-pi-tui-*.tgz' -print | sort
+          )
+          if [ "${#TARBALLS[@]}" -ne 1 ]; then
+            echo "Expected exactly one tarball, found ${#TARBALLS[@]}" >&2
+            printf '%s\n' "${TARBALLS[@]}" >&2
+            exit 1
+          fi
+          node --import tsx/esm scripts/sixel-packed-verification.mjs "${TARBALLS[0]}"
+
+  # ---------------------------------------------------------------------------
   # Publish the EXACT artifact produced by `qualified` — never the provisional
   # one, and never a rebuild.
   #
@@ -2082,7 +2164,7 @@ jobs:
   publish:
     name: Publish to npm
 
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.qualified.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.ecosystem-compat.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && needs.dsh-context.result == 'success' && needs.release-context.result == 'success' && needs.source-checks.result == 'success' && needs.qualified.result == 'success' && needs.client-family-compat.result == 'success' && needs.compat-smoke.result == 'success' && needs.ecosystem-compat.result == 'success' && needs.official-preset-assembly.result == 'success' && needs.runtime-boundary.result == 'success' && needs.security-audit.result == 'success' && needs.release-metadata.result == 'success' && needs.release-packed-check.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
 
     needs:
       - dsh-context
@@ -2096,6 +2178,7 @@ jobs:
       - runtime-boundary
       - security-audit
       - release-metadata
+      - release-packed-check
 
     runs-on: ubuntu-latest
     timeout-minutes: 5

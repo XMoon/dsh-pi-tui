@@ -492,7 +492,7 @@ test('the accelerated DAG is the ONLY product-lane path, on every event', () => 
     .filter(([, job]) => typeof job.if === 'string' && job.if.includes("refs/tags/"))
     .map(([name]) => name)
     .sort()
-  assert.deepEqual(tagGated, ['publish', 'release', 'release-context', 'release-metadata'])
+  assert.deepEqual(tagGated, ['publish', 'release', 'release-context', 'release-metadata', 'release-packed-check'])
   for (const name of tagGated) {
     // A release job must still REQUIRE the qualification.
     if (name === 'publish' || name === 'release') {

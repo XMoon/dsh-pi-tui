@@ -63,7 +63,7 @@ export const REQUIRED_PHASES = [
 export const SUMMARY_EXTRA_PHASES = ['qualified']
 
 /** Phases that exist only on a release tag. */
-export const RELEASE_PHASES = ['release-context', 'release-metadata', 'publish', 'release']
+export const RELEASE_PHASES = ['release-context', 'release-metadata', 'release-packed-check', 'publish', 'release']
 
 /**
  * The status each MODE-DEPENDENT job must show.

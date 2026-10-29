@@ -105,7 +105,7 @@ test('every CI job that installs npm dependencies pins the public registry', () 
   // list deliberately), while a silently added sixth one fails here.
   assert.deepEqual(
     inlineInstalls.map(entry => entry.job).sort(),
-    ['compat-smoke', 'ecosystem-compat', 'official-preset-assembly', 'runtime-boundary', 'source-checks'],
+    ['compat-smoke', 'ecosystem-compat', 'official-preset-assembly', 'release-packed-check', 'runtime-boundary', 'source-checks'],
   )
 
   // Every inline install except the runtime-boundary workspace install uses
