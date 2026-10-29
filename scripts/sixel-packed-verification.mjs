@@ -12,16 +12,21 @@
  * It is deliberately NOT a product-lane test: that lane provisions neither a
  * packed tarball nor the `dsh` CLI, and a qualification lane must not carry a
  * skip for a capability it cannot provide. This script belongs to the artifact
- * phase (`pnpm verify:sixel-packed` against the tarball `pnpm pack` produced).
+ * phase, run in a development tree (it decodes through the repository's oracle,
+ * so `tsx` is required):
+ *
+ *   node --import tsx/esm scripts/sixel-packed-verification.mjs [tgz]
  *
  * Chain: tarball → fresh `npm install` → `dsh plugin add` into an isolated
  * DSH_HOME → the real `dsh --profile …` CLI under a PTY (`script -qec`) with the
  * terminal's own DA1 / `CSI 6;h;w t` / OSC 11 replies written to its stdin →
  * `/image <png>` typed into the real editor → the Screen's DCS, validated here
  * against the same facts the independent decoder checks in the unit suite
- * (declared raster geometry, the two-band palette, a single ST terminator).
+ * (declared raster geometry, the two-band palette, a single ST terminator) AND by
+ * decoding every sixel band: the top half must composite red and the bottom half
+ * blue, which is the same independent decoder the unit suite trusts.
  *
- * Usage: node scripts/sixel-packed-verification.mjs [path-to-tgz]
+ * Usage: node --import tsx/esm scripts/sixel-packed-verification.mjs [path-to-tgz]
  *   The tarball defaults to the newest `xmoon76-dsh-pi-tui-*.tgz` in the repo root.
  * Env: SIXEL_PACKED_KEEP=1 keeps the temp install for inspection.
  * @module sixel-packed-verification
@@ -32,6 +37,8 @@ import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { decodeSixel, pixelAt } from '../test/support/sixel-oracle.ts'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const failures = []
@@ -178,6 +185,12 @@ async function main() {
       check('the DCS declares the scaled two-band raster', dcs.includes('"1;1;80;36'), dcs.slice(0, 40))
       check('the exact palette carries both bands', dcs.includes('#0;2;100;0;0') && dcs.includes('#1;2;0;0;100'))
       check('no Kitty APC is emitted', output.includes('\x1b_G') === false)
+      const decoded = decodeSixel(dcs)
+      check('the declared raster covers the whole picture', decoded.width === 80 && decoded.height === 36)
+      const [topR, topG, topB] = pixelAt(decoded, 4, 4)
+      check('the top band composites red on the reported background', topR > 120 && topG < 80 && topB < 80, `${topR},${topG},${topB}`)
+      const [bottomR, bottomG, bottomB] = pixelAt(decoded, 4, 30)
+      check('the bottom band composites blue', bottomB > 120 && bottomR < 80 && bottomG < 80, `${bottomR},${bottomG},${bottomB}`)
     } finally {
       child.kill('SIGTERM')
     }
