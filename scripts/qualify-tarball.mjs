@@ -80,7 +80,10 @@ export function selectCandidate(directory, explicitPath = undefined) {
 }
 
 function main() {
-  const args = process.argv.slice(2)
+  const rawArgs = process.argv.slice(2)
+  // `pnpm run <script> -- <arg>` forwards the `--` separator to the script
+  // (pnpm 12 does this), so strip it before the positional-argument check.
+  const args = rawArgs[0] === '--' ? rawArgs.slice(1) : rawArgs
   if (args.length > 1) {
     fail('usage: node scripts/qualify-tarball.mjs [candidate.tgz]')
   }

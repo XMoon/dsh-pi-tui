@@ -9,11 +9,13 @@
  */
 
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import test from 'node:test'
 
 import { SMOKE_SCRIPTS, selectCandidate } from '../../scripts/qualify-tarball.mjs'
+import { pnpmExecutable } from '../../scripts/lib/process.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 const ROOT = join(import.meta.dirname, '..', '..')
@@ -80,4 +82,18 @@ test('an explicit path must be this project\'s tarball', (t) => {
   // accepted only when its name is the project's.
   const valid = createFile(directory, CANDIDATE)
   assert.equal(basename(selectCandidate(directory, valid)), CANDIDATE)
+})
+
+test('the real pnpm CLI separator reaches the runner, not its usage guard', () => {
+  // pnpm 12 forwards the `--` separator to the script. The CI command
+  // `pnpm smoke:release -- "$CANDIDATE"` must therefore fail on the candidate
+  // path (here: absent) and never on a two-argument usage error.
+  const result = spawnSync(pnpmExecutable(), ['smoke:release', '--', '/no/such/xmoon76-dsh-pi-tui-0.5.4.tgz'], {
+    cwd: ROOT,
+    encoding: 'utf8',
+  })
+  const output = `${result.stdout}\n${result.stderr}`
+  assert.notEqual(result.status, 0, output)
+  assert.match(output, /does not exist/u)
+  assert.doesNotMatch(output, /usage: node scripts\/qualify-tarball\.mjs/u)
 })
