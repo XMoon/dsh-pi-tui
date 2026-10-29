@@ -10,6 +10,7 @@ import test from 'node:test'
 import { Image, resetCapabilitiesCache, setCapabilities, visibleWidth } from '@xmoon76/pi-tui'
 import { ImageViewerPanel } from '../../src/tui/components/media/image-viewer.ts'
 import { Frame } from '../../src/tui/components/frame.ts'
+import type { ImageGraphics, PixelBody } from '../../src/tui/graphics/native-image.ts'
 import { ImageCache } from '../../src/client/media/image/cache.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import {
@@ -110,6 +111,7 @@ function panelOf(
     scope?: unknown
     requestRender?: () => void
     onClose?: () => void
+    graphics?: ImageGraphics
   } = {},
 ): ImageViewerPanel {
   return new ImageViewerPanel({
@@ -121,7 +123,55 @@ function panelOf(
     theme: THEME,
     requestRender: options.requestRender ?? (() => {}),
     onClose: options.onClose ?? (() => {}),
+    ...(options.graphics === undefined ? {} : { graphics: options.graphics }),
   })
+}
+
+/** One encoded SIXEL occurrence the fake owner reports as physically painted. */
+interface SixelCall {
+  readonly pngBase64: string
+  readonly widthPx: number
+  readonly heightPx: number
+  readonly maxWidthCells: number
+  readonly maxHeightCells: number
+}
+
+const SIXEL_DCS = '\x1bP0;1;q"1;1;80;60#0;2;100;0;0~\x1b\\'
+
+/**
+ * A narrow Direct SIXEL owner face: every bound occurrence renders the SAME
+ * trusted DCS (the real encoder's output is covered by the SIXEL suites), and
+ * `paintedBodyAt` reports the footprint the viewer would hit-test. The calls
+ * array proves which PNG payload and row grant the Viewer asked for.
+ */
+function sixelGraphics(calls: SixelCall[] = []): { graphics: ImageGraphics; disposals: () => number } {
+  let disposals = 0
+  const graphics = {
+    mode: 'sixel',
+    canPaint: () => true,
+    image: (source: { pngBase64: string; widthPx: number; heightPx: number }, options: { maxWidthCells: number; maxHeightCells?: number }) => {
+      calls.push({
+        pngBase64: source.pngBase64,
+        widthPx: source.widthPx,
+        heightPx: source.heightPx,
+        maxWidthCells: options.maxWidthCells,
+        maxHeightCells: options.maxHeightCells ?? 0,
+      })
+      const body: PixelBody = {
+        render: () => [SIXEL_DCS, '', ''],
+        invalidate: () => {},
+        paintedBodyAt: (width: number) => ({ width, columns: 10, rows: 3 }),
+        dispose: () => { disposals += 1 },
+      }
+      return body
+    },
+    terminal: {} as never,
+    screen: {} as never,
+    observeScreen: () => {},
+    resample: () => {},
+    dispose: () => {},
+  } as unknown as ImageGraphics
+  return { graphics, disposals: () => disposals }
 }
 
 test('a ready PNG on kitty paints title, metadata and Esc close within the grant', async () => {
@@ -776,4 +826,161 @@ test('dispose while the derived conversion is pending never repaints or keeps a 
   assert.equal(requested, requestedAtDispose, 'the late derived settle requests no frame for the disposed panel')
   assert.equal((panel as unknown as { instance?: unknown }).instance, undefined, 'a disposed panel holds no local Image')
   assert.equal((panel as unknown as { unsubscribe?: unknown }).unsubscribe, undefined)
+})
+
+// ── Image-8 / I8-2B: Direct SIXEL Viewer ───────────────────────────────────
+
+test('a ready PNG on Direct SIXEL paints through the managed owner with the original metadata', async () => {
+  capabilities(null) // the fork reports no legacy protocol: SIXEL is the ONLY live answer
+  const { graphics, disposals } = sixelGraphics()
+  const panel = panelOf(loaderOf(PNG_BYTES), { graphics })
+  panel.setMaxRows(12)
+  const loading = panel.render(60)
+  assert.ok(stripSgr(loading[1]!).includes('Loading…'), `the idle frame starts the read: ${stripSgr(loading[1]!)}`)
+  await drainLoaderSettle()
+  const lines = panel.render(60)
+  const text = lines.join('\n')
+  assert.ok(text.includes(SIXEL_DCS), 'the Screen-bound SIXEL command is painted through the managed owner')
+  assert.ok(!text.includes('\x1b_G'), 'no Kitty APC is produced on a SIXEL surface')
+  assert.equal(stripSgr(lines[0]!), 'Image · shot.png')
+  const bottom = stripSgr(lines[lines.length - 1]!)
+  assert.ok(bottom.includes('800×600 · image/png · 16 B'), bottom)
+  assert.ok(bottom.endsWith('Esc close'), bottom)
+  assert.equal((panel as unknown as { instanceProtocol?: string }).instanceProtocol, 'sixel')
+  panel.dispose()
+  assert.ok(disposals() > 0, 'dispose releases the managed occurrence')
+})
+
+test('a real JPEG under Direct SIXEL reuses the ONE scoped derived PNG', async () => {
+  capabilities(null)
+  const ref = { ...REAL_JPEG_REF, attachmentId: 'att-sixel-jpeg' }
+  const scope = { key: 'viewer-sixel:jpeg' }
+  let reads = 0
+  let conversions = 0
+  const loader = new ImageLoader(
+    async () => {
+      reads += 1
+      return { ref: {}, data: SAMPLE_JPEG }
+    },
+    new ImageCache(),
+    async (input, mediaType) => {
+      conversions += 1
+      return convertKittyThumbnail(input, mediaType)
+    },
+  )
+  const derived = await convertKittyThumbnail(SAMPLE_JPEG, 'image/jpeg')
+  const { graphics } = sixelGraphics()
+  const panel = panelOf(loader, { ref, scope, graphics })
+  panel.setMaxRows(10)
+  panel.render(60)
+  await until(() => loader.get(ref, scope).state === 'ready', 'the raw JPEG read')
+  panel.render(60)
+  await until(() => loader.getKittyThumbnail(ref, scope).state === 'ready', 'the derived PNG')
+  const lines = panel.render(60)
+  assert.equal(reads, 1, 'one scoped raw read')
+  assert.equal(conversions, 1, 'one 6A conversion')
+  assert.ok(lines.join('\n').includes(SIXEL_DCS), 'the derived PNG is encoded by the SIXEL owner')
+  const bottom = stripSgr(lines[lines.length - 1]!)
+  assert.ok(bottom.includes('120×80 · image/jpeg'), `the ORIGINAL identity stays: ${bottom}`)
+  assert.ok(bottom.includes(`${SAMPLE_JPEG.byteLength} B`), bottom)
+  // The payload the owner received is the derived PNG, not the JPEG bytes.
+  const call = (panel as unknown as { instanceWidthPx?: number; instanceHeightPx?: number })
+  assert.deepEqual([call.instanceWidthPx, call.instanceHeightPx], [derived.width, derived.height])
+  panel.dispose()
+})
+
+test('SIXEL row grants 1 and 2 keep the chrome and start no read or encode', () => {
+  capabilities(null)
+  let reads = 0
+  const loader = new ImageLoader(async () => {
+    reads += 1
+    return { ref: {}, data: PNG_BYTES }
+  })
+  const { graphics } = sixelGraphics()
+  const one = panelOf(loader, { graphics })
+  one.setMaxRows(1)
+  const short = one.render(60)
+  assert.equal(short.length, 1)
+  assert.ok(short[0]!.includes('Image · shot.png'))
+  assert.ok(short[0]!.endsWith('Esc close'))
+  const two = panelOf(loader, { graphics })
+  two.setMaxRows(2)
+  const twoLines = two.render(60)
+  assert.equal(twoLines.length, 2)
+  assert.ok(!twoLines.join('\n').includes(SIXEL_DCS))
+  assert.equal(reads, 0, 'no I/O without a body grant')
+})
+
+test('a SIXEL resize and body-grant change rebuild the one local occurrence', async () => {
+  capabilities(null)
+  const calls: SixelCall[] = []
+  const { graphics, disposals } = sixelGraphics(calls)
+  const panel = panelOf(loaderOf(PNG_BYTES), { graphics })
+  panel.setMaxRows(10)
+  panel.render(60)
+  await drainLoaderSettle()
+  panel.render(60)
+  assert.equal(calls.length, 1, 'the first body grant binds one occurrence')
+  panel.setMaxRows(14)
+  panel.render(80)
+  assert.equal(calls.length, 2, 'the changed width/row grant rebuilds the placement')
+  assert.deepEqual([calls[1]!.maxWidthCells, calls[1]!.maxHeightCells], [80, 12])
+  assert.equal(disposals(), 1, 'the superseded occurrence is disposed first')
+  // The same inputs reuse the local instance.
+  panel.render(80)
+  assert.equal(calls.length, 2, 'unchanged inputs reuse the managed occurrence')
+  panel.dispose()
+})
+
+test('the local placement key includes the live protocol', async () => {
+  capabilities(null)
+  let binds = 0
+  const mutable = {
+    mode: 'kitty' as 'kitty' | 'sixel',
+    canPaint: () => true,
+    image: () => {
+      binds += 1
+      const body: PixelBody = {
+        render: () => [`\x1b_protocol_${binds}\x1b\\`],
+        invalidate: () => {},
+        paintedBodyAt: (width: number) => ({ width, columns: 4, rows: 1 }),
+        dispose: () => {},
+      }
+      return body
+    },
+    terminal: {} as never,
+    screen: {} as never,
+    observeScreen: () => {},
+    resample: () => {},
+    dispose: () => {},
+  } as unknown as ImageGraphics
+  const panel = panelOf(loaderOf(PNG_BYTES), { graphics: mutable })
+  panel.setMaxRows(8)
+  panel.render(60)
+  await drainLoaderSettle()
+  const first = panel.render(60)
+  assert.ok(first.join('\n').includes('_protocol_1'), 'the Kitty placement bound once')
+  ;(mutable as unknown as { mode: string }).mode = 'sixel'
+  const second = panel.render(60)
+  assert.ok(second.join('\n').includes('_protocol_2'), 'a protocol change rebuilt the occurrence')
+  assert.ok(!second.join('\n').includes('_protocol_1'), 'the old protocol sequence is not reused')
+  panel.dispose()
+})
+
+test('iTerm2 stays Preview unavailable even when a loader is present', async () => {
+  capabilities('iterm2')
+  let reads = 0
+  const loader = new ImageLoader(async () => {
+    reads += 1
+    return { ref: {}, data: JPEG_BYTES }
+  })
+  const panel = panelOf(loader, { ref: JPEG_REF })
+  panel.setMaxRows(10)
+  panel.render(60)
+  await drainLoaderSettle()
+  const lines = panel.render(60)
+  assert.ok(stripSgr(lines[1]!).includes('Preview unavailable'))
+  assert.ok(!lines.join('\n').includes('\x1bP'), 'no SIXEL DCS on iTerm2')
+  assert.equal(reads, 0, 'the restricted surface reads nothing')
+  panel.dispose()
 })
