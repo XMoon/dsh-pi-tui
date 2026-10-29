@@ -26,6 +26,13 @@ import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import test from 'node:test'
 import { SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
+import {
+  createUserMessage,
+  LlmAdapter,
+  type GenerateOptions,
+  type LlmResolvedModelInfo,
+  type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { RemoteSessionLifecycle } from '../../src/runtime/remote/session-lifecycle-remote.ts'
 import { loadExperimentalRemoteRuntime } from '../../src/runtime/backend-loader.ts'
@@ -299,4 +306,92 @@ test('a failed Remote open never replaces the current Session, its draft, or rep
   } finally {
     sessions.retain = originalRetain
   }
+})
+
+/** A real model-request stand-in: normal until `hold()`, then held until cancelled. */
+class HeldWireLlmAdapter extends LlmAdapter {
+  readonly aborts: string[] = []
+  calls = 0
+  private gate: Promise<void> | undefined
+
+  hold(): void {
+    this.gate = new Promise<void>(() => {})
+  }
+
+  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return Promise.resolve({ provider, id: model, name: model })
+  }
+
+  async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.calls += 1
+    const gate = this.gate
+    if (gate === undefined) return
+    await new Promise<never>((_resolve, reject) => {
+      const signal = options.signal
+      if (signal === undefined) return
+      if (signal.aborted) { reject(new Error('cancelled')); return }
+      signal.addEventListener('abort', () => {
+        this.aborts.push('aborted')
+        reject(new Error('cancelled'))
+      }, { once: true })
+      // A held stream never resolves on its own; the turn waits for the cancel.
+    })
+  }
+}
+
+/**
+ * L5 official-wire positive for the PR-A Remote owner cancel: the REAL
+ * Host/Client graph (real AgentLoop, Gateway, RemoteAccess, retrained Session
+ * binding) receives `retirement.cancel(exactOwner)` and settles `committed`
+ * on a genuinely running Host turn. The held LLM endpoint is the only
+ * substitution; the Client → Gateway → Host cancel is the official wire.
+ */
+test('the Remote owner cancel reaches the real official Host and settles committed on a running turn', async (t) => {
+  const life = testLifecycle(t)
+  const llm = new HeldWireLlmAdapter()
+  const host = await createRemoteApplicationHostFixture(life, 's3-owner-cancel-wire', { llmAdapter: llm })
+  const runtime = await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
+    hostContext: host.ctx,
+    waitForHostPrerequisites: async () => {},
+  })
+  life.defer(() => runtime.dispose().catch(() => {}))
+  const sessions = runtime.client.sessions
+  await sessions.refresh()
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation)
+  const id = 'remote-owner-cancel-wire'
+  const created = await lifecycle.create({ sessionId: id, cwd: host.anchorDir })
+  assert.equal(created.outcome.kind, 'created', `the official create must commit: ${created.ownership}/${created.outcome.kind}`)
+  if (created.outcome.kind !== 'created') return
+  const handle = created.outcome.handle
+  assert.ok(handle.client !== undefined, 'the official create must carry its exact Client owner')
+
+  // Start a REAL Host turn through the live Agent, then cancel through the
+  // Client owner adapter (the exact production path under test).
+  const agents = host.ctx.get('agents') as unknown as {
+    get(id: SessionId): { followup(message: unknown): void } | undefined
+  }
+  const agent = agents.get(SessionId(id))
+  assert.ok(agent, 'the Host Agent must be live for the created Session')
+  llm.hold()
+  const callsBefore = llm.calls
+  agent.followup(createUserMessage({
+    content: [{ type: 'text', text: 'cancel over the official wire' }],
+    source: { kind: 'user' },
+  }))
+  await waitFor('the held model request started', () => llm.calls > callsBefore, 15_000)
+  const binding = sessions.binding(SessionId(id)) as unknown as {
+    readonly session: { getSnapshot(): { readonly running: boolean } }
+  } | undefined
+  assert.ok(binding !== undefined, 'the retained exact binding must be observable')
+  await waitFor('the real Host turn running', () => binding.session.getSnapshot().running === true)
+
+  const services = createRemoteSessionOwnerServices({
+    binding: (sessionId: string) => sessions.binding(SessionId(sessionId)) as never,
+  }, runtime.client.connection.generation)
+  const owner = services.owners.fromHandle(handle)
+  assert.ok(owner, 'the created Client owner must map to the exact Remote owner')
+
+  assert.deepEqual(await services.retirement.cancel(owner), { kind: 'committed', value: undefined })
+  assert.deepEqual(llm.aborts, ['aborted'], 'the official Host Agent observed the wire cancel')
+  await waitFor('the Host turn idle after the wire cancel', () => binding.session.getSnapshot().running === false)
 })
