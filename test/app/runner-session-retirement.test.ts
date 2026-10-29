@@ -826,8 +826,13 @@ test('a pre-mount unload while the resume whenIdle is pending cancels the agent 
     header: { id: 'premount-whenidle-session', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
     events: sessionEvents('resumed answer'),
   })
-  // The resume whenIdle hangs (a busy agent): the pre-mount wait must be
-  // broken by the lifecycle abort, not left hanging forever.
+  // SYNTHETIC failure-control gate: a non-cooperative `whenIdle` stands in for
+  // any unobservable pre-mount wait. It is deliberately NOT a production
+  // reachability claim — the real Direct `agents.resume` experiment (which
+  // always materializes an idle, crash-repaired owner) lives in
+  // test/app/startup-resume-reachability.test.ts. This case proves the abort
+  // path itself: the pre-mount wait must be broken by the lifecycle abort, not
+  // left hanging forever.
   let whenIdleStarted!: () => void
   const whenIdleStartedPromise = new Promise<void>(resolve => { whenIdleStarted = resolve })
   const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents, async () => {
@@ -857,10 +862,14 @@ test('a pre-mount unload while the resume whenIdle is pending cancels the agent 
   context = undefined
   await settle()
   const events = harness.retirementEvents
-  assert.ok(events.some(event => event === 'cancel:premount-whenidle-session'),
-    'the abort must cancel the agent so the pre-mount whenIdle settles')
+  assert.equal(events.filter(event => event === 'cancel:premount-whenidle-session').length, 1,
+    'the abort must cancel the agent exactly once so the pre-mount whenIdle settles')
+  assert.equal(events.filter(event => event === 'flush:premount-whenidle-session').length, 1,
+    'the pre-mount abort must flush the resumed owner exactly once')
   assert.equal(events.filter(event => event === 'dispose:premount-whenidle-session').length, 1,
     'the just-created owner must be retired exactly once')
+  assert.equal((harness.agents as { get(id: string): unknown }).get('premount-whenidle-session'), undefined,
+    'the cancelled startup must not leak a live Host Session reference')
   assert.equal(probe.apps.length, 0, 'the cancelled startup must not mount a TUI')
 })
 
