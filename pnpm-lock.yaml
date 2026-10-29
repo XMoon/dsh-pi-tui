@@ -196,6 +196,9 @@ importers:
       sharp:
         specifier: 0.35.5
         version: 0.35.5(@types/node@22.20.3)
+      sixel:
+        specifier: 0.16.0
+        version: 0.16.0
       yaml:
         specifier: ^2.8.1
         version: 2.9.1
@@ -4526,6 +4529,9 @@ packages:
   signal-exit@4.1.0:
     resolution: {integrity: sha512-bzyZ1e88w9O1iNJbKnOlvYTrWPDl46O1bG0D3XInv+9tkPrxrN8jUUTiFlDkkmKWgn1M6CfIA13SuGqOa9Korw==}
     engines: {node: '>=14'}
+
+  sixel@0.16.0:
+    resolution: {integrity: sha512-xicu6Y6Cyhmv5rjyHxq2r5RnKerlL/nyZEGjOU5bLCshXkZryc9JFJThTCKPOAtWXCfeWquEKFVFfMPcTD25PA==}
 
   standardwebhooks@1.1.1:
     resolution: {integrity: sha512-bCbX9ZEyFkWPsRz7Bl3NuQUJohmwGSev/yhr7vhaGPlc4AfIrspIRa6cPTBuI1ItmrTDJ4d/S2hCsfe4+vQGnQ==}
@@ -8858,6 +8864,8 @@ snapshots:
       '@types/node': 22.20.3
 
   signal-exit@4.1.0: {}
+
+  sixel@0.16.0: {}
 
   standardwebhooks@1.1.1:
     dependencies:

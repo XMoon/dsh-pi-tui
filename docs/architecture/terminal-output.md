@@ -371,6 +371,40 @@ Proof: `test/tui/tmux-kitty-admission.test.ts`,
 of `test/tui/kitty-graphics-owner.test.ts` and the geometry parity in
 `test/tui/kitty-native-protocol.test.ts`.
 
+## SIXEL capability facts and the pixel gate
+
+SIXEL has no image-id residency model, so nothing here is shared with the Kitty
+Core. What the Client may rely on is one observed terminal fact and one gate:
+
+- **The primary DA1 is the only capability source.** A terminal that paints
+  SIXEL advertises attribute `4` in its primary device-attributes reply; the
+  graphics-inquiry query is not a reliable substitute (some terminals never
+  answer it). `ProcessTerminal` therefore observes a COMPLETE DA1 and exposes it
+  through the optional `Terminal.onSixelSupport()` (divergence X071). The
+  observation is passive: it issues no query, selects no protocol, and does not
+  change the keyboard-negotiation, program-status or color-query sentinels that
+  already own those replies. Parameters are matched as whole tokens, so `14` and
+  `42` are not SIXEL evidence. The observed answer belongs to the physical
+  terminal and survives `stop()`/`start()`; a new instance starts unknown.
+- **Admission is a candidate verdict, not permission to paint.**
+  `src/tui/graphics/sixel-capability.ts` folds the observation together with the
+  environment and the existing legacy capability into
+  `pending | admitted | denied`. An explicit `PI_IMAGE_PROTOCOL=none|0`, a
+  configured or detected Kitty/iTerm2 terminal, and any multiplexer topology
+  deny the candidate outright; no reply stays `pending`, which consumers treat
+  as "not paintable". `getCapabilities().images` and
+  `effectiveImageProtocol()` do not report SIXEL, so no surface paints it.
+- **Pixels stay gated on the Screen footprint contract.** A SIXEL raster has no
+  deletable id: only clearing the whole occupied cell footprint (`CSI 2K` per
+  affected row, or ECH) removes it, and clearing the anchor row alone leaves
+  pixels behind. A product path may only paint once the Screen owns that
+  footprint and its row diff, so no consumer in this contract emits SIXEL bytes.
+- **Untrusted text never becomes SIXEL.** The sanitizers accept no DCS; only a
+  codec operating on authorized image bytes may produce a sequence.
+
+Proof: `packages/pi-tui/test/terminal.test.ts` (passive DA1 observation) and
+`test/tui/sixel-capability.test.ts` (production DA1 stream to verdict).
+
 ## Specialized contracts that stay as they are
 
 These own their own policy and are guarded by negative-control regression

@@ -376,6 +376,235 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 	});
 });
 
+describe("ProcessTerminal passive DA1 SIXEL observation (dsh-pi-tui divergence X071)", () => {
+	const WT_DA1 = "\x1b[?61;4;6;7;14;21;22;23;24;28;32;42;52c";
+	const NO_SIXEL_DA1 = "\x1b[?61;14;42c";
+
+	/** Full lifecycle harness: real start()/stop(), stubbed process streams. */
+	function setupLifecycle() {
+		const terminal = new ProcessTerminal();
+		const writes: string[] = [];
+		const stdinDataListeners: ((data: string) => void)[] = [];
+		const resizeListeners: (() => void)[] = [];
+		const inputs: string[] = [];
+		let cleaned = false;
+
+		const previousWrite = process.stdout.write;
+		const previousStdoutOn = process.stdout.on;
+		const previousStdoutRemoveListener = process.stdout.removeListener;
+		const previousStdinOn = process.stdin.on;
+		const previousStdinRemoveListener = process.stdin.removeListener;
+		const previousStdinSetEncoding = process.stdin.setEncoding;
+		const previousStdinResume = process.stdin.resume;
+		const previousStdinPause = process.stdin.pause;
+		const previousSetRawModeDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "setRawMode");
+
+		process.stdout.write = ((chunk: string | Uint8Array) => {
+			writes.push(String(chunk));
+			return true;
+		}) as typeof process.stdout.write;
+		process.stdout.on = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+			if (event === "resize") resizeListeners.push(listener as () => void);
+			return process.stdout;
+		}) as typeof process.stdout.on;
+		process.stdout.removeListener = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+			if (event === "resize") {
+				const index = resizeListeners.lastIndexOf(listener as () => void);
+				if (index >= 0) resizeListeners.splice(index, 1);
+			}
+			return process.stdout;
+		}) as typeof process.stdout.removeListener;
+		process.stdin.on = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+			if (event === "data") stdinDataListeners.push(listener as (data: string) => void);
+			return process.stdin;
+		}) as typeof process.stdin.on;
+		process.stdin.removeListener = ((event: string | symbol, listener: (...args: unknown[]) => void) => {
+			if (event === "data") {
+				const index = stdinDataListeners.lastIndexOf(listener as (data: string) => void);
+				if (index >= 0) stdinDataListeners.splice(index, 1);
+			}
+			return process.stdin;
+		}) as typeof process.stdin.removeListener;
+		process.stdin.setEncoding = (() => process.stdin) as typeof process.stdin.setEncoding;
+		process.stdin.resume = (() => process.stdin) as typeof process.stdin.resume;
+		process.stdin.pause = (() => process.stdin) as typeof process.stdin.pause;
+		Object.defineProperty(process.stdin, "setRawMode", {
+			value: () => process.stdin,
+			configurable: true,
+		});
+
+		return {
+			terminal,
+			writes,
+			inputs,
+			stdinDataListeners,
+			start(): void {
+				terminal.start(
+					(data) => inputs.push(data),
+					() => {},
+				);
+			},
+			send(data: string): void {
+				// Deliver as stdin would: every live data listener sees it once.
+				for (const listener of [...stdinDataListeners]) listener(data);
+			},
+			cleanup(): void {
+				if (cleaned) return;
+				cleaned = true;
+				try {
+					terminal.stop();
+				} finally {
+					process.stdout.write = previousWrite;
+					process.stdout.on = previousStdoutOn;
+					process.stdout.removeListener = previousStdoutRemoveListener;
+					process.stdin.on = previousStdinOn;
+					process.stdin.removeListener = previousStdinRemoveListener;
+					process.stdin.setEncoding = previousStdinSetEncoding;
+					process.stdin.resume = previousStdinResume;
+					process.stdin.pause = previousStdinPause;
+					if (previousSetRawModeDescriptor) {
+						Object.defineProperty(process.stdin, "setRawMode", previousSetRawModeDescriptor);
+					} else {
+						Reflect.deleteProperty(process.stdin, "setRawMode");
+					}
+					setKittyProtocolActive(false);
+				}
+			},
+		};
+	}
+
+	it("observes the SIXEL attribute of the DA1 the keyboard sentinel consumes", () => {
+		const harness = setupLifecycle();
+		try {
+			harness.start();
+			const observed: boolean[] = [];
+			harness.terminal.onSixelSupport((supported) => observed.push(supported));
+
+			harness.send(WT_DA1);
+
+			// The keyboard sentinel still consumes the owed DA (no editor input),
+			// and the fallback stays exactly as before: no Kitty flags => modifyOtherKeys.
+			assert.deepEqual(harness.inputs, [], "the owed DA1 must still be consumed by the keyboard sentinel");
+			assert.equal(harness.terminal.kittyProtocolActive, false);
+			assert.ok(harness.writes.includes("\x1b[>4;2m"), "the modifyOtherKeys fallback must be unchanged");
+			assert.deepEqual(observed, [true], "one complete DA1 yields exactly one positive observation");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("does not treat 14 or 42 as SIXEL attribute 4", () => {
+		const harness = setupLifecycle();
+		try {
+			harness.start();
+			const observed: boolean[] = [];
+			harness.terminal.onSixelSupport((supported) => observed.push(supported));
+
+			harness.send(NO_SIXEL_DA1);
+
+			assert.deepEqual(observed, [false], "a DA1 without a whole `4` token is a negative observation");
+			assert.equal(harness.terminal.kittyProtocolActive, false);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("reports the known answer to a late subscriber and never duplicates a repeated fact", () => {
+		const harness = setupLifecycle();
+		try {
+			harness.start();
+			harness.send(WT_DA1);
+
+			const late: boolean[] = [];
+			harness.terminal.onSixelSupport((supported) => late.push(supported));
+			assert.deepEqual(late, [true], "a subscriber registering after the fact gets it synchronously");
+
+			// A repeated identical DA1 must not notify again.
+			harness.send(WT_DA1);
+			assert.deepEqual(late, [true]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("keeps one physical-terminal observation across stop() and start()", () => {
+		const harness = setupLifecycle();
+		try {
+			harness.start();
+			const observed: boolean[] = [];
+			harness.terminal.onSixelSupport((supported) => observed.push(supported));
+			harness.send(WT_DA1);
+			assert.deepEqual(observed, [true]);
+
+			harness.terminal.stop();
+			harness.start();
+
+			// Same physical terminal: the capability cannot be un-learned by a
+			// Main <-> Alt borrow, and no new query may be invented for it.
+			const afterRestart: boolean[] = [];
+			harness.terminal.onSixelSupport((supported) => afterRestart.push(supported));
+			assert.deepEqual(afterRestart, [true], "a repeated start() keeps the observed fact");
+
+			const queries = harness.writes.filter((chunk) => chunk.includes("\x1b[c"));
+			assert.equal(queries.length, 2, "each start() sends its own query batch; no extra DA1 probe is added");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("unsubscribes idempotently and stops notifying", () => {
+		const harness = setupLifecycle();
+		try {
+			harness.start();
+			const observed: boolean[] = [];
+			const unsubscribe = harness.terminal.onSixelSupport((supported) => observed.push(supported));
+
+			unsubscribe();
+			unsubscribe();
+			harness.send(WT_DA1);
+			assert.deepEqual(observed, [], "no observation may arrive after unsubscribe");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("ignores CSI 16t, OSC 11 and ordinary keys", () => {
+		const harness = setupLifecycle();
+		try {
+			harness.start();
+			const observed: boolean[] = [];
+			harness.terminal.onSixelSupport((supported) => observed.push(supported));
+
+			harness.send("\x1b[6;20;10t");
+			harness.send("\x1b]11;rgb:2828/2c2c/3434\x1b\\");
+			harness.send("x");
+
+			assert.deepEqual(observed, [], "only a complete primary DA1 may change the observation");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("reassembles a fragmented DA1 into one observation", () => {
+		const harness = setupLifecycle();
+		try {
+			harness.start();
+			const observed: boolean[] = [];
+			harness.terminal.onSixelSupport((supported) => observed.push(supported));
+
+			// Split inside the parameter list: the negotiation buffer must hold the
+			// prefix instead of leaking it to the editor.
+			harness.send("\x1b[?61;4;6");
+			harness.send(";7;14;21;22;23;24;28;32;42;52c");
+
+			assert.deepEqual(harness.inputs, [], "a fragmented DA1 must not reach the editor as text");
+			assert.deepEqual(observed, [true]);
+		} finally {
+			harness.cleanup();
+		}
+	});
+});
+
 describe("shouldKeepTerminalProgressAlive", () => {
 	it("treats every Ghostty marker as heartbeat-required", () => {
 		assert.equal(shouldKeepTerminalProgressAlive({ TERM_PROGRAM: "ghostty" }), true);
