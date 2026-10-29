@@ -665,7 +665,9 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     if (this.disposed || this.observer === undefined || screen !== this.observer) return
     const shown = new Map<string, ScreenFrameRaster>()
     for (const raster of retained) shown.set(raster.line, raster)
-    let changed = false
+    // A release needs no extra repaint: the frame being committed already paints
+    // the revoked occurrence as text, and any newly granted encode repaints when
+    // it settles. (Aborting an in-flight encode is the only side effect here.)
     for (const occurrence of [...this.occurrences]) {
       if (occurrence.grant === undefined) {
         // Idempotent: aborts an in-flight encode too, so an off-screen occurrence
@@ -692,7 +694,6 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
       if (occurrence.full === undefined) occurrence.image.ensureFull()
       else occurrence.image.ensureCrop(occurrence.grant.cropTopRows, occurrence.grant.visibleRows)
     }
-    if (changed) this.requestRepaint()
   }
 
   /** @internal — drop one occurrence's full/crop records (used on release). */

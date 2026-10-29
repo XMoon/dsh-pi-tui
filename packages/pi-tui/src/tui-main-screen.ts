@@ -566,10 +566,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			this.suppressOverlayCoveredSixelBlocks(rawLines);
 		}
 
-		const frameViewportTop =
-			this.previousLines.length === 0
-				? Math.max(0, rawLines.length - height)
-				: Math.max(0, prevViewportTop + Math.max(0, rawLines.length - this.previousLines.length));
+		// The main screen follows the tail: the physical viewport is always the last
+		// `height` rows of the document it is about to write, for the first frame,
+		// an append, and a resize alike. The projection and every commit use this
+		// one value so a granted row is always a committed row.
+		const frameViewportTop = Math.max(0, rawLines.length - height);
 		let projection = this.projectSixelCandidates(rawLines, height, frameViewportTop, true);
 		if (projection.recompose) {
 			// The grant set changed with this frame's demands: the component lines
