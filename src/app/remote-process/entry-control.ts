@@ -10,8 +10,8 @@
  * @module app/remote-process/entry-control
  */
 
-import { readFileSync } from 'node:fs'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
+import { readProcessStarttime } from './local-scope.ts'
 
 /** One structured line emitted by a process entry. */
 export function writeEntryRecord(record: Record<string, unknown>): void {
@@ -24,15 +24,7 @@ export function writeEntryRecord(record: Record<string, unknown>): void {
  * the same live process. `undefined` when the platform does not expose it.
  */
 export function readProcessStartIdentity(pid: number = process.pid): string | undefined {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
-    // The comm field may contain spaces and parentheses; everything after the
-    // LAST ')' is the fixed positional tail whose first entry is field 3.
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)
-    return fields[19]
-  } catch {
-    return undefined
-  }
+  return readProcessStarttime(pid)
 }
 
 /** A role-labelled structured diagnostics sink for the entry's detached work. */

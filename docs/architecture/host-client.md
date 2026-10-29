@@ -3,7 +3,10 @@
 This document owns the long-lived Host/Client boundary: locality, the semantic
 port contract, Direct/Remote equivalence, currentness/identity rules and the
 qualification tiers. Direct remains the production backend; Remote is the
-experimental in-process official wire with no public selector.
+experimental in-process official wire with no public selector. An internal,
+Linux-only split-process entry (`dist/local-host.mjs` / `dist/local-client.mjs`)
+qualifies the same npm package over an authenticated loopback HTTP/WebSocket
+carrier; it is not a package export, bin, backend selector or Session surface.
 
 The current Host-coupling allowlist is
 `scripts/client-boundary-baseline.json`, enforced by
@@ -90,6 +93,66 @@ Must-not:
 Generated Client/Remote objects must keep their identity and prototype
 accessors; a fixture must reproduce production prerequisites without adding a
 second Host service or runtime graph.
+
+## Split-process local Host transport
+
+The internal split-process entry is two OS processes from ONE installed npm
+package. It is Linux-only, Linux abstract AF_UNIX sockets are its only process
+admission authority, and the non-Linux entry fails before writing runtime files
+with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
+`hasLiveClient()` result may stand in for that kernel ownership.
+
+- **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
+  canonicalized through `realpath` plus the current UID decide the scope. The
+  private run directory is `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/`, created and
+  proved 0700. The same canonical profile directory shares one scope across
+  workspaces; the Client cwd is not a scope input.
+- **Single Host / single TUI seat.** The Host holds one abstract socket from
+  before the profile Context exists until process termination; a second Host
+  candidate loses `bind` and exits without building a Context, webserver, Agent
+  or Session. The Client holds a second abstract socket for its lifetime; a
+  second Client fails `CLIENT_ALREADY_ACTIVE` before spawning or touching a
+  Host. Kernel release on process death is the only stale-seat recovery.
+- **Identity is authenticated, never registry-only.** The registry
+  (`instance.json`, 0600) is an unauthenticated hint containing the scope,
+  canonical profile path, `instanceId`, Host PID, Linux `/proc/<pid>/stat`
+  starttime, loopback origin, protocol `m4-b1/1`, installed bundle/DSH versions
+  and the installed-build fingerprint. Readiness requires the official
+  `dsh-client-connection` `/connect` launch-token exchange (signed Cookie) and
+  the owner-only authenticated identity Fetch route
+  `/api/pi-tui.local-host`, with every identity field strictly equal to the
+  registry and the current kernel starttime. A different build or protocol is
+  `HOST_BUILD_INCOMPATIBLE`; a mismatched authenticated identity is
+  `HOST_IDENTITY_MISMATCH`; neither replaces or kills the live Host.
+- **Official carrier only.** The Host reuses the base `typert-gateway` row and
+  mounts exactly one `dsh-client-connection` owner and one `dsh-api-remotes`
+  forwarded-event source on the Host-only overlay. The Client installs the
+  official Node `typert-registry`, `client-connection` and `api-gateway` halves
+  on the single A0 Client Context with a Cookie-bearing
+  `fetch`/`createWebSocket` and `streamBaseUrl`. `ownsHost`, in-process
+  RPC/openStream bridges, custom Bearer/Basic auth and any second business RPC
+  are prohibited. The only private route is the read-only GET identity route
+  behind the official `/api` admission; it carries no Session, write,
+  shutdown, approval or version-switch operation.
+- **Secret boundary.** The launch token lives only in the Host process and its
+  0600 `launch.json` (atomic same-directory rename); the Client keeps its own
+  Cookie in memory only. Neither token, Cookie nor `connectUrl` may appear in
+  the registry, stdout/stderr, logs, argv or environment. The registry and
+  launch files are 0600, the run directory 0700, and unsafe ownership, modes or
+  symlinks fail closed.
+- **Lifecycle.** A Client exit, crash or HUP disposes only the Client subtree,
+  official transport, Client root and Client seat. It never calls a Host
+  shutdown. The Host's official `runProfile` shutdown owner is the only Host
+  stop; its cleanup first withdraws the identity route, then shuts down, then
+  removes only files matching its own `instanceId`, then closes the kernel seat.
+  A replaced Host's files are never deleted by another instance.
+- **Session boundary.** The Client derives `connecting | connected | disconnected`
+  from the official Connection state and generation on every read and never
+  copies it into a long-lived flag. The split-process Client keeps
+  `sessionOpen=false`: SessionReference/Session Writer/real TUI operation are a
+  later migration step, and no business mutation is replayed across a transport
+  reconnect. The protocol guarantees only a reconnect to the same Host; a Host
+  crash is not a graceful migration.
 
 ## Direct/Remote semantic equivalence
 
@@ -408,3 +471,8 @@ Rules:
   implementation files.
 - Never present a Host-only suite as a TUI PASS, a skipped/mode-gated CI step as
   passed, or a lane green on a different snapshot.
+- The Linux split-process lane (`smoke:split-process`, driven from an installed
+  npm tarball) is a distribution-boundary proof outside L1–L6. It proves OS
+  process admission, the official authenticated loopback carrier and the
+  `sessionOpen=false` boundary; it is not a TUI Session or Direct/Remote parity
+  proof.
