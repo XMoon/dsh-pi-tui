@@ -284,10 +284,17 @@ async function publishLocalHost(
  * post-boot controller (official-module load, scope construction, kernel seat,
  * overlay write, starttime read or profile boot) still passes through this
  * owner-safe finally; the launcher-supplied path and another live Host's
- * scratch are never deletion authority.
+ * scratch are never deletion authority. A forced `process.exit()` from the
+ * launcher's native signal handler during `runProfile` bypasses the async
+ * finally, so a synchronous exit mirror below removes the same owned scratch.
  */
 export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise<void> {
   const owned: HostScratchOwner = {}
+  process.once('exit', () => {
+    if (owned.scopeDir !== undefined && owned.scratchDir !== undefined) {
+      removeOwnedScratch(owned.scopeDir, owned.scratchDir)
+    }
+  })
   try {
     await runLocalHostEntryOwned(options, owned)
   } finally {
