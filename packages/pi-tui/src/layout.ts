@@ -501,8 +501,13 @@ function paintBox(
 				// A block whose row a visible scrollbar claims yields WITHOUT a demand:
 				// it paints no pixels, so it must not hold a residency slot either.
 				const scrollbar = box.scrollView === undefined ? undefined : getScrollbarGeometry(box);
+				// The TRACK spans its rows; a block whose ANCHOR is above the track but
+				// whose body rows intersect it still yields (paintScrollbar owns those
+				// rows), so compare the whole visible range, not just the anchor row.
 				const scrollbarClaimsRow =
-					scrollbar !== undefined && row >= scrollbar.trackTop && row < scrollbar.trackTop + scrollbar.trackHeight;
+					scrollbar !== undefined &&
+					row <= scrollbar.trackTop + scrollbar.trackHeight - 1 &&
+					row + visibleRows - 1 >= scrollbar.trackTop;
 				if (block.kind === "candidate") {
 					if (fullWidthCell && visibleRows > 0 && !scrollbarClaimsRow) {
 						context.sixelDemands.push({ line, cropTopRows: 0, visibleRows, physicalRow: row });
