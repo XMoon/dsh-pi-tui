@@ -471,15 +471,33 @@ test('a Connection rollover while open waits for readiness reports opened+supers
   assert.equal(h.bindingOf('session-a'), undefined)
 })
 
-test('an abort while open waits for readiness is superseded and releases once', async () => {
+test('an abort before the official open settles is superseded and releases once', async () => {
   const h = harness()
   h.setCatalogued('session-a', true)
+  h.setOpenState('cold')
   h.setReadyHold()
   const controller = new AbortController()
   const pending = h.lifecycle.open({ sessionId: 'session-a', signal: controller.signal })
   controller.abort()
   assert.deepEqual(await pending, { ownership: 'superseded', outcome: { kind: 'cancelled' } })
   assert.equal(h.calls.releases.length, 1)
+  assert.equal(h.bindingOf('session-a'), undefined)
+})
+
+test('an abort after the official open settled but before continuation is opened+superseded', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setReadyHold()
+  h.setOpenState('open')
+  const controller = new AbortController()
+  const pending = h.lifecycle.open({ sessionId: 'session-a', signal: controller.signal })
+  h.resolveReady()
+  controller.abort()
+  assert.deepEqual(await pending, {
+    ownership: 'superseded',
+    outcome: { kind: 'opened', handle: { session: { id: 'session-a' } } },
+  }, 'an official open that already reached open is not a proven non-execution')
+  assert.equal(h.calls.releases.length, 1, 'the aborted-opened reference is released exactly once')
   assert.equal(h.bindingOf('session-a'), undefined)
 })
 
