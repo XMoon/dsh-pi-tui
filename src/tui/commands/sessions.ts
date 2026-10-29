@@ -343,7 +343,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           if (!direct) app.notify(sanitizeTerminalText(text), 'error')
           settle({ kind: 'failed', text })
         }
-        if (direct) app.notify('switching session…', 'info')
+        // The native Browser's `resumePending` is the non-terminal indicator;
+        // the command owner receives the real outcome below. Do not paint a
+        // transient notice from inside the read-owner callback: a native
+        // presentation may already be closed/replaced.
         runOwned('session browser resume', () => switchSessionOutcome(intent.sessionId, scope), {
           diag: runner.diag,
           sessionId: () => intent.sessionId,
