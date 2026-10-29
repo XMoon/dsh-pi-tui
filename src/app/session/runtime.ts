@@ -389,7 +389,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     }
     const owner = core.owner()
     if (owner === undefined) return { kind: 'nothing' }
-    const outcome = await deps.retirement.cancel(owner)
+    const outcome = await deps.retirement.cancelForNavigation(owner)
     if (outcome.kind === 'committed') return { kind: 'stopped' }
     if (outcome.kind === 'cancelled') return { kind: 'nothing' }
     if (outcome.kind === 'unsupported') {
@@ -416,12 +416,36 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     )
 
   /**
+   * Run one navigation task through the gate and close the deferred-queue-recall
+   * window if the ADMISSION (not the body) failed. A queue pull-back admitted
+   * before the freeze can finish during the stop, remove its occurrences and
+   * DEFER its local restore to the pending transition (`gate.busy` is true); the
+   * body's own settle would restore it, but a stop failure never runs the body.
+   * The restore is attached AFTER the gate promise settled — the gate's own
+   * `active=false` handler is registered first, so an admitted writer that
+   * completed during the frozen stop and deferred late is caught here, while a
+   * writer completing after that observes a non-busy gate and restores itself.
+   * Body failures keep their existing `transitionTo` finally settlement.
+   */
+  const runNavigationGate = <T>(task: () => Promise<T> | T): Promise<T> => {
+    let stopFailed = false
+    return core.gate.run(task)
+      .catch((error: unknown): never => {
+        if (error instanceof SessionNavigationStopError) stopFailed = true
+        throw error
+      })
+      .finally(() => {
+        if (stopFailed) deps.surface.settlePendingQueueRecalls(false)
+      })
+  }
+
+  /**
    * Run ONE user-navigation transaction through the gate + barrier. The stop
    * and drain run BEFORE the body; the body then creates and commits exactly
    * like {@link transitionTo}.
    */
   const withNavigation = <T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T> =>
-    core.gate.run(() => runNavigationTransition(intent, task))
+    runNavigationGate(() => runNavigationTransition(intent, task))
 
   /**
    * Run one ordinary session transition/switch: quiesce + flush the old owner,
@@ -679,15 +703,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * CURRENT session live and says why.
    */
   const switchSession = (sessionId: string, expectedScope?: SessionScope): Promise<string | undefined> => {
+    /** The barrier half of this switch (the gate wrapper is added below). */
     const runLocked = (scope: SessionScope): Promise<string | undefined> => {
-      // A switch INTO the session we are already on is a NO-OP: nothing is
-      // being replaced, so it must NOT stop the current owner's turn. Checked
-      // inside the gate, so a queued intent whose target became current in the
-      // meantime skips the stop too.
-      if (core.currentSessionId() === sessionId) {
-        deps.surface.settlePendingQueueRecalls(false)
-        return Promise.resolve('already on this session')
-      }
       const intent: NavigationIntent = { scope, admission: { oldOwnerStopped: false } }
       return runNavigationTransition(intent, async () => {
         try {
@@ -697,31 +714,40 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // recall that was waiting on this transition in that case.
           deps.surface.settlePendingQueueRecalls(false)
         }
-      }).catch((error: unknown) => {
-        if (!(error instanceof SessionNavigationStopError)) throw error
-        // A stale capture is a locally superseded navigation: the surface already
-        // moved, so nothing is reported (the existing superseded path is silent).
-        if (error.settlement === 'stale') return undefined
-        return `${error.message}; the session was not switched`
       })
+    }
+    const mapStopFailure = (error: unknown): string | undefined => {
+      if (!(error instanceof SessionNavigationStopError)) throw error
+      // A stale capture is a locally superseded navigation: the surface already
+      // moved, so nothing is reported (the existing superseded path is silent).
+      if (error.settlement === 'stale') return undefined
+      return `${error.message}; the session was not switched`
     }
     if (expectedScope === undefined) {
       core.bumpNavigationEpoch()
-      return core.gate.run(() => {
+      return runNavigationGate(() => {
+        // A switch INTO the session we are already on is a NO-OP: nothing is
+        // being replaced, so it must NOT stop the current owner's turn. Checked
+        // inside the gate, so a queued intent whose target became current in the
+        // meantime skips the stop too.
+        if (core.currentSessionId() === sessionId) {
+          deps.surface.settlePendingQueueRecalls(false)
+          return 'already on this session'
+        }
         // Capture the owner this queued selection is actually leaving WHEN ITS
         // TURN COMES: every earlier transition already settled, and the capture
         // and the barrier freeze still happen in the SAME synchronous stack.
         return runLocked(deps.captureScope())
-      })
+      }).catch(mapStopFailure)
     }
     if (!deps.isScopeCurrent(expectedScope)) return Promise.resolve(undefined)
-    return core.gate.run(() => {
+    return runNavigationGate(() => {
       // A previous queued transition may have published a new owner while this
       // intent waited. Recheck before this request bumps navigation or opens B.
       if (!deps.isScopeCurrent(expectedScope)) return undefined
       core.bumpNavigationEpoch()
       return runLocked(expectedScope)
-    })
+    }).catch(mapStopFailure)
   }
 
   const switchSessionLocked = async (

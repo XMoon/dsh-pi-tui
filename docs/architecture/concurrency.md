@@ -248,7 +248,13 @@ UI intent captures the OLD generation (scope)
   retried. A `cancelled` stop proves the request never left the TUI (the exact
   owner/binding generation is already unobservable, or the runner is exiting):
   it is "nothing to stop" and the transition proceeds — the same state makes
-  `whenIdleOrAbort` observe idle.
+  `whenIdleOrAbort` observe idle. The navigation stop therefore uses
+  `SessionOwnerRetirement.cancelForNavigation`: unlike the control `cancel`
+  (whose official caller-cancellation settlement stays `cancelled` for the
+  user Stop gesture), a DISPATCHED call whose reply is a caller/carrier
+  cancellation is `indeterminate` for navigation — the Host may have executed
+  it, so the navigation aborts instead of creating/switching behind a possibly
+  running old Turn.
 - Cancellation is never rolled back. Every failure AFTER an accepted stop says
   that the old Turn is already stopped and cannot be resumed; a failure before
   it (a stale capture) owns no message.

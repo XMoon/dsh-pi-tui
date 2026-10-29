@@ -1758,8 +1758,12 @@ test('the real /new stops a LIVE Question owner instead of parking until it is a
     const delivered = outcomeOf(plane.ask(
       liveAgentOf(harness, sessionA.id), sessionA.id, 'call-c-new', B3_QUESTION, abort.signal,
     ))
-    // The question is NEVER answered in this witness: aborting the official
-    // request is the teardown's own settlement, not a user answer.
+    // This B3 plane is the TUI presentation witness only: it does NOT relay
+    // Agent cancellation to the request. The official ASK_ABORTED settlement on
+    // the REAL Host service is covered by the Direct TSP integration test
+    // "a live official Question settles ASK_ABORTED ..."; here the question is
+    // never answered, which is exactly what a navigation that does not DEPEND
+    // on the answer must tolerate.
     life.defer(() => { abort.abort() })
     await waitUntil('the live form on the pane', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
     assert.ok(owned.pane.output.text().includes('Which target?'), 'the official question text is rendered')
