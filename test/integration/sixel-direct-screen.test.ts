@@ -20,13 +20,11 @@
  */
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import test from 'node:test'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { decodeSixel, pixelAt } from '../support/sixel-oracle.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 /**
@@ -66,6 +64,14 @@ async function until(predicate: () => boolean, label: string, timeoutMs = 30_000
   }
 }
 
+/**
+ * Let the app's throttled frame timer fire.
+ *
+ * reason: the app paints on its OWN 16 ms throttle and exposes no frame
+ * completion hook to this harness, so after a keystroke the test must give the
+ * timer a bounded window. Every assertion below still waits for an
+ * authoritative byte (a raster or a `2K` frame), never for this sleep alone.
+ */
 function tick(ms = 25): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -117,13 +123,12 @@ interface AppFixture {
  * real background, then type the draft placeholder into the editor.
  */
 async function startSixelApp(t: test.TestContext): Promise<AppFixture> {
-  const home = mkdtempSync(join(tmpdir(), 'sixel-app-'))
+  const home = testLifecycle(t).tempDir('sixel-app-')
   const previousHome = process.env.DSH_HOME
   process.env.DSH_HOME = home
   t.after(() => {
     if (previousHome === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previousHome
-    rmSync(home, { recursive: true, force: true })
   })
 
   const terminal = new SixelAppTerminal(100, 24)
