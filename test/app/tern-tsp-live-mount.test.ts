@@ -305,7 +305,7 @@ async function mountTspHarness(options: {
 
   let mountedRenderer: TspRenderer | undefined
   const renderer: SurfaceRendererMount = {
-    mount: (binding) => {
+    mount: (binding, statusReader) => {
       mountedRenderer = mountTspRenderer(session, { copyVisual: async () => false,
         requestExit: () => {
           exitCount += 1
@@ -313,6 +313,10 @@ async function mountTspHarness(options: {
         },
         ...(options.onFatal === undefined ? {} : { onFatal: options.onFatal }),
       })
+      // TSP-7 PR-A: the status reader is bound BEFORE the image binding, like
+      // the production mount — a renderer that fails its image bind still
+      // releases through the existing path.
+      mountedRenderer.bindStatusReader(statusReader)
       // PR-C: the mount hands the renderer the ONE image binding of this
       // surface — the fake mount installs it, it never fakes success.
       mountedRenderer.bindImages(binding)
@@ -1143,12 +1147,15 @@ test('A-13: the hydrate-tail reset keeps committed status facts and an explicit 
       'the hydrate-tail reset does not clear the just-committed title')
     assert.ok(harness.tern.output.text().includes('AUTHORITATIVE_TITLE'), 'the title stays visible')
 
-    // A partial commit must not drop the SIBLING facts (working/plan stay).
+    // A partial commit must not drop the SIBLING facts.
+    // TSP-7 PR-A: the legacy banner's `working`/`plan` words retired with it
+    // (they are native-status facts now, and the run phase lands in PR-B), so
+    // the sibling witness is the title — a displayable legacy line that the
+    // partial `todos` commit must leave intact.
     harness.surface.display.commitStatusFacts({ todos: [{ content: 'a todo', status: 'pending' }] })
     await settle()
     const wire = harness.tern.output.text()
-    assert.ok(wire.includes('working'), 'the sibling working fact survives a partial commit')
-    assert.ok(wire.includes('plan'), 'the sibling plan fact survives a partial commit')
+    assert.ok(wire.includes('AUTHORITATIVE_TITLE'), 'the sibling title fact survives a partial commit')
     assert.ok(wire.includes('todos 0/1'), 'the todo fact is visible')
 
     // PRESENCE semantics: an explicitly-present undefined title CLEARS it.
@@ -1379,9 +1386,12 @@ test('the surface withdraws the interaction owner BEFORE it starts the renderer 
       // PR-C: the fake mount receives the ONE image binding of this surface.
       // It PROVES the binding carries a real loader and a scope sampler
       // instead of accepting a default that would hide a missing binder.
-      mount: (binding) => {
+      mount: (binding, statusReader) => {
         assert.equal(typeof binding.imageLoader.load, 'function')
         assert.equal(typeof binding.imageScope, 'function')
+        // TSP-7 PR-A: the mount hands over a READ-ONLY reader — no store
+        // writer and no subscription travel with it.
+        assert.equal(typeof statusReader.snapshot, 'function')
         return {
           display,
           // The TSP mount always supplies the Task Center presentation sink

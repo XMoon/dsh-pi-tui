@@ -87,6 +87,7 @@ reading is an additional rendering container, never a second renderer.
 | SDK frame/ACK/current sent View | Installed SDK `Surface`/`Session` | A second application-side reconciler without a demonstrated gap |
 | The temporary reading surface, its reading identity and its close | `src/tui/tsp/session.ts` (the reader slot) | A presenter-owned surface, a business owner, a second Session, or a persisted reading state |
 | Terminal rendering, pixel clipping and scroll view state | Tern client | Node-tree text, TypeScript props, guessed pixels |
+| Status facts (permission, workspace, usage, plan) | The ONE `StatusStore` the `SurfaceRuntime` creates and updates | A renderer-owned store, a second writer, or a value derived from the dock, the transcript or `process.cwd()` |
 
 State-representation rule: authority, disposable projection, SDK transport
 state and component-local draft may contain similar values without being
@@ -144,6 +145,13 @@ reduction; a search hit or "two variables" is not proof of entropy.
    frame pump does not establish a practical deadlock or authorize a
    retry/watchdog. SDK `close()` can force a final flush; it is teardown, not a
    runtime delivery cure.
+9. The renderer receives the status facts through a READ-ONLY port
+   (`StatusSnapshotReader`) that the mount installs once; it carries a `snapshot()`
+   getter and nothing else. The surface stays the sole writer: it updates the
+   ONE store inside `SurfaceRuntime.commitStatus` and then completes the display
+   commit on the renderer, which samples the snapshot at exactly that point —
+   never per render and never through a store subscription. A renderer with no
+   bound reader fails the display commit fast instead of projecting a substitute.
 
 ### Bounded reader surface lifecycle
 
@@ -407,10 +415,9 @@ store.
   it, which is exactly why the per-node ceiling above exists. CSS is a visual
   degradation, never a substitute for the ceiling and never a reason to withhold
   the composer.
-- **Count summary.** The draft count prefixes the EXISTING dock status line
-  (`Draft N · …`); with no staged image the status text and its key are
-  unchanged. Occurrences beyond the shown ones are not deleted — they are simply
-  not drawn, and the count still reports them.
+- **Count summary.** The draft count is its own short dock line (`Draft N`),
+  present only while a draft is really staged. Occurrences beyond the shown ones
+  are not deleted — they are simply not drawn, and the count still reports them.
 - The canonical `[image #N (W×H)]` token parser is the ONE source of WHICH
   occurrences a draft references, so the preview and the submission expansion
   cannot disagree. A staged image that no live token references is not a

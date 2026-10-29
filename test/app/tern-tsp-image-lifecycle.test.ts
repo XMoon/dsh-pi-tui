@@ -738,8 +738,16 @@ function dockDraftRows(tern: ScriptedTern): { id: string; kind: string; text?: s
 }
 
 /** The dock's status line text (the ONE line that carries `Draft N · …`). */
+/**
+ * The dock's draft-count text.
+ *
+ * TSP-7 PR-A: the count is its OWN short line (`Draft N`, present only while a
+ * draft is really staged) instead of a prefix on the retired status banner, so
+ * the witness addresses `dock.draft-count`. An empty draft mounts no line at
+ * all — that is the "prefix disappeared" fact.
+ */
 function dockStatusText(tern: ScriptedTern): string | undefined {
-  const node = currentNodes(tern).find(candidate => candidate.id === 'dock.status')
+  const node = currentNodes(tern).find(candidate => candidate.id === 'dock.draft-count')
   return typeof node?.props.text === 'string' ? node.props.text : undefined
 }
 
@@ -1049,8 +1057,8 @@ test('the live draft count prefixes the ONE status line and adds no extra title 
 
   harness.stageDrafts(`${first.placeholder} ${second.placeholder}`, [first, second])
   await until('the status to report two drafts', () => dockStatusText(harness.tern)?.startsWith('Draft 2') === true)
-  assert.equal(dockStatusText(harness.tern)?.startsWith('Draft 2 · '), true,
-    'the count is a PREFIX on the existing status text')
+  assert.equal(dockStatusText(harness.tern), 'Draft 2',
+    'the count is its own short line (the retired banner prefix is gone)')
 
   // Exactly one status line, and no second `Draft images …` heading exists.
   const texts = dockDraftRows(harness.tern).filter(row => row.kind === 'text')
@@ -1062,7 +1070,7 @@ test('the live draft count prefixes the ONE status line and adds no extra title 
 
   // Back to an empty draft: the status text and key are byte-identical to before.
   harness.stageDrafts('', [first, second])
-  await until('the status prefix to disappear', () => (dockStatusText(harness.tern) ?? '').startsWith('Draft') === false)
+  await until('the draft-count line to disappear', () => dockStatusText(harness.tern) === undefined)
   await harness.dispose()
 })
 
