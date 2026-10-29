@@ -308,7 +308,8 @@ export function createRemoteSessionOwnerServices(
       cancel,
       // Host-owned durability: rc.2 has no Client flush verb.
       flush: async (): Promise<void> => {},
-      // Synchronous by contract; the real Remote cancel is SessionWriter.cancel.
+      // Synchronous by contract; the real Remote cancel is this adapter's
+      // `cancel` (the official SessionFace.cancel on the exact binding).
       preCancel: (): void => {},
       retire,
       park,

@@ -165,14 +165,6 @@ export interface DirectTspFixture {
     readonly agentStatus: string
     readonly outcome: WriteOutcome
   }) => void): { readonly calls: () => number; readonly detach: () => void }
-  /**
-   * FAULT-INJECTION override for the production writer's `cancel` (the
-   * cancel-ERROR qualification): saves the unbound original (identity
-   * restored on detach) but does NOT forward — every call returns the fixed
-   * outcome. This is deliberately NOT a recorder; the injected outcome is
-   * the subject under test.
-   */
-  recordCancels(outcome: () => WriteOutcome): { readonly detach: () => void }
   settle(): Promise<void>
 }
 
@@ -694,18 +686,6 @@ export async function createDirectTspFixture(
     }
   }
 
-  /** The cancel-ERROR fault-injection seam: force the production outcome. */
-  const recordCancels = (outcome: () => WriteOutcome): { readonly detach: () => void } => {
-    const prototype = DirectSessionWriter.prototype as unknown as {
-      cancel(this: DirectSessionWriter, sessionId: string): Promise<WriteOutcome>
-    }
-    const originalCancel = prototype.cancel
-    prototype.cancel = async function (this: DirectSessionWriter) {
-      return outcome()
-    }
-    return { detach: () => { prototype.cancel = originalCancel } }
-  }
-
   const fixture = {
     ctx,
     workRoot,
@@ -713,7 +693,6 @@ export async function createDirectTspFixture(
     cancellations: () => llmAdapter.aborts.length,
     modelCalls: () => llmAdapter.calls,
     recordPrompts,
-    recordCancels,
     settle,
   }
   return pane === undefined ? fixture : { ...fixture, pane }
