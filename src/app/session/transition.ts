@@ -40,7 +40,16 @@ import type { SessionScope } from './scope.ts'
  *  a formatted message. */
 export type TransitionOutcome<T> =
   | { ok: true; next: T }
-  | { ok: false; message: string; error?: unknown }
+  | {
+      ok: false
+      message: string
+      error?: unknown
+      /** True only when the pre-commit OLD-owner quiesce (`whenIdleOrAbort`
+       *  + the final flush) COMPLETED before this failure. An accepted stop
+       *  request alone does NOT imply it: the Host may still be winding the
+       *  Turn down. */
+      oldOwnerQuiesced?: boolean
+    }
 
 /**
  * Why the one-shot navigation stop of the captured OLD owner did not settle
@@ -92,13 +101,16 @@ export class SessionNavigationStopError extends Error {
 /** What one user-navigation admission established BEFORE its body ran. */
 export interface NavigationAdmission {
   /**
-   * The one-shot stop of the captured OLD owner was ACCEPTED by the backend.
-   * Every later failure must state that the old Turn is already stopped
-   * (cancellation is never rolled back); `false` means nothing was dispatched
-   * (a sessionless surface, or a provable pre-dispatch cancellation), so the
-   * failure must not imply a Turn was stopped.
+   * The one-shot stop of the captured OLD owner was ACCEPTED by the backend
+   * (the Host acknowledged the cancellation REQUEST). This does NOT mean the
+   * old Turn already reached idle — that is only proven later, when the
+   * transition's OLD-owner quiesce completes. Every failure states the
+   * difference: "stop requested, completion unconfirmed" before the quiesce,
+   * "stopped and cannot be resumed" only after it. `false` means nothing was
+   * dispatched (a sessionless surface, or a provable pre-dispatch
+   * cancellation), so no Turn-stop claim is made at all.
    */
-  readonly oldOwnerStopped: boolean
+  readonly oldStopAccepted: boolean
 }
 
 /**
@@ -112,7 +124,7 @@ export interface NavigationIntent {
   /** The Session generation this intent is leaving. */
   readonly scope: SessionScope
   /** Filled once by the transition admission, before the body runs. */
-  readonly admission: { oldOwnerStopped: boolean }
+  readonly admission: { oldStopAccepted: boolean }
 }
 
 /** The caller-owned transition steps. */

@@ -518,7 +518,10 @@ export interface TuiCommandRunner {
     target: { id: string; header?: { cwd?: string } }
     prepare?: () => Promise<void> | void
     create: () => Promise<T>
-  }): Promise<{ ok: true; next: T } | { ok: false; message: string; error?: unknown }>
+  }): Promise<
+    | { ok: true; next: T }
+    | { ok: false; message: string; error?: unknown; oldOwnerQuiesced?: boolean }
+  >
   /** The preset the live agent runs on, when the deployment composes one. */
   currentPreset(): string | undefined
   /** The Host turn-boundary authority's blank state for the live Session

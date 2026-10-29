@@ -160,8 +160,8 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
      * before its first await and its transition admission stops the captured
      * old generation BEFORE the admitted writers drain. `undefined` (e.g. the
      * `/preset` swap) keeps the plain transition admission and never cancels.
-     * The intent's `admission.oldOwnerStopped` records what the admission
-     * established (always false without a navigation).
+     * The intent's `admission.oldStopAccepted` records whether the one-shot
+     * stop was accepted (always false without a navigation).
      */
     run<T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T>
   }

@@ -258,9 +258,12 @@ UI intent captures the OLD generation (scope)
   leaves the control `cancel` taxonomy untouched: the control Stop still
   reports a dispatched caller/carrier cancellation as `cancelled`, while
   navigation resolves that same reply as dispatched-unproven.
-- Cancellation is never rolled back. Every failure AFTER an accepted stop says
-  that the old Turn is already stopped and cannot be resumed; a failure before
-  it (a stale capture) owns no message.
+- Cancellation is never rolled back. An ACCEPTED stop has two distinct proven
+  facts: until the pre-commit OLD-owner quiesce (`whenIdleOrAbort` + the final
+  flush) completes, a failure says the stop was REQUESTED but its completion is
+  not confirmed; only after that quiesce does a failure say the old Turn is
+  stopped and cannot be resumed. A failure before any accepted stop owns no
+  message.
 - Browsing is read-only: opening `/sessions`, bare `/resume` or `/search` never
   stops the current owner. Only an explicit target selection enters this
   admission.

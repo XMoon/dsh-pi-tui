@@ -366,8 +366,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * admission), so a replacement published elsewhere can never receive this
    * navigation's stop. A still-current capture is the ONLY prerequisite:
    *
-   * - `stopped` (backend `committed`) — the backend accepted the stop, so the
-   *   old Turn is stopped (a later failure must say it cannot be resumed);
+   * - `stopped` (backend `committed`) — the backend accepted the STOP REQUEST;
+   *   only the transition's OLD-owner quiesce can prove the Turn stopped, and
+   *   the failure wording distinguishes "requested, not yet confirmed" from
+   *   "quiesced, cannot be resumed";
    * - `nothing` — the surface is sessionless (there is no old owner to stop),
    *   or the runner is exiting (the transition is moot);
    * - `failed` — ONLY a `committed` cancellation is permission to enter the
@@ -417,7 +419,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       async () => {
         const stop = await navigationStop(intent.scope)
         if (stop.kind === 'failed') throw new SessionNavigationStopError(stop.failure)
-        intent.admission.oldOwnerStopped = stop.kind === 'stopped'
+        intent.admission.oldStopAccepted = stop.kind === 'stopped'
       },
     )
 
@@ -485,8 +487,11 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // fire-and-forget retirement).
     let preCommitRelease: Promise<void> | undefined
     let transitionCommitted = false
+    // Whether the pre-commit OLD-owner quiesce (whenIdle + final flush)
+    // completed. A committed stop request alone does not prove this.
+    let oldOwnerQuiesced = false
     try {
-      return await runTransitionTo<T>({
+      const outcome = await runTransitionTo<T>({
         quiesceOld: async () => {
           const owner = core.owner()
           if (owner === undefined) return
@@ -496,12 +501,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // (which may be a NEW owner committed by an earlier queued transition),
           // so the transition settles instead of hanging past the appExit
           // watchdog.
-          await deps.retirement.whenIdleOrAbort(owner, deps.lifecycleSignal)
+          const aborted = await deps.retirement.whenIdleOrAbort(owner, deps.lifecycleSignal)
+          if (aborted) return
           // Final flush before the switch. The owner is re-read AFTER the quiesce
           // (the abort path may have swapped it), matching the pre-cutover read.
           const flushOwner = core.owner()
           if (flushOwner === undefined) return
           await deps.retirement.flush(flushOwner)
+          oldOwnerQuiesced = true
         },
         commit: (next) => {
           // Map the NEW owner BEFORE the commit section can throw: the commit
@@ -675,6 +682,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         deps.surface.clearOpening(opening)
       },
       }, steps)
+      return !outcome.ok && oldOwner !== undefined
+        ? { ...outcome, oldOwnerQuiesced }
+        : outcome
     } catch (error) {
       // The commit section started the exactly-once release of an acquired
       // but never-published NEW owner: AWAIT it before this transition
@@ -709,7 +719,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   const switchSession = (sessionId: string, expectedScope?: SessionScope): Promise<string | undefined> => {
     /** The barrier half of this switch (the gate wrapper is added below). */
     const runLocked = (scope: SessionScope): Promise<string | undefined> => {
-      const intent: NavigationIntent = { scope, admission: { oldOwnerStopped: false } }
+      const intent: NavigationIntent = { scope, admission: { oldStopAccepted: false } }
       return runNavigationTransition(intent, async () => {
         try {
           return await switchSessionLocked(sessionId, intent.admission)
@@ -765,11 +775,15 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     sessionId: string,
     admission: NavigationAdmission,
   ): Promise<string | undefined> => {
-    // Every failure AFTER the navigation stop must state that the old Turn is
-    // already stopped and cannot be resumed.
-    const stopped = admission.oldOwnerStopped
-      ? '; the previous turn was stopped and cannot be resumed'
-      : ''
+    // Every failure AFTER an ACCEPTED stop distinguishes the two proven
+    // states: the old Turn is stopped and can never be resumed only once the
+    // pre-commit quiesce completed; before that, the stop is merely requested.
+    const stopNote = (quiesced: boolean): string => {
+      if (!admission.oldStopAccepted) return ''
+      return quiesced
+        ? '; old turn stopped (cannot resume)'
+        : '; turn stop requested (not yet confirmed)'
+    }
     // Draft cleanup happens ONLY after the switch committed (the transaction
     // returned ok): a refused/failed switch keeps the CURRENT session and its
     // staged drafts intact — clearing up front would orphan the editor's
@@ -805,7 +819,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           if (result.error.ownership === 'superseded') return undefined
         }
         // The resume failed: the CURRENT session is still live.
-        return `${result.message}${stopped}`
+        return `${result.message}${stopNote(result.oldOwnerQuiesced === true)}`
       }
       // The switch COMMITTED: staged drafts are per-session UI state — drop the
       // unpinned ones now (never durable attachments). In-flight submissions
@@ -823,7 +837,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       const message = safeErrorMessage(error)
       deps.surface.reportSwitchFailure(sessionId, message)
       // The CURRENT session is still live.
-      return `switch failed: ${message}${stopped}`
+      return `switch failed: ${message}${stopNote(false)}`
     }
   }
 
