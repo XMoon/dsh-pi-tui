@@ -66,6 +66,8 @@ test('an exit during the TSP SDK handshake after a resume releases the renderer 
     else process.env.DSH_PI_TUI_RENDERER = previousRenderer
   })
   pane.queueWithHandshake('\u0004')
+  const inputListenerBaseline = pane.input.listenerCount('data')
+  const rawModeBaseline = pane.input.isRaw
   const probe = installProbe()
   life.defer(probe.restore)
 
@@ -96,8 +98,75 @@ test('an exit during the TSP SDK handshake after a resume releases the renderer 
 
   assert.equal(probe.apps.length, 0, 'the cancelled startup never starts a PiTui fallback')
   assert.equal(pane.closeFrames(), 1, 'the acquired SDK session is released exactly once')
+  assert.equal(pane.input.listenerCount('data'), inputListenerBaseline, 'the SDK input listener returns to its baseline')
+  assert.equal(pane.input.isRaw, rawModeBaseline, 'the scripted tty is restored to cooked mode')
   const events = harness.retirementEvents
   assert.equal(events.filter(event => event === `cancel:${resumed.id}`).length, 1, 'the resumed owner is cancelled exactly once')
   assert.equal(events.filter(event => event === `dispose:${resumed.id}`).length, 1, 'the resumed owner is disposed exactly once')
   assert.equal(events.filter(event => event === `flush:${resumed.id}`).length, 1, 'the resumed owner is flushed exactly once')
+})
+
+test('an HMR unload during a held TSP handshake after a resume releases the renderer and retires the owner once', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-prd-resume-handshake-hmr-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const pane = installTspPane({})
+  life.defer(() => pane.restore())
+  const previousRenderer = process.env.DSH_PI_TUI_RENDERER
+  process.env.DSH_PI_TUI_RENDERER = 'tsp'
+  life.defer(() => {
+    if (previousRenderer === undefined) delete process.env.DSH_PI_TUI_RENDERER
+    else process.env.DSH_PI_TUI_RENDERER = previousRenderer
+  })
+  pane.holdHandshake()
+  const inputListenerBaseline = pane.input.listenerCount('data')
+  const rawModeBaseline = pane.input.isRaw
+  const probe = installProbe()
+  life.defer(probe.restore)
+
+  const resumed: FakeSession = fakeSession({
+    id: 'prd-resume-handshake-hmr',
+    header: { id: 'prd-resume-handshake-hmr', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('resumed answer'),
+  })
+  const harness = makeHarness(home, resumed)
+  const context = new Context()
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  life.defer(() => disposeContext(context))
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+
+  await waitUntil(() => pane.probed(), 'the SDK handshake probe')
+  assert.equal(probe.apps.length, 0, 'no PiTui surface is mounted while the handshake is held')
+
+  // REAL HMR disposal while the handshake is held: the teardown must wait for
+  // the acquired renderer, then retire the exact resumed owner exactly once.
+  let disposalSettled = false
+  const disposal = (async () => {
+    await disposeContext(context)
+    await fiber!.dispose()
+  })().then(() => { disposalSettled = true })
+  // Negative observation window: the held handshake is the only unresolved
+  // acquisition; the settlement flag may not flip while the tty is held.
+  await new Promise<void>(resolve => setTimeout(resolve, 150)) // negative observation window
+  assert.equal(disposalSettled, false, 'the fiber disposer waits for the held handshake')
+  assert.equal(pane.closeFrames(), 0, 'nothing is released before the handshake settles')
+
+  pane.releaseHandshake()
+  await disposal
+  await settle() // bounded microtask drain, not a wall-clock wait
+
+  assert.equal(probe.apps.length, 0, 'the cancelled startup never starts a PiTui fallback')
+  assert.equal(pane.closeFrames(), 1, 'the acquired SDK session is released exactly once')
+  assert.equal(pane.input.listenerCount('data'), inputListenerBaseline, 'the SDK input listener returns to its baseline')
+  assert.equal(pane.input.isRaw, rawModeBaseline, 'the scripted tty is restored to cooked mode')
+  const events = harness.retirementEvents
+  assert.equal(events.filter(event => event === `cancel:${resumed.id}`).length, 1, 'the resumed owner is cancelled exactly once')
+  assert.equal(events.filter(event => event === `flush:${resumed.id}`).length, 1, 'the resumed owner is flushed exactly once')
+  assert.equal(events.filter(event => event === `dispose:${resumed.id}`).length, 1, 'the resumed owner is disposed exactly once')
 })
