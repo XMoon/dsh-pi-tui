@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resetCapabilitiesCache, setCapabilities, type Terminal, type TerminalProgressState } from '@xmoon76/pi-tui'
 import { effectiveImageProtocol } from '../../src/tui/graphics/image-capability.ts'
+import type { ImageGraphics } from '../../src/tui/graphics/native-image.ts'
 import { createZellijKittyGraphics } from '../../src/tui/graphics/zellij-image.ts'
 import { createTmuxKittyGraphics, TmuxKittyImage } from '../../src/tui/graphics/tmux-image.ts'
 import { TmuxKittyAdmission, probeTmuxKittyIdentity } from '../../src/tui/graphics/tmux-admission.ts'
@@ -513,4 +514,34 @@ test('source to sink: the admitted component really emits the managed grid, and 
   } finally {
     cli.dispose()
   }
+})
+
+/**
+ * The classifier reads exactly TWO members of a handle (`mode` and
+ * `canPaint()`), so a minimal object is a faithful input for THIS contract — a
+ * fuller fake would only restate the Kitty face the sibling files already own.
+ */
+function classifierHandle(mode: 'native' | 'tmux-virtual' | 'sixel', paints: boolean): ImageGraphics {
+  return { mode, canPaint: () => paints } as unknown as ImageGraphics
+}
+
+test('Direct SIXEL is the last branch: it never overrides a managed handle and never invents pixels', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', true)), 'sixel', 'a ready Direct SIXEL owner answers sixel')
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', false)), null, 'pending/denied SIXEL paints text')
+
+  // A managed Kitty handle keeps precedence even while it cannot paint: a
+  // revoked tmux pane must not silently degrade to a different protocol.
+  assert.equal(effectiveImageProtocol(classifierHandle('native', true)), 'kitty')
+  assert.equal(effectiveImageProtocol(classifierHandle('native', false)), null)
+  assert.equal(effectiveImageProtocol(classifierHandle('tmux-virtual', false)), null)
+
+  // The SIXEL owner is the authority even where the fork's own legacy detection
+  // would answer iTerm2: `getCapabilities().images` never selects SIXEL.
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', true)), 'sixel')
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', false)), null, 'a denied SIXEL never falls back to iTerm2')
+  assert.equal(effectiveImageProtocol(undefined), 'iterm2', 'no handle keeps the fork answer')
+  resetCapabilitiesCache()
 })
