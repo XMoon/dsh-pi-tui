@@ -267,6 +267,7 @@ function harness() {
     lifecycleSignal: controller.signal,
     surface,
     isScopeCurrent: (scope) => scopeAuthority?.isCurrent(scope) ?? currentScope,
+    captureScope: () => scopeAuthority?.capture() ?? ({ sessionId: core.currentSessionId() } as SessionScope),
     diag,
   })
 
@@ -852,6 +853,7 @@ test('a Direct-shaped owned fork handle adopts directly without any lifecycle op
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,
     isScopeCurrent: () => true,
+    captureScope: () => ({ sessionId: core.currentSessionId() } as SessionScope),
     diag: fakeDiag,
   })
   const outcome = await runtime.forkSession('session-direct-source')
@@ -1001,6 +1003,7 @@ test('a Direct pre-publication commit throw releases the child once and never re
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,
     isScopeCurrent: () => true,
+    captureScope: () => ({ sessionId: core.currentSessionId() } as SessionScope),
     diag: fakeDiag,
   })
   explodeCommit = true
@@ -1117,6 +1120,7 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,
     isScopeCurrent: () => true,
+    captureScope: () => ({ sessionId: core.currentSessionId() } as SessionScope),
     diag: fakeDiag,
   })
   explodeCompletion = true
@@ -1203,6 +1207,7 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,
     isScopeCurrent: () => true,
+    captureScope: () => ({ sessionId: core.currentSessionId() } as SessionScope),
     diag: fakeDiag,
   })
   explodeCommit = true
@@ -1404,11 +1409,17 @@ test('the control interrupt reaches the EXACT old binding while a navigation tra
   assert.equal(h.core.barrier.inTransition, true, 'the navigation transition froze the writer barrier')
   assert.equal(h.core.barrier.activeWriters, 1, 'the admitted writer is still outstanding')
   assert.equal(h.events.includes('open:session-b'), false, 'the transition body has not run yet')
+  // The navigation admission already stopped the captured old generation ONCE,
+  // before the drain (the PR-B order).
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1,
+    'the navigation stop reached the exact old binding before the writer drain')
 
   // The Busy Esc / Stop control entry: it is admitted while frozen, captures
-  // the exact OLD owner and cancels only that generation's binding.
+  // the SAME exact OLD owner and cancels only that generation's binding again
+  // (a user Stop after the navigation stop is a Host no-op, but it must still
+  // be addressed exactly).
   assert.deepEqual(await h.runtime.interrupt(oldScope), { kind: 'committed', value: undefined })
-  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'the OLD exact binding received the cancel')
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 2, 'the OLD exact binding received the control cancel')
   assert.equal(h.bindingOf('session-b'), undefined, 'the NEW binding was not even materialized by the control')
   assert.equal(h.events.includes('open:session-b'), false, 'the control did not shortcut the writer drain')
 
@@ -1451,4 +1462,166 @@ test('the control interrupt with an aborted runner is cancelled and never reache
   h.controller.abort()
   assert.deepEqual(await h.runtime.interrupt(scope), { kind: 'cancelled' })
   assert.equal(h.bindingOf('session-a')!.cancelCalls(), 0)
+})
+
+// ── the navigation admission: stop the captured old generation, then switch ─
+//
+// A selected-session switch and `/new` are USER NAVIGATIONS: the captured OLD
+// generation is stopped EXACTLY once, after the barrier freeze and BEFORE the
+// admitted-writer drain, and a refused/unproven stop aborts BEFORE any target
+// open/create. The stop is the official one-shot Host cancel of the exact
+// binding generation (`SessionFace.cancel` in the fake model), never a
+// `preCancel` no-op.
+
+test('a selected-session switch stops the exact captured owner BEFORE its writer drain, then commits', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+
+  // An ordinary writer admitted BEFORE the navigation holds the drain open.
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const writer = h.runtime.withWriter(oldScope, async () => {
+    h.events.push('writer-start')
+    await writerGate
+    h.events.push('writer-end')
+  })
+  const transition = h.runtime.switchSession('session-b', oldScope)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.core.barrier.inTransition, true, 'the switch froze the barrier')
+  assert.equal(h.core.barrier.activeWriters, 1, 'the admitted writer is still outstanding')
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1,
+    'the navigation stop reached the exact captured binding while the writer still drains')
+  assert.deepEqual(h.calls.opens, [], 'the target open has not run before the drain')
+
+  releaseWriter()
+  await writer
+  assert.equal(await transition, undefined)
+  assert.equal(h.core.currentSessionId(), 'session-b', 'the switch committed after the drain')
+  assert.equal(h.bindingOf('session-b')!.cancelCalls(), 0, 'the target generation never receives the old stop')
+  assert.deepEqual(h.calls.opens, ['session-b'], 'the target is opened exactly once, after the drain')
+  assert.equal(h.countRefs('session-a'), 0, 'the replaced owner is released exactly once')
+})
+
+test('a REFUSED navigation stop keeps the old session current and never opens the target', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+  // A pinned domain refusal (a proven pre-dispatch rejection): the stop did NOT
+  // happen, so navigation must not create/switch behind a possibly running Turn.
+  h.bindingOf('session-a')!.setCancelResult({
+    ok: false,
+    error: { code: 'session/not-found', message: 'no live Agent for the addressed session' },
+  })
+  const message = await h.runtime.switchSession('session-b', oldScope)
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
+  assert.deepEqual(h.calls.opens, [], 'the target is never opened')
+  assert.equal(h.countRefs('session-b'), 0, 'no target generation is retained')
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'the refused stop was dispatched exactly once')
+  assert.match(String(message), /the current turn could not be stopped/)
+  assert.doesNotMatch(String(message), /may already have stopped/,
+    'a proven refusal must not claim the old Turn may have stopped')
+  assert.match(String(message), /the session was not switched/)
+})
+
+test('an INDETERMINATE navigation stop aborts with the may-have-stopped statement and never opens the target', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+  // An unproven carrier failure after dispatch: the cancel may have taken
+  // effect, so the navigation aborts (no child) and never retries.
+  h.bindingOf('session-a')!.setCancelResult({
+    ok: false,
+    error: { code: 'gateway/internal', message: 'carrier internal' },
+  })
+  const message = await h.runtime.switchSession('session-b', oldScope)
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
+  assert.deepEqual(h.calls.opens, [], 'the target is never opened')
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'an indeterminate stop is never replayed')
+  assert.match(String(message), /unconfirmed result/)
+  assert.match(String(message), /the current turn may already have stopped/,
+    'the failure must state that the old Turn may already be stopped')
+  assert.match(String(message), /the session was not switched/)
+})
+
+test('a stale captured scope never stops the replacement session', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+  // Another navigation commits first: the captured A scope is now stale.
+  assert.equal(await h.runtime.switchSession('session-b'), undefined)
+  assert.equal(h.core.currentSessionId(), 'session-b')
+  const cancelCallsBefore = h.bindingOf('session-b')!.cancelCalls()
+  const opensBefore = [...h.calls.opens]
+  const superseded = await h.runtime.switchSession('session-c', oldScope)
+  assert.equal(superseded, undefined, 'a superseded queued switch settles silently')
+  assert.equal(h.bindingOf('session-b')!.cancelCalls(), cancelCallsBefore,
+    'the stale intent never stops the replacement generation')
+  assert.deepEqual(h.calls.opens, opensBefore, 'the stale intent never opens its target')
+  assert.equal(h.core.currentSessionId(), 'session-b')
+})
+
+test('withNavigation writes the admission fact BEFORE the body and stops the captured owner once', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const intent = {
+    scope: scopeAuthority.capture(),
+    admission: { oldOwnerStopped: false },
+  }
+  // A held writer keeps the drain open: the body must not run until it settles,
+  // while the stop has already been dispatched.
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+  const writer = h.runtime.withWriter(oldScope, async () => { await writerGate })
+  const task = h.runtime.withNavigation(intent, async () => {
+    assert.equal(intent.admission.oldOwnerStopped, true,
+      'the body must observe the accepted stop fact')
+    h.events.push('navigation-body')
+    return 'created'
+  })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'the admission stopped the captured owner')
+  assert.equal(h.events.includes('navigation-body'), false, 'the body still waits for the writer drain')
+  releaseWriter()
+  await writer
+  assert.equal(await task, 'created')
+  assert.ok(h.events.includes('navigation-body'))
+})
+
+test('a refused navigation stop aborts withNavigation BEFORE its body (create is never dispatched)', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const intent = {
+    scope: scopeAuthority.capture(),
+    admission: { oldOwnerStopped: false },
+  }
+  h.bindingOf('session-a')!.setCancelResult({
+    ok: false,
+    error: { code: 'session/not-found', message: 'no live Agent for the addressed session' },
+  })
+  let bodyRan = false
+  await assert.rejects(
+    h.runtime.withNavigation(intent, () => { bodyRan = true; return 'created' }),
+    (error: unknown) => error instanceof Error
+      && error.name === 'SessionNavigationStopError'
+      && /could not be stopped/.test(error.message),
+    'the refused stop aborts the navigation with the typed failure',
+  )
+  assert.equal(bodyRan, false, 'the transition body never runs')
+  assert.equal(intent.admission.oldOwnerStopped, false, 'no stop may be reported')
+  assert.equal(h.core.currentSessionId(), 'session-a')
+  assert.equal(h.core.barrier.inTransition, false, 'the aborted admission unfreezes the barrier')
+  assert.equal(h.core.barrier.activeWriters, 0)
 })

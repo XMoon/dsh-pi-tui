@@ -149,9 +149,11 @@ export interface RunnerHarness {
    *  busy-window control can force their status exactly like
    *  `submit-hot-path`'s `harness.host.status`. */
   readonly liveAgents: () => ReadonlyArray<{ status: string }>
-  /** Retirement-phase records (`cancel:<id>` / `idle:<id>` / `drain:<id>` /
-   * `flush:<id>` / `dispose:<id>`) in call order — the Direct
-   * owned-session retirement assertions. */
+  /** Retirement-phase records (`cancel:<id>` / `cancel:keepInbox:<id>` /
+   * `idle:<id>` / `drain:<id>` / `flush:<id>` / `dispose:<id>`) in call order —
+   * the Direct owned-session retirement assertions. A `keepInbox` cancel is the
+   * USER stop (navigation admission or Busy Esc control), never the retirement
+   * close-order cancel. */
   readonly retirementEvents: string[]
   /** The simulated official command executor's `command/run` / `command/done`
    * appends, each with whether the session still had a live owner handle at
@@ -212,8 +214,15 @@ export function fakeAgent(
         else resolve()
       })
     },
-    cancel: () => {
-      retirementEvents?.push(`cancel:${session.id}`)
+    cancel: (_cause?: unknown, options?: { keepInbox?: boolean }) => {
+      // Distinguish the USER stop (`keepInbox`, the navigation/Esc control
+      // semantic) from the retirement close-order cancel (no options): the
+      // same Agent legitimately receives both in a `/new` (the navigation stop
+      // first, then the retirement's own cancel), and a witness must be able to
+      // tell which one it is counting.
+      retirementEvents?.push(options?.keepInbox === true
+        ? `cancel:keepInbox:${session.id}`
+        : `cancel:${session.id}`)
       cancelled = true
       releaseIdle?.()
     },

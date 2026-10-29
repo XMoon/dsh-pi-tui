@@ -1170,11 +1170,15 @@ test('Busy Esc preserves the REAL Direct Host pending inbox while a REAL admitte
     const originalRunTransition = SessionOperationBarrier.prototype.runTransition
     let frozen = false
     let bodyRan = false
-    SessionOperationBarrier.prototype.runTransition = function <T>(this: SessionOperationBarrier, fn: () => Promise<T>): Promise<T> {
+    SessionOperationBarrier.prototype.runTransition = function <T>(
+      this: SessionOperationBarrier,
+      fn: () => Promise<T>,
+      stopOldOwner?: () => Promise<void>,
+    ): Promise<T> {
       const promise = originalRunTransition.call(this, async () => {
         bodyRan = true
         return fn()
-      }) as Promise<T>
+      }, stopOldOwner) as Promise<T>
       if (this.activeWriters > 0) frozen = true
       return promise
     }
@@ -1207,6 +1211,25 @@ test('Busy Esc preserves the REAL Direct Host pending inbox while a REAL admitte
     }
     const newDefinition = commands.find(undefined, 'new')
     assert.ok(newDefinition, 'the real TUI /new handler must be registered in the Host registry')
+    // Record EVERY cancel the real Agent receives, with its options, by
+    // shadowing the production instance method and forwarding unchanged (never
+    // `.bind`, so the real receiver and the original function identity are
+    // preserved): the navigation stop and the Busy Esc control stop must BOTH
+    // be visible even after the first one already ended the held request.
+    const realOldAgent = agents.get(SessionId(oldId)) as unknown as {
+      cancel: (cause: unknown, options?: { keepInbox?: boolean }) => void
+    }
+    const originalCancel = realOldAgent.cancel
+    const cancelCalls: Array<{ keepInbox: boolean | undefined }> = []
+    realOldAgent.cancel = function recordedCancel(
+      this: unknown,
+      cause: unknown,
+      options?: { keepInbox?: boolean },
+    ): void {
+      cancelCalls.push({ keepInbox: options?.keepInbox })
+      originalCancel.call(this, cause, options)
+    }
+    life.defer(() => { realOldAgent.cancel = originalCancel })
     const transition = Promise.resolve(newDefinition.handler({
       commandId: 'cmd-pra-real-new',
       agent: undefined,
@@ -1216,10 +1239,22 @@ test('Busy Esc preserves the REAL Direct Host pending inbox while a REAL admitte
     await waitFor('the real /new transition froze on the admitted writer', () => frozen, 25_000)
     assert.equal(bodyRan, false, 'the transition body must still be waiting for the real writer')
 
+    // The navigation stop lands at admission: the OLD turn's held model
+    // request observes the cancel while the admitted writer is STILL draining,
+    // and before the transition body runs.
+    await waitFor('the /new navigation stop cancelled the held turn', () => fixture.cancellations() === 1, 25_000)
+    assert.deepEqual(cancelCalls, [{ keepInbox: true }],
+      'the navigation stop is ONE keepInbox user cancel of the exact old Agent, before any control Stop')
+    assert.equal(bodyRan, false, 'the navigation stop must not shortcut the real writer drain')
+    assert.ok(inboxHas(oldId, 'queued marker'),
+      'the REAL Direct Host pending inbox preserves the queued occurrence across the navigation stop')
+
     // The real Busy Esc: TSP pane input -> application onCancel -> the real
     // SessionRuntime.interrupt -> the exact real Direct Agent cancel.
     fixture.pane.key('\x1b')
-    await waitFor('the real held model request observed the cancel', () => fixture.cancellations() === 1, 25_000)
+    await waitFor('the Busy Esc control stop also reached the exact old Agent', () => cancelCalls.length === 2, 25_000)
+    assert.deepEqual(cancelCalls[1], { keepInbox: true },
+      'the control stop keeps the Host pending inbox even when the turn already ended')
     assert.equal(bodyRan, false, 'the control cancel must not shortcut the real writer drain')
     assert.ok(inboxHas(oldId, 'queued marker'),
       'the REAL Direct Host pending inbox preserves the queued occurrence across the control cancel')
@@ -1289,13 +1324,15 @@ test('a BUSY TSP /new submit runs the TUI navigation command, never Queue/Steer'
       'the /new line must never enter the Host queue or steering inbox')
     assert.equal(fixture.modelCalls(), modelCallsBefore, 'the /new line must never start a model turn')
 
-    // PR-A /new still waits for the old turn; release it so the REAL transition
-    // can create the fresh Session through the TUI command route.
-    releaseHold()
-    await waitFor('the /new child session', () => {
+    // The navigation stop cancels the held turn: the fresh Session is created
+    // WITHOUT waiting for the hold to be released (a `/new` never waits for
+    // the old Turn to finish naturally).
+    await waitFor('the /new child session while the old stream is still held', () => {
       const ids = welcomeSessionIds(fixture)
       return ids.length === 1 && ids[0] !== oldId
     }, 25_000)
+    assert.equal(fixture.cancellations(), 1,
+      'the navigation stop is the cancellation that ended the held old turn')
     const newId = welcomeSessionIds(fixture)[0]!
     assert.notEqual(newId, oldId)
     assert.equal(fixture.modelCalls(), modelCallsBefore,

@@ -39,6 +39,7 @@ import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefini
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
+import type { NavigationIntent } from './app/session/transition.ts'
 import type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
 import type { Component } from '@xmoon76/pi-tui'
 import type { EmbeddedPluginPage } from './tui/plugin-manager/workspace.ts'
@@ -733,8 +734,16 @@ export interface TuiCommandRunner {
    * outside this FIFO; only its current visible adoption and Direct retirement
    * handoff use the gate. Re-entering the gate from inside a task is refused
    * loudly (it would deadlock).
+   *
+   * `navigation` marks a USER NAVIGATION intent (`/new`, a selected-session
+   * switch): the caller captures `runner.captureSessionScope()` synchronously
+   * before its first await and passes the intent here. The transition admission
+   * then sends ONE exact-owner stop of that captured generation BEFORE the
+   * admitted writers drain; without it (e.g. the `/preset` swap) nothing is
+   * cancelled. The intent records whether that stop was accepted, so a later
+   * failure can state that the old Turn is already stopped.
    */
-  withSessionTransition<T>(task: () => Promise<T> | T): Promise<T>
+  withSessionTransition<T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T>
   /**
    * Run one scope-bound TUI session write (A3 §1.3): the captured scope is
    * validated ONCE, synchronously, before the operation barrier is entered, so

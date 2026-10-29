@@ -371,6 +371,7 @@ function buildSessionFixture(life: TestLifecycle, options: {
     lifecycleSignal: new AbortController().signal,
     surface,
     isScopeCurrent: scope => sessionScope.isCurrent(scope),
+    captureScope: () => sessionScope.capture(),
     diag: fakeDiag,
   })
 
