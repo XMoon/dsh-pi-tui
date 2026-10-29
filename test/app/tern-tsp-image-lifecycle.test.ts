@@ -737,14 +737,13 @@ function dockDraftRows(tern: ScriptedTern): { id: string; kind: string; text?: s
   return rows
 }
 
-/** The dock's status line text (the ONE line that carries `Draft N · …`). */
+/** The dock's draft-count text (the ONE short line carrying `Draft N`). */
 /**
  * The dock's draft-count text.
  *
  * TSP-7 PR-A: the count is its OWN short line (`Draft N`, present only while a
- * draft is really staged) instead of a prefix on the retired status banner, so
- * the witness addresses `dock.draft-count`. An empty draft mounts no line at
- * all — that is the "prefix disappeared" fact.
+ * draft is really staged), so the witness addresses `dock.draft-count`. An
+ * empty draft mounts no line at all.
  */
 function dockStatusText(tern: ScriptedTern): string | undefined {
   const node = currentNodes(tern).find(candidate => candidate.id === 'dock.draft-count')
@@ -1048,9 +1047,9 @@ test('a resize never re-installs the sheet', async () => {
   await harness.dispose()
 })
 
-// ── S3.5: the draft count rides the EXISTING status line, never a new row ───
+// ── S3.5: the draft count is its OWN short line, never a second title row ───
 
-test('the live draft count prefixes the ONE status line and adds no extra title row', async () => {
+test('the live draft count is its own short line and adds no extra title row', async () => {
   const harness = await mountHarness()
   const first = localDraft(1, '[image #1 (640×360)]', 256, 'a.png')
   const second = localDraft(2, '[image #2 (640×360)]', 256, 'b.png')
@@ -1058,9 +1057,9 @@ test('the live draft count prefixes the ONE status line and adds no extra title 
   harness.stageDrafts(`${first.placeholder} ${second.placeholder}`, [first, second])
   await until('the status to report two drafts', () => dockStatusText(harness.tern)?.startsWith('Draft 2') === true)
   assert.equal(dockStatusText(harness.tern), 'Draft 2',
-    'the count is its own short line (the retired banner prefix is gone)')
+    'the count is its own short line')
 
-  // Exactly one status line, and no second `Draft images …` heading exists.
+  // Exactly one count line, and no second `Draft images …` heading exists.
   const texts = dockDraftRows(harness.tern).filter(row => row.kind === 'text')
   assert.equal(texts.some(row => String(row.text ?? '').startsWith('Draft images')), false,
     'the amendment removed the separate title line')
@@ -1115,7 +1114,7 @@ test('a narrow pane reads and sends only the occurrences it can SHOW', async () 
   assert.equal(dockDraftRows(harness.tern).filter(row => row.kind === 'image').length, 1,
     'exactly one preview node is drawn')
   assert.equal((dockStatusText(harness.tern) ?? '').startsWith('Draft 2'), true,
-    'the hidden occurrence is still COUNTED in the status line')
+    'the hidden occurrence is still COUNTED in the draft-count line')
   await harness.dispose()
 })
 

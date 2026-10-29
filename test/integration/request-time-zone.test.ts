@@ -242,10 +242,12 @@ test('the rendered surface keeps the ordinary Queue/transcript/composer behaviou
       await waitForInputDelivery(fixture.pane)
       fixture.pane.input.type('parity question')
       await awaitComposer(fixture, 'parity question')
-      fixture.pane.input.type('\r')
-      // TSP-7 PR-A retired the dock banner, so the turn is observed through the
-      // AUTHORITATIVE fact: the real model request this submission starts.
+      // The baseline MUST precede the submission: `stream()` counts the call the
+      // moment it runs, so a baseline read after Enter can already contain this
+      // request and the `>` comparison would never fire. TSP-7 PR-A retired the
+      // dock banner, so the turn is observed through this real model request.
       const modelCallsBefore = fixture.modelCalls()
+      fixture.pane.input.type('\r')
       await waitFor('the real model request to start', () => fixture.modelCalls() > modelCallsBefore, 25_000)
       await waitFor('the first settled prompt', () => recorder.calls() === 1, 25_000)
 
