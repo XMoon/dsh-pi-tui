@@ -242,22 +242,22 @@ UI intent captures the OLD generation (scope)
   is actually leaving inside the gate, right before the freeze, so a queued
   later selection keeps its own FIFO intent instead of inheriting an older
   generation.
-- A stop failure aborts BEFORE the drain and before any child work:
-  `rejected` (a proven refusal) and `indeterminate` (dispatched, effect
-  unproven) keep the current Session live, create nothing and are never
-  retried. The navigation stop uses
-  `SessionOwnerRetirement.cancelForNavigation`, whose `cancelled` must prove
-  BOTH that the request never left the TUI AND that no current work of the
-  captured generation remains (the runner is exiting). A merely UNADDRESSABLE
-  exact generation — a disconnected Connection generation, a replaced binding,
-  a released owner reference — does NOT prove the Host stopped: a Remote
-  retained binding can still report `running` while its Connection generation
-  is unavailable, and `whenIdleOrAbort` reads the binding's running state, not
-  the generation, so it makes no "idle" claim in that state. Navigation
-  therefore reports `indeterminate` and aborts. The control `cancel` keeps
-  PR-A's settlement for the user Stop gesture (a dispatched caller/carrier
-  cancellation stays `cancelled` there, and only the control consumer's
-  silence applies).
+- ONLY a `committed` cancellation is permission to enter the next phase.
+  `rejected` (a proven refusal), `indeterminate` (dispatched, effect unproven)
+  and `cancelled` (the exact generation could not be addressed, so the request
+  provably never left the TUI) all abort BEFORE the drain and before any child
+  work: the current Session stays live, nothing is created/opened and nothing is
+  retried. `cancelled` means "the Host cancel was NOT ADDRESSED", never "there
+  is no work to stop": a disconnected Connection generation, a replaced binding
+  or a released owner reference leaves the old Host Turn unproven, and
+  `whenIdleOrAbort` observing nothing (or returning `false`) for an unobservable
+  binding is not proof of idle — navigation never reaches that quiesce without a
+  `committed` stop. Only `indeterminate` states that the old Turn may already
+  have stopped. The Remote adapter keeps PR-A's one-shot cancel taxonomy
+  (`cancelled` for a pre-dispatch refusal, `indeterminate` for a superseded /
+  caller-cancelled dispatched reply, `rejected` for a proven business refusal);
+  the navigation LAYER, not the port, decides that a non-committed result
+  cannot proceed.
 - Cancellation is never rolled back. Every failure AFTER an accepted stop says
   that the old Turn is already stopped and cannot be resumed; a failure before
   it (a stale capture) owns no message.
