@@ -686,7 +686,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			// The bookkeeping records what was actually written: a history row whose
 			// record was released is text again after the clear.
 			for (const [row, fallback] of historyFallbacks) {
-				if (row < newLines.length) newLines[row] = fallback;
+				if (row >= newLines.length) continue;
+				newLines[row] = fallback;
+				// The row is TEXT again: drop the stale SIXEL row count so a later
+				// diff never expands a range over it as an image block.
+				lineSixelRows[row] = 0;
 			}
 			const bufferLength = Math.max(height, newLines.length);
 			this.previousViewportTop = Math.max(0, bufferLength - height);
