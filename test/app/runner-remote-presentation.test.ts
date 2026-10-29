@@ -99,6 +99,14 @@ function* scriptedTextTurn(text: string): Generator<StreamChunk> {
 class StubStreamingLlmAdapter extends LlmAdapter {
   private gate: Promise<void> | undefined
   private openGate: (() => void) | undefined
+  private heldStreams = 0
+
+  /** How many model requests actually ENTERED the held gate (a witness that a
+   *  test asserting a held step is not merely observing `step/start`, which the
+   *  Agent can append before the model request is issued). */
+  get heldStreamCount(): number {
+    return this.heldStreams
+  }
 
   /** Hold every subsequent turn open; returns the release. */
   hold(): () => void {
@@ -135,6 +143,7 @@ class StubStreamingLlmAdapter extends LlmAdapter {
     // of parking the Host teardown's whenIdle() forever.
     const gate = this.gate
     if (gate !== undefined) {
+      this.heldStreams += 1
       const signal = options.signal
       if (signal === undefined) {
         await gate
@@ -1295,11 +1304,14 @@ test('a real Remote /new cancels the running old turn through the official Host 
   const oldSession = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
     snapshotEvents(): readonly { type: string; data?: unknown }[]
   }
-  // Wait for the real STEP: the held model request is then in flight, so only a
-  // cancellation can end the turn (the hold is never released by the assertions).
-  await waitFor('the old Host step started (the held model request is in flight)', () => {
+  // Wait for the real STEP and, decisively, for the MODEL REQUEST itself to
+  // enter the held gate: `step/start` can be appended before the request is
+  // issued, so only the adapter's own counter proves the held-model case. The
+  // hold is never released by the assertions.
+  await waitFor('the old Host step started', () => {
     return oldSession.snapshotEvents().some(event => event.type === 'step/start')
   }, 20_000)
+  await waitFor('the held model request entered its gate', () => adapter.heldStreamCount >= 1, 20_000)
   const hostIdsBefore = new Set(seedHost.ctx.sessions.list().map(session => String(session.id)))
 
   // The REAL user gesture: a /new typed into the mounted Remote composer.

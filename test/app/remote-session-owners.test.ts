@@ -542,6 +542,31 @@ test('a control cancel on a fully retired generation is cancelled without a Host
   assert.deepEqual(h.calls.releases, ['session-a'], 'the retired reference was released exactly once')
 })
 
+test('a DISPATCHED caller cancellation is indeterminate for navigation but keeps the control settlement', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  // `gateway/cancelled` is an official settlement AFTER the call was
+  // dispatched: it does not prove the Host left the turn running. The control
+  // (Busy Esc) audience keeps PR-A's own `cancelled`; the navigation audience
+  // must treat it as unproven, so it can never proceed to create/switch behind
+  // a possibly running old Turn.
+  binding.setCancelResult({ ok: false, error: { code: 'gateway/cancelled', message: 'carrier cancelled' } })
+  assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'cancelled' })
+  const navigation = await h.services.retirement.cancelForNavigation(owner)
+  assert.equal(navigation.kind, 'indeterminate',
+    'a dispatched navigation cancel must not be reported as provably not dispatched')
+  assert.equal(navigation.kind === 'indeterminate' ? navigation.error.code : undefined,
+    'session/cancel-indeterminate')
+  assert.equal(binding.cancelCalls(), 2, 'each audience addresses its own exact binding once')
+  assert.deepEqual(h.calls.releases, [], 'neither cancel releases the Client reference')
+  // A PROVEN pre-dispatch refusal is unchanged for navigation.
+  binding.setCancelResult({ ok: false, error: { code: 'session/not-running', message: 'nothing to cancel' } })
+  assert.equal((await h.services.retirement.cancelForNavigation(owner)).kind, 'rejected',
+    'a proven business refusal stays rejected for navigation too')
+})
+
 test('a control cancel keeps the official write-failure taxonomy', async () => {
   const h = harness()
   const { handle } = retainedHandle(h, 'session-a')

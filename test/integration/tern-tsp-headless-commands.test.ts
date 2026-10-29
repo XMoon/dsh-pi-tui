@@ -1383,3 +1383,100 @@ test('a BUSY TSP /new with a genuine Host /new keeps the Host sink', async (t) =
     await fixture.settle() // bounded fixture teardown (not a fixed wait)
   }
 })
+
+test('a live official Question settles ASK_ABORTED when the /new navigation cancel aborts its owner', async (t) => {
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, { deltas: ['NAV-QUESTION'] })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    // A REAL fresh Session/Agent first: no model turn, so the question below is
+    // the only in-flight Host interaction when /new runs.
+    await submitInput(fixture, '/new')
+    await waitFor('the Session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    const oldId = welcomeSessionIds(fixture)[0]!
+    const agents = fixture.ctx.get('agents') as unknown as {
+      get(id: SessionId): {
+        cancel(cause: { kind: 'user' }, options?: { keepInbox?: boolean }): void
+      } | undefined
+    }
+    const oldAgent = agents.get(SessionId(oldId))
+    assert.ok(oldAgent !== undefined, 'the fresh Session has a live Host Agent')
+    // The official ask's cancellation lifetime is the TOOL CALL's signal. This
+    // fixture does not script a model tool call, so model exactly the Agent
+    // loop's part: the REAL Agent.cancel (the one the navigation stop invokes)
+    // aborts the in-flight request signal. Nothing else in the test aborts it.
+    const abort = new AbortController()
+    const originalCancel = oldAgent.cancel
+    oldAgent.cancel = function patchedCancel(
+      this: unknown,
+      cause: { kind: 'user' },
+      options?: { keepInbox?: boolean },
+    ): void {
+      abort.abort()
+      originalCancel.call(this, cause, options)
+    }
+    life.defer(() => { oldAgent.cancel = originalCancel })
+    const questions = fixture.ctx.get('userQuestions') as unknown as {
+      ask(request: unknown): Promise<unknown>
+    }
+    const question = questions.ask({
+      agent: oldAgent,
+      wait: { callId: 'call-nav-question' },
+      questions: [{ id: 'q-nav', question: 'Which target?', options: [{ label: 'alpha' }, { label: 'beta' }] }],
+      signal: abort.signal,
+    }).then(
+      value => ({ kind: 'answered' as const, value }),
+      (error: unknown) => ({ kind: 'rejected' as const, error }),
+    )
+    await waitFor('the official Question form', () => fixture.pane.output.text().includes('Which target?'), 25_000)
+
+    // The REAL registered /new handler (the live modal owns the keys, so the
+    // command plane is the production path to a navigation transition).
+    const commands = fixture.ctx.get('commands') as unknown as {
+      find(agent: unknown, name: string): { handler(invocation: unknown): unknown } | undefined
+    }
+    const newDefinition = commands.find(undefined, 'new')
+    assert.ok(newDefinition, 'the real TUI /new handler is registered')
+    const transition = Promise.resolve(newDefinition.handler({
+      commandId: 'cmd-nav-question',
+      agent: undefined,
+      rawInput: '',
+      signal: new AbortController().signal,
+    }))
+
+    // The navigation stop really cancelled the owner: the official request
+    // settles with the service's documented abort code, never with an answer.
+    const outcome = await question
+    assert.equal(outcome.kind, 'rejected', 'the navigation cancel must settle the official Question')
+    const code = outcome.kind === 'rejected'
+      ? (outcome.error as { readonly code?: unknown }).code
+      : undefined
+    assert.equal(code, 'ASK_ABORTED',
+      'the settled code is the official abort code, not a fabricated user answer')
+
+    await transition
+    await waitFor('the /new child session', () => {
+      const ids = welcomeSessionIds(fixture)
+      return ids.length === 1 && ids[0] !== oldId
+    }, 25_000)
+    // The replaced presentation is withdrawn and the old owner is retired; the
+    // new Session is the live surface. The pane's TEXT history keeps the old
+    // caption, so liveness is read from the modal layer frames (the wire).
+    const liveModalCount = (): number => {
+      const live = new Set<string>()
+      for (const frame of fixture.pane.frames()) {
+        for (const op of frame.ops) {
+          if (op[0] === 'add' && /^layer\.modal-\d+$/u.test(op[1])) live.add(op[1])
+          else if (op[0] === 'del' && /^layer\.modal-\d+$/u.test(op[1])) live.delete(op[1])
+        }
+      }
+      return live.size
+    }
+    await waitFor('the replaced Question form left the seat', () => liveModalCount() === 0, 25_000)
+    const ids = welcomeSessionIds(fixture)
+    assert.equal(ids.length, 1)
+    assert.notEqual(ids[0], oldId, 'the fresh Session owns the surface')
+  } finally {
+    await fixture.settle()
+  }
+})
