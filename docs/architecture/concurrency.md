@@ -250,8 +250,8 @@ UI intent captures the OLD generation (scope)
   nothing is created/opened and nothing is retried. `cancelled` means "the Host
   cancel was NOT ADDRESSED", never "there is no work to stop": a disconnected
   Connection generation, a replaced binding or a released owner reference
-  leaves the old Host Turn unproven, and `whenIdleOrAbort` observing nothing (or
-  returning `false`) for an unobservable binding is not proof of idle —
+  leaves the old Host Turn unproven, and `whenIdleOrAbort` returning
+  `'unobservable'` for a rolled/released binding is not proof of idle —
   navigation never reaches that quiesce without a `committed` stop. Only
   `indeterminate` states that the old Turn may already have stopped. The phase
   distinction comes from `SessionOwnerRetirement.cancelForNavigation`, which
@@ -259,11 +259,13 @@ UI intent captures the OLD generation (scope)
   reports a dispatched caller/carrier cancellation as `cancelled`, while
   navigation resolves that same reply as dispatched-unproven.
 - Cancellation is never rolled back. An ACCEPTED stop has two distinct proven
-  facts: until the pre-commit OLD-owner quiesce (`whenIdleOrAbort` + the final
-  flush) completes, a failure says the stop was REQUESTED but its completion is
-  not confirmed; only after that quiesce does a failure say the old Turn is
-  stopped and cannot be resumed. A failure before any accepted stop owns no
-  message.
+  facts: until the pre-commit OLD-owner quiesce completes, a failure says the
+  stop was REQUESTED but its completion is not confirmed; only after an
+  OBSERVED settle (`whenIdleOrAbort === false`) followed by the final flush does
+  a failure say the old Turn is stopped and cannot be resumed. An
+  `'unobservable'` quiesce (a rolled/released exact binding) is NOT a completed
+  quiesce, and the Remote no-op flush adds no proof. A failure before any
+  accepted stop owns no message.
 - Browsing is read-only: opening `/sessions`, bare `/resume` or `/search` never
   stops the current owner. Only an explicit target selection enters this
   admission.

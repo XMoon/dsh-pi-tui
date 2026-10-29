@@ -967,17 +967,17 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
           scope: runner.captureSessionScope(),
           admission: { oldStopAccepted: false },
         }
+        // The quiesce callback is the ONLY proof that the old Turn reached
+        // idle. An accepted stop is just a REQUEST until then.
+        let oldOwnerQuiesced = false
+        const stopNote = (): string => {
+          if (!navigation.admission.oldStopAccepted) return ''
+          return oldOwnerQuiesced
+            ? '; old turn stopped (cannot resume)'
+            : '; turn stop requested (not yet confirmed)'
+        }
         try {
           return await runner.withSessionTransition(async () => {
-            // An accepted stop is only a REQUEST until the transition's
-            // OLD-owner quiesce completes. Every failure states which of the
-            // two proven facts applies, never over-claiming a stopped Turn.
-            const stopNote = (quiesced: boolean): string => {
-              if (!navigation.admission.oldStopAccepted) return ''
-              return quiesced
-                ? '; old turn stopped (cannot resume)'
-                : '; turn stop requested (not yet confirmed)'
-            }
             // The unified transaction: the old session is flushed BEFORE the
             // fresh session is created, the commit is synchronous, and a failure
             // anywhere before the create leaves the current session untouched
@@ -997,9 +997,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               // rejection. Any OTHER failure keeps its real diagnostic — never
               // mislabeled as a cancellation.
               if (runner.signal.aborted) {
-                return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote(false)}` }
+                return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote()}` }
               }
-              return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}${stopNote(false)}` }
+              return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}${stopNote()}` }
             }
             // Coordinate with the newest sessionless `/model` global-default write
             // BEFORE dispatching the create (v2 §0.8.3/§0.8.4): quiesce EVERY
@@ -1011,10 +1011,11 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             } catch (error) {
               // The lifetime signal aborted while waiting for the default write:
               // no create is dispatched (the old session stays current).
-              return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote(false)}` }
+              return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote()}` }
             }
             const result = await runner.transitionTo({
               target: { id: String(sessionId), header: { cwd } },
+              onOldOwnerQuiesced: () => { oldOwnerQuiesced = true },
               create: async () => {
                 // Re-wait immediately before dispatch: a newer sessionless /model may
                 // have started between the first wait and here, and the Direct
@@ -1046,7 +1047,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
                 // published id) is already recorded in the diagnostic above.
                 if (result.error.ownership === 'superseded') return { kind: 'success' }
               }
-              return { kind: 'error', text: `${result.message}${stopNote(result.oldOwnerQuiesced === true)}` }
+              return { kind: 'error', text: `${result.message}${stopNote()}` }
             }
             // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
             // drop the unpinned ones now, never before (a failed create keeps
@@ -1066,7 +1067,11 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             if (error.settlement === 'stale') return { kind: 'success' }
             return { kind: 'error', text: `fresh session creation failed: ${error.message}` }
           }
-          throw error
+          if (isCancellation(error)) throw error
+          // The transition can THROW after the quiesce (a synchronous commit
+          // seam): keep the phase fact in the user-visible failure instead of
+          // letting the generic command path drop it.
+          return { kind: 'error', text: `${safeErrorMessage(error)}${stopNote()}` }
         } finally {
           freshSessionInFlight = false
         }

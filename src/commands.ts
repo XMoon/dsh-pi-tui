@@ -517,11 +517,10 @@ export interface TuiCommandRunner {
     /** The child's pre-generated session identity (mandatory). */
     target: { id: string; header?: { cwd?: string } }
     prepare?: () => Promise<void> | void
+    /** See `TransitionSteps.onOldOwnerQuiesced`. */
+    onOldOwnerQuiesced?: () => void
     create: () => Promise<T>
-  }): Promise<
-    | { ok: true; next: T }
-    | { ok: false; message: string; error?: unknown; oldOwnerQuiesced?: boolean }
-  >
+  }): Promise<{ ok: true; next: T } | { ok: false; message: string; error?: unknown }>
   /** The preset the live agent runs on, when the deployment composes one. */
   currentPreset(): string | undefined
   /** The Host turn-boundary authority's blank state for the live Session

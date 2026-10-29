@@ -40,16 +40,7 @@ import type { SessionScope } from './scope.ts'
  *  a formatted message. */
 export type TransitionOutcome<T> =
   | { ok: true; next: T }
-  | {
-      ok: false
-      message: string
-      error?: unknown
-      /** True only when the pre-commit OLD-owner quiesce (`whenIdleOrAbort`
-       *  + the final flush) COMPLETED before this failure. An accepted stop
-       *  request alone does NOT imply it: the Host may still be winding the
-       *  Turn down. */
-      oldOwnerQuiesced?: boolean
-    }
+  | { ok: false; message: string; error?: unknown }
 
 /**
  * Why the one-shot navigation stop of the captured OLD owner did not settle
@@ -134,6 +125,13 @@ export interface TransitionSteps<T> {
   /** ALL TUI-owned preflight — runs BEFORE the DSH boundary. A throw
    * aborts with zero side effects. */
   prepare?: () => Promise<void> | void
+  /** Called once when the pre-commit OLD-owner quiesce (`whenIdleOrAbort`
+   * observed the exact owner settle + the final flush) COMPLETED. The
+   * transition may still fail afterwards (prepare/create/commit/retire); a
+   * caller composing a failure message uses this fact to distinguish
+   * "stop requested, completion unconfirmed" from "stopped, cannot resume".
+   * An accepted stop request alone does NOT call this. */
+  onOldOwnerQuiesced?: () => void
   /** Create or resume the child. A rejection is NEVER retried: the old
    * session stays current and the caller may retry. */
   create: () => Promise<T>
