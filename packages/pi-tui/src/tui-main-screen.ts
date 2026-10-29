@@ -323,6 +323,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				preserved.add(row);
 			} else if (this.previousRawLines[row] === token) {
 				this.previousLines[row] = info.fallback;
+				// The row is TEXT again: drop the cached image/sixel metadata together
+				// with the payload, or the next frame re-records a plain fallback as an
+				// image block (and a full render reserves body rows for it).
+				this.previousLineSixelRows[row] = 0;
+				this.previousLineImageRows[row] = 0;
+				this.previousLineImageIds[row] = [];
 				lines[row] = info.fallback;
 				preserved.add(row);
 			} else {
