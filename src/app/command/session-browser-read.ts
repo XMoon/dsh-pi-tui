@@ -43,6 +43,7 @@ export type SessionBrowserReadSettlement =
 export type SessionBrowserResumeSettlement =
   | { readonly kind: 'switched'; readonly sessionId: string }
   | { readonly kind: 'failed'; readonly text: string }
+  | { readonly kind: 'indeterminate'; readonly text: string }
   | { readonly kind: 'cancelled' }
 
 export interface SessionBrowserOpenOptions {

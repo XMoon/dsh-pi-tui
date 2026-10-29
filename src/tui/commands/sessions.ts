@@ -358,8 +358,11 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
                 break
               case 'already-current':
               case 'failed':
-              case 'indeterminate':
                 fail(outcome.message)
+                break
+              case 'indeterminate':
+                if (direct) settle({ kind: 'indeterminate', text: outcome.message })
+                else fail(outcome.message)
                 break
               case 'superseded':
                 if (direct) settle({ kind: 'failed', text: outcome.message })
@@ -394,7 +397,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     readonly requireQuery?: boolean
   }
   const openNativeSessionBrowser = (
-    invocation: { rawInput: string },
+    invocation: { rawInput: string; commandId?: string },
     options: SessionPickerOpenOptions,
     presentation: SessionBrowserPresentation,
   ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
@@ -419,6 +422,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       if (result.kind === 'matched') {
         const resume: SessionBrowserResumeSettlement = await handle.resumeSettlement
         if (resume.kind === 'switched') return { kind: 'success' }
+        if (resume.kind === 'indeterminate') {
+          // A Host-side open may already have happened; the draft must not be
+          // restored as a plain retry intent.
+          recordCommandDraftDisposition(invocation.commandId, 'suppressed')
+          return { kind: 'error', text: resume.text }
+        }
         return { kind: 'error', text: resume.kind === 'failed' ? resume.text : 'resume cancelled' }
       }
       if (result.kind === 'ready') return { kind: 'success' }
@@ -428,7 +437,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
   }
 
   const openSessionPicker = async (
-    invocation: { rawInput: string },
+    invocation: { rawInput: string; commandId?: string },
     options: SessionPickerOpenOptions,
   ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
     if (options.requireQuery === true && invocation.rawInput.trim() === '') {
@@ -534,6 +543,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
      * (the switch has started before the handler returns). */
     type ListingOutcome =
       | { kind: 'switched' }
+      | { kind: 'indeterminate'; text: string }
       | { kind: 'picker' }
       | { kind: 'refused'; text: string }
       | { kind: 'cancelled' }
@@ -786,6 +796,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             (outcome) => {
               if (outcome.kind === 'committed') settleOnce({ kind: 'switched' })
               else if (outcome.kind === 'cancelled') settleOnce({ kind: 'cancelled' })
+              else if (outcome.kind === 'indeterminate') settleOnce({ kind: 'indeterminate', text: outcome.message })
               else settleOnce({ kind: 'refused', text: outcome.message })
             },
             (error) => settleOnce({ kind: 'refused', text: `session switch failed: ${safeErrorMessage(error)}` }),
@@ -863,6 +874,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     // stays interactive during the wait (Esc cancels). No match settles as
     // success with the filtered picker; a refusal returns the error text.
     const outcome = await listing
+    if (outcome.kind === 'indeterminate') {
+      // The Host may have opened the target; never restore `/resume ...` as a
+      // plain retry intent.
+      recordCommandDraftDisposition(invocation.commandId, 'suppressed')
+      return { kind: 'error', text: outcome.text }
+    }
     if (outcome.kind === 'refused') return { kind: 'error', text: outcome.text }
     if (outcome.kind === 'cancelled') return { kind: 'error', text: 'resume cancelled' }
     return { kind: 'success' }

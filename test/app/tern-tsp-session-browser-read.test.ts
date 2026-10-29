@@ -710,6 +710,11 @@ test('a failed resume attempt re-enables the panel and each intent settles indep
   await waitUntil('the failed attempt clears pending', () => presentation.latest()?.resumePending === false, 3_000)
   request.onResumeIntent({ sessionId: 'session-other', currentSessionId: 'session-current', source: 'enter' })
   await waitUntil('the retry is accepted', () => presentation.latest()?.resumePending === true, 3_000)
+  // A LATE settle from the FIRST attempt must not clear the SECOND attempt.
+  settles[0]!({ kind: 'switched', sessionId: 'session-target' })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(presentation.latest()?.resumePending, true,
+    'the older attempt must not settle the newer pending intent')
   settles[1]!({ kind: 'switched', sessionId: 'session-other' })
   await waitUntil('the retry settles pending', () => presentation.latest()?.resumePending === false, 3_000)
 })
