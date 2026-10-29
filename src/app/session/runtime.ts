@@ -501,6 +501,13 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // watchdog.
           const idle = await deps.retirement.whenIdleOrAbort(owner, deps.lifecycleSignal)
           if (idle === true) return
+          if (idle === 'unobservable') {
+            // The exact OLD generation can no longer be observed: we cannot
+            // prove its Turn stopped. A user navigation must NOT create/open a
+            // replacement behind an unknown old Turn (that would be a silent
+            // detach); abort before the create with the phase fact preserved.
+            throw new Error('the old session owner is no longer observable — refusing to switch without a confirmed stop')
+          }
           // Final flush before the switch. The owner is re-read AFTER the quiesce
           // (the abort path may have swapped it), matching the pre-cutover read.
           const flushOwner = core.owner()
