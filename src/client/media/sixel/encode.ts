@@ -29,7 +29,7 @@ import { Worker } from 'node:worker_threads'
 import {
   SIXEL_BACKGROUND_SELECT,
   SIXEL_BAND_HEIGHT_PX,
-  SIXEL_ENCODE_TIMEOUT_MS,
+  SIXEL_WORKER_ENCODE_TIMEOUT_MS,
   SIXEL_MAX_CELL_HEIGHT_PX,
   SIXEL_MAX_CELL_WIDTH_PX,
   SIXEL_MAX_OUTPUT_BYTES,
@@ -553,9 +553,11 @@ export class SixelEncoder {
     job.worker = worker
 
     const sequence = await new Promise<string>((resolve, reject) => {
+      // Scope: this worker call only. The decode/quantize stages that ran
+      // before it are bounded by the input budget, not by this clock.
       job.timer = setTimeout(() => {
-        reject(new SixelEncodeFailedError(`SIXEL encode exceeded ${SIXEL_ENCODE_TIMEOUT_MS} ms.`))
-      }, SIXEL_ENCODE_TIMEOUT_MS)
+        reject(new SixelEncodeFailedError(`SIXEL worker encode exceeded ${SIXEL_WORKER_ENCODE_TIMEOUT_MS} ms.`))
+      }, SIXEL_WORKER_ENCODE_TIMEOUT_MS)
       worker.once('message', (message: unknown) => {
         const payload = message as { ok?: unknown; sequence?: unknown; message?: unknown }
         if (payload.ok === true && typeof payload.sequence === 'string') {

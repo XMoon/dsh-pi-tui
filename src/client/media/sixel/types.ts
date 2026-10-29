@@ -33,8 +33,25 @@ export const SIXEL_BAND_HEIGHT_PX = 6
 export const SIXEL_MAX_OUTPUT_BYTES = 8 * 1024 * 1024
 /** Largest number of QUEUED jobs next to the one active job. */
 export const SIXEL_MAX_QUEUED_JOBS = 16
-/** Hard encode deadline; a timeout is a real failure, never an empty success. */
-export const SIXEL_ENCODE_TIMEOUT_MS = 5000
+/**
+ * Deadline for the WORKER encode stage only: one `sixelEncode()` call plus its
+ * round trip. A timeout is a real failure, never an empty success.
+ *
+ * It deliberately does NOT bound the whole request. The plan freezes a worker
+ * timeout and nothing else, and sharp's native decode/resize/quantize work
+ * cannot be interrupted at an arbitrary point, so a whole-job deadline would
+ * either abandon work that keeps holding the lane or require a second
+ * isolation mechanism this stage does not have. What bounds the earlier stages
+ * is the input budget instead: {@link SIXEL_MAX_PNG_BYTES},
+ * {@link SIXEL_MAX_SOURCE_DIMENSION}, {@link SIXEL_MAX_SOURCE_PIXELS} and the
+ * target caps are all checked before or around the decode, so the
+ * preprocessing cost is bounded by the accepted input, not by a wall clock.
+ *
+ * A future consumer that wants an end-to-end deadline must settle the request
+ * and await the in-flight native work before releasing the lane; racing a
+ * promise at the call site would let two jobs overlap.
+ */
+export const SIXEL_WORKER_ENCODE_TIMEOUT_MS = 5000
 /** Palette ceiling handed to the codec. */
 export const SIXEL_PALETTE_MAX_COLORS = 256
 /** SIXEL background select `1`: never repaint untouched zero-bit positions. */
