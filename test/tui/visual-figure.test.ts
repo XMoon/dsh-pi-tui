@@ -258,7 +258,7 @@ const SIXEL_PLACEMENT = '\x1bP0;1;q"1;1;320;160#0;2;100;0;0~\x1b\\'
 
 /** A Direct SIXEL owner face whose committed footprint is controlled by the
  *  test: the component renders before the Screen materializes the raster. */
-function sixelFigureGraphics(state: { committed: boolean; rows: number; columns: number }): ImageGraphics {
+function sixelFigureGraphics(state: { committed: boolean; rows: number; columns: number; cropTopRows?: number }): ImageGraphics {
   return {
     mode: 'sixel',
     canPaint: () => true,
@@ -266,7 +266,7 @@ function sixelFigureGraphics(state: { committed: boolean; rows: number; columns:
       const body: PixelBody = {
         render: () => [SIXEL_PLACEMENT, '', ''],
         invalidate: () => {},
-        paintedBodyAt: (width: number) => (state.committed ? { width, columns: state.columns, rows: state.rows } : undefined),
+        paintedBodyAt: (width: number) => (state.committed ? { width, columns: state.columns, rows: state.rows, ...(state.cropTopRows === undefined ? {} : { cropTopRows: state.cropTopRows }) } : undefined),
         dispose: () => {},
       }
       return body
@@ -286,7 +286,7 @@ async function drainRaster(): Promise<void> {
 test('a SIXEL figure reports its pixel hit only after the Screen commits, without another render', async () => {
   setCapabilities({ images: null, trueColor: true, hyperlinks: false })
   try {
-    const state = { committed: false, rows: 3, columns: 8 }
+    const state: { committed: boolean; rows: number; columns: number; cropTopRows?: number } = { committed: false, rows: 3, columns: 8 }
     const loader = new SvgRasterLoader(async (_source, options) => ({
       png: new Uint8Array(),
       base64: TINY_PNG_BASE64,
@@ -328,6 +328,14 @@ test('a SIXEL figure reports its pixel hit only after the Screen commits, withou
     state.rows = 3
     state.columns = 101
     assert.equal(figure.paintedHitMap(100)?.thumbnailBody, undefined, 'a footprint wider than the grant is never a hit')
+    // A top-cropped window starts where the Screen really starts showing it.
+    state.columns = 8
+    state.rows = 1
+    state.cropTopRows = 2
+    const cropped = figure.paintedHitMap(100)?.thumbnailBody
+    assert.ok(cropped !== undefined)
+    assert.equal(cropped.startRow, body.startRow + 2, 'the crop offset moves the hit start')
+    assert.equal(cropped.endRow, cropped.startRow + 1)
     figure.dispose()
     loader.dispose()
   } finally {

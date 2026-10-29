@@ -194,7 +194,7 @@ interface Occurrence {
   /** The current frame grant, or undefined when the occurrence is off screen. */
   grant?: { cropTopRows: number; visibleRows: number }
   /** The last frame in which the Screen really showed this occurrence's pixels. */
-  painted?: { width: number; columns: number; rows: number }
+  painted?: { width: number; columns: number; rows: number; cropTopRows?: number }
   full?: RasterRecord
   crop?: { cropTopRows: number; visibleRows: number; record: RasterRecord }
   /**
@@ -672,16 +672,23 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
         continue
       }
       const raster = shown.get(occurrence.token)
+      const crop = occurrence.crop
       const record =
         raster === undefined
           ? undefined
           : occurrence.full?.dcs === raster.dcs
             ? occurrence.full
-            : occurrence.crop?.record.dcs === raster.dcs
-              ? occurrence.crop.record
+            : crop?.record.dcs === raster.dcs
+              ? crop.record
               : undefined
-      occurrence.painted =
-        record === undefined ? undefined : { width: occurrence.width, columns: record.columns, rows: record.rows }
+      occurrence.painted = record === undefined
+        ? undefined
+        : {
+            width: occurrence.width,
+            columns: record.columns,
+            rows: record.rows,
+            cropTopRows: record === crop?.record ? crop.cropTopRows : 0,
+          }
     }
     // Bottom-up order is the caller's contract: the newest content wins a
     // contested slot, and every grant beyond the hard budget settles into text.
@@ -846,7 +853,12 @@ class SixelImage implements Component {
   paintedBodyAt(width: number): NativeKittyImageBody | undefined {
     const painted = this.occurrence?.painted
     if (painted === undefined || painted.width !== width) return undefined
-    return { width, columns: painted.columns, rows: painted.rows }
+    return {
+      width,
+      columns: painted.columns,
+      rows: painted.rows,
+      ...(painted.cropTopRows === undefined ? {} : { cropTopRows: painted.cropTopRows }),
+    }
   }
 
   /**

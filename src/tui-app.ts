@@ -12312,7 +12312,10 @@ export class TuiApp {
    * `ImageThumbnail` render-request wiring MUST go through here. */
   private settleThumbnailRender(): void {
     this.fullscreenRowsDirty = true
-    this.requestRender()
+    // A pixel settle changes an image body's painted geometry. On the
+    // fullscreen surface the scroll view can otherwise consider the frame
+    // unchanged, so force the repaint that publishes the new row map/hits.
+    this.requestRender(this.fullscreen !== undefined)
   }
 
   /**
@@ -12852,6 +12855,18 @@ export class TuiApp {
    * and scroll state are re-read fresh on EVERY commit. Contract:
    * docs/architecture/transcript.md ("Fullscreen geometry-epoch snapshot reuse"). The snapshot
    * keeps STABLE values only. */
+  /** Re-commit the fullscreen row snapshot when a live visual pixel body is
+   *  painted but the last snapshot still resolves its rows as inert. */
+  private reconcilePaintedRowSnapshot(): void {
+    const liveBody = this.messageRows.some(entry =>
+      entry.visuals?.some(hit => hit.thumbnailBody !== undefined) === true)
+    const snapshotBody = this.fullscreenPaintSnapshot?.rows.some(row =>
+      row.visualHits?.some(hit => hit.kind === 'body') === true) ?? false
+    if (!this.fullscreenRowsDirty && (!liveBody || snapshotBody)) return
+    this.fullscreenRowsDirty = true
+    this.commitFullscreenPaintSnapshot()
+  }
+
   private commitFullscreenPaintSnapshot(): void {
     const snapshotStart = this.scrollProfiler.enabled ? performance.now() : 0
     const previousSnapshot = this.fullscreenPaintSnapshot
@@ -13863,6 +13878,11 @@ export class TuiApp {
    */
   private handleFullscreenPress(x: number, y: number): void {
     this.clearFullscreenPointerGestures()
+    // A pixel body that was painted after the last snapshot commit changes the
+    // row-hit map without any chrome change. Re-commit the row geometry before
+    // resolving this press, so the press-time identity is the one the user
+    // actually clicked instead of a stale inert row.
+    this.reconcilePaintedRowSnapshot()
     // Image UX PR1: the composer preview band is pinned chrome above the
     // editor. A modal owner or a capturing overlay consumes it as inert
     // (never a hidden draft edit); only the last-painted `×` cell starts a

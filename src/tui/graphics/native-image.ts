@@ -61,6 +61,8 @@ export interface PixelBody {
 /** The body one render really painted (the host row mapper reads it). */
 export interface NativeKittyImageBody extends KittyPlacementGeometry {
   readonly width: number
+  /** Rows cropped from the TOP of the source by the Screen's visible window. */
+  readonly cropTopRows?: number
 }
 
 /**
