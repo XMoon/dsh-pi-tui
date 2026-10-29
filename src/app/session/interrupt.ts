@@ -1,8 +1,15 @@
 /**
- * The live-turn interrupt helper (web Stop parity): abort the current
+ * The public live-turn interrupt helper (web Stop parity): abort the current
  * turn/tool run while PRESERVING the pending queue. Kept out of the
  * composition root so the rule is testable headless, and its structural
  * faces keep the internal runtime port module out of the published entry.
+ *
+ * This is the PUBLIC, session-id-addressed writer convenience. The TUI's own
+ * Busy Esc / extension `cancel-activity` path does NOT use it: that path goes
+ * through `SessionRuntime.interrupt`, which addresses the EXACT captured owner
+ * generation under the session control admission (so a navigation transition
+ * that froze the ordinary writers cannot refuse it, and a same-id owner
+ * rollover cannot receive the wrong generation's cancel).
  * @module @xmoon76/dsh-pi-tui/app/session/interrupt
  */
 /** Public settlement shape for the interrupt helper. Kept local so the

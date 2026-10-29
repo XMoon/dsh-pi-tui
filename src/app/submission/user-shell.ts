@@ -32,7 +32,7 @@ import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { InterruptAgentLike } from '../session/interrupt.ts'
 import type { TuiSettingsDoc } from '../../runtime/config-port.ts'
 import type { HostUserShellPort } from '../../runtime/host-user-shell-port.ts'
-import type { SessionWriter } from '../../runtime/session-writer-port.ts'
+import type { SessionWriter, WriteOutcome } from '../../runtime/session-writer-port.ts'
 import { localShellSandboxPreferenceOf, shellCommandOf, shellModeOf } from './shell-context.ts'
 import { submitShell } from '../submission/runtime.ts'
 import type { LiveSessionScope } from '../session/scope.ts'
@@ -68,7 +68,13 @@ export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
   /** The ownership generation read (the run-start fence). */
   readonly ownership: { generation(): number }
   /** `SessionRuntime.withWriter`: the scope-bound writer admission. */
-  readonly session: { withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T> }
+  readonly session: {
+    withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
+    /** The scope-bound CONTROL admission: a busy interrupt must still reach
+     *  the exact captured owner while a navigation transition holds the
+     *  ordinary-writer barrier. */
+    interrupt(scope: LiveSessionScope): Promise<WriteOutcome<undefined>>
+  }
   /** The synchronous live-scope capture (throws when no live owner). */
   readonly requireLiveScope: () => LiveSessionScope
   /** The optional live-scope capture (undefined when no live owner) — the
@@ -141,11 +147,13 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
    *
    * 1. the Host user-shell PROCESS cancel — the branch-local abort
    *    controller, forwarded to the Host process by the adapter;
-   * 2. the Session TURN cancel — the semantic `SessionWriter.cancel` under
-   *    the live-scope writer admission, addressed by the CURRENT session
-   *    id (never by a Direct Agent object, so the Remote branch cancels
-   *    through the official Session cancel; §27 "remove Direct-Agent-only
-   *    current Session cancellation").
+   * 2. the Session TURN cancel — `SessionRuntime.interrupt`, the ONE
+   *    scope-bound CONTROL admission. It is accepted while a navigation
+   *    transition holds the ordinary-writer barrier, addresses the EXACT
+   *    captured owner (never a session-id re-resolution), and keeps the
+   *    Host pending inbox. A stale capture or an exiting runner settles as
+   *    `cancelled` (the request provably never left the TUI), so a normal
+   *    supersede is never reported as an `agent interrupt` error.
    */
   const interrupt = (): void => {
     if (deps.isCleanedUp()) return
@@ -157,14 +165,10 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     const scope = deps.captureLiveScope()
     if (scope === undefined) return
     const generation = deps.ownership.generation()
-    // The scope-bound writer admission (A3-4): interrupt is NOT a submission
-    // write, so its business ownership stays here — only the admission moves
-    // through SessionRuntime.withWriter. ONE capture: the same record fences
-    // the admission and addresses the cancel.
-    runOwned('agent interrupt', () => deps.session.withWriter(
-      scope,
-      () => deps.writer.cancel(scope.sessionId),
-    ), {
+    // The control admission captures the exact owner synchronously and is not
+    // refused by a frozen transitional barrier. The business ownership stays
+    // here: the outcome/notice gates below belong to this gesture.
+    runOwned('agent interrupt', () => deps.session.interrupt(scope), {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
       onResult: (outcome) => {
@@ -174,9 +178,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
           ? outcome.error.message
           : outcome.kind === 'unsupported'
             ? outcome.reason
-            : outcome.kind === 'indeterminate'
-              ? 'session cancellation result is indeterminate — do not retry automatically'
-              : 'session cancellation was cancelled'
+            : 'session cancellation result is indeterminate — do not retry automatically'
         deps.notify(message, 'error')
       },
       onError: (error) => {

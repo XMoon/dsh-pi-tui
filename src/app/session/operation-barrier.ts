@@ -16,12 +16,23 @@
  *                 operation, writers-- (finally)
  * transition:     frozen = true, wait writers == 0, run the whole
  *                 transition, frozen = false
+ * control:        run NOW, with no writer count and no wait (the caller
+ *                 owns the exact-owner/currentness fence)
  * ```
  *
  * A transition therefore waits for in-flight TUI writers to drain BEFORE
  * it quiesces the old agent, and no new writer can enter while it runs.
  * The old FIFO gate (SessionTransitionGate) remains for the single-writer
  * transition rule; correctness no longer rests on a `busy` flag.
+ *
+ * CONTROL is the ONE exception: a user Stop gesture (Busy Esc / extension
+ * `cancel-activity`) and the Task-Center subagent Stop must still reach
+ * their EXACT captured owner while a navigation transition holds the
+ * barrier. They are not session writes: they never increment `writers`,
+ * never wait for the transition, and never release an ordinary writer.
+ * The session runtime owns their scope/owner fence; this hook only owns
+ * the documented admission, so no ordinary business write can use it as
+ * a bypass.
  * @module @xmoon76/dsh-pi-tui/app/session/operation-barrier
  */
 
@@ -68,6 +79,22 @@ export class SessionOperationBarrier {
         for (const resolve of pending) resolve()
       }
     }
+  }
+
+  /**
+   * Run one CONTROL operation — a user interrupt of the captured owner or a
+   * selected subagent Stop — while a transition may hold the barrier.
+   *
+   * A control section is deliberately NOT a writer admission: it never
+   * increments `writers`, never waits for the transition to drain, and never
+   * unfreezes/releases an ordinary writer. The caller owns the exact captured
+   * owner/scope fence and the typed settlement; only the session runtime's
+   * control entries (`withControl` / `interrupt`) and the Task-Center Stop
+   * use this hook. Ordinary prompts, steer/queue edits, Host commands,
+   * `/preset`, `/model` and shutdown keep `runWriter` / `runTransition`.
+   */
+  async runControl<T>(fn: () => Promise<T> | T): Promise<T> {
+    return await fn()
   }
 
   /**

@@ -22,6 +22,10 @@
  * owner, so `flush`/`preCancel` are deliberate no-ops, `retire` releases the
  * exact Client reference exactly once, and `whenIdleOrAbort` observes the
  * official `SessionSnapshot.running` without ever cancelling the Host session.
+ * The ONE Host mutation here is `cancel`: the explicit user Stop addresses the
+ * EXACT captured binding generation through the official `SessionFace.cancel`
+ * verb; it never substitutes a same-id replacement and never releases the
+ * Client reference.
  *
  * Composition note: this provider is not wired into any production
  * bootstrap yet (M3-3B/M3-4 own the Remote runtime selection seam). Tests and
@@ -32,6 +36,9 @@
 
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { clientOwnerOf, type ClientSessionOwner, type SessionHandle } from '../../runtime/session-lifecycle-port.ts'
+import type { WriteOutcome } from '../../runtime/session-writer-port.ts'
+import { classifyRemoteWriteFailure } from '../../runtime/remote/write-failure.ts'
+import type { RemoteResultLike } from '../../runtime/remote/session-writer-remote.ts'
 import type {
   SessionOwnerAccess,
   SessionOwnerRetirement,
@@ -46,9 +53,14 @@ interface RemoteOwnerRunningFace {
   subscribe(fn: () => void): () => void
 }
 
+/** The official `SessionFace` cancellation verb addressed by EXACT binding. */
+interface RemoteOwnerCancelFace extends RemoteOwnerRunningFace {
+  cancel(): Promise<RemoteResultLike<{ readonly accepted: true }>>
+}
+
 /** Structural official `SessionBinding` observation subset (`session` face). */
 export interface RemoteOwnerBindingFace {
-  readonly session: RemoteOwnerRunningFace
+  readonly session: RemoteOwnerCancelFace
 }
 
 /**
@@ -138,6 +150,26 @@ export function createRemoteSessionOwnerServices(source: RemoteOwnerBindingSourc
   }
 
   const sessionId = (owner: SessionOwnerRef): string => recordOf(owner).sessionId
+
+  /**
+   * ONE-SHOT user interrupt of the exact Remote owner. The borrowed binding is
+   * fenced by OBJECT identity: a same-id replacement or a fully retired
+   * generation is `cancelled` (this exact owner's work is not addressable
+   * client-side anymore) and the NEW generation's cancel is never called. The
+   * official result branch keeps the shared write taxonomy; a Client reference
+   * release is never part of this operation.
+   */
+  const cancel = async (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> => {
+    const record = recordOf(owner)
+    if (record.currentWrapper === undefined) return { kind: 'cancelled' }
+    const borrowed = source.binding(record.sessionId)
+    if (borrowed === undefined || !Object.is(borrowed, record.bindingIdentity)) {
+      return { kind: 'cancelled' }
+    }
+    const result = await borrowed.session.cancel()
+    if (result.ok) return { kind: 'committed', value: undefined }
+    return classifyRemoteWriteFailure(result.error)
+  }
 
   const whenIdleOrAbort = (owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean> => {
     const record = recordOf(owner)
@@ -240,6 +272,7 @@ export function createRemoteSessionOwnerServices(source: RemoteOwnerBindingSourc
     },
     retirement: {
       whenIdleOrAbort,
+      cancel,
       // Host-owned durability: rc.2 has no Client flush verb.
       flush: async (): Promise<void> => {},
       // Synchronous by contract; the real Remote cancel is SessionWriter.cancel.

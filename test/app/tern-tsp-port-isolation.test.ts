@@ -222,8 +222,8 @@ test('the UserShell interrupt error notice routes through the injected renderer-
     updateLocalMessage: (card: unknown) => { cardCalls.push('update'); return card },
     clearSettledLocalMessages: () => { cardCalls.push('clear') },
   }
-  // A writer whose cancel REJECTS, so the interrupt path reaches its
-  // onError notice.
+  // A control interrupt whose backend cancel REJECTS, so the interrupt path
+  // reaches its onError notice.
   const failingWriter = {
     cancel: () => Promise.reject(new Error('cancel port refused')),
     prompt: () => Promise.resolve(),
@@ -241,9 +241,12 @@ test('the UserShell interrupt error notice routes through the injected renderer-
     isCleanedUp: () => false,
     liveAgent: () => undefined,
     ownership: { generation: () => 1 },
-    // The interrupt path's writer admission: admit synchronously and run the
-    // task (the cancel REJECTS, which is what this test observes).
-    session: { withWriter: ((_scope: unknown, task: () => unknown) => Promise.resolve().then(task)) as never },
+    // The interrupt control admission: the injected backend cancel REJECTS,
+    // which is the failure this test observes on the neutral notify.
+    session: {
+      withWriter: ((_scope: unknown, task: () => unknown) => Promise.resolve().then(task)) as never,
+      interrupt: () => Promise.reject(new Error('cancel port refused')),
+    },
     requireLiveScope: () => { throw new Error('not exercised') },
     captureLiveScope: () => ({ sessionId: 'session-b0' }) as never,
     writerSection: (task) => task(),
