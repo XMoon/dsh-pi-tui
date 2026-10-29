@@ -300,6 +300,24 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         })
         return false
       }
+      if (request.op === 'qualification-host-foundation') {
+        // Qualification-only: mount the two Remote contributions on THIS live
+        // Client Context, prove the official/private RPC and unmount them. The
+        // module is loaded dynamically so it never joins the normal startup
+        // path or the Client entry's static dependency graph.
+        if (context === undefined) throw new Error('local client entry: the qualification probe has no Client Context')
+        const { runHostFoundationProbe } = await import('./host-foundation-probe.ts')
+        const proof = await runHostFoundationProbe(context, {
+          dshAnchor: options.dshAnchor,
+          host,
+        })
+        writeEntryRecord({
+          ...proof,
+          processRole: 'client',
+          ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+        })
+        return false
+      }
       writeEntryRecord({ m4a0: 'control-error', error: `local client entry: unknown op ${JSON.stringify(request.op)}` })
       return false
     })

@@ -17,6 +17,9 @@ import {
   assertRemoteHostPrerequisites,
   REMOTE_HOST_PREREQUISITE_SERVICES,
 } from '../remote/host-prerequisites.ts'
+import { PI_TUI_HOST_READY_SERVICE } from '../host/pi-tui-host-runtime.ts'
+import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
+import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
 
 /** Cordis `FiberState.ACTIVE` (the enum is a const enum with no runtime value). */
 const FIBER_ACTIVE = 2
@@ -68,6 +71,42 @@ function fiberStateLabel(entry: LoaderEntryLike): string {
   return `state-${String(state)}`
 }
 
+/** Minimal structural view of one Typert Gateway binding. */
+interface TypertBindingLike {
+  readonly serviceKey?: unknown
+  readonly namespace?: unknown
+}
+
+/** The official Session-serving services whose Typert namespace must be real. */
+const OFFICIAL_TYPERT_BINDINGS = [
+  { serviceKey: 'sessionController', namespace: 'session' },
+  { serviceKey: 'fileUploads', namespace: 'fileUploads' },
+  { serviceKey: 'settingsController', namespace: 'settings' },
+] as const
+
+/** The package's two private endpoint bindings. */
+const PRIVATE_TYPERT_BINDINGS = [
+  { serviceKey: 'piTuiFileReferences', namespace: PI_TUI_FILE_REFERENCES_NAMESPACE },
+  { serviceKey: 'piTuiTerminalProgress', namespace: PI_TUI_TERMINAL_PROGRESS_NAMESPACE },
+] as const
+
+/**
+ * Assert one Host service is readable AND carries the expected Typert binding.
+ * A truthy service alone is not proof: the Gateway dispatches on the binding.
+ */
+function assertTypertBinding(context: Context, serviceKey: string, namespace: string): void {
+  const service = context.reflect.get(serviceKey) as { readonly typertRemote?: TypertBindingLike } | undefined
+  if (service === undefined) {
+    throw new Error(`local host entry: the Host did not publish the "${serviceKey}" service`)
+  }
+  const binding = service.typertRemote
+  if (binding === undefined || binding.serviceKey !== serviceKey || binding.namespace !== namespace) {
+    throw new Error(
+      `local host entry: the "${serviceKey}" Typert binding is not ${serviceKey}/${namespace}`,
+    )
+  }
+}
+
 /**
  * Assert the disabled TUI rows stayed disabled AND did not activate despite the
  * profile patch. The declaration check is what makes an overlay mutation
@@ -113,6 +152,19 @@ export function collectHostEntryStatus(
   for (const service of REMOTE_HOST_PREREQUISITE_SERVICES) {
     services[service] = context.reflect.get(service) !== undefined
   }
+  // The foundation services this overlay adds are evidence too: the smoke reads
+  // the readiness record and must not have to infer them from row names alone.
+  for (const service of [
+    'sessionController',
+    'fileUploads',
+    'settingsController',
+    PI_TUI_FILE_REFERENCES_NAMESPACE,
+    PI_TUI_TERMINAL_PROGRESS_NAMESPACE,
+    PI_TUI_HOST_READY_SERVICE,
+    'piTuiPerformanceReady',
+  ]) {
+    services[service] = context.reflect.get(service) !== undefined
+  }
   /** Only ACTIVE rows own a service; a disabled/absent row proves nothing. */
   const activeIds = (id: string): readonly string[] => entries
     .filter(entry => entry.options.id === id && entry.fiber?.state === FIBER_ACTIVE)
@@ -127,6 +179,19 @@ export function collectHostEntryStatus(
     connection: activeIds('split-host-connection'),
     apiRemotes: activeIds('split-host-api-remotes'),
     typertGateway: activeIds('typert-gateway'),
+    // The six official Session-serving rows and the ONE built-in PiTui Host
+    // Runtime row the Host-only overlay adds.
+    fileUpload: activeIds('split-host-file-upload'),
+    sessionStats: activeIds('split-host-session-stats'),
+    turnOutline: activeIds('split-host-turn-outline'),
+    sessionController: activeIds('split-host-session-controller'),
+    settingsController: activeIds('split-host-settings-controller'),
+    sessionLogExport: activeIds('split-host-session-log-download'),
+    piTuiHostRuntime: activeIds('split-host-pi-tui-runtime'),
+    // The pre-existing bundle rows must remain the sole owners: Performance
+    // publishes `piTuiPerformanceReady`, Visual Tools stays an independent row.
+    performance: activeIds('pi-tui-performance-host'),
+    visualTools: activeIds('pi-tui-visual-tools'),
   }
   for (const [owner, ids] of Object.entries(ownerEntries)) {
     if (ids.length !== 1) {
@@ -135,6 +200,15 @@ export function collectHostEntryStatus(
         `local host entry: expected exactly one active ${owner} owner row, found ${String(ids.length)}; entries=${visible.join(',')}`,
       )
     }
+  }
+  for (const { serviceKey, namespace } of [...OFFICIAL_TYPERT_BINDINGS, ...PRIVATE_TYPERT_BINDINGS]) {
+    assertTypertBinding(context, serviceKey, namespace)
+  }
+  if (context.reflect.get(PI_TUI_HOST_READY_SERVICE) === undefined) {
+    throw new Error(`local host entry: the built-in PiTui Host Runtime did not publish "${PI_TUI_HOST_READY_SERVICE}"`)
+  }
+  if (context.reflect.get('piTuiPerformanceReady') === undefined) {
+    throw new Error('local host entry: the existing pi-tui-performance-host row did not publish piTuiPerformanceReady')
   }
   if (context.reflect.get('connection') === undefined) {
     throw new Error('local host entry: the Host did not publish the official Connection service')

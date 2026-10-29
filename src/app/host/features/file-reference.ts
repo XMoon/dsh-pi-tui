@@ -1,6 +1,6 @@
 /**
- * The private `piTuiFileReferences` Host service (TS8-HF1) — the Cordis row the
- * Remote Host composition mounts, owning:
+ * The private `piTuiFileReferences` Host service (TS8-HF1) — one of the two
+ * internal business rows the built-in PiTui Host Runtime mounts, owning:
  *
  * ```text
  * the Host service key + wire namespace (piTuiFileReferences)
@@ -9,9 +9,10 @@
  * ```
  *
  * The Typert CONTRIBUTION (the descriptor the Gateway dispatches on) is owned
- * by the composition, not by this row: rc.2 admits exactly one contribution per
- * package identity, so all of this package's private invocations are registered
- * together in `runtime/remote/pi-tui-remote-contribution.ts`.
+ * by the built-in Host Runtime, not by this row: rc.2 admits exactly one
+ * contribution per package identity, so all of this package's private
+ * invocations are registered together in
+ * `runtime/remote/pi-tui-remote-contribution.ts`.
  *
  * The actual completion semantics live behind the transport-neutral bridge
  * (`runtime/remote/pi-tui-file-reference-host-bridge.ts`): the SAME Host-scoped
@@ -20,11 +21,12 @@
  * scoped discovery. No Agent object, no Client cwd and no Client filesystem
  * fact crosses the wire.
  *
- * LAYER NOTE: this service lives in `app/remote/**` (composition owns the row
- * and its lifecycle) and reaches the Direct Host implementation only through
- * `runtime/remote/**`, which is the direction the architecture gate permits.
+ * LAYER NOTE: this service lives in `app/host/features/**` (the built-in Host
+ * Runtime owns the row and its lifecycle) and reaches the Direct Host
+ * implementation only through `runtime/remote/**`, which is the direction the
+ * architecture gate permits.
  *
- * @module @xmoon76/dsh-pi-tui/app/remote/pi-tui-file-reference-host
+ * @module @xmoon76/dsh-pi-tui/app/host/features/file-reference
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -34,23 +36,23 @@ import {
   type PiTuiHostFileReferenceBridgeDeps,
   type PiTuiHostFileReferenceRuntime,
   type WorkingDirectoryServiceLike,
-} from '../../runtime/remote/pi-tui-file-reference-host-bridge.ts'
-import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
-import type { HostFileListResult } from '../../runtime/host-file-port.ts'
+} from '../../../runtime/remote/pi-tui-file-reference-host-bridge.ts'
+import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../../runtime/remote/pi-tui-file-reference-contract.ts'
+import type { HostFileListResult } from '../../../runtime/host-file-port.ts'
 
 export type {
   FileReferencesServiceLike,
   LiveAgentLike,
   PiTuiHostFileReferenceBridgeDeps,
   WorkingDirectoryServiceLike,
-} from '../../runtime/remote/pi-tui-file-reference-host-bridge.ts'
+} from '../../../runtime/remote/pi-tui-file-reference-host-bridge.ts'
 
-/** The Host facts the composition resolves for the row. */
+/** The Host facts the built-in Host Runtime resolves for the row. */
 export type PiTuiFileReferenceHostDeps = PiTuiHostFileReferenceBridgeDeps
 
 /**
- * The Host endpoint of the private augmentation. One instance per Remote Host
- * composition; the descriptor leaves with the owning fiber.
+ * The Host endpoint of the private augmentation. One instance per built-in
+ * Host Runtime; the descriptor leaves with the owning fiber.
  */
 export class PiTuiFileReferenceHostService extends TypertRemoteService {
   /** The Typert registry owns the explicit invocation definitions. */
@@ -59,7 +61,7 @@ export class PiTuiFileReferenceHostService extends TypertRemoteService {
 
   /**
    * @param ctx - the Host context this row is mounted in.
-   * @param deps - the narrow Host facts the composition resolved.
+   * @param deps - the narrow Host facts the built-in Host Runtime resolved.
    */
   constructor(ctx: Context, deps: PiTuiFileReferenceHostDeps) {
     super(ctx, PI_TUI_FILE_REFERENCES_NAMESPACE)

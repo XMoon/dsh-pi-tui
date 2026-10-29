@@ -283,6 +283,16 @@ function main() {
     check('types dist/builtins.d.mts', has('dist/builtins.d.mts'))
     check('exports entry dist/visual-tools.mjs', has('dist/visual-tools.mjs'))
     check('types dist/visual-tools.d.mts', has('dist/visual-tools.d.mts'))
+    check('exports entry dist/host-runtime.mjs', has('dist/host-runtime.mjs'))
+    check('types dist/host-runtime.d.mts', has('dist/host-runtime.d.mts'))
+    // M4-B2-HF: ONE Loader subpath for the built-in Host composition. The two
+    // private business services must never become installable business
+    // subpaths of their own.
+    check('host-runtime is the only new Loader subpath',
+      pkg.exports?.['./host-runtime'] !== undefined
+        && pkg.exports?.['./file-reference-host'] === undefined
+        && pkg.exports?.['./terminal-progress-host'] === undefined,
+      `exports=${Object.keys(pkg.exports ?? {}).join(',')}`)
     check('cordis.patch.yml included', has('cordis.patch.yml'))
     check('no duplicated official preset root', !files.some(name => name.startsWith('config/agent-presets/')))
     // The generated preset mirror MUST ship: upstream bundle-patch loading
@@ -406,12 +416,15 @@ function main() {
       // `app/host/performance-host` is a public Loader row ENTRY (like
       // `startup`/`builtins`), exposed as the flat `./performance-host`
       // subpath — the nested canonical source path, never a new root module.
+      // `app/host/pi-tui-host-runtime` is the M4-B2-HF built-in Host Runtime
+      // entry; its two internal feature modules are inlined regions of that
+      // entry, not separate public entries.
       const isRoot = name === 'dist/index.d.mts'
       for (const line of lines) {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/host\/performance-host|app\/host\/visual-tools|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/visual-tools|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }
@@ -483,7 +496,8 @@ function main() {
           "Promise.all([import('@xmoon76/dsh-pi-tui'), import('@xmoon76/dsh-pi-tui/startup'),"
             + "import('@xmoon76/dsh-pi-tui/extensions'), import('@xmoon76/dsh-pi-tui/builtins'),"
             + "import('@xmoon76/dsh-pi-tui/extensions/advanced'), import('@xmoon76/dsh-pi-tui/extensions/unstable'),"
-            + "import('@xmoon76/dsh-pi-tui/performance-host'), import('@xmoon76/dsh-pi-tui/visual-tools')])"
+            + "import('@xmoon76/dsh-pi-tui/performance-host'), import('@xmoon76/dsh-pi-tui/visual-tools'),"
+            + "import('@xmoon76/dsh-pi-tui/host-runtime')])"
             + ".then(m => { if (m[4].ADVANCED_API_LEVEL !== 1) throw new Error('ADVANCED_API_LEVEL');"
             + "if (m[5].UNSTABLE_API_LEVEL !== 1) throw new Error('UNSTABLE_API_LEVEL');"
             + "if (m[6].name !== 'pi-tui-performance-host') throw new Error('performance-host row');"
@@ -495,6 +509,9 @@ function main() {
             + "if (m[7].SVG_TOOL_NAME !== 'dsh_pi_tui_svg') throw new Error('SVG_TOOL_NAME');"
             + "if (typeof m[7].apply !== 'function') throw new Error('visual-tools apply');"
             + "if (!Array.isArray(m[7].inject)) throw new Error('visual-tools inject');"
+            + "if (m[8].name !== 'pi-tui-host-runtime') throw new Error('host-runtime row');"
+            + "if (typeof m[8].apply !== 'function') throw new Error('host-runtime apply');"
+            + "if (!Array.isArray(m[8].inject) || m[8].inject.join(',') !== 'typert,agents,fileReferences,workingDirectory') throw new Error('host-runtime inject');"
             + "console.log('imports-ok') })"
             + ".catch(e => { console.error(e.message); process.exit(1) })",
         ], { cwd: probeDir })

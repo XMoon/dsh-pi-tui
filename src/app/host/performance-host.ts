@@ -12,9 +12,9 @@
  * may load it before the surface exists, and `--help` never mounts it.
  *
  * The row is mounted ONCE PER HOST CONTEXT: the Direct profile adds it through
- * `cordis.patch.yml`, and the experimental Remote composition mounts it on its
- * own Host Context (`app/remote/host-runtime.ts`). Registering twice on the
- * SAME Host Context would share one unit (the seam counts registrations) —
+ * `cordis.patch.yml`, and the M3 in-process Host fixtures mount it beside the
+ * built-in PiTui Host Runtime (which no longer mounts it). Registering twice on
+ * the SAME Host Context would share one unit (the seam counts registrations) —
  * that is not a supported composition.
  *
  * @module @xmoon76/dsh-pi-tui/app/host/performance-host
@@ -49,8 +49,8 @@ export const PI_TUI_PERFORMANCE_READY_SERVICE = 'piTuiPerformanceReady'
  * Register the `piTuiPerformance` unit and publish the readiness gate.
  *
  * The registry is resolved through the context's reflection layer, the
- * documented Host-plane idiom of this repository (`app/remote/host-runtime.ts`
- * and `app/remote/pi-tui-file-reference-host.ts` do the same): this module IS
+ * documented Host-plane idiom of this repository (`app/host/pi-tui-host-runtime.ts`
+ * and `app/host/features/file-reference.ts` do the same): this module IS
  * the Host plane, so its Host-service read is not Client-side coupling and the
  * client-boundary inventory stays unchanged. `inject` above is what guarantees
  * the service is present and active here.

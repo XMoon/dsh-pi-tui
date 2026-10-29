@@ -102,15 +102,17 @@ test('a completed waitForExit does not leave its deadline holding the process', 
   )
 })
 
-test('the upgraded smoke carries every B1 gate and the critical negative controls', () => {
+test('the upgraded smoke carries every B1/B2-HF gate and the critical negative controls', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20']) {
+  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26']) {
     assert.match(source, new RegExp(`\\b${gate}\\b`, 'u'), `missing ${gate}`)
   }
   for (const marker of [
     '/api/pi-tui.local-host',
     '/connect',
     'qualification-drop-websocket',
+    'qualification-host-foundation',
+    'host-rpc-proof',
     'SPLIT_PROCESS_CLIENT_FORCE_FAILURE',
     'SPLIT_PROCESS_CLIENT_OMIT_COOKIE',
     'SPLIT_PROCESS_CLIENT_FORCE_STARTUP_FATAL',
@@ -123,6 +125,13 @@ test('the upgraded smoke carries every B1 gate and the critical negative control
     'FAILPOINT_CLEANUP_OK',
     't14-startup-fatal',
     't13-retryable-refresh',
+    't21',
+    't22-t24-host-rpc-proof',
+    't25-repeat-probe',
+    't25-client-detach',
+    't26-runtime-missing',
+    't26-official-row-disabled',
+    't26-no-cookie',
     'mutation-tui-enabled',
     'mutation-connection-disabled',
     'killIsolatedProcesses',
@@ -138,9 +147,10 @@ test('the upgraded smoke carries every B1 gate and the critical negative control
     assert.ok(source.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 4, 'the extra patch may only implement the two child mutations and the whole-smoke mutation mode')
+  assert.equal(extraPatchUses.length, 5, 'the extra patch may only implement the two child mutations, the T26 official-row mutation and the whole-smoke mutation mode')
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
+  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(source, /mutationEnv/u)

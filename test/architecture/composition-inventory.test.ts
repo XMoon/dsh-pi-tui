@@ -416,14 +416,14 @@ const OTHER_HOST_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
  * the private `piTuiTerminalProgress` Host row observes the same Host events on
  * the other backend branch of the same process (plan R2 §6.4). The two owners
  * never run together (the Direct rows are gated by `if (direct)` and the Host
- * row is mounted only by the Remote composition), but both sites exist
+ * row is mounted only by the built-in PiTui Host Runtime), but both sites exist
  * statically, so both are pinned BY BRANCH: a third site — or a second one in
  * either file — still fails.
  */
 const REMOTE_BRANCH_SUBSCRIPTIONS: ReadonlyArray<readonly [string, string]> = [
-  ['session/event', 'src/app/remote/terminal-progress-host.ts'],
-  ['agent/status', 'src/app/remote/terminal-progress-host.ts'],
-  ['agent/disposed', 'src/app/remote/terminal-progress-host.ts'],
+  ['session/event', 'src/app/host/features/terminal-progress.ts'],
+  ['agent/status', 'src/app/host/features/terminal-progress.ts'],
+  ['agent/disposed', 'src/app/host/features/terminal-progress.ts'],
 ]
 
 /** Dynamic (non-literal event) `ctx.on` bridges: the Direct config port only. */
