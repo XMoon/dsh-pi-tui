@@ -45,6 +45,7 @@ import { TranscriptWindowController } from '../../src/domain/transcript/window.t
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { isQuitKey, mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import { wireNodes } from '../support/tsp-picker-wire.ts'
+import { waitUntil } from '../support/tsp-runner-harness.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -719,7 +720,7 @@ test('A-10b: an idle authoritative queue explains the next-prompt wake; local-on
       tail: [],
       running: false,
     } as never)
-    await settle()
+    await waitUntil('the parked queue hint', () => lastFrame(harness.tern.output.text()).includes('dock.queue-parked-hint'))
     let wire = harness.tern.output.text()
     const parked = lastFrame(wire)
     assert.ok(parked.includes('"add","dock.queue-parked-hint"') && parked.includes('waiting for the next prompt — send a message to continue'),
@@ -730,7 +731,7 @@ test('A-10b: an idle authoritative queue explains the next-prompt wake; local-on
       tail: [],
       running: false,
     } as never)
-    await settle()
+    await waitUntil('the local-only queue row', () => lastFrame(harness.tern.output.text()).includes('local-only text'))
     wire = harness.tern.output.text()
     const local = lastFrame(wire)
     assert.ok(local.includes('local-only text'), `the local echo must stay visible:\n${local}`)
@@ -743,7 +744,7 @@ test('A-10b: an idle authoritative queue explains the next-prompt wake; local-on
       tail: [],
       running: true,
     } as never)
-    await settle()
+    await waitUntil('the running queue row', () => lastFrame(harness.tern.output.text()).includes('running queue text'))
     wire = harness.tern.output.text()
     const running = lastFrame(wire)
     assert.ok(!running.includes('"add","dock.queue-parked-hint"') && !running.includes('waiting for the next prompt'),
