@@ -797,7 +797,7 @@ test('a same-width background change without an intermediate render never re-emi
   assert.ok(greenG > 100 && greenR > 60, `composited over green, got ${greenR},${greenG}`)
 })
 
-test('an over-budget occurrence stays text until its own facts change (E2 P3)', async (t) => {
+test('an over-budget occurrence stays text until its own facts change, then retries (E2 P3)', async (t) => {
   const harness = await readyHarness(t)
   t.after(() => harness.graphics.dispose())
   const images: PixelBody[] = []
