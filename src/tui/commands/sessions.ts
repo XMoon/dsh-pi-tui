@@ -801,6 +801,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               else if (outcome.kind === 'indeterminate') settleOnce({ kind: 'indeterminate', text: outcome.message })
               else settleOnce({ kind: 'refused', text: outcome.message })
             },
+            onCancel: () => settleOnce({ kind: 'cancelled' }),
             onError: (error) => settleOnce({ kind: 'refused', text: `session switch failed: ${safeErrorMessage(error)}` }),
           })
           return
