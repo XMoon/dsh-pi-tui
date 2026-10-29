@@ -554,12 +554,17 @@ test('a real pending Remote Question survives reconnect — the same flow answer
     }
     return String(reason)
   }
+  const describeAskValue = (value: unknown): string => JSON.stringify(value) ?? String(value)
   try {
     await waitFor('the question surface is visible', () => {
-      // An early NO_PROVIDER (or any other rejection) must surface its REAL
-      // error immediately, never as a generic 20-second visibility timeout.
-      if (askOutcome?.kind === 'rejected') {
-        throw new Error(`the Host ask was rejected before the question surface: ${describeAskReason(askOutcome.reason)}`)
+      // The contract is that the question REMAINS pending until the mounted
+      // user answers it. Any early settlement — rejection OR fulfillment — is
+      // a real flow failure and must surface immediately, never as a 20s wait.
+      if (askOutcome !== undefined) {
+        const detail = askOutcome.kind === 'rejected'
+          ? `rejected: ${describeAskReason(askOutcome.reason)}`
+          : `fulfilled before the user answered: ${describeAskValue(askOutcome.value)}`
+        throw new Error(`the Host ask settled before the question surface was answerable (${detail})`)
       }
       return view().includes('Proceed with the reconnect probe?')
     }, 20_000)
