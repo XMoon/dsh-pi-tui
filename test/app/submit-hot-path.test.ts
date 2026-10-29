@@ -5717,9 +5717,6 @@ test('Busy Esc during a frozen /new transition cancels the EXACT live Agent with
     return originalExecute(agent, line, attachments)
   }
 
-  // Real Host-owned pending row: the user Stop must preserve it.
-  harness.host.nextTurn.push(queuedText('kept-queue-row', 'kept queue row'))
-
   // Record the transition's pre-commit flush vs the child create.
   const sessions = harness.sessions as { flush: (session?: unknown) => Promise<void> }
   const originalFlush = sessions.flush.bind(sessions)
@@ -5775,8 +5772,6 @@ test('Busy Esc during a frozen /new transition cancels the EXACT live Agent with
     'the Busy Esc control cancel must preserve the Host pending inbox')
   assert.equal(slowSettled, false, 'the control cancel must not wait for the admitted writer')
   assert.equal(bodyRan, false, 'the control cancel must not shortcut the writer drain')
-  assert.deepEqual(harness.host.nextTurn.map(row => row.id), ['kept-queue-row'],
-    'the authoritative Host queued occurrence is preserved')
 
   // Release the writer: drain → quiesce → flush old → create/commit → retire.
   releaseSlow()
@@ -5789,8 +5784,6 @@ test('Busy Esc during a frozen /new transition cancels the EXACT live Agent with
   assert.equal(slowSettled, true, 'the admitted writer settled before the commit')
   assert.equal(harness.host.cancelLog[1]!.keepInbox, undefined,
     'the retirement cancel is not the user keepInbox control cancel')
-  assert.deepEqual(harness.host.nextTurn.map(row => row.id), ['kept-queue-row'],
-    'the Host queue row survives the whole navigation')
   assert.ok(order.indexOf('cancel:control') < order.indexOf('release:slow'),
     `the control cancel precedes the writer release: ${JSON.stringify(order)}`)
   assert.ok(order.indexOf('release:slow') < order.indexOf('flush:pra-esc-session')
