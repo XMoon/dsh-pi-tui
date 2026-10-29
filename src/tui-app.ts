@@ -4304,7 +4304,10 @@ export class TuiApp {
       // handle keeps precedence even while its own admission is pending/denied,
       // and a statically excluded topology returns no handle at all (no DA1
       // subscription, no encoder, no output).
-      ?? createDirectSixelGraphics(resizeAware, process.env, () => this.requestRender())
+      // The SIXEL owner's settle is a PIXEL settle: it changes the body height of
+      // the cards that own the raster, so it goes through the SAME seam the
+      // loader settles use (mark the fullscreen row map dirty, then repaint).
+      ?? createDirectSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
     this.graphics = graphics
     this.terminal = graphics?.terminal ?? resizeAware
     // A revoked tmux admission refuses a whole managed physical batch from
@@ -25583,6 +25586,11 @@ export class TuiApp {
     if (this.workspaceLease !== undefined) screens.push(this.workspaceLease.screen)
     for (const screen of screens) {
       this.schemeDisposers.push(screen.onTerminalColorSchemeChange((scheme) => {
+        // A scheme report means the terminal's REAL background may have changed,
+        // so the Direct SIXEL owner re-observes it before the next raster is
+        // composited: a semi-transparent picture must never keep blending over the
+        // previous background. (No SIXEL handle: nothing to do.)
+        this.graphics?.mode === 'sixel' && this.graphics.resample()
         for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
       }))
     }

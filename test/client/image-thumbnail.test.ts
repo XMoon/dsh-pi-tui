@@ -22,6 +22,8 @@ import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../src/dom
 import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
 import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
 import { NativeKittyImage, type ImageGraphics } from '../../src/tui/graphics/native-image.ts'
+import { createDirectSixelGraphics } from '../../src/tui/graphics/sixel-image.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { createTmuxKittyGraphics } from '../../src/tui/graphics/tmux-image.ts'
 import { createFakeTmuxCli } from '../support/fake-tmux-cli.ts'
 import { KITTY_VIRTUAL_PLACEHOLDER } from '../../src/tui/graphics/tmux-virtual.ts'
@@ -1133,4 +1135,89 @@ test('a collapsed or narrow SIXEL occurrence performs no attachment read', () =>
   collapsed = false
   collapsedComponent.render(80)
   assert.notEqual(loader.get(REF).state, 'idle', 'expanding at a paintable width starts it')
+})
+
+/**
+ * RFL-001: the transcript occurrence is the one consumer whose frame cache is
+ * decided by the component itself. A SIXEL raster settles asynchronously, so the
+ * frame that follows the settle must be a NEW frame — without any input, resize
+ * or invalidate — or the transcript image would stay its first fallback forever.
+ *
+ * This uses the REAL `DirectSixelGraphics` owner and the real async encoder, not
+ * a fake body, so the assertion measures the production settle path.
+ */
+test('a transcript PNG repaints after the async SIXEL encode settles (no invalidate)', async (t) => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const home = testLifecycle(t).tempDir('sixel-thumb-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+
+  const listeners = new Set<(supported: boolean) => void>()
+  let cellListener: ((cell: { widthPx: number; heightPx: number }) => void) | undefined
+  let repaints = 0
+  const terminal = {
+    writes: [] as string[], columns: 100, rows: 30, kittyProtocolActive: false,
+    start() {}, stop() {}, async drainInput() {}, write(data: string) { this.writes.push(data) },
+    moveBy() {}, hideCursor() {}, showCursor() {}, clearLine() {}, clearFromCursor() {},
+    clearScreen() {}, setTitle() {}, setProgress() {}, setProgramStatus() {}, setProgressState() {},
+    onSixelSupport(listener: (supported: boolean) => void) {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    },
+  }
+  const screen = {
+    queryCellSizeForSixel() {},
+    onCellSizeObserved(listener: (cell: { widthPx: number; heightPx: number }) => void) {
+      cellListener = listener
+      return () => { cellListener = undefined }
+    },
+    async queryTerminalBackgroundColor() {
+      return { r: 0x28, g: 0x2c, b: 0x34 }
+    },
+  }
+  const graphics = createDirectSixelGraphics(terminal as never, { TERM: 'xterm-256color' }, () => { repaints += 1 })
+  assert.ok(graphics !== undefined)
+  t.after(() => graphics.dispose())
+  graphics.observeScreen(screen, terminal.columns, terminal.rows)
+  for (const listener of [...listeners]) listener(true)
+  cellListener?.({ widthPx: 10, heightPx: 20 })
+  await until(() => graphics.canPaint(), 'the three verified facts')
+
+  // A real two-band PNG served by the REAL loader.
+  const { default: sharp } = await import('sharp')
+  const rgba = new Uint8Array(80 * 40 * 4)
+  for (let y = 0; y < 40; y += 1) {
+    for (let x = 0; x < 80; x += 1) {
+      const offset = (y * 80 + x) * 4
+      rgba[offset] = y < 20 ? 255 : 0
+      rgba[offset + 2] = y < 20 ? 0 : 255
+      rgba[offset + 3] = 255
+    }
+  }
+  const png = new Uint8Array(await sharp(Buffer.from(rgba), { raw: { width: 80, height: 40, channels: 4 } }).png().toBuffer())
+  const loader = new ImageLoader(async () => ({ ref: {}, data: png }))
+  loader.load(REF)
+  await until(() => loader.get(REF).state === 'ready', 'the attachment read')
+  const component = new ImageThumbnail(REF, loader, THEME, () => {}, undefined, undefined, undefined, graphics)
+
+  const first = component.render(80)
+  assert.ok(!first.join('').includes('\x1bP'), `the first frame is the text fallback: ${JSON.stringify(first)}`)
+  assert.equal(component.paintedImageBody(80), undefined, 'a pending raster is not a clickable body')
+
+  // NO invalidate(): the owner's own settle must be enough for the next frame.
+  // `repaints` also counts the readiness commit, so the window starts HERE.
+  const settledFrom = repaints
+  await until(() => repaints > settledFrom, 'the owner settle')
+  await new Promise(resolve => setImmediate(resolve))
+  const second = component.render(80)
+  assert.ok(second.join('').includes('\x1bP'), `the settled raster reaches the next frame: ${JSON.stringify(second)}`)
+  const body = component.paintedImageBody(80)
+  assert.notEqual(body, undefined, 'and it registers the REAL footprint as the click body')
+  assert.ok(body!.rows >= 2, `the two-band raster is at least two cell rows, got ${body!.rows}`)
+  assert.ok(body!.endCol > 0)
 })

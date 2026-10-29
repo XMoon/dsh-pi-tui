@@ -30,6 +30,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/graphics/sixel-image
  */
 
+import { createHash } from 'node:crypto'
 import { getCapabilities, type Terminal, TuiMainScreen } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { diagFromEnv, type Diag } from '../../runtime/process/diagnostics.ts'
@@ -116,10 +117,13 @@ interface RasterRecord {
   readonly bytes: number
   /**
    * The occurrences painting this raster. Identical sources can encode to the
-   * identical DCS, so one record serves several occurrences; an empty set is a
-   * crop variant, which is evictable.
+   * identical DCS, so one record serves several occurrences. Only a record with
+   * NO live owner is evictable, and the CURRENT crop of a live occurrence is an
+   * owner, so a crop on screen can never be dropped to make room for another.
    */
   readonly owners: Set<Occurrence>
+  /** Whether this raster is a full encode or a bounded visible-window variant. */
+  readonly kind: 'full' | 'crop'
   /** Monotonic last-use stamp (registry hits and admission). */
   useStamp: number
 }
@@ -147,6 +151,9 @@ interface Occurrence {
   full: RasterRecord
   crop?: { cropTopRows: number; visibleRows: number; record: RasterRecord }
   pendingCrop?: { cropTopRows: number; visibleRows: number; controller: AbortController }
+  /** A visible window this source cannot draw; re-requested only when the trust
+   *  table changed, because a budget refusal may then succeed. */
+  failedCrop?: { cropTopRows: number; visibleRows: number; revision: number }
 }
 
 /** What one {@link SixelImage} render produced. */
@@ -200,6 +207,9 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
   /** Every live occurrence, so disposal can release all rasters at once. */
   private readonly occurrences = new Set<Occurrence>()
   private retainedBytes = 0
+  /** Bumped on every admission/unregistration, so a REFUSED request can be
+   *  retried only when the trust table actually changed. */
+  private admissionRevision = 0
   private observer: SixelScreenObservation | undefined
   private detachObserver: (() => void) | undefined
   private observedColumns = 0
@@ -404,6 +414,18 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     if (pending !== undefined && pending.cropTopRows === cropTopRows && pending.visibleRows === bounded) {
       return undefined
     }
+    // A variant that deterministically produced nothing (or was refused by the
+    // budget) must not be re-requested on every frame; a changed trust table may
+    // make a refused one succeed, so the revision is part of the memory.
+    const failed = occurrence.failedCrop
+    if (
+      failed !== undefined &&
+      failed.cropTopRows === cropTopRows &&
+      failed.visibleRows === bounded &&
+      failed.revision === this.admissionRevision
+    ) {
+      return undefined
+    }
     pending?.controller.abort()
     this.releaseCrop(occurrence)
     const controller = new AbortController()
@@ -426,11 +448,18 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
         if (settled === undefined || settled.controller !== controller) return
         occurrence.pendingCrop = undefined
         if (controller.signal.aborted || this.disposed || !this.occurrences.has(occurrence)) return
-        // Nothing drawable (a fully transparent window): keep the row empty
-        // rather than inventing a DCS.
-        if (raster === null) return
-        const registered = this.admit(raster)
-        if (registered === undefined) return
+        // Nothing drawable (a fully transparent window) or a refused budget: keep
+        // the row empty and remember the outcome for THIS window.
+        if (raster === null) {
+          occurrence.failedCrop = { cropTopRows, visibleRows: bounded, revision: this.admissionRevision }
+          return
+        }
+        const registered = this.admit(raster, 'crop')
+        if (registered === undefined) {
+          occurrence.failedCrop = { cropTopRows, visibleRows: bounded, revision: this.admissionRevision }
+          return
+        }
+        registered.owners.add(occurrence)
         occurrence.crop = { cropTopRows, visibleRows: bounded, record: registered }
         this.onReadinessChanged()
       },
@@ -440,7 +469,7 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
   }
 
   /** Register one raster, or refuse when every retained variant is in use. */
-  private admit(raster: SixelRaster): RasterRecord | undefined {
+  private admit(raster: SixelRaster, kind: 'full' | 'crop'): RasterRecord | undefined {
     const existing = this.records.get(raster.sequence)
     if (existing !== undefined) {
       // Two occurrences of the same source encode to the SAME trusted string:
@@ -461,10 +490,12 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
       columns: raster.columns,
       bytes,
       owners: new Set(),
+      kind,
       useStamp: ++this.useStamp,
     }
     this.records.set(record.dcs, record)
     this.retainedBytes += bytes
+    this.admissionRevision += 1
     return record
   }
 
@@ -487,13 +518,17 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
   }
 
   private unregister(record: RasterRecord): void {
-    if (this.records.delete(record.dcs)) this.retainedBytes -= record.bytes
+    if (!this.records.delete(record.dcs)) return
+    this.retainedBytes -= record.bytes
+    this.admissionRevision += 1
   }
 
   private releaseCrop(occurrence: Occurrence): void {
+    occurrence.failedCrop = undefined
     const crop = occurrence.crop
     if (crop === undefined) return
     occurrence.crop = undefined
+    crop.record.owners.delete(occurrence)
     this.unregister(crop.record)
   }
 
@@ -521,7 +556,12 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
 
   /** @internal — register a freshly encoded FULL raster; the caller marks its owner. */
   admitFull(raster: SixelRaster): RasterRecord | undefined {
-    return this.admit(raster)
+    return this.admit(raster, 'full')
+  }
+
+  /** @internal — the current trust-table revision (see `admissionRevision`). */
+  get registryRevision(): number {
+    return this.admissionRevision
   }
 
   /** @internal — the diagnostics channel every owned async task reports through. */
@@ -597,6 +637,8 @@ class SixelImage implements Component {
   private occurrence: Occurrence | undefined
   private entry: ReadyEntry | undefined
   private inFlight: { key: string; controller: AbortController } | undefined
+  /** A deterministically unpaintable request; not re-sent on every frame. */
+  private rejected: { key: string; revision: number } | undefined
   private cachedLines: string[] | undefined
   private cachedWidth: number | undefined
   private disposed = false
@@ -605,10 +647,14 @@ class SixelImage implements Component {
     this.owner = owner
     this.options = options
     // The union face is shared with the Kitty path, which carries base64. The
-    // encoder takes bytes, so the decode happens ONCE per occurrence here.
+    // encoder takes bytes, so the decode happens ONCE per occurrence here. The
+    // identity is the digest of those bytes: a prefix/length pair would be a
+    // heuristic, and two different pictures sharing one raster is exactly the
+    // staleness this registry exists to prevent.
+    const png = Buffer.from(source.pngBase64, 'base64')
     this.source = {
-      png: Buffer.from(source.pngBase64, 'base64'),
-      identity: `${source.widthPx}x${source.heightPx}:${source.pngBase64.length}:${source.pngBase64.slice(0, 64)}`,
+      png,
+      identity: `${source.widthPx}x${source.heightPx}:${createHash('sha256').update(png).digest('hex')}`,
     }
   }
 
@@ -657,6 +703,7 @@ class SixelImage implements Component {
     this.disposed = true
     this.inFlight?.controller.abort()
     this.inFlight = undefined
+    this.rejected = undefined
     this.entry = undefined
     if (this.occurrence !== undefined) this.owner.removeOccurrence(this.occurrence)
     this.occurrence = undefined
@@ -695,6 +742,10 @@ class SixelImage implements Component {
       return this.readyLines(occurrence.full)
     }
     if (this.inFlight?.key === key) return [this.options.fallback]
+    const rejected = this.rejected
+    if (rejected !== undefined && rejected.key === key && rejected.revision === this.owner.registryRevision) {
+      return [this.options.fallback]
+    }
     this.retire()
     this.startEncode(key, geometry, maxColumns, maxRows, width)
     return [this.options.fallback]
@@ -735,12 +786,18 @@ class SixelImage implements Component {
         // raster was produced for, so a result that settled after a screen,
         // width, cell or background change is dropped here.
         if (controller.signal.aborted) return
-        if (raster === null) return
+        if (raster === null) {
+          // A fully transparent picture paints nothing, deterministically.
+          this.rejected = { key, revision: this.owner.registryRevision }
+          return
+        }
         if (this.owner.ready?.epoch !== geometry.epoch) return
         const record = this.owner.admitFull(raster)
         if (record === undefined) {
-          // Every retained variant is on screen: this occurrence stays text
-          // rather than evicting a picture the current frame is painting.
+          // Every retained variant is on screen: this occurrence stays text rather
+          // than evicting a picture the current frame is painting, and the same
+          // request is not re-sent until the trust table changes.
+          this.rejected = { key, revision: this.owner.registryRevision }
           return
         }
         const occurrence: Occurrence = {

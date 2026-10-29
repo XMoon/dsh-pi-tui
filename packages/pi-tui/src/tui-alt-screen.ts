@@ -2219,6 +2219,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const lines: string[] = [];
 		for (let row = selection.start.row; row <= selection.end.row; row++) {
 			const line = sourceLines[row] ?? "";
+			// A trusted SIXEL anchor is a device command, not transcript text: it is
+			// never parsed for its cells and never copied. (X074.)
+			if (this.isRenderableImageLine(line)) {
+				lines.push("");
+				continue;
+			}
 			const columns = this.getSelectionColumns(line, row, selection);
 			const sliced = stripTerminalSequences(
 				sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),
@@ -2353,7 +2359,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const result = [...screen];
 		for (const [row, ranges] of rangesByRow) {
 			let line = result[row] ?? "";
-			if (isImageLine(line)) continue;
+			// A trusted SIXEL anchor is a device command: slicing it to wrap a match
+			// would emit an unterminated DCS. (X074.)
+			if (this.isRenderableImageLine(line)) continue;
 			const lineWidth = visibleWidth(line);
 			for (const range of ranges.sort((a, b) => b.startCol - a.startCol)) {
 				const startCol = Math.min(range.startCol, lineWidth);
@@ -2433,7 +2441,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				row > maxRow ||
 				row < screenSelection.start.row ||
 				row > screenSelection.end.row ||
-				isImageLine(line)
+				// A trusted SIXEL anchor is never selected/copied AND never re-wrapped
+				// into an unterminated DCS. (X074.)
+				this.isRenderableImageLine(line)
 			) {
 				return line;
 			}
@@ -2466,7 +2476,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const clip = box?.clip;
 		if (!clip || clip.width <= 0 || clip.height <= 0) return screen;
 		const row = clip.y + clip.height - 1;
-		if (row >= screen.length || isImageLine(screen[row] ?? "")) return screen;
+		if (row >= screen.length || this.isRenderableImageLine(screen[row] ?? "")) return screen;
 		const scrollbarColumn = box ? getScrollbarGeometry(box)?.column : undefined;
 		const label = truncateToWidth(this.scrollToEndIndicator(), clip.width, "");
 		const labelWidth = visibleWidth(label);
@@ -2491,6 +2501,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const line = flashLines[row]!;
 			const flashWidth = visibleWidth(line);
 			if (flashWidth === 0) continue;
+			// A trusted SIXEL anchor owns the whole row: compositing would slice the
+			// command, so the flash yields that row this frame. (X074.)
+			if (this.isRenderableImageLine(result[row] ?? "")) continue;
 			result[row] = compositeTuiLine(result[row] ?? "", line, width - flashWidth, flashWidth, width);
 		}
 		return result;

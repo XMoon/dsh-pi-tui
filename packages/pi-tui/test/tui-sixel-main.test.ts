@@ -189,6 +189,42 @@ describe("TuiMainScreen trusted SIXEL footprint (X073)", () => {
 		tui.stop();
 	});
 
+	it("keeps the exact footprint cache across a raster-painting diff and erases it later (three frames)", async () => {
+		const terminal = new RecordingTerminal();
+		const port = new TestSixelPort();
+		const tui = new TestableMainScreen(terminal, port);
+		const document = new Document();
+		document.lines = ["info", "pending", "x", "y", "tail"];
+		tui.addChild(document);
+		tui.start();
+		await frame(tui);
+
+		// Frame 2: the raster becomes ready and the DIFF path paints it.
+		const dcs = port.register(sixel("G"), { columns: 4, rows: 3 });
+		document.lines = ["info", dcs, "", "", "tail"];
+		await frame(tui);
+		assert.ok(terminal.output().includes(dcs), "the diff frame paints the command");
+		const internals = tui as unknown as {
+			previousLineImageRows: number[];
+			previousLineSixelRows: number[];
+		};
+		assert.strictEqual(
+			internals.previousLineSixelRows[1],
+			3,
+			"the SAME sixel cache that the full-redraw path keeps must be maintained by the diff tail",
+		);
+		assert.strictEqual(internals.previousLineImageRows[1], 3);
+
+		// Frame 3: the block is replaced by three text rows; every old row is erased.
+		terminal.clear();
+		document.lines = ["info", "a", "b", "c", "tail"];
+		await frame(tui);
+		const output = terminal.output();
+		assert.ok(!output.includes(dcs), "the retired command is not repainted");
+		assert.ok((output.match(/\x1b\[2K/g) ?? []).length >= 3, "all three old footprint rows are cleared");
+		tui.stop();
+	});
+
 	it("writes no SIXEL control for a text-only frame", async () => {
 		const terminal = new RecordingTerminal();
 		const port = new TestSixelPort();

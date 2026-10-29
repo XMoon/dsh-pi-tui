@@ -876,6 +876,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.previousRawLines = rawLines;
 		this.previousLineImageIds = lineImageIds;
 		this.previousLineImageRows = lineImageRows;
+		this.previousLineSixelRows = lineSixelRows;
 		this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
 		this.previousWidth = width;
 		this.previousHeight = height;
