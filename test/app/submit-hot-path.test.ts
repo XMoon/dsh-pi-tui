@@ -5797,3 +5797,38 @@ test('Busy Esc during a frozen /new transition cancels the EXACT live Agent with
   assert.ok(log.includes('switch ok'), `the committed switch must be reported: ${log.slice(-800)}`)
   assert.ok(!log.includes('agent interrupt'), `no agent interrupt ERROR on a normally admitted Stop: ${log.slice(-800)}`)
 })
+
+test('a BUSY PiTui /new submit runs the TUI navigation command, never Queue/Steer', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running' })
+  harness.host.status = 'running'
+  mounted.app.setBusy(true)
+  const followedBefore = harness.host.followedUp.length
+  const steeredBefore = harness.host.steered.length
+  mounted.app.setDraft('/new')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => harness.createdSessionIds.length === 1, 5_000), true,
+    'the busy /new must create the fresh Session through the TUI command route')
+  assert.ok(harness.executed.some(row => row.line === '/new' && row.outcome === 'executed'),
+    'the TUI /new command must reach the command plane')
+  assert.equal(harness.host.followedUp.length, followedBefore,
+    'the /new line must never become a queued prompt')
+  assert.equal(harness.host.steered.length, steeredBefore,
+    'the /new line must never become a steer')
+})
+
+test('a BUSY PiTui /new with a genuine Host /new keeps the Host sink', async (t) => {
+  const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'running', hostCommands: ['new'] })
+  harness.host.status = 'running'
+  mounted.app.setBusy(true)
+  const createdBefore = harness.createdSessionIds.length
+  mounted.app.setDraft('/new')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => harness.executed.some(row => row.line === '/new' && row.outcome === 'executed'), 5_000), true,
+    'the genuine Host /new must execute')
+  assert.equal(harness.createdSessionIds.length, createdBefore,
+    'the TUI /new navigation handler must not create a Session when a genuine Host /new wins')
+  assert.equal(harness.host.followedUp.length, 0,
+    'the Host /new line must never become a queued prompt')
+  assert.equal(harness.host.steered.length, 0,
+    'the Host /new line must never become a steer')
+})

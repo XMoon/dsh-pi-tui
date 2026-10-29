@@ -28,6 +28,22 @@ function composerText(fixture: DirectTspFixture): string | undefined {
   return typeof composer?.p.text === 'string' ? composer.p.text : undefined
 }
 
+/** Whether the REAL live Host Agent inbox still holds a matching occurrence. */
+function hostInboxHas(fixture: DirectTspFixture, sessionId: string, marker: string): boolean {
+  const agents = fixture.ctx.get('agents') as unknown as {
+    get(id: SessionId): {
+      readonly inbox: {
+        readonly nextTurn: readonly unknown[]
+        readonly nextStep: readonly unknown[]
+      }
+    } | undefined
+  }
+  const agent = agents.get(SessionId(sessionId))
+  if (agent === undefined) return false
+  return [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+    .some(item => JSON.stringify(item).includes(marker))
+}
+
 /** The current Session id(s) the dock welcome card carries (hydration signal). */
 function welcomeSessionIds(fixture: DirectTspFixture): string[] {
   const prefix = 'dock.welcome-'
@@ -1241,6 +1257,92 @@ test('Busy Esc preserves the REAL Direct Host pending inbox while a REAL admitte
   } finally {
     releaseHold()
     releaseSlow()
-    await fixture.settle()
+    await fixture.settle() // bounded fixture teardown (not a fixed wait)
+  }
+})
+test('a BUSY TSP /new submit runs the TUI navigation command, never Queue/Steer', async (t) => {
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  let releaseHold!: () => void
+  const hold = new Promise<void>(resolve => { releaseHold = resolve })
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['BUSY NEW'],
+    streamHold: () => hold,
+    tuiConfig: { busyEnter: 'queue' },
+  })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    await submitInput(fixture, 'busy /new opener')
+    await waitFor('the real Direct session', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    const oldId = welcomeSessionIds(fixture)[0]!
+    await waitFor('the real turn running', () => {
+      const agents = fixture.ctx.get('agents') as unknown as {
+        get(id: SessionId): { readonly status: string } | undefined
+      }
+      return agents.get(SessionId(oldId))?.status === 'running'
+    }, 25_000)
+    const modelCallsBefore = fixture.modelCalls()
+
+    // The REAL busy Composer submit: if the line were misrouted as a queue or
+    // steer prompt it would enter the Host inbox and later start a model turn.
+    await submitInput(fixture, '/new')
+    assert.equal(hostInboxHas(fixture, oldId, '/new'), false,
+      'the /new line must never enter the Host queue or steering inbox')
+    assert.equal(fixture.modelCalls(), modelCallsBefore, 'the /new line must never start a model turn')
+
+    // PR-A /new still waits for the old turn; release it so the REAL transition
+    // can create the fresh Session through the TUI command route.
+    releaseHold()
+    await waitFor('the /new child session', () => {
+      const ids = welcomeSessionIds(fixture)
+      return ids.length === 1 && ids[0] !== oldId
+    }, 25_000)
+    const newId = welcomeSessionIds(fixture)[0]!
+    assert.notEqual(newId, oldId)
+    assert.equal(fixture.modelCalls(), modelCallsBefore,
+      'the /new line never became a queued prompt that started a second model turn')
+  } finally {
+    releaseHold()
+    await fixture.settle() // bounded fixture teardown (not a fixed wait)
+  }
+})
+
+test('a BUSY TSP /new with a genuine Host /new keeps the Host sink', async (t) => {
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  let releaseHold!: () => void
+  const hold = new Promise<void>(resolve => { releaseHold = resolve })
+  const calls: string[] = []
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['HOST NEW'],
+    streamHold: () => hold,
+    tuiConfig: { busyEnter: 'queue' },
+    hostCommands: [{
+      name: 'new',
+      description: 'Host-owned new',
+      handler: () => { calls.push('host-new'); return { kind: 'success' } },
+    }],
+  })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    await submitInput(fixture, 'busy host /new opener')
+    await waitFor('the real Direct session', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    const oldId = welcomeSessionIds(fixture)[0]!
+    await waitFor('the real turn running', () => {
+      const agents = fixture.ctx.get('agents') as unknown as {
+        get(id: SessionId): { readonly status: string } | undefined
+      }
+      return agents.get(SessionId(oldId))?.status === 'running'
+    }, 25_000)
+    const modelCallsBefore = fixture.modelCalls()
+
+    await submitInput(fixture, '/new')
+    await waitFor('the genuine Host /new sink', () => calls.length === 1, 25_000)
+    assert.deepEqual(welcomeSessionIds(fixture), [oldId],
+      'the TUI /new navigation handler must not create a second Session when the Host wins')
+    assert.equal(hostInboxHas(fixture, oldId, '/new'), false,
+      'the genuine Host /new line must never become a queued prompt')
+    assert.equal(fixture.modelCalls(), modelCallsBefore, 'the genuine Host /new must not start a model turn')
+  } finally {
+    releaseHold()
+    await fixture.settle() // bounded fixture teardown (not a fixed wait)
   }
 })
