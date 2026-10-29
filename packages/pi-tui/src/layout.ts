@@ -498,8 +498,13 @@ function paintBox(
 				const fullWidthCell = box.rect.x === 0 && box.rect.width >= totalWidth;
 				const clipBottom = Math.min(screen.length, box.clip.y + box.clip.height);
 				const visibleRows = Math.min(block.rows, clipBottom - row);
+				// A block whose row a visible scrollbar claims yields WITHOUT a demand:
+				// it paints no pixels, so it must not hold a residency slot either.
+				const scrollbar = box.scrollView === undefined ? undefined : getScrollbarGeometry(box);
+				const scrollbarClaimsRow =
+					scrollbar !== undefined && row >= scrollbar.trackTop && row < scrollbar.trackTop + scrollbar.trackHeight;
 				if (block.kind === "candidate") {
-					if (fullWidthCell && visibleRows > 0) {
+					if (fullWidthCell && visibleRows > 0 && !scrollbarClaimsRow) {
 						context.sixelDemands.push({ line, cropTopRows: 0, visibleRows, physicalRow: row });
 						// The owner answers only for a GRANTED occurrence; anything else
 						// (pending, revoked, over budget) becomes this block's own text.
