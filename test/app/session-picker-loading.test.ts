@@ -602,6 +602,7 @@ test('a late native failure from a closed Browser never notifies the reopened co
   let request: SessionBrowserPanelRequest | undefined
   let snapshot: SessionBrowserReadSnapshot | undefined
   let opens = 0
+  const notices: string[] = []
   const presentation: SessionBrowserPresentation = {
     open: (next) => {
       opens += 1
@@ -613,7 +614,7 @@ test('a late native failure from a closed Browser never notifies the reopened co
         close: () => {},
       }
     },
-    notify: () => {},
+    notify: (message) => { notices.push(message) },
   }
   const h = harness({
     list: async () => rows,
@@ -634,7 +635,7 @@ test('a late native failure from a closed Browser never notifies the reopened co
   assert.equal(opens, 2, 'the Browser was closed and reopened before the old switch settled')
   resolveSwitch({ kind: 'failed', message: 'session open failed: lease held' })
   await new Promise<void>(resolve => setImmediate(resolve))
-  assert.ok(!h.app.notifyTextForTest().includes('lease held'),
+  assert.ok(!notices.some(message => message.includes('lease held')),
     'the stale Browser operation must not paint its failure into the new context')
 })
 
@@ -647,13 +648,14 @@ test('a native interactive resume failure on the still-current Browser is visibl
   const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
   let request: SessionBrowserPanelRequest | undefined
   let snapshot: SessionBrowserReadSnapshot | undefined
+  const notices: string[] = []
   const presentation: SessionBrowserPresentation = {
     open: (next) => {
       request = next
       snapshot = undefined
       return { isDisposed: () => false, setSnapshot: (value) => { snapshot = value }, close: () => {} }
     },
-    notify: () => {},
+    notify: (message) => { notices.push(message) },
   }
   const h = harness({
     list: async () => rows,
@@ -670,6 +672,6 @@ test('a native interactive resume failure on the still-current Browser is visibl
   await new Promise<void>(resolve => setImmediate(resolve))
   resolveSwitch({ kind: 'failed', message: 'session open failed: lease held' })
   await new Promise<void>(resolve => setImmediate(resolve))
-  assert.ok(h.app.notifyTextForTest().includes('lease held'),
+  assert.ok(notices.some(message => message.includes('lease held')),
     'a failure on the still-current Browser must stay visible')
 })

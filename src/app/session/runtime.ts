@@ -886,12 +886,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             return result.error.publishedSessionId !== undefined
               ? {
                   kind: 'indeterminate',
-                  message: `${result.message}${stopNote(oldOwnerQuiesced)}`,
+                  message: `${result.message}${stopNote(oldOwnerQuiesced)} — do not retry automatically`,
                 }
               : { kind: 'superseded', message: 'the session changed before this switch completed' }
           }
           if (result.error.settlement === 'indeterminate') {
-            return { kind: 'indeterminate', message: `${result.message}${stopNote(oldOwnerQuiesced)}` }
+            return { kind: 'indeterminate', message: `${result.message}${stopNote(oldOwnerQuiesced)} — do not retry automatically` }
           }
         }
         // The resume failed: the CURRENT session is still live. The full

@@ -550,7 +550,14 @@ test('a submit inside a session transition is refused, keeps the draft and dispa
     presentationSource.presentationReader.read = originalRead
     releaseHydration?.()
   })
-  submitDraft(fixture, '/resume pr3-transition-b')
+  // PR-C: direct `/resume` now waits for its tracked settlement, so start the
+  // same transition through the Browser selection (a non-FIFO navigation)
+  // while keeping the hydration fence real.
+  submitDraft(fixture, '/sessions')
+  await waitFor('the Session Browser is open', () => fixture.vt.getViewport().join('\n').includes('sessions'), 15_000)
+  fixture.vt.sendInput('pr3-transition-b')
+  await waitFor('the target row is filtered', () => fixture.vt.getViewport().join('\n').includes('pr3-transition-b'), 15_000)
+  fixture.vt.sendInput('\r')
   await waitFor('the transition committed and parked its surface hydration', () => parked >= 1, 15_000)
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void; getDraft(): string }
   app.setDraft('fenced transition draft zeta')
