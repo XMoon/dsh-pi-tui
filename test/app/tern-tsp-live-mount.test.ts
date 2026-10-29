@@ -44,6 +44,7 @@ import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { isQuitKey, mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import { wireNodes } from '../support/tsp-picker-wire.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -117,6 +118,8 @@ class ScriptedTern {
   readonly output = new FakeOutput()
   readonly frames: WireFrame[] = []
   readonly closeBodies: unknown[] = []
+  /** The pane-shaped frame reader the shared wire helpers fold. */
+  readonly pane = { frames: (): readonly WireFrame[] => this.frames }
 
   constructor(hello: typeof HELLO = HELLO) {
     this.output.onWrite = bytes => {
@@ -1147,21 +1150,43 @@ test('A-13: the hydrate-tail reset keeps committed status facts and an explicit 
       'the hydrate-tail reset does not clear the just-committed title')
     assert.ok(harness.tern.output.text().includes('AUTHORITATIVE_TITLE'), 'the title stays visible')
 
-    // A partial commit must not drop the SIBLING facts.
-    // TSP-7 PR-A: the legacy banner's `working`/`plan` words retired with it
-    // (they are native-status facts now, and the run phase lands in PR-B), so
-    // the sibling witness is the title — a displayable legacy line that the
-    // partial `todos` commit must leave intact.
+    // A partial commit must not drop the SIBLING facts. Each surviving fact is
+    // witnessed on its OWN authority:
+    //   title → the displayable legacy line;
+    //   plan  → the NATIVE status row the projection owns (committed below).
+    // The banner's `working` word retired with the banner (plan §1.3); the
+    // run-phase display is PR-B scope and is NOT re-asserted here.
     harness.surface.display.commitStatusFacts({ todos: [{ content: 'a todo', status: 'pending' }] })
     await settle()
     const wire = harness.tern.output.text()
     assert.ok(wire.includes('AUTHORITATIVE_TITLE'), 'the sibling title fact survives a partial commit')
     assert.ok(wire.includes('todos 0/1'), 'the todo fact is visible')
+    // The plan fact is a NATIVE row now: it exists only after a formal display
+    // commit has published the store snapshot that carries `collaboration.plan`.
+    // Committing it is the setup, not the witness — the witness is that the
+    // partial `todos` commit AFTER it does not drop the row.
+    harness.surface.commitStatus(
+      { collaboration: { plan: { effective: true } } } as never,
+      {},
+      undefined,
+    )
+    await settle()
+    const planSeg = wireNodes(harness.tern.pane)
+      .find(node => node.k === 'seg' && node.p.key === 'status-r1-plan')
+    assert.ok(planSeg !== undefined, 'the committed plan paints its native seg')
+    assert.equal(planSeg.p.text, 'plan', 'the plan word is the builtin formatter output')
+    harness.surface.display.commitStatusFacts({ sessionTitle: 'POST_PLAN_TITLE' })
+    await settle()
+    const planAfterFactsCommit = wireNodes(harness.tern.pane)
+      .find(node => node.k === 'seg' && node.p.key === 'status-r1-plan')
+    assert.ok(planAfterFactsCommit !== undefined,
+      'the plan seg survives a sibling status-facts commit')
 
     // PRESENCE semantics: an explicitly-present undefined title CLEARS it.
     harness.surface.display.commitStatusFacts({ sessionTitle: undefined })
     await settle()
-    assert.equal(harness.surface.display.getSessionTitle(), '', 'explicit undefined clears the title')
+    assert.equal(harness.surface.display.getSessionTitle(), '',
+      'explicit undefined clears even the replacement title')
   } finally {
     await harness.dispose()
     await harness.session.close()

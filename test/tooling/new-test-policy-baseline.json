@@ -44,7 +44,7 @@
     "app/task-quick-composition.test.ts": 1,
     "app/tern-tsp-interaction-runner.test.ts": 5,
     "app/tern-tsp-interaction.test.ts": 1,
-    "app/tern-tsp-live-mount.test.ts": 55,
+    "app/tern-tsp-live-mount.test.ts": 57,
     "app/tern-tsp-live-projection.test.ts": 10,
     "app/tern-tsp-model-picker.test.ts": 6,
     "app/tern-tsp-port-isolation.test.ts": 1,

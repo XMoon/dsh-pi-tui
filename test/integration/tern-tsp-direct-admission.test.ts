@@ -295,10 +295,13 @@ for (const busyEnter of ['queue', 'steer'] as const) {
         // Start a real turn; its model stream is HELD so the turn stays running.
         fixture.pane.input.type('first prompt')
         await awaitComposer(fixture, 'first prompt')
-        fixture.pane.input.type('\r')
-        // TSP-7 PR-A retired the dock banner: the turn is observed through the
-        // AUTHORITATIVE fact — the real model request this submission starts.
+        // The baseline MUST precede the submission: `stream()` counts the call
+        // the moment it runs, so a baseline read after Enter can already contain
+        // this request and the `>` comparison would never fire. TSP-7 PR-A
+        // retired the dock banner, so the turn is observed through the
+        // AUTHORITATIVE fact — this real model request.
         const modelCallsBefore = fixture.modelCalls()
+        fixture.pane.input.type('\r')
         await waitFor('the real model request to start', () => fixture.modelCalls() > modelCallsBefore, 25_000)
         await waitFor('the first settled prompt', () => recorder.calls() === 1 && promptCalls.length === 1, 25_000)
         assert.equal(promptCalls.length, recorder.calls(), 'the settled records and the count agree (a settled-only recorder)')
@@ -401,9 +404,12 @@ test('Esc during a RUNNING turn cancels the turn through the existing path (no e
     await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('cancel me')
     await awaitComposer(fixture, 'cancel me')
-    fixture.pane.input.type('\r')
-    // TSP-7 PR-A retired the dock banner: the running turn is the real request.
+    // The baseline MUST precede the submission: `stream()` counts the call the
+    // moment it runs, so a baseline read after Enter can already contain this
+    // request and the `>` comparison would never fire. TSP-7 PR-A retired the
+    // dock banner, so the turn is observed through this real model request.
     const modelCallsBefore = fixture.modelCalls()
+    fixture.pane.input.type('\r')
     await waitFor('the real model request to start', () => fixture.modelCalls() > modelCallsBefore, 25_000)
     // Escape maps to the EXISTING application cancel path (never an exit).
     // The authoritative observation is the LIVE MODEL REQUEST: the existing
@@ -449,9 +455,12 @@ test('a REJECTED session cancel surfaces a renderer-neutral error notice (never 
     await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('cancel rejection case')
     await awaitComposer(fixture, 'cancel rejection case')
-    fixture.pane.input.type('\r')
-    // TSP-7 PR-A retired the dock banner: the running turn is the real request.
+    // The baseline MUST precede the submission: `stream()` counts the call the
+    // moment it runs, so a baseline read after Enter can already contain this
+    // request and the `>` comparison would never fire. TSP-7 PR-A retired the
+    // dock banner, so the turn is observed through this real model request.
     const modelCallsBefore = fixture.modelCalls()
+    fixture.pane.input.type('\r')
     await waitFor('the real model request to start', () => fixture.modelCalls() > modelCallsBefore, 25_000)
     fixture.pane.input.type('\u001b')
     await waitFor('the rejected cancel notice', () =>

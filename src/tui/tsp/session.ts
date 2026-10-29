@@ -1880,8 +1880,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       lines.push(ui.text({ key: 'pending-submit', text: pendingSubmit === 'submit' ? 'Submitting…' : 'Queued…' }))
     }
     // TSP-7 PR-A: the draft count is its own short line (only when a draft is
-    // really staged). It no longer rides a status banner — the banner's
-    // `working/plan` words are duplicated by the native status rows below.
+    // really staged). It no longer rides a status banner — the banner is gone
+    // (its `plan` word moved to the native plan-state row; the run-phase display
+    // is PR-B scope).
     const draftCount = imageBinding?.draftImages.occurrences().length ?? 0
     if (draftCount > 0) {
       lines.push(ui.text({ key: 'draft-count', wrap: 'none', text: `Draft ${draftCount}` }))
@@ -2009,8 +2010,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * TSP-7 PR-A: the legacy dock text lines that survive as SHORT standalone
    * rows. They are the facts no PR-A native item carries (the session title and
    * the todo completion count) plus the compaction phase, an immediate state
-   * channel that must not depend on a status commit. The banner's `working` and
-   * `plan` duplicates are gone — the native rows own those words now.
+   * channel that must not depend on a status commit. The banner's `plan` word
+   * migrated to the native plan-state row; the run-phase display (`busy` /
+   * `working`) is PR-B scope exactly as the accepted plan assigns it, and those
+   * presence facts stay mirrored here for that handover — nothing else reads
+   * them in PR-A.
    */
   const legacyDockLines = (): { key: string; text: string }[] => {
     const lines: { key: string; text: string }[] = []
