@@ -166,16 +166,6 @@ export function createRemoteSessionOwnerServices(
   const sessionId = (owner: SessionOwnerRef): string => recordOf(owner).sessionId
 
   /**
-   * ONE-SHOT user interrupt of the exact Remote owner. The borrow, the
-   * Connection generation capture and the exact binding check form the
-   * pre-dispatch fence; the same two identities are re-checked AFTER the
-   * official reply. A reply carried by a replaced/retired owner generation or
-   * a superseded Connection generation is `indeterminate` — the call DID
-   * dispatch, so neither a definite `committed` nor a refusal may be claimed
-   * for the current generation, and it is never retried. The Client reference
-   * is never released by this operation.
-   */
-  /**
    * The ONE exact-owner cancel body. `dispatched` records whether the official
    * `SessionFace.cancel()` was actually invoked: a local fence can prove it was
    * not; every reply (including a cancelled/superseded one) is about a call
