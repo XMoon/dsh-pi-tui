@@ -1045,7 +1045,8 @@ row: a chart keeps the exact `ChartBody` values and appends `Copy Data`
 admitted thumbnail and appends `View` / `Copy SVG` (the raw admitted source).
 `src/tui/components/transcript/visual-figure.ts` owns that row and reports the
 cells it ACTUALLY painted; it holds no Session, no keymap and no clipboard. The
-figure's action cells and the thumbnail's real Kitty pixel body are the only
+figure's action cells and the thumbnail's real committed pixel body (a Kitty
+placement or a Direct SIXEL footprint) are the only
 operable cells on those rows — the title, description and a loading/error row
 are inert, and a click inside the figure never folds the Assistant card. The
 fullscreen `onCellPress`/`onCellClick` owner records the painted owner, row,
@@ -1084,8 +1085,12 @@ unsubscribed variant (`releaseUnused`) — a thumbnail variant other rows still
 watch is never dropped. The target width is derived from the real content grant
 (columns, rows and the admitted viewBox ratio inside the existing 2048px /
 4M-pixel budget), never from a fixed size and never by upscaling the thumbnail.
-Preview pixels stay Kitty-only; without that protocol the page says
-`Preview unavailable` while Source and Copy remain fully usable.
+Preview pixels render on Kitty and on Direct SIXEL once the terminal's own
+live DA1, cell-size and background facts admit it; iTerm2 remains intentionally
+outside the Viewer/SVG pixel scope. Without a usable protocol the page says
+`Preview unavailable` while Source and Copy remain fully usable. A Direct SIXEL
+thumbnail's clickable body is the Screen-committed footprint read at hit time,
+never the component's render-time candidate.
 
 ### Display `/copy` for consumed visual markers
 
@@ -1246,8 +1251,8 @@ independent occurrences with independent fold state.
   from the thumbnail's `40×12` limits. States are distinguishable: `Loading…`,
   `Read failed: <sanitized reason>`, `Preview unavailable` (no protocol, an
   empty payload, an unsupported MIME, or a protocol this surface does not
-  support), each with the real name/dimensions/media type/bytes. On a Kitty
-  surface a JPEG/WebP occurrence instead paints the SAME scoped 6A derivative
+  support), each with the real name/dimensions/media type/bytes. On a Kitty or
+  Direct SIXEL surface a JPEG/WebP occurrence instead paints the SAME scoped 6A derivative
   described below: a READY derivative is used immediately (even when the raw
   read has been evicted), and only when none exists yet is the authorized raw
   read requested first. Pending/failed derivatives read `Loading…` /
@@ -1281,7 +1286,8 @@ independent occurrences with independent fold state.
   dimensions. Idle/loading/failed preview states
   paint informational rows only (a bounded `Preview unavailable`), a collapsed
   occurrence starts no conversion, and a body hit exists only when that frame
-  actually emitted the Kitty placement. PNG, iTerm2 (original OSC 1337) and GIF
+  actually emitted the Kitty placement or, on Direct SIXEL, only after the
+  Screen committed the occurrence's raster footprint. PNG, iTerm2 (original OSC 1337) and GIF
   (text fallback) keep their existing paths. The VIEWER consumes the SAME
   scoped derivative instead of staying PNG-only: a JPEG/WebP body click (or a
   `/view-image` selection) paints that PNG while the title/metadata keep the
@@ -1295,14 +1301,15 @@ independent occurrences with independent fold state.
   a read. A candidate selected after the mounted window changed is refused with
   `the image left the current transcript window` and the workspace closes; a
   stale scope is never authorized against the replacement session.
-- **Protocol scope (PR2).** The leased AltScreen renders real pixels through the
-  Kitty protocol only. The pinned AltScreen disables the iTerm2 image
-  capability and its cursor-up framing is outside the fork's ANSI width layer,
-  so the iTerm2 workspace shows the metadata plus `Preview unavailable`; native
-  iTerm2 workspace pixels are deferred to separate renderer/protocol work.
-  Transcript thumbnails keep their per-surface capability behavior; on Kitty
-  both their JPEG/WebP bodies and the Viewer use the SAME bounded derivative
-  above.
+- **Protocol scope (PR2 / I8-2B).** The leased AltScreen renders real pixels
+  through Kitty and through Direct SIXEL after the terminal's own live DA1,
+  cell-size and background observations admit it. The pinned AltScreen disables
+  the iTerm2 image capability and its cursor-up framing is outside the fork's
+  ANSI width layer, so the iTerm2 workspace shows the metadata plus
+  `Preview unavailable`; native iTerm2 workspace pixels are deferred to
+  separate renderer/protocol work. Transcript thumbnails keep their per-surface
+  capability behavior; on Kitty and Direct SIXEL both their JPEG/WebP bodies
+  and the Viewer use the SAME bounded derivative above.
 
 Authority: `TuiApp` (occurrence projection, last-painted hit classifier, leased
 image workspace), `ImageThumbnail` (info/control/body geometry),

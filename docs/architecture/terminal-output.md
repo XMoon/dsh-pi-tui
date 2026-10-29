@@ -412,6 +412,13 @@ Core. What the Client may rely on is one observed terminal fact and one gate:
   EXACT string the owner encoded, and re-encodes a visible crop from the same
   source at the same scale. A DCS is never parsed for syntax, sliced, truncated,
   reflowed or composited as text; an unregistered one stays ordinary text.
+- **The image workspace consumes the same owner.** `ImageWorkspacePanel` keeps
+  ONE leased screen for its list/viewer states; its `ImageViewerPanel` and
+  `SvgViewerPanel` paint through the SAME `ImageGraphics` handle and
+  `SvgRasterLoader` the rest of the surface uses — never a second graphics owner
+  or SVG raster pipeline. An SVG thumbnail's clickable body is the Screen's
+  last-committed footprint (`paintedBodyAt`), read at hit time; a pending,
+  covered, collapsed or revoked occurrence holds no pixels and no hit.
 - **Residency follows the physical frame, not component lifetime.** A component
   in SIXEL mode emits an inert candidate marker for its block, never a DCS. The
   Screen collects the blocks its FINAL layout really shows — including a
