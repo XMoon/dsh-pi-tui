@@ -858,7 +858,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // plus the old-turn note fit a 44x20 viewport without scrolling the
         // current Session card away.
         deps.diag.warn('session switch refused', { sessionId, message: result.message })
-        const displayMessage = result.message.replace(/ \(raw log: [^)]*\)/u, '')
+        const displayMessage = result.message.replace(/\s+\(raw log: .*\)$/u, '')
         return `${displayMessage}${stopNote(oldOwnerQuiesced)}`
       }
       // The switch COMMITTED: staged drafts are per-session UI state — drop the
