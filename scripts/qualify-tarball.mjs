@@ -79,22 +79,20 @@ export function selectCandidate(directory, explicitPath = undefined) {
   return candidate
 }
 
-function main() {
-  const rawArgs = process.argv.slice(2)
-  // `pnpm run <script> -- <arg>` forwards the `--` separator to the script
-  // (pnpm 12 does this), so strip it before the positional-argument check.
-  const args = rawArgs[0] === '--' ? rawArgs.slice(1) : rawArgs
-  if (args.length > 1) {
-    fail('usage: node scripts/qualify-tarball.mjs [candidate.tgz]')
-  }
-  const candidate = selectCandidate(ROOT, args[0])
+/**
+ * Run the fixed smoke sequence against one candidate.
+ *
+ * @param {string} candidate absolute path to the one tarball
+ * @param {{scripts?: string[], spawn?: Function, root?: string}} options
+ */
+export function runQualification(candidate, { scripts = SMOKE_SCRIPTS, spawn = spawnSync, root = ROOT } = {}) {
   console.log(`qualify: candidate ${basename(candidate)}`)
 
-  for (const [index, script] of SMOKE_SCRIPTS.entries()) {
-    const stage = `${index + 1}/${SMOKE_SCRIPTS.length} ${basename(script, '.mjs')}`
+  for (const [index, script] of scripts.entries()) {
+    const stage = `${index + 1}/${scripts.length} ${basename(script, '.mjs')}`
     console.log(`qualify [${stage}]: starting`)
-    const result = spawnSync(process.execPath, [join(ROOT, script), candidate], {
-      cwd: ROOT,
+    const result = spawn(process.execPath, [join(root, script), candidate], {
+      cwd: root,
       env: process.env,
       stdio: 'inherit',
     })
@@ -107,7 +105,19 @@ function main() {
     console.log(`qualify [${stage}]: passed`)
   }
 
-  console.log(`qualify: all ${SMOKE_SCRIPTS.length} packed-artifact smokes passed for ${basename(candidate)}`)
+  console.log(`qualify: all ${scripts.length} packed-artifact smokes passed for ${basename(candidate)}`)
+}
+
+function main() {
+  const rawArgs = process.argv.slice(2)
+  // `pnpm run <script> -- <arg>` forwards the `--` separator to the script
+  // (pnpm 12 does this), so strip it before the positional-argument check.
+  const args = rawArgs[0] === '--' ? rawArgs.slice(1) : rawArgs
+  if (args.length > 1) {
+    fail('usage: node scripts/qualify-tarball.mjs [candidate.tgz]')
+  }
+  const candidate = selectCandidate(ROOT, args[0])
+  runQualification(candidate)
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
