@@ -364,7 +364,11 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     // `open`, the Host may have opened the target even though this Client lost
     // currentness; report `opened + superseded` so the runtime classifies it
     // indeterminate rather than a proven non-execution.
-    if (!Object.is(captured, this.generation.getSnapshot()) || isAborted(request.signal)) {
+    if (isAborted(request.signal)) {
+      owner.release()
+      return { ownership: 'superseded', outcome: { kind: 'cancelled' } }
+    }
+    if (!Object.is(captured, this.generation.getSnapshot())) {
       const stateAtLoss = owner.openState()
       owner.release()
       if (stateAtLoss.openState === 'open') {
