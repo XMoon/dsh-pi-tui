@@ -286,7 +286,7 @@ test('DirectSessionReader: persisted subagent is excluded from native typed-matc
       }),
       diag,
       sessionId: () => parentId,
-      onResumeIntent: (intent, _scope, settle) => { intents.push(intent); settle() },
+      onResumeIntent: (intent, _scope, settle) => { intents.push(intent); settle({ kind: 'cancelled' }) },
     })
     const browse = owner.open()
     assert.deepEqual(await browse.settlement, { kind: 'ready' })

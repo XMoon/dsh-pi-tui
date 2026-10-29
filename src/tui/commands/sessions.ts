@@ -12,11 +12,12 @@
 import { scheduler } from 'node:timers/promises'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { PickerCategory, TuiApp } from '../../tui-app.ts'
-import { createSessionBrowserReadOwner, type SessionBrowserReadOwner, type SessionBrowserReadSettlement } from '../../app/command/session-browser-read.ts'
+import { createSessionBrowserReadOwner, type SessionBrowserReadOwner, type SessionBrowserReadSettlement, type SessionBrowserResumeSettlement } from '../../app/command/session-browser-read.ts'
 import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type SessionScope } from '../../app/session/scope.ts'
 import { SessionNavigationStopError, type NavigationIntent } from '../../app/session/transition.ts'
+import type { SessionSwitchOutcome } from '../../app/session/runtime.ts'
 import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { LifecycleError } from '../../runtime/session-lifecycle-port.ts'
@@ -69,6 +70,7 @@ type SessionCommandRunner = Pick<
   | 'sessionWriter'
   | 'signal'
   | 'switchSession'
+  | 'switchSessionOutcome'
   | 'transitionTo'
   | 'withSessionTransition'
   | 'withWriter'
@@ -269,6 +271,19 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     })
   }
 
+  /** The tracked switch settlement used by `/resume`: `matched`/accepted is
+   * not success; only a committed target counts. Legacy narrow fakes without
+   * the tracked entry keep the old string result (undefined = committed). */
+  const switchSessionOutcome = (id: string, scope?: SessionScope): Promise<SessionSwitchOutcome> => {
+    if (runner.switchSessionOutcome !== undefined) return runner.switchSessionOutcome(id, scope)
+    return runner.switchSession(id, scope).then(
+      error => error === undefined
+        ? { kind: 'committed', sessionId: id } as const
+        : { kind: 'failed', message: error } as const,
+      error => ({ kind: 'failed', message: `session switch failed: ${safeErrorMessage(error)}` }) as const,
+    )
+  }
+
   // Shared /sessions + /resume + /search body — input-first (the official
   // /resume fix): the picker overlay opens IMMEDIATELY on a loading
   // placeholder and owns the input (Esc, arrows, search) while the Host
@@ -311,31 +326,41 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         if (!runner.isSessionScopeCurrent(scope)
           || intent.currentSessionId !== scope.sessionId
           || intent.sessionId === scope.sessionId) {
-          settle()
+          settle({ kind: 'cancelled' })
           return
         }
-        runOwned('session browser resume', () => runner.switchSession(intent.sessionId, scope), {
+        const direct = intent.source === 'direct'
+        const fail = (text: string): void => {
+          if (!direct) app.notify(sanitizeTerminalText(text), 'error')
+          settle({ kind: 'failed', text })
+        }
+        if (direct) app.notify('switching session…', 'info')
+        runOwned('session browser resume', () => switchSessionOutcome(intent.sessionId, scope), {
           diag: runner.diag,
           sessionId: () => intent.sessionId,
           isCancellation: () => runner.signal.aborted,
-          onResult: (error) => {
-            try {
-              if (error !== undefined && runner.isSessionScopeCurrent(scope)) {
-                presentation.notify(sanitizeTerminalText(error), 'error')
-              }
-            } finally {
-              settle()
+          onResult: (outcome) => {
+            switch (outcome.kind) {
+              case 'committed':
+                settle({ kind: 'switched', sessionId: intent.sessionId })
+                break
+              case 'already-current':
+              case 'failed':
+              case 'indeterminate':
+                fail(outcome.message)
+                break
+              case 'superseded':
+                if (direct) settle({ kind: 'failed', text: outcome.message })
+                else settle({ kind: 'cancelled' })
+                break
+              case 'cancelled':
+                settle({ kind: 'cancelled' })
+                break
             }
           },
-          onCancel: settle,
+          onCancel: () => settle({ kind: 'cancelled' }),
           onError: (error) => {
-            try {
-              if (runner.isSessionScopeCurrent(scope)) {
-                presentation.notify(`session switch failed: ${sanitizeTerminalText(safeErrorMessage(error))}`, 'error')
-              }
-            } finally {
-              settle()
-            }
+            fail(`session switch failed: ${sanitizeTerminalText(safeErrorMessage(error))}`)
           },
         })
       },
@@ -378,8 +403,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       ...(directMatch === undefined ? {} : { directMatch }),
     })
     if (directMatch === undefined) return Promise.resolve({ kind: 'success' })
-    return handle.settlement.then((result: SessionBrowserReadSettlement) => {
-      if (result.kind === 'matched' || result.kind === 'ready') return { kind: 'success' }
+    return handle.settlement.then(async (result: SessionBrowserReadSettlement) => {
+      if (result.kind === 'matched') {
+        const resume: SessionBrowserResumeSettlement = await handle.resumeSettlement
+        if (resume.kind === 'switched') return { kind: 'success' }
+        return { kind: 'error', text: resume.kind === 'failed' ? resume.text : 'resume cancelled' }
+      }
+      if (result.kind === 'ready') return { kind: 'success' }
       if (result.kind === 'refused') return { kind: 'error', text: result.text }
       return { kind: 'error', text: 'resume cancelled' }
     })
@@ -491,6 +521,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       | { kind: 'refused'; text: string }
       | { kind: 'cancelled' }
     let settleListing: ((outcome: ListingOutcome) => void) | undefined
+    let switchInFlight = false
     const listing = options.directMatchQuery === undefined
       ? undefined
       : new Promise<ListingOutcome>(resolve => { settleListing = resolve })
@@ -501,10 +532,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       settleListing = undefined
     }
     if (listing !== undefined) {
-      // Esc / any close settles the awaiting /resume <arg> handler; a real
-      // switch settles 'switched' BEFORE the abort so the listener cannot
-      // overwrite it.
-      controller.signal.addEventListener('abort', () => settleOnce({ kind: 'cancelled' }), { once: true })
+      // Esc / any close settles the awaiting /resume <arg> handler. A closed
+      // picker that is carrying a switch in flight must NOT be reported as a
+      // cancellation: the tracked switch result owns the final settlement.
+      controller.signal.addEventListener('abort', () => {
+        if (!switchInFlight) settleOnce({ kind: 'cancelled' })
+      }, { once: true })
     }
     // Content-search lifecycle (plan §9 + review P1/P2): local metadata
     // filtering is immediate; Host content search is a 250ms-debounced
@@ -711,8 +744,8 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       }
       // `/resume <arg>` direct fast path, resolved against the ONE shared
       // listing (never a second one): a unique id/prefix match closes the
-      // picker and switches (the switch has STARTED before the awaiting
-      // handler returns — the old synchronous semantics); matching the
+      // picker and settles the command with the TRACKED switch outcome — the
+      // picker close itself is never success; matching the
       // CURRENT session surfaces the already-on notice; no match falls
       // through to the filtered picker with the argument preserved as the
       // live search query.
@@ -728,10 +761,18 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             picker.close()
             return
           }
-          settleOnce({ kind: 'switched' })
+          switchInFlight = true
           controller.abort()
           picker.close()
-          switchSession(match.id)
+          app.notify('switching session…', 'info')
+          void switchSessionOutcome(match.id).then(
+            (outcome) => {
+              if (outcome.kind === 'committed') settleOnce({ kind: 'switched' })
+              else if (outcome.kind === 'cancelled') settleOnce({ kind: 'cancelled' })
+              else settleOnce({ kind: 'refused', text: outcome.message })
+            },
+            (error) => settleOnce({ kind: 'refused', text: `session switch failed: ${safeErrorMessage(error)}` }),
+          )
           return
         }
         settleOnce({ kind: 'picker' })

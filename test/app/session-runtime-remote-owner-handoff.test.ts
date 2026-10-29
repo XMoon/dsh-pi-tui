@@ -1936,3 +1936,20 @@ test('an accepted stop cannot be quiesced against a generation captured after a 
   assert.deepEqual(h.calls.opens, [],
     'the target is never opened against a generation captured after the accepted stop')
 })
+
+test('the tracked switch outcome distinguishes committed, already-current, failed, and superseded', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  assert.deepEqual(await h.runtime.switchSessionOutcome('session-a'), {
+    kind: 'already-current', message: 'already on this session',
+  }, 'a same-id switch is an explicit no-op, not success')
+  h.arms.set('session-b', { fail: true })
+  const failed = await h.runtime.switchSessionOutcome('session-b')
+  assert.equal(failed.kind, 'failed', 'an unavailable target is a real failure')
+  h.arms.set('session-c', { supersede: true })
+  const superseded = await h.runtime.switchSessionOutcome('session-c')
+  assert.equal(superseded.kind, 'superseded', 'a proven local supersession is not reported as success')
+  const committed = await h.runtime.switchSessionOutcome('session-d')
+  assert.deepEqual(committed, { kind: 'committed', sessionId: 'session-d' })
+  assert.equal(h.core.currentSessionId(), 'session-d')
+})

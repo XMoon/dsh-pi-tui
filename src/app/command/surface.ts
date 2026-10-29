@@ -278,6 +278,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     ensureSession(): Promise<void>
     withWriter: CommandSessionRuntime['withWriter']
     switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
+    switchSessionOutcome?(sessionId: string, expectedScope?: SessionScope): Promise<import('../session/runtime.ts').SessionSwitchOutcome>
     /** The application Session runtime's `/fork` entry. Its `SessionForkOutcome`
      *  carries the POST-ADOPTION navigation identity, so the facade can tell a
      *  real adoption from a superseded/parked child that also reports success. */
@@ -1137,6 +1138,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         return 'applied' as const
       },
       switchSession: (sessionId, expectedScope) => deps.session.switchSession(sessionId, expectedScope),
+      ...(deps.session.switchSessionOutcome === undefined ? {} : { switchSessionOutcome: (sessionId, expectedScope) => deps.session.switchSessionOutcome!(sessionId, expectedScope) }),
       forkSession: async (sourceSessionId) => {
         const result = await deps.session.forkSession(sourceSessionId)
         // The ONE `/fork` success notice. `kind: 'success'` alone also covers a

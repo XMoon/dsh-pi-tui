@@ -29,6 +29,8 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import type { SessionReader } from '../../src/runtime/session-reader-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import type { SessionSwitchOutcome } from '../../src/app/session/runtime.ts'
+import type { SessionBrowserPresentation } from '../../src/app/command/session-browser-presentation.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -62,7 +64,12 @@ interface Harness {
 }
 
 /** Mount the command surface with an injectable sessionReader. */
-function harness(sessionReader: SessionReader, size: { readonly columns: number; readonly rows: number } = { columns: 80, rows: 24 }): Harness {
+function harness(
+  sessionReader: SessionReader,
+  size: { readonly columns: number; readonly rows: number } = { columns: 80, rows: 24 },
+  switchOutcome?: (id: string) => Promise<SessionSwitchOutcome>,
+  nativePresentation?: SessionBrowserPresentation,
+): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(size.columns, size.rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -88,6 +95,7 @@ function harness(sessionReader: SessionReader, size: { readonly columns: number;
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => state.agent, () => 1),
+    ...(nativePresentation === undefined ? {} : { sessionBrowserPresentation: nativePresentation }),
     get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -136,6 +144,10 @@ function harness(sessionReader: SessionReader, size: { readonly columns: number;
     switchSession: async (id: string): Promise<string | undefined> => {
       switched.push(id)
       return undefined
+    },
+    switchSessionOutcome: async (id: string): Promise<SessionSwitchOutcome> => {
+      switched.push(id)
+      return switchOutcome === undefined ? { kind: 'committed', sessionId: id } : switchOutcome(id)
     },
     transitionTo: async <T>(steps: { create: () => Promise<T> }) => ({ ok: true, next: await steps.create() }),
     currentPreset: () => undefined,
@@ -506,4 +518,70 @@ test('/resume <arg> with a unique match switches after exactly one listing', asy
   assert.equal(listCalls, 1, 'the direct fast path resolves against the ONE shared input-first listing')
   await waitUntil(() => !h.view().includes('Current directory'), 3000)
   assert.deepEqual(h.switched, ['session-target'], 'no further switch may fire after the picker closes')
+})
+
+test('/resume <arg> does not report success until the tracked switch commits', async (t) => {
+  const rows = [
+    { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  let resolveSwitch!: (outcome: SessionSwitchOutcome) => void
+  const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => gate)
+  t.after(() => h.app.stop())
+
+  const result = h.runResume('target') as Promise<{ kind: string; text?: string }>
+  await waitUntil(() => h.switched.length === 1)
+  let settled = false
+  void result.then(() => { settled = true })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(settled, false, 'a matched picker close must not settle the command as success')
+  resolveSwitch({ kind: 'failed', message: 'session "session-target" is not available' })
+  assert.deepEqual(await result, { kind: 'error', text: 'session "session-target" is not available' })
+  assert.deepEqual(h.switched, ['session-target'], 'the tracked switch is dispatched exactly once')
+})
+
+test('native /resume awaits the tracked switch outcome, not the matched settlement', async (t) => {
+  const rows = [
+    { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  let resolveSwitch!: (outcome: SessionSwitchOutcome) => void
+  const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
+  const presentation: SessionBrowserPresentation = {
+    open: () => ({
+      isDisposed: () => false,
+      setSnapshot: () => {},
+      close: () => {},
+    }),
+    notify: () => {},
+  }
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => gate, presentation)
+  t.after(() => h.app.stop())
+
+  const result = h.runResume('target') as Promise<{ kind: string; text?: string }>
+  await waitUntil(() => h.switched.length === 1)
+  let settled = false
+  void result.then(() => { settled = true })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(settled, false, 'the native matched settlement must not settle the command as success')
+  resolveSwitch({ kind: 'indeterminate', message: 'the Session was opened but the local surface was superseded' })
+  assert.deepEqual(await result, {
+    kind: 'error',
+    text: 'the Session was opened but the local surface was superseded',
+  }, 'a Host-side open with lost local currentness is not reported as success')
 })

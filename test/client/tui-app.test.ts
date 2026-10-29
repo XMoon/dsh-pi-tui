@@ -602,7 +602,7 @@ test('queue pane suppresses steer-all affordance while the active subject is idl
   await vt.waitForRender()
   let view = vt.getViewport().join('\n')
   assert.ok(view.includes('❯ wait for the next turn'), `idle queue row missing:\n${view}`)
-  assert.ok(view.includes('queued until the current task resumes'), `idle queue state missing:\n${view}`)
+  assert.ok(view.includes('waiting for the next prompt — send a message to continue'), `idle parked queue explanation missing:\n${view}`)
   assert.ok(!view.includes('ctrl+s to steer all'), `idle queue must not advertise a no-op steer:\n${view}`)
 
   app.setQueueItems([{ id: 'idle-q', text: 'wait for the next turn', mode: 'followup' }], true)
@@ -5405,4 +5405,18 @@ test('a narrow short terminal prefers Esc back over the Stop hint', async () => 
   assert.ok(view().includes('Esc back'), `the close/back verb must survive a narrow short terminal:\n${view()}`)
   assert.ok(!view().includes('stop'), `Stop must degrade away first:\n${view()}`)
   app.dispose()
+})
+
+test('a client-local queued echo alone never gets the parked-queue explanation', async () => {
+  const { vt, app } = startApp()
+  await vt.waitForRender()
+  app.setPendingInputPresentation({
+    queued: [{ id: 'req-local', rpcId: 'req-local', text: 'not yet acknowledged', mode: 'followup', local: true }],
+    tail: [],
+    running: false,
+  })
+  await vt.waitForRender()
+  const view = vt.getViewport().join('\n')
+  assert.ok(view.includes('❯ not yet acknowledged'), `the local echo must stay visible:\n${view}`)
+  assert.ok(!view.includes('waiting for the next prompt'), `a local-only echo is not Host-acked parked work:\n${view}`)
 })
