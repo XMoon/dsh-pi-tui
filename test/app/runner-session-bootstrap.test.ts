@@ -233,6 +233,12 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
   const bIdle = new Promise<void>(resolve => { releaseBIdle = resolve })
   let bIdleStarted!: () => void
   const bIdleStartedPromise = new Promise<void>(resolve => { bIdleStarted = resolve })
+  // Failure fallbacks: a failed assertion inside the B-resume window must not
+  // leave the suspended transition for teardown to wait on. These defers are
+  // registered AFTER the fiber disposer, so (reverse-order teardown) they run
+  // BEFORE `fiber.dispose()`; resolves are idempotent.
+  life.defer(() => releaseBResume())
+  life.defer(() => releaseBIdle())
   const harness = makeHarness(
     home,
     [sessionA, sessionB],
