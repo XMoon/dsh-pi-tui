@@ -30,8 +30,9 @@ import { basename, dirname, join } from 'node:path'
 import {
   LOCAL_PROTOCOL,
   LocalScopeError,
-  parseProcessStatStarttime,
+  parseProcessStat,
   readProcessStarttime,
+  removeOwnedScratch,
   type LocalScope,
 } from './local-scope.ts'
 
@@ -329,14 +330,20 @@ export function inspectHostProcess(record: LocalInstanceRecord, procRoot = '/pro
       error,
     )
   }
-  const starttime = parseProcessStatStarttime(stat)
-  if (starttime === undefined) {
+  const parsed = parseProcessStat(stat)
+  if (parsed === undefined) {
     throw new LocalScopeError(
       'PROCESS_STARTTIME_UNAVAILABLE',
-      `local discovery: /proc/${String(record.hostPid)}/stat has no usable starttime`,
+      `local discovery: /proc/${String(record.hostPid)}/stat has no usable state/starttime`,
     )
   }
-  return starttime === record.hostStarttime ? 'alive' : 'dead'
+  if (parsed.starttime !== record.hostStarttime) return 'dead'
+  // A killed but not-yet-reaped Host is a zombie (Z) or dead (X/x): Linux keeps
+  // its /proc stat and starttime until the parent reaps it, but it holds no
+  // socket and can never become ready. Classify it dead so the Client can
+  // replace it through the one kernel seat.
+  if (parsed.state === 'Z' || parsed.state === 'X' || parsed.state === 'x') return 'dead'
+  return 'alive'
 }
 
 /** Read a bounded UTF-8 body; an over-limit identity response is a mismatch. */
@@ -525,7 +532,10 @@ function spawnHostCandidate(options: EnsureLocalHostOptions): () => Error | unde
       env,
     })
     let spawnFailure: Error | undefined
-    child.once('error', error => { spawnFailure = error })
+    child.once('error', error => {
+      spawnFailure = error
+      if (scratch !== undefined) removeOwnedScratch(options.scope.dir, scratch)
+    })
     child.unref()
     return () => spawnFailure
   } catch (error) {

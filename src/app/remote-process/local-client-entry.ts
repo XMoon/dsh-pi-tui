@@ -321,6 +321,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       processRole: 'client',
       phase: context === undefined ? 'startup' : 'after-context',
       pid: process.pid,
+      ...(transport?.status() ?? {}),
       ...(failure instanceof LocalScopeError ? { code: failure.code } : {}),
       error: primary.message,
       ...(primary.stack === undefined ? {} : { stack: primary.stack }),

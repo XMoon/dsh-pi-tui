@@ -26,8 +26,10 @@ import {
   computeBuildId,
   LocalScopeError,
   LOCAL_PROTOCOL,
+  parseProcessStat,
   parseProcessStatStarttime,
   readLinuxStarttime,
+  removeOwnedScratch,
   readProcessStarttime,
   scopeFromInstalledProfile,
   type LocalScope,
@@ -345,6 +347,16 @@ test('a definite missing PID is dead, while unreadable or malformed proc data is
     writeFileSync(statPath, realStat)
     assert.equal(inspectHostProcess({ ...record, hostStarttime: realStart }, procRoot), 'alive')
     assert.equal(inspectHostProcess({ ...record, hostStarttime: '0' }, procRoot), 'dead')
+    const liveStat = parseProcessStat(realStat)
+    assert.ok(liveStat !== undefined, 'the live stat must expose state and starttime')
+    const close = realStat.lastIndexOf(')')
+    const zombieStat = `${realStat.slice(0, close + 2)}Z${realStat.slice(close + 3)}`
+    writeFileSync(statPath, zombieStat)
+    assert.equal(
+      inspectHostProcess({ ...record, hostStarttime: liveStat.starttime }, procRoot),
+      'dead',
+      'a matching-starttime zombie is dead, not a live Host',
+    )
     chmodSync(statPath, 0o000)
     assert.throws(
       () => inspectHostProcess(record, procRoot),
@@ -354,6 +366,77 @@ test('a definite missing PID is dead, while unreadable or malformed proc data is
   } finally {
     cleanup(value.root)
   }
+})
+
+test('a real unreaped child zombie is dead and the kernel Host seat is claimable', async t => {
+  const value = fixture(t)
+  try {
+    const scope = scopeFor(value)
+    const holder = spawn('sh', ['-c', 'sleep 60 & echo $!; exec sleep 60'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    try {
+      const pid = await new Promise<number>((resolve, reject) => {
+        // bounded deadline: the holder must print its child pid promptly.
+        const timer = setTimeout(() => reject(new Error('the zombie holder did not print a child pid')), 5_000)
+        holder.stdout!.once('data', (chunk: Buffer) => {
+          clearTimeout(timer)
+          const line = chunk.toString('utf8').split('\n')[0].trim()
+          const parsed = Number(line)
+          if (!Number.isInteger(parsed) || parsed <= 0) reject(new Error(`bad zombie child pid: ${line}`))
+          else resolve(parsed)
+        })
+      })
+      const before = parseProcessStat(readFileSync(`/proc/${String(pid)}/stat`, 'utf8'))
+      assert.ok(before !== undefined, 'the killed child has no parseable stat')
+      process.kill(pid, 'SIGKILL')
+      let zombie
+      for (let attempt = 0; attempt < 500; attempt += 1) {
+        try {
+          zombie = parseProcessStat(readFileSync(`/proc/${String(pid)}/stat`, 'utf8'))
+        } catch {
+          zombie = undefined
+        }
+        if (zombie?.state === 'Z') break
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      assert.equal(zombie?.state, 'Z', 'the killed child never became an OS zombie')
+      assert.equal(zombie.starttime, before.starttime, 'the zombie starttime changed')
+      assert.equal(
+        inspectHostProcess(recordFor(scope, { hostPid: pid, hostStarttime: before.starttime })),
+        'dead',
+        'the real zombie was classified alive',
+      )
+      // The zombie holds no socket: the one kernel Host seat is free for a new Host.
+      const seat = await bindProcessSeat(scope.hostSocketName, 'HOST_ALREADY_OWNED')
+      await seat.close()
+    } finally {
+      holder.kill('SIGKILL')
+      await new Promise<void>(resolve => holder.once('exit', () => resolve()))
+    }
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('scratch removal is containment-scoped', t => {
+  const root = testLifecycle(t).tempDir('dsh-m4-b1-scratch-')
+  const scopeDir = join(root, 'scope')
+  mkdirSync(scopeDir, { mode: 0o700 })
+  const owned = join(scopeDir, 'host-scratch-owned')
+  mkdirSync(owned, { mode: 0o700 })
+  removeOwnedScratch(scopeDir, owned)
+  assert.equal(existsSync(owned), false, 'an owned host-scratch child must be removed')
+
+  const foreignParent = join(root, 'host-scratch-foreign')
+  mkdirSync(foreignParent, { mode: 0o700 })
+  removeOwnedScratch(scopeDir, foreignParent)
+  assert.equal(existsSync(foreignParent), true, 'a scratch outside the scope must not be removed')
+
+  const foreignName = join(scopeDir, 'not-a-host-scratch')
+  mkdirSync(foreignName, { mode: 0o700 })
+  removeOwnedScratch(scopeDir, foreignName)
+  assert.equal(existsSync(foreignName), true, 'a non-host-scratch child must not be removed')
 })
 
 test('concurrent first scope creation converges without an unsafe-directory refusal', async t => {
