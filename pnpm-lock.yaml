@@ -557,9 +557,6 @@ importers:
       '@xterm/headless':
         specifier: 5.5.0
         version: 5.5.0
-      husky:
-        specifier: ^9.1.7
-        version: 9.1.7
       immer:
         specifier: ^10.1.1
         version: 10.2.0
@@ -4131,11 +4128,6 @@ packages:
   human-signals@8.0.1:
     resolution: {integrity: sha512-eKCa6bwnJhvxj14kZk5NCPc6Hb6BdsU9DZcOnmQKSnO1VKrfV0zCvtttPZUsBvjmNDn8rpcJfpwSYnHBjc95MQ==}
     engines: {node: '>=18.18.0'}
-
-  husky@9.1.7:
-    resolution: {integrity: sha512-5gs5ytaNjBrh5Ow3zrvdUUY+0VxIuWVL4i9irt6friV+BqdCfmV11CQTWMiBYWHbXhco+J1kHfTOUkePhCDvMA==}
-    engines: {node: '>=18'}
-    hasBin: true
 
   immer@10.2.0:
     resolution: {integrity: sha512-d/+XTN3zfODyjr89gM3mPq1WNX2B8pYsu7eORitdwyA2sBubnTl3laYlBk4sXY5FUa5qTZGBDPJICVbvqzjlbw==}
@@ -8507,8 +8499,6 @@ snapshots:
       - supports-color
 
   human-signals@8.0.1: {}
-
-  husky@9.1.7: {}
 
   immer@10.2.0: {}
 

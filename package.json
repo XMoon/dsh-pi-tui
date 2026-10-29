@@ -261,7 +261,6 @@
     "@types/ws": "8.18.1",
     "@xmoon76/pi-tui": "workspace:^1.1.0",
     "@xterm/headless": "5.5.0",
-    "husky": "^9.1.7",
     "immer": "^10.1.1",
     "semver": "7.8.5",
     "tsdown": "0.22.0",
@@ -326,18 +325,12 @@
     "smoke:vim": "node scripts/vim-plugin-smoke.mjs",
     "gate:pi-surface-compat": "node --test test/extension/pi-component-compat.test.ts",
     "smoke:examples": "node scripts/examples-plugin-smoke.mjs",
-    "prepack": "pnpm clean && pnpm clean:fork && pnpm build && pnpm typecheck:bundle && pnpm test:product",
-    "postpack": "node scripts/tarball-smoke.mjs && node scripts/extension-fixture-smoke.mjs && node scripts/advanced-plugin-smoke.mjs && node scripts/phase4-plugin-smoke.mjs && node scripts/unstable-plugin-smoke.mjs && node scripts/vim-plugin-smoke.mjs && node scripts/examples-plugin-smoke.mjs && node scripts/compose-agent-compat-smoke.mjs",
-    "pack:release": "rm -f xmoon76-dsh-pi-tui-*.tgz && pnpm pack --pack-destination .",
     "release:context": "node scripts/release-context.mjs",
     "release:notes": "node scripts/release-notes.mjs",
     "smoke:pack": "node scripts/tarball-smoke.mjs",
     "dev:doctor": "node scripts/dev-doctor.mjs",
     "dev:bootstrap": "node scripts/dev-bootstrap.mjs",
     "dev:shell": "node scripts/dev-shell.mjs",
-    "verify:prepush": "pnpm typecheck:fork && pnpm typecheck:bench && pnpm test:fork && pnpm test:tmux && pnpm test:tooling && pnpm gate:installation-doc && pnpm gate:pi-divergence-ledger && pnpm gate:pi-vendor-diff --strict && node scripts/naming-gate.mjs && node scripts/check-no-session-events.mjs && pnpm gate:boundary && pnpm gate:architecture && pnpm gate:production-reads && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release",
-    "verify:prepush:nofork": "pnpm typecheck:bench && pnpm test:tmux && pnpm test:tooling && pnpm gate:installation-doc && pnpm gate:pi-divergence-ledger && pnpm gate:pi-vendor-diff --strict && node scripts/naming-gate.mjs && node scripts/check-no-session-events.mjs && pnpm gate:boundary && pnpm gate:architecture && pnpm gate:production-reads && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release",
-    "prepare": "husky",
     "gate:boundary": "node scripts/client-boundary-gate.mjs",
     "gate:architecture": "node scripts/application-architecture-gate.mjs",
     "gate:production-reads": "node scripts/check-production-reads.mjs",
@@ -351,6 +344,10 @@
     "gen:dsh-presets": "node scripts/generate-dsh-presets.mjs",
     "gate:dsh-preset-parity": "node scripts/generate-dsh-presets.mjs --check",
     "smoke:p1-profile": "node scripts/dsh-p1-profile-smoke.mjs",
-    "smoke:s4-d2-bundles": "node scripts/dsh-s4-d2-bundles-smoke.mjs"
+    "smoke:s4-d2-bundles": "node scripts/dsh-s4-d2-bundles-smoke.mjs",
+    "pack:artifact": "rm -f xmoon76-dsh-pi-tui-*.tgz && pnpm pack --config.ignore-scripts=true --pack-destination .",
+    "smoke:release": "node scripts/qualify-tarball.mjs",
+    "pack:release": "pnpm clean && pnpm clean:fork && pnpm build && pnpm typecheck:bundle && pnpm test:product && pnpm pack:artifact && pnpm smoke:release",
+    "verify:release": "pnpm typecheck:fork && pnpm typecheck:bench && pnpm test:fork && pnpm test:tmux && pnpm test:tooling && pnpm gate:installation-doc && pnpm gate:pi-divergence-ledger && pnpm gate:pi-vendor-diff --strict && node scripts/naming-gate.mjs && node scripts/check-no-session-events.mjs && pnpm gate:boundary && pnpm gate:architecture && pnpm gate:production-reads && pnpm gate:keybindings && pnpm audit --prod --audit-level high && pnpm pack:release"
   }
 }
