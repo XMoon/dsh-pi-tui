@@ -122,8 +122,11 @@ interface RasterRecord {
    * owner, so a crop on screen can never be dropped to make room for another.
    */
   readonly owners: Set<Occurrence>
-  /** Whether this raster is a full encode or a bounded visible-window variant. */
-  readonly kind: 'full' | 'crop'
+  /** Whether this raster is a full encode or a bounded visible-window variant.
+   *  A FULL admission that dedups into an existing crop record upgrades it, so a
+   *  picture can never be refused a crop merely because a variant with the same
+   *  bytes was registered first. */
+  kind: 'full' | 'crop'
   /** Monotonic last-use stamp (registry hits and admission). */
   useStamp: number
 }
@@ -483,6 +486,9 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     if (existing !== undefined) {
       // Two occurrences of the same source encode to the SAME trusted string:
       // one retained payload serves both, and neither pays a second budget slot.
+      // A full admission wins the record's kind: "is this a cropable source" must
+      // not depend on which occurrence happened to encode those bytes first.
+      if (kind === 'full') existing.kind = 'full'
       existing.useStamp = ++this.useStamp
       return existing
     }

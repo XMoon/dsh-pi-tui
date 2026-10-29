@@ -2899,6 +2899,15 @@ export class TuiApp {
   private syncSixelObservation(): void {
     const graphics = this.graphics
     if (graphics === undefined || graphics.mode !== 'sixel') return
+    if (!this.terminalPresentationActive) {
+      // The app does not own the physical terminal right now (suspended for
+      // $EDITOR, a workspace transition, or stopped): a readiness query written
+      // by a screen nobody started would be answered into the OTHER owner's
+      // input chain and never reach us. Detach instead, so the resume re-binds
+      // and re-observes from scratch. (RFL-015.)
+      graphics.observeScreen(undefined, this.terminal.columns, this.terminal.rows)
+      return
+    }
     // The screen that OWNS the terminal answers the facts: a leased Job/Settings
     // workspace replaces the return surface for the whole lease, so binding the
     // stopped return screen would query a screen nobody reads from.
@@ -5240,6 +5249,13 @@ export class TuiApp {
     // The suspend stopped the active screen (clearing OSC 9;4 + its
     // keepalive): restore a still-desired busy state (plan §7/§12.7).
     this.enterTerminalPresentation()
+    // A screen that was STOPPED owned no terminal, so the SIXEL readiness
+    // projection must be re-bound and re-observed here: the suspend also released
+    // the OSC 11 observation, and a resize processed while $EDITOR held the tty
+    // invalidated the cell facts. The scheme fan-out is the same ownership seam
+    // every other handoff uses. (RFL-015.)
+    this.refreshSchemeRegistrations()
+    if (this.graphics?.mode === 'sixel') this.graphics.resample()
     // The suspend released the observation that screen owned; the resumed SAME screen
     // re-samples once when the latest intent still follows the terminal (the shared
     // hand-off completion point).

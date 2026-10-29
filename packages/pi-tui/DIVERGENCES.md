@@ -6279,6 +6279,7 @@ The alternate screen's layout engine paints into a clipped viewport and its own 
 - TuiAltScreenOptions gains sixelScreen?: SixelScreenPort and its imageProtocol/imageProtocolOverride widen to ImageProtocol | 'sixel'; the global ImageProtocol type is untouched.
 - TuiAltScreen.doRender computes the frame's per-anchor footprint heights, erases every old and new covered row with `CSI 2K`, writes all text first and ONE DCS per visible uncovered block last at its own absolute row; a changed row inside a block forces the whole block to be cleared and repainted.
 - A block an overlay paints over is withheld for the frame; afterTerminalStop() projects a trusted anchor to an empty line so leaving the alt screen never replays a DCS into the main screen's restored history.
+- The alternate screen's own search index is built with every trusted anchor row emptied (row count and indices preserved), so a DCS substring can never match and a reveal can never target a row that shows no text; the highlight pass skips the same rows.
 
 #### Dependency map
 

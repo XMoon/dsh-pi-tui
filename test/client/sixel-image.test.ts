@@ -638,3 +638,48 @@ test('an unadmittable crop is not re-encoded on every frame (RFL-006 crop branch
   await new Promise(resolve => setTimeout(resolve, 300))
   assert.equal(encodes, settled, 'the refused crop is not re-sent until the trust table changes')
 })
+
+test('a crop variant shared by two occurrences survives one owner leaving (RFL-010)', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  // Two DIFFERENT pictures with an IDENTICAL first cell row: their 1-row crop
+  // encodes to the same bytes, which is exactly the shared-record case.
+  const top = (y: number): [number, number, number, number] => (y < 20 ? [255, 0, 0, 255] : [0, 0, 0, 255])
+  const firstPng = await pngFromRgba(fill(40, 60, (_x, y) => (y < 20 ? [255, 0, 0, 255] : y < 40 ? [0, 255, 0, 255] : [0, 0, 255, 255])), 40, 60)
+  const secondPng = await pngFromRgba(fill(40, 60, (_x, y) => (y < 20 ? [255, 0, 0, 255] : y < 40 ? [0, 0, 255, 255] : [0, 255, 0, 255])), 40, 60)
+  void top
+  const first = harness.graphics.image({ pngBase64: firstPng, widthPx: 40, heightPx: 60 }, { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' })
+  const second = harness.graphics.image({ pngBase64: secondPng, widthPx: 40, heightPx: 60 }, { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' })
+  await waitUntil(() => {
+    first.render(40)
+    second.render(40)
+    return first.paintedBodyAt?.(40) !== undefined && second.paintedBodyAt?.(40) !== undefined
+  }, 'both full rasters')
+  const firstDcs = first.render(40)[0]!
+  const secondDcs = second.render(40)[0]!
+  assert.notEqual(firstDcs, secondDcs, 'the two pictures are different')
+
+  const cropUntilReady = async (line: string): Promise<string> => {
+    let value: string | undefined
+    await waitUntil(() => {
+      value = harness.graphics.screen.crop(line, 0, 1)
+      return value !== undefined
+    }, 'the first-row variant')
+    return value!
+  }
+  const firstVariant = await cropUntilReady(firstDcs)
+  const secondVariant = await cropUntilReady(secondDcs)
+  assert.equal(firstVariant, secondVariant, 'identical visible rows share ONE registry record')
+  assert.notEqual(harness.graphics.screen.footprint(firstVariant), undefined)
+
+  // One owner leaves: the shared variant must stay registered for the other one.
+  first.dispose?.()
+  assert.equal(harness.graphics.screen.crop(secondDcs, 0, 1), secondVariant, 'the survivor still answers')
+  assert.notEqual(
+    harness.graphics.screen.footprint(secondVariant),
+    undefined,
+    'and the Screen still trusts that exact string',
+  )
+  // A crop OF a crop variant is refused: only a full raster has a source.
+  assert.equal(harness.graphics.screen.crop(secondVariant, 0, 1), undefined)
+})
