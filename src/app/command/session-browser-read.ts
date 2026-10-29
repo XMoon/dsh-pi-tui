@@ -78,9 +78,11 @@ interface ActiveRead {
   hasMore: boolean
   resumePending: boolean
   readonly resumeSettlement: Promise<SessionBrowserResumeSettlement>
-  readonly settleResume: (outcome: SessionBrowserResumeSettlement) => void
+  readonly resolveResume: (outcome: SessionBrowserResumeSettlement) => void
   resumeRequested: boolean
-  resumeSettled: boolean
+  resumeAttempt: number
+  resumeSettledAttempt: number
+  resumeHandleSettled: boolean
 }
 
 export interface SessionBrowserReadHandle {
@@ -104,11 +106,13 @@ export interface SessionBrowserReadOwnerOptions {
   readonly sessionId?: () => string | undefined
   /** App-owned handoff to the one existing SessionRuntime switch entry. The
    * callback MUST call `settle` with the REAL final outcome; an accepted
-   * request is not a committed switch. */
+   * request is not a committed switch. `isCurrent` identifies the exact panel
+   * operation so a late failure can never notify a newer Browser context. */
   readonly onResumeIntent?: (
     intent: SessionBrowserResumeIntent,
     scope: SessionScope,
     settle: (outcome: SessionBrowserResumeSettlement) => void,
+    isCurrent: () => boolean,
   ) => void
 }
 
@@ -152,7 +156,10 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     // An accepted resume is owned by the command operation and must settle
     // with the REAL switch outcome; only a panel that never requested a resume
     // is cancelled here.
-    if (!panel.resumeRequested) panel.settleResume({ kind: 'cancelled' })
+    if (!panel.resumeRequested && !panel.resumeHandleSettled) {
+      panel.resumeHandleSettled = true
+      panel.resolveResume({ kind: 'cancelled' })
+    }
     if (panel.queryTimer !== undefined) clearTimeout(panel.queryTimer)
     panel.queryTimer = undefined
     panel.queryController?.abort()
@@ -333,12 +340,28 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     }
     panel.resumePending = true
     panel.resumeRequested = true
+    // Each accepted intent is its own operation: a failed attempt must clear
+    // its pending state and allow a retry; a late older attempt must not settle
+    // the newer one.
+    const attempt = ++panel.resumeAttempt
+    const settle = (outcome: SessionBrowserResumeSettlement): void => {
+      if (panel.resumeAttempt !== attempt || panel.resumeSettledAttempt === attempt) return
+      panel.resumeSettledAttempt = attempt
+      if (!panel.resumeHandleSettled) {
+        panel.resumeHandleSettled = true
+        panel.resolveResume(outcome)
+      }
+      if (!panel.disposed) {
+        panel.resumePending = false
+        publish(panel)
+      }
+    }
     publish(panel)
     if (!isActive(panel)) return false
     try {
-      options.onResumeIntent(intent, panel.scope, panel.settleResume)
+      options.onResumeIntent(intent, panel.scope, settle, () => isActive(panel))
     } catch (error) {
-      panel.settleResume({ kind: 'failed', text: safeErrorMessage(error) })
+      settle({ kind: 'failed', text: safeErrorMessage(error) })
     }
     return true
   }
@@ -465,17 +488,11 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         hasMore: false,
         resumePending: false,
         resumeSettlement,
-        settleResume: (outcome) => {
-          if (panel.resumeSettled) return
-          panel.resumeSettled = true
-          resolveResume(outcome)
-          if (!panel.disposed) {
-            panel.resumePending = false
-            publish(panel)
-          }
-        },
+        resolveResume,
         resumeRequested: false,
-        resumeSettled: false,
+        resumeAttempt: 0,
+        resumeSettledAttempt: 0,
+        resumeHandleSettled: false,
       }
       active = panel
       const presentationHandle = options.presentation.open({

@@ -30,7 +30,7 @@ import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts
 import type { SessionReader } from '../../src/runtime/session-reader-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
 import type { SessionSwitchOutcome } from '../../src/app/session/runtime.ts'
-import type { SessionBrowserPresentation } from '../../src/app/command/session-browser-presentation.ts'
+import type { SessionBrowserPanelRequest, SessionBrowserPresentation, SessionBrowserReadSnapshot } from '../../src/app/command/session-browser-presentation.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -61,6 +61,7 @@ interface Harness {
   runResume: (rawInput: string) => Promise<unknown>
   view: () => string
   switched: string[]
+  switchScopes: Array<import('../../src/app/session/scope.ts').SessionScope | undefined>
 }
 
 /** Mount the command surface with an injectable sessionReader. */
@@ -88,6 +89,7 @@ function harness(
   ctx.provide('commands', commands as never)
   const state: { agent: Agent | undefined } = { agent: undefined }
   const switched: string[] = []
+  const switchScopes: Array<import('../../src/app/session/scope.ts').SessionScope | undefined> = []
   const runner: TuiCommandRunner = {
     deliveredFilesSnapshot: () => undefined,
     ctx,
@@ -145,8 +147,9 @@ function harness(
       switched.push(id)
       return undefined
     },
-    switchSessionOutcome: async (id: string): Promise<SessionSwitchOutcome> => {
+    switchSessionOutcome: async (id: string, scope?: import('../../src/app/session/scope.ts').SessionScope): Promise<SessionSwitchOutcome> => {
       switched.push(id)
+      switchScopes.push(scope)
       return switchOutcome === undefined ? { kind: 'committed', sessionId: id } : switchOutcome(id)
     },
     transitionTo: async <T>(steps: { create: () => Promise<T> }) => ({ ok: true, next: await steps.create() }),
@@ -197,6 +200,7 @@ function harness(
     runResume: (rawInput: string) => invoke(resumeDef!.handler, rawInput),
     view: () => vt.getViewport().join('\n'),
     switched,
+    switchScopes,
   }
 }
 
@@ -515,6 +519,8 @@ test('/resume <arg> with a unique match switches after exactly one listing', asy
   await h.runResume('target')
   await waitUntil(() => h.switched.length === 1)
   assert.deepEqual(h.switched, ['session-target'])
+  assert.ok(h.switchScopes[0] !== undefined,
+    'the typed /resume must pass the SYNCHRONOUSLY captured source scope, never an unscoped switch')
   assert.equal(listCalls, 1, 'the direct fast path resolves against the ONE shared input-first listing')
   await waitUntil(() => !h.view().includes('Current directory'), 3000)
   assert.deepEqual(h.switched, ['session-target'], 'no further switch may fire after the picker closes')
@@ -584,4 +590,50 @@ test('native /resume awaits the tracked switch outcome, not the matched settleme
     kind: 'error',
     text: 'the Session was opened but the local surface was superseded',
   }, 'a Host-side open with lost local currentness is not reported as success')
+})
+
+test('a late native failure from a closed Browser never notifies the reopened context', async (t) => {
+  const rows = [
+    { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  let resolveSwitch!: (outcome: SessionSwitchOutcome) => void
+  const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
+  let request: SessionBrowserPanelRequest | undefined
+  let snapshot: SessionBrowserReadSnapshot | undefined
+  let opens = 0
+  const presentation: SessionBrowserPresentation = {
+    open: (next) => {
+      opens += 1
+      request = next
+      snapshot = undefined
+      return {
+        isDisposed: () => false,
+        setSnapshot: (value) => { snapshot = value },
+        close: () => {},
+      }
+    },
+    notify: () => {},
+  }
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => gate, presentation)
+  t.after(() => h.app.stop())
+
+  await h.runSessions()
+  await waitUntil(() => snapshot?.rows.some(row => row.id === 'session-target') === true)
+  request!.onResumeIntent({ sessionId: 'session-target', currentSessionId: undefined, source: 'enter' })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  request!.onClose()
+  await h.runSessions()
+  assert.equal(opens, 2, 'the Browser was closed and reopened before the old switch settled')
+  resolveSwitch({ kind: 'failed', message: 'session open failed: lease held' })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.ok(!h.app.notifyTextForTest().includes('lease held'),
+    'the stale Browser operation must not paint its failure into the new context')
 })
