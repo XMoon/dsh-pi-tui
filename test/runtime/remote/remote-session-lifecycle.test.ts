@@ -456,14 +456,17 @@ test('open reports a rejected readiness as unavailable and releases exactly once
   assert.equal(h.bindingOf('session-a'), undefined)
 })
 
-test('a Connection rollover while open waits for readiness is superseded and releases once', async () => {
+test('a Connection rollover while open waits for readiness reports opened+superseded and releases once', async () => {
   const h = harness()
   h.setCatalogued('session-a', true)
   h.setReadyHold()
   const pending = h.lifecycle.open({ sessionId: 'session-a' })
   h.setGeneration(2)
   h.resolveReady()
-  assert.deepEqual(await pending, { ownership: 'superseded', outcome: { kind: 'cancelled' } })
+  assert.deepEqual(await pending, {
+    ownership: 'superseded',
+    outcome: { kind: 'opened', handle: { session: { id: 'session-a' } } },
+  }, 'the official open may have reached open before currentness was lost')
   assert.equal(h.calls.releases.length, 1)
   assert.equal(h.bindingOf('session-a'), undefined)
 })
