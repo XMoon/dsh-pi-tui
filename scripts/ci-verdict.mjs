@@ -5,7 +5,7 @@
  *
  * The accelerated DAG has one job — `qualified` — whose only purpose is to
  * refuse publication unless the whole graph succeeded. That job cannot use
- * GitHub's implicit `success()` requirement, because two of its needs are
+ * GitHub's implicit `success()` requirement, because three of its needs are
  * LEGITIMATELY skipped depending on the dependency mode, and `always()` /
  * `!cancelled()` suppress the implicit check. So the verdict is a script:
  * it is exercised by tests, it prints a table, and it fails closed.
@@ -16,12 +16,12 @@
  *     an ABSENT phase are failures, because a phase that did not run did not
  *     prove anything;
  *   - the MODE-DEPENDENT phases have the status their mode requires: in
- *     Source Mode the pinned distribution must have been built (`success`)
- *     and the npm-only client-family gate must be `skipped`; in npm mode the
- *     distribution must be `skipped` and the client-family gate `success`. A
- *     source run whose distribution was skipped has no dependency graph to
- *     qualify against, and an npm run whose client-family gate was skipped
- *     silently dropped a check;
+ *     Source Mode the pinned distribution must have been built (`success`),
+ *     and the npm-only client-family and split-process gates must be
+ *     `skipped`; in npm mode the distribution must be `skipped` and both
+ *     npm-only gates `success`. A source run whose distribution was skipped
+ *     has no dependency graph to qualify against, and an npm run whose
+ *     npm-only gate was skipped silently dropped a check;
  *   - on a RELEASE TAG the release phases are required too.
  *
  * Usage:
@@ -68,13 +68,21 @@ export const RELEASE_PHASES = ['release-context', 'release-metadata', 'publish',
 /**
  * The status each MODE-DEPENDENT job must show.
  *
- * These are the two jobs whose presence is a function of the dependency mode.
+ * These are the jobs whose presence is a function of the dependency mode.
  * `success` and `skipped` are both "expected"; what is forbidden is the WRONG
  * one, which is what a mis-gated job looks like.
  */
 export const MODE_STATUS = {
-  npm: { 'prepare-dsh-source': 'skipped', 'client-family-compat': 'success' },
-  source: { 'prepare-dsh-source': 'success', 'client-family-compat': 'skipped' },
+  npm: {
+    'prepare-dsh-source': 'skipped',
+    'client-family-compat': 'success',
+    'split-process': 'success',
+  },
+  source: {
+    'prepare-dsh-source': 'success',
+    'client-family-compat': 'skipped',
+    'split-process': 'skipped',
+  },
 }
 
 const RESULT_VALUES = new Set(['success', 'failure', 'cancelled', 'skipped'])

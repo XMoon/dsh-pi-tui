@@ -37,13 +37,21 @@ import {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const VERDICT_SCRIPT = join(ROOT, 'scripts', 'ci-verdict.mjs')
 
-/** Every required phase at one result, plus the two mode-dependent phases. */
+/** Every required phase at one result, plus the mode-dependent phases. */
 function phasesAt(result, { mode = 'npm', extra = {} } = {}) {
   return [
     ...REQUIRED_PHASES.map(name => ({ name, result })),
     ...(mode === 'npm'
-      ? [{ name: 'prepare-dsh-source', result: 'skipped' }, { name: 'client-family-compat', result: 'success' }]
-      : [{ name: 'prepare-dsh-source', result: 'success' }, { name: 'client-family-compat', result: 'skipped' }]),
+      ? [
+          { name: 'prepare-dsh-source', result: 'skipped' },
+          { name: 'client-family-compat', result: 'success' },
+          { name: 'split-process', result: 'success' },
+        ]
+      : [
+          { name: 'prepare-dsh-source', result: 'success' },
+          { name: 'client-family-compat', result: 'skipped' },
+          { name: 'split-process', result: 'skipped' },
+        ]),
     ...Object.entries(extra).map(([name, value]) => ({ name, result: value })),
   ]
 }
@@ -260,7 +268,7 @@ test('the retired build-and-pack job is GONE, and nothing still waits for it', (
 
 test('the accelerated jobs exist and the old artifact has exactly one producer', () => {
   const jobs = workflow().jobs
-  for (const name of ['build', 'typecheck', 'product-shard', 'aggregate', 'candidate', 'qualify', 'equivalence', 'qualified']) {
+  for (const name of ['build', 'typecheck', 'product-shard', 'aggregate', 'candidate', 'qualify', 'split-process', 'equivalence', 'qualified']) {
     assert.ok(name in jobs, `the accelerated DAG is missing '${name}'`)
   }
   // One build, one pack. A second `pnpm build` anywhere else means a consumer
@@ -339,27 +347,30 @@ test('every job that can be SKIPPED by mode states the mode it needs', () => {
     /ci-verdict\.mjs qualify/u)
 })
 
-test('the two mode-dependent jobs stay in the qualification verdict with their EXACT status', () => {
+test('the mode-dependent jobs stay in the qualification verdict with their EXACT status', () => {
   // Source needs the pinned distribution built; npm needs the npm-only
-  // client-family gate. Accepting "not failed" would let a source run qualify
-  // with no dependency graph, and an npm run qualify with a dropped check.
+  // client-family and split-process gates. Accepting "not failed" would let a
+  // source run qualify with no dependency graph, and an npm run qualify with a
+  // dropped check.
   //
-  // The policy now lives in `ci-verdict` (the job must RUN on failure instead
-  // of being skipped by a job-level condition), but it is still the same exact
-  // pair, and the job still waits for both jobs.
+  // The policy lives in `ci-verdict` (the qualified job must RUN on failure
+  // instead of being skipped by a job-level condition), and the job still
+  // waits for every one of these jobs.
   assert.deepEqual(MODE_STATUS.npm, {
     'prepare-dsh-source': 'skipped',
     'client-family-compat': 'success',
+    'split-process': 'success',
   })
   assert.deepEqual(MODE_STATUS.source, {
     'prepare-dsh-source': 'success',
     'client-family-compat': 'skipped',
+    'split-process': 'skipped',
   })
   const job = workflow().jobs.qualified
   assert.deepEqual(
     new Set(needsOf(job)),
     new Set([...REQUIRED_PHASES, ...Object.keys(MODE_STATUS.npm)]),
-    'the qualified job must still wait for every verdict phase, including both mode-dependent jobs',
+    'the qualified job must still wait for every verdict phase, including every mode-dependent job',
   )
   const verdictStep = job.steps.find(step => typeof step.run === 'string' && step.run.includes('ci-verdict.mjs qualify'))
   assert.ok(verdictStep, 'the qualified job must delegate its verdict to ci-verdict')
@@ -367,7 +378,7 @@ test('the two mode-dependent jobs stay in the qualification verdict with their E
   assert.deepEqual(
     new Set(listed),
     new Set([...REQUIRED_PHASES, ...Object.keys(MODE_STATUS.npm)]),
-    'the verdict must be given every phase the script requires, including both mode-dependent jobs',
+    'the verdict must be given every phase the script requires, including every mode-dependent job',
   )
   assert.match(verdictStep.run, /--mode "\$DSH_MODE"/u)
   assert.match(verdictStep.env.DSH_MODE, /outputs\.mode/u,
