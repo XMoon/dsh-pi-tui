@@ -30,7 +30,9 @@
  * component lifetime, not "painted by the current frame", on purpose: evicting a
  * record while its component still emits that DCS would make the Screen treat a
  * raster as untrusted text, and the plan's two-method port has no channel to
- * invalidate the component. The honest consequence is that a transcript with more
+ * invalidate the component. A refusal is therefore TERMINAL for that request: only
+ * a change to the request's own facts (source, width, cell box, background, epoch)
+ * mints a new key and tries again. The honest consequence is that a transcript with more
  * expanded occurrences than the cap shows the over-budget ones as text, even when
  * they are off screen; releasing off-screen records needs a component-visible
  * invalidation channel and is recorded as a follow-up rather than guessed here.
@@ -774,25 +776,31 @@ class SixelImage implements Component {
       this.retire()
       return [this.options.fallback]
     }
-    const key = this.encodeKey(geometry, width)
+    const bounds = this.bounds(geometry, width)
+    const key = bounds.key
     if (this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines
-    const lines = this.paint(geometry, key)
+    const lines = this.paint(geometry, bounds)
     this.cachedLines = lines
     this.cachedWidth = width
     this.cachedKey = key
     return lines
   }
 
-  /** The exact facts one raster depends on; the frame cache and the occurrence
-   *  both key on it, so a stale composite can never be reused. */
-  private encodeKey(geometry: VerifiedGeometry, width: number): string {
+  /**
+   * The cell box this occurrence may use at `width`, plus the EXACT key every
+   * raster it produces depends on (source, width, cell box, background, epoch).
+   *
+   * One derivation feeds both the encoder request and the frame cache, so a stale
+   * composite can never be reused and the two can never drift apart.
+   */
+  private bounds(geometry: VerifiedGeometry, width: number): { width: number; maxColumns: number; maxRows: number; key: string } {
     const maxColumns = Math.max(1, Math.min(width - 2, this.options.maxWidthCells))
     const defaultMaxRows = Math.max(1, Math.ceil((maxColumns * geometry.cellWidthPx) / geometry.cellHeightPx))
     const maxRows = Math.max(
       1,
       Math.min(this.options.maxHeightCells ?? defaultMaxRows, this.owner.terminalRows),
     )
-    return [
+    const key = [
       this.source.identity,
       String(width),
       String(maxColumns),
@@ -802,6 +810,7 @@ class SixelImage implements Component {
       String(geometry.backgroundRgb),
       String(geometry.epoch),
     ].join('|')
+    return { width, maxColumns, maxRows, key }
   }
 
   /** Drop the cached frame but keep the raster: a repaint of the same
@@ -826,12 +835,11 @@ class SixelImage implements Component {
     this.cachedWidth = undefined
   }
 
-  private paint(geometry: VerifiedGeometry, key: string): string[] {
-    const [identity, rawWidth, rawColumns, rawRows] = key.split('|')
-    void identity
-    const width = Number(rawWidth)
-    const maxColumns = Number(rawColumns)
-    const maxRows = Number(rawRows)
+  private paint(
+    geometry: VerifiedGeometry,
+    bounds: { width: number; maxColumns: number; maxRows: number; key: string },
+  ): string[] {
+    const { width, maxColumns, maxRows, key } = bounds
     const entry = this.entry
     if (entry !== undefined && entry.key === key) return this.readyLines(entry.record)
     const occurrence = this.occurrence
@@ -918,10 +926,12 @@ class SixelImage implements Component {
         if (this.owner.ready?.epoch !== geometry.epoch) return
         const record = this.owner.admitFull(raster)
         if (record === undefined) {
-          // Every retained variant is on screen: this occurrence stays text rather
-          // than evicting a picture the current frame is painting, and the same
-          // request is not re-sent until the trust table changes.
-          this.rejected = { key, revision: this.owner.registryRevision, terminal: false }
+          // Every retained variant is in use. A refusal is TERMINAL for these facts:
+          // evicting a record a live component still renders would make the Screen
+          // treat that raster as text, and the port has no component-invalidation
+          // channel. Any real change (source, width, cell, background, epoch) mints a
+          // new key and tries again; the cached text frame is the intended result.
+          this.rejected = { key, revision: this.owner.registryRevision, terminal: true }
           return
         }
         const occurrence: Occurrence = {

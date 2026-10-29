@@ -47,7 +47,7 @@ const checks = []
  * and the child terminal is the scripted PTY below, not the developer's tty.
  */
 const AMBIENT_TERMINAL_ENV = [
-  'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'KITTY_WINDOW_ID', 'KITTY_PID',
+  'TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'KITTY_WINDOW_ID', 'KITTY_PID', 'WEZTERM_PANE',
   'ZELLIJ', 'ZELLIJ_PANE_ID', 'ZELLIJ_SESSION_NAME', '_ZL_MATCH_MODE',
   'TMUX', 'TMUX_PANE', 'STY',
   'TERN_ACP', 'TERN_BLOB_DIR', 'TERN_COMPLETE', 'TERN_IDENTITY', 'TERN_LENSES',

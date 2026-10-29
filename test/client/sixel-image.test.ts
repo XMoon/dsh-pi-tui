@@ -796,3 +796,29 @@ test('a same-width background change without an intermediate render never re-emi
   const [greenR, greenG] = pixelAt(decodeSixel(overGreen), 4, 4)
   assert.ok(greenG > 100 && greenR > 60, `composited over green, got ${greenR},${greenG}`)
 })
+
+test('an over-budget occurrence stays text until its own facts change (E2 P3)', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const images: PixelBody[] = []
+  for (let index = 0; index < SIXEL_REGISTRY_MAX_VARIANTS; index += 1) {
+    const distinct = await pngFromRgba(fill(40, 40, (x) => (x < 20 ? [255, 0, index * 4, 255] : [0, 0, 255, 255])), 40, 40)
+    images.push(harness.graphics.image({ pngBase64: distinct, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'fallback' }))
+  }
+  await waitUntil(() => {
+    for (const image of images) image.render(40)
+    return images.every(image => image.paintedBodyAt?.(40) !== undefined)
+  }, 'the registry to fill')
+
+  const extra = await pngFromRgba(fill(40, 40, () => [10, 200, 10, 255]), 40, 40)
+  const overBudget = harness.graphics.image({ pngBase64: extra, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'fallback' })
+  overBudget.render(40)
+  // reason: a NEGATIVE observation window — the refusal has no positive signal.
+  await new Promise(resolve => setTimeout(resolve, 300))
+  // A refusal while every retained variant is in use is terminal for these facts
+  // (the registry never evicts a record a live occurrence still renders).
+  for (let frame = 0; frame < 10; frame += 1) {
+    assert.deepEqual(overBudget.render(40), ['fallback'], 'the refused occurrence stays text')
+  }
+  assert.equal(overBudget.paintedBodyAt?.(40), undefined)
+})
