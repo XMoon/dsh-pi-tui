@@ -251,7 +251,8 @@ UI intent captures the OLD generation (scope)
   cancel was NOT ADDRESSED", never "there is no work to stop": a disconnected
   Connection generation, a replaced binding or a released owner reference
   leaves the old Host Turn unproven, and `whenIdleOrAbort` returning
-  `'unobservable'` for a rolled/released binding is not proof of idle —
+  `'unobservable'` for a rolled/released binding or a changed Connection
+  generation is not proof of idle —
   navigation never reaches that quiesce without a `committed` stop. Only
   `indeterminate` states that the old Turn may already have stopped. The phase
   distinction comes from `SessionOwnerRetirement.cancelForNavigation`, which

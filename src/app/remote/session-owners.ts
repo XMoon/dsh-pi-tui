@@ -78,6 +78,19 @@ export interface RemoteOwnerBindingFace {
  */
 export interface RemoteOwnerBindingSource {
   binding(id: string): RemoteOwnerBindingFace | undefined
+  /** Official `ISessions.retainInfo(id)`: a stable observable of the local
+   *  reference counts. A same-id binding replacement necessarily changes those
+   *  counts (the new retain and/or the old release), so it is the liveness
+   *  event that catches a rollover even when the OLD face emits no snapshot
+   *  change. Optional so a narrow test source can omit it; the production
+   *  `ISessions` always provides it. */
+  retainInfo?(id: string): RemoteRetainInfoSource
+}
+
+/** The official local-retain-count observable subset. */
+export interface RemoteRetainInfoSource {
+  getSnapshot(): { readonly referenceCount: number }
+  subscribe(listener: () => void): () => void
 }
 
 /** The registry record behind one opaque Remote owner. */
@@ -248,6 +261,11 @@ export function createRemoteSessionOwnerServices(
 
   const whenIdleOrAbort = (owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean | 'unobservable'> => {
     const record = recordOf(owner)
+    // Capture the EXACT Connection generation the wait (and the cancel that
+    // preceded it) belongs to: a later generation must not prove anything
+    // about this one.
+    const capturedGeneration = generation.getSnapshot()
+    if (capturedGeneration === undefined) return Promise.resolve('unobservable')
     // Borrow the live binding and fence it by exact identity: a replaced or
     // fully retired generation is not observable through the official borrow,
     // and the wait must never observe a NEW same-id generation instead.
@@ -257,28 +275,37 @@ export function createRemoteSessionOwnerServices(
       // its Host Turn is idle.
       return Promise.resolve('unobservable')
     }
+    const exactBindingCurrent = (): boolean =>
+      Object.is(source.binding(record.sessionId), record.bindingIdentity)
+      && Object.is(generation.getSnapshot(), capturedGeneration)
     const face = borrowed.session
-    if (!face.getSnapshot().running) return Promise.resolve(false)
+    if (!face.getSnapshot().running) return Promise.resolve(exactBindingCurrent() ? false : 'unobservable')
     if (signal.aborted) return Promise.resolve(true)
-    // The exact binding can be retired or replaced WHILE this wait is armed
-    // (the app owner is republished independently). The old face can then emit
-    // running=false as a teardown notification, which is NOT proof that the
-    // captured generation's Turn reached idle. Re-fence immediately before
-    // resolving the settled/not-aborted result.
-    const exactBindingCurrent = (): boolean => {
-      const current = source.binding(record.sessionId)
-      return current !== undefined && Object.is(current, record.bindingIdentity)
-    }
     return new Promise<boolean | 'unobservable'>(resolve => {
       let settled = false
       let unsubscribe: (() => void) | undefined
       let offAbort: (() => void) | undefined
+      let offGeneration: (() => void) | undefined
+      let offRetain: (() => void) | undefined
+      const retainInfo = source.retainInfo?.(record.sessionId)
       const settle = (result: boolean | 'unobservable'): void => {
         if (settled) return
         settled = true
         unsubscribe?.()
         offAbort?.()
+        offGeneration?.()
+        offRetain?.()
         resolve(result)
+      }
+      // A Connection-generation replacement, or a same-id binding rollover
+      // (observed through the local retain-count source), makes the exact
+      // generation unobservable IMMEDIATELY — the wait must not depend on the
+      // old face's next snapshot notification.
+      const onGeneration = (): void => {
+        if (!Object.is(generation.getSnapshot(), capturedGeneration)) settle('unobservable')
+      }
+      const onRetain = (): void => {
+        if (!exactBindingCurrent()) settle('unobservable')
       }
       const onSnapshot = (): void => {
         if (!face.getSnapshot().running) settle(exactBindingCurrent() ? false : 'unobservable')
@@ -286,9 +313,13 @@ export function createRemoteSessionOwnerServices(
       const onAbort = (): void => { settle(true) }
       // Arm the abort cleanup BEFORE subscribing: `subscribe` may invoke the
       // snapshot callback synchronously, and that settle must be able to
-      // remove the abort listener it is already responsible for.
+      // remove every listener it is already responsible for.
       signal.addEventListener('abort', onAbort, { once: true })
       offAbort = (): void => { signal.removeEventListener('abort', onAbort) }
+      offGeneration = generation.subscribe(onGeneration)
+      if (settled) offGeneration()
+      offRetain = retainInfo?.subscribe(onRetain)
+      if (settled) offRetain?.()
       unsubscribe = face.subscribe(onSnapshot)
       // A synchronous settle during `subscribe` could not remove the
       // subscription yet (the unsubscribe handle did not exist); remove it
@@ -296,7 +327,7 @@ export function createRemoteSessionOwnerServices(
       if (settled) unsubscribe()
       // Lost-wakeup fence: the running → idle transition may have happened
       // before this subscriber registered, so re-check the snapshot after
-      // subscribing — with the same exact-binding fence.
+      // subscribing — with the same exact-binding/generation fence.
       if (!face.getSnapshot().running) settle(exactBindingCurrent() ? false : 'unobservable')
       if (signal.aborted) settle(true)
     })

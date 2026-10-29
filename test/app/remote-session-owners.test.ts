@@ -155,9 +155,29 @@ function harness() {
     }
   }
 
+  /** Model `ISessions.retainInfo(id)`: the stable local-reference observable
+   *  that wakes a wait when a same-id generation is retained/released. */
+  const retainInfos = new Map<string, { count: number; listeners: Set<() => void> }>()
+  const retainInfoOf = (id: string): { count: number; listeners: Set<() => void> } => {
+    const existing = retainInfos.get(id)
+    if (existing !== undefined) return existing
+    const created = { count: 0, listeners: new Set<() => void>() }
+    retainInfos.set(id, created)
+    return created
+  }
   /** Model `ISessions.binding(id)`: the official borrow of a retained generation. */
   const bindingSource = {
     binding: (id: string): RemoteOwnerBindingFace | undefined => live.get(id)?.binding,
+    retainInfo: (id: string): { getSnapshot(): { referenceCount: number }; subscribe(fn: () => void): () => void } => {
+      const entry = retainInfoOf(id)
+      return {
+        getSnapshot: () => ({ referenceCount: entry.count }),
+        subscribe: (fn) => {
+          entry.listeners.add(fn)
+          return () => { entry.listeners.delete(fn) }
+        },
+      }
+    },
   }
   const generation = generationHarness()
 
@@ -174,6 +194,11 @@ function harness() {
     ownerOf,
     retain,
     generation,
+    notifyRetainInfo: (id: string, referenceCount: number): void => {
+      const entry = retainInfoOf(id)
+      entry.count = referenceCount
+      for (const fn of [...entry.listeners]) fn()
+    },
     bindingOf: (id: string): HarnessBinding | undefined => live.get(id)?.binding,
     isLive: (id: string): boolean => live.has(id),
     handleOf: (sessionId: string, client?: ClientSessionOwner): SessionHandle => ({
@@ -669,5 +694,50 @@ test('whenIdleOrAbort reports unobservable when the exact binding rolls over DUR
   await pending
   assert.equal(settled, 'unobservable',
     'a mid-wait rollover must not be reported as an observed idle settle')
+  void replacement
+})
+
+test('whenIdleOrAbort reports unobservable when the Connection generation changes DURING the wait', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  binding.setRunning(true)
+  const signal = fakeSignal()
+  let settled: boolean | 'unobservable' | undefined
+  const pending = h.services.retirement.whenIdleOrAbort(owner, signal).then(result => { settled = result })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, undefined, 'the running exact generation must not settle early')
+  // A reconnect replaces the Connection generation while the old binding
+  // object is STILL retained: the old running snapshot cannot prove this
+  // generation is idle.
+  h.generation.set({ id: 2 })
+  await pending
+  assert.equal(settled, 'unobservable',
+    'a generation change during the wait is not an observed idle settle')
+  assert.equal(binding.cancelCalls(), 0, 'the quiesce wait never cancels')
+})
+
+test('whenIdleOrAbort reports unobservable when the binding is replaced with NO old-face notification', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  binding.setRunning(true)
+  const signal = fakeSignal()
+  let settled: boolean | 'unobservable' | undefined
+  const pending = h.services.retirement.whenIdleOrAbort(owner, signal).then(result => { settled = result })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, undefined)
+  // Retire the exact generation and retain a same-id replacement. The OLD
+  // face deliberately emits NOTHING; only the local retain-count observable
+  // wakes the wait.
+  await h.services.retirement.retire(owner, 'transition')
+  const replacement = retainedHandle(h, 'session-a')
+  h.notifyRetainInfo('session-a', 2)
+  await pending
+  assert.equal(settled, 'unobservable',
+    'a silent binding replacement must be detected through the retain-count liveness, never an old-face notification')
+  assert.equal(binding.session.getSnapshot().running, true, 'the old face never emitted running=false')
   void replacement
 })
