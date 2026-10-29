@@ -4712,6 +4712,39 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 			}
 		});
 
+		it("never indexes a trusted DCS, so a command substring finds nothing", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(60, 6);
+				const port = new RecordingSixelPort();
+				const dcs = port.register(raster("SEARCH"), { columns: 4, rows: 1 });
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				tui.addChild({ render: () => ["needle above", dcs, "needle below"], invalidate: () => {} });
+				tui.start();
+				await terminal.waitForRender();
+
+				// Positive control: the visible text is searchable.
+				terminal.sendInput("\x1b[102;6u");
+				terminal.sendInput("needle");
+				await terminal.waitForRender();
+				assert.ok(terminal.getViewport().some((line) => line.includes("1/2")), "the visible text is indexed");
+
+				// A DCS substring must NOT match: `ESC P` is not a recognized ANSI
+				// sequence, so the raw bytes would otherwise be in the corpus.
+				terminal.sendInput("\x1b[102;6u");
+				terminal.sendInput("80;36");
+				await terminal.waitForRender();
+				const viewport = terminal.getViewport();
+				assert.ok(!viewport.some((line) => /\d+\/\d+/.test(line)), `no match counter for a command substring: ${JSON.stringify(viewport)}`);
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
 		it("never replays a SIXEL DCS into the main screen's restored document", async () => {
 			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 			try {

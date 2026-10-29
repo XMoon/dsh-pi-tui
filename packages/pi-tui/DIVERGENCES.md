@@ -6226,6 +6226,7 @@ A SIXEL block is ONE command whose pixels cover every row of its footprint. TuiM
 
 - packages/pi-tui/test/tui-sixel-main.test.ts: X073 - the first frame reserves the whole block and writes ONE DCS wrapped in DECSC/DECRC; a replaced block clears every old footprint row and repaints no raster; the frame that makes a raster ready writes the trailing text change BEFORE the raster and nothing clears a covered row afterwards; a text-only frame emits no SIXEL control; an overlay over any block row withholds it and the block returns when the overlay is gone; a width change keeps the `2J`+`H`+`3J` contract.
 - packages/pi-tui/test/tui-render.test.ts, tui-render-cache.test.ts and the rest of the fork suite: the unchanged upstream cases stay green without a port.
+- packages/pi-tui/test/tui-sixel-main.test.ts: X073 three-frame case — a diff frame that paints a raster keeps the EXACT per-line footprint cache (the old-block expansion after a later frame cannot fall back to the blank-body scan), and the frame that replaces the block clears all three old rows.
 
 #### Upstream comparison
 
@@ -6314,6 +6315,7 @@ The alternate screen's layout engine paints into a clipped viewport and its own 
 - packages/pi-tui/test/layout.test.ts: X074 - a bottom-clipped anchor requests cropTopRows=0 with the visible row count and paints the ready variant instead of the full command; an unready variant leaves the row empty; a top-scrolled anchor requests its real top crop and is painted on the first visible row; a horizontally offset box schedules no crop and drops the command; a visible scrollbar yields the anchor row and still paints its glyph.
 - packages/pi-tui/test/tui-alt-screen.test.ts: X074 - every text row is written before the ONE raster; retiring a block clears the old footprint and leaves no ghost row; an overlay over the block withholds it and the block returns afterwards; the alt screen's exit projection never replays a DCS into the main screen.
 - packages/pi-tui/test/tui-alt-screen.test.ts and layout.test.ts upstream groups: the Kitty crop, virtual-placement and iTerm2 cases stay green without a port.
+- packages/pi-tui/test/tui-alt-screen.test.ts: X074 review-round guards — a DCS wider than the terminal keeps its ST through the width clamp; the jump-to-end indicator yields an anchor row instead of splicing it; a press-drag selection across a block never rewrites the anchor row and never copies it; and the search INDEX never contains a trusted DCS, so a command substring finds nothing (the row is kept empty to preserve every other row's index).
 
 #### Upstream comparison
 
