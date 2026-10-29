@@ -96,7 +96,7 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
    * The Agent OBJECT is the address, never a session-id re-resolution, so a
    * same-id generation rollover can never receive this owner's interrupt.
    */
-  const cancelExactOwner = async (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> => {
+  const cancel = async (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> => {
     const record = attachmentOf(owner)
     if (record === undefined) {
       // A Remote generation reaching the Direct port is a composition defect:
@@ -292,12 +292,7 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
 
   return {
     whenIdleOrAbort,
-    cancel: cancelExactOwner,
-    // Direct `Agent.cancel` is synchronous and addressed by the Agent OBJECT:
-    // every settlement is already either a local pre-dispatch refusal or a
-    // proven-accepted/unknown synchronous call, so the navigation audience
-    // shares the exact same implementation.
-    cancelForNavigation: cancelExactOwner,
+    cancel,
     flush,
     preCancel,
     retire,

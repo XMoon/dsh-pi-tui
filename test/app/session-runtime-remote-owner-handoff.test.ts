@@ -148,6 +148,9 @@ function harness() {
   /** Every queue-recall settlement, with the transition state at settle time
    *  (the deferred-recall restoration must happen AFTER the gate cleared). */
   const recallSettlements: Array<{ committed: boolean; inTransition: boolean; gateBusy: boolean }> = []
+  /** A test probe run after each settlement — the place to model a pull-back
+   *  writer that finishes exactly at a transition boundary. */
+  let recallSettleObserver: ((entry: { committed: boolean; inTransition: boolean; gateBusy: boolean }) => void) | undefined
   const countingOwners = {
     owners: {
       ...services.owners,
@@ -228,12 +231,14 @@ function harness() {
     clearOpening: () => {},
     settlePendingQueueRecalls: (committed) => {
       events.push(`recalls:${committed}`)
-      recallSettlements.push({
+      const entry = {
         committed,
         inTransition: core.barrier.inTransition,
         gateBusy: core.gate.busy,
-      })
+      }
+      recallSettlements.push(entry)
       queueRecalls.settleQueueRecalls(committed)
+      recallSettleObserver?.(entry)
     },
     settleLocalSubmitAck: () => {},
     resetSubmitLatency: () => {},
@@ -363,6 +368,7 @@ function harness() {
     diagnostics,
     queueRecalls,
     recallSettlements,
+    setRecallSettleObserver: (observer: typeof recallSettleObserver): void => { recallSettleObserver = observer },
     setGeneration: (next: { id: number } | undefined): void => { generationState = next },
     sessionIdCallCount: (): number => sessionIdCalls,
     throwOnSessionIdCall: (call: number): void => { throwOnSessionIdCall = call },
@@ -818,7 +824,6 @@ test('a Direct-shaped owned fork handle adopts directly without any lifecycle op
     retirement: {
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
-      cancelForNavigation: async () => ({ kind: 'committed', value: undefined }),
       flush: async () => {},
       preCancel: () => {},
       retire: async () => ({ failures: [], durabilityFailure: undefined }),
@@ -917,8 +922,8 @@ test('a pre-publication commit throw releases the acquired NEW owner; OLD stays 
   const falseCount = h.events.filter(entry => entry === 'recalls:false').length
   assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 0,
     'neither failed transition committed the recalls')
-  assert.equal(falseCount, 3,
-    'each failure restored the recalls (transitionTo finally + the switch wrapper no-op + the direct transitionTo finally)')
+  assert.equal(falseCount, 4,
+    'each failure restored the recalls (transitionTo finally + the switch body finally + the navigation gate close + the DIRECT transitionTo finally)')
 })
 
 test('a pre-publication commit throw after the adoption open releases the retained child exactly once', async () => {
@@ -964,7 +969,6 @@ test('a Direct pre-publication commit throw releases the child once and never re
     retirement: {
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
-      cancelForNavigation: async () => ({ kind: 'committed', value: undefined }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -1082,7 +1086,6 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
     retirement: {
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
-      cancelForNavigation: async () => ({ kind: 'committed', value: undefined }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -1175,7 +1178,6 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
     retirement: {
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
-      cancelForNavigation: async () => ({ kind: 'committed', value: undefined }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -1649,15 +1651,15 @@ test('a refused navigation stop aborts withNavigation BEFORE its body (create is
   assert.equal(h.core.barrier.activeWriters, 0)
 })
 
-test('a DISPATCHED caller cancellation aborts navigation as indeterminate, never "nothing to stop"', async () => {
+test('a caller-cancelled cancel still aborts navigation: only a COMMITTED stop may proceed', async () => {
   const h = harness()
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const scope = scopeAuthority.captureLive()
   assert.ok(scope !== undefined)
   // The official call was dispatched, then its reply was a caller/carrier
-  // cancellation. That does NOT prove the Host left the old Turn running: the
-  // navigation must abort before opening the target, and must never retry.
+  // cancellation (PR-A's `cancelled`). The navigation must NOT read that as
+  // permission to switch: only a committed stop may enter quiesce/create.
   h.bindingOf('session-a')!.setCancelResult({
     ok: false,
     error: { code: 'gateway/cancelled', message: 'carrier cancelled the reply' },
@@ -1666,29 +1668,57 @@ test('a DISPATCHED caller cancellation aborts navigation as indeterminate, never
   assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
   assert.deepEqual(h.calls.opens, [], 'the target is never opened')
   assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'the dispatched cancel is never replayed')
-  assert.match(String(message), /unconfirmed result/)
-  assert.match(String(message), /the current turn may already have stopped/)
+  assert.match(String(message), /the current turn could not be stopped/)
+  assert.match(String(message), /not been proven stopped/)
+  assert.doesNotMatch(String(message), /may already have stopped/,
+    'only the dispatched-UNPROVEN `indeterminate` settlement may say the turn may have stopped')
 })
 
-test('an UNADDRESSABLE exact generation aborts navigation as unproven, never a silent switch', async () => {
+test('an UNADDRESSABLE exact generation aborts navigation: cancelled is NOT permission to switch', async () => {
   const h = harness()
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const scope = scopeAuthority.captureLive()
   assert.ok(scope !== undefined)
   // A disconnected Connection generation: the official cancel can never be
-  // dispatched, but that does NOT prove the Host has no running work for the
-  // exact generation (`whenIdleOrAbort` reads the retained binding's running
-  // state, not the generation). Navigation must fail closed, never switch
-  // behind a possibly running old Turn.
+  // dispatched (PR-A's `cancelled`), but that does NOT prove the Host has no
+  // running work for the exact generation. Navigation keeps the PR-A
+  // classification (no fake `indeterminate`) and aborts before any open.
   const oldBinding = h.bindingOf('session-a')!
   h.setGeneration(undefined)
   const message = await h.runtime.switchSession('session-b', scope)
-  assert.match(String(message), /unconfirmed result/)
-  assert.match(String(message), /the current turn may already have stopped/)
+  assert.match(String(message), /the current turn could not be stopped/)
+  assert.match(String(message), /not been proven stopped/)
+  assert.doesNotMatch(String(message), /may already have stopped/)
   assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
   assert.deepEqual(h.calls.opens, [], 'the target is never opened')
   assert.equal(oldBinding.cancelCalls(), 0, 'no cancel was dispatched on the disconnected generation')
+})
+
+test('a RELEASED exact owner reference aborts navigation: cancelled is not permission to switch', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  const owner = h.core.owner()
+  assert.ok(owner !== undefined)
+  const oldBinding = h.bindingOf('session-a')!
+  // The exact owner reference was released while the app-level subject still
+  // reports it as current (the adapter's pre-dispatch `cancelled` family), and
+  // the same Session id is re-materialized as a NEW binding generation.
+  await h.services.retirement.retire(owner, 'transition')
+  const replacement = h.retain('session-a')
+  const replacementBinding = h.bindingOf('session-a')!
+  const message = await h.runtime.switchSession('session-b', scope)
+  assert.match(String(message), /the current turn could not be stopped/)
+  assert.match(String(message), /not been proven stopped/)
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
+  assert.deepEqual(h.calls.opens, [], 'the target is never opened')
+  assert.equal(oldBinding.cancelCalls(), 0, 'no official cancel was dispatched')
+  assert.equal(replacementBinding.cancelCalls(), 0,
+    'the replaced same-id generation never receives the old owner cancel')
+  replacement.release()
 })
 
 test('a failed navigation stop restores the deferred queue recall AFTER the gate clears (no leak into a later transition)', async () => {
@@ -1734,7 +1764,7 @@ test('a failed navigation stop restores the deferred queue recall AFTER the gate
   // The successful navigation's own ledger is empty: its commit settles `true`
   // and its body/gate settles are no-ops. The failed admission's restore stays
   // the FIRST and only aborted settlement.
-  assert.deepEqual(h.recallSettlements.map(entry => entry.committed), [false, true, false])
+  assert.deepEqual(h.recallSettlements.map(entry => entry.committed), [false, true, false, false])
   assert.deepEqual(h.recallSettlements[0], { committed: false, inTransition: false, gateBusy: false })
 })
 
@@ -1752,9 +1782,11 @@ test('a scoped switch to the CURRENT session is a no-op: no stop, no open (seam 
   assert.equal(h.core.currentSessionId(), 'session-a')
   assert.equal(binding.cancelCalls(), 0, 'a no-op switch must not stop the current owner turn')
   assert.deepEqual(h.calls.opens, [], 'a no-op switch must not reopen the current Session')
-  assert.equal(h.recallSettlements.length, 1, 'the no-op gesture still settles its recall fence')
+  assert.equal(h.recallSettlements.length, 2, 'the no-op gesture still settles its recall fence (in-task and at gate close)')
   assert.deepEqual(h.recallSettlements[0], { committed: false, inTransition: false, gateBusy: true },
-    'the no-op settles INSIDE its gate task (no freeze, no body), so the gesture fence is released there')
+    'the no-op settles INSIDE its gate task (no freeze, no body)')
+  assert.deepEqual(h.recallSettlements[1], { committed: false, inTransition: false, gateBusy: false },
+    'the navigation gate close runs after the task cleared and before any next task')
 })
 
 test('a failed admission aborts its deferred recall BEFORE the queued next navigation starts', async () => {
@@ -1804,4 +1836,41 @@ test('a failed admission aborts its deferred recall BEFORE the queued next navig
   assert.equal(h.recallSettlements[0]!.inTransition, false)
   assert.equal(h.recallSettlements.filter(entry => entry.committed).length, 1,
     'the second navigation commits only its own (already empty) ledger')
+})
+
+test('a recall deferred at a boundary is settled by the QUEUED stale navigation, never leaked', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scopeA = scopeAuthority.captureLive()
+  assert.ok(scopeA !== undefined)
+  const binding = h.bindingOf('session-a')!
+  // The first navigation commits B (with one keepInbox stop); the second scoped
+  // intent was captured while A was current and is STALE by the time its gate
+  // turn comes, so it returns silently without a body.
+  const first = h.runtime.switchSession('session-b', scopeA)
+  const second = h.runtime.switchSession('session-c', scopeA)
+  assert.equal(h.core.gate.pending, true, 'the second intent is queued behind the first')
+  const recallLog: string[] = []
+  let injected = false
+  // Model the production late writer: `isTransitionPending` is
+  // `gate.pending || barrier.inTransition`, so a pull-back finishing exactly
+  // after the FIRST navigation's gate close (and while the stale second is
+  // queued) still defers. The observer fires on that first close.
+  h.setRecallSettleObserver(entry => {
+    if (injected || entry.committed || entry.inTransition || entry.gateBusy) return
+    injected = true
+    h.queueRecalls.deferQueueRecall({
+      commit: () => recallLog.push('commit'),
+      abort: () => recallLog.push('abort'),
+    })
+  })
+  assert.equal(await first, undefined)
+  assert.equal(await second, undefined, 'the stale scoped intent is refused silently')
+  assert.equal(h.core.currentSessionId(), 'session-b')
+  assert.deepEqual(h.calls.opens, ['session-b'], 'the stale intent never opens its target')
+  assert.equal(injected, true, 'the boundary deferral was actually injected')
+  assert.deepEqual(recallLog, ['abort'],
+    'the queued stale navigation still closed the deferred-recall window instead of leaking it')
+  assert.equal(binding.cancelCalls(), 1, 'only the first navigation stopped the old owner')
 })

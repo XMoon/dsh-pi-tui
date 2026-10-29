@@ -44,14 +44,20 @@ export type TransitionOutcome<T> =
 
 /**
  * Why the one-shot navigation stop of the captured OLD owner did not settle
- * `committed`. `stale` proves the captured owner/generation is no longer
- * current (another navigation already won) and the request never left the
- * TUI; `rejected` is a proven backend refusal; `indeterminate` dispatched but
- * cannot prove its effect, so the old Turn may already be stopped and must
- * never be retried automatically.
+ * `committed`. ONLY `committed` is permission to enter the quiesce/create
+ * phase; every settlement below aborts navigation before any child work.
+ *
+ * `stale` proves the captured owner/generation is no longer current (another
+ * navigation already won) and the request never left the TUI; `rejected` is a
+ * proven backend refusal; `cancelled` is the confirmed pre-dispatch family (the
+ * exact Remote generation could not be addressed, or the runner is exiting) —
+ * it says the cancel was NOT ADDRESSED, never that there is no old work to
+ * stop; `indeterminate` is a dispatched call whose effect cannot be proven. The
+ * old Turn may already have stopped only for `indeterminate`; nothing is ever
+ * retried automatically.
  */
 export interface NavigationStopFailure {
-  readonly settlement: 'stale' | 'rejected' | 'indeterminate'
+  readonly settlement: 'stale' | 'rejected' | 'cancelled' | 'indeterminate'
   /** The backend's own failure message (empty for `stale`). */
   readonly detail: string
 }
@@ -61,8 +67,9 @@ export interface NavigationStopFailure {
  * transition NEVER ran: no child was created and the old Session stays
  * current. A `stale` failure is a locally SUPERSEDED navigation (the surface
  * already moved) and settles silently; the other settlements are reported.
- * `mayHaveStoppedOldTurn` is true only for `indeterminate` — the cancel was
- * dispatched, so a later message must never claim the old Turn still runs.
+ * `mayHaveStoppedOldTurn` is true only for `indeterminate` (dispatched,
+ * unproven) — a `cancelled`/`rejected` stop proves the cancel did not produce a
+ * proven stop, not that the old Turn may have stopped.
  */
 export class SessionNavigationStopError extends Error {
   readonly settlement: NavigationStopFailure['settlement']
@@ -73,7 +80,9 @@ export class SessionNavigationStopError extends Error {
       ? `stopping the current turn has an unconfirmed result (${failure.detail}); the current turn may already have stopped`
       : failure.settlement === 'stale'
         ? 'the session changed before this navigation could start'
-        : `the current turn could not be stopped (${failure.detail})`)
+        : failure.settlement === 'cancelled'
+          ? 'the current turn could not be stopped (the cancel did not produce a proven stop); the old turn has not been proven stopped'
+          : `the current turn could not be stopped (${failure.detail})`)
     this.name = 'SessionNavigationStopError'
     this.settlement = failure.settlement
     this.mayHaveStoppedOldTurn = failure.settlement === 'indeterminate'

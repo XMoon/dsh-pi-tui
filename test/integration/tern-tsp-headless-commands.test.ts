@@ -15,6 +15,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { symbols } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
 import { SessionOperationBarrier } from '../../src/app/session/operation-barrier.ts'
@@ -1401,6 +1402,32 @@ test('a real ask_user_question tool call settles ASK_ABORTED on the /new navigat
     },
     officialServices: { askUserTool: true },
   })
+  // Observe the PRODUCTION user-questions service instance the tool actually
+  // calls. Unwrap the Cordis proxy, keep the real receiver and the original
+  // function identity, and forward every settlement unchanged (one call ⇒ one
+  // record): the test must assert the actual rejection code, not infer it from
+  // the withdrawn modal.
+  const questionsProxy = fixture.ctx.get('userQuestions') as unknown as {
+    ask(request: unknown): Promise<unknown>
+    readonly [symbols.original]?: unknown
+  }
+  const questions = (questionsProxy[symbols.original] ?? questionsProxy) as {
+    ask(request: unknown): Promise<unknown>
+  }
+  const originalAsk = questions.ask
+  const askFailures: Array<string | undefined> = []
+  questions.ask = function recordedAsk(this: unknown, request: unknown): Promise<unknown> {
+    return originalAsk.call(this, request).then(
+      value => value,
+      (error: unknown) => {
+        askFailures.push(typeof error === 'object' && error !== null
+          ? (error as { readonly code?: string }).code
+          : undefined)
+        throw error
+      },
+    )
+  }
+  life.defer(() => { questions.ask = originalAsk })
   try {
     await waitForInputDelivery(fixture.pane)
     // A real user turn: the model answers with the tool call, the Host executes
@@ -1450,6 +1477,8 @@ test('a real ask_user_question tool call settles ASK_ABORTED on the /new navigat
       return live.size
     }
     await waitFor('the replaced Question form left the seat', () => liveModalCount() === 0, 25_000)
+    assert.deepEqual(askFailures, ['ASK_ABORTED'],
+      'the REAL user-questions service rejected the tool request ONCE with the official abort code')
     const query = fixture.ctx.get('sessionQuery') as unknown as {
       observeSession(id: SessionId): Promise<{ events: readonly { type: string; data?: unknown }[] }>
     }

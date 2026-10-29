@@ -368,13 +368,16 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    *
    * - `stopped` (backend `committed`) — the backend accepted the stop, so the
    *   old Turn is stopped (a later failure must say it cannot be resumed);
-   * - `nothing` — either the request provably never left the TUI (the exact
-   *   owner/connection generation is already gone, or the runner is exiting),
-   *   or the surface is sessionless: there is no current work of this captured
-   *   generation left, so navigation may proceed;
-   * - `failed` — the stop did not happen (`rejected`) or cannot be proven
-   *   (`indeterminate`): navigation must NOT create/switch behind a possibly
-   *   running old Turn, and an indeterminate stop is never retried.
+   * - `nothing` — the surface is sessionless (there is no old owner to stop),
+   *   or the runner is exiting (the transition is moot);
+   * - `failed` — the stop did not happen or its state is unknown. ONLY a
+   *   `committed` cancellation is permission to enter the next phase: a
+   *   proven pre-dispatch refusal (`rejected`/`cancelled`) and an unproven
+   *   dispatched call (`indeterminate`) all abort navigation. A `cancelled`
+   *   result means the exact generation could not be addressed, NOT that the
+   *   Host has no running work; a Remote `whenIdleOrAbort` returning `false`
+   *   for an unobservable binding is likewise not proof of idle, and is never
+   *   reached on this path. An indeterminate stop is never retried.
    * A stale capture aborts FIRST: another navigation owns the surface, and
    * this intent must not stop the replacement's work.
    */
@@ -389,9 +392,17 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     }
     const owner = core.owner()
     if (owner === undefined) return { kind: 'nothing' }
-    const outcome = await deps.retirement.cancelForNavigation(owner)
+    const outcome = await deps.retirement.cancel(owner)
     if (outcome.kind === 'committed') return { kind: 'stopped' }
-    if (outcome.kind === 'cancelled') return { kind: 'nothing' }
+    if (outcome.kind === 'cancelled') {
+      return {
+        kind: 'failed',
+        failure: {
+          settlement: 'cancelled',
+          detail: 'the exact session generation could not be addressed for the cancel',
+        },
+      }
+    }
     if (outcome.kind === 'unsupported') {
       return { kind: 'failed', failure: { settlement: 'rejected', detail: outcome.reason } }
     }
@@ -416,25 +427,26 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     )
 
   /**
-   * Run one navigation task through the gate and close the deferred-queue-recall
-   * window if the ADMISSION (not the body) failed. A queue pull-back admitted
-   * before the freeze can finish during the stop, remove its occurrences and
-   * DEFER its local restore to the pending transition (`gate.busy` is true); the
-   * body's own settle would restore it, but a stop failure never runs the body.
+   * Run one navigation task through the gate and ALWAYS close the
+   * deferred-queue-recall window at its end. A queue pull-back admitted before
+   * the freeze can finish during the stop, remove its occurrences and DEFER its
+   * local restore to the pending transition — whose production predicate is
+   * `gate.pending || barrier.inTransition`, so a QUEUED later task also keeps it
+   * pending. The body's own settle restores it only when the body runs; a
+   * refused admission, a stale scoped recheck and a stop failure never reach
+   * that body.
    *
-   * The restore runs in the FIRST rejection reaction on the gate task. The gate
-   * registers its own `active=false` reaction when `run` is called, i.e. BEFORE
-   * this catch, and the next queued task starts from the tail THAT reaction
-   * resolves — so at this point the gate is no longer busy and the next task has
-   * NOT started yet. A writer completing later observes a non-busy gate and
-   * restores itself. Body failures keep their existing `transitionTo` finally
-   * settlement.
+   * The settle is registered DIRECTLY on the gate task promise. The gate's own
+   * `active=false` reaction was registered first, and the next queued task is
+   * chained on the tail that reaction resolves — so this runs after the gate
+   * cleared and BEFORE the next task starts. A writer that defers during this
+   * task (including one that observed the still-queued next task) is caught
+   * here; one that defers later is attributed to the NEXT navigation task, which
+   * closes its own window the same way. The commit/body settlements already
+   * performed make this a no-op on the ordinary success path.
    */
   const runNavigationGate = <T>(task: () => Promise<T> | T): Promise<T> =>
-    core.gate.run(task).catch((error: unknown): never => {
-      if (error instanceof SessionNavigationStopError) deps.surface.settlePendingQueueRecalls(false)
-      throw error
-    })
+    core.gate.run(task).finally(() => deps.surface.settlePendingQueueRecalls(false))
 
   /**
    * Run ONE user-navigation transaction through the gate + barrier. The stop

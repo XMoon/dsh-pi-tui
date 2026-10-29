@@ -62,19 +62,6 @@ export interface SessionOwnerRetirement {
    *  generation is `cancelled`, a proven refusal is `rejected`, and an
    *  unproven carrier failure is `indeterminate` (never retried). */
   cancel(owner: SessionOwnerRef): Promise<WriteOutcome<undefined>>
-  /**
-   * ONE-SHOT NAVIGATION stop of this EXACT owner's current work (a user
-   * leaving the Session through `/new` or a selected-session switch). It has
-   * the same exact-owner/one-shot contract as {@link cancel}, but a stricter
-   * failure rule: `cancelled` must mean the request PROVABLY never left the
-   * TUI (a locally superseded/gone generation, or an exiting runner). A
-   * dispatched call whose settlement is merely a caller/carrier cancellation
-   * is `indeterminate`, because the Host may have executed it — navigation
-   * must not create/switch behind a possibly running old Turn. The control
-   * `cancel` keeps the caller-cancellation settlement for the user Stop
-   * gesture; the two audiences deliberately differ.
-   */
-  cancelForNavigation(owner: SessionOwnerRef): Promise<WriteOutcome<undefined>>
   /** The final durable flush of the owner's session. */
   flush(owner: SessionOwnerRef): Promise<void>
   /** Synchronously cancel the owner's work BEFORE the surface is torn down. */

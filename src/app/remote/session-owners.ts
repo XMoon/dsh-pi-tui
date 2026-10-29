@@ -22,16 +22,15 @@
  * owner, so `flush`/`preCancel` are deliberate no-ops, `retire` releases the
  * exact Client reference exactly once, and `whenIdleOrAbort` observes the
  * official `SessionSnapshot.running` without ever cancelling the Host session.
- * The ONE Host mutation here is the one-shot cancel: the explicit user Stop
- * (`cancel`) AND a user navigation's old-owner stop (`cancelForNavigation`)
- * address the EXACT captured binding generation through the official
- * `SessionFace.cancel` verb; neither substitutes a same-id replacement nor
- * releases the Client reference. The Connection generation is captured before
- * dispatch and re-checked with the exact binding after the reply, so a
- * superseded reply is `indeterminate`, never the current generation's definite
- * result. The two audiences differ ONLY in a dispatched caller/carrier
- * cancellation: the control Stop keeps PR-A's `cancelled` settlement, while
- * navigation reports `indeterminate` because the Host may have executed it.
+ * The ONE Host mutation here is `cancel`: the explicit user Stop addresses the
+ * EXACT captured binding generation through the official `SessionFace.cancel`
+ * verb; it never substitutes a same-id replacement and never releases the
+ * Client reference. The Connection generation is captured before dispatch and
+ * re-checked with the exact binding after the reply, so a superseded reply is
+ * `indeterminate`, never the current generation's definite result. The same
+ * one-shot verb serves a user navigation's old-owner stop; the NAVIGATION layer
+ * decides that only a `committed` cancellation may enter the next phase (a
+ * `cancelled` pre-dispatch result is not permission to switch).
  *
  * Composition note: the Remote application runtime constructs this provider
  * ONCE over the official Client's sessions and Connection generation source.
@@ -174,37 +173,18 @@ export function createRemoteSessionOwnerServices(
    * for the current generation, and it is never retried. The Client reference
    * is never released by this operation.
    */
-  const cancelExactOwner = async (
-    owner: SessionOwnerRef,
-    audience: 'control' | 'navigation',
-  ): Promise<WriteOutcome<undefined>> => {
-    /** A local fence proved the exact call was never dispatched. For the
-     *  control (Esc) audience this is PR-A's `cancelled`; for navigation a
-     *  merely UNADDRESSABLE generation does not prove the Host has no work, so
-     *  it must stay unproven (never a silent "nothing to stop" switch). */
-    const notDispatched = (message: string): WriteOutcome<undefined> => audience === 'navigation'
-      ? {
-          kind: 'indeterminate',
-          error: { code: 'session/cancel-indeterminate', message },
-        }
-      : { kind: 'cancelled' }
+  const cancel = async (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> => {
     const record = recordOf(owner)
-    if (record.currentWrapper === undefined) {
-      return notDispatched('the session owner has no retained Client reference, so the Host cancel could not be addressed')
-    }
+    if (record.currentWrapper === undefined) return { kind: 'cancelled' }
     const capturedGeneration = generation.getSnapshot()
-    if (capturedGeneration === undefined) {
-      return notDispatched('the Connection generation is unavailable, so the Host cancel could not be addressed')
-    }
+    if (capturedGeneration === undefined) return { kind: 'cancelled' }
     const borrowed = source.binding(record.sessionId)
     if (borrowed === undefined || !Object.is(borrowed, record.bindingIdentity)) {
-      return notDispatched('the exact Session binding is no longer observable, so the Host cancel could not be addressed')
+      return { kind: 'cancelled' }
     }
     // The borrow and the generation re-read are synchronous; a replacement
     // observed here proves the official call was never dispatched.
-    if (!Object.is(capturedGeneration, generation.getSnapshot())) {
-      return notDispatched('the Connection generation changed before dispatch, so the Host cancel could not be addressed')
-    }
+    if (!Object.is(capturedGeneration, generation.getSnapshot())) return { kind: 'cancelled' }
     const result = await borrowed.session.cancel()
     // Post-dispatch identity fence (host-client.md: every Remote async result
     // is generation-bound; a superseded reply is never the current
@@ -224,33 +204,8 @@ export function createRemoteSessionOwnerServices(
       }
     }
     if (result.ok) return { kind: 'committed', value: undefined }
-    const failure = classifyRemoteWriteFailure(result.error)
-    if (failure.kind === 'cancelled' && audience === 'navigation') {
-      // The official call WAS dispatched: a caller/carrier cancellation of its
-      // reply does not prove the Host did not execute it. The navigation
-      // audience must not treat this as "nothing to stop"; the control (Esc)
-      // audience keeps its own PR-A settlement.
-      return {
-        kind: 'indeterminate',
-        error: {
-          code: 'session/cancel-indeterminate',
-          message: 'the Host session cancel was dispatched but its acceptance was not proven',
-        },
-      }
-    }
-    return failure
+    return classifyRemoteWriteFailure(result.error)
   }
-
-  /** The ONE-SHOT control cancel (Busy Esc / Stop): PR-A's settlement, where
-   *  an official caller cancellation stays `cancelled`. */
-  const cancel = (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> =>
-    cancelExactOwner(owner, 'control')
-
-  /** The navigation audience: BOTH a dispatched caller/carrier cancellation and
-   *  an unaddressable exact generation are `indeterminate`, never "provably
-   *  nothing to stop". */
-  const cancelForNavigation = (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> =>
-    cancelExactOwner(owner, 'navigation')
 
   const whenIdleOrAbort = (owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean> => {
     const record = recordOf(owner)
@@ -354,7 +309,6 @@ export function createRemoteSessionOwnerServices(
     retirement: {
       whenIdleOrAbort,
       cancel,
-      cancelForNavigation,
       // Host-owned durability: rc.2 has no Client flush verb.
       flush: async (): Promise<void> => {},
       // Synchronous by contract; the real Remote cancel is this adapter's
