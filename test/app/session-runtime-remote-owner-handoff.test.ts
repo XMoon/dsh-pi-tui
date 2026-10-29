@@ -824,6 +824,7 @@ test('a Direct-shaped owned fork handle adopts directly without any lifecycle op
     retirement: {
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
+      cancelForNavigation: async () => ({ kind: 'committed' as const }),
       flush: async () => {},
       preCancel: () => {},
       retire: async () => ({ failures: [], durabilityFailure: undefined }),
@@ -969,6 +970,7 @@ test('a Direct pre-publication commit throw releases the child once and never re
     retirement: {
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
+      cancelForNavigation: async () => ({ kind: 'committed' as const }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -1086,6 +1088,7 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
     retirement: {
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
+      cancelForNavigation: async () => ({ kind: 'committed' as const }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -1178,6 +1181,7 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
     retirement: {
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
+      cancelForNavigation: async () => ({ kind: 'committed' as const }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -1668,10 +1672,9 @@ test('a caller-cancelled cancel still aborts navigation: only a COMMITTED stop m
   assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
   assert.deepEqual(h.calls.opens, [], 'the target is never opened')
   assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'the dispatched cancel is never replayed')
-  assert.match(String(message), /the current turn could not be stopped/)
-  assert.match(String(message), /not been proven stopped/)
-  assert.doesNotMatch(String(message), /may already have stopped/,
-    'only the dispatched-UNPROVEN `indeterminate` settlement may say the turn may have stopped')
+  assert.match(String(message), /unconfirmed result/)
+  assert.match(String(message), /the current turn may already have stopped/,
+    'a DISPATCHED caller cancellation is the dispatched-unproven settlement for navigation')
 })
 
 test('an UNADDRESSABLE exact generation aborts navigation: cancelled is NOT permission to switch', async () => {

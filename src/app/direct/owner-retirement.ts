@@ -22,7 +22,11 @@ import {
   type RetirementReport,
 } from '../../runtime/direct/owned-session-retirement.ts'
 import type { SessionOwnerRef } from '../session/subject.ts'
-import type { SessionOwnerRetirement, SessionRetirementReport } from '../session/owner-access.ts'
+import type {
+  NavigationCancelSettlement,
+  SessionOwnerRetirement,
+  SessionRetirementReport,
+} from '../session/owner-access.ts'
 import type { DirectOwnerRegistry } from './owner-registry.ts'
 
 /** The Direct boundary facts the retirement needs. */
@@ -126,6 +130,23 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
       }
     }
     return { kind: 'committed', value: undefined }
+  }
+
+  /**
+   * The navigation audience of the SAME one-shot cancel. Direct's settlement is
+   * already phase-exact: a `cancelled` is only the local pre-dispatch refusal
+   * (an exiting runner), a synchronous throw is dispatched-unproven, and a
+   * proven refusal stays rejected.
+   */
+  const cancelForNavigation = async (owner: SessionOwnerRef): Promise<NavigationCancelSettlement> => {
+    const outcome = await cancel(owner)
+    switch (outcome.kind) {
+      case 'committed': return { kind: 'committed' }
+      case 'rejected': return { kind: 'rejected', detail: outcome.error.message }
+      case 'unsupported': return { kind: 'rejected', detail: outcome.reason }
+      case 'cancelled': return { kind: 'cancelled' }
+      case 'indeterminate': return { kind: 'indeterminate', detail: outcome.error.message }
+    }
   }
 
   const preCancel = (owner: SessionOwnerRef): void => {
@@ -293,6 +314,7 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
   return {
     whenIdleOrAbort,
     cancel,
+    cancelForNavigation,
     flush,
     preCancel,
     retire,

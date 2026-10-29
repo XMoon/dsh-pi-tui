@@ -243,21 +243,21 @@ UI intent captures the OLD generation (scope)
   later selection keeps its own FIFO intent instead of inheriting an older
   generation.
 - ONLY a `committed` cancellation is permission to enter the next phase.
-  `rejected` (a proven refusal), `indeterminate` (dispatched, effect unproven)
-  and `cancelled` (the exact generation could not be addressed, so the request
-  provably never left the TUI) all abort BEFORE the drain and before any child
-  work: the current Session stays live, nothing is created/opened and nothing is
-  retried. `cancelled` means "the Host cancel was NOT ADDRESSED", never "there
-  is no work to stop": a disconnected Connection generation, a replaced binding
-  or a released owner reference leaves the old Host Turn unproven, and
-  `whenIdleOrAbort` observing nothing (or returning `false`) for an unobservable
-  binding is not proof of idle — navigation never reaches that quiesce without a
-  `committed` stop. Only `indeterminate` states that the old Turn may already
-  have stopped. The Remote adapter keeps PR-A's one-shot cancel taxonomy
-  (`cancelled` for a pre-dispatch refusal, `indeterminate` for a superseded /
-  caller-cancelled dispatched reply, `rejected` for a proven business refusal);
-  the navigation LAYER, not the port, decides that a non-committed result
-  cannot proceed.
+  `rejected` (a proven refusal), `cancelled` (confirmed pre-dispatch: the exact
+  generation could not be addressed, or the runner is exiting) and
+  `indeterminate` (the call WAS dispatched but its effect is unproven) all abort
+  BEFORE the drain and before any child work: the current Session stays live,
+  nothing is created/opened and nothing is retried. `cancelled` means "the Host
+  cancel was NOT ADDRESSED", never "there is no work to stop": a disconnected
+  Connection generation, a replaced binding or a released owner reference
+  leaves the old Host Turn unproven, and `whenIdleOrAbort` observing nothing (or
+  returning `false`) for an unobservable binding is not proof of idle —
+  navigation never reaches that quiesce without a `committed` stop. Only
+  `indeterminate` states that the old Turn may already have stopped. The phase
+  distinction comes from `SessionOwnerRetirement.cancelForNavigation`, which
+  leaves the control `cancel` taxonomy untouched: the control Stop still
+  reports a dispatched caller/carrier cancellation as `cancelled`, while
+  navigation resolves that same reply as dispatched-unproven.
 - Cancellation is never rolled back. Every failure AFTER an accepted stop says
   that the old Turn is already stopped and cannot be resumed; a failure before
   it (a stale capture) owns no message.
