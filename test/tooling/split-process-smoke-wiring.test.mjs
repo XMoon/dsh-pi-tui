@@ -67,7 +67,7 @@ test('a stale or unrelated record cannot satisfy a new status request id', () =>
 
 test('the upgraded smoke carries every B1 gate and the critical negative controls', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19']) {
+  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20']) {
     assert.match(source, new RegExp(`\\b${gate}\\b`, 'u'), `missing ${gate}`)
   }
   for (const marker of [
@@ -81,6 +81,7 @@ test('the upgraded smoke carries every B1 gate and the critical negative control
     'SPLIT_PROCESS_SMOKE_FAIL_AFTER',
     'SPLIT_PROCESS_HOST_PUBLISH_BARRIER',
     'SPLIT_PROCESS_HOST_STOP_BARRIER',
+    'SPLIT_PROCESS_HOST_FORCE_EARLY_EXIT',
     'stop-repeat-ignored',
     'FAILPOINT_CLEANUP_OK',
     't14-startup-fatal',
