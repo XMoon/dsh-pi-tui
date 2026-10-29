@@ -1513,8 +1513,12 @@ async function mountPreparingHarness(): Promise<PreparingHarness> {
 
   let mountedRenderer: TspRenderer | undefined
   const renderer: SurfaceRendererMount = {
-    mount: (binding) => {
+    mount: (binding, statusReader) => {
       mountedRenderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
+      // TSP-7 PR-A: the status reader is bound BEFORE the image binding, like
+      // the production mount — a renderer that fails its image bind still
+      // releases through the existing path.
+      mountedRenderer.bindStatusReader(statusReader)
       // PR-C: the mount hands the renderer the ONE image binding of this
       // surface — the fake mount installs it, it never fakes success.
       mountedRenderer.bindImages(binding)

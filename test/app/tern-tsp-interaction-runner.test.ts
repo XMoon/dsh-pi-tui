@@ -392,8 +392,11 @@ async function mountRunnerHarness(options: {
     return opened
   }
   const renderer: SurfaceRendererMount = {
-    mount: (binding) => {
+    mount: (binding, statusReader) => {
       mountedRenderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => { exitCount += 1 } })
+      // TSP-7 PR-A: bind the read-only status reader exactly as the production
+      // mount does (the renderer samples it only at a formal display commit).
+      mountedRenderer.bindStatusReader(statusReader)
       // PR-C: the mount hands the renderer the ONE image binding of this
       // surface — the fake mount installs it, it never fakes success.
       mountedRenderer.bindImages(binding)

@@ -420,17 +420,23 @@ async function mountTspSurface(
     },
   })
   const rendererMount: SurfaceRendererMount = {
-    mount: () => ({
-      display: renderer.display,
-      taskPresentation: renderer.taskPresentation,
-      composer: renderer.composer,
-      modelPresentation: renderer.modelPresentation,
-      presetPresentation: renderer.presetPresentation,
-      sessionBrowserPresentation: renderer.sessionBrowserPresentation,
-      interaction: renderer.interaction,
-      bindInput: handlers => renderer.bindInput(handlers),
-      dispose: () => renderer.dispose(),
-    }),
+    mount: (binding, statusReader) => {
+      // TSP-7 PR-A: this mount drives a REAL TSP renderer, so it installs the
+      // read-only status reader and the image binding exactly as production.
+      renderer.bindStatusReader(statusReader)
+      renderer.bindImages(binding)
+      return {
+        display: renderer.display,
+        taskPresentation: renderer.taskPresentation,
+        composer: renderer.composer,
+        modelPresentation: renderer.modelPresentation,
+        presetPresentation: renderer.presetPresentation,
+        sessionBrowserPresentation: renderer.sessionBrowserPresentation,
+        interaction: renderer.interaction,
+        bindInput: handlers => renderer.bindInput(handlers),
+        dispose: () => renderer.dispose(),
+      }
+    },
     releaseUnmounted: () => renderer.dispose(),
   }
   const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })

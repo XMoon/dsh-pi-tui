@@ -127,7 +127,7 @@ import { SvgRasterLoader } from '../../client/media/svg/raster-loader.ts'
 import { isolatedSvgRasterSupported, rasterizeSvg } from '../../client/media/svg/rasterize.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { StatusStore } from '../../domain/status/store.ts'
-import type { StatusPatch } from '../../domain/status/types.ts'
+import type { StatusPatch, StatusSnapshotReader } from '../../domain/status/types.ts'
 import { initialStatusSnapshot } from '../../domain/status/snapshot.ts'
 import { assistantPresentationRevision, assistantStepOf, type TranscriptFolder } from '../../domain/transcript/folder.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
@@ -353,8 +353,12 @@ export interface SurfaceRendererMount {
    * renderer's first projection, so the renderer can present a durable image
    * attachment through the SAME loader and scope authority the PiTui branch
    * uses. A renderer that ignores the binding has no image capability.
+   *
+   * TSP-7 PR-A: `statusReader` is the read-only projection of the ONE store
+   * this surface created at `createSurfaceRuntime` — never the store itself, so
+   * no renderer gains an update/subscribe capability of its own.
    */
-  mount(binding: SurfaceImageBinding): {
+  mount(binding: SurfaceImageBinding, statusReader: StatusSnapshotReader): {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
     /**
@@ -2366,7 +2370,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // store: the draft lifecycle stays with the application owner.
         const preview = deps.draftImagePreviewSource
         const draftImages = createSurfaceDraftImageProjection(() => composerPort, preview)
-        const mounted = deps.renderer.mount({ imageLoader, imageScope: deps.imageScope, draftImages })
+        // TSP-7 PR-A: the mount receives the READ-ONLY projection of the ONE
+        // store (`status`), never the store itself — the surface stays the sole
+        // writer and the renderer can only sample an already-committed snapshot.
+        const mounted = deps.renderer.mount(
+          { imageLoader, imageScope: deps.imageScope, draftImages },
+          { snapshot: () => status.snapshot() },
+        )
         display = mounted.display
         taskPresentation = mounted.taskPresentation
         composerPort = mounted.composer

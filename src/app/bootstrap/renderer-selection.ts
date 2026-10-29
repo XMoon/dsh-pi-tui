@@ -10,6 +10,7 @@
  * @module @xmoon76/dsh-pi-tui/app/bootstrap/renderer-selection
  */
 
+import type { StatusSnapshotReader } from '../../domain/status/types.ts'
 import type { SurfaceRendererMount } from '../surface/runtime.ts'
 
 /** What the selection needs from the composition root. */
@@ -47,6 +48,13 @@ export interface RendererSelectionDeps {
      * the renderer needs it before its first tool projection.
      */
     readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
+    /**
+     * TSP-7 PR-A: install the read-only status reader ONCE, before the first
+     * image binding. It carries presentation capability only — no render, no
+     * store subscription, no business write — so a later `bindImages` failure
+     * still leaves the existing acquired-session release path intact.
+     */
+    readonly bindStatusReader: (reader: StatusSnapshotReader) => void
     readonly dispose: () => Promise<void>
   } | undefined>
   /** The environment read (production: `process.env`). */
@@ -73,7 +81,11 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
     // the mount — before the surface's first transcript projection. The
     // renderer keeps the ONE loader of this mount; the wrapper never builds
     // a second one.
-    mount: (binding) => {
+    // TSP-7 PR-A: the status reader is installed FIRST and synchronously — a
+    // renderer that later fails its image binding still releases through the
+    // existing acquired-session path, and no status subscription is created.
+    mount: (binding, statusReader) => {
+      tsp.bindStatusReader(statusReader)
       tsp.bindImages(binding)
       return {
         display: tsp.display,
@@ -135,6 +147,7 @@ export function productionTspConnector(
   readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
   readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
   readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
+  readonly bindStatusReader: (reader: StatusSnapshotReader) => void
   readonly dispose: () => Promise<void>
 } | undefined> {
   return async () => {

@@ -41,6 +41,7 @@
 import { connect as sdkConnect, ui, View } from '@stencil-hq/tern'
 import type { Key, Node, ScrollTo, Session, SessionInput, Surface, Tree, TspEvent } from '@stencil-hq/tern'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { StatusSnapshot, StatusSnapshotReader } from '../../domain/status/types.ts'
 import type { ComposerSubmitRequest } from '../../tui-app.ts'
 import type {
   DisplayDockNotice,
@@ -62,6 +63,7 @@ import { createTspInteractionSeat, type TspContinuedRow, type TspInteractionSeat
 import { TspModelPicker } from './model-picker.ts'
 import { TspPresetPicker } from './preset-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
+import { nativeStatuslineRows } from './statusline-view.ts'
 import { TspWorkHub } from './work-hub.ts'
 import {
   WORK_DETAILS_REGION,
@@ -100,20 +102,8 @@ import {
 } from './assistant-visual.ts'
 import type { ToolImageState } from './transcript-view.ts'
 
-/**
- * The banner the composer-active renderer pins in its dock. The PR3-A
- * read-only banner (with its bare `q` quit key) retired together with the
- * composer: a typed `q` is EDITOR TEXT now. Like the PR3-A banner, it names
- * NO chord labels — the renderer owns no keymap (there is no authority to
- * route a chord label through), and the host-keybindings gate keeps its
- * sanctioned-seam list closed to non-keymap copy. The submit/newline
- * gestures are the SDK editor's own affordances.
- */
-const DOCK_BANNER = 'DSH TSP renderer · experimental composer'
-
-/** The renderer-local dock state (banner + status facts + welcome + notices). */
+/** The renderer-local dock state (welcome + notices). */
 interface DockState {
-  statusLine: string
   notices: readonly DisplayDockNotice[]
   welcome: readonly DisplayWelcomeFacts[]
 }
@@ -329,6 +319,14 @@ export interface TspRenderer extends TspInputBinding {
    */
   readonly bindImages: (binding: SurfaceImageBinding) => void
   /**
+   * TSP-7 PR-A: install the read-only status reader ONCE. It carries NO store
+   * authority: the renderer samples a snapshot only at the formal display
+   * commit point, never subscribes and never writes. A second binding or a
+   * binding after disposal is an explicit error (the mount is the only
+   * installer, and it runs before the first business commit).
+   */
+  readonly bindStatusReader: (reader: StatusSnapshotReader) => void
+  /**
    * Stop the input loop, close the surface + session ONCE. The promise
    * settles only after the SDK restored the tty (input drain included), so
    * callers awaiting it can safely touch the terminal afterwards.
@@ -517,7 +515,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * premature no-op (and the resources are still released exactly once).
    */
   let disposeTask: Promise<void> | undefined
-  const dock: DockState = { statusLine: DOCK_BANNER, notices: [], welcome: [] }
+  const dock: DockState = { notices: [], welcome: [] }
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
   /** The application's pending-submit fact, surfaced as a dock line. */
   let pendingSubmit: SubmitPendingDetail | undefined
@@ -761,6 +759,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   let imageBinding: SurfaceImageBinding | undefined
   let imageBindingInstalled = false
+  /**
+   * TSP-7 PR-A: the read-only status reader, installed ONCE by the mount. It
+   * is sampled ONLY at the formal display commit point — never on a render,
+   * never through a subscription — so the renderer never observes a
+   * half-applied store state.
+   */
+  let statusReader: StatusSnapshotReader | undefined
+  /** TSP-7 PR-A: the one-time binding latch (a lifecycle fact, not a cache). */
+  let statusReaderInstalled = false
+  /**
+   * TSP-7 PR-A: the last FORMALLY COMMITTED, displayable snapshot reference.
+   * It is a read-only presentation pointer — never patched, derived or
+   * persisted — cleared at every hydration begin so an outgoing subject's
+   * status can never paint beside the incoming one's transcript.
+   */
+  let presentedStatus: StatusSnapshot | undefined
   /**
    * PR-C: the immutable image scope of the CURRENT display subject, captured
    * ONCE per projection source. An ordinary repaint or delta REUSES it: the
@@ -1865,14 +1879,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (pendingSubmit !== undefined) {
       lines.push(ui.text({ key: 'pending-submit', text: pendingSubmit === 'submit' ? 'Submitting…' : 'Queued…' }))
     }
-    // PR4: the draft count rides the EXISTING status line as a single prefix
-    // (`Draft N · <status>`), so the dock gains no second title row. With no
-    // draft the text and the key stay byte-identical to before.
+    // TSP-7 PR-A: the draft count is its own short line (only when a draft is
+    // really staged). It no longer rides a status banner — the banner's
+    // `working/plan` words are duplicated by the native status rows below.
     const draftCount = imageBinding?.draftImages.occurrences().length ?? 0
-    const statusLine = draftCount === 0
-      ? dock.statusLine
-      : `Draft ${draftCount} · ${dock.statusLine === '' ? DOCK_BANNER : dock.statusLine}`
-    if (statusLine !== '') lines.push(ui.text({ key: 'status', wrap: 'none', text: sanitizedPhysicalLine(statusLine) }))
+    if (draftCount > 0) {
+      lines.push(ui.text({ key: 'draft-count', wrap: 'none', text: `Draft ${draftCount}` }))
+    }
+    // TSP-7 PR-A: the legacy text facts that no native row carries yet, kept
+    // as short single lines above the editor (the session title and the todo
+    // completion count have no PR-A native item, and the compaction phase is an
+    // immediate state channel).
+    for (const legacy of legacyDockLines()) lines.push(ui.text({ key: legacy.key, wrap: 'none', text: sanitizedPhysicalLine(legacy.text) }))
     // PR3-B B3 (§3.8): the parked-Question count is a PRESENTATION of the ONE
     // controller's read (`InteractionRuntime.publishAttention` → presenter);
     // the Alt+Q entry is the inspection route, never an answerability fact.
@@ -1922,6 +1940,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       placeholder: 'Message',
       prompt: '> ',
     }))
+    // TSP-7 PR-A: the two read-only native status rows follow the editor. They
+    // are projected from the LAST FORMALLY COMMITTED snapshot, and they are
+    // suppressed for the whole hydration window so an outgoing subject's status
+    // can never appear beside the incoming subject's transcript.
+    if (presentedStatus !== undefined && !hydrating) {
+      lines.push(...nativeStatuslineRows(presentedStatus))
+    }
     return ui.col({ key: 'dock' }, ...lines)
   }
 
@@ -1980,27 +2005,55 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
 
   /** Mutable renderer-local mirror of the last committed status facts. */
   const statusFacts: { busy?: boolean; working?: boolean; planMode?: boolean; sessionTitle?: string; todos?: readonly TodoItem[]; compactionPhase?: DisplayStatusFacts['compactionPhase'] } = {}
-  const flushStatus = (): void => {
-    const parts: string[] = []
-    if (statusFacts.busy === true || statusFacts.working === true) parts.push('working')
-    if (statusFacts.planMode === true) parts.push('plan')
-    if (statusFacts.compactionPhase !== undefined && statusFacts.compactionPhase !== 'idle') parts.push(`compacting (${statusFacts.compactionPhase})`)
-    if (statusFacts.sessionTitle !== undefined && statusFacts.sessionTitle !== '') parts.push(statusFacts.sessionTitle)
+  /**
+   * TSP-7 PR-A: the legacy dock text lines that survive as SHORT standalone
+   * rows. They are the facts no PR-A native item carries (the session title and
+   * the todo completion count) plus the compaction phase, an immediate state
+   * channel that must not depend on a status commit. The banner's `working` and
+   * `plan` duplicates are gone — the native rows own those words now.
+   */
+  const legacyDockLines = (): { key: string; text: string }[] => {
+    const lines: { key: string; text: string }[] = []
+    if (statusFacts.compactionPhase !== undefined && statusFacts.compactionPhase !== 'idle') {
+      lines.push({ key: 'compaction-phase', text: `compacting (${statusFacts.compactionPhase})` })
+    }
+    if (statusFacts.sessionTitle !== undefined && statusFacts.sessionTitle !== '') {
+      lines.push({ key: 'session-title', text: statusFacts.sessionTitle })
+    }
     const todos = statusFacts.todos
     if (todos !== undefined && todos.length > 0) {
       const open = todos.filter(todo => todo.status !== 'completed').length
-      parts.push(`todos ${todos.length - open}/${todos.length}`)
+      lines.push({ key: 'todos', text: `todos ${todos.length - open}/${todos.length}` })
     }
-    dock.statusLine = parts.length === 0 ? DOCK_BANNER : `${DOCK_BANNER} · ${parts.join(' · ')}`
+    return lines
+  }
+  const flushStatus = (): void => {
+    // TSP-7 PR-A: the legacy banner text is gone, so this is the presentation
+    // repaint only — the facts above are read by `dockView` on the next frame.
     render()
   }
 
   const display: SurfaceDisplaySeam = {
     setTranscript,
     commitDisplaySubject() {
-      // The shared StatusStore sections are committed by the surface
-      // aggregate at its ONE atomic commit point (surface.commitStatus);
-      // the read-only renderer has no chrome projection of its own.
+      // TSP-7 PR-A: the surface already committed the store patch (the ONE
+      // atomic commit in `SurfaceRuntime.commitStatus`); this is the display
+      // completion point of that SAME business commit. The snapshot is
+      // sampled HERE — not on every render and never through a subscription —
+      // so the native rows always belong to the subject the surface just
+      // committed, never to a half-applied store state.
+      //
+      // A DISPOSED renderer samples nothing: the reader belongs to the mount
+      // this renderer already released, and a late commit on a retained seam
+      // owns no frame to paint (§3.4). This is a lifecycle stop, not a silent
+      // fallback — the normal path never reaches it, because the surface
+      // withdraws the display seam with the renderer release.
+      if (disposed) return
+      if (statusReader === undefined) {
+        throw new Error('the TSP renderer has no status reader: the mount must bind one')
+      }
+      presentedStatus = statusReader.snapshot()
+      render()
     },
     commitStatusFacts(facts) {
       // PRESENCE is the write authority: an explicitly-present
@@ -2041,6 +2094,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // window (§3.4 row 1).
       hydrating = true
       retiredSource = projectionScope
+      // TSP-7 PR-A: the outgoing subject's status is dropped with its
+      // transcript — the Loading frame shows NO native status row, so an old
+      // permission/cwd/usage fact can never sit beside the incoming subject.
+      presentedStatus = undefined
       // PR-C: the retired subject's image subscriptions go with it - a late
       // settle of the outgoing subject must not repaint the incoming one.
       releaseImageSubscriptions()
@@ -2628,6 +2685,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (imageBindingInstalled) throw new Error('the TSP renderer image binding is already installed')
       imageBindingInstalled = true
       imageBinding = binding
+    },
+    // TSP-7 PR-A: the read-only status reader. Binding is capability install
+    // ONLY: no snapshot is sampled and no frame is painted here, so a mount
+    // that fails afterwards leaves nothing to unwind.
+    bindStatusReader: (reader) => {
+      if (disposed) throw new Error('cannot bind status reader after TSP renderer disposal')
+      if (statusReaderInstalled) throw new Error('the TSP renderer status reader is already bound')
+      statusReaderInstalled = true
+      statusReader = reader
     },
     bindInput: (handlers) => {
       if (disposed) throw new Error('the TSP renderer is disposed')
