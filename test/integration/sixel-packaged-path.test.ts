@@ -22,9 +22,10 @@
  * - the DCS the app's Screen actually wrote is decoded with the independent
  *   oracle.
  *
- * A missing tarball SKIPS (the product lane runs before `pnpm pack` exists).
- * `SIXEL_PACKAGED_PATH_REQUIRED=1` turns that skip into a hard failure, which is
- * how the stage's evidence run is executed.
+ * A missing tarball SKIPS with the class declared in `scripts/ci-accepted-skips.txt`
+ * (the product lane provisions neither a tarball nor the `dsh` CLI). The stage's
+ * evidence run passes `SIXEL_PACKED_TARBALL=<path>` explicitly, so `pass 1` in that
+ * log — never `skipped 1` — is what proves the packed path really executed.
  * @module @xmoon76/dsh-pi-tui/integration/sixel-packaged-path.test
  */
 
@@ -132,7 +133,10 @@ test('the PACKED publish entry paints a draft card through the real SIXEL chain 
     if (process.env.SIXEL_PACKAGED_PATH_REQUIRED === '1') {
       assert.fail('SIXEL_PACKAGED_PATH_REQUIRED=1 but no xmoon76-dsh-pi-tui-*.tgz exists; run `pnpm pack` first')
     }
-    t.skip('no packed tarball in the repository root (run `pnpm pack` to exercise F6b)')
+    // The lane provisions neither the tarball nor the `dsh` CLI this case drives;
+    // the class is declared in `scripts/ci-accepted-skips.txt` with its evidence, and
+    // `SIXEL_PACKED_PATH_REQUIRED=1` turns this into a hard failure for the F6b run.
+    t.skip('BLOCKED: no packed tarball provisioned in this lane (F6b runs from the packed artifact separately)')
     return
   }
   const dsh = dshBinary()
