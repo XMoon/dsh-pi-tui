@@ -720,6 +720,29 @@ async function main() {
       gatewayOwners: hostReady.ownerEntries.typertGateway,
     })
 
+    // RFL-012: the Host must never treat SPLIT_PROCESS_SCRATCH as deletion
+    // authority. A second Host whose env names the live Host's own scratch or
+    // a scope-outside host-scratch-* directory must exit on the seat conflict
+    // without deleting either.
+    const scopeScratchDirs = () => readdirSync(scopeDir).filter(name => name.startsWith('host-scratch-'))
+    assert(scopeScratchDirs().length === 1, `the 16-host winner must own exactly one scope scratch, found ${String(scopeScratchDirs().length)}`)
+    const mainScratch = join(scopeDir, scopeScratchDirs()[0])
+    const outsideScratch = join(workDir, 'host-scratch-outside')
+    mkdirSync(outsideScratch, { mode: 0o700 })
+    for (const target of [mainScratch, outsideScratch]) {
+      const foreign = new EntryProcess('host', entries.host, {
+        ...base,
+        env: { ...base.env, SPLIT_PROCESS_SCRATCH: target },
+      })
+      const conflict = await foreign.waitFor(record => record.m4a0 === 'host-seat-conflict', 'RFL-012 foreign scratch seat conflict', 60_000)
+      assert(conflict.error === 'HOST_ALREADY_OWNED', `RFL-012 foreign scratch conflict was ${JSON.stringify(conflict.error)}`)
+      const foreignExit = await foreign.waitForExit(30_000)
+      assert(foreignExit.code === 0, `RFL-012 foreign scratch exit was ${JSON.stringify(foreignExit)}`)
+    }
+    assert(existsSync(mainScratch), 'a live Host scratch was deleted through SPLIT_PROCESS_SCRATCH')
+    assert(existsSync(outsideScratch), 'a scope-outside directory was deleted through SPLIT_PROCESS_SCRATCH')
+    trace('t08-scratch', { winnerScratch: 1, liveHostScratchKept: true, outsideKept: true })
+
     // T09: two Clients race for the one kernel TUI seat. Only the winner may
     // create a Client Context or reach the Host.
     const clients = [new EntryProcess('client', entries.client, base), new EntryProcess('client', entries.client, base)]
@@ -1249,7 +1272,6 @@ async function main() {
     // RFL-010/F3: a real Client spawn whose Host fails before runProfile must
     // remove only its own launcher-created scratch. The main Host is already
     // dead, so ensureLocalHost actually spawns a candidate.
-    const scopeScratchDirs = () => readdirSync(scopeDir).filter(name => name.startsWith('host-scratch-'))
     const preProfileScratch = scopeScratchDirs().length
     const preProfile = new EntryProcess('client', entries.client, {
       ...base,
@@ -1281,7 +1303,7 @@ async function main() {
     assert(c6Outcome.host.hostPid !== zombie.pid, 'T15 new Host reused the zombie PID')
     assert(c6Outcome.host.hostStarttime !== hostReady.localHost.hostStarttime, 'T15 new Host reused the dead starttime')
     assert(c6Outcome.host.hostStarttime !== zombie.starttime, 'T15 new Host reused the zombie starttime')
-    assert(scopeScratchDirs().length === 1, 'T15 spawned Host scratch is not the one process-owned directory')
+    assert(scopeScratchDirs().length === 2, 'T15 spawned Host scratch plus the stale SIGKILL scratch is not two directories')
     trace('t15-scratch-spawn', { afterSpawn: scopeScratchDirs().length })
     assertClientHostFacts(c6Outcome.host, readJson(registryPath), 'T15 new Client/registry')
     trackedProcesses.set(c6Outcome.host.hostPid, c6Outcome.host.hostStarttime)
@@ -1307,7 +1329,7 @@ async function main() {
     const c7Outcome = await waitForOutcome(c7, 'T15 attach to active Host', 120_000)
     assert(c7Outcome.m4a0 === 'ready' && c7Outcome.transport === 'connected', `T15 attach did not connect: ${JSON.stringify(c7Outcome)}`)
     assertClientHostFacts(c7Outcome.host, c6Outcome.host, 'T15 attach')
-    assert(scopeScratchDirs().length === 1, 'a new Client erased the active Host overlay scratch')
+    assert(scopeScratchDirs().length === 2, 'a new Client erased an active Host overlay scratch')
     trace('t15-scratch-attach', { afterAttach: scopeScratchDirs().length })
     const c7Exit = await c7.shutdown()
     assert(c7Exit.code === 0, `T15 attach exit was ${JSON.stringify(c7Exit)}`)
@@ -1328,7 +1350,7 @@ async function main() {
       await waitGone(c6Outcome.host.hostPid, 5_000)
     }
     assert(!alive(c6Outcome.host.hostPid), 'T17 spawned Host did not exit')
-    assert(scopeScratchDirs().length === 0, 'the clean Host shutdown left a host-scratch directory')
+    assert(scopeScratchDirs().length === 1, 'the clean Host shutdown did not remove only its own scratch')
     trace('t15-scratch-clean', { afterCleanExit: scopeScratchDirs().length })
     const scopeSuffix = hostReady.localHost.scopeId.slice(0, 40)
     await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 10_000)

@@ -264,6 +264,15 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       await stop(1, terminalError)
       return
     }
+    // Install the process-lifetime shutdown handlers BEFORE the ready record:
+    // the qualification harness sends SIGTERM as soon as it observes ready, and
+    // a handler installed afterwards loses that race to the default action.
+    process.on('SIGTERM', () => {
+      runDetached('local client: SIGTERM shutdown', () => stop(0), { diag })
+    })
+    process.on('SIGINT', () => {
+      runDetached('local client: SIGINT shutdown', () => stop(130), { diag })
+    })
     writeEntryRecord({ m4a0: 'ready', ...handle.status })
     compositionDone = true
 
@@ -293,12 +302,6 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       }
       writeEntryRecord({ m4a0: 'control-error', error: `local client entry: unknown op ${JSON.stringify(request.op)}` })
       return false
-    })
-    process.on('SIGTERM', () => {
-      runDetached('local client: SIGTERM shutdown', () => stop(0), { diag })
-    })
-    process.on('SIGINT', () => {
-      runDetached('local client: SIGINT shutdown', () => stop(130), { diag })
     })
     await stopped
   } catch (error) {

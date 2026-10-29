@@ -19,7 +19,6 @@ import {
   fstatSync,
   fsyncSync,
   lstatSync,
-  mkdtempSync,
   openSync,
   readFileSync,
   renameSync,
@@ -32,7 +31,6 @@ import {
   LocalScopeError,
   parseProcessStat,
   readProcessStarttime,
-  removeOwnedScratch,
   type LocalScope,
 } from './local-scope.ts'
 
@@ -511,16 +509,13 @@ function spawnHostCandidate(options: EnsureLocalHostOptions): () => Error | unde
   }
   const logPath = join(options.scope.dir, 'host.log')
   let fd: number | undefined
-  let scratch: string | undefined
   try {
     fd = openSync(logPath, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW, 0o600)
     fchmodSync(fd, 0o600)
-    scratch = mkdtempSync(join(options.scope.dir, 'host-scratch-'))
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       SPLIT_PROCESS_DSH_ANCHOR: options.dshAnchor,
       SPLIT_PROCESS_PROFILE: options.profile,
-      SPLIT_PROCESS_SCRATCH: scratch,
     }
     delete env.SPLIT_PROCESS_EXTRA_PATCH
     delete env.DSH_PI_TUI_ROLE
@@ -532,10 +527,7 @@ function spawnHostCandidate(options: EnsureLocalHostOptions): () => Error | unde
       env,
     })
     let spawnFailure: Error | undefined
-    child.once('error', error => {
-      spawnFailure = error
-      if (scratch !== undefined) removeOwnedScratch(options.scope.dir, scratch)
-    })
+    child.once('error', error => { spawnFailure = error })
     child.unref()
     return () => spawnFailure
   } catch (error) {

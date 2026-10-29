@@ -24,9 +24,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { attachEntryControl, createEntryDiag, writeEntryRecord } from './entry-control.ts'
@@ -115,10 +114,14 @@ export interface LocalHostEntryOptions {
   readonly dshAnchor: string
   /** Profile to boot; defaults to `pi-tui`. */
   readonly profile: string
-  /** Scratch directory for the generated Host-only overlay. */
-  readonly scratchDir: string
   /** Extra overlay applied after the Host-only overlay (negative controls). */
   readonly extraPatchFiles?: readonly string[]
+}
+
+/** The exact scratch this Host process created under its real scope. */
+interface HostScratchOwner {
+  scopeDir?: string
+  scratchDir?: string
 }
 
 /** Node's `RequestInit` omits the cache mode; B1 requires `no-store` explicitly. */
@@ -253,17 +256,21 @@ async function publishLocalHost(
 }
 
 /**
- * Run one Host-only process and always remove the launcher-created scratch
- * after the process-owned boot/shutdown lifetime ends. A failure anywhere
- * before the post-boot controller (official-module load, scope construction,
- * kernel seat, overlay write, starttime read or profile boot) still passes
- * through this owner-safe finally; a still-running Host keeps its overlay.
+ * Run one Host-only process and remove only the scratch this process created
+ * under its independently derived real scope. A failure anywhere before the
+ * post-boot controller (official-module load, scope construction, kernel seat,
+ * overlay write, starttime read or profile boot) still passes through this
+ * owner-safe finally; the launcher-supplied path and another live Host's
+ * scratch are never deletion authority.
  */
 export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise<void> {
+  const owned: HostScratchOwner = {}
   try {
-    await runLocalHostEntryOwned(options)
+    await runLocalHostEntryOwned(options, owned)
   } finally {
-    removeOwnedScratch(dirname(options.scratchDir), options.scratchDir)
+    if (owned.scopeDir !== undefined && owned.scratchDir !== undefined) {
+      removeOwnedScratch(owned.scopeDir, owned.scratchDir)
+    }
   }
 }
 
@@ -272,7 +279,7 @@ export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise
  * the process-level qualification harness can document its exact contract; the
  * module's `import.meta.main` block is the only caller in production.
  */
-async function runLocalHostEntryOwned(options: LocalHostEntryOptions): Promise<void> {
+async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwner: HostScratchOwner): Promise<void> {
   const dsh = await loadOfficialDsh(options.dshAnchor)
   const dshHome = dsh.resolveDshHome()
   const scope = scopeFromInstalledProfile({
@@ -281,6 +288,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions): Promise<v
     packageRoot: installedPackageRootFromEntry(import.meta.url),
     dshVersion: readInstalledDshVersion(options.dshAnchor),
   })
+  scratchOwner.scopeDir = scope.dir
 
   let seat: ProcessSeat
   try {
@@ -289,7 +297,6 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions): Promise<v
     if (error instanceof LocalScopeError && error.code === 'HOST_ALREADY_OWNED') {
       // A live Host already owns this profile scope. This candidate never
       // creates a Context, webserver, Agent or Session.
-      removeOwnedScratch(scope.dir, options.scratchDir)
       writeEntryRecord({
         m4a0: 'host-seat-conflict',
         processRole: 'host',
@@ -305,8 +312,9 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions): Promise<v
   let handle: Awaited<ReturnType<OfficialDshModules['runProfile']>> | undefined
   let registration: PublishedLocalHost | undefined
   try {
-    mkdirSync(options.scratchDir, { recursive: true, mode: 0o700 })
-    const overlayPath = join(options.scratchDir, 'host-only.patch.yml')
+    const scratchDir = mkdtempSync(join(scope.dir, 'host-scratch-'))
+    scratchOwner.scratchDir = scratchDir
+    const overlayPath = join(scratchDir, 'host-only.patch.yml')
     writeFileSync(overlayPath, HOST_ONLY_PATCH, { mode: 0o600 })
     const processStartIdentity = readLinuxStarttime()
     if (process.env.SPLIT_PROCESS_HOST_FORCE_BOOT_FAILURE === 'before-profile') {
@@ -340,10 +348,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions): Promise<v
       const instanceId = published.identity.instanceId
       // The exit backstop removes only this instance's files; SIGKILL leaves
       // them for the stale-candidate path to classify.
-      process.once('exit', () => {
-        cleanupOwnedFiles(scope, instanceId)
-        removeOwnedScratch(scope.dir, options.scratchDir)
-      })
+      process.once('exit', () => { cleanupOwnedFiles(scope, instanceId) })
       writeEntryRecord({ m4a0: 'ready', ...status, localHost: published.identity })
 
       let stopping: Promise<void> | undefined
@@ -351,6 +356,10 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions): Promise<v
       const stopped = new Promise<void>(resolve => { resolveStopped = resolve })
       const stop = (code: number): Promise<void> => {
         if (stopping !== undefined) return stopping
+        // runProfile already consumed the Host-only overlay. Remove only this
+        // process's own scratch under the real scope before the official
+        // shutdown, so a slow shutdown cannot strand it; SIGKILL still defers.
+        removeOwnedScratch(scope.dir, scratchDir)
         stopping = (async () => {
           const errors: unknown[] = []
           try {
@@ -364,7 +373,6 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions): Promise<v
             errors.push(error)
           }
           cleanupOwnedFiles(scope, instanceId)
-          removeOwnedScratch(scope.dir, options.scratchDir)
           if (errors.length > 0) {
             const primary = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
             writeEntryRecord({
@@ -463,7 +471,6 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions): Promise<v
         priorCleanupFailure === undefined ? undefined : { priorCleanupFailure },
       )
       if (registration !== undefined) cleanupOwnedFiles(scope, registration.identity.instanceId)
-      removeOwnedScratch(scope.dir, options.scratchDir)
       process.exitCode = 1
     }
   } finally {
@@ -523,7 +530,6 @@ function optionsFromEnvironment(): LocalHostEntryOptions {
   return {
     dshAnchor,
     profile: process.env.SPLIT_PROCESS_PROFILE ?? 'pi-tui',
-    scratchDir: process.env.SPLIT_PROCESS_SCRATCH ?? mkdtempSync(join(tmpdir(), 'split-process-host-')),
     ...(process.env.SPLIT_PROCESS_EXTRA_PATCH === undefined || process.env.SPLIT_PROCESS_EXTRA_PATCH === ''
       ? {}
       : { extraPatchFiles: [process.env.SPLIT_PROCESS_EXTRA_PATCH] }),
