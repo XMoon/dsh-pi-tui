@@ -27,7 +27,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import { Context } from '@deepseek-ai/cordis'
@@ -108,7 +109,25 @@ const SIZES = [
 ] as const
 
 for (const { columns, rows, cardVisible, fragments } of SIZES) test(`the REAL Session Picker excludes an unlistable log and surfaces a refused body at ${columns}x${rows}`, async t => {
+  // The 44x20 case also runs under a LONG PARENTHESIZED temp root: the
+  // official persistence error appends an unescaped path, so a legal ')' in a
+  // storage directory must not truncate the raw-log suffix removal and leave a
+  // path fragment that scrolls the Session card out.
+  const previousTmp = process.env.TMPDIR
+  const parenthesizedRoot = columns === 44 && rows === 20
+    ? join(tmpdir(), 'dsh-prb(archive)', 'dsh-pi-tui-test-run-bZMkpP-' + 'x'.repeat(150))
+    : undefined
+  if (parenthesizedRoot !== undefined) {
+    mkdirSync(parenthesizedRoot, { recursive: true })
+    process.env.TMPDIR = parenthesizedRoot
+  }
   const life = testLifecycle(t)
+  life.defer(() => {
+    if (parenthesizedRoot === undefined) return
+    if (previousTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmp
+    rmSync(parenthesizedRoot, { recursive: true, force: true })
+  })
   const root = life.tempDir('dsh-s2b-real-picker-')
   const home = life.tempDir('dsh-s2b-real-picker-home-')
   const previousHome = process.env.DSH_HOME
@@ -286,6 +305,8 @@ for (const { columns, rows, cardVisible, fragments } of SIZES) test(`the REAL Se
   const noticeText = currentNoticeText()
   assert.ok(noticeText !== undefined && noticeText.includes(UNKNOWN_EVENT) && noticeText.includes('unknown to this harness'),
     `the refusal notice is the official message, got: ${String(noticeText)}`)
+  assert.ok(noticeText !== undefined && noticeText.includes('old turn stopped (cannot resume)'),
+    `the notice preserves the old-turn stopped fact, got: ${String(noticeText)}`)
   for (const fragment of fragments) {
     assert.ok(after.includes(fragment),
       `the painted refusal carries "${fragment}" at ${columns} columns:\n${after}`)
