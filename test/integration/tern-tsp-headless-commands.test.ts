@@ -790,8 +790,10 @@ test('a no-panel TUI builtin executes locally while the turn runs (busyEnter=ste
   const writes = fixture.recordPrompts(() => {})
   try {
     await waitForInputDelivery(fixture.pane)
+    // seedTurn already waits for the AUTHORITATIVE running-turn fact (the real
+    // model request). TSP-7 PR-A retired the dock banner, so there is no banner
+    // word left to wait for.
     const sessionId = await seedTurn(fixture, 'hold the turn open')
-    await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
     const writesBefore = writes.calls()
     await submitInput(fixture, '/title While the turn runs')
     await waitFor('the title write while running', () =>
