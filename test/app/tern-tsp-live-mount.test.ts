@@ -44,7 +44,7 @@ import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { isQuitKey, mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
-import { wireNodes } from '../support/tsp-picker-wire.ts'
+import { foldWireNodes, wireNodes } from '../support/tsp-picker-wire.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 
 const ENCODER = new TextEncoder()
@@ -736,8 +736,8 @@ test('A-10b: an idle authoritative queue explains the next-prompt wake; local-on
     const local = lastFrame(wire)
     assert.ok(local.includes('local-only text'), `the local echo must stay visible:\n${local}`)
     assert.ok(local.includes('sending…'), `a local echo is still being admitted:\n${local}`)
-    assert.ok(!local.includes('"add","dock.queue-parked-hint"') && !local.includes('waiting for the next prompt'),
-      `a local-only echo has no Host ack and must not be presented as parked:\n${local}`)
+    assert.ok(!foldWireNodes(harness.tern.frames).some(node => node.id === 'dock.queue-parked-hint'),
+      `the old parked hint must be retired from the folded wire for local-only rows:\n${local}`)
 
     harness.surface.display.setPendingInputPresentation({
       queued: [{ id: 'q-running', text: 'running queue text', mode: 'followup' }],
@@ -747,8 +747,8 @@ test('A-10b: an idle authoritative queue explains the next-prompt wake; local-on
     await waitUntil('the running queue row', () => lastFrame(harness.tern.output.text()).includes('running queue text'))
     wire = harness.tern.output.text()
     const running = lastFrame(wire)
-    assert.ok(!running.includes('"add","dock.queue-parked-hint"') && !running.includes('waiting for the next prompt'),
-      `a BUSY queued row is normal queueing, not parked:\n${running}`)
+    assert.ok(!foldWireNodes(harness.tern.frames).some(node => node.id === 'dock.queue-parked-hint'),
+      `a BUSY queued row is normal queueing, not parked; the hint is retired from the folded wire:\n${running}`)
   } finally {
     await harness.dispose()
     await harness.session.close()
