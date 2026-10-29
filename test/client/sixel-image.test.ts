@@ -821,4 +821,18 @@ test('an over-budget occurrence stays text until its own facts change (E2 P3)', 
     assert.deepEqual(overBudget.render(40), ['fallback'], 'the refused occurrence stays text')
   }
   assert.equal(overBudget.paintedBodyAt?.(40), undefined)
+
+  // ...but the refusal is per REQUEST, not per occurrence: a changed fact (here the
+  // width, which changes the cell box and the key) is a new request and tries again.
+  const originalEncode = SixelEncoder.prototype.encode
+  let attempts = 0
+  SixelEncoder.prototype.encode = function patched(this: SixelEncoder, request) {
+    attempts += 1
+    return originalEncode.call(this, request)
+  }
+  t.after(() => {
+    SixelEncoder.prototype.encode = originalEncode
+  })
+  overBudget.render(38)
+  await waitUntil(() => attempts >= 1, 'a retry for the changed request')
 })
