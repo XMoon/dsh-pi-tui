@@ -35,7 +35,7 @@
 
 import { Image, imageFallback, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { color } from '../../theme/runtime.ts'
@@ -111,14 +111,14 @@ export interface DraftImagePreviewOptions {
    * native-admitted Kitty terminal the card's pixels come from the Core; every
    * other terminal keeps the legacy fork `Image` path.
    */
-  graphics?: KittyGraphics
+  graphics?: ImageGraphics
 }
 
 /** The identity row's admission/derivation state for the current card. */
 type DraftPreviewStatus = 'ready' | 'pending' | 'unavailable'
 
 /** The card's pixel path for the current protocol/MIME/source admission. */
-type DraftPreviewPixelMode = 'direct' | 'kitty-derived' | 'unavailable'
+type DraftPreviewPixelMode = 'direct' | 'derived' | 'unavailable'
 
 /** The theme surface the fork `Image` needs for its text fallback. */
 export interface DraftImagePreviewTheme {
@@ -153,7 +153,7 @@ export class DraftImagePreview implements Component {
   /** The ONE managed graphics owner of this physical terminal, when admitted.
    *  Present does NOT mean paintable: `effectiveImageProtocol` re-reads the live
    *  admission, so a revoked tmux handle falls back to text for this frame. */
-  private readonly graphics: KittyGraphics | undefined
+  private readonly graphics: ImageGraphics | undefined
   /** Encoded bytes are immutable per draft; keyed by id + byte length. */
   private readonly base64Cache = new Map<string, string>()
   private occurrenceCache: { text: string; occurrences: readonly DraftImageOccurrence[] } | undefined
@@ -276,7 +276,7 @@ export class DraftImagePreview implements Component {
       // A raw PNG / iTerm2 card retires any previous derived presentation.
       this.retireDraftPresentation()
       status = 'ready'
-    } else if (mode === 'kitty-derived') {
+    } else if (mode === 'derived') {
       const preview = this.advanceDerivedPreview(last.image)
       status = preview.status
       derivedPng = preview.png
@@ -428,7 +428,7 @@ export class DraftImagePreview implements Component {
     const image = occurrence.image
     const native = this.graphics
     const protocol = effectiveImageProtocol(this.graphics) ?? 'none'
-    const key = `${image.id}:${occurrence.ordinal}:derived-kitty:${this.draftGeneration}:${cardWidth}:${maxRows}:${protocol}:${png.width}:${png.height}:${png.byteLength}:${native === undefined ? 'legacy' : 'managed'}`
+    const key = `${image.id}:${occurrence.ordinal}:derived:${this.draftGeneration}:${cardWidth}:${maxRows}:${protocol}:${png.width}:${png.height}:${png.byteLength}:${native === undefined ? 'legacy' : 'managed'}`
     usedKeys.add(key)
     usedIds.add(image.id)
     let cached = this.imageCache.get(key)
@@ -487,9 +487,11 @@ export class DraftImagePreview implements Component {
     if (image.source.type === 'recalled') return 'unavailable'
     if (image.bytes.byteLength === 0 || image.bytes.byteLength > DRAFT_PREVIEW_MAX_PIXEL_BYTES) return 'unavailable'
     if (image.byteLength > DRAFT_PREVIEW_MAX_PIXEL_BYTES) return 'unavailable'
-    if (protocol === 'kitty') {
+    if (protocol === 'kitty' || protocol === 'sixel') {
       if (image.mediaType === 'image/png') return 'direct'
-      if (image.mediaType === 'image/jpeg' || image.mediaType === 'image/webp') return 'kitty-derived'
+      // The SAME existing derived-PNG conversion the Kitty card uses; SIXEL's
+      // codec decodes a trusted PNG only, so there is no second decode chain.
+      if (image.mediaType === 'image/jpeg' || image.mediaType === 'image/webp') return 'derived'
       return 'unavailable'
     }
     return 'direct'

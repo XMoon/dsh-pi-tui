@@ -29,7 +29,7 @@
 
 import { Image, imageFallback, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
@@ -71,7 +71,7 @@ export interface ImageViewerInput {
    * Viewer paints Kitty pixels through the Core when it is admitted; iTerm2 and
    * every other surface keep the legacy `Image` path.
    */
-  readonly graphics?: KittyGraphics
+  readonly graphics?: ImageGraphics
 }
 
 /** One read-only rendered attachment, sized to the frame's content grant. */
@@ -93,7 +93,7 @@ export class ImageViewerPanel implements Component {
   private instance: PixelBody | undefined
   /** Whether `instance` is a managed component (it owns a Core handle). */
   private instanceManaged = false
-  private readonly graphics: KittyGraphics | undefined
+  private readonly graphics: ImageGraphics | undefined
   /** The exact inputs the local instance was built for. */
   private instanceAttachmentId: string | undefined
   private instanceProtocol: 'kitty' | 'iterm2' | undefined

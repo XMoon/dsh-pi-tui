@@ -36,7 +36,7 @@ import { SVG_MAX_RASTER_PIXELS, SVG_MAX_RASTER_SIDE } from '../../../domain/visu
 import { admitSvg, type SvgAdmission } from '../../../domain/visual/svg-admission.ts'
 import { isolatedSvgRasterSupported } from '../../../client/media/svg/rasterize.ts'
 import type { SvgRasterLoader, SvgRasterState } from '../../../client/media/svg/raster-loader.ts'
-import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
 import { SVG_VIEWER_CHORDS, SVG_VIEWER_SCROLL_LABEL } from '../../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../../presentation/action-bar.ts'
@@ -72,7 +72,7 @@ export interface SvgViewerInput {
    * Preview page paints through the Core when it is admitted; the legacy
    * `Image` path stays for every other surface.
    */
-  readonly graphics?: KittyGraphics
+  readonly graphics?: ImageGraphics
 }
 
 /** The two Viewer pages. */

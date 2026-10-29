@@ -78,6 +78,17 @@ export interface SixelRasterRequest {
   readonly maxRows: number
   /** Whole terminal rows hidden above the visible window. */
   readonly cropTopRows: number
+  /**
+   * Visible cell-row ceiling AFTER the full-image scale and the top crop, or
+   * `undefined` for the whole `maxRows` grant.
+   *
+   * This is a BOTTOM crop: `maxRows` still drives the scale (so scrolling never
+   * re-scales the image) and `cropTopRows` still hides whole rows above the
+   * window; this value only stops the raster where the visible window ends.
+   * A Screen that needs a shorter raster asks for a variant here instead of
+   * cutting the DCS string.
+   */
+  readonly maxVisibleRows?: number
   /** Real terminal background as `0xRRGGBB`, used for semi-transparent pixels. */
   readonly backgroundRgb: number
   /** Cancellation owned by the caller. */

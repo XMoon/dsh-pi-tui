@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 72
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 56, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 75
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 59, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -164,6 +164,9 @@
 | X069 | ACTIVE | LOW | BUGFIX_MISSING_UPSTREAM | NO |
 | X070 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X071 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
+| X072 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
+| X073 | ACTIVE | HIGH | HARD_HOST_API | NO |
+| X074 | ACTIVE | HIGH | HARD_HOST_API | NO |
 
 ## Divergences
 
@@ -6077,3 +6080,267 @@ Windows Terminal advertises SIXEL only through the SIXEL attribute (4) of its pr
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Image-8 I8-1A: the WT/WSL evidence rounds established DA1 attribute 4 as the only reliable SIXEL positive, and a controlled runtime probe on the production ProcessTerminal confirmed that an owed keyboard DA consumes ANY primary DA1 before the host input callback. Confirmed against the pinned v1.1.0 tree that upstream has no observation seam and that a host-only listener cannot see consumed replies.
+
+### X072 — Shared trusted SIXEL screen port and the ONE real cell-reply observation
+
+- Status: `ACTIVE`
+- Category: `HARD_HOST_API`
+- Risk: `MEDIUM`
+- Files: `src/terminal-image.ts`, `src/tui.ts`
+- Last audited: `2026-10-29`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+A SIXEL DCS is a device command, not cell content: a Screen that normalizes, truncates or composites it corrupts the command, and a Screen that parses arbitrary DCS text would let any tool result paint pixels. The fork's physical Screen therefore needs one narrow trust seam that answers only two questions - is this EXACT string a raster the Client owner really encoded, and how tall is it - plus the bounded re-encode request for a visible crop. The host cannot supply this through the existing public surface: the Screen owns line normalization, the image-line test, overlay compositing and the per-row erase, so a host-only shim would either duplicate those passes or write raw bytes past the Screen. The same owner also needs the screen's real `CSI 6;h;w t` answer, and the fork already has the ONE parser for it; a second host parser would race that parser and the editor input chain.
+
+#### Changed surface
+
+- src/terminal-image.ts: adds the SixelScreenFootprint and SixelScreenPort STRUCTURAL types only (footprint(line) and crop(line, cropTopRows, visibleRows)). The legacy `getCapabilities().images` type, Image and renderImage()/isImageLine() keep their existing behaviour and are NOT an arbitrary-DCS allowlist.
+- src/tui.ts: TuiBase takes an optional fourth constructor argument sixelScreen?: SixelScreenPort; protected isRenderableImageLine()/sixelFootprint() recognise a registered raster; the existing isImageLine checks in applyLineResets and the overlay compositor use it so a DCS is never normalized, sliced or overwritten.
+- src/tui.ts: TuiBase.onCellSizeObserved(listener) exposes the reply its existing consumeCellSizeResponse() already parsed, and queryCellSizeForSixel() issues `CSI 16t` only after start(). No second parser, no new query type, no change to the startup probe.
+- src/tui.ts: overlayPaintedLineRange()/linesCoveredByOverlay() expose the placements the compositor already computed, so a screen can withhold a raster whose rows an overlay paints.
+- Every screen without a port (kitty, iTerm2, no-image terminals, every structural test fake) keeps byte-for-byte upstream behaviour.
+
+#### Dependency map
+
+**Vendor internal**
+- consumeCellSizeResponse() remains the only `CSI 6;h;w t` parser and the only setCellDimensions() caller; the observers are notified from inside it, after the existing invalidate()/requestRender().
+- applyLineResets and compositeLineAt keep their existing order and output for every non-SIXEL line; only the image-line predicate widened.
+- renderedOverlayLayouts and the workingHeight - termHeight origin stay the compositor's own; the new helpers read them and never recompute a placement.
+- Audit note: One optional constructor argument, two trust predicates, one cell observer set and two read-only placement helpers.
+
+**Inheritance / structural**
+- The port is an interface with two methods, so a structural fake satisfies it and no class must be extended.
+- TuiMainScreen's new constructor forwards the port to super() with the same optional semantics; TuiAltScreen reads it from TuiAltScreenOptions.
+- Both screen subclasses keep their existing public surfaces; no method was renamed or removed.
+- Audit note: Additive optional construction only; every existing subclass and fake compiles unchanged.
+
+**Host**
+- src/tui/graphics/sixel-image.ts creates the ONE port per app (the exact-string registry) and the readiness projection that calls queryCellSizeForSixel()/onCellSizeObserved(); TuiApp binds the active screen on every screen start and resize.
+- DirectSixelScreenPort is derived from ConstructorParameters<typeof TuiMainScreen>[3], so the host holds the fork's type instead of a second declaration.
+- src/tui/graphics/sixel-capability.ts keeps the DA1 verdict; the fork only ever observes, it never selects a protocol.
+- Audit note: The host is the only port implementation and the only consumer of the cell observation.
+
+**Public / extension**
+- Nothing is added to the package root export list; the port types are internal to the package and reachable only through the screen constructor signature the host already imports.
+- Third-party extension surfaces are unaffected: they cannot obtain a port and therefore cannot promote a DCS.
+- Audit note: No new public entry point and no new exported name at the package root.
+
+**Behavioral coupling**
+- Without a port, isRenderableImageLine() is exactly isImageLine() and the screens behave as before; the fork suite proves this.
+- With a port, an unregistered DCS stays ordinary text through the normal normalization/truncation path, so untrusted terminal output can never become a device command.
+- A cell reply reaches every observer once per parsed reply; whether an identical value is a new fact is the consumer's projection, so the startup probe and a repeated reply cannot loop.
+- Audit note: Trust widening is limited to one exact-string lookup; no syntax-based DCS acceptance exists.
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-cell-size-input.test.ts: X072 - queryCellSizeForSixel() sends nothing before start() and exactly one `CSI 16t` after it; the real `CSI 6;40;20t` reply reaches an observer once with the parsed value; unsubscribe stops delivery; the single parser still updates getCellDimensions().
+- packages/pi-tui/test/tui-sixel-main.test.ts: an unregistered DCS is never treated as an image (the fallback/overlay cases), and a registered one is never normalized.
+- test/client/sixel-image.test.ts: the registry answers only exact encoded strings; an unrelated well-formed DCS is refused.
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- src/terminal-image.ts
+- src/tui.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream pi-tui has no physical-Screen image trust contract: isImageLine() recognises Kitty/iTerm2 syntax only, TuiBase has no cell-size observation and no per-screen image port. The fork adds one optional structural port, one image-line predicate built on it, and one observer of the reply its existing parser already produces. Upstream's syntax-only recognition, normalization, overlay compositing and cell-size parsing rules are unchanged.
+
+#### Retirement conditions
+
+- Retire when upstream exposes a physical-Screen hook that distinguishes an owner-encoded raster from untrusted text, or when the Direct SIXEL product path is removed.
+- Retirement must re-run the X072 case in packages/pi-tui/test/tui-cell-size-input.test.ts plus the sixel cases of tui-sixel-main.test.ts and test/client/sixel-image.test.ts.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Image-8 I8-2A: the WT/WSL clear matrix proved an anchor-only `CSI 2K` leaves pixels and a full-footprint per-row clear removes them, so only the Screen can erase a raster; and the same evidence showed a sliced DCS corrupts the command. Confirmed against the pinned v1.1.0 tree that upstream has neither a trust port nor a cell observation seam.
+
+### X073 — Main Screen physical footprint diff, erase and deferred raster paint
+
+- Status: `ACTIVE`
+- Category: `HARD_HOST_API`
+- Risk: `HIGH`
+- Files: `src/tui-main-screen.ts`
+- Last audited: `2026-10-29`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+A SIXEL block is ONE command whose pixels cover every row of its footprint. TuiMainScreen's differential renderer only knew Kitty placements: it expanded a changed range to the anchor's reserved rows and cleared the anchor line, which is exactly the clear the WT/WSL matrix proved insufficient (an anchor-only `CSI 2K` leaves the raster visible). It also wrote the image command inline, so a body row or a replacement text row written later in the same frame cut the picture. Only the Screen owns the per-row erase and the paint order, so this cannot be corrected from the host.
+
+#### Changed surface
+
+- TuiMainScreen gains an explicit constructor(terminal, showHardwareCursor?, logDirectory?, sixelScreen?) that only forwards to super(); its default behaviour is unchanged.
+- Per-line declared image rows are now cached for the PREVIOUS frame too (previousLineImageRows/previousLineSixelRows), so a raster whose component was disposed is still erased with its real old height.
+- getImageReservedRows() treats a trusted SIXEL footprint as exact (the encoder reserved those rows) instead of scanning blank body rows, which an overlay or a replacement text row would collapse.
+- expandChangedRangeForImages() expands to the union of the old and new footprints for both Kitty and SIXEL blocks.
+- In the incremental path every trusted SIXEL anchor is DEFERRED: all text rows (with their `CSI 2K`) are written first, then each anchor is positioned from the clamped top margin (`CSI 999A` + bounded `CSI nB`), wrapped in DECSC/DECRC, and the frame cursor is restored to the last rendered row. A DCS whose post-command cursor is terminal-defined is therefore never assumed to leave the cursor at zero.
+- A block whose footprint would not fit inside the painted viewport keeps the existing full-redraw fallback; the first render, width/height changes and clearOnShrink keep the existing `2J`/`H`/`3J` contract.
+- An overlay that paints ANY row of a block withholds that block's DCS for the frame (the identity row above it stays); the block returns as soon as the overlay is gone.
+
+#### Dependency map
+
+**Vendor internal**
+- BoundedTerminalWriter still streams the frame in 1 MiB chunks; the deferred anchors are appended to the SAME writer, so chunking cannot reorder them.
+- positionHardwareCursor(), captureRenderState()/restoreRenderState() and the scrollback/viewport bookkeeping are unchanged; restoreRenderState() blanks a trusted anchor exactly like a Kitty line.
+- deleteChangedKittyImages() keeps its Kitty-id ownership and never touches a SIXEL raster.
+- Audit note: One optional constructor argument, two per-frame row caches and one deferred paint phase.
+
+**Inheritance / structural**
+- TuiMainScreen still extends TuiBase and implements TUI; the port arrives through the base constructor.
+- A screen constructed without a port takes the identical upstream code path (the deferred list stays empty).
+- Audit note: Additive optional construction; no base class signature change is required for other subclasses (the base argument is optional).
+
+**Host**
+- TuiApp constructs the main screen with the DirectSixelGraphics port only in SIXEL mode, and both the media consumers and the screen share the owner's single registry.
+- The host owns the encoder and the readiness projection; the screen owns only the erase and paint order.
+- Audit note: The host never writes a DCS past the screen.
+
+**Public / extension**
+- No exported name changes: the constructor is the same class, with one additional optional parameter.
+- Extensions cannot obtain the port, so they cannot make the screen paint their bytes.
+- Audit note: No new public entry point.
+
+**Behavioral coupling**
+- A text-only frame emits no SIXEL control and no anchor positioning.
+- A frame that makes a raster ready writes every text row first and the raster last, with the old footprint cleared before any text lands on it.
+- An unchanged block is not repainted; a removed block has every old footprint row erased.
+- A width change still emits exactly one `2J`+`H`+`3J` full redraw.
+- Audit note: The erase order matches the WT clear matrix (full-footprint per-row `CSI 2K`, verified TESTED_PASS).
+
+#### Guarding tests
+
+- packages/pi-tui/test/tui-sixel-main.test.ts: X073 - the first frame reserves the whole block and writes ONE DCS wrapped in DECSC/DECRC; a replaced block clears every old footprint row and repaints no raster; the frame that makes a raster ready writes the trailing text change BEFORE the raster and nothing clears a covered row afterwards; a text-only frame emits no SIXEL control; an overlay over any block row withholds it and the block returns when the overlay is gone; a width change keeps the `2J`+`H`+`3J` contract.
+- packages/pi-tui/test/tui-render.test.ts, tui-render-cache.test.ts and the rest of the fork suite: the unchanged upstream cases stay green without a port.
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- src/tui-main-screen.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream TuiMainScreen's differential renderer knows only Kitty/iTerm2 image lines: it expands a changed range by the placement's declared rows, clears the anchor with `CSI 2K` and writes the image command inline. The fork additionally treats a registered SIXEL footprint as an exact block, clears every covered row, defers the command until after every text write, positions it from the clamped top margin, restores the cursor with DECSC/DECRC and withholds a covered block. All Kitty/iTerm2 behaviour, the full-redraw contract and the scrollback rules are unchanged.
+
+#### Retirement conditions
+
+- Retire when upstream provides a Screen-level image block contract (declared footprint plus guaranteed full-footprint erase and paint-last ordering) usable by a non-Kitty raster, or when the Direct SIXEL product path is removed.
+- Retirement must re-run the X073 group in packages/pi-tui/test/tui-sixel-main.test.ts and the WT+WSL clear/erase evidence.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Image-8 I8-2A: the WT clear matrix's CLR01/CLR02 pair proved an anchor-only clear leaves pixels while a full-footprint per-row `CSI 2K` removes them, and CLR05 proved shrinking a raster leaves the old pixels. Confirmed against the pinned v1.1.0 tree that the main screen has no such contract.
+
+### X074 — Alt Screen and layout trusted raster crop, paint order and erase
+
+- Status: `ACTIVE`
+- Category: `HARD_HOST_API`
+- Risk: `HIGH`
+- Files: `src/tui-alt-screen.ts`, `src/layout.ts`
+- Last audited: `2026-10-29`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+The alternate screen's layout engine paints into a clipped viewport and its own differential renderer clears changed rows. A SIXEL raster cannot be handled like text or like a Kitty placement there: clipping the DCS string paints pixels outside the box, relocating an unclipped command paints above it, and a write on any covered row destroys the picture. The visible part must therefore be RE-ENCODED from the same source at the same scale, the command must be written after every text/border/overlay/scrollbar write, and the old footprint must be erased row by row. Only the fork owns the layout clip and the alt-screen write order.
+
+#### Changed surface
+
+- renderLayoutFrame(root, width, height, requestRender, sixelScreen?) threads the optional port through LayoutContext; the default path is unchanged.
+- paintBox paints a trusted anchor only in a full-width box at x=0 whose clip still contains its visible part; a bottom-clipped block asks the port for cropTopRows=0, a bottom-clipped anchor above scrollTop asks for the real top crop, and an unknown box shape paints no pixels at all (a DCS is never composited as text).
+- The upward anchor search is bounded to 12 image body rows and stops at the first non-empty or foreign line, so a viewport scroll never scans the whole transcript.
+- paintScrollbar draws its glyph on a blank base for a row that carries a trusted anchor, so the reserved scrollbar column wins the anchor row instead of cutting the command.
+- TuiAltScreenOptions gains sixelScreen?: SixelScreenPort and its imageProtocol/imageProtocolOverride widen to ImageProtocol | 'sixel'; the global ImageProtocol type is untouched.
+- TuiAltScreen.doRender computes the frame's per-anchor footprint heights, erases every old and new covered row with `CSI 2K`, writes all text first and ONE DCS per visible uncovered block last at its own absolute row; a changed row inside a block forces the whole block to be cleared and repainted.
+- A block an overlay paints over is withheld for the frame; afterTerminalStop() projects a trusted anchor to an empty line so leaving the alt screen never replays a DCS into the main screen's restored history.
+
+#### Dependency map
+
+**Vendor internal**
+- renderCached/measureHeight/measureWidth and the LayoutBox clip computation are unchanged; the port is one extra context field.
+- cropKittyImageLine/getKittyImageMetadata and the managed virtual-placement relocation keep their own branches, untouched.
+- The alt screen's existing WezTerm Kitty re-draw path and the iTerm2 whole-screen branch keep their conditions (`imageProtocol === 'kitty'` / `'iterm2'`), so a SIXEL instance never enters either.
+- Audit note: One optional option/parameter, one per-frame row array and one paint phase.
+
+**Inheritance / structural**
+- TuiAltScreen passes options.sixelScreen to the base constructor; a screen created without it behaves exactly as upstream.
+- The widened per-instance protocol type is local to the option and field; ImageProtocol itself keeps its two values.
+- Audit note: Additive optional option and parameter; no method signature removal.
+
+**Host**
+- TuiApp passes the same DirectSixelGraphics port to the main screen and to every alternate screen it creates (fullscreen transcript, Job workspace, Settings workspace).
+- The port's crop() is the host's bounded re-encode: it never blocks the render, returns undefined until ready, and repaints when it settles.
+- Audit note: The host owns the encode; the fork owns the clip, the erase and the write order.
+
+**Public / extension**
+- TuiAltScreenOptions is exported, so the new optional field is an additive public option; existing callers compile unchanged.
+- No new exported function or type alias is added at the package root.
+- Audit note: Additive optional option only.
+
+**Behavioral coupling**
+- A frame with no trusted block emits no SIXEL control and no extra erase; the diff path is otherwise unchanged.
+- A horizontally offset, scrollbar-covered or overlay-covered block paints nothing and keeps its identity text; the next eligible frame paints it again.
+- The visible clip is honoured by re-encoding, never by cutting the command, and the top-scrolled case paints exactly one variant on the first visible row.
+- Leaving the alt screen restores text, never a stale raster.
+- Audit note: The paint order is text/border/overlay/scrollbar first, then one DCS per block, matching the WT evidence for per-row erase.
+
+#### Guarding tests
+
+- packages/pi-tui/test/layout.test.ts: X074 - a bottom-clipped anchor requests cropTopRows=0 with the visible row count and paints the ready variant instead of the full command; an unready variant leaves the row empty; a top-scrolled anchor requests its real top crop and is painted on the first visible row; a horizontally offset box schedules no crop and drops the command; a visible scrollbar yields the anchor row and still paints its glyph.
+- packages/pi-tui/test/tui-alt-screen.test.ts: X074 - every text row is written before the ONE raster; retiring a block clears the old footprint and leaves no ghost row; an overlay over the block withholds it and the block returns afterwards; the alt screen's exit projection never replays a DCS into the main screen.
+- packages/pi-tui/test/tui-alt-screen.test.ts and layout.test.ts upstream groups: the Kitty crop, virtual-placement and iTerm2 cases stay green without a port.
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- src/tui-alt-screen.ts
+- src/layout.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream renderLayoutFrame and TuiAltScreen handle only Kitty placements: they crop the APC in place and interleave the image write with the text rows. The fork additionally recognises a registered SIXEL footprint, re-encodes the visible window through the owner, erases every covered row, paints each block last at an absolute row, withholds a covered block and projects a trusted anchor to an empty line on exit. The Kitty crop, the virtual-placement relocation, the iTerm2 branch and every default path are unchanged.
+
+#### Retirement conditions
+
+- Retire when upstream's layout/alt screen provides a clip-aware raster contract that can re-encode a visible window and guarantee the erase/paint order for a non-Kitty protocol, or when the Direct SIXEL product path is removed.
+- Retirement must re-run the X074 groups in packages/pi-tui/test/layout.test.ts and tui-alt-screen.test.ts, plus the WT+WSL fullscreen scroll/crop evidence.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Image-8 I8-2A: the WT clear matrix proved a full-footprint per-row erase and that a sliced/relocated command paints outside its box; the layout clip and the alt-screen write order are fork-owned, so the host cannot satisfy the contract. Confirmed against the pinned v1.1.0 tree.

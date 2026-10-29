@@ -140,6 +140,9 @@ function checkRequest(request: SixelRasterRequest): void {
   }
   positiveInteger(request.maxColumns, 'maxColumns', Number.MAX_SAFE_INTEGER)
   positiveInteger(request.maxRows, 'maxRows', Number.MAX_SAFE_INTEGER)
+  if (request.maxVisibleRows !== undefined) {
+    positiveInteger(request.maxVisibleRows, 'maxVisibleRows', request.maxRows)
+  }
   if (!Number.isInteger(request.cropTopRows) || request.cropTopRows < 0) {
     throw new SixelEncodeRejectedError(`cropTopRows must be a non-negative integer; received ${String(request.cropTopRows)}.`)
   }
@@ -187,7 +190,11 @@ function planRaster(request: SixelRasterRequest, sourceWidth: number, sourceHeig
   heightPx = Math.max(1, Math.floor(heightPx * budget))
 
   const hiddenPx = cropTopRows * cellHeightPx
-  const visibleAvailable = Math.min(heightPx - hiddenPx, grantHeightPx)
+  // `maxRows` drove the scale above; the visible-window ceiling only ends the
+  // raster EARLY, so a bottom-truncated variant has the same pixels-per-cell as
+  // the full one and the same top-crop arithmetic still lands on whole rows.
+  const visibleRows = request.maxVisibleRows ?? maxRows
+  const visibleAvailable = Math.min(heightPx - hiddenPx, visibleRows * cellHeightPx)
   const drawableHeightPx = Math.floor(visibleAvailable / SIXEL_BAND_HEIGHT_PX) * SIXEL_BAND_HEIGHT_PX
   if (drawableHeightPx <= 0) return null
 

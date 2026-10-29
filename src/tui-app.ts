@@ -243,8 +243,10 @@ import { VisualAssistantBody, VisualAssistantDisposalFrame } from './tui/compone
 import type { VisualFigureOptions } from './tui/components/transcript/visual-figure.ts'
 import {
   createNativeKittyGraphics,
+  type ImageGraphics,
   type KittyGraphics,
 } from './tui/graphics/native-image.ts'
+import { createDirectSixelGraphics, type SixelScreenObservation } from './tui/graphics/sixel-image.ts'
 import { createTmuxKittyGraphics } from './tui/graphics/tmux-image.ts'
 import { createZellijKittyGraphics } from './tui/graphics/zellij-image.ts'
 import { TmuxGraphicsRevokedError } from './tui/graphics/kitty-terminal.ts'
@@ -2864,12 +2866,12 @@ interface ScopeSettlement {
 export class TuiApp {
   private readonly terminal: Terminal
   /**
-   * The ONE managed Kitty graphics owner of this physical terminal
-   * (Image-7A native / Image-7B-A tmux virtual). `undefined` on every terminal
-   * that admitted neither transport: those consumers keep the legacy fork
+   * The ONE managed graphics owner of this physical terminal (Image-7A native /
+   * Image-7B-A tmux virtual / Image-8 Direct SIXEL). `undefined` on every
+   * terminal that admitted no transport: those consumers keep the legacy fork
    * `Image`/text path.
    */
-  private readonly graphics: KittyGraphics | undefined
+  private readonly graphics: ImageGraphics | undefined
   /**
    * The image protocol every Alt Screen must use for this app's managed Native
    * route. A Zellij live `OK` can admit the Kitty transport while the fork's
@@ -2879,8 +2881,26 @@ export class TuiApp {
    * fork's existing static capability (including legacy iTerm2 and the tmux
    * virtual path).
    */
-  private get altScreenImageProtocol(): ImageProtocol | undefined {
-    return this.graphics?.mode === 'native' ? 'kitty' : undefined
+  private get altScreenImageProtocol(): ImageProtocol | 'sixel' | undefined {
+    if (this.graphics === undefined) return undefined
+    if (this.graphics.mode === 'sixel') return 'sixel'
+    return this.graphics.mode === 'native' ? 'kitty' : undefined
+  }
+
+  /**
+   * Point the Direct SIXEL readiness projection at the screen that owns the
+   * terminal NOW (Image-8 / I8-2A).
+   *
+   * A screen swap is the only place the three verified facts can become stale
+   * (a new screen parses its own `CSI 6;h;w t`, owns its own OSC 11 probe, and
+   * has its own clip); a resize re-samples because the device-pixel cell size
+   * can change with the font. Nothing here queries from a render.
+   */
+  private syncSixelObservation(): void {
+    const graphics = this.graphics
+    if (graphics === undefined || graphics.mode !== 'sixel') return
+    const screen: SixelScreenObservation = this.fullscreen ?? this.tui
+    graphics.observeScreen(screen, this.terminal.columns, this.terminal.rows)
   }
   /** The extension surface host (M2), when the runner attached one. */
   private readonly extensionHost: SurfaceHost | undefined
@@ -4277,9 +4297,14 @@ export class TuiApp {
     // its own chance. Every factory fails closed, so a terminal that admits
     // none keeps `getCapabilities()` untouched and every consumer keeps its
     // legacy `Image`/text path.
-    const graphics = createNativeKittyGraphics(resizeAware)
+    const graphics: ImageGraphics | undefined = createNativeKittyGraphics(resizeAware)
       ?? createZellijKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
       ?? createTmuxKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
+      // Direct SIXEL is the LAST candidate and never a fallback: a managed Kitty
+      // handle keeps precedence even while its own admission is pending/denied,
+      // and a statically excluded topology returns no handle at all (no DA1
+      // subscription, no encoder, no output).
+      ?? createDirectSixelGraphics(resizeAware, process.env, () => this.requestRender())
     this.graphics = graphics
     this.terminal = graphics?.terminal ?? resizeAware
     // A revoked tmux admission refuses a whole managed physical batch from
@@ -4541,7 +4566,12 @@ export class TuiApp {
       focusSeatOwner: () => this.focusSeatOwner(),
     })
 
-    this.tui = new TuiMainScreen(this.terminal)
+    this.tui = new TuiMainScreen(
+      this.terminal,
+      undefined,
+      undefined,
+      this.graphics?.mode === 'sixel' ? this.graphics.screen : undefined,
+    )
     // The host default editor is the TuiEditor subclass: kimi parity for
     // `@dir/` mention completion (Tab-accepting a directory reopens the
     // dropdown at its children; Esc closes it without re-triggering). Its
@@ -5058,6 +5088,7 @@ export class TuiApp {
     }
     try {
       this.tui.start()
+      this.syncSixelObservation()
     } catch (error) {
       // A throw must never leak the claimed slot (plan §11).
       if (firstStart && this.processTuiSlotClaimed) {
@@ -5195,9 +5226,11 @@ export class TuiApp {
     this.workspaceLeaseFreezeDepth -= 1
     if (this.fullscreen !== undefined) {
       this.fullscreen.start()
+      this.syncSixelObservation()
       this.fullscreen.requestRender(true)
     } else {
       this.tui.start()
+      this.syncSixelObservation()
       this.tui.requestRender(true)
     }
     // The suspend stopped the active screen (clearing OSC 9;4 + its
@@ -8020,6 +8053,7 @@ export class TuiApp {
       // expanded individually, exactly like a web disclosure row.
       const alt = new TuiAltScreen(this.terminal, undefined, undefined, {
         imageProtocolOverride: this.altScreenImageProtocol,
+        ...(this.graphics?.mode === 'sixel' ? { sixelScreen: this.graphics.screen } : {}),
         // The fullscreen mouse-wheel step (Client preference): the fork
         // reads it at construction, so a change while fullscreen is
         // active applies on the next re-entry.
@@ -8223,6 +8257,9 @@ export class TuiApp {
       this.projectSeatOccupant()
       alt.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
       this.fullscreen = alt
+      // The alt screen owns the terminal now: re-certify the verified cell and
+      // background facts for THIS screen before any pixel may be painted.
+      this.syncSixelObservation()
       // The alt screen now owns the terminal input handler: scheme reports
       // arrive THERE, so re-register the fan-out on both screens.
       this.refreshSchemeRegistrations()
@@ -8234,6 +8271,9 @@ export class TuiApp {
       // A latched profiler window must not leak across a fullscreen swap.
       this.resetScrollProfileFrame()
       this.tui.start()
+      // The main screen owns the terminal again: the alt screen's verified facts
+      // do not carry over to a different physical Screen.
+      this.syncSixelObservation()
       // The alt screen's stop cleared the physical progress indicator;
       // re-assert the desired state on the main screen (plan §7).
       this.enterTerminalPresentation()
@@ -20448,6 +20488,11 @@ export class TuiApp {
       // contract (the right-gutter resize matrix). The latch skips the
       // first geometry pass (nothing built yet); the rebuild re-enters
       // requestRender, where the latch is already updated, so no loop.
+      if (widthChanged || heightChanged) {
+        // A device-pixel cell size can change with the font/zoom, so the SIXEL
+        // readiness projection re-asks the active screen at the new geometry.
+        this.syncSixelObservation()
+      }
       if (widthChanged) {
         this.lastTranscriptWidth = width
         if (this.messageRows.length > 0) this.rebuildMessages()
@@ -24225,6 +24270,7 @@ export class TuiApp {
     })
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       imageProtocolOverride: this.altScreenImageProtocol,
+      ...(this.graphics?.mode === 'sixel' ? { sixelScreen: this.graphics.screen } : {}),
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,
@@ -24529,6 +24575,7 @@ export class TuiApp {
     const token: object = {}
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       imageProtocolOverride: this.altScreenImageProtocol,
+      ...(this.graphics?.mode === 'sixel' ? { sixelScreen: this.graphics.screen } : {}),
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,

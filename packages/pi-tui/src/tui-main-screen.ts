@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
+import { deleteKittyImage, isImageLine, type SixelScreenPort } from "./terminal-image.ts";
+import type { Terminal } from "./terminal.ts";
 import { SEGMENT_RESET, type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
 import { asciiVisibleWidthEarlyExit, normalizeTerminalOutput, sliceByColumn, visibleWidth } from "./utils.ts";
 
@@ -137,12 +138,35 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	/** Per-line kitty image ids of the previous frame, aligned with previousRawLines. */
 	private previousLineImageIds: ReadonlyArray<number>[] = [];
 	private previousKittyImageIds = new Set<number>();
+	/**
+	 * Declared image rows of the previous frame, aligned with
+	 * {@link previousLines}: a Kitty `r=`/registered placement row count, or a
+	 * trusted SIXEL footprint. Cached instead of re-deriving from the line,
+	 * because a raster whose component was disposed is no longer registered —
+	 * the OLD block must still be erased (X073).
+	 */
+	private previousLineImageRows: number[] = [];
+	/**
+	 * Per-line TRUSTED SIXEL footprint height of the previous frame (0 = no
+	 * SIXEL block). Unlike the Kitty row count this is exact, so it never has to
+	 * be re-derived by scanning blank body rows — a scan would collapse under an
+	 * overlay or a text row that landed inside the block. (X073.)
+	 */
+	private previousLineSixelRows: number[] = [];
 	private previousWidth = 0;
 	private previousHeight = 0;
 	private cursorRow = 0;
 	private hardwareCursorRow = 0;
 	private maxLinesRendered = 0;
 	private previousViewportTop = 0;
+
+	/**
+	 * @param sixelScreen - the Client-local SIXEL trust port (X072). Absent for
+	 * every non-SIXEL terminal, and then this screen is byte-for-byte upstream.
+	 */
+	constructor(terminal: Terminal, showHardwareCursor?: boolean, logDirectory?: string, sixelScreen?: SixelScreenPort) {
+		super(terminal, showHardwareCursor, logDirectory, sixelScreen);
+	}
 
 	captureRenderState(): TuiMainScreenRenderState {
 		return {
@@ -157,9 +181,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	}
 
 	restoreRenderState(state: TuiMainScreenRenderState): void {
-		this.previousLines = state.previousLines.map((line) => (isImageLine(line) ? "" : line));
+		this.previousLines = state.previousLines.map((line) => (this.isRenderableImageLine(line) ? "" : line));
 		this.previousRawLines = [];
 		this.previousLineImageIds = [];
+		this.previousLineImageRows = [];
+		this.previousLineSixelRows = [];
 		this.previousKittyImageIds = new Set();
 		this.previousWidth = state.previousWidth;
 		this.previousHeight = state.previousHeight;
@@ -173,6 +199,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.previousLines = [];
 		this.previousRawLines = [];
 		this.previousLineImageIds = [];
+		this.previousLineImageRows = [];
+		this.previousLineSixelRows = [];
 		this.previousWidth = -1;
 		this.previousHeight = -1;
 		this.cursorRow = 0;
@@ -212,32 +240,72 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		return buffer;
 	}
 
-	private getKittyImageReservedRows(lines: string[], index: number, maxIndex = lines.length - 1): number {
-		const rows = extractKittyImageRows(lines[index] ?? "");
+	/**
+	 * The image rows one line DECLARES: a Kitty `r=`/registered placement, or a
+	 * trusted SIXEL footprint. `0` for a non-image line, so callers can decide
+	 * "is an image" and "how tall" from one number.
+	 */
+	private declaredImageRows(line: string): number {
+		const footprint = this.sixelFootprint(line);
+		if (footprint !== undefined) return footprint.rows;
+		return isImageLine(line) ? extractKittyImageRows(line) : 0;
+	}
+
+	/** The trusted SIXEL footprint height of one line, or 0 when it is not a
+	 *  registered raster. */
+	private sixelBlockRows(line: string): number {
+		return this.sixelFootprint(line)?.rows ?? 0;
+	}
+
+	/**
+	 * The rows an image block really occupies in `lines`, starting at `index`.
+	 *
+	 * `declared` is the per-line declared row count of the SAME frame (cached for
+	 * the previous frame), so a raster that is no longer registered still
+	 * reports its real old height. The scan stops at the first body row another
+	 * image owns or at the first row with cell content.
+	 */
+	private getImageReservedRows(
+		lines: readonly string[],
+		declared: readonly number[],
+		sixel: readonly number[],
+		index: number,
+		maxIndex = lines.length - 1,
+	): number {
+		const rows = declared[index] ?? 0;
 		if (rows <= 1) return 1;
 
 		const maxRows = Math.min(rows, maxIndex - index + 1, lines.length - index);
+		// A trusted SIXEL footprint IS the reserved height: the encoder reserved
+		// exactly those rows and the Screen must erase exactly those rows, no
+		// matter what an overlay or a replacement text row did to them.
+		if ((sixel[index] ?? 0) > 0) return maxRows;
 		let reservedRows = 1;
 		while (reservedRows < maxRows) {
 			const line = lines[index + reservedRows] ?? "";
-			if (isImageLine(line) || visibleWidth(line) > 0) break;
+			if ((declared[index + reservedRows] ?? 0) > 0 || visibleWidth(line) > 0) break;
 			reservedRows++;
 		}
 		return reservedRows;
 	}
 
-	private expandChangedRangeForKittyImages(
+	private expandChangedRangeForImages(
 		firstChanged: number,
 		lastChanged: number,
-		newLines: string[],
-		newLineImageIds: ReadonlyArray<number>[],
+		newLines: readonly string[],
+		newLineImageRows: readonly number[],
+		newLineSixelRows: readonly number[],
 	): { firstChanged: number; lastChanged: number } {
 		let expandedFirstChanged = firstChanged;
 		let expandedLastChanged = lastChanged;
-		const expandForLines = (lines: string[], lineImageIds: ReadonlyArray<number>[]): void => {
+		const expandForLines = (
+			lines: readonly string[],
+			declared: readonly number[],
+			sixel: readonly number[],
+		): void => {
 			for (let i = 0; i < lines.length; i++) {
-				if ((lineImageIds[i] ?? EMPTY_IMAGE_IDS).length === 0) continue;
-				const blockEnd = i + this.getKittyImageReservedRows(lines, i) - 1;
+				if ((declared[i] ?? 0) === 0) continue;
+				const blockEnd = i + this.getImageReservedRows(lines, declared, sixel, i) - 1;
 				if (i >= firstChanged || (i <= lastChanged && blockEnd >= firstChanged)) {
 					expandedFirstChanged = Math.min(expandedFirstChanged, i);
 					expandedLastChanged = Math.max(expandedLastChanged, blockEnd);
@@ -245,8 +313,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 		};
 
-		expandForLines(this.previousLines, this.previousLineImageIds);
-		expandForLines(newLines, newLineImageIds);
+		expandForLines(this.previousLines, this.previousLineImageRows, this.previousLineSixelRows);
+		expandForLines(newLines, newLineImageRows, newLineSixelRows);
 		return { firstChanged: expandedFirstChanged, lastChanged: expandedLastChanged };
 	}
 
@@ -262,6 +330,83 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		}
 
 		return this.deleteKittyImages(ids);
+	}
+
+	/**
+	 * Drop the DCS of every trusted SIXEL block that a visible overlay paints
+	 * over (X073).
+	 *
+	 * One raster is one command covering its whole footprint, so "clear only the
+	 * row the overlay touched" is impossible: the pixels would either cover the
+	 * overlay text or leave a ghost. The block therefore yields this frame — the
+	 * component's own identity row above it still names the attachment — and the
+	 * next frame after the overlay closes restores it, because the anchor line
+	 * changes and the block re-enters the changed range.
+	 */
+	private suppressOverlayCoveredSixelBlocks(lines: string[]): void {
+		for (let i = 0; i < lines.length; i++) {
+			const rows = this.sixelBlockRows(lines[i] ?? "");
+			if (rows === 0) continue;
+			if (!this.linesCoveredByOverlay(i, i + rows - 1, lines.length)) continue;
+			lines[i] = "";
+		}
+	}
+
+	/**
+	 * Write every deferred trusted SIXEL anchor at its own absolute row, then
+	 * leave the cursor on `finalCursorRow`.
+	 *
+	 * `CSI 999A` (cursor up, clamped at the top margin) is the one deterministic
+	 * origin the main screen has: it cannot scroll and it lands on the physical
+	 * top row, which this screen's bookkeeping maps to buffer row `viewportTop`.
+	 * From there a bounded `CSI nB` reaches any visible row exactly. Each DCS is
+	 * wrapped in DECSC/DECRC because its post-command cursor position is
+	 * terminal-defined, never assumed to be zero.
+	 *
+	 * Returns false when an anchor is not inside the painted viewport; the caller
+	 * then falls back to a full redraw instead of painting outside it.
+	 */
+	private writeDeferredSixelAnchors(
+		output: BoundedTerminalWriter,
+		anchors: readonly number[],
+		lines: readonly string[],
+		viewportTop: number,
+		height: number,
+		finalCursorRow: number,
+	): boolean {
+		for (const anchor of anchors) {
+			const screenRow = anchor - viewportTop;
+			if (screenRow < 0 || screenRow >= height) return false;
+			output.append("\x1b[999A");
+			if (screenRow > 0) output.append(`\x1b[${screenRow}B`);
+			output.append("\x1b7");
+			output.append(lines[anchor] ?? "");
+			output.append("\x1b8");
+		}
+		const endScreenRow = Math.max(0, Math.min(height - 1, finalCursorRow - viewportTop));
+		output.append("\x1b[999A");
+		if (endScreenRow > 0) output.append(`\x1b[${endScreenRow}B`);
+		output.append("\r");
+		return true;
+	}
+
+	/**
+	 * Write one image anchor at the cursor's current row.
+	 *
+	 * A Kitty placement leaves the cursor where it was; a SIXEL DCS does not, and
+	 * its post-command position is terminal-defined. The anchor is therefore
+	 * SAVED before the command and RESTORED after it (DECSC/DECRC), and the
+	 * caller then moves the cursor explicitly — "the DCS left it at 0" is never
+	 * assumed. (dsh-pi-tui divergence X073.)
+	 */
+	private appendImageCommand(output: BoundedTerminalWriter, line: string, sixel: boolean): void {
+		if (!sixel) {
+			output.append(line);
+			return;
+		}
+		output.append("\x1b7");
+		output.append(line);
+		output.append("\x1b8");
 	}
 
 	protected doRender(): void {
@@ -286,6 +431,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {
 			newLines = this.compositeOverlays(newLines, width, height);
+			// An overlay that paints ANY row of a SIXEL block must win the whole
+			// block: the raster is one command whose pixels cover every row, so a
+			// per-row decision would paint over the overlay's own text. This frame
+			// paints no pixels there; the image's identity row above stays visible
+			// and the block returns as soon as the overlay is gone. (X073.)
+			this.suppressOverlayCoveredSixelBlocks(newLines);
 		}
 
 		// Extract cursor position before applying line resets (marker must be found first)
@@ -311,16 +462,22 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		const reuseProcessed = !widthChanged && this.previousRawLines.length > 0;
 		const processedLines: string[] = new Array(rawLines.length);
 		const lineImageIds: ReadonlyArray<number>[] = new Array(rawLines.length);
+		const lineImageRows: number[] = new Array(rawLines.length);
+		const lineSixelRows: number[] = new Array(rawLines.length);
 		for (let i = 0; i < rawLines.length; i++) {
 			const rawLine = rawLines[i]!;
 			if (reuseProcessed && rawLine === this.previousRawLines[i]) {
 				processedLines[i] = this.previousLines[i]!;
 				lineImageIds[i] = this.previousLineImageIds[i]!;
+				lineImageRows[i] = this.previousLineImageRows[i]!;
+				lineSixelRows[i] = this.previousLineSixelRows[i]!;
 				continue;
 			}
 			let line = rawLine;
 			let imageIds: readonly number[] = EMPTY_IMAGE_IDS;
-			if (isImageLine(line)) {
+			const sixelRows = this.sixelBlockRows(line);
+			const declaredImageRows = this.declaredImageRows(line);
+			if (declaredImageRows > 0) {
 				imageIds = extractKittyImageIds(line);
 			} else {
 				const lineWidth = asciiVisibleWidthEarlyExit(line, width) ?? visibleWidth(line);
@@ -331,6 +488,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			processedLines[i] = line;
 			lineImageIds[i] = imageIds;
+			lineImageRows[i] = declaredImageRows;
+			lineSixelRows[i] = sixelRows;
 		}
 		newLines = processedLines;
 
@@ -346,19 +505,20 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			for (let i = 0; i < newLines.length; i++) {
 				if (i > 0) output.append("\r\n");
 				const line = newLines[i];
-				const isImage = isImageLine(line);
-				const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i) : 1;
+				const isSixel = (lineSixelRows[i] ?? 0) > 0;
+				const isImage = isSixel || isImageLine(line);
+				const imageReservedRows = isImage ? this.getImageReservedRows(newLines, lineImageRows, lineSixelRows, i) : 1;
 				if (imageReservedRows > 1 && imageReservedRows <= height) {
 					for (let row = 1; row < imageReservedRows; row++) {
 						output.append("\r\n");
 					}
 					output.append(`\x1b[${imageReservedRows - 1}A`);
-					output.append(line);
+					this.appendImageCommand(output, line, isSixel);
 					output.append(`\x1b[${imageReservedRows - 1}B`);
 					i += imageReservedRows - 1;
 					continue;
 				}
-				output.append(line);
+				this.appendImageCommand(output, line, isSixel);
 			}
 			output.append("\x1b[?2026l"); // End synchronized output
 			output.flush();
@@ -376,6 +536,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			this.previousLines = newLines;
 			this.previousRawLines = rawLines;
 			this.previousLineImageIds = lineImageIds;
+			this.previousLineImageRows = lineImageRows;
+			this.previousLineSixelRows = lineSixelRows;
 			this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
 			this.previousWidth = width;
 			this.previousHeight = height;
@@ -445,7 +607,13 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			lastChanged = newLines.length - 1;
 		}
 		if (firstChanged !== -1) {
-			const expandedRange = this.expandChangedRangeForKittyImages(firstChanged, lastChanged, newLines, lineImageIds);
+			const expandedRange = this.expandChangedRangeForImages(
+				firstChanged,
+				lastChanged,
+				newLines,
+				lineImageRows,
+				lineSixelRows,
+			);
 			firstChanged = expandedRange.firstChanged;
 			lastChanged = expandedRange.lastChanged;
 		}
@@ -461,6 +629,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			// cursor-marker line gets a fresh string every frame).
 			this.previousRawLines = rawLines;
 			this.previousLineImageIds = lineImageIds;
+			this.previousLineImageRows = lineImageRows;
+			this.previousLineSixelRows = lineSixelRows;
 			return;
 		}
 
@@ -509,6 +679,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			this.previousLines = newLines;
 			this.previousRawLines = rawLines;
 			this.previousLineImageIds = lineImageIds;
+			this.previousLineImageRows = lineImageRows;
+			this.previousLineSixelRows = lineSixelRows;
 			this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
 			this.previousWidth = width;
 			this.previousHeight = height;
@@ -557,16 +729,22 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Only render changed lines (firstChanged to lastChanged), not all lines to end
 		// This reduces flicker when only a single line changes (e.g., spinner animation)
 		const renderEnd = Math.min(lastChanged, newLines.length - 1);
+		// SIXEL anchors are written AFTER every text row of this frame (X073). A
+		// write on ANY row a raster covers destroys its pixels there, so painting
+		// the anchor inline would let the very next body/text row cut the picture
+		// it just drew.
+		const deferredSixelAnchors: number[] = [];
 		for (let i = firstChanged; i <= renderEnd; i++) {
 			if (i > firstChanged) output.append("\r\n");
 			const line = newLines[i];
-			const isImage = isImageLine(line);
-			const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i, renderEnd) : 1;
+			const isSixel = (lineSixelRows[i] ?? 0) > 0;
+			const isImage = isSixel || isImageLine(line);
+			const imageReservedRows = isImage ? this.getImageReservedRows(newLines, lineImageRows, lineSixelRows, i, renderEnd) : 1;
 			if (imageReservedRows > 1) {
 				const imageStartScreenRow = i - viewportTop;
 				if (imageStartScreenRow < 0 || imageStartScreenRow + imageReservedRows > height) {
 					logRedraw(
-						`kitty image pre-clear would scroll (${imageStartScreenRow} + ${imageReservedRows} > ${height})`,
+						`image pre-clear would scroll (${imageStartScreenRow} + ${imageReservedRows} > ${height})`,
 					);
 					fullRender(true);
 					return;
@@ -577,7 +755,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 					output.append("\r\n\x1b[2K");
 				}
 				output.append(`\x1b[${imageReservedRows - 1}A`);
-				output.append(line);
+				if (isSixel) deferredSixelAnchors.push(i);
+				else output.append(line);
 				output.append(`\x1b[${imageReservedRows - 1}B`);
 				i += imageReservedRows - 1;
 				continue;
@@ -617,7 +796,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				].join("\n");
 				throw new Error(errorMsg);
 			}
-			output.append(line);
+			if (isSixel) deferredSixelAnchors.push(i);
+			else output.append(line);
 		}
 
 		// Track where cursor ended up after rendering
@@ -637,6 +817,14 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			// Move cursor back to end of new content
 			output.append(`\x1b[${extraLines}A`);
+		}
+
+		if (deferredSixelAnchors.length > 0) {
+			if (!this.writeDeferredSixelAnchors(output, deferredSixelAnchors, newLines, viewportTop, height, finalCursorRow)) {
+				logRedraw("deferred SIXEL anchor is not inside the painted viewport");
+				fullRender(true);
+				return;
+			}
 		}
 
 		output.append("\x1b[?2026l"); // End synchronized output
@@ -687,6 +875,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.previousLines = newLines;
 		this.previousRawLines = rawLines;
 		this.previousLineImageIds = lineImageIds;
+		this.previousLineImageRows = lineImageRows;
 		this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
 		this.previousWidth = width;
 		this.previousHeight = height;

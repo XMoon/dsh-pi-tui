@@ -328,6 +328,53 @@ export function isImageLine(line: string): boolean {
 }
 
 /**
+ * The real cell footprint one trusted SIXEL raster occupies (X072).
+ *
+ * `columns` is the width the raster really reserved (it may be NARROWER than
+ * the granted box: a portrait image paints fewer columns), and `rows` is the
+ * height a Screen must erase. Never derived from the requested ceiling.
+ */
+export interface SixelScreenFootprint {
+	readonly columns: number;
+	readonly rows: number;
+}
+
+/**
+ * The ONE intra-process trust seam between the Client-local SIXEL owner and the
+ * physical Screen (X072).
+ *
+ * A SIXEL DCS is a device command, not cell content: a Screen that sliced,
+ * truncated or composited it as text would emit a corrupted command while
+ * believing it painted a line. This port therefore answers exactly one
+ * question — "is this EXACT string a raster the owner really encoded, and how
+ * big is it?" — and refuses everything else. The owner registers only the
+ * complete DCS its own encoder produced, so an arbitrary DCS arriving from a
+ * component, a tool result or an extension is still ordinary (untrusted) text.
+ *
+ * The interface is deliberately not exported from the package root: the Host
+ * derives the structural type from the screen constructor, so there is exactly
+ * one definition and no second copy to drift.
+ */
+export interface SixelScreenPort {
+	/**
+	 * Metadata for a registered, internally encoded complete DCS, or
+	 * `undefined` for every other line. Schedules no terminal work.
+	 */
+	footprint(line: string): SixelScreenFootprint | undefined;
+	/**
+	 * An ALREADY READY re-encoded variant of this line's own source, cropped to
+	 * the visible window, or `undefined` when that variant is not ready yet.
+	 *
+	 * `cropTopRows` and `visibleRows` are whole cell rows and are bounded by the
+	 * line's own registered footprint. A missing variant is scheduled exactly
+	 * once by the Client owner, which repaints when it settles; the Screen must
+	 * paint NOTHING for that anchor this frame rather than clipping the DCS
+	 * string or reusing an older crop.
+	 */
+	crop(line: string, cropTopRows: number, visibleRows: number): string | undefined;
+}
+
+/**
  * Generate a random image ID for Kitty graphics protocol.
  * Uses random IDs to avoid collisions between different module instances
  * (e.g., main app vs extensions).

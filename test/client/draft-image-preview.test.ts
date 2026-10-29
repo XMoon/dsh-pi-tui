@@ -21,6 +21,7 @@ import {
   type KittyThumbnailPng,
 } from '../../src/client/media/image/kitty-thumbnail.ts'
 import type { DraftImage, DraftImagePreviewSource } from '../../src/client/media/image/types.ts'
+import type { ImageGraphics } from '../../src/tui/graphics/native-image.ts'
 import type { DraftImageOccurrence } from '../../src/client/media/image/placeholder.ts'
 import { color } from '../../src/tui/theme/runtime.ts'
 
@@ -83,6 +84,7 @@ function harness(
     fullscreen?: boolean
     removable?: (occurrence: DraftImageOccurrence) => boolean
     convertThumbnail?: KittyThumbnailConverter
+    graphics?: ImageGraphics
   } = {},
 ): PreviewHarness {
   let draft = options.draft ?? ''
@@ -95,6 +97,7 @@ function harness(
     fullscreenMouse: () => options.fullscreen ?? false,
     requestRender: () => { requested += 1 },
     ...(options.removable === undefined ? {} : { removable: options.removable }),
+    ...(options.graphics === undefined ? {} : { graphics: options.graphics }),
   }, THEME, options.convertThumbnail)
   return { component, setDraft: (text: string) => { draft = text }, renders: () => requested }
 }
@@ -780,4 +783,104 @@ test('dispose before the conversion microtask releases the slot without a frame 
   await until(() => internals(component).activeDraftConversion === undefined, 'the disposed pre-start task to release the slot')
   assert.equal(conversions, 0, 'a disposed component never starts the decoder')
   assert.equal(renders(), 0, 'a disposed component requests no frame')
+})
+
+// === Image-8 / I8-2A: Direct SIXEL draft card (E2) ========================
+
+/**
+ * A SIXEL handle whose DCS states the card width it was granted, so the test can
+ * prove the SAME bounded card box the Kitty path uses (44 / 22 cells) and that
+ * no Kitty id/APC is involved.
+ */
+function sixelDraftGraphics(ready: () => boolean): ImageGraphics {
+  const terminal = {
+    writes: [] as string[], columns: 80, rows: 24, kittyProtocolActive: false,
+    start() {}, stop() {}, async drainInput() {}, write() {}, moveBy() {}, hideCursor() {},
+    showCursor() {}, clearLine() {}, clearFromCursor() {}, clearScreen() {}, setTitle() {},
+    setProgress() {}, setProgramStatus() {}, setProgressState() {},
+  }
+  return {
+    mode: 'sixel',
+    canPaint: () => true,
+    image: (_source, options) => {
+      const dcs = `\x1bP0;1;q"1;1;${options.maxWidthCells * 10};36#0;2;100;0;0~\x1b\\`
+      return {
+        render: () => (ready() ? [dcs] : [options.fallback]),
+        invalidate: () => {},
+        paintedBodyAt: (width: number) => (ready() ? { width, columns: options.maxWidthCells, rows: 1 } : undefined),
+        dispose: () => {},
+      }
+    },
+    terminal: terminal as never,
+    screen: { footprint: () => undefined, crop: () => undefined },
+    observeScreen: () => {},
+    resample: () => {},
+    dispose: () => {},
+  }
+}
+
+test('a PNG draft card paints through Direct SIXEL with the same 44/22 cell box', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const store = new DraftImageStore()
+  const image = addImage(store, { name: 'shot.png' })
+  const graphics = sixelDraftGraphics(() => true)
+  const wide = harness(store, { draft: image.placeholder, graphics }).component.render(100)
+  const wideLine = wide.find(line => line.includes('\x1bP'))
+  assert.ok(wideLine !== undefined, `a SIXEL draft card body: ${JSON.stringify(wide.slice(0, 2))}`)
+  assert.match(wideLine, /"1;1;440;36/, 'the wide card is the same 44 cells')
+  assert.ok(!wide.join('').includes('\x1b_G'), 'no Kitty APC in a SIXEL card')
+
+  const split = harness(store, { draft: image.placeholder, graphics }).component.render(60)
+  const splitLine = split.find(line => line.includes('\x1bP'))
+  assert.ok(splitLine !== undefined)
+  assert.match(splitLine, /"1;1;220;36/, 'the split card is the same 22 cells')
+})
+
+test('a JPEG draft card derives its PNG once and then paints through SIXEL', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  let conversions = 0
+  const store = new DraftImageStore()
+  const image = addImage(store, { mediaType: 'image/jpeg', bytes: new Uint8Array(SAMPLE_JPEG), name: 'photo.jpg' })
+  let ready = false
+  const graphics = sixelDraftGraphics(() => ready)
+  const card = harness(store, {
+    draft: image.placeholder,
+    graphics,
+    convertThumbnail: async (input, mediaType) => {
+      conversions += 1
+      return convertKittyThumbnail(input, mediaType)
+    },
+  })
+  const pending = card.component.render(100)
+  assert.ok(!pending.join('').includes('\x1bP'), 'no pixels while the derivation is pending')
+  await until(() => conversions === 1, 'the derived conversion')
+  await until(() => internals(card.component).draftReady !== undefined, 'the derived PNG')
+  // The derived PNG is ready, but the SIXEL raster is not: still informational.
+  const stillPending = card.component.render(100)
+  assert.ok(!stillPending.join('').includes('\x1bP'))
+  // The raster becomes ready between frames: a repaint (never an invalidate,
+  // which would legitimately retire the derived presentation) picks it up.
+  ready = true
+  const painted = card.component.render(100)
+  assert.ok(painted.some(line => line.includes('\x1bP')), 'the derived PNG reaches the SIXEL card')
+  assert.ok(painted[0]!.includes('#1/1'), 'the identity row stays')
+})
+
+test('a recalled draft occurrence never paints pixels under SIXEL', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const store = new DraftImageStore()
+  const recalled = store.add({
+    mediaType: 'image/png',
+    width: 800,
+    height: 100,
+    source: { type: 'recalled' },
+    recalledRef: { attachmentId: 'att-s', mediaType: 'image/png', bytes: 10, width: 800, height: 100 },
+  })
+  const image = recalled
+  const graphics = sixelDraftGraphics(() => true)
+  const lines = harness(store, { draft: image.placeholder, graphics }).component.render(100)
+  assert.ok(!lines.join('').includes('\x1bP'), 'a recalled occurrence keeps metadata only')
 })

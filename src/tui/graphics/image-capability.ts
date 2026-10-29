@@ -18,10 +18,10 @@
  */
 
 import { getCapabilities } from '@xmoon76/pi-tui'
-import type { KittyGraphics } from './native-image.ts'
+import type { ImageGraphics } from './native-image.ts'
 
 /** The image protocol a consumer may paint with right now. */
-export type EffectiveImageProtocol = 'kitty' | 'iterm2' | null
+export type EffectiveImageProtocol = 'kitty' | 'iterm2' | 'sixel' | null
 
 /**
  * Whether THIS render may paint real pixels, and through which protocol.
@@ -33,9 +33,17 @@ export type EffectiveImageProtocol = 'kitty' | 'iterm2' | null
  * capability must never fall back to legacy `a=T`; the pane paints text
  * instead. An EMPTY `ZELLIJ` value is not a Zellij session marker and must not
  * suppress a direct terminal's own capability.
+ *
+ * SIXEL (Image-8 / I8-2A) is the LAST branch and never a fallback: an existing
+ * managed Kitty handle keeps precedence even while it is denied or pending, so
+ * a revoked tmux virtual pane or an unanswered Zellij pane query still paints
+ * text and never silently degrades to a different protocol. `PI_IMAGE_PROTOCOL`
+ * and `getCapabilities().images` are not authorities for it — the Direct SIXEL
+ * owner's own readiness projection is.
  */
-export function effectiveImageProtocol(graphics: KittyGraphics | undefined): EffectiveImageProtocol {
-  if (graphics !== undefined) return graphics.canPaint() ? 'kitty' : null
+export function effectiveImageProtocol(graphics: ImageGraphics | undefined): EffectiveImageProtocol {
+  if (graphics !== undefined && graphics.mode !== 'sixel') return graphics.canPaint() ? 'kitty' : null
+  if (graphics !== undefined) return graphics.canPaint() ? 'sixel' : null
   if ((process.env.ZELLIJ ?? '') !== '') return null
   return getCapabilities().images ?? null
 }

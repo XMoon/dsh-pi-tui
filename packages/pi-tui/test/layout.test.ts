@@ -5,7 +5,7 @@ import { ScrollView } from "../src/components/scroll-view.ts";
 import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
 import { renderLayoutFrame } from "../src/layout.ts";
-import { encodeKitty, registerKittyImageMetadata } from "../src/terminal-image.ts";
+import { encodeKitty, registerKittyImageMetadata, type SixelScreenFootprint, type SixelScreenPort } from "../src/terminal-image.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 
 function visibleLines(lines: string[]): string[] {
@@ -595,5 +595,105 @@ describe("virtual placement clipping", () => {
 
 		assert.ok(frame.lines[0]!.startsWith(anchor(42, 297)), "the 297-row window still finds the anchor");
 		assert.ok(frame.lines[0]!.includes(grid(296)));
+	});
+});
+
+describe("trusted SIXEL screen port (X074)", () => {
+	/** A complete DCS the port below is the only thing that may recognize. */
+	const raster = (id: string): string => `\x1bP0;1;q"1;1;40;36#0;2;100;0;0${id}\x1b\\`;
+	/** The bounded variant the owner would have encoded for a crop request. */
+	const variant = (id: string, cropTopRows: number, visibleRows: number): string =>
+		`\x1bP0;1;q"1;1;40;6#0;2;100;0;0${id}:${cropTopRows}:${visibleRows}\x1b\\`;
+
+	class RecordingSixelPort implements SixelScreenPort {
+		readonly rasters = new Map<string, SixelScreenFootprint>();
+		readonly crops = new Map<string, string>();
+		readonly requests: Array<[string, number, number]> = [];
+		/** When false the port has no ready variant (it would schedule one). */
+		ready = true;
+
+		register(dcs: string, footprint: SixelScreenFootprint): string {
+			this.rasters.set(dcs, footprint);
+			return dcs;
+		}
+
+		footprint(line: string): SixelScreenFootprint | undefined {
+			return this.rasters.get(line);
+		}
+
+		crop(line: string, cropTopRows: number, visibleRows: number): string | undefined {
+			this.requests.push([line, cropTopRows, visibleRows]);
+			if (!this.ready) return undefined;
+			const key = `${line}\u0000${cropTopRows}\u0000${visibleRows}`;
+			const cached = this.crops.get(key);
+			if (cached !== undefined) return cached;
+			const created = variant("V", cropTopRows, visibleRows);
+			this.rasters.set(created, { columns: 4, rows: visibleRows });
+			this.crops.set(key, created);
+			return created;
+		}
+	}
+
+	function frameWith(port: RecordingSixelPort, lines: string[], width: number, height: number, scrollTop: number) {
+		const scroll = new ScrollView({ render: () => lines, invalidate: () => {} }, { primary: true, follow: "none" });
+		scroll.updateLayout(lines.length, height, () => {});
+		scroll.scrollTo(scrollTop);
+		return renderLayoutFrame(scroll, width, height, () => {}, port);
+	}
+
+	it("bottom-clips a visible anchor through the port instead of cutting the DCS", () => {
+		const port = new RecordingSixelPort();
+		const dcs = port.register(raster("A"), { columns: 4, rows: 3 });
+		const frame = frameWith(port, ["a", "b", dcs, "", "", "tail"], 20, 4, 0);
+
+		assert.deepStrictEqual(port.requests, [[dcs, 0, 2]], "the Screen asks for two visible rows, from the top");
+		assert.strictEqual(frame.lines[2], variant("V", 0, 2), "the painted row is the ready VARIANT");
+		assert.ok(!frame.lines.join("").includes(dcs), "the unclipped command is never painted");
+	});
+
+	it("paints nothing at the anchor while the variant is not ready", () => {
+		const port = new RecordingSixelPort();
+		port.ready = false;
+		const dcs = port.register(raster("B"), { columns: 4, rows: 3 });
+		const frame = frameWith(port, ["a", "b", dcs, "", "", "tail"], 20, 4, 0);
+
+		assert.deepStrictEqual(port.requests, [[dcs, 0, 2]]);
+		assert.strictEqual(frame.lines[2], "", "an unready variant leaves the row empty, never clipped bytes");
+	});
+
+	it("re-encodes an anchor that scrolled above the viewport with its real top crop", () => {
+		const port = new RecordingSixelPort();
+		const dcs = port.register(raster("C"), { columns: 4, rows: 3 });
+		const frame = frameWith(port, ["a", dcs, "", "", "tail"], 20, 2, 2);
+
+		assert.deepStrictEqual(port.requests, [[dcs, 1, 2]], "one hidden row, two visible rows");
+		assert.strictEqual(frame.lines[0], variant("V", 1, 2), "the variant is painted on the first visible row");
+		assert.ok(!frame.lines.join("").includes(dcs));
+	});
+
+	it("refuses a horizontally offset box instead of compositing the command as text", () => {
+		const port = new RecordingSixelPort();
+		const dcs = port.register(raster("D"), { columns: 4, rows: 3 });
+		const inner = { render: () => [dcs, "", ""], invalidate: () => {} };
+		const root = new HStack([{ component: new Text("left", 0, 0), basis: 3 }, { component: inner, basis: 0, grow: 1 }]);
+		const frame = renderLayoutFrame(root, 20, 4, () => {}, port);
+
+		assert.deepStrictEqual(port.requests, [], "no crop is scheduled for an unpaintable box");
+		assert.ok(!frame.lines.join("").includes(dcs), "the DCS is dropped, never sliced into a cell row");
+	});
+
+	it("yields the anchor row to a visible scrollbar instead of cutting the DCS", () => {
+		const port = new RecordingSixelPort();
+		const dcs = port.register(raster("E"), { columns: 4, rows: 3 });
+		const scroll = new ScrollView(
+			{ render: () => ["a", dcs, "", "", "tail"], invalidate: () => {} },
+			{ primary: true, follow: "none", scrollbar: "always" },
+		);
+		scroll.updateLayout(5, 4, () => {});
+		scroll.scrollTo(0);
+		const frame = renderLayoutFrame(scroll, 20, 4, () => {}, port);
+
+		assert.ok(!frame.lines.join("").includes(dcs), "the anchor yields to the reserved scrollbar column");
+		assert.ok(frame.lines.some((line) => stripTerminalSequences(line).trimEnd().endsWith("│")), "the scrollbar is still painted");
 	});
 });

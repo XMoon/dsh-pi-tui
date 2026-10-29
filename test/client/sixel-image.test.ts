@@ -1,0 +1,500 @@
+/**
+ * Image-8 / I8-2A — the ONE Direct SIXEL graphics owner.
+ *
+ * These cases prove the product-level contract, not the codec's pixel math
+ * (that is `sixel-encoder.test.ts`) and not the fork Screen's physics (that is
+ * `packages/pi-tui/test/tui-sixel-*.test.ts`):
+ *
+ * - a raster is painted ONLY after three real facts (DA1, cell reply, OSC 11
+ *   background) have all arrived for the CURRENT screen;
+ * - the Screen's trust port recognises the EXACT encoded DCS and reports the
+ *   encoder's real footprint, never a requested ceiling;
+ * - a visible crop is a NEW bounded encode of the same source, never a sliced
+ *   DCS string, and a superseded variant never paints;
+ * - a late settle (disposed occurrence, changed screen, changed background)
+ *   cannot register anything;
+ * - the registry refuses a new raster rather than evicting one the current
+ *   frame is painting.
+ *
+ * Every pixel assertion goes through the independent decoder in
+ * `test/support/sixel-oracle.ts`.
+ * @module @xmoon76/dsh-pi-tui/client/sixel-image.test
+ */
+
+import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import test from 'node:test'
+import { SixelEncoder } from '../../src/client/media/sixel/encode.ts'
+import {
+  createDirectSixelGraphics,
+  SIXEL_REGISTRY_MAX_VARIANTS,
+  type DirectSixelGraphics,
+  type SixelScreenObservation,
+} from '../../src/tui/graphics/sixel-image.ts'
+import type { PixelBody } from '../../src/tui/graphics/native-image.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { decodeSixel, pixelAt } from '../support/sixel-oracle.ts'
+
+/** A Direct terminal whose DA1 attribute 4 arrives when the test says so. */
+class ScriptedSixelTerminal extends VirtualTerminal {
+  private listeners = new Set<(supported: boolean) => void>()
+
+  onSixelSupport(listener: (supported: boolean) => void): () => void {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  declareSixel(supported: boolean): void {
+    for (const listener of [...this.listeners]) listener(supported)
+  }
+}
+
+/**
+ * The active screen's observation face.
+ *
+ * It answers with the values a real screen reads: `queryCellSizeForSixel` sends
+ * one `CSI 16t` (counted), the cell reply arrives through the ONE parser, and
+ * the background resolves from the screen's own OSC 11 probe.
+ */
+class ScriptedScreen implements SixelScreenObservation {
+  cellQueries = 0
+  background: { r: number; g: number; b: number } | undefined
+  private readonly listeners = new Set<(cell: { widthPx: number; heightPx: number }) => void>()
+
+  queryCellSizeForSixel(): void {
+    this.cellQueries += 1
+  }
+
+  onCellSizeObserved(listener: (cell: { widthPx: number; heightPx: number }) => void): () => void {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  async queryTerminalBackgroundColor(_options: { timeoutMs: number }): Promise<{ r: number; g: number; b: number } | undefined> {
+    return this.background
+  }
+
+  replyCell(widthPx: number, heightPx: number): void {
+    for (const listener of [...this.listeners]) listener({ widthPx, heightPx })
+  }
+}
+
+/**
+ * Poll a predicate until it holds.
+ *
+ * The encode lane's settle time is the real codec's (sharp import + worker
+ * spawn), so a fixed sleep would either be flaky or waste seconds. The
+ * predicate never mutates owner state.
+ */
+async function waitUntil(predicate: () => boolean, label: string, timeoutMs = 20_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`)
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+}
+
+/** Wait for exactly one more readiness notification (i.e. one settle repaint). */
+async function waitForRepaint(harness: { notifications(): number }, label: string): Promise<void> {
+  const before = harness.notifications()
+  await waitUntil(() => harness.notifications() > before, label)
+}
+
+async function pngFromRgba(rgba: Uint8Array, width: number, height: number): Promise<string> {
+  const { default: sharp } = await import('sharp')
+  const buffer = await sharp(Buffer.from(rgba), { raw: { width, height, channels: 4 } }).png().toBuffer()
+  return buffer.toString('base64')
+}
+
+function fill(width: number, height: number, color: (x: number, y: number) => [number, number, number, number]): Uint8Array {
+  const rgba = new Uint8Array(width * height * 4)
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const [r, g, b, a] = color(x, y)
+      const offset = (y * width + x) * 4
+      rgba[offset] = r
+      rgba[offset + 1] = g
+      rgba[offset + 2] = b
+      rgba[offset + 3] = a
+    }
+  }
+  return rgba
+}
+
+interface Harness {
+  readonly graphics: DirectSixelGraphics
+  readonly terminal: ScriptedSixelTerminal
+  readonly screen: ScriptedScreen
+  /** Every readiness notification (repaint request) the owner produced so far. */
+  notifications(): number
+}
+
+/** Build the owner with the three facts already complete. */
+async function readyHarness(t: test.TestContext, options: { rows?: number; background?: { r: number; g: number; b: number } } = {}): Promise<Harness> {
+  const home = mkdtempSync(join(tmpdir(), 'sixel-image-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  })
+  const terminal = new ScriptedSixelTerminal(120, options.rows ?? 24)
+  const screen = new ScriptedScreen()
+  screen.background = options.background ?? { r: 0x28, g: 0x2c, b: 0x34 }
+  const state = { notifications: 0 }
+  const graphics = createDirectSixelGraphics(terminal, { TERM: 'xterm-256color' }, () => {
+    state.notifications += 1
+  })
+  assert.notEqual(graphics, undefined)
+  graphics!.observeScreen(screen, terminal.columns, terminal.rows)
+  terminal.declareSixel(true)
+  screen.replyCell(10, 20)
+  const harness: Harness = {
+    graphics: graphics!,
+    terminal,
+    screen,
+    notifications: () => state.notifications,
+  }
+  await waitUntil(() => graphics!.canPaint(), 'three verified facts')
+  return harness
+}
+
+const TWO_BAND_PNG = async (): Promise<string> =>
+  pngFromRgba(fill(40, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 40, 40)
+
+test('an admitted terminal paints the exact trusted DCS and its REAL footprint', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const image = harness.graphics.image(
+    { pngBase64: await TWO_BAND_PNG(), widthPx: 40, heightPx: 40 },
+    { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' },
+  )
+  // Frame 1: admission is synchronous, the encode is not — a text row only.
+  const repaint = harness.notifications()
+  assert.deepEqual(image.render(40), ['fallback'])
+  assert.equal(image.paintedBodyAt?.(40), undefined, 'a pending encode registers no body')
+  await waitUntil(() => harness.notifications() > repaint, 'the first encode settle')
+
+  const lines = image.render(40)
+  const dcs = lines[0]!
+  assert.ok(dcs.startsWith('\x1bP'), 'the anchor is one complete DCS')
+  const footprint = harness.graphics.screen.footprint(dcs)
+  assert.notEqual(footprint, undefined, 'the Screen trust port recognises the exact encoded string')
+  const body = image.paintedBodyAt?.(40)
+  assert.deepEqual(body, { width: 40, columns: footprint!.columns, rows: footprint!.rows })
+  assert.equal(lines.length, footprint!.rows, 'the body carries the footprint height, one DCS plus blank rows')
+  assert.ok(lines.slice(1).every(line => line === ''), 'only the anchor row carries bytes')
+
+  const decoded = decodeSixel(dcs)
+  assert.equal(decoded.width, footprint!.columns * 10, 'the real footprint covers exactly the encoded width')
+  assert.equal(decoded.height % 6, 0, 'a SIXEL raster is always a whole number of 6 px bands')
+  assert.ok(
+    decoded.height <= footprint!.rows * 20 && decoded.height > (footprint!.rows - 1) * 20,
+    `the encoded height ${decoded.height} must sit inside ${footprint!.rows} cell rows`,
+  )
+  const [topR] = pixelAt(decoded, 4, 0)
+  assert.ok(topR > 200, 'the first band is red')
+
+  // An unrelated DCS is NOT trusted, however well formed it looks.
+  assert.equal(harness.graphics.screen.footprint('\x1bP0;1;0q"1;1;10;10#1;2;100;0;0!10~\x1b\\'), undefined)
+})
+
+test('every missing fact paints text instead, and no geometry query precedes the DA1', async (t) => {
+  const home = mkdtempSync(join(tmpdir(), 'sixel-image-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  })
+  const png = await TWO_BAND_PNG()
+
+  // (a) no DA1 answer at all.
+  {
+    const terminal = new ScriptedSixelTerminal()
+    const screen = new ScriptedScreen()
+    screen.background = { r: 0, g: 0, b: 0 }
+    const graphics = createDirectSixelGraphics(terminal, { TERM: 'xterm-256color' })!
+    t.after(() => graphics.dispose())
+    graphics.observeScreen(screen, terminal.columns, terminal.rows)
+    screen.replyCell(10, 20)
+    await new Promise(resolve => setTimeout(resolve, 50))
+    assert.equal(graphics.canPaint(), false, 'a pending DA1 is not permission')
+    const image = graphics.image({ pngBase64: png, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'pending' })
+    assert.deepEqual(image.render(40), ['pending'])
+    assert.equal(image.paintedBodyAt?.(40), undefined)
+    assert.equal(screen.cellQueries, 0, 'the candidate must not spend a geometry query before the terminal declares SIXEL')
+  }
+
+  // (b) DA1 admitted, no real `CSI 6;h;w t` reply.
+  {
+    const terminal = new ScriptedSixelTerminal()
+    const screen = new ScriptedScreen()
+    screen.background = { r: 0, g: 0, b: 0 }
+    const graphics = createDirectSixelGraphics(terminal, { TERM: 'xterm-256color' })!
+    t.after(() => graphics.dispose())
+    graphics.observeScreen(screen, terminal.columns, terminal.rows)
+    terminal.declareSixel(true)
+    await new Promise(resolve => setTimeout(resolve, 100))
+    assert.equal(screen.cellQueries, 1, 'admission triggers exactly one real geometry query')
+    assert.equal(graphics.canPaint(), false, 'a default 9x18 cell is not a verified fact')
+    const image = graphics.image({ pngBase64: png, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'pending' })
+    assert.deepEqual(image.render(40), ['pending'])
+  }
+
+  // (c) DA1 + cell, but the OSC 11 background timed out (resolves undefined).
+  {
+    const terminal = new ScriptedSixelTerminal()
+    const screen = new ScriptedScreen()
+    screen.background = undefined
+    const graphics = createDirectSixelGraphics(terminal, { TERM: 'xterm-256color' })!
+    t.after(() => graphics.dispose())
+    graphics.observeScreen(screen, terminal.columns, terminal.rows)
+    terminal.declareSixel(true)
+    screen.replyCell(10, 20)
+    await new Promise(resolve => setTimeout(resolve, 100))
+    assert.equal(graphics.canPaint(), false, 'a background observation that timed out is not a guessed black')
+    const image = graphics.image({ pngBase64: png, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'pending' })
+    assert.deepEqual(image.render(40), ['pending'])
+  }
+})
+
+test('a statically excluded topology gets no handle at all', () => {
+  const terminal = new ScriptedSixelTerminal()
+  for (const environment of [
+    { TERM: 'xterm-256color', PI_IMAGE_PROTOCOL: 'none' },
+    { TERM: 'xterm-256color', PI_IMAGE_PROTOCOL: '0' },
+    { TERM: 'xterm-256color', PI_IMAGE_PROTOCOL: 'kitty' },
+    { TERM: 'xterm-256color', TMUX: '/tmp/tmux' },
+    { TERM: 'xterm-256color', ZELLIJ: '1' },
+    { TERM: 'xterm-256color', TERM_PROGRAM: 'herdr' },
+    { TERM: 'screen-256color' },
+  ] as NodeJS.ProcessEnv[]) {
+    assert.equal(
+      createDirectSixelGraphics(terminal, environment),
+      undefined,
+      `SIXEL must not even become a candidate for ${JSON.stringify(environment)}`,
+    )
+  }
+})
+
+test('a bottom-clipped block is a NEW encode of its own source, never a sliced DCS', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const image = harness.graphics.image(
+    { pngBase64: await TWO_BAND_PNG(), widthPx: 40, heightPx: 40 },
+    { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' },
+  )
+  image.render(40)
+  await waitForRepaint(harness, 'the full encode')
+  const full = image.render(40)[0]!
+  const footprint = harness.graphics.screen.footprint(full)!
+  assert.equal(footprint.rows, 2)
+
+  // A window that covers the whole block needs no variant at all: the port
+  // answers with the SAME raster, so the Screen repaints nothing new.
+  assert.equal(harness.graphics.screen.crop(full, 0, 2), full)
+  assert.equal(harness.graphics.screen.crop(full, 0, 9), full)
+
+  // Only the first cell row is visible: ONE bounded encode of the same source.
+  const beforeClip = harness.notifications()
+  assert.equal(harness.graphics.screen.crop(full, 0, 1), undefined, 'a missing variant paints nothing this frame')
+  await waitUntil(() => harness.notifications() > beforeClip, 'the bottom-crop variant')
+  const clipped = harness.graphics.screen.crop(full, 0, 1)
+  assert.notEqual(clipped, undefined)
+  assert.notEqual(clipped, full, 'the variant is a different, shorter raster')
+  const clippedFootprint = harness.graphics.screen.footprint(clipped!)!
+  assert.deepEqual(clippedFootprint, { columns: footprint.columns, rows: 1 })
+  const decoded = decodeSixel(clipped!)
+  const [red, , blueChannel] = pixelAt(decoded, 4, 0)
+  assert.ok(red > 200 && blueChannel < 60, 'the visible row still starts with the source top')
+  assert.equal(decoded.height % 6, 0, 'the variant is still whole bands')
+
+  // A top crop of the SECOND cell row is a different variant of the same source.
+  const beforeTop = harness.notifications()
+  assert.equal(harness.graphics.screen.crop(full, 1, 1), undefined)
+  await waitUntil(() => harness.notifications() > beforeTop, 'the top-crop variant')
+  const second = harness.graphics.screen.crop(full, 1, 1)
+  assert.notEqual(second, undefined)
+  const [, , secondBlue] = pixelAt(decodeSixel(second!), 4, 0)
+  assert.ok(secondBlue > 200, 'cropping one cell row starts at the blue band')
+
+  // Out-of-contract bounds are refused instead of clamped silently.
+  assert.equal(harness.graphics.screen.crop(full, 2, 1), undefined)
+  assert.equal(harness.graphics.screen.crop(full, -1, 1), undefined)
+  assert.equal(harness.graphics.screen.crop(full, 0, 0), undefined)
+  assert.equal(harness.graphics.screen.crop(full, 0, 1.5), undefined)
+})
+
+test('a superseded crop variant never paints', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const image = harness.graphics.image(
+    { pngBase64: await TWO_BAND_PNG(), widthPx: 40, heightPx: 40 },
+    { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' },
+  )
+  image.render(40)
+  await waitForRepaint(harness, 'the full encode')
+  const full = image.render(40)[0]!
+
+  const before = harness.notifications()
+  assert.equal(harness.graphics.screen.crop(full, 0, 1), undefined)
+  assert.equal(harness.graphics.screen.crop(full, 1, 1), undefined, 'the second request supersedes the first')
+  await waitUntil(() => harness.notifications() > before, 'the surviving variant')
+  const second = harness.graphics.screen.crop(full, 1, 1)
+  assert.notEqual(second, undefined)
+  // Exactly ONE variant settled: the superseded request was aborted before it
+  // could register a second raster (a second repaint would prove otherwise).
+  const settled = harness.notifications()
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(harness.notifications(), settled, 'the aborted variant must not settle into a raster')
+})
+
+test('a background change re-encodes instead of reusing the old composite', async (t) => {
+  const harness = await readyHarness(t, { background: { r: 0, g: 0, b: 255 } })
+  t.after(() => harness.graphics.dispose())
+  // A semi-transparent red over the terminal background: the painted pixel can
+  // only come from the VERIFIED background.
+  const png = await pngFromRgba(fill(40, 40, () => [255, 0, 0, 128]), 40, 40)
+  const image = harness.graphics.image({ pngBase64: png, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'fallback' })
+  image.render(40)
+  await waitForRepaint(harness, 'the first encode')
+  const overBlue = image.render(40)[0]!
+  const [blueR, , blueB] = pixelAt(decodeSixel(overBlue), 4, 4)
+  assert.ok(blueB > 100 && blueR > 60, `the semi-transparent red must composite over the blue background, got ${blueR},${blueB}`)
+
+  // The terminal background really changed: the readiness projection must
+  // re-sample and the old composite must not be reused.
+  harness.screen.background = { r: 0, g: 255, b: 0 }
+  harness.graphics.resample()
+  assert.equal(harness.graphics.canPaint(), false, 'a re-sample drops the old verified facts')
+  assert.deepEqual(image.render(40), ['fallback'], 'no pixels while the facts are being re-verified')
+  harness.screen.replyCell(10, 20)
+  await waitUntil(() => harness.graphics.canPaint(), 'the new background facts')
+  const beforeReencode = harness.notifications()
+  // The component notices the new fact epoch on its next render and re-encodes.
+  assert.deepEqual(image.render(40), ['fallback'], 'the old composite must not be reused')
+  await waitUntil(() => harness.notifications() > beforeReencode, 'the re-encoded raster')
+  const overGreen = image.render(40)[0]!
+  assert.notEqual(overGreen, overBlue, 'the new background must produce a new raster')
+  const [greenR, greenG] = pixelAt(decodeSixel(overGreen), 4, 4)
+  assert.ok(greenG > 100 && greenR > 60, `the same alpha must now composite over green, got ${greenR},${greenG}`)
+})
+
+test('an identical cell reply is the same fact and never restarts the projection', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const image = harness.graphics.image(
+    { pngBase64: await TWO_BAND_PNG(), widthPx: 40, heightPx: 40 },
+    { maxWidthCells: 8, fallback: 'fallback' },
+  )
+  image.render(40)
+  await waitForRepaint(harness, 'the first encode')
+  const dcs = image.render(40)[0]!
+  const settled = harness.notifications()
+
+  // The terminal answering the SAME geometry twice must not invalidate the
+  // verified facts (that would drop every raster and re-encode the transcript).
+  harness.screen.replyCell(10, 20)
+  harness.screen.replyCell(10, 20)
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.equal(harness.graphics.canPaint(), true)
+  assert.equal(harness.notifications(), settled, 'no readiness change, so no repaint request')
+  assert.equal(image.render(40)[0], dcs, 'the ready raster is unchanged')
+})
+
+test('invalidate() repaints the same occurrence without a second encode', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const image = harness.graphics.image(
+    { pngBase64: await TWO_BAND_PNG(), widthPx: 40, heightPx: 40 },
+    { maxWidthCells: 8, fallback: 'fallback' },
+  )
+  image.render(40)
+  await waitForRepaint(harness, 'the first encode')
+  const first = image.render(40)[0]!
+
+  const originalEncode = SixelEncoder.prototype.encode
+  let encodes = 0
+  SixelEncoder.prototype.encode = function patched(this: SixelEncoder, request) {
+    encodes += 1
+    return originalEncode.call(this, request)
+  }
+  t.after(() => {
+    SixelEncoder.prototype.encode = originalEncode
+  })
+  image.invalidate()
+  assert.equal(image.render(40)[0], first, 'the ready raster survives an invalidate')
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(encodes, 0, 'a repaint of the same facts must not re-encode')
+})
+
+test('dispose drops every raster, aborts the lane and refuses new work', async (t) => {
+  const harness = await readyHarness(t)
+  const image = harness.graphics.image(
+    { pngBase64: await TWO_BAND_PNG(), widthPx: 40, heightPx: 40 },
+    { maxWidthCells: 8, fallback: 'fallback' },
+  )
+  image.render(40)
+  await waitForRepaint(harness, 'the encode')
+  const dcs = image.render(40)[0]!
+  assert.notEqual(harness.graphics.screen.footprint(dcs), undefined)
+
+  harness.graphics.dispose()
+  harness.graphics.dispose()
+  assert.equal(harness.graphics.canPaint(), false)
+  assert.equal(harness.graphics.screen.footprint(dcs), undefined, 'the trust table is emptied')
+  assert.deepEqual(image.render(40), ['fallback'])
+  assert.equal(image.paintedBodyAt?.(40), undefined)
+  await new Promise(resolve => setTimeout(resolve, 200))
+})
+
+test('a settle that lands after disposal registers nothing', async (t) => {
+  const harness = await readyHarness(t, { rows: 24 })
+  const notifications = harness.notifications()
+  const png = await pngFromRgba(fill(600, 400, (x, y) => [x % 256, y % 256, 120, 255]), 600, 400)
+  const image = harness.graphics.image({ pngBase64: png, widthPx: 600, heightPx: 400 }, { maxWidthCells: 40, fallback: 'fallback' })
+  assert.deepEqual(image.render(40), ['fallback'])
+  // Dispose while the encode is in flight.
+  harness.graphics.dispose()
+  await new Promise(resolve => setTimeout(resolve, 1500))
+  assert.deepEqual(image.render(40), ['fallback'], 'a late result never revives a disposed occurrence')
+  assert.equal(image.paintedBodyAt?.(40), undefined)
+  assert.equal(harness.notifications(), notifications, 'a disposed owner requests no repaint')
+})
+
+test('the registry refuses a new raster instead of evicting a painted one', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const images: PixelBody[] = []
+  for (let index = 0; index < SIXEL_REGISTRY_MAX_VARIANTS + 1; index += 1) {
+    // Every occurrence is a DIFFERENT picture, so every raster is a distinct
+    // retained payload: an identical source would legitimately share one.
+    const png = await pngFromRgba(
+      fill(40, 40, (x) => (x < 20 ? [255, 0, 0, 255] : [0, 0, index * 8, 255])),
+      40,
+      40,
+    )
+    images.push(harness.graphics.image({ pngBase64: png, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'fallback' }))
+  }
+  // Every frame re-renders every mounted component; do the same here so a
+  // settled encode is actually looked up again.
+  await waitUntil(() => {
+    for (const image of images) image.render(40)
+    return images.filter(image => image.paintedBodyAt?.(40) !== undefined).length >= SIXEL_REGISTRY_MAX_VARIANTS
+  }, 'the registry to fill')
+  await new Promise(resolve => setTimeout(resolve, 300))
+  const painted = images.map(image => image.render(40)[0]!)
+  const ready = painted.filter(line => harness.graphics.screen.footprint(line) !== undefined)
+  assert.equal(ready.length, SIXEL_REGISTRY_MAX_VARIANTS, 'the cap is exactly the frozen variant budget')
+  assert.equal(harness.graphics.screen.footprint(painted[painted.length - 1]!), undefined, 'the over-budget occurrence stays text')
+  assert.deepEqual(images[images.length - 1]!.render(40), ['fallback'])
+})

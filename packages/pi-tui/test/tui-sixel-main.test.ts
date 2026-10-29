@@ -1,0 +1,254 @@
+import assert from "node:assert";
+import { describe, it } from "node:test";
+import type { Terminal } from "../src/terminal.ts";
+import type { SixelScreenFootprint, SixelScreenPort } from "../src/terminal-image.ts";
+import { type Component, type TUI } from "../src/tui.ts";
+import { TuiMainScreen } from "../src/tui-main-screen.ts";
+import type { TuiStopOptions } from "../src/tui.ts";
+
+/**
+ * A trusted SIXEL raster string. Its bytes are irrelevant to the Screen: the
+ * port below is the only thing that may recognize it (X072), and the Screen
+ * never parses a DCS.
+ */
+function sixel(id: string): string {
+	return `\x1bP0;1;q"1;1;40;36#0;2;100;0;0#1;2;0;0;100#0!40~#1!40~\x1b\\${id}`;
+}
+
+/** A port that trusts exactly the rasters this test registered. */
+class TestSixelPort implements SixelScreenPort {
+	private readonly rasters = new Map<string, SixelScreenFootprint>();
+	private readonly crops = new Map<string, string>();
+
+	register(dcs: string, footprint: SixelScreenFootprint): string {
+		this.rasters.set(dcs, footprint);
+		return dcs;
+	}
+
+	/** Register the ready crop variant a Screen would ask for. */
+	registerCrop(line: string, cropTopRows: number, visibleRows: number, dcs: string): string {
+		this.rasters.set(dcs, { columns: this.rasters.get(line)?.columns ?? 1, rows: visibleRows });
+		this.crops.set(`${line}\u0000${cropTopRows}\u0000${visibleRows}`, dcs);
+		return dcs;
+	}
+
+	footprint(line: string): SixelScreenFootprint | undefined {
+		return this.rasters.get(line);
+	}
+
+	crop(line: string, cropTopRows: number, visibleRows: number): string | undefined {
+		return this.crops.get(`${line}\u0000${cropTopRows}\u0000${visibleRows}`);
+	}
+}
+
+class RecordingTerminal implements Terminal {
+	readonly writes: string[] = [];
+	columns = 40;
+	rows = 12;
+	readonly kittyProtocolActive = false;
+
+	start(_onInput: (data: string) => void, _onResize: () => void): void {}
+	stop(): void {}
+	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
+	write(data: string): void {
+		this.writes.push(data);
+	}
+	moveBy(_lines: number): void {}
+	hideCursor(): void {}
+	showCursor(): void {}
+	clearLine(): void {}
+	clearFromCursor(): void {}
+	clearScreen(): void {}
+	setTitle(_title: string): void {}
+	setProgress(_active: boolean): void {}
+	setProgramStatus(): void {}
+
+	output(): string {
+		return this.writes.join("");
+	}
+
+	clear(): void {
+		this.writes.length = 0;
+	}
+}
+
+class Document implements Component {
+	lines: string[] = [];
+
+	render(_width: number): string[] {
+		return this.lines;
+	}
+
+	invalidate(): void {}
+}
+
+class TestableMainScreen extends TuiMainScreen {
+	constructor(terminal: Terminal, port: SixelScreenPort) {
+		super(terminal, false, undefined, port);
+	}
+
+	renderNow(): void {
+		const internals = this as unknown as { doRender: () => void };
+		internals.doRender();
+	}
+
+	stopWith(options: TuiStopOptions): void {
+		const internals = this as unknown as { beforeTerminalStop: (value: TuiStopOptions) => void };
+		internals.beforeTerminalStop(options);
+	}
+}
+
+async function frame(tui: TestableMainScreen): Promise<void> {
+	tui.renderNow();
+	// `requestRender` schedules; the direct `doRender` above is the frame.
+	await Promise.resolve();
+}
+
+describe("TuiMainScreen trusted SIXEL footprint (X073)", () => {
+	it("reserves the whole block, writes ONE DCS and restores the frame cursor", async () => {
+		const terminal = new RecordingTerminal();
+		const port = new TestSixelPort();
+		const tui = new TestableMainScreen(terminal, port);
+		const document = new Document();
+		const dcs = port.register(sixel("A"), { columns: 4, rows: 3 });
+		document.lines = ["info", dcs, "", "", "tail"];
+		tui.addChild(document);
+		tui.start();
+		await frame(tui);
+
+		const output = terminal.output();
+		assert.strictEqual(
+			output.split(dcs).length - 1,
+			1,
+			"the anchor is written exactly once",
+		);
+		assert.ok(output.includes("\x1b7"), "the anchor's cursor is saved before the command");
+		assert.ok(output.includes("\x1b8"), "and restored after it");
+		// The FIRST frame renders the whole document through the full-redraw path,
+		// so the anchor is placed inline there; the deferred positioning is proven
+		// by the incremental cases below.
+		// The body rows are reserved and left blank; the DCS lands on the anchor's row.
+		assert.strictEqual(tui.captureRenderState().previousLines.length, 5);
+		tui.stop();
+	});
+
+	it("clears the OLD footprint rows and repaints the raster AFTER the text that replaced it", async () => {
+		const terminal = new RecordingTerminal();
+		const port = new TestSixelPort();
+		const tui = new TestableMainScreen(terminal, port);
+		const document = new Document();
+		const dcs = port.register(sixel("B"), { columns: 4, rows: 3 });
+		document.lines = ["info", dcs, "", "", "tail"];
+		tui.addChild(document);
+		tui.start();
+		await frame(tui);
+
+		// The body rows become text (the picture shrank back to one row of text).
+		terminal.clear();
+		document.lines = ["info", "text-1", "text-2", "text-3", "tail"];
+		await frame(tui);
+
+		const output = terminal.output();
+		assert.ok(!output.includes(dcs), "the disposed raster is not painted again");
+		const rowClears = output.split("\x1b[2K").length - 1;
+		assert.ok(rowClears >= 3, `every old footprint row is cleared with CSI 2K, got ${rowClears}`);
+		assert.ok(output.includes("text-1") && output.includes("text-3"), "the replacement text is written");
+		tui.stop();
+	});
+
+	it("repaints the raster LAST in the frame that makes it ready", async () => {
+		const terminal = new RecordingTerminal();
+		const port = new TestSixelPort();
+		const tui = new TestableMainScreen(terminal, port);
+		const document = new Document();
+		// Frame 1: the component has no raster yet and paints text rows instead.
+		document.lines = ["info", "pending-text", "x", "y", "tail"];
+		tui.addChild(document);
+		tui.start();
+		await frame(tui);
+
+		// Frame 2: the raster is ready AND a text row after the block changes in the
+		// SAME frame. The picture must be painted after every text row of the frame,
+		// otherwise the next text write would cut the rows it just covered.
+		const dcs = port.register(sixel("C"), { columns: 4, rows: 3 });
+		terminal.clear();
+		document.lines = ["info", dcs, "", "", "tail-changed"];
+		await frame(tui);
+
+		const output = terminal.output();
+		const anchorAt = output.indexOf(dcs);
+		const textAt = output.indexOf("tail-changed");
+		assert.ok(anchorAt >= 0, "the raster is painted when it becomes ready");
+		assert.ok(textAt >= 0, "the trailing text change is written");
+		assert.ok(textAt < anchorAt, "the raster is painted AFTER every text row of the frame");
+		assert.ok(
+			!output.slice(anchorAt + dcs.length).includes("\x1b[2K"),
+			"nothing clears a covered row after the DCS",
+		);
+		assert.ok(output.includes("\x1b[999A"), "the deferred anchor is positioned from the top margin");
+		tui.stop();
+	});
+
+	it("writes no SIXEL control for a text-only frame", async () => {
+		const terminal = new RecordingTerminal();
+		const port = new TestSixelPort();
+		const tui = new TestableMainScreen(terminal, port);
+		const document = new Document();
+		const dcs = port.register(sixel("D"), { columns: 4, rows: 3 });
+		document.lines = ["info", dcs, "", "", "tail"];
+		tui.addChild(document);
+		tui.start();
+		await frame(tui);
+
+		terminal.clear();
+		document.lines = ["info", dcs, "", "", "tail", "appended"];
+		await frame(tui);
+
+		const output = terminal.output();
+		assert.ok(!output.includes(dcs), "an unchanged block is not repainted");
+		assert.ok(!output.includes("\x1b[999A"), "and no anchor positioning is emitted");
+		tui.stop();
+	});
+
+	it("suppresses a block a visible overlay paints over, and restores it afterwards", async () => {
+		const terminal = new RecordingTerminal();
+		const port = new TestSixelPort();
+		const tui = new TestableMainScreen(terminal, port);
+		const document = new Document();
+		const dcs = port.register(sixel("E"), { columns: 4, rows: 3 });
+		document.lines = ["info", dcs, "", "", "tail"];
+		tui.addChild(document);
+		tui.start();
+		await frame(tui);
+
+		const overlay: Component = { render: () => ["OVERLAY"], invalidate: () => {} };
+		const handle = tui.showOverlay(overlay, { row: 2, col: 0, width: 10 });
+		terminal.clear();
+		await frame(tui);
+		assert.ok(!terminal.output().includes(dcs), "an overlay over any block row wins the whole block this frame");
+
+		tui.hideOverlay(handle);
+		terminal.clear();
+		await frame(tui);
+		assert.ok(terminal.output().includes(dcs), "the block returns when the overlay is gone");
+		tui.stop();
+	});
+
+	it("keeps the full-redraw contract when the terminal is resized", async () => {
+		const terminal = new RecordingTerminal();
+		const port = new TestSixelPort();
+		const tui = new TestableMainScreen(terminal, port);
+		const document = new Document();
+		const dcs = port.register(sixel("F"), { columns: 4, rows: 3 });
+		document.lines = ["info", dcs, "", "", "tail"];
+		tui.addChild(document);
+		tui.start();
+		await frame(tui);
+
+		terminal.clear();
+		terminal.columns = 30;
+		await frame(tui);
+		assert.ok(terminal.output().includes("\x1b[2J\x1b[H\x1b[3J"), "a width change still clears viewport and scrollback");
+		tui.stop();
+	});
+});
