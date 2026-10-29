@@ -372,6 +372,22 @@ test('open does not report opened before the initial history open settles', asyn
   assert.equal((await pending).outcome.kind, 'opened')
 })
 
+test('open reports opened+superseded when the generation is lost after a real open settles', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setReadyHold()
+  const pending = h.lifecycle.open({ sessionId: 'session-a' })
+  h.resolveReady()
+  h.setGeneration(2)
+  const result = await pending
+  assert.deepEqual(result, {
+    ownership: 'superseded',
+    outcome: { kind: 'opened', handle: { session: { id: 'session-a' } } },
+  }, 'an official open that already reached open is not a proven non-execution')
+  assert.equal(h.calls.releases.length, 1, 'the superseded reference is released exactly once')
+  assert.equal(h.bindingOf('session-a'), undefined, 'no superseded generation leaks')
+})
+
 test('open reports an official history-open error as unavailable and releases exactly once', async () => {
   const h = harness()
   h.setCatalogued('session-a', true)
