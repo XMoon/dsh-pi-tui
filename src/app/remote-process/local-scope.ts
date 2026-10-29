@@ -14,10 +14,10 @@
  */
 
 import { createHash } from 'node:crypto'
-import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
+import { lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { Buffer } from 'node:buffer'
-import { dirname, join, relative, sep } from 'node:path'
+import { basename, dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** The only B1 identity protocol string. */
@@ -301,17 +301,35 @@ export function scopeFromInstalledProfile(facts: InstalledProfileFacts): LocalSc
   })
 }
 
+/** Field 3 (state) and field 22 (`starttime`) from one `/proc/<pid>/stat`. */
+export interface LinuxProcessStat {
+  /** Single-letter Linux task state: R/S/D/T/t/Z/X/x/K/W/P/I. */
+  readonly state: string
+  /** Starttime in clock ticks since boot. */
+  readonly starttime: string
+}
+
 /**
- * Parse field 22 (`starttime`) from one `/proc/<pid>/stat` text. The comm field
- * may contain spaces and parentheses; everything after the LAST ')' is the
- * fixed positional tail whose first entry is field 3.
+ * Parse field 3 (`state`) and field 22 (`starttime`) from one
+ * `/proc/<pid>/stat` text. The comm field may contain spaces and parentheses;
+ * everything after the LAST ')' is the fixed positional tail whose first entry
+ * is field 3. A stat without a single-letter state and a numeric starttime is
+ * malformed, never a usable liveness observation.
  */
-export function parseProcessStatStarttime(stat: string): string | undefined {
+export function parseProcessStat(stat: string): LinuxProcessStat | undefined {
   const close = stat.lastIndexOf(')')
   if (close < 0) return undefined
   const fields = stat.slice(close + 2).trim().split(/\s+/)
+  const state = fields[0]
   const value = fields[19]
-  return value !== undefined && /^\d+$/u.test(value) ? value : undefined
+  if (state === undefined || !/^[A-Za-z]$/u.test(state)) return undefined
+  if (value === undefined || !/^\d+$/u.test(value)) return undefined
+  return { state, starttime: value }
+}
+
+/** Parse only field 22 (`starttime`) from one `/proc/<pid>/stat`. */
+export function parseProcessStatStarttime(stat: string): string | undefined {
+  return parseProcessStat(stat)?.starttime
 }
 
 /** Best-effort Linux `starttime` read used by A0 status surfaces (may be undefined). */
@@ -383,4 +401,15 @@ export function bindProcessSeat(
       })
     })
   })
+}
+
+/**
+ * Remove one scratch directory only when it is exactly a Client-created
+ * `host-scratch-*` child of this scope. A SIGKILL leaves it for deferred
+ * cleanup; an active Host's scratch is never touched by a new Client.
+ */
+export function removeOwnedScratch(scopeDir: string, scratchDir: string): void {
+  if (dirname(scratchDir) !== scopeDir) return
+  if (!basename(scratchDir).startsWith('host-scratch-')) return
+  rmSync(scratchDir, { recursive: true, force: true })
 }

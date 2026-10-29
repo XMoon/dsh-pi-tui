@@ -64,6 +64,10 @@ export interface LocalTransportStatus {
   readonly transport: ConnectionState
   readonly generationId?: number
   readonly hostHome?: string
+  /** Active lazy wrappers; qualification observes this stays bounded. */
+  readonly activeWrappers: number
+  /** Physical mux sockets still owned; one for a connected generation. */
+  readonly liveSockets: number
 }
 
 /** One live official Client transport; the caller owns its disposal. */
@@ -195,6 +199,7 @@ function lazyWebSocket(
   open: () => Promise<RawSocket>,
   adopt: (socket: RawSocket) => void,
   diag: Diag,
+  release: () => void,
 ): ConnectionWebSocketLike {
   interface Buffered {
     readonly type: string
@@ -221,6 +226,7 @@ function lazyWebSocket(
     closed = true
     notify('error', { error })
     notify('close', {})
+    release()
   }
   const start = async (): Promise<void> => {
     try {
@@ -230,6 +236,7 @@ function lazyWebSocket(
         // here because the real carrier was never adopted by the gateway.
         socket.addEventListener('error', () => {})
         socket.terminate()
+        release()
         return
       }
       real = socket
@@ -237,7 +244,7 @@ function lazyWebSocket(
       socket.addEventListener('open', event => { notify('open', event) }, { once: true })
       socket.addEventListener('error', event => { notify('error', event) })
       socket.addEventListener('message', event => { notify('message', event) })
-      socket.addEventListener('close', event => { closed = true; notify('close', event) }, { once: true })
+      socket.addEventListener('close', event => { closed = true; notify('close', event); release() }, { once: true })
     } catch (error) {
       fail(error instanceof Error ? error : new Error(String(error)))
     }
@@ -262,6 +269,7 @@ function lazyWebSocket(
       }
       closed = true
       notify('close', {})
+      release()
     },
     addEventListener(type, listener, options): void {
       buffered.push({ type, listener, once: options?.once === true })
@@ -310,7 +318,7 @@ function cookieWebSocketFactory(
     }, socket => {
       sockets.add(socket)
       socket.once('close', () => { sockets.delete(socket) })
-    }, diag)
+    }, diag, () => { wrappers.delete(wrapper) })
     wrappers.add(wrapper)
     return wrapper
   }
@@ -590,6 +598,8 @@ export async function startLocalTransport(
           ...(transport === 'connected' && generation !== undefined
             ? { generationId: generation.id, hostHome: generation.host.home }
             : {}),
+          activeWrappers: wrappers.size,
+          liveSockets: sockets.size,
         }
       },
       dropWebSocketsForQualification(): void {

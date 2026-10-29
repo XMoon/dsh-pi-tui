@@ -53,6 +53,10 @@ export interface LocalClientStatus {
   readonly host?: LocalClientHostFacts
   readonly generationId?: number
   readonly hostHome?: string
+  /** Active lazy WebSocket wrappers; one while connected. */
+  readonly activeWrappers?: number
+  /** Physical mux sockets still owned; one while connected. */
+  readonly liveSockets?: number
 }
 
 /** The Client composition inputs that are not startup facts. */
@@ -146,6 +150,8 @@ export async function startLocalClient(
         transport: observed.transport,
         ...(observed.generationId === undefined ? {} : { generationId: observed.generationId }),
         ...(observed.hostHome === undefined ? {} : { hostHome: observed.hostHome }),
+        activeWrappers: observed.activeWrappers,
+        liveSockets: observed.liveSockets,
       }
     },
     async dispose(): Promise<void> {

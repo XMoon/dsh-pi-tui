@@ -116,6 +116,46 @@ function readStartIdentity(pid) {
   }
 }
 
+function readProcState(pid) {
+  try {
+    const stat = readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
+    return stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[0]
+  } catch {
+    return undefined
+  }
+}
+
+/** Leave one real killed child unreaped by its shell parent; return its PID. */
+async function makeZombie() {
+  const holder = spawn('sh', ['-c', 'sleep 60 & echo $!; exec sleep 60'], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  })
+  holder.unref()
+  const pid = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('the zombie holder did not print a child pid')), 5_000)
+    holder.stdout.once('data', chunk => {
+      clearTimeout(timer)
+      const value = Number(chunk.toString('utf8').split('\n')[0].trim())
+      if (!Number.isInteger(value) || value <= 0) reject(new Error(`bad zombie child pid: ${String(value)}`))
+      else resolve(value)
+    })
+  })
+  const starttime = readStartIdentity(pid)
+  assert(starttime !== undefined, 'the zombie child has no starttime')
+  const holderStarttime = readStartIdentity(holder.pid)
+  if (holderStarttime !== undefined) trackedProcesses.set(holder.pid, holderStarttime)
+  process.kill(pid, 'SIGKILL')
+  let state
+  for (let attempt = 0; attempt < 250; attempt += 1) {
+    state = readProcState(pid)
+    if (state === 'Z') break
+    await sleep(20)
+  }
+  assert(state === 'Z', 'the killed child did not become a real OS zombie')
+  return { pid, starttime }
+}
+
 function alive(pid) {
   try {
     process.kill(pid, 0)
@@ -707,6 +747,8 @@ async function main() {
     assert(Number.isSafeInteger(c1Ready.generationId) && c1Ready.generationId > 0, 'T02 client has no real generation')
     assert(c1Ready.hostHome === home, `T02 client host home is ${JSON.stringify(c1Ready.hostHome)}`)
     assert(c1Ready.rootFiberUid !== undefined, 'T02 client root fiber identity missing')
+    assert(c1Ready.activeWrappers === 1, `T02 client active wrapper baseline is ${String(c1Ready.activeWrappers)}`)
+    assert(c1Ready.liveSockets === 1, `T02 client live socket baseline is ${String(c1Ready.liveSockets)}`)
     assertClientHostFacts(c1Ready.host, hostReady.localHost, 'T02')
     assert(!Object.hasOwn(c1Ready.host, 'profileRealpath'), 'T02 client status leaked the profile path')
     trace('client-ready', {
@@ -832,33 +874,50 @@ async function main() {
     })
     trace('reconnect-baseline', { clientPid: c2Outcome.pid, generationId: beforeDropGeneration })
 
-    // T13: physically drop the actual mux socket; official state must clear
-    // first and the same Host must form a replacement generation.
-    c2.send({ op: 'qualification-drop-websocket', requestId: 'drop-1' })
-    await c2.waitFor(record => record.m4a0 === 'qualification' && record.requestId === 'drop-1', 'T13 qualification drop', 30_000)
-    let sawInterruption = false
-    let reconnected
-    const reconnectDeadline = Date.now() + 20_000
-    while (Date.now() < reconnectDeadline) {
-      const status = await clientStatus(c2)
-      if (!sawInterruption && status.transport !== 'connected') {
-        sawInterruption = true
-        assert(status.generationId === undefined, 'T13 interrupted status kept a stale generation')
-        trace('reconnect-interruption', { transport: status.transport })
+    // T13/F2: physically drop the actual mux socket repeatedly. Each cycle
+    // must clear the generation, form a replacement on the same Host, and
+    // return the active wrapper/socket ownership to its one-connection
+    // baseline. Thirty-six cycles expose cumulative wrapper retention.
+    const RECONNECT_CYCLES = 36
+    assert(c2Outcome.activeWrappers === 1, `T13 wrapper baseline is ${String(c2Outcome.activeWrappers)}`)
+    assert(c2Outcome.liveSockets === 1, `T13 socket baseline is ${String(c2Outcome.liveSockets)}`)
+    let beforeGeneration = beforeDropGeneration
+    let lastReconnected
+    for (let cycle = 1; cycle <= RECONNECT_CYCLES; cycle += 1) {
+      const requestId = `drop-${cycle}`
+      c2.send({ op: 'qualification-drop-websocket', requestId })
+      await c2.waitFor(record => record.m4a0 === 'qualification' && record.requestId === requestId, `T13 qualification drop ${cycle}`, 30_000)
+      let sawInterruption = false
+      let reconnected
+      const reconnectDeadline = Date.now() + 20_000
+      while (Date.now() < reconnectDeadline) {
+        const status = await clientStatus(c2)
+        if (!sawInterruption && status.transport !== 'connected') {
+          sawInterruption = true
+          assert(status.generationId === undefined, `T13 cycle ${cycle} interrupted status kept a stale generation`)
+          if (cycle === 1) trace('reconnect-interruption', { transport: status.transport })
+        }
+        if (sawInterruption && status.transport === 'connected' && status.generationId > beforeGeneration) {
+          reconnected = status
+          break
+        }
+        await sleep(25)
       }
-      if (sawInterruption && status.transport === 'connected' && status.generationId > beforeDropGeneration) {
-        reconnected = status
-        break
-      }
-      await sleep(50)
+      assert(sawInterruption, `T13 cycle ${cycle} never observed a disconnected/connecting state`)
+      assert(reconnected !== undefined, `T13 cycle ${cycle} never formed a replacement generation`)
+      assert(reconnected.activeWrappers === 1, `T13 cycle ${cycle} retained ${String(reconnected.activeWrappers)} wrapper(s)`)
+      assert(reconnected.liveSockets === 1, `T13 cycle ${cycle} retained ${String(reconnected.liveSockets)} socket(s)`)
+      beforeGeneration = reconnected.generationId
+      lastReconnected = reconnected
     }
-    assert(sawInterruption, 'T13 never observed a disconnected/connecting state')
-    assert(reconnected !== undefined, 'T13 never formed a replacement generation')
-    assertClientHostFacts(reconnected.host, hostReady.localHost, 'T13 reconnected')
+    assertClientHostFacts(lastReconnected.host, hostReady.localHost, 'T13 reconnected')
     trace('reconnect', {
+      cycles: RECONNECT_CYCLES,
       beforeGenerationId: beforeDropGeneration,
-      afterGenerationId: reconnected.generationId,
-      hostInstanceId: reconnected.host.instanceId,
+      afterGenerationId: lastReconnected.generationId,
+      activeWrappers: lastReconnected.activeWrappers,
+      liveSockets: lastReconnected.liveSockets,
+      hostInstanceId: lastReconnected.host.instanceId,
     })
     const c2Exit = await c2.shutdown()
     assert(c2Exit.code === 0, `T13 C2 normal exit was ${JSON.stringify(c2Exit)}`)
@@ -987,7 +1046,10 @@ async function main() {
     await forcedClient.waitFor(record => record.m4a0 === 'failure', 'T17 forced bootstrap failure', 60_000)
     const forcedExit = await forcedClient.waitForExit(30_000)
     assert(forcedExit.code === 1, `T17 forced bootstrap failure exit was ${JSON.stringify(forcedExit)}`)
-    assert(forcedClient.records.some(record => record.m4a0 === 'failure' && record.phase === 'after-context'), 'T17 forced bootstrap failure did not report after-context failure')
+    const forcedFailure = forcedClient.records.find(record => record.m4a0 === 'failure')
+    assert(forcedFailure !== undefined && forcedFailure.phase === 'after-context', 'T17 forced bootstrap failure did not report after-context failure')
+    assert(forcedFailure.activeWrappers === 0, `T17 forced bootstrap retained ${String(forcedFailure.activeWrappers)} wrapper(s)`)
+    assert(forcedFailure.liveSockets === 0, `T17 forced bootstrap retained ${String(forcedFailure.liveSockets)} socket(s)`)
     assert(forcedClient.records.some(record => record.m4a0 === 'cleanup' && record.status === 'completed'), 'T17 forced bootstrap failure did not emit completed cleanup')
     assert(!forcedClient.records.some(record => record.m4a0 === 'cleanup-failure'), 'T17 forced bootstrap failure falsely reported cleanup failure')
     assert(alive(hostReady.pid), 'T17 forced bootstrap failure killed the Host')
@@ -1184,12 +1246,24 @@ async function main() {
     assert(!missingHostRecords.some(record => record.m4a0 === 'cleanup-failure'), 'T17 missing host chunk falsely reported cleanup failure')
     trace('t17-host-chunk', { phase: 'after-boot', cleanup: 'completed' })
 
+    // F1: the stale registry names a real killed-but-unreaped zombie. The
+    // Client must classify it dead from /proc state Z + matching starttime and
+    // start a replacement through the free kernel seat.
+    const zombie = await makeZombie()
+    writeRawPrivate(registryPath, { ...registry, hostPid: zombie.pid, hostStarttime: zombie.starttime })
+    trace('t15-zombie', { pid: zombie.pid, state: 'Z', starttime: zombie.starttime })
+
     const c6 = new EntryProcess('client', entries.client, base)
     const c6Outcome = await waitForOutcome(c6, 'T15 restarted Host', 240_000)
     assert(c6Outcome.m4a0 === 'ready' && c6Outcome.transport === 'connected', `T15 Client did not connect to a new Host: ${JSON.stringify(c6Outcome)}`)
     assert(c6Outcome.host.instanceId !== hostReady.localHost.instanceId, 'T15 new Host reused the dead instance id')
     assert(c6Outcome.host.hostPid !== hostReady.localHost.hostPid, 'T15 new Host reused the dead PID')
+    assert(c6Outcome.host.hostPid !== zombie.pid, 'T15 new Host reused the zombie PID')
     assert(c6Outcome.host.hostStarttime !== hostReady.localHost.hostStarttime, 'T15 new Host reused the dead starttime')
+    assert(c6Outcome.host.hostStarttime !== zombie.starttime, 'T15 new Host reused the zombie starttime')
+    const scopeScratchDirs = () => readdirSync(scopeDir).filter(name => name.startsWith('host-scratch-'))
+    assert(scopeScratchDirs().length === 1, 'T15 spawned Host scratch is not the one process-owned directory')
+    trace('t15-scratch', { afterSpawn: scopeScratchDirs().length, afterAttach: 1, afterCleanExit: 0 })
     assertClientHostFacts(c6Outcome.host, readJson(registryPath), 'T15 new Client/registry')
     trackedProcesses.set(c6Outcome.host.hostPid, c6Outcome.host.hostStarttime)
     failpoint('spawned-host')
@@ -1210,6 +1284,14 @@ async function main() {
     const c6Exit = await c6.shutdown()
     assert(c6Exit.code === 0, `T15 new Client exit was ${JSON.stringify(c6Exit)}`)
     assert(alive(c6Outcome.host.hostPid), 'T15 new Host died on Client exit')
+    const c7 = new EntryProcess('client', entries.client, base)
+    const c7Outcome = await waitForOutcome(c7, 'T15 attach to active Host', 120_000)
+    assert(c7Outcome.m4a0 === 'ready' && c7Outcome.transport === 'connected', `T15 attach did not connect: ${JSON.stringify(c7Outcome)}`)
+    assertClientHostFacts(c7Outcome.host, c6Outcome.host, 'T15 attach')
+    assert(scopeScratchDirs().length === 1, 'a new Client erased the active Host overlay scratch')
+    const c7Exit = await c7.shutdown()
+    assert(c7Exit.code === 0, `T15 attach exit was ${JSON.stringify(c7Exit)}`)
+    assert(alive(c6Outcome.host.hostPid), 'T15 attach killed the new Host')
     trace('reconnect-new-host', {
       oldInstanceId: hostReady.localHost.instanceId,
       newInstanceId: c6Outcome.host.instanceId,
@@ -1226,6 +1308,8 @@ async function main() {
       await waitGone(c6Outcome.host.hostPid, 5_000)
     }
     assert(!alive(c6Outcome.host.hostPid), 'T17 spawned Host did not exit')
+    assert(scopeScratchDirs().length === 0, 'the clean Host shutdown left a host-scratch directory')
+    trace('t15-scratch', { afterSpawn: 1, afterAttach: 1, afterCleanExit: scopeScratchDirs().length })
     const scopeSuffix = hostReady.localHost.scopeId.slice(0, 40)
     await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 10_000)
     await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 10_000)

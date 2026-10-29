@@ -29,7 +29,7 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { attachEntryControl, writeEntryRecord } from './entry-control.ts'
+import { attachEntryControl, createEntryDiag, writeEntryRecord } from './entry-control.ts'
 import {
   bindProcessSeat,
   installedPackageRootFromEntry,
@@ -37,10 +37,12 @@ import {
   LOCAL_PROTOCOL,
   readInstalledDshVersion,
   readLinuxStarttime,
+  removeOwnedScratch,
   scopeFromInstalledProfile,
   type LocalScope,
   type ProcessSeat,
 } from './local-scope.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
 import { cleanupOwnedFiles, type LocalInstanceRecord } from './local-discovery.ts'
 
 /**
@@ -272,6 +274,7 @@ export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise
     if (error instanceof LocalScopeError && error.code === 'HOST_ALREADY_OWNED') {
       // A live Host already owns this profile scope. This candidate never
       // creates a Context, webserver, Agent or Session.
+      removeOwnedScratch(scope.dir, options.scratchDir)
       writeEntryRecord({
         m4a0: 'host-seat-conflict',
         processRole: 'host',
@@ -319,7 +322,10 @@ export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise
       const instanceId = published.identity.instanceId
       // The exit backstop removes only this instance's files; SIGKILL leaves
       // them for the stale-candidate path to classify.
-      process.once('exit', () => { cleanupOwnedFiles(scope, instanceId) })
+      process.once('exit', () => {
+        cleanupOwnedFiles(scope, instanceId)
+        removeOwnedScratch(scope.dir, options.scratchDir)
+      })
       writeEntryRecord({ m4a0: 'ready', ...status, localHost: published.identity })
 
       let stopping: Promise<void> | undefined
@@ -340,6 +346,7 @@ export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise
             errors.push(error)
           }
           cleanupOwnedFiles(scope, instanceId)
+          removeOwnedScratch(scope.dir, options.scratchDir)
           if (errors.length > 0) {
             const primary = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
             writeEntryRecord({
@@ -359,6 +366,12 @@ export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise
         return stopping
       }
 
+      process.once('SIGTERM', () => {
+        runDetached('local host: SIGTERM shutdown', () => stop(0), { diag: createEntryDiag('host') })
+      })
+      process.once('SIGINT', () => {
+        runDetached('local host: SIGINT shutdown', () => stop(130), { diag: createEntryDiag('host') })
+      })
       attachEntryControl(async request => {
         if (request.op === 'status') {
           writeEntryRecord({
@@ -432,6 +445,7 @@ export async function runLocalHostEntry(options: LocalHostEntryOptions): Promise
         priorCleanupFailure === undefined ? undefined : { priorCleanupFailure },
       )
       if (registration !== undefined) cleanupOwnedFiles(scope, registration.identity.instanceId)
+      removeOwnedScratch(scope.dir, options.scratchDir)
       process.exitCode = 1
     }
   } finally {
