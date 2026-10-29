@@ -11,20 +11,22 @@
  * The component never awaits: it consults the raster loader synchronously and
  * asks it to fire the isolated conversion on first render; the loader's settle
  * notification invalidates the component, which repaints with the PNG. Inline
- * pixels are shown for the Kitty protocol only (the PR2.5 visual contract:
- * SVG preview pixels are not extended to iTerm2/macOS/Windows); otherwise it
- * emits NO rows — the figure's description and source availability remain the
- * whole presentation.
+ * pixels are shown for Kitty and for Direct SIXEL (Image-8 / I8-2B); iTerm2 and
+ * every other surface emit NO rows — the figure's description and source
+ * availability remain the whole presentation.
  *
- * `paintedImageBody()` reports the REAL pixel rows the last render painted, so
- * a click can only open the viewer from pixels the user actually saw: a
- * loading, failed or text-fallback render registers no body.
+ * `paintedImageBody()` reports the REAL pixel rows the last COMMITTED frame
+ * painted, so a click can only open the viewer from pixels the user actually
+ * saw: a loading, failed or text-fallback render registers no body. For Kitty
+ * that footprint is synchronous with the render; for SIXEL it is the owner's
+ * last-committed answer, read live at query time (the Screen materializes the
+ * raster after the component renders).
  * @module @xmoon76/dsh-pi-tui/tui/components/media/svg-thumbnail
  */
 
 import { Image, imageFallback, type Component } from '@xmoon76/pi-tui'
 import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
-import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
+import { effectiveImageProtocol, type EffectiveImageProtocol } from '../../graphics/image-capability.ts'
 import type { ImageThumbnailTheme } from './image-thumbnail.ts'
 import { MAX_IMAGE_ROWS, MAX_IMAGE_WIDTH, NARROW_WIDTH_THRESHOLD } from './image-thumbnail.ts'
 import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
@@ -112,28 +114,43 @@ export class SvgThumbnail implements Component {
   }
 
   /**
-   * The REAL pixel body rows the LAST render at `width` painted, or undefined
-   * when that render carried no pixels (not ready, failed, narrow, no inline
-   * graphics protocol, or a non-Kitty surface). This is the authoritative
-   * "may a click on these rows open the Viewer?" answer — deliberately not
-   * "the component emits rows".
+   * The REAL pixel body rows the LAST COMMITTED frame at `width` painted, or
+   * undefined when that render carried no pixels (not ready, failed, narrow,
+   * no inline graphics protocol, or a non-pixel surface). This is the
+   * authoritative "may a click on these rows open the Viewer?" answer —
+   * deliberately not "the component emits rows".
+   *
+   * Kitty reports the footprint its synchronous render built. SIXEL must read
+   * the owner's last-committed footprint at QUERY time: the component renders
+   * before the Screen materializes the raster, so a render-time snapshot would
+   * lag one frame (or clear on every repaint).
    * @param width - the transcript content width being hit-tested.
    * @returns the painted body row count and its widest occupied column.
    */
   paintedImageBody(width: number): SvgThumbnailBody | undefined {
+    if (this.graphics?.mode === 'sixel') {
+      const live = this.instance?.paintedBodyAt?.(width)
+      return live === undefined ? undefined : { rows: live.rows, endCol: live.columns }
+    }
     const painted = this.paintedBody
     if (painted === undefined || painted.width !== width) return undefined
     return { rows: painted.rows, endCol: painted.endCol }
   }
 
   /**
-   * The actual raster dimensions of the derivative the LAST render at `width`
-   * painted (never the admitted target width, never the source's declared
-   * width). `undefined` when that render painted no pixels.
+   * The actual raster dimensions of the derivative the LAST COMMITTED frame at
+   * `width` painted (never the admitted target width, never the source's
+   * declared width). `undefined` when that frame painted no pixels.
    * @param width - the transcript content width being inspected.
    * @returns the painted PNG's width/height in pixels.
    */
   paintedPixelSize(width: number): { readonly widthPx: number; readonly heightPx: number } | undefined {
+    if (this.graphics?.mode === 'sixel') {
+      if (this.instance?.paintedBodyAt?.(width) === undefined) return undefined
+      const live = this.paintedPixel
+      if (live === undefined || live.width !== width) return undefined
+      return { widthPx: live.widthPx, heightPx: live.heightPx }
+    }
     const painted = this.paintedPixel
     if (painted === undefined || painted.width !== width) return undefined
     return { widthPx: painted.widthPx, heightPx: painted.heightPx }
@@ -156,7 +173,7 @@ export class SvgThumbnail implements Component {
     const protocol = effectiveImageProtocol(this.graphics)
     const key = `${width}:${protocol ?? 'none'}`
     if (this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines
-    const rendered = this.renderLines(width)
+    const rendered = this.renderLines(width, protocol)
     // A nested card reserves a FIXED image row budget: a loading placeholder
     // and the settled image must not move later child headers/search rows.
     let lines = rendered
@@ -169,18 +186,30 @@ export class SvgThumbnail implements Component {
     return lines
   }
 
-  private renderLines(width: number): string[] {
+  private renderLines(width: number, protocol: EffectiveImageProtocol): string[] {
     // Every non-pixel branch below clears the recorded body first: a previous
-    // render's geometry must never survive a state change at the same width.
+    // frame's geometry must never survive a state change at the same width.
     this.paintedBody = undefined
     this.paintedPixel = undefined
     if (width < NARROW_WIDTH_THRESHOLD) return []
-    // SVG preview pixels are a Kitty-only capability in this contract. iTerm2's
-    // inline framing is not understood by the fork's ANSI width layer, and the
-    // other platforms have no verified native raster bound: the figure keeps
-    // its description and source actions instead of faking a pixel body. An
-    // admitted tmux virtual handle is a real Kitty transport here.
-    if (effectiveImageProtocol(this.graphics) !== 'kitty') return []
+    // SVG preview pixels are available through Kitty and Direct SIXEL
+    // (Image-8 / I8-2B). iTerm2's inline framing is not understood by the
+    // fork's ANSI width layer, and the other platforms have no verified native
+    // raster bound: the figure keeps its description and source actions instead
+    // of faking a pixel body. An admitted tmux virtual handle is a real Kitty
+    // transport here.
+    if (protocol !== 'kitty' && protocol !== 'sixel') return []
+    // The FIXED row budget is a real PIXEL-height ceiling for SIXEL: slicing
+    // the returned lines cannot crop the DCS the Screen encodes. One row is
+    // the leading spacer, so N fixed rows grant at most N-1 image rows.
+    const pixelRows = this.fixedRows === undefined
+      ? MAX_IMAGE_ROWS
+      : Math.min(MAX_IMAGE_ROWS, Math.max(0, this.fixedRows - 1))
+    if (this.fixedRows !== undefined && pixelRows === 0) {
+      // No body grant: paint the spacer (fixedRows === 1) or nothing
+      // (fixedRows === 0) and start no raster read/encode at all.
+      return this.fixedRows === 1 ? [''] : []
+    }
     const state = this.loader.get(this.digest, this.targetWidth)
     if (state.state === 'ready') this.lastReady = state
     // The loader cache is bounded; an eviction (or a clear) must not turn an
@@ -198,7 +227,7 @@ export class SvgThumbnail implements Component {
           ? this.graphics!.image(
             { pngBase64: effective.base64, widthPx: effective.widthPx, heightPx: effective.heightPx },
             {
-              maxHeightCells: MAX_IMAGE_ROWS,
+              maxHeightCells: protocol === 'sixel' ? pixelRows : MAX_IMAGE_ROWS,
               maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
               fallback: this.theme.fallbackColor(imageFallback(
                 'image/png',
@@ -212,7 +241,7 @@ export class SvgThumbnail implements Component {
             'image/png',
             { fallbackColor: this.theme.fallbackColor },
             {
-              maxHeightCells: MAX_IMAGE_ROWS,
+              maxHeightCells: protocol === 'sixel' ? pixelRows : MAX_IMAGE_ROWS,
               maxWidthCells: Math.min(MAX_IMAGE_WIDTH, Math.max(1, width - 2)),
               filename: 'svg',
             },
@@ -221,6 +250,14 @@ export class SvgThumbnail implements Component {
         this.instanceManaged = managed
       }
       const body = this.instance.render(width)
+      if (protocol === 'sixel') {
+        // The Screen materializes the DCS after this render, so the candidate
+        // body is NOT pixel evidence yet. Keep only the derivative facts this
+        // render bound; the getters still require the owner's committed
+        // footprint before answering.
+        this.paintedPixel = { width, widthPx: effective.widthPx, heightPx: effective.heightPx }
+        return ['', ...body]
+      }
       const columns = this.instance.paintedBodyAt?.(width)?.columns ?? paintedImageColumns(body)
       if (columns !== undefined) {
         this.paintedBody = { width, rows: body.length, endCol: columns }

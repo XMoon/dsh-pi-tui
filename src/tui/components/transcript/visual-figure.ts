@@ -149,8 +149,14 @@ export class VisualFigureComponent implements Component {
   /** The chart body, the SVG description text, or the explicit fallback row. */
   private readonly body: Component
   private readonly thumbnail: SvgThumbnail | undefined
-  /** The hit geometry of the LAST render, keyed by the width it painted at. */
-  private painted: (VisualFigurePaintedHits & { readonly width: number }) | undefined
+  /** The hit geometry of the LAST render, keyed by the width it painted at.
+   *  `thumbnailStartRow`/`thumbnailMaxRows` are the stable row snapshot of that
+   *  frame (the live SIXEL footprint is queried separately at hit time). */
+  private painted: (VisualFigurePaintedHits & {
+    readonly width: number
+    readonly thumbnailStartRow?: number
+    readonly thumbnailMaxRows?: number
+  }) | undefined
   /** Whether this figure carries an action row at all. */
   private readonly actions: readonly ActionSpec[]
 
@@ -209,10 +215,27 @@ export class VisualFigureComponent implements Component {
    */
   paintedHitMap(width: number): VisualFigurePaintedHits | undefined {
     if (this.painted === undefined || this.painted.width !== width) return undefined
+    // Kitty keeps its render-time snapshot. SIXEL's real footprint only exists
+    // after the Screen materializes the raster, so the hit is read LIVE at
+    // query time from the same thumbnail occurrence; the row displacement and
+    // action rows stay those of the LAST render (they never move with the
+    // asynchronous raster).
+    let thumbnailBody = this.painted.thumbnailBody
+    if (this.options.graphics?.mode === 'sixel' && this.thumbnail !== undefined) {
+      thumbnailBody = undefined
+      const live = this.thumbnail.paintedImageBody(width)
+      const startRow = this.painted.thumbnailStartRow
+      const maxRows = this.painted.thumbnailMaxRows
+      if (live !== undefined && startRow !== undefined && maxRows !== undefined
+        && live.rows > 0 && live.rows <= maxRows
+        && live.endCol > 0 && live.endCol <= width) {
+        thumbnailBody = { startRow, endRow: startRow + live.rows, endCol: live.endCol }
+      }
+    }
     return {
       height: this.painted.height,
       actions: this.painted.actions,
-      ...(this.painted.thumbnailBody === undefined ? {} : { thumbnailBody: this.painted.thumbnailBody }),
+      ...(thumbnailBody === undefined ? {} : { thumbnailBody }),
     }
   }
 
@@ -232,17 +255,26 @@ export class VisualFigureComponent implements Component {
     const bodyRows = lines.length
     let thumbnailRows: string[] = []
     let thumbnailBody: VisualFigurePaintedHits['thumbnailBody']
+    let thumbnailStartRow: number | undefined
+    let thumbnailMaxRows: number | undefined
     if (this.thumbnail !== undefined) {
       thumbnailRows = this.thumbnail.render(safeWidth)
-      const painted = this.thumbnail.paintedImageBody(safeWidth)
       // The thumbnail's first row is its own spacer, so its first REAL pixel
       // row is bodyRows + 1. A loading/error/text-fallback render reports no
       // body, and the rows stay inert.
-      if (painted !== undefined) {
-        thumbnailBody = {
-          startRow: bodyRows + 1,
-          endRow: bodyRows + 1 + painted.rows,
-          endCol: painted.endCol,
+      thumbnailStartRow = bodyRows + 1
+      thumbnailMaxRows = Math.max(0, thumbnailRows.length - 1)
+      if (this.options.graphics?.mode !== 'sixel') {
+        // Kitty's placement is synchronous with this render: the snapshot is
+        // the same fact the user sees. SIXEL must not declare pixels here —
+        // its committed footprint is read at hit time (see `paintedHitMap`).
+        const painted = this.thumbnail.paintedImageBody(safeWidth)
+        if (painted !== undefined) {
+          thumbnailBody = {
+            startRow: thumbnailStartRow,
+            endRow: thumbnailStartRow + painted.rows,
+            endCol: painted.endCol,
+          }
         }
       }
     }
@@ -257,6 +289,8 @@ export class VisualFigureComponent implements Component {
       height,
       actions,
       ...(thumbnailBody === undefined ? {} : { thumbnailBody }),
+      ...(thumbnailStartRow === undefined ? {} : { thumbnailStartRow }),
+      ...(thumbnailMaxRows === undefined ? {} : { thumbnailMaxRows }),
     }
     return actionRow === undefined
       ? [...lines, ...thumbnailRows]

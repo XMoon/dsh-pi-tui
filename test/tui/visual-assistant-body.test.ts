@@ -19,6 +19,8 @@ import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.t
 import { TuiApp } from '../../src/tui-app.ts'
 import { HOST_MARKDOWN_OPTIONS, markdownTheme } from '../../src/tui/theme/runtime.ts'
 import { SharedDefinitionsMarkdown } from '../../src/tui/components/transcript/shared-definitions-markdown.ts'
+import { VisualAssistantBody } from '../../src/tui/components/transcript/visual-assistant-body.ts'
+import type { ImageGraphics } from '../../src/tui/graphics/native-image.ts'
 import { setAssistantVisualPresentation, type VisualPresentationKey } from '../../src/domain/visual/presentation.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 import { svgFactFromArgs } from '../../src/domain/visual/svg.ts'
@@ -880,4 +882,81 @@ test('fullscreen drag selection copies the visual Assistant body and leaves one 
   const after = vt.getViewport().join('\n')
   assert.equal(after.split('Request latency').length - 1, 1, 'copying never duplicates or removes the chart')
   app.stop()
+})
+
+// ── Image-8 / I8-2B: the body must not freeze a pre-commit SIXEL hit ──────
+
+const SIXEL_BODY_PLACEMENT = '\x1bP0;1;q"1;1;320;160#0;2;100;0;0~\x1b\\'
+
+function sixelBodyGraphics(state: { committed: boolean }): ImageGraphics {
+  return {
+    mode: 'sixel',
+    canPaint: () => true,
+    image: () => ({
+      render: () => [SIXEL_BODY_PLACEMENT, '', ''],
+      invalidate: () => {},
+      paintedBodyAt: (width: number) => (state.committed ? { width, columns: 6, rows: 3 } : undefined),
+      dispose: () => {},
+    }),
+    terminal: {} as never,
+    screen: {} as never,
+    observeScreen: () => {},
+    resample: () => {},
+    dispose: () => {},
+  } as unknown as ImageGraphics
+}
+
+test('a SIXEL Assistant figure hit is read from the committed frame, not the render snapshot', async () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const state = { committed: false }
+  const loader = new SvgRasterLoader(async (_source, options) => ({
+    png: new Uint8Array(),
+    base64: TINY_PNG_BASE64,
+    widthPx: options.targetWidth,
+    heightPx: Math.max(1, Math.round(options.targetWidth / 2)),
+  }))
+  const publication = svgPublication(REF_A)
+  const body = new VisualAssistantBody({
+    pieces: [{ kind: 'visual', ref: REF_A, publication, blockIndex: null, placement: 'tail' }],
+    definitions: [],
+    blocks: [],
+    theme: markdownTheme,
+    markdownOptions: HOST_MARKDOWN_OPTIONS,
+    paint: text => text,
+    requestRender: () => {},
+    figure: () => ({
+      publication,
+      selected: () => false,
+      paint: text => text,
+      requestRender: () => {},
+      onCopy: () => {},
+      onView: () => {},
+      svgLoader: loader,
+      svgTheme: { fallbackColor: text => text },
+      svgAdmissionWidth: 640,
+      graphics: sixelBodyGraphics(state),
+    }),
+    nonText: () => undefined,
+  })
+  body.render(100)
+  for (let index = 0; index < 40; index += 1) await new Promise(resolve => setImmediate(resolve))
+  body.render(100)
+  const before = body.paintedVisualHits(100)
+  assert.equal(before.length, 1)
+  assert.equal(before[0]!.thumbnailBody, undefined, 'the pre-commit render declares no pixel body')
+
+  state.committed = true
+  // No extra component render: the same body answers from the committed frame.
+  const after = body.paintedVisualHits(100)
+  assert.equal(after.length, 1)
+  const hit = after[0]!
+  assert.ok(hit.thumbnailBody !== undefined, 'the committed frame produces the pixel hit')
+  assert.ok(hit.thumbnailBody.endRow > hit.thumbnailBody.startRow)
+  assert.equal(hit.thumbnailBody.endCol, 6)
+  assert.equal(hit.top, before[0]!.top, 'the figure top is the last-render position')
+  assert.equal(hit.height, before[0]!.height, 'the figure height never moves with the raster')
+  assert.deepEqual(hit.actions, before[0]!.actions, 'action rows stay the last-render snapshot')
+  body.dispose()
+  loader.dispose()
+  resetCapabilitiesCache()
 })
