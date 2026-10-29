@@ -412,6 +412,27 @@ Core. What the Client may rely on is one observed terminal fact and one gate:
   EXACT string the owner encoded, and re-encodes a visible crop from the same
   source at the same scale. A DCS is never parsed for syntax, sliced, truncated,
   reflowed or composited as text; an unregistered one stays ordinary text.
+- **Residency follows the physical frame, not component lifetime.** A component
+  in SIXEL mode emits an inert candidate marker for its block, never a DCS. The
+  Screen collects the blocks its FINAL layout really shows — including a
+  bottom-clipped block and an anchor that scrolled above the viewport — and asks
+  the owner to reconcile that frame's demands. The owner grants residency within
+  its fixed budget (bottom-up: the newest visible content wins), answers
+  `materialize()` with the exact DCS only for a granted and ready window, and
+  takes no other token→DCS path. After a frame is really written, the Screen
+  reports every raster the physical screen still shows (written this frame, or
+  kept by the diff); the owner pins those occurrences, releases every other
+  retained record, and only then tasks the one encoder lane for granted-but-
+  unready blocks, which paint on a later settled frame. A component that merely
+  rendered, an occurrence scrolled off screen, and a pending or refused block
+  all hold no pixels and no clickable body.
+- **A residency decision never rewrites committed scrollback.** On the main
+  screen a projected block whose pixels already sit above the viewport is a
+  historical fact: a change of residency/materialization for the SAME occurrence
+  must be projected onto the previous physical line, not treated as new content.
+  Only a real content change (source, fold, deletion, reorder, text, width,
+  clear or reset) may become `firstChanged`; a no-write frame keeps the previous
+  physical raster set instead of releasing it as an empty one.
 - **The erase and the paint order belong to the physical Screen.** The main
   screen (X073) expands its diff to the union of the old and new footprint,
   erases every covered row before any text lands on it, and writes the command

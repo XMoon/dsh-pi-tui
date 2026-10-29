@@ -39,6 +39,77 @@ class TestSixelPort implements SixelScreenPort {
 	crop(line: string, cropTopRows: number, visibleRows: number): string | undefined {
 		return this.crops.get(`${line}\u0000${cropTopRows}\u0000${visibleRows}`);
 	}
+
+	/** The new X072 candidate surface: these fixtures exercise the DCS trust path. */
+	candidate(_line: string): undefined {
+		return undefined;
+	}
+
+	reconcileVisible(_screen: object, _demands: readonly SixelVisibleCandidate[]): boolean {
+		return false;
+	}
+
+	materialize(_line: string, _cropTopRows: number, _visibleRows: number): string | undefined {
+		return undefined;
+	}
+
+	framePainted(_screen: object, _retained: readonly SixelFrameRaster[]): void {}
+}
+
+/**
+ * A candidate-mode port: components emit tokens, the Screen materializes a DCS
+ * only for the blocks the final viewport really shows. The Owner side is this
+ * test's map from token to a ready raster and from grant to visibility.
+ */
+class CandidateSixelPort implements SixelScreenPort {
+	private readonly rasters = new Map<string, SixelScreenFootprint>();
+	private readonly tokens = new Map<string, { fallback: string; rows: number }>();
+	private readonly dcsByToken = new Map<string, string>();
+	private readonly grants = new Map<string, number>();
+	private seq = 0;
+
+	registerSource(fallback: string, rows: number): string {
+		const token = `\u2063SIXC:test${++this.seq}\u2063`;
+		this.tokens.set(token, { fallback, rows });
+		return token;
+	}
+
+	bindRaster(token: string, dcs: string, footprint: SixelScreenFootprint): void {
+		this.dcsByToken.set(token, dcs);
+		this.rasters.set(dcs, footprint);
+	}
+
+	candidate(line: string): { id: string; fallback: string; layoutRows: number } | undefined {
+		const token = this.tokens.get(line);
+		if (token === undefined) return undefined;
+		return { id: line, fallback: token.fallback, layoutRows: token.rows };
+	}
+
+	reconcileVisible(_screen: object, demands: readonly SixelVisibleCandidate[]): boolean {
+		this.grants.clear();
+		for (const demand of demands) this.grants.set(demand.line, demand.visibleRows);
+		return false;
+	}
+
+	materialize(line: string, _cropTopRows: number, _visibleRows: number): string | undefined {
+		if (!this.grants.has(line)) return undefined;
+		return this.dcsByToken.get(line);
+	}
+
+	framePainted(_screen: object, _retained: readonly SixelFrameRaster[]): void {}
+
+	footprint(line: string): SixelScreenFootprint | undefined {
+		return this.rasters.get(line);
+	}
+
+	crop(): string | undefined {
+		return undefined;
+	}
+
+	/** How many distinct rasters the frame materialized. */
+	materializedCount(): number {
+		return [...this.grants.keys()].filter(token => this.dcsByToken.has(token)).length;
+	}
 }
 
 class RecordingTerminal implements Terminal {
@@ -287,4 +358,36 @@ describe("TuiMainScreen trusted SIXEL footprint (X073)", () => {
 		assert.ok(terminal.output().includes("\x1b[2J\x1b[H\x1b[3J"), "a width change still clears viewport and scrollback");
 		tui.stop();
 	});
+});
+
+it("keeps native scrollback when a painted image leaves the viewport (X073)", async () => {
+	const terminal = new RecordingTerminal();
+	terminal.rows = 12;
+	const port = new CandidateSixelPort();
+	const screen = new TestableMainScreen(terminal, port);
+	const document = new Document();
+	const tokens: string[] = [];
+	for (let index = 0; index < 24; index += 1) {
+		const token = port.registerSource(`image ${index}`, 3);
+		port.bindRaster(token, sixel(`many-${index}`), { columns: 4, rows: 3 });
+		tokens.push(token);
+	}
+	// 24 three-row blocks: the viewport (12 rows) shows exactly the last four.
+	document.lines = tokens.flatMap((token) => [token, "", ""]);
+	screen.addChild(document);
+	await frame(screen);
+	assert.equal(port.materializedCount(), 4, "only the visible tail is materialized");
+	const firstFrame = terminal.output();
+	assert.ok(firstFrame.includes(sixel("many-23")), "the newest visible image painted");
+
+	// Append one text line: the oldest visible image moves above the viewport.
+	// Its pixels are already in native scrollback; a residency-only projection
+	// change must not rewrite that history (no `2J`/`3J`).
+	terminal.clear();
+	document.lines = [...document.lines, "tail text"];
+	await frame(screen);
+	const wire = terminal.output();
+	assert.ok(!wire.includes("\x1b[3J"), "no scrollback clear for a residency-only change");
+	assert.ok(!wire.includes("\x1b[2J"), "no full screen clear for a residency-only change");
+	assert.ok(wire.includes("tail text"), "the real content change is written");
 });

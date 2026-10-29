@@ -632,6 +632,19 @@ describe("trusted SIXEL screen port (X074)", () => {
 			this.crops.set(key, created);
 			return created;
 		}
+		candidate(_line: string): undefined {
+			return undefined;
+		}
+
+		reconcileVisible(_screen: object, _demands: readonly SixelVisibleCandidate[]): boolean {
+			return false;
+		}
+
+		materialize(_line: string, _cropTopRows: number, _visibleRows: number): string | undefined {
+			return undefined;
+		}
+
+		framePainted(_screen: object, _retained: readonly SixelFrameRaster[]): void {}
 	}
 
 	function frameWith(port: RecordingSixelPort, lines: string[], width: number, height: number, scrollTop: number) {

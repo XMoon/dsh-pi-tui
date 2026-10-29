@@ -62,6 +62,11 @@ import type { NativeKittyImageBody, NativeKittyImageOptions, PixelBody } from '.
  */
 export type DirectSixelScreenPort = NonNullable<ConstructorParameters<typeof TuiMainScreen>[3]>
 
+/** One visible block the Screen reports for this frame (mirror of X072's shape). */
+type ScreenVisibleCandidate = Parameters<DirectSixelScreenPort['reconcileVisible']>[1][number]
+/** One raster the physical Screen still shows after a committed write. */
+type ScreenFrameRaster = Parameters<DirectSixelScreenPort['framePainted']>[1][number]
+
 /** The one graphics handle a Direct SIXEL app owns per physical terminal. */
 export interface DirectSixelGraphics {
   readonly mode: 'sixel'
@@ -160,19 +165,41 @@ interface SourceBinding {
 }
 
 /**
- * One occurrence's encoded raster and the facts it was encoded for.
+ * One bound occurrence: a stable candidate identity plus the rasters it owns.
  *
- * `crop` holds at most one CURRENT variant: the one the last frame asked for.
- * A superseded variant is unregistered immediately, so a fast scroll back to a
- * previous offset re-encodes instead of projecting a stale crop.
+ * The identity exists BEFORE any encode: a Screen can only ask the owner about
+ * an image it can see through this token, which is what breaks the
+ * "encode first, then discover visibility" cycle. `full`/`crop` are filled in
+ * as the owner encodes on a granted frame, never merely because a component
+ * rendered.
+ *
+ * `crop` holds at most one CURRENT variant: the one the granted frame asked
+ * for. A superseded variant is unregistered when the next window is granted,
+ * so a fast scroll back re-encodes instead of projecting a stale crop.
  */
 interface Occurrence {
+  /** Stable per-occurrence identity (never derived from the DCS). */
+  readonly id: string
+  /** The inert marker the component emits; resolvable only by exact lookup. */
+  readonly token: string
+  /** This occurrence's own safe text while no pixels are granted. */
+  readonly fallback: string
+  /** Conservative layout reserve in cell rows, before a raster exists. */
+  readonly layoutRows: number
+  /** The component that owns this occurrence's encode lifecycle. */
+  readonly image: SixelImage
+  /** The exact encode key (source, width, cell box, background, epoch). */
+  readonly key: string
   readonly source: SourceBinding
-  readonly geometry: VerifiedGeometry
-  readonly maxColumns: number
-  readonly maxRows: number
-  readonly width: number
-  full: RasterRecord
+  geometry: VerifiedGeometry
+  maxColumns: number
+  maxRows: number
+  width: number
+  /** The current frame grant, or undefined when the occurrence is off screen. */
+  grant?: { cropTopRows: number; visibleRows: number }
+  /** The last frame in which the Screen really showed this occurrence's pixels. */
+  painted?: { width: number; columns: number; rows: number }
+  full?: RasterRecord
   crop?: { cropTopRows: number; visibleRows: number; record: RasterRecord }
   /**
    * The one in-flight variant request. `attempts` carries the SAME window's failure
@@ -246,6 +273,12 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
   private readonly records = new Map<string, RasterRecord>()
   /** Every live occurrence, so disposal can release all rasters at once. */
   private readonly occurrences = new Set<Occurrence>()
+  /** Exact candidate token -> occurrence. The ONLY candidate lookup. */
+  private readonly candidates = new Map<string, Occurrence>()
+  /** Monotonic occurrence identity (never reused within one app). */
+  private occurrenceSeq = 0
+  /** The current frame's granted occurrences, in bottom-up priority order. */
+  private grantOrder: Occurrence[] = []
   private retainedBytes = 0
   /** Bumped on every admission/unregistration, so a REFUSED request can be
    *  retried only when the trust table actually changed. */
@@ -280,6 +313,20 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
       },
       crop: (line: string, cropTopRows: number, visibleRows: number) =>
         this.cropTrusted(line, cropTopRows, visibleRows),
+      candidate: (line: string) => {
+        const occurrence = this.candidates.get(line)
+        if (occurrence === undefined) return undefined
+        return {
+          id: occurrence.id,
+          fallback: occurrence.fallback,
+          layoutRows: occurrence.full?.rows ?? occurrence.layoutRows,
+        }
+      },
+      reconcileVisible: (screen: object, demands: readonly ScreenVisibleCandidate[]) =>
+        this.reconcileVisible(screen, demands),
+      materialize: (line: string, cropTopRows: number, visibleRows: number) =>
+        this.materialize(line, cropTopRows, visibleRows),
+      framePainted: (screen: object, retained: readonly ScreenFrameRaster[]) => this.framePainted(screen, retained),
     }
     this.unsubscribeDa1 = terminal.onSixelSupport?.(() => this.capabilityChanged())
     // A late subscriber receives the terminal's already-known DA1 value, so the
@@ -433,133 +480,6 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
 
   // === trust registry =======================================================
 
-  private cropTrusted(line: string, cropTopRows: number, visibleRows: number): string | undefined {
-    const record = this.records.get(line)
-    if (record === undefined) return undefined
-    record.useStamp = ++this.useStamp
-    // Only a FULL raster has a source to re-encode from: cropping a crop variant
-    // would derive a window from a window.
-    if (record.kind !== 'full') return undefined
-    const occurrence = record.owners.values().next().value
-    if (occurrence === undefined || this.disposed) return undefined
-    const fullRows = occurrence.full.rows
-    if (!Number.isInteger(cropTopRows) || cropTopRows < 0 || cropTopRows >= fullRows) return undefined
-    if (!Number.isInteger(visibleRows) || visibleRows < 1) return undefined
-    const bounded = Math.min(visibleRows, fullRows - cropTopRows)
-    if (cropTopRows === 0 && bounded >= fullRows) return occurrence.full.dcs
-    const current = occurrence.crop
-    if (current !== undefined && current.cropTopRows === cropTopRows && current.visibleRows === bounded) {
-      if (this.records.get(current.record.dcs) !== current.record) {
-        // The record left the trust table (a shared variant released by its other
-        // owner): fail closed instead of returning a string the Screen no longer
-        // recognises as an image.
-        occurrence.crop = undefined
-        return undefined
-      }
-      current.record.useStamp = ++this.useStamp
-      return current.record.dcs
-    }
-    const pending = occurrence.pendingCrop
-    if (pending !== undefined && pending.cropTopRows === cropTopRows && pending.visibleRows === bounded) {
-      return undefined
-    }
-    // A variant that deterministically produced nothing (or was refused by the
-    // budget) must not be re-requested on every frame; a changed trust table may
-    // make a refused one succeed, so the revision is part of the memory.
-    const failed = occurrence.failedCrop
-    if (
-      failed !== undefined &&
-      failed.cropTopRows === cropTopRows &&
-      failed.visibleRows === bounded &&
-      (failed.terminal || (failed.kind === 'refused' && failed.revision === this.admissionRevision))
-    ) {
-      return undefined
-    }
-    // A retry for the SAME window inherits its failure count; a different window
-    // starts a fresh budget.
-    const carriedAttempts =
-      failed !== undefined && failed.cropTopRows === cropTopRows && failed.visibleRows === bounded
-        ? failed.attempts
-        : 0
-    pending?.controller.abort()
-    this.releaseCrop(occurrence)
-    const controller = new AbortController()
-    occurrence.pendingCrop = { cropTopRows, visibleRows: bounded, controller, attempts: carriedAttempts }
-    runDetached(
-      'SIXEL crop variant',
-      async () => {
-        let raster: SixelRaster | null
-        try {
-          raster = await this.encoder.encode({
-            png: occurrence.source.png,
-            cellWidthPx: occurrence.geometry.cellWidthPx,
-            cellHeightPx: occurrence.geometry.cellHeightPx,
-            maxColumns: occurrence.maxColumns,
-            maxRows: occurrence.maxRows,
-            cropTopRows,
-            maxVisibleRows: bounded,
-            backgroundRgb: occurrence.geometry.backgroundRgb,
-            signal: controller.signal,
-          })
-        } catch (error) {
-          // Settle the token even on failure: a rejected crop must not answer
-          // `undefined` forever. A busy lane is retried a bounded number of times.
-          const task = occurrence.pendingCrop
-          // A SUPERSEDED or cancelled task is not this window's failure: never charge
-          // its error to the window the user is looking at now.
-          if (task === undefined || task.controller !== controller) return
-          occurrence.pendingCrop = undefined
-          const attempts = task.attempts + 1
-          occurrence.failedCrop = {
-            cropTopRows,
-            visibleRows: bounded,
-            revision: this.admissionRevision,
-            terminal: attempts >= SIXEL_ENCODE_ATTEMPT_LIMIT,
-            kind: 'rejected',
-            attempts,
-          }
-          throw error
-        }
-        const settled = occurrence.pendingCrop
-        if (settled === undefined || settled.controller !== controller) return
-        occurrence.pendingCrop = undefined
-        if (controller.signal.aborted || this.disposed || !this.occurrences.has(occurrence)) return
-        // Nothing drawable (a fully transparent window) or a refused budget: keep
-        // the row empty and remember the outcome for THIS window.
-        if (raster === null) {
-          // A transparent window paints nothing, for these facts, forever.
-          occurrence.failedCrop = {
-            cropTopRows,
-            visibleRows: bounded,
-            revision: this.admissionRevision,
-            terminal: true,
-            kind: 'refused',
-            attempts: 1,
-          }
-          return
-        }
-        const registered = this.admit(raster, 'crop')
-        if (registered === undefined) {
-          // A budget refusal may succeed once the trust table changes.
-          occurrence.failedCrop = {
-            cropTopRows,
-            visibleRows: bounded,
-            revision: this.admissionRevision,
-            terminal: false,
-            kind: 'refused',
-            attempts: 1,
-          }
-          return
-        }
-        registered.owners.add(occurrence)
-        occurrence.crop = { cropTopRows, visibleRows: bounded, record: registered }
-        this.onReadinessChanged()
-      },
-      { diag: this.diag },
-    )
-    return undefined
-  }
-
   /** Register one raster, or refuse when every retained variant is in use. */
   private admit(raster: SixelRaster, kind: 'full' | 'crop'): RasterRecord | undefined {
     const existing = this.records.get(raster.sequence)
@@ -594,13 +514,7 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     return record
   }
 
-  /**
-   * Drop the least recently used CROP variant.
-   *
-   * A full raster belongs to a live component that is still painting it, and
-   * the plan forbids dropping a record that is on screen to make room: when
-   * nothing else is evictable the new request falls back to text instead.
-   */
+  /** Drop the oldest record no live occurrence holds. */
   private evictOne(): boolean {
     let oldest: RasterRecord | undefined
     for (const record of this.records.values()) {
@@ -618,15 +532,34 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     this.admissionRevision += 1
   }
 
-  private releaseCrop(occurrence: Occurrence): void {
-    occurrence.failedCrop = undefined
-    const crop = occurrence.crop
-    if (crop === undefined) return
-    occurrence.crop = undefined
-    // Two occurrences can share one crop raster (identical visible pixels). Only
-    // the LAST owner may unregister it; the other still paints the same bytes.
-    crop.record.owners.delete(occurrence)
-    if (crop.record.owners.size === 0) this.unregister(crop.record)
+  /**
+   * Legacy trust helper retained for the port's `crop()` contract and existing
+   * callers: an ALREADY READY variant only. It never starts work — the Screen's
+   * materialization path is the only place a visible window is granted.
+   */
+  private cropTrusted(line: string, cropTopRows: number, visibleRows: number): string | undefined {
+    const record = this.records.get(line)
+    if (record === undefined) return undefined
+    record.useStamp = ++this.useStamp
+    if (record.kind !== 'full') return undefined
+    const occurrence = record.owners.values().next().value
+    if (occurrence === undefined || this.disposed) return undefined
+    const full = occurrence.full
+    if (full === undefined) return undefined
+    if (cropTopRows === 0 && visibleRows >= full.rows) return full.dcs
+    const current = occurrence.crop
+    if (current !== undefined && current.cropTopRows === cropTopRows && current.visibleRows === visibleRows) {
+      if (this.records.get(current.record.dcs) !== current.record) {
+        occurrence.crop = undefined
+        return undefined
+      }
+      current.record.useStamp = ++this.useStamp
+      return current.record.dcs
+    }
+    // Legacy direct-crop callers (the DCS trust path the fork fixtures use):
+    // schedule the bounded variant exactly once; the Screen repaints on settle.
+    occurrence.image.ensureCrop(cropTopRows, visibleRows)
+    return undefined
   }
 
   // === occurrences ==========================================================
@@ -646,9 +579,143 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     return this.verifiedGeometry()
   }
 
-  /** @internal — one new occurrence identity. */
-  addOccurrence(occurrence: Occurrence): void {
+  /** @internal — bind one candidate identity BEFORE any encode exists. */
+  bindOccurrence(
+    image: SixelImage,
+    source: SourceBinding,
+    options: NativeKittyImageOptions,
+    geometry: VerifiedGeometry,
+    bounds: { width: number; maxColumns: number; maxRows: number; layoutRows: number; key: string },
+  ): Occurrence {
+    const id = String(++this.occurrenceSeq)
+    const occurrence: Occurrence = {
+      id,
+      token: `\u2063SIXC:${id}\u2063`,
+      fallback: options.fallback,
+      layoutRows: bounds.layoutRows,
+      image,
+      key: bounds.key,
+      source,
+      geometry,
+      maxColumns: bounds.maxColumns,
+      maxRows: bounds.maxRows,
+      width: bounds.width,
+    }
     this.occurrences.add(occurrence)
+    this.candidates.set(occurrence.token, occurrence)
+    return occurrence
+  }
+
+  /**
+   * Grant residency to the occurrences the final layout really shows.
+   *
+   * `screen` must be the SAME object `observeScreen` bound; a late frame from a
+   * stale/inactive screen changes nothing. The grant set is the frame's whole
+   * visibility truth: occurrences not demanded here lose their grant and are
+   * released after the next committed write. Encoding is NOT started here —
+   * `framePainted` releases first, then tasks the one lane in bottom-up order.
+   */
+  private reconcileVisible(screen: object, demands: readonly ScreenVisibleCandidate[]): boolean {
+    if (this.disposed || this.observer === undefined || screen !== this.observer) return false
+    const wanted = new Map<Occurrence, { cropTopRows: number; visibleRows: number }>()
+    for (const demand of demands) {
+      const occurrence = this.candidates.get(demand.line)
+      if (occurrence === undefined) continue
+      wanted.set(occurrence, { cropTopRows: demand.cropTopRows, visibleRows: demand.visibleRows })
+    }
+    this.grantOrder = [...wanted.keys()]
+    let changed = false
+    for (const occurrence of this.occurrences) {
+      const grant = wanted.get(occurrence)
+      if (grant === undefined) {
+        if (occurrence.grant !== undefined) {
+          occurrence.grant = undefined
+          changed = true
+        }
+        continue
+      }
+      if (occurrence.grant?.cropTopRows !== grant.cropTopRows || occurrence.grant.visibleRows !== grant.visibleRows) {
+        occurrence.grant = grant
+        changed = true
+      }
+    }
+    return changed
+  }
+
+  /** Exact DCS for a granted window; never starts work and never accepts an
+   *  unregistered request. */
+  private materialize(line: string, cropTopRows: number, visibleRows: number): string | undefined {
+    const occurrence = this.candidates.get(line)
+    if (occurrence === undefined || occurrence.grant === undefined) return undefined
+    if (occurrence.grant.cropTopRows !== cropTopRows || occurrence.grant.visibleRows !== visibleRows) return undefined
+    return occurrence.image.readyDcs(cropTopRows, visibleRows)
+  }
+
+  /**
+   * Close one committed frame: release every occurrence that lost its grant,
+   * mark what the physical screen still shows, then task the lane for the
+   * granted-but-unready occurrences in the caller's bottom-up order.
+   */
+  private framePainted(screen: object, retained: readonly ScreenFrameRaster[]): void {
+    if (this.disposed || this.observer === undefined || screen !== this.observer) return
+    const shown = new Map<string, ScreenFrameRaster>()
+    for (const raster of retained) shown.set(raster.line, raster)
+    let changed = false
+    for (const occurrence of [...this.occurrences]) {
+      if (occurrence.grant === undefined) {
+        const held = occurrence.full !== undefined || occurrence.crop !== undefined || occurrence.painted !== undefined
+        if (held) {
+          occurrence.image.releaseRecords()
+          changed = true
+        }
+        continue
+      }
+      const raster = shown.get(occurrence.token)
+      const record =
+        raster === undefined
+          ? undefined
+          : occurrence.full?.dcs === raster.dcs
+            ? occurrence.full
+            : occurrence.crop?.record.dcs === raster.dcs
+              ? occurrence.crop.record
+              : undefined
+      occurrence.painted =
+        record === undefined ? undefined : { width: occurrence.width, columns: record.columns, rows: record.rows }
+    }
+    // Bottom-up order is the caller's contract: the newest content wins a
+    // contested slot, and every grant beyond the hard budget settles into text.
+    for (const occurrence of this.grantOrder) {
+      if (occurrence.grant === undefined) continue
+      if (occurrence.full === undefined) occurrence.image.ensureFull()
+      else occurrence.image.ensureCrop(occurrence.grant.cropTopRows, occurrence.grant.visibleRows)
+    }
+    if (changed) this.requestRepaint()
+  }
+
+  /** @internal — drop one occurrence's full/crop records (used on release). */
+  releaseOccurrence(occurrence: Occurrence): void {
+    const full = occurrence.full
+    occurrence.grant = undefined
+    occurrence.painted = undefined
+    occurrence.full = undefined
+    occurrence.crop = undefined
+    if (full === undefined) return
+    full.owners.delete(occurrence)
+    if (full.owners.size === 0) this.unregister(full)
+  }
+
+  /** @internal — drop the current crop variant (a new window is being encoded). */
+  releaseCropRecords(occurrence: Occurrence): void {
+    const crop = occurrence.crop
+    occurrence.crop = undefined
+    if (crop === undefined) return
+    crop.record.owners.delete(occurrence)
+    if (crop.record.owners.size === 0) this.unregister(crop.record)
+  }
+
+  /** @internal — register a freshly encoded crop variant. */
+  admitCrop(raster: SixelRaster): RasterRecord | undefined {
+    return this.admit(raster, 'crop')
   }
 
   /** @internal — register a freshly encoded FULL raster; the caller marks its owner. */
@@ -669,11 +736,17 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
   /** @internal — drop one occurrence and everything it retained. */
   removeOccurrence(occurrence: Occurrence): void {
     if (!this.occurrences.delete(occurrence)) return
+    this.candidates.delete(occurrence.token)
     occurrence.pendingCrop?.controller.abort()
     occurrence.pendingCrop = undefined
-    this.releaseCrop(occurrence)
-    occurrence.full.owners.delete(occurrence)
-    if (occurrence.full.owners.size === 0) this.unregister(occurrence.full)
+    this.releaseCropRecords(occurrence)
+    const full = occurrence.full
+    occurrence.full = undefined
+    occurrence.grant = undefined
+    occurrence.painted = undefined
+    if (full === undefined) return
+    full.owners.delete(occurrence)
+    if (full.owners.size === 0) this.unregister(full)
   }
 
   /** @internal — the terminal's current row count, for the raster's row ceiling. */
@@ -700,7 +773,7 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     for (const occurrence of [...this.occurrences]) {
       occurrence.pendingCrop?.controller.abort()
       occurrence.pendingCrop = undefined
-      occurrence.full.owners.delete(occurrence)
+      occurrence.full?.owners.delete(occurrence)
     }
     this.occurrences.clear()
     this.records.clear()
@@ -732,7 +805,6 @@ class SixelImage implements Component {
   private readonly source: SourceBinding
   private readonly options: NativeKittyImageOptions
   private occurrence: Occurrence | undefined
-  private entry: ReadyEntry | undefined
   private inFlight: { key: string; controller: AbortController } | undefined
   /** A request not worth re-sending on every frame; `terminal` means "for these
    *  facts, forever" (a transparent picture or a spent retry budget). */
@@ -740,12 +812,6 @@ class SixelImage implements Component {
   /** Bounded retries per key: a transient failure may retry, a permanent one may not
    *  spin the single encoder lane forever. */
   private failures: { key: string; attempts: number } | undefined
-  private cachedLines: string[] | undefined
-  private cachedWidth: number | undefined
-  /** The exact encode key the cached frame was produced for. A background/epoch
-   *  change at an unchanged width must miss it, or the old composite would be
-   *  re-emitted after re-verification. */
-  private cachedKey: string | undefined
   private disposed = false
 
   constructor(owner: DirectSixelGraphicsOwner, source: KittyImageSource, options: NativeKittyImageOptions) {
@@ -764,49 +830,147 @@ class SixelImage implements Component {
   }
 
   /**
-   * The real painted footprint at `width`, or `undefined` when that render
-   * carried no pixels.
+   * The real painted footprint at `width`, or `undefined` when the last frame
+   * carried no pixels for this occurrence.
    *
-   * Only a registered, encoded raster answers: a pending encode, a budget
-   * fallback and a fully transparent window all paint no body, so a click can
-   * never open the Viewer from a row of text.
+   * Only a raster the Screen really materialized and kept in its last committed
+   * frame answers: a pending encode, a budget fallback, an overlay-covered block
+   * and a released (off-screen) record all paint no body, so a click can never
+   * open the Viewer from a row of text.
    */
   paintedBodyAt(width: number): NativeKittyImageBody | undefined {
-    const entry = this.entry
-    if (entry === undefined || this.cachedWidth !== width) return undefined
-    return { width, columns: entry.record.columns, rows: entry.record.rows }
+    const painted = this.occurrence?.painted
+    if (painted === undefined || painted.width !== width) return undefined
+    return { width, columns: painted.columns, rows: painted.rows }
+  }
+
+  /**
+   * The component's lines: an inert candidate marker plus its conservative
+   * layout reserve, never a DCS.
+   *
+   * The Screen resolves the marker only after its final layout told the owner
+   * which blocks are really visible; until then this line must not claim any
+   * pixels. `undefined` means the facts are not verified and the component
+   * renders its ordinary fallback.
+   */
+  candidateLines(width: number): string[] | undefined {
+    if (this.disposed) return undefined
+    const geometry = this.owner.ready
+    if (geometry === undefined) {
+      this.dropOccurrence()
+      return undefined
+    }
+    const bounds = this.bounds(geometry, width)
+    if (this.occurrence === undefined || this.occurrence.key !== bounds.key) {
+      this.dropOccurrence()
+      this.occurrence = this.owner.bindOccurrence(this, this.source, this.options, geometry, bounds)
+    }
+    const occurrence = this.occurrence
+    const rows = occurrence.full?.rows ?? occurrence.layoutRows
+    const lines = [occurrence.token]
+    for (let row = 1; row < rows; row += 1) lines.push('')
+    return lines
   }
 
   render(width: number): string[] {
     if (this.disposed) return [this.options.fallback]
-    const geometry = this.owner.ready
-    if (geometry === undefined) {
-      // A fact loss (a denied DA1, a stopped/replaced screen, a timed-out
-      // background or a resize) makes the previous pixels illegal on THIS
-      // frame, cached or not: the raster is dropped and the row becomes text.
-      this.cachedLines = undefined
-      this.cachedWidth = undefined
-      this.retire()
-      return [this.options.fallback]
+    return this.candidateLines(width) ?? [this.options.fallback]
+  }
+
+  /** The PixelBody contract: there is no per-instance frame cache any more —
+   *  what paints is decided by the Screen's grant, so a repaint is always safe. */
+  invalidate(): void {}
+
+
+  /** @internal — the DCS for a granted window, or undefined while not ready. */
+  readyDcs(cropTopRows: number, visibleRows: number): string | undefined {
+    const occurrence = this.occurrence
+    if (occurrence === undefined) return undefined
+    const full = occurrence.full
+    if (full === undefined) return undefined
+    if (cropTopRows === 0 && visibleRows >= full.rows) return full.dcs
+    const crop = occurrence.crop
+    if (crop !== undefined && crop.cropTopRows === cropTopRows && crop.visibleRows === visibleRows) return crop.record.dcs
+    return undefined
+  }
+
+  /** @internal — a granted occurrence needs its full raster. */
+  ensureFull(): void {
+    const occurrence = this.occurrence
+    if (occurrence === undefined || this.disposed) return
+    if (occurrence.full !== undefined) return
+    if (this.inFlight?.key === occurrence.key) return
+    const rejected = this.rejected
+    if (
+      rejected !== undefined &&
+      rejected.key === occurrence.key &&
+      (rejected.terminal || rejected.revision === this.owner.registryRevision)
+    ) {
+      return
     }
-    const bounds = this.bounds(geometry, width)
-    const key = bounds.key
-    if (this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines
-    const lines = this.paint(geometry, bounds)
-    this.cachedLines = lines
-    this.cachedWidth = width
-    this.cachedKey = key
-    return lines
+    this.startEncode(occurrence)
+  }
+
+  /** @internal — a granted window needs its bounded crop variant. */
+  ensureCrop(cropTopRows: number, visibleRows: number): void {
+    const occurrence = this.occurrence
+    if (occurrence === undefined || this.disposed) return
+    const full = occurrence.full
+    if (full === undefined) {
+      this.ensureFull()
+      return
+    }
+    if (cropTopRows === 0 && visibleRows >= full.rows) return
+    const current = occurrence.crop
+    if (current !== undefined && current.cropTopRows === cropTopRows && current.visibleRows === visibleRows) return
+    const pending = occurrence.pendingCrop
+    if (pending !== undefined && pending.cropTopRows === cropTopRows && pending.visibleRows === visibleRows) return
+    const failed = occurrence.failedCrop
+    if (
+      failed !== undefined &&
+      failed.cropTopRows === cropTopRows &&
+      failed.visibleRows === visibleRows &&
+      (failed.terminal || (failed.kind === 'refused' && failed.revision === this.owner.registryRevision))
+    ) {
+      return
+    }
+    this.startCropEncode(occurrence, cropTopRows, visibleRows)
+  }
+
+  /** @internal — the owner releases the occurrence's records after a frame. */
+  releaseRecords(): void {
+    this.inFlight?.controller.abort()
+    this.inFlight = undefined
+    const occurrence = this.occurrence
+    if (occurrence === undefined) return
+    occurrence.pendingCrop?.controller.abort()
+    occurrence.pendingCrop = undefined
+    this.owner.releaseOccurrence(occurrence)
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.inFlight?.controller.abort()
+    this.inFlight = undefined
+    this.rejected = undefined
+    this.failures = undefined
+    this.dropOccurrence()
+  }
+
+  private dropOccurrence(): void {
+    if (this.occurrence !== undefined) this.owner.removeOccurrence(this.occurrence)
+    this.occurrence = undefined
   }
 
   /**
    * The cell box this occurrence may use at `width`, plus the EXACT key every
    * raster it produces depends on (source, width, cell box, background, epoch).
    *
-   * One derivation feeds both the encoder request and the frame cache, so a stale
-   * composite can never be reused and the two can never drift apart.
+   * One derivation feeds both the encoder request and the occurrence identity,
+   * so a stale composite can never be reused and the two can never drift apart.
    */
-  private bounds(geometry: VerifiedGeometry, width: number): { width: number; maxColumns: number; maxRows: number; key: string } {
+  private bounds(geometry: VerifiedGeometry, width: number): { width: number; maxColumns: number; maxRows: number; layoutRows: number; key: string } {
     const maxColumns = Math.max(1, Math.min(width - 2, this.options.maxWidthCells))
     const defaultMaxRows = Math.max(1, Math.ceil((maxColumns * geometry.cellWidthPx) / geometry.cellHeightPx))
     const maxRows = Math.max(
@@ -823,80 +987,17 @@ class SixelImage implements Component {
       String(geometry.backgroundRgb),
       String(geometry.epoch),
     ].join('|')
-    return { width, maxColumns, maxRows, key }
+    // The conservative layout reserve: the full picture's height at this width,
+    // never more than the granted row ceiling. The real raster height replaces it
+    // once an encode settles; it exists only so a Screen can recognize a block
+    // whose anchor scrolled above the viewport before any pixels exist.
+    const layoutRows = Math.max(1, Math.min(maxRows, defaultMaxRows))
+    return { width, maxColumns, maxRows, layoutRows, key }
   }
 
-  /** Drop the cached frame but keep the raster: a repaint of the same
-   *  occurrence must not re-encode the same picture. */
-  invalidate(): void {
-    this.cachedLines = undefined
-    this.cachedWidth = undefined
-    this.cachedKey = undefined
-  }
-
-  dispose(): void {
-    if (this.disposed) return
-    this.disposed = true
-    this.inFlight?.controller.abort()
-    this.inFlight = undefined
-    this.rejected = undefined
-    this.failures = undefined
-    this.entry = undefined
-    if (this.occurrence !== undefined) this.owner.removeOccurrence(this.occurrence)
-    this.occurrence = undefined
-    this.cachedLines = undefined
-    this.cachedWidth = undefined
-  }
-
-  private paint(
-    geometry: VerifiedGeometry,
-    bounds: { width: number; maxColumns: number; maxRows: number; key: string },
-  ): string[] {
-    const { width, maxColumns, maxRows, key } = bounds
-    const entry = this.entry
-    if (entry !== undefined && entry.key === key) return this.readyLines(entry.record)
-    const occurrence = this.occurrence
-    if (
-      occurrence !== undefined &&
-      sameOccurrence(occurrence, this.source, geometry, maxColumns, maxRows, width)
-    ) {
-      // The facts are unchanged and the raster is still registered: only the
-      // per-frame render cache was dropped (an `invalidate()`), so this repaint
-      // must NOT start a second encode of the same picture.
-      this.entry = { key, record: occurrence.full }
-      return this.readyLines(occurrence.full)
-    }
-    if (this.inFlight?.key === key) return [this.options.fallback]
-    const rejected = this.rejected
-    if (
-      rejected !== undefined &&
-      rejected.key === key &&
-      (rejected.terminal || rejected.revision === this.owner.registryRevision)
-    ) {
-      return [this.options.fallback]
-    }
-    if (this.failures !== undefined && this.failures.key !== key) this.failures = undefined
-    this.retire()
-    this.startEncode(key, geometry, maxColumns, maxRows, width)
-    return [this.options.fallback]
-  }
-
-  private readyLines(record: RasterRecord): string[] {
-    const lines: string[] = [record.dcs]
-    for (let row = 1; row < record.rows; row++) lines.push('')
-    return lines
-  }
-
-  private startEncode(
-    key: string,
-    geometry: VerifiedGeometry,
-    maxColumns: number,
-    maxRows: number,
-    width: number,
-  ): void {
-    this.inFlight?.controller.abort()
+  private startEncode(occurrence: Occurrence): void {
     const controller = new AbortController()
-    this.inFlight = { key, controller }
+    this.inFlight = { key: occurrence.key, controller }
     runDetached(
       'SIXEL image encode',
       async () => {
@@ -904,63 +1005,97 @@ class SixelImage implements Component {
         try {
           raster = await this.owner.encoderLane.encode({
             png: this.source.png,
-            cellWidthPx: geometry.cellWidthPx,
-            cellHeightPx: geometry.cellHeightPx,
-            maxColumns,
-            maxRows,
+            cellWidthPx: occurrence.geometry.cellWidthPx,
+            cellHeightPx: occurrence.geometry.cellHeightPx,
+            maxColumns: occurrence.maxColumns,
+            maxRows: occurrence.maxRows,
             cropTopRows: 0,
-            backgroundRgb: geometry.backgroundRgb,
+            backgroundRgb: occurrence.geometry.backgroundRgb,
             signal: controller.signal,
           })
         } catch (error) {
-          // A rejected request (a full lane, a refusal, a codec failure) must still
-          // SETTLE this occurrence's token. Leaving it set would make every later
-          // frame believe the encode is still running and paint text forever.
           if (this.inFlight?.controller === controller) this.inFlight = undefined
-          this.recordFailure(key)
-          // The cached frame holds the fallback under this exact key: leaving it
-          // would make every later render return it without ever retrying.
-          this.cachedLines = undefined
-          this.cachedWidth = undefined
-          this.cachedKey = undefined
+          this.recordFailure(occurrence.key)
           throw error
         }
         if (this.disposed || this.inFlight?.controller !== controller) return
         this.inFlight = undefined
-        // A superseded request never paints: the key carries every fact the
-        // raster was produced for, so a result that settled after a screen,
-        // width, cell or background change is dropped here.
         if (controller.signal.aborted) return
         if (raster === null) {
-          // A fully transparent picture paints nothing, deterministically.
-          this.rejected = { key, revision: this.owner.registryRevision, terminal: true }
+          this.rejected = { key: occurrence.key, revision: this.owner.registryRevision, terminal: true }
           return
         }
-        if (this.owner.ready?.epoch !== geometry.epoch) return
+        if (this.owner.ready?.epoch !== occurrence.geometry.epoch) return
         const record = this.owner.admitFull(raster)
         if (record === undefined) {
-          // Every retained variant is in use. A refusal is TERMINAL for these facts:
-          // evicting a record a live component still renders would make the Screen
-          // treat that raster as text, and the port has no component-invalidation
-          // channel. Any real change (source, width, cell, background, epoch) mints a
-          // new key and tries again; the cached text frame is the intended result.
-          this.rejected = { key, revision: this.owner.registryRevision, terminal: true }
+          // The hard budget is exhausted by rasters the CURRENT frame keeps. The
+          // occurrence stays text until the trust table changes; the Screen's next
+          // committed frame may release a record and grant it again.
+          this.rejected = { key: occurrence.key, revision: this.owner.registryRevision, terminal: false }
           return
         }
-        const occurrence: Occurrence = {
-          source: this.source,
-          geometry,
-          maxColumns,
-          maxRows,
-          width,
-          full: record,
-        }
         record.owners.add(occurrence)
-        this.occurrence = occurrence
-        this.entry = { key, record }
-        this.owner.addOccurrence(occurrence)
-        this.cachedLines = undefined
-        this.cachedWidth = undefined
+        occurrence.full = record
+        this.owner.requestRepaint()
+      },
+      { diag: this.owner.diagnosticSink },
+    )
+  }
+
+  private startCropEncode(occurrence: Occurrence, cropTopRows: number, visibleRows: number): void {
+    occurrence.pendingCrop?.controller.abort()
+    this.owner.releaseCropRecords(occurrence)
+    const controller = new AbortController()
+    const failed = occurrence.failedCrop
+    const carried = failed !== undefined && failed.cropTopRows === cropTopRows && failed.visibleRows === visibleRows ? failed.attempts : 0
+    occurrence.pendingCrop = { cropTopRows, visibleRows, controller, attempts: carried }
+    runDetached(
+      'SIXEL crop variant',
+      async () => {
+        let raster: SixelRaster | null
+        try {
+          raster = await this.owner.encoderLane.encode({
+            png: this.source.png,
+            cellWidthPx: occurrence.geometry.cellWidthPx,
+            cellHeightPx: occurrence.geometry.cellHeightPx,
+            maxColumns: occurrence.maxColumns,
+            maxRows: occurrence.maxRows,
+            cropTopRows,
+            maxVisibleRows: visibleRows,
+            backgroundRgb: occurrence.geometry.backgroundRgb,
+            signal: controller.signal,
+          })
+        } catch (error) {
+          const task = occurrence.pendingCrop
+          if (task === undefined || task.controller !== controller) return
+          occurrence.pendingCrop = undefined
+          const attempts = task.attempts + 1
+          occurrence.failedCrop = {
+            cropTopRows,
+            visibleRows,
+            revision: this.owner.registryRevision,
+            terminal: attempts >= SIXEL_ENCODE_ATTEMPT_LIMIT,
+            kind: 'rejected',
+            attempts,
+          }
+          throw error
+        }
+        const task = occurrence.pendingCrop
+        if (task === undefined || task.controller !== controller) return
+        occurrence.pendingCrop = undefined
+        if (controller.signal.aborted || this.disposed) return
+        if (this.owner.ready?.epoch !== occurrence.geometry.epoch) return
+        if (raster === null) {
+          occurrence.failedCrop = { cropTopRows, visibleRows, revision: this.owner.registryRevision, terminal: true, kind: 'refused', attempts: 1 }
+          return
+        }
+        const record = this.owner.admitCrop(raster)
+        if (record === undefined) {
+          occurrence.failedCrop = { cropTopRows, visibleRows, revision: this.owner.registryRevision, terminal: false, kind: 'refused', attempts: 1 }
+          return
+        }
+        occurrence.crop = { cropTopRows, visibleRows, record }
+        record.owners.add(occurrence)
         this.owner.requestRepaint()
       },
       { diag: this.owner.diagnosticSink },
@@ -981,14 +1116,6 @@ class SixelImage implements Component {
     if (attempts >= SIXEL_ENCODE_ATTEMPT_LIMIT) {
       this.rejected = { key, revision: this.owner.registryRevision, terminal: true }
     }
-  }
-
-  private retire(): void {
-    this.inFlight?.controller.abort()
-    this.inFlight = undefined
-    this.entry = undefined
-    if (this.occurrence !== undefined) this.owner.removeOccurrence(this.occurrence)
-    this.occurrence = undefined
   }
 }
 

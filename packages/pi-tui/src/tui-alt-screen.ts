@@ -714,6 +714,44 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	 * on screen and the block returns when the overlay is gone (the anchor line
 	 * changes, so the next frame re-enters the changed range).
 	 */
+	/**
+	 * Report this frame's physical SIXEL set after the write (X074).
+	 *
+	 * `sixelDemands` is the final layout's visible set; a block that materialized
+	 * is retained with its exact DCS (emitted only when this frame really wrote
+	 * that row), while a granted-but-unready block has no DCS and simply keeps
+	 * its grant for the owner to task the lane.
+	 */
+	private commitSixelFrame(
+		frame: LayoutFrame,
+		screen: readonly string[],
+		changedRows: readonly boolean[],
+		fullRedraw: boolean,
+	): void {
+		const port = this.sixelScreen;
+		if (port === undefined) return;
+		const retained: Array<{ row: number; line: string; dcs: string; cropTopRows: number; visibleRows: number; emitted: boolean }> = [];
+		for (const demand of frame.sixelDemands) {
+			const row = demand.physicalRow;
+			const line = screen[row] ?? "";
+			const footprint = port.footprint(line);
+			if (footprint === undefined) continue;
+			retained.push({
+				row,
+				line: demand.line,
+				dcs: line,
+				cropTopRows: demand.cropTopRows,
+				visibleRows: footprint.rows,
+				emitted: fullRedraw || changedRows[row] !== false,
+			});
+		}
+		retained.sort((left, right) => right.row - left.row);
+		port.framePainted(
+			this,
+			retained.map(({ line, dcs, cropTopRows, visibleRows, emitted }) => ({ line, dcs, cropTopRows, visibleRows, emitted })),
+		);
+	}
+
 	private prepareSixelRows(screen: string[]): number[] {
 		const rows = new Array<number>(screen.length).fill(0);
 		let any = false;
@@ -2525,6 +2563,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (this.refreshSearch(nextLayout)) {
 			nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender(), this.sixelScreen);
 		}
+		// The final layout is the visibility authority: grant residency to what it
+		// really shows, and recompose ONCE when the grant set changed. (X074.)
+		if (this.sixelScreen !== undefined && nextLayout.sixelDemands.length > 0) {
+			if (this.sixelScreen.reconcileVisible(this, nextLayout.sixelDemands)) {
+				nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender(), this.sixelScreen);
+			}
+		}
 		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 		screen = this.applySearchHighlights(screen, nextLayout);
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
@@ -2674,6 +2719,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		buffer += END_SYNCHRONIZED_OUTPUT;
 		this.terminal.write(buffer);
+		this.commitSixelFrame(nextLayout, screen, changedRows, fullRedraw);
 
 		this.previousScreen = screen;
 		this.previousSixelRows = sixelRows;

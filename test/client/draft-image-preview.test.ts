@@ -812,7 +812,14 @@ function sixelDraftGraphics(ready: () => boolean): ImageGraphics {
       }
     },
     terminal: terminal as never,
-    screen: { footprint: () => undefined, crop: () => undefined },
+    screen: {
+      footprint: () => undefined,
+      crop: () => undefined,
+      candidate: () => undefined,
+      reconcileVisible: () => false,
+      materialize: () => undefined,
+      framePainted: () => {},
+    },
     observeScreen: () => {},
     resample: () => {},
     dispose: () => {},

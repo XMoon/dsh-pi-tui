@@ -430,3 +430,82 @@ test('returning from the external editor re-observes the facts and repaints (RFL
   await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the resume re-observation')
   await until(() => paintedRasters(terminal).length > 0, 'the raster after the resume')
 })
+
+test('24 distinct transcript images: the newest visible paints, and scrolling back re-encodes the first (B4 residency)', async (t) => {
+  // 24 DISTINCT sources (a unique top-band tint each), so no two share a raster.
+  const pngs: Uint8Array[] = []
+  for (let index = 0; index < 24; index += 1) {
+    pngs.push(
+      await pngFromRgba(
+        fill(80, 40, (x, y) => (y < 20 ? [255, (index * 10) % 255, x % 2 === 0 ? 0 : 8, 255] : [0, 0, 255, 255])),
+        80,
+        40,
+      ),
+    )
+  }
+  const refs = pngs.map((png, index) => ({
+    attachmentId: `att-many-${index}`,
+    mediaType: 'image/png' as const,
+    bytes: png.byteLength,
+    width: 80,
+    height: 40,
+    name: `many-${index}.png`,
+  }))
+  const { terminal, app } = await startSixelApp(t, {
+    imageLoader: new ImageLoader(async (ref) => {
+      const index = Number(String((ref as { attachmentId?: string }).attachmentId ?? '').split('-').at(-1))
+      return { ref: {}, data: pngs[index]! }
+    }),
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  const folder = new TranscriptFolder()
+  folder.apply(
+    refs.map((ref, index) => ({
+      type: 'user/message',
+      seq: index + 1,
+      time: index + 1,
+      data: { content: [{ type: 'image', attachment: ref }], source: { kind: 'user' } },
+    })) as never,
+  )
+  terminal.writes.length = 0
+  app.setTranscript(folder.messages())
+  app.requestRender()
+  await until(() => paintedRasters(terminal).length > 0, 'a raster on the main screen')
+
+  /** The decoded top-band green channel of the LAST raster, uniquely identifying the source. */
+  const lastTopGreen = (): number => {
+    const dcs = paintedRasters(terminal).at(-1)!
+    const decoded = decodeSixel(dcs)
+    return pixelAt(decoded, 4, 4)[1]
+  }
+  // The newest message is in the main screen's visible tail: it is pixels, and it
+  // is the 24th source (green = 230).
+  assert.equal(lastTopGreen(), (23 * 10) % 255, 'the newest visible image is the one painted')
+
+  // Fullscreen Alt: the same transcript, same bottom anchor.
+  terminal.writes.length = 0
+  app.setFullscreen(true)
+  await until(() => paintedRasters(terminal).length > 0, 'a raster in the fullscreen transcript')
+  const altFirst = paintedRasters(terminal).at(-1)!
+  assert.equal(pixelAt(decodeSixel(altFirst), 4, 4)[1], (23 * 10) % 255, 'the alt bottom anchor is the newest image')
+
+  // Scroll to the TOP: the FIRST image becomes visible. Its sixteen-slot record
+  // was released while it was off screen, so this must be a fresh encode of the
+  // first source (green = 0), not a fallback.
+  terminal.writes.length = 0
+  app.scrollToTop()
+  await until(
+    () => paintedRasters(terminal).some(dcs => pixelAt(decodeSixel(dcs), 4, 4)[1] <= 10),
+    'an early image to re-encode after scrolling back',
+  )
+  const recovered = paintedRasters(terminal).filter(dcs => pixelAt(decodeSixel(dcs), 4, 4)[1] <= 10)
+  assert.ok(recovered.length > 0, 'the top window re-encoded one of the first sources (not a fallback)')
+
+  // Back to the bottom: the newest image paints again.
+  terminal.writes.length = 0
+  app.scrollToBottom()
+  await until(() => {
+    const dcs = paintedRasters(terminal).at(-1)
+    return dcs !== undefined && pixelAt(decodeSixel(dcs), 4, 4)[1] === (23 * 10) % 255
+  }, 'the newest image to return after scrolling back down')
+})

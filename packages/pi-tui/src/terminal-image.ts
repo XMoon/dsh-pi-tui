@@ -355,6 +355,49 @@ export interface SixelScreenFootprint {
  * derives the structural type from the screen constructor, so there is exactly
  * one definition and no second copy to drift.
  */
+/**
+ * One occurrence's inert candidate line, as the owner reports it (X072).
+ *
+ * `line` is an opaque, owner-registered marker the component emits instead of a
+ * DCS. It has no device meaning, is never written to the terminal, and only an
+ * EXACT registry lookup can resolve it; ordinary text that happens to share a
+ * prefix is not a candidate.
+ */
+export interface SixelCandidateInfo {
+	/** Stable per-occurrence identity, independent of raster deduplication. */
+	readonly id: string;
+	/** The occurrence's own safe text when no pixels are granted this frame. */
+	readonly fallback: string;
+	/** Conservative layout reserve (cell rows) before a raster exists. */
+	readonly layoutRows: number;
+}
+
+/**
+ * One visible block in the frame the Screen is about to write.
+ *
+ * `cropTopRows` is the part of the block above the clip, `visibleRows` the part
+ * the clip allows, and `physicalRow` the row it will occupy — the Screen's
+ * bottom-up priority input. It is a short-lived FRAME demand, not a mirror.
+ */
+export interface SixelVisibleCandidate {
+	readonly line: string;
+	readonly cropTopRows: number;
+	readonly visibleRows: number;
+	readonly physicalRow: number;
+}
+
+/** One raster the physical Screen still shows after a completed write. */
+export interface SixelFrameRaster {
+	/** The occurrence identity that painted it (a DCS can be shared). */
+	readonly line: string;
+	/** The exact trusted DCS still present on that screen. */
+	readonly dcs: string;
+	readonly cropTopRows: number;
+	readonly visibleRows: number;
+	/** True when THIS frame wrote the DCS; false when a diff kept old pixels. */
+	readonly emitted: boolean;
+}
+
 export interface SixelScreenPort {
 	/**
 	 * Metadata for a registered, internally encoded complete DCS, or
@@ -372,6 +415,32 @@ export interface SixelScreenPort {
 	 * string or reusing an older crop.
 	 */
 	crop(line: string, cropTopRows: number, visibleRows: number): string | undefined;
+	/**
+	 * The exact candidate a component emitted, or `undefined` for ordinary text.
+	 * An exact identity lookup only: never a syntax/prefix test.
+	 */
+	candidate(line: string): SixelCandidateInfo | undefined;
+	/**
+	 * Authorize the occurrences this frame's final layout really shows, within
+	 * the owner's hard budget. Returns true when the grant set changed and the
+	 * frame must be recomposed once before writing.
+	 *
+	 * `screen` is the live Screen object; a stale or inactive screen is ignored.
+	 */
+	reconcileVisible(screen: object, demands: readonly SixelVisibleCandidate[]): boolean;
+	/**
+	 * The exact trusted DCS for one visible candidate window, or `undefined`
+	 * while it is not ready. The ONLY token→DCS exit; never starts work.
+	 */
+	materialize(line: string, cropTopRows: number, visibleRows: number): string | undefined;
+	/**
+	 * Called after the Screen really wrote a complete frame and committed its
+	 * own bookkeeping. `retained` is every raster the physical screen still
+	 * shows (written this frame or kept by the diff). The owner releases every
+	 * record not retained, then schedules encodes for granted-but-unready
+	 * occurrences. A no-write frame must not call this with an empty set.
+	 */
+	framePainted(screen: object, retained: readonly SixelFrameRaster[]): void;
 }
 
 /**

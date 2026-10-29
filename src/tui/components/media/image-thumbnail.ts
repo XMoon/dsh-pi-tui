@@ -293,6 +293,14 @@ export class ImageThumbnail implements Component {
    * treating it as pixels would open a Viewer from a line of plain text.
    */
   paintedImageBody(width: number): { rows: number; endCol: number } | undefined {
+    // A SIXEL occurrence's hit body is the LAST COMMITTED frame's footprint, which
+    // the owner keeps until the next `framePainted`: the component renders before
+    // the Screen materializes, so a component-local snapshot would always lag one
+    // frame (or clear on every render). (X072/X073.)
+    if (this.instanceKind === 'raw-sixel') {
+      const live = this.instance?.paintedBodyAt?.(width)
+      return live === undefined ? undefined : { rows: live.rows, endCol: live.columns }
+    }
     const painted = this.paintedBody
     if (painted === undefined || painted.width !== width) return undefined
     return { rows: painted.rows, endCol: painted.endCol }

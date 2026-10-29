@@ -26,7 +26,9 @@ import {
 	resetCapabilitiesCache,
 	setCapabilities,
 	type SixelScreenFootprint,
-	type SixelScreenPort,
+	type SixelFrameRaster,
+		type SixelScreenPort,
+		type SixelVisibleCandidate,
 } from "../src/terminal-image.ts";
 import type { TuiMouseEvent } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
@@ -4476,6 +4478,19 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 			crop(line: string, _cropTopRows: number, _visibleRows: number): string | undefined {
 				return line;
 			}
+			candidate(_line: string): undefined {
+				return undefined;
+			}
+
+			reconcileVisible(_screen: object, _demands: readonly SixelVisibleCandidate[]): boolean {
+				return false;
+			}
+
+			materialize(_line: string, _cropTopRows: number, _visibleRows: number): string | undefined {
+				return undefined;
+			}
+
+			framePainted(_screen: object, _retained: readonly SixelFrameRaster[]): void {}
 		}
 
 		class Block {
