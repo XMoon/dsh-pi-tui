@@ -10,6 +10,7 @@ import {
 	isImageLine,
 	isKittyVirtualPlaceholderLine,
 	matchesKittyVirtualPlaceholderIdentity,
+	type SixelScreenPort,
 } from "./terminal-image.ts";
 import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
 import {
@@ -66,7 +67,12 @@ interface LayoutContext {
 	maxWidthCache: Map<Component, Map<number, number>>;
 	requestRender: () => void;
 	primaryScrollView: ScrollView | undefined;
+	/** The Client-local SIXEL trust port (X072), or undefined. */
+	sixelScreen: SixelScreenPort | undefined;
 }
+
+/** The largest number of image body rows an upward crop search may cross (X074). */
+const MAX_SIXEL_CROP_SCAN_ROWS = 12;
 
 function intersect(a: LayoutRect, b: LayoutRect): LayoutRect {
 	const x = Math.max(a.x, b.x);
@@ -331,7 +337,12 @@ export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false):
 	};
 }
 
-function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): void {
+function paintScrollbar(
+	box: LayoutBox,
+	screen: string[],
+	totalWidth: number,
+	sixelScreen: SixelScreenPort | undefined,
+): void {
 	const geometry = getScrollbarGeometry(box);
 	if (!geometry || !box.scrollView) return;
 
@@ -342,8 +353,13 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 		const replacement = isThumb
 			? box.scrollView.scrollbarThumbStyle(box.scrollView.isScrollbarActive ? "█" : "┃")
 			: box.scrollView.scrollbarTrackStyle("│");
+		// A trusted SIXEL anchor is a device command: slicing it to place one glyph
+		// would emit a corrupted command, so the glyph is drawn on a blank row
+		// instead and the caller has already withheld the block's DCS because its
+		// columns reach this reserved column. (X074.)
+		const base = sixelScreen?.footprint(screen[row] ?? "") === undefined ? (screen[row] ?? "") : "";
 		screen[row] = replaceScrollbarCell(
-			screen[row] ?? "",
+			base,
 			geometry.column,
 			totalWidth,
 			replacement,
@@ -413,7 +429,21 @@ function findRelocatedVirtualAnchor(
 	return undefined;
 }
 
-function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
+/**
+ * Paint one box's own lines, then its children, then its scrollbar.
+ *
+ * A trusted SIXEL raster may only be painted in a full-width box at x=0 whose
+ * clip still contains its visible part. Everything else paints NO pixels this
+ * frame — a DCS is never sliced, shifted or reflowed like text. The scrollbar
+ * pass owns the same rule from the other side: a reserved column replaces the
+ * anchor with its glyph instead of cutting the command. (X074.)
+ */
+function paintBox(
+	box: LayoutBox,
+	screen: string[],
+	totalWidth: number,
+	sixelScreen: SixelScreenPort | undefined,
+): void {
 	if (box.lines) {
 		const offset = box.lineOffset ?? 0;
 		const firstRow = Math.max(box.rect.y, box.clip.y, 0);
@@ -440,6 +470,27 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 				line = line.slice(marker.sequence.length);
 			}
 			if (relocated !== undefined && sourceIndex === relocated.sourceIndex) line = relocated.sequence + line;
+			const sixelFootprint = sixelScreen?.footprint(line);
+			if (sixelFootprint !== undefined) {
+				// A reserved scrollbar column owns this row: `paintScrollbar` draws its
+				// glyph onto a blank base, so the block yields this frame rather than
+				// cutting the command. (X074.)
+				const fullWidthCell = box.rect.x === 0 && box.rect.width >= totalWidth;
+				const clipBottom = Math.min(screen.length, box.clip.y + box.clip.height);
+				const visibleRows = Math.min(sixelFootprint.rows, clipBottom - row);
+				if (fullWidthCell && visibleRows > 0) {
+					if (visibleRows >= sixelFootprint.rows) {
+						screen[row] = line;
+					} else {
+						// A bottom-clipped block is re-encoded from its own source at the
+						// SAME scale; clipping this DCS string would paint pixels outside
+						// the box. Until the variant is ready the row stays empty.
+						const cropped = sixelScreen?.crop(line, 0, visibleRows);
+						screen[row] = cropped ?? "";
+					}
+				}
+				continue;
+			}
 			const imageMetadata = getKittyImageMetadata(line);
 			if (imageMetadata) {
 				const clipBottom = Math.min(screen.length, box.clip.y + box.clip.height);
@@ -458,11 +509,30 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 			}
 		}
 	}
-	for (const child of box.children) paintBox(child, screen, totalWidth);
+	for (const child of box.children) paintBox(child, screen, totalWidth, sixelScreen);
 
 	if (box.scrollView && box.scrollContentLines && box.scrollView.scrollTop > 0 && box.rect.height > 0) {
+		const scanFloor = Math.max(0, box.scrollView.scrollTop - MAX_SIXEL_CROP_SCAN_ROWS);
 		for (let imageRow = box.scrollView.scrollTop - 1; imageRow >= 0; imageRow--) {
 			const imageLine = box.scrollContentLines[imageRow] ?? "";
+			const sixelFootprint = sixelScreen?.footprint(imageLine);
+			if (sixelFootprint !== undefined) {
+				const hiddenRows = box.scrollView.scrollTop - imageRow;
+				const visibleRows = Math.min(box.rect.height, sixelFootprint.rows - hiddenRows);
+				if (
+					hiddenRows < sixelFootprint.rows
+					&& visibleRows > 0
+					&& box.rect.x === 0
+					&& box.rect.width >= totalWidth
+				) {
+					// The anchor scrolled above the viewport: re-encode the SAME source
+					// from its real top crop instead of relocating the unclipped DCS
+					// (which would paint above the box).
+					const cropped = sixelScreen?.crop(imageLine, hiddenRows, visibleRows);
+					if (cropped !== undefined) screen[box.rect.y] = cropped;
+				}
+				break;
+			}
 			const metadata = getKittyImageMetadata(imageLine);
 			if (metadata) {
 				const hiddenRows = box.scrollView.scrollTop - imageRow;
@@ -474,10 +544,14 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 				break;
 			}
 			if (imageLine !== "") break;
+			// A SIXEL block never spans further than the owner's own body budget, so
+			// the upward search is bounded instead of scanning the whole corpus.
+			// Kitty keeps its upstream unbounded contiguous-blank scan.
+			if (sixelScreen !== undefined && imageRow <= scanFloor) break;
 		}
 	}
 
-	paintScrollbar(box, screen, totalWidth);
+	paintScrollbar(box, screen, totalWidth, sixelScreen);
 }
 
 export function renderLayoutFrame(
@@ -485,6 +559,7 @@ export function renderLayoutFrame(
 	width: number,
 	height: number,
 	requestRender: () => void,
+	sixelScreen?: SixelScreenPort,
 ): LayoutFrame {
 	const safeWidth = Math.max(1, Math.floor(width));
 	const safeHeight = Math.max(1, Math.floor(height));
@@ -494,6 +569,7 @@ export function renderLayoutFrame(
 		maxWidthCache: new Map(),
 		requestRender,
 		primaryScrollView: undefined,
+		sixelScreen,
 	};
 	const rootBox = layoutComponent(context, root, 0, 0, safeWidth, safeHeight, {
 		x: 0,
@@ -502,7 +578,7 @@ export function renderLayoutFrame(
 		height: safeHeight,
 	});
 	const lines = Array.from({ length: safeHeight }, () => "");
-	paintBox(rootBox, lines, safeWidth);
+	paintBox(rootBox, lines, safeWidth, context.sixelScreen);
 	return {
 		root: rootBox,
 		width: safeWidth,

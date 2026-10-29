@@ -25,6 +25,8 @@ import {
 	registerKittyImageMetadata,
 	resetCapabilitiesCache,
 	setCapabilities,
+	type SixelScreenFootprint,
+	type SixelScreenPort,
 } from "../src/terminal-image.ts";
 import type { TuiMouseEvent } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
@@ -4449,6 +4451,175 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 				assert.ok(!wire.includes("\x1b[2J"), "explicit null keeps the text-only branch");
 				tui.stop();
 				assert.strictEqual(getCapabilities().images, "kitty", "the process capability is untouched");
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+	});
+
+	describe("trusted SIXEL screen port (X074)", () => {
+		/** A complete DCS the port below is the only thing that may recognize. */
+		const raster = (id: string): string => `\x1bP0;1;q"1;1;40;36#0;2;100;0;0${id}\x1b\\`;
+
+		class RecordingSixelPort implements SixelScreenPort {
+			readonly rasters = new Map<string, SixelScreenFootprint>();
+
+			register(dcs: string, footprint: SixelScreenFootprint): string {
+				this.rasters.set(dcs, footprint);
+				return dcs;
+			}
+
+			footprint(line: string): SixelScreenFootprint | undefined {
+				return this.rasters.get(line);
+			}
+
+			crop(line: string, _cropTopRows: number, _visibleRows: number): string | undefined {
+				return line;
+			}
+		}
+
+		class Block {
+			dcs: string | undefined;
+
+			render(): string[] {
+				return this.dcs === undefined ? ["image", "text"] : ["image", this.dcs, "", ""];
+			}
+
+			invalidate(): void {}
+		}
+
+		function wire(terminal: RecordingTerminal): string {
+			return terminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => (event.type === "write" ? event.data : ""))
+				.join("");
+		}
+
+		it("writes every text row of the frame before the ONE raster", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				const block = new Block();
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+
+				block.dcs = port.register(raster("A"), { columns: 4, rows: 3 });
+				terminal.events.length = 0;
+				tui.renderNow();
+				await terminal.waitForRender();
+				const output = wire(terminal);
+				const anchorAt = output.indexOf(block.dcs);
+				const textAt = output.indexOf("image");
+				assert.ok(anchorAt >= 0, "the raster is painted");
+				assert.ok(textAt >= 0, "the text row is repainted");
+				assert.ok(textAt < anchorAt, "text first, pixels last");
+				assert.ok(!output.includes("\x1b_G"), "no Kitty placement is emitted for a SIXEL frame");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("clears every old footprint row before the replacement text", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				const block = new Block();
+				block.dcs = port.register(raster("B"), { columns: 4, rows: 3 });
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+
+				const before = terminal.getViewport().map((line) => line.trimEnd());
+				assert.deepStrictEqual(before.slice(0, 3), ["image", "", ""], "the block reserves three rows");
+
+				block.dcs = undefined;
+				terminal.events.length = 0;
+				tui.renderNow();
+				await terminal.waitForRender();
+				const output = wire(terminal);
+				assert.ok(!output.includes(raster("B")), "the retired raster is not repainted");
+				const clears = (output.match(/\x1b\[3;1H\x1b\[2K/g) ?? []).length;
+				assert.ok(clears >= 1, "the third (body) row is cleared by its own absolute row write");
+				assert.deepStrictEqual(
+					terminal.getViewport().map((line) => line.trimEnd()).slice(0, 3),
+					["image", "text", ""],
+					"no ghost row survives",
+				);
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("yields the block to a visible overlay and restores it afterwards", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				const block = new Block();
+				const dcs = port.register(raster("C"), { columns: 4, rows: 3 });
+				block.dcs = dcs;
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+				assert.ok(wire(terminal).includes(dcs), "the block paints while nothing covers it");
+
+				const overlay = { render: () => ["MODAL"], invalidate: () => {} };
+				const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
+				terminal.events.length = 0;
+				tui.renderNow();
+				await terminal.waitForRender();
+				assert.ok(!wire(terminal).includes(dcs), "an overlay over the block wins the whole block");
+				assert.ok(wire(terminal).includes("MODAL"), "the overlay itself is painted");
+
+				tui.hideOverlay(handle);
+				terminal.events.length = 0;
+				tui.renderNow();
+				await terminal.waitForRender();
+				assert.ok(wire(terminal).includes(dcs), "the block returns when the overlay is gone");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("never replays a SIXEL DCS into the main screen's restored document", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				const block = new Block();
+				const dcs = port.register(raster("D"), { columns: 4, rows: 3 });
+				block.dcs = dcs;
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+
+				terminal.events.length = 0;
+				tui.stop();
+				const leftAltScreen = wire(terminal);
+				assert.ok(!leftAltScreen.includes(dcs), "the alt screen's exit projection drops the raster");
+				assert.ok(leftAltScreen.includes("image"), "its identity row is still restored as text");
 			} finally {
 				resetCapabilitiesCache();
 			}

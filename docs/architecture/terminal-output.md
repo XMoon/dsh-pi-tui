@@ -392,18 +392,48 @@ Core. What the Client may rely on is one observed terminal fact and one gate:
   `pending | admitted | denied`. An explicit `PI_IMAGE_PROTOCOL=none|0`, a
   configured or detected Kitty/iTerm2 terminal, and any multiplexer topology
   deny the candidate outright; no reply stays `pending`, which consumers treat
-  as "not paintable". `getCapabilities().images` and
-  `effectiveImageProtocol()` do not report SIXEL, so no surface paints it.
-- **Pixels stay gated on the Screen footprint contract.** A SIXEL raster has no
-  deletable id: only clearing the whole occupied cell footprint (`CSI 2K` per
-  affected row, or ECH) removes it, and clearing the anchor row alone leaves
-  pixels behind. A product path may only paint once the Screen owns that
-  footprint and its row diff, so no consumer in this contract emits SIXEL bytes.
+  as "not paintable". A managed Kitty handle keeps precedence over SIXEL even
+  while its own admission is pending or revoked, so a multiplexed pane paints
+  text instead of silently switching protocol.
+- **Three real facts, one projection, one protocol answer.**
+  `src/tui/graphics/sixel-image.ts` is the only Direct SIXEL owner. It paints
+  only after the DA1 attribute, the active Screen's real `CSI 6;h;w t` reply and
+  the active Screen's real OSC 11 background have all arrived for THAT screen;
+  a missing fact is text, never a `9x18` default cell or a guessed background.
+  The screen handoff and every terminal resize re-observe those facts, and a
+  colour-scheme report re-observes them without changing the binding. Only then
+  does `effectiveImageProtocol()` answer `'sixel'` — from the owner's live
+  readiness, never from `getCapabilities().images` or `PI_IMAGE_PROTOCOL`.
+- **A DCS is a device command, so the Screen must own it.** A SIXEL raster has
+  no deletable id: only clearing the whole occupied cell footprint (`CSI 2K` per
+  affected row) removes it, and clearing the anchor row alone leaves pixels
+  behind. The Screen therefore receives exactly one narrow trust port
+  (`SixelScreenPort`, divergence X072): it reports the real footprint of an
+  EXACT string the owner encoded, and re-encodes a visible crop from the same
+  source at the same scale. A DCS is never parsed for syntax, sliced, truncated,
+  reflowed or composited as text; an unregistered one stays ordinary text.
+- **The erase and the paint order belong to the physical Screen.** The main
+  screen (X073) expands its diff to the union of the old and new footprint,
+  erases every covered row before any text lands on it, and writes the command
+  after every text row of the frame, positioned from the clamped top margin and
+  protected by DECSC/DECRC because a DCS's post-command cursor is
+  terminal-defined. The alternate screen (X074) re-encodes the visible window
+  for a bottom-clipped or top-scrolled block, erases the old footprint, writes
+  text/border/overlay/scrollbar first and one command per visible block last, and
+  yields a block whose anchor row a visible scrollbar or an overlay claims. The
+  image's identity row above the body stays text in every case.
 - **Untrusted text never becomes SIXEL.** The sanitizers accept no DCS; only a
-  codec operating on authorized image bytes may produce a sequence.
+  codec operating on authorized image bytes may produce a sequence, and only the
+  owner's registry can make the Screen treat it as an image.
 
-Proof: `packages/pi-tui/test/terminal.test.ts` (passive DA1 observation) and
-`test/tui/sixel-capability.test.ts` (production DA1 stream to verdict).
+Proof: `packages/pi-tui/test/terminal.test.ts` (passive DA1 observation),
+`test/tui/sixel-capability.test.ts` (production DA1 stream to verdict),
+`test/client/sixel-image.test.ts` (three-fact gating, trust registry, crop
+variants), `packages/pi-tui/test/tui-cell-size-input.test.ts` (the one cell-size
+parser), `packages/pi-tui/test/tui-sixel-main.test.ts` (X073 erase/paint order)
+and `packages/pi-tui/test/layout.test.ts` + `tui-alt-screen.test.ts` (X074 crop
+and paint order), plus the end-to-end chain in
+`test/integration/sixel-direct-screen.test.ts`.
 
 ## Specialized contracts that stay as they are
 

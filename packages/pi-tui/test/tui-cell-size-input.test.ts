@@ -5,6 +5,15 @@ import type { Component, TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
+class RecordingVirtualTerminal extends VirtualTerminal {
+	readonly writes: string[] = [];
+
+	override write(data: string): void {
+		this.writes.push(data);
+		super.write(data);
+	}
+}
+
 class InputRecorder implements Component {
 	readonly inputs: string[] = [];
 
@@ -103,6 +112,47 @@ describe("TUI cell size responses", () => {
 			terminal.sendInput("\x1b[6;20;10t");
 			assert.deepStrictEqual(listenerInputs, [], "the cell-size reply must never reach input listeners");
 			assert.deepStrictEqual(getCellDimensions(), { widthPx: 10, heightPx: 20 }, "the dimensions must still update");
+			tui.stop();
+		});
+	});
+
+	it("queries only from a STARTED screen and delivers one real reply to one observer (X072)", () => {
+		withImageTerminal(() => {
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+			const terminal = new RecordingVirtualTerminal(80, 24);
+			const tui = new TuiMainScreen(terminal);
+			const observed: Array<{ widthPx: number; heightPx: number }> = [];
+			const unsubscribe = tui.onCellSizeObserved((cell) => observed.push(cell));
+
+			// Before `start()` this screen does not own the terminal: a query here
+			// would be answered into whoever does.
+			const writesBeforeStart = terminal.writes.length;
+			tui.queryCellSizeForSixel();
+			assert.deepStrictEqual(terminal.writes.slice(writesBeforeStart), [], "no query before start");
+
+			tui.start();
+			const queriesBefore = terminal.writes.filter((data) => data.includes("\x1b[16t")).length;
+			tui.queryCellSizeForSixel();
+			const queries = terminal.writes.filter((data) => data.includes("\x1b[16t")).length;
+			assert.strictEqual(queries, queriesBefore + 1, "one `CSI 16t` after start");
+
+			// The reply goes through the ONE parser and reaches the observer once.
+			terminal.sendInput("\x1b[6;40;20t");
+			assert.deepStrictEqual(observed, [{ widthPx: 20, heightPx: 40 }], "the parsed value, not the wire bytes");
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 20, heightPx: 40 });
+
+			// Every REAL reply is one observation; whether an identical value is a
+			// new fact is the consumer's projection (the SIXEL owner dedupes by
+			// value, so a repeated reply never restarts its readiness epoch).
+			terminal.sendInput("\x1b[6;40;20t");
+			terminal.sendInput("\x1b[6;40;20t");
+			assert.strictEqual(observed.length, 3, "each parsed reply reaches the observer once");
+			assert.deepStrictEqual(observed[2], { widthPx: 20, heightPx: 40 });
+
+			unsubscribe();
+			terminal.sendInput("\x1b[6;30;15t");
+			assert.strictEqual(observed.length, 3, "the unsubscribed observer hears nothing");
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 15, heightPx: 30 });
 			tui.stop();
 		});
 	});

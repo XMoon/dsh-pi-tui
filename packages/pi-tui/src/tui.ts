@@ -12,7 +12,13 @@ import {
 	type TerminalColorScheme,
 	type TerminalColors,
 } from "./terminal-colors.ts";
-import { getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
+import {
+	getCapabilities,
+	isImageLine,
+	setCellDimensions,
+	type SixelScreenFootprint,
+	type SixelScreenPort,
+} from "./terminal-image.ts";
 import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.ts";
 
 /**
@@ -985,17 +991,74 @@ export abstract class TuiBase extends Container implements TUI {
 			.mouseLayout;
 	}
 	private overlayFocusRestore: OverlayFocusRestoreState = { status: "inactive" };
+	/**
+	 * The Client-local SIXEL trust port (X072), or undefined for every other
+	 * terminal. A Screen never parses a DCS itself: it asks this port, which
+	 * only recognizes rasters its own owner encoded.
+	 */
+	protected readonly sixelScreen: SixelScreenPort | undefined;
+	/** Whether `start()` has brought the terminal up (only then may a query go out). */
+	private terminalStarted = false;
+	/** Observers of this screen's ONE real `CSI 6;h;w t` parse (X072). */
+	private readonly cellSizeListeners = new Set<(cell: { widthPx: number; heightPx: number }) => void>();
 
-	constructor(terminal: Terminal, showHardwareCursor?: boolean, logDirectory?: string) {
+	constructor(terminal: Terminal, showHardwareCursor?: boolean, logDirectory?: string, sixelScreen?: SixelScreenPort) {
 		super();
 		this.terminal = terminal;
 		this.logDirectory = logDirectory;
+		this.sixelScreen = sixelScreen;
 		if (showHardwareCursor !== undefined) {
 			this.showHardwareCursor = showHardwareCursor;
 		}
 	}
 
 	protected abstract doRender(): void;
+
+	/**
+	 * Whether this line must be treated as an IMAGE by the physical Screen
+	 * (X072): a legacy Kitty/iTerm2 placement, or an exact DCS the Client-local
+	 * SIXEL owner registered.
+	 *
+	 * This is a trust question, not a syntax question. A DCS that is not in the
+	 * owner's registry stays ordinary text and goes through the normal
+	 * normalization/truncation path, so an arbitrary `ESC P…q…ESC \` from a tool
+	 * result can never be promoted to a device command.
+	 */
+	protected isRenderableImageLine(line: string): boolean {
+		return isImageLine(line) || this.sixelScreen?.footprint(line) !== undefined;
+	}
+
+	/** The registered SIXEL footprint of a trusted anchor line, if any (X072). */
+	protected sixelFootprint(line: string): SixelScreenFootprint | undefined {
+		return this.sixelScreen?.footprint(line);
+	}
+
+	/**
+	 * Observe every real cell-size reply this screen parses, or return the
+	 * current value immediately when it is already known (X072).
+	 *
+	 * There is ONE parser (`consumeCellSizeResponse`); observers never see a
+	 * query they issued, only the terminal's actual `CSI 6;h;w t` answer.
+	 */
+	onCellSizeObserved(listener: (cell: { widthPx: number; heightPx: number }) => void): () => void {
+		this.cellSizeListeners.add(listener);
+		return () => {
+			this.cellSizeListeners.delete(listener);
+		};
+	}
+
+	/**
+	 * Ask the terminal for its cell size in device pixels (`CSI 16t`, answered as
+	 * `CSI 6;h;w t`) on behalf of a consumer that needs REAL geometry (X072).
+	 *
+	 * Unlike the startup probe this refuses before `start()`: a query written to
+	 * a terminal this screen does not own yet would be answered into the input
+	 * stream of whoever does.
+	 */
+	queryCellSizeForSixel(): void {
+		if (!this.terminalStarted) return;
+		this.terminal.write("\x1b[16t");
+	}
 
 	protected resetRenderState(): void {}
 
@@ -1489,6 +1552,7 @@ export abstract class TuiBase extends Container implements TUI {
 			(data) => this.handleTerminalInput(data),
 			() => this.requestRender(),
 		);
+		this.terminalStarted = true;
 		this.afterTerminalStart();
 		this.terminal.hideCursor();
 		if (this.terminalColorSchemeNotificationsEnabled) {
@@ -1538,6 +1602,7 @@ export abstract class TuiBase extends Container implements TUI {
 
 	stop(options: TuiStopOptions = {}): void {
 		this.stopped = true;
+		this.terminalStarted = false;
 		this.cancelRenderTimer();
 		// Release a pending narrow background observation: a stopped screen must
 		// never apply a late OSC 11 result (and its timer must not stay armed).
@@ -1820,6 +1885,12 @@ export abstract class TuiBase extends Container implements TUI {
 		}
 
 		setCellDimensions({ widthPx, heightPx });
+		// The ONE place a real cell reply becomes a fact (X072). Observers read
+		// the parsed value, never the wire bytes, so there is no second parser
+		// that could interpret the same reply differently.
+		for (const listener of this.cellSizeListeners) {
+			listener({ widthPx, heightPx });
+		}
 		// Invalidate all components so images re-render with correct dimensions.
 		this.invalidate();
 		this.requestRender();
@@ -2043,7 +2114,7 @@ export abstract class TuiBase extends Container implements TUI {
 		const reset = SEGMENT_RESET;
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
-			if (!isImageLine(line)) {
+			if (!this.isRenderableImageLine(line)) {
 				lines[i] = normalizeTerminalOutput(line) + reset;
 			}
 		}
@@ -2057,7 +2128,41 @@ export abstract class TuiBase extends Container implements TUI {
 		overlayWidth: number,
 		totalWidth: number,
 	): string {
+		// A trusted SIXEL anchor is a device command, not cell content: slicing it
+		// as text would emit a corrupted command (X072). An overlay that reaches
+		// this row wins the cell, so this frame paints no pixels on it and the
+		// image's own identity row stays visible above.
+		if (this.sixelScreen?.footprint(baseLine) !== undefined) {
+			return compositeTuiLine("", overlayLine, startCol, overlayWidth, totalWidth);
+		}
 		return compositeTuiLine(baseLine, overlayLine, startCol, overlayWidth, totalWidth);
+	}
+
+	/**
+	 * The absolute line range a visible overlay painted on this frame (X072).
+	 *
+	 * Overlay placements are viewport-relative, exactly like the compositor's own
+	 * `workingHeight - termHeight` origin, so the mapping is derived from the same
+	 * inputs instead of being guessed by the caller.
+	 */
+	protected overlayPaintedLineRange(
+		overlayRow: number,
+		overlayHeight: number,
+		totalLines: number,
+	): { first: number; last: number } {
+		const viewportStart = Math.max(0, totalLines - this.terminal.rows);
+		const first = viewportStart + overlayRow;
+		return { first, last: first + overlayHeight - 1 };
+	}
+
+	/** Whether a visible overlay painted any cell on any of these absolute lines. */
+	protected linesCoveredByOverlay(firstLine: number, lastLine: number, totalLines: number): boolean {
+		for (const layout of this.renderedOverlayLayouts) {
+			const range = this.overlayPaintedLineRange(layout.row, layout.height, totalLines);
+			if (range.last < firstLine || range.first > lastLine) continue;
+			return true;
+		}
+		return false;
 	}
 
 	/**

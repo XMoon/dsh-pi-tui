@@ -244,6 +244,91 @@ test('cropTopRows drops whole terminal rows from the SCALED raster', async () =>
   }
 })
 
+test('maxVisibleRows ends the raster early without re-scaling the image', async () => {
+  const encoder = new SixelEncoder()
+  try {
+    // Three 20 px bands (red / green / blue) at the source scale: 40x60 px.
+    const png = await pngFromRgba(
+      fill(40, 60, (_x, y) => (y < 20 ? [255, 0, 0, 255] : y < 40 ? [0, 255, 0, 255] : [0, 0, 255, 255])),
+      40,
+      60,
+    )
+    const full = (await encoder.encode(request({ png })))!
+    assert.equal(full.heightPx, 60)
+    assert.equal(full.rows, 3)
+
+    const clipped = (await encoder.encode(request({ png, maxVisibleRows: 2 })))!
+    assert.equal(clipped.widthPx, full.widthPx, 'a bottom crop must not change the encoded width')
+    assert.equal(clipped.heightPx, 36, 'two visible rows of 20 px floor to 36 px of bands')
+    assert.equal(clipped.columns, full.columns)
+    assert.equal(clipped.rows, 2)
+    assert.equal(clipped.footprintRows, 2)
+
+    // Same scale, same texture: every surviving pixel is the pixel the full
+    // raster painted at the same device coordinate.
+    const fullPixels = decodeSixel(full.sequence)
+    const clippedPixels = decodeSixel(clipped.sequence)
+    for (const [x, y] of [[0, 0], [1, 0], [39, 0], [0, 18], [20, 18], [39, 18], [0, 35], [39, 35]] as const) {
+      assert.deepEqual(pixelAt(clippedPixels, x, y), pixelAt(fullPixels, x, y), `pixel ${x},${y} must keep its color`)
+    }
+    const [greenR, greenG] = pixelAt(clippedPixels, 4, 20)
+    assert.ok(greenG > 200 && greenR < 60, 'the second band is still green')
+    const [topR, topG] = pixelAt(clippedPixels, 4, 0)
+    assert.ok(topR > 200 && topG < 60, 'the first band is still red')
+
+    // A one-row ceiling is floored to whole bands rather than rounded up.
+    const oneRow = (await encoder.encode(request({ png, maxVisibleRows: 1 })))!
+    assert.equal(oneRow.heightPx, 18)
+    assert.equal(oneRow.rows, 1)
+  } finally {
+    await encoder.dispose()
+  }
+})
+
+test('cropTopRows and maxVisibleRows compose on the same scaled raster', async () => {
+  const encoder = new SixelEncoder()
+  try {
+    const png = await pngFromRgba(
+      fill(40, 60, (x, y) => (y < 20 ? [255, 0, 0, 255] : y < 40 ? [0, 255, 0, 255] : [0, 0, x < 20 ? 200 : 255, 255])),
+      40,
+      60,
+    )
+    const full = decodeSixel((await encoder.encode(request({ png })))!.sequence)
+    const variant = (await encoder.encode(request({ png, cropTopRows: 1, maxVisibleRows: 2 })))!
+
+    assert.equal(variant.heightPx, 36)
+    assert.equal(variant.rows, 2)
+    const decoded = decodeSixel(variant.sequence)
+    // The top crop removes exactly one cell row of the FULL raster, so the
+    // variant's first row is the full raster's row 20 — not a re-scaled image.
+    for (const x of [0, 1, 19, 20, 39]) {
+      for (const y of [0, 6, 19]) {
+        assert.deepEqual(pixelAt(decoded, x, y), pixelAt(full, x, y + 20), `column ${x} row ${y} must match the full raster 20 px lower`)
+      }
+    }
+  } finally {
+    await encoder.dispose()
+  }
+})
+
+test('refuses a visible-row ceiling outside the granted window', async () => {
+  const encoder = new SixelEncoder()
+  try {
+    const png = await pngFromRgba(fill(40, 60, () => [255, 0, 0, 255]), 40, 60)
+    for (const maxVisibleRows of [0, -1, 1.5, 5, 99]) {
+      await assert.rejects(
+        () => encoder.encode(request({ png, maxRows: 4, maxVisibleRows })),
+        SixelEncodeRejectedError,
+        `maxVisibleRows=${String(maxVisibleRows)} must be refused`,
+      )
+    }
+    // A ceiling that cannot fit one band is a null raster, never an empty DCS.
+    assert.equal(await encoder.encode(request({ png, maxVisibleRows: 1, cropTopRows: 3 })), null)
+  } finally {
+    await encoder.dispose()
+  }
+})
+
 test('floors every height to whole bands', async () => {
   const encoder = new SixelEncoder()
   try {

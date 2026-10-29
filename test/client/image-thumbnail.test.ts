@@ -21,7 +21,7 @@ import {
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
 import { KittyGraphicsCore } from '../../src/tui/graphics/kitty-core.ts'
 import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
-import { NativeKittyImage } from '../../src/tui/graphics/native-image.ts'
+import { NativeKittyImage, type ImageGraphics } from '../../src/tui/graphics/native-image.ts'
 import { createTmuxKittyGraphics } from '../../src/tui/graphics/tmux-image.ts'
 import { createFakeTmuxCli } from '../support/fake-tmux-cli.ts'
 import { KITTY_VIRTUAL_PLACEHOLDER } from '../../src/tui/graphics/tmux-virtual.ts'
@@ -966,4 +966,171 @@ test('a COLLAPSED occurrence with an idle loader starts no read at all', async (
   live.render(80)
   await until(() => reads === 1, 'the expanded occurrence read')
   assert.equal(reads, 1, 'the expanded occurrence read the payload exactly once')
+})
+
+// === Image-8 / I8-2A: Direct SIXEL consumer (E1) ============================
+
+const SIXEL_DCS = '\x1bP0;1;q"1;1;40;36#0;2;100;0;0#1;2;0;0;100#0!40~#1!40~\x1b\\'
+
+const SIXEL_TERMINAL = {
+  writes: [] as string[],
+  columns: 80,
+  rows: 24,
+  kittyProtocolActive: false,
+  start() {},
+  stop() {},
+  async drainInput() {},
+  write(data: string) {
+    this.writes.push(data)
+  },
+  moveBy() {},
+  hideCursor() {},
+  showCursor() {},
+  clearLine() {},
+  clearFromCursor() {},
+  clearScreen() {},
+  setTitle() {},
+  setProgress() {},
+  setProgramStatus() {},
+  setProgressState() {},
+}
+
+/**
+ * A SIXEL handle whose occurrence reports what the real owner would: a trusted
+ * DCS plus the encoder's real footprint (`paintedBodyAt`), or nothing at all.
+ *
+ * `paint(width)` returns the body lines this occurrence would render; the fake
+ * derives the footprint from it, so a pending/transparent/fallback render can
+ * never register a clickable body.
+ */
+function sixelGraphics(paint: () => string[] | undefined, calls: string[] = []): ImageGraphics {
+  return {
+    mode: 'sixel',
+    canPaint: () => true,
+    image: (_source, options) => {
+      calls.push(options.fallback)
+      return {
+        render: (_width: number) => paint() ?? [options.fallback],
+        invalidate: () => {},
+        paintedBodyAt: (width: number) => {
+          const lines = paint()
+          if (lines === undefined || !lines[0]!.startsWith('\x1bP')) return undefined
+          return { width, columns: 4, rows: lines.length }
+        },
+        dispose: () => {},
+      }
+    },
+    terminal: SIXEL_TERMINAL as never,
+    screen: {
+      footprint: (line: string) => (line === SIXEL_DCS ? { columns: 4, rows: 3 } : undefined),
+      crop: () => undefined,
+    },
+    observeScreen: () => {},
+    resample: () => {},
+    dispose: () => {},
+  }
+}
+
+test('a PNG paints through Direct SIXEL even when the fork capability is null', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const loader = loaderOf(new Uint8Array([1, 2, 3]))
+  loader.load(REF)
+  await until(() => loader.get(REF).state === 'ready', 'the attachment read')
+  const graphics = sixelGraphics(() => [SIXEL_DCS, '', ''])
+  const component = new ImageThumbnail(REF, loader, THEME, () => {}, undefined, undefined, undefined, graphics)
+  const lines = component.render(80)
+
+  assert.equal(lines.length, 4, 'one identity row plus the three-row raster')
+  assert.ok(lines[0]!.includes('🖼️ shot.png'), 'the identity row stays constant')
+  assert.equal(lines[1], SIXEL_DCS, 'the raster anchor is the encoder\'s exact string')
+  assert.ok(lines.slice(2).every((line) => line === ''), 'the body rows are blank layout rows')
+  assert.deepEqual(component.paintedImageBody(80), { rows: 3, endCol: 4 }, 'the REAL encoder footprint is the click body')
+})
+
+test('a pending or fallback SIXEL render registers no clickable body', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const loader = loaderOf(new Uint8Array([1, 2, 3]))
+  loader.load(REF)
+  await until(() => loader.get(REF).state === 'ready', 'the attachment read')
+  const graphics = sixelGraphics(() => undefined)
+  const component = new ImageThumbnail(REF, loader, THEME, () => {}, undefined, undefined, undefined, graphics)
+  const lines = component.render(80)
+
+  assert.equal(lines.length, 2, 'the identity row and one safe fallback line')
+  assert.ok(lines[0]!.includes('🖼️ shot.png'))
+  assert.ok(!lines.join('').includes('\x1bP'), 'no DCS while the facts are incomplete')
+  assert.equal(component.paintedImageBody(80), undefined, 'text is never a pixel body')
+})
+
+test('a JPEG under Direct SIXEL reuses the SAME derived-PNG conversion', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  let conversions = 0
+  const loader = imageLoaderWith(SAMPLE_JPEG, async (input, mediaType) => {
+    conversions += 1
+    return convertKittyThumbnail(input, mediaType)
+  })
+  loader.load(JPEG_REF)
+  await until(() => loader.get(JPEG_REF).state === 'ready', 'the raw JPEG read')
+  const graphics = sixelGraphics(() => [SIXEL_DCS, '', ''])
+  const component = new ImageThumbnail(JPEG_REF, loader, THEME, () => {}, undefined, undefined, undefined, graphics)
+
+  const pending = component.render(80)
+  assert.equal(pending.length, 1, 'no pixels before the derived PNG is ready')
+  assert.ok(pending[0]!.includes('🖼️ photo.jpg · 120×80'), 'the ORIGINAL identity stays')
+  assert.ok(pending[0]!.includes('…'), 'pending marker')
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(conversions, 1, 'exactly one derivation, through the existing 6A path')
+  await until(() => loader.getKittyThumbnail(JPEG_REF).state === 'ready', 'the derived PNG')
+
+  const ready = component.render(80)
+  assert.ok(ready[0]!.includes('🖼️ photo.jpg · 120×80'), 'still the original identity')
+  assert.equal(ready[1], SIXEL_DCS, 'the derived PNG reaches the SIXEL encoder')
+})
+
+test('a GIF under Direct SIXEL keeps the text fallback and never becomes a body', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const gif = new Uint8Array([
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0, 0, 0, 0, 0, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00,
+    0x21, 0xf9, 0x04, 0x01, 0, 0, 0, 0, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0x02, 0x02, 0x44, 0x01, 0x00, 0x3b,
+  ])
+  const loader = new ImageLoader(async () => ({ ref: {}, data: gif }))
+  const ref = { attachmentId: 'gif-6a', mediaType: 'image/gif' as const, bytes: gif.length, width: 1, height: 1, name: 'a.gif' }
+  loader.load(ref)
+  await until(() => loader.get(ref).state === 'ready', 'the GIF read')
+  const graphics = sixelGraphics(() => [SIXEL_DCS, '', ''])
+  const component = new ImageThumbnail(ref, loader, THEME, () => {}, undefined, undefined, undefined, graphics)
+  const lines = component.render(80)
+
+  assert.ok(!lines.join('').includes('\x1bP'), 'a GIF is never handed to the SIXEL encoder')
+  assert.ok(lines.join('').includes('[Image: a.gif [image/gif] 1x1]'), 'the legacy text fallback stays')
+  assert.equal(component.paintedImageBody(80), undefined)
+})
+
+test('a collapsed or narrow SIXEL occurrence performs no attachment read', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const graphics = sixelGraphics(() => [SIXEL_DCS, '', ''])
+
+  let collapsed = true
+  const loader = loaderOf(new Uint8Array([1, 2, 3]))
+  const collapsedComponent = new ImageThumbnail(
+    REF, loader, THEME, () => {}, () => collapsed, undefined, undefined, graphics,
+  )
+  collapsedComponent.render(80)
+  assert.equal(loader.get(REF).state, 'idle', 'a collapsed occurrence never starts the read')
+
+  const narrowLoader = loaderOf(new Uint8Array([1, 2, 3]))
+  const narrow = new ImageThumbnail(
+    REF, narrowLoader, THEME, () => {}, undefined, undefined, undefined, graphics,
+  )
+  narrow.render(NARROW_WIDTH_THRESHOLD - 1)
+  assert.equal(narrowLoader.get(REF).state, 'idle', 'a narrow terminal never starts the read')
+
+  collapsed = false
+  collapsedComponent.render(80)
+  assert.notEqual(loader.get(REF).state, 'idle', 'expanding at a paintable width starts it')
 })

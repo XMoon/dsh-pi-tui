@@ -23,7 +23,7 @@
  */
 
 import { Image, imageFallback, type Component } from '@xmoon76/pi-tui'
-import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
 import type { ImageThumbnailTheme } from './image-thumbnail.ts'
 import { MAX_IMAGE_ROWS, MAX_IMAGE_WIDTH, NARROW_WIDTH_THRESHOLD } from './image-thumbnail.ts'
@@ -70,7 +70,7 @@ export class SvgThumbnail implements Component {
   /** Whether `instance` is a managed component (it owns a Core handle). */
   private instanceManaged = false
   /** The ONE managed graphics owner of this physical terminal, when admitted. */
-  private readonly graphics: KittyGraphics | undefined
+  private readonly graphics: ImageGraphics | undefined
   private cachedLines: string[] | undefined
   private cachedKey: string | undefined
   /** The real pixel rows and placement width the LAST render at `width`
@@ -87,7 +87,7 @@ export class SvgThumbnail implements Component {
     theme: SvgThumbnailTheme,
     requestRender: () => void,
     fixedRows?: number,
-    graphics?: KittyGraphics,
+    graphics?: ImageGraphics,
   ) {
     this.digest = digest
     this.source = source

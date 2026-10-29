@@ -851,8 +851,16 @@ test('explicit Zellij hard-off and nested multiplexers stay text-only and never 
       app.start()
       apps.started.add(app)
       try {
-        assert.equal((app as unknown as { graphics: KittyGraphics | undefined }).graphics, undefined,
-          `${entry.name}: no managed handle`)
+        // The 'ZELLIJ empty' case is NOT a Zellij session (an empty marker is not
+        // a session): it is a Direct terminal, so Image-8 / I8-2A may create its
+        // one SIXEL candidate there. Such a candidate is `pending` and may paint
+        // nothing until the terminal's own DA1 admits it, so the contract this
+        // case proves is "no MANIPULABLE handle", not "no object at all".
+        const handle = (app as unknown as { graphics: KittyGraphics | { mode: string; canPaint(): boolean } | undefined }).graphics
+        if (handle !== undefined) {
+          assert.equal((handle as { mode: string }).mode, 'sixel', `${entry.name}: only a Direct SIXEL candidate may exist`)
+          assert.equal(handle.canPaint(), false, `${entry.name}: and it may paint nothing`)
+        }
         const ref = imageRef(`att-negative-${index}`, 'rejected.png', 'image/png')
         app.setTranscript(transcriptOf(ref).messages())
         await settle(app, terminal)
