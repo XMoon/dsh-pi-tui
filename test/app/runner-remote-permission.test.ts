@@ -484,6 +484,25 @@ test('a real pending Remote Question survives reconnect — the same flow answer
     presentation: aggregate.presentation,
     extensionService: aggregate.clientUi.extensionService,
   }
+  // `waitFor('remote runner mount')` only proves the terminal has painted; it
+  // does NOT prove the interaction port has registered its question provider.
+  // Observe the REAL registration result (the exact `attachInteraction` path)
+  // before asking, so `service.ask()` can never race the provider's install.
+  const questionsPort = aggregate.backendRuntime.semantics.interaction.questions as unknown as {
+    onRequest(provider: unknown): boolean
+  }
+  const originalOnRequest = questionsPort.onRequest
+  let questionProviderRegistered = false
+  let questionRegistrationFailure: string | undefined
+  questionsPort.onRequest = function patchedQuestionOnRequest(this: unknown, provider: unknown): boolean {
+    const accepted = originalOnRequest.call(this, provider)
+    if (accepted) questionProviderRegistered = true
+    else if (!questionProviderRegistered) {
+      questionRegistrationFailure = 'the question interaction port rejected the provider'
+    }
+    return accepted
+  }
+  life.defer(() => { questionsPort.onRequest = originalOnRequest })
   const apps: unknown[] = []
   const originalStart = TuiApp.prototype.start
   TuiApp.prototype.start = function patchedStart(this: unknown) {
@@ -497,6 +516,10 @@ test('a real pending Remote Question survives reconnect — the same flow answer
   await runnerFiber
   life.defer(() => { runnerFiber.dispose() })
   await waitFor('remote runner mount', () => vt.getViewport().join('').length > 0, 20_000)
+  await waitFor('the question provider is registered', () => {
+    if (questionRegistrationFailure !== undefined) throw new Error(questionRegistrationFailure)
+    return questionProviderRegistered
+  }, 20_000)
 
   const app = await (async () => {
     for (let i = 0; i < 600; i += 1) {
@@ -524,7 +547,25 @@ test('a real pending Remote Question survives reconnect — the same flow answer
     value => { askOutcome = { kind: 'fulfilled', value } },
     reason => { askOutcome = { kind: 'rejected', reason } },
   )
-  await waitFor('the question surface is visible', () => view().includes('Proceed with the reconnect probe?'), 20_000)
+  const describeAskReason = (reason: unknown): string => {
+    if (reason instanceof Error) {
+      const code = (reason as { code?: unknown }).code
+      return `${typeof code === 'string' ? `${code}: ` : ''}${reason.name}: ${reason.message}`
+    }
+    return String(reason)
+  }
+  try {
+    await waitFor('the question surface is visible', () => {
+      // An early NO_PROVIDER (or any other rejection) must surface its REAL
+      // error immediately, never as a generic 20-second visibility timeout.
+      if (askOutcome?.kind === 'rejected') {
+        throw new Error(`the Host ask was rejected before the question surface: ${describeAskReason(askOutcome.reason)}`)
+      }
+      return view().includes('Proceed with the reconnect probe?')
+    }, 20_000)
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.message : String(error)}; providerRegistered=${String(questionProviderRegistered)}; session=${mainId}; viewport:\n${view()}`)
+  }
   const handlesBefore = (app as unknown as { overlayGraphState(): { handles: number } }).overlayGraphState().handles
 
   // ── reconnect A -> B (the same official carrier the sibling suites use).
