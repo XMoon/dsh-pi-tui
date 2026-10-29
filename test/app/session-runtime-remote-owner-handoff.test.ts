@@ -1895,11 +1895,11 @@ test('a binding rollover after an accepted cancel reports "requested, not confir
   const scopeAuthority = installScope(h)
   const scope = scopeAuthority.captureLive()
   assert.ok(scope !== undefined)
-  h.arms.set('session-b', { fail: true })
   const message = await h.runtime.switchSession('session-b', scope)
+  assert.match(String(message), /no longer observable/)
   assert.match(String(message), /turn stop requested \(not yet confirmed\)/)
   assert.doesNotMatch(String(message), /old turn stopped \(cannot resume\)/,
     'an unobservable binding is not proof that the old Turn stopped')
   assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
-  assert.deepEqual(h.calls.opens, ['session-b'], 'the target open was attempted and failed')
+  assert.deepEqual(h.calls.opens, [], 'the target open is NEVER attempted without a confirmed old quiesce')
 })

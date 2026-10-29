@@ -648,3 +648,26 @@ test('a control cancel on a disconnected Connection is cancelled without dispatc
   assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'cancelled' })
   assert.equal(binding.cancelCalls(), 0, 'a disconnected generation never receives the cancel')
 })
+
+test('whenIdleOrAbort reports unobservable when the exact binding rolls over DURING the wait', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const oldBinding = h.bindingOf('session-a')!
+  oldBinding.setRunning(true)
+  const signal = fakeSignal()
+  let settled: boolean | 'unobservable' | undefined
+  const pending = h.services.retirement.whenIdleOrAbort(owner, signal).then(result => { settled = result })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, undefined, 'a running exact generation must not settle early')
+  // The exact generation is retired and a same-id replacement is retained
+  // WHILE the wait is armed; the OLD face then emits its teardown
+  // running=false notification. That notification is not observed idle.
+  await h.services.retirement.retire(owner, 'transition')
+  const replacement = retainedHandle(h, 'session-a')
+  oldBinding.setRunning(false)
+  await pending
+  assert.equal(settled, 'unobservable',
+    'a mid-wait rollover must not be reported as an observed idle settle')
+  void replacement
+})

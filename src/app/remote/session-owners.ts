@@ -260,19 +260,28 @@ export function createRemoteSessionOwnerServices(
     const face = borrowed.session
     if (!face.getSnapshot().running) return Promise.resolve(false)
     if (signal.aborted) return Promise.resolve(true)
-    return new Promise<boolean>(resolve => {
+    // The exact binding can be retired or replaced WHILE this wait is armed
+    // (the app owner is republished independently). The old face can then emit
+    // running=false as a teardown notification, which is NOT proof that the
+    // captured generation's Turn reached idle. Re-fence immediately before
+    // resolving the settled/not-aborted result.
+    const exactBindingCurrent = (): boolean => {
+      const current = source.binding(record.sessionId)
+      return current !== undefined && Object.is(current, record.bindingIdentity)
+    }
+    return new Promise<boolean | 'unobservable'>(resolve => {
       let settled = false
       let unsubscribe: (() => void) | undefined
       let offAbort: (() => void) | undefined
-      const settle = (aborted: boolean): void => {
+      const settle = (result: boolean | 'unobservable'): void => {
         if (settled) return
         settled = true
         unsubscribe?.()
         offAbort?.()
-        resolve(aborted)
+        resolve(result)
       }
       const onSnapshot = (): void => {
-        if (!face.getSnapshot().running) settle(false)
+        if (!face.getSnapshot().running) settle(exactBindingCurrent() ? false : 'unobservable')
       }
       const onAbort = (): void => { settle(true) }
       // Arm the abort cleanup BEFORE subscribing: `subscribe` may invoke the
@@ -287,8 +296,8 @@ export function createRemoteSessionOwnerServices(
       if (settled) unsubscribe()
       // Lost-wakeup fence: the running → idle transition may have happened
       // before this subscriber registered, so re-check the snapshot after
-      // subscribing.
-      if (!face.getSnapshot().running) settle(false)
+      // subscribing — with the same exact-binding fence.
+      if (!face.getSnapshot().running) settle(exactBindingCurrent() ? false : 'unobservable')
       if (signal.aborted) settle(true)
     })
   }
