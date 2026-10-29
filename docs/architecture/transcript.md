@@ -1301,7 +1301,7 @@ independent occurrences with independent fold state.
   a read. A candidate selected after the mounted window changed is refused with
   `the image left the current transcript window` and the workspace closes; a
   stale scope is never authorized against the replacement session.
-- **Protocol scope (PR2 / I8-2B).** The leased AltScreen renders real pixels
+- **Protocol scope.** The leased AltScreen renders real pixels
   through Kitty and through Direct SIXEL after the terminal's own live DA1,
   cell-size and background observations admit it. The pinned AltScreen disables
   the iTerm2 image capability and its cursor-up framing is outside the fork's

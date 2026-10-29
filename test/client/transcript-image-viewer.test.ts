@@ -869,7 +869,8 @@ test('a real JPEG under Direct SIXEL reuses the ONE scoped derived PNG', async (
     },
   )
   const derived = await convertKittyThumbnail(SAMPLE_JPEG, 'image/jpeg')
-  const { graphics } = sixelGraphics()
+  const calls: SixelCall[] = []
+  const { graphics } = sixelGraphics(calls)
   const panel = panelOf(loader, { ref, scope, graphics })
   panel.setMaxRows(10)
   panel.render(60)
@@ -883,9 +884,11 @@ test('a real JPEG under Direct SIXEL reuses the ONE scoped derived PNG', async (
   const bottom = stripSgr(lines[lines.length - 1]!)
   assert.ok(bottom.includes('120×80 · image/jpeg'), `the ORIGINAL identity stays: ${bottom}`)
   assert.ok(bottom.includes(`${SAMPLE_JPEG.byteLength} B`), bottom)
-  // The payload the owner received is the derived PNG, not the JPEG bytes.
-  const call = (panel as unknown as { instanceWidthPx?: number; instanceHeightPx?: number })
-  assert.deepEqual([call.instanceWidthPx, call.instanceHeightPx], [derived.width, derived.height])
+  // The payload the owner ACTUALLY received is the derived PNG, not the JPEG
+  // bytes (the fake records the exact source handed to `image()`).
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0]!.pngBase64, derived.base64, 'the owner receives the derived PNG bytes')
+  assert.deepEqual([calls[0]!.widthPx, calls[0]!.heightPx], [derived.width, derived.height])
   panel.dispose()
 })
 

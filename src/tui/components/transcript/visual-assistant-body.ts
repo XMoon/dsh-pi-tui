@@ -65,7 +65,13 @@ export interface VisualAssistantPaintedHits {
   readonly top: number
   readonly height: number
   readonly actions: readonly VisualFigureActionHit[]
-  readonly thumbnailBody?: { readonly startRow: number; readonly endRow: number; readonly endCol: number }
+  readonly thumbnailBody?: {
+    readonly startRow: number
+    readonly endRow: number
+    readonly endCol: number
+    /** Figure-relative left edge when it is not the bullet indent (Direct SIXEL). */
+    readonly startCol?: number
+  }
 }
 
 /** One figure's stable layout entry from the LAST render: the actual figure

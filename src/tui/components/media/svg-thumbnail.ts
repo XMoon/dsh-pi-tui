@@ -205,9 +205,10 @@ export class SvgThumbnail implements Component {
     const pixelRows = this.fixedRows === undefined
       ? MAX_IMAGE_ROWS
       : Math.min(MAX_IMAGE_ROWS, Math.max(0, this.fixedRows - 1))
-    if (this.fixedRows !== undefined && pixelRows === 0) {
-      // No body grant: paint the spacer (fixedRows === 1) or nothing
-      // (fixedRows === 0) and start no raster read/encode at all.
+    if (protocol === 'sixel' && this.fixedRows !== undefined && pixelRows === 0) {
+      // No SIXEL body grant: paint the spacer (fixedRows === 1) or nothing
+      // (fixedRows === 0) and start no raster read/encode at all. Kitty keeps
+      // its existing fixed-row behavior (its loading/status row still paints).
       return this.fixedRows === 1 ? [''] : []
     }
     const state = this.loader.get(this.digest, this.targetWidth)

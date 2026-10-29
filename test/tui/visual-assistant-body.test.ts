@@ -953,6 +953,7 @@ test('a SIXEL Assistant figure hit is read from the committed frame, not the ren
   assert.ok(hit.thumbnailBody !== undefined, 'the committed frame produces the pixel hit')
   assert.ok(hit.thumbnailBody.endRow > hit.thumbnailBody.startRow)
   assert.equal(hit.thumbnailBody.endCol, 6)
+  assert.equal(hit.thumbnailBody.startCol, 0, 'the SIXEL figure reports its real left edge')
   assert.equal(hit.top, before[0]!.top, 'the figure top is the last-render position')
   assert.equal(hit.height, before[0]!.height, 'the figure height never moves with the raster')
   assert.deepEqual(hit.actions, before[0]!.actions, 'action rows stay the last-render snapshot')
