@@ -356,32 +356,40 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       const stopped = new Promise<void>(resolve => { resolveStopped = resolve })
       const stop = (code: number): Promise<void> => {
         if (stopping !== undefined) return stopping
-        // runProfile already consumed the Host-only overlay. Remove only this
-        // process's own scratch under the real scope before the official
-        // shutdown, so a slow shutdown cannot strand it; SIGKILL still defers.
-        removeOwnedScratch(scope.dir, scratchDir)
         stopping = (async () => {
-          const errors: unknown[] = []
+          const errors: Array<{ step: string; error: unknown }> = []
+          // runProfile already consumed the Host-only overlay. Remove only this
+          // process's own scratch under the real scope; a removal failure is one
+          // collected cleanup step and must never truncate the official shutdown.
+          try {
+            if (process.env.SPLIT_PROCESS_HOST_FORCE_SCRATCH_REMOVE_FAILURE === '1') {
+              throw new Error('local host entry: qualification forced scratch removal failure')
+            }
+            removeOwnedScratch(scope.dir, scratchDir)
+          } catch (error) {
+            errors.push({ step: 'scratch-remove', error })
+          }
           try {
             await published.unregisterIdentity()
           } catch (error) {
-            errors.push(error)
+            errors.push({ step: 'identity-unregister', error })
           }
           try {
             await handle?.shutdown.shutdown(code)
           } catch (error) {
-            errors.push(error)
+            errors.push({ step: 'shutdown', error })
           }
           cleanupOwnedFiles(scope, instanceId)
           if (errors.length > 0) {
-            const primary = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0]))
+            const first = errors[0]
+            const primary = first.error instanceof Error ? first.error : new Error(String(first.error))
             writeEntryRecord({
               m4a0: 'cleanup-failure',
               processRole: 'host',
               phase: 'shutdown',
               pid: process.pid,
               error: primary.message,
-              step: 'identity-unregister-or-shutdown',
+              step: first.step,
             })
             process.exitCode = 1
           } else {

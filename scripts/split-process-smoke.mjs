@@ -173,13 +173,15 @@ class EntryProcess {
     this.stderr = ''
     this.exited = false
     this.exitResult = undefined
+    const effectiveScratch = options.env?.SPLIT_PROCESS_SCRATCH ?? join(options.scratch, `${role}-${++sequence}`)
+    this.effectiveScratch = effectiveScratch
     this.child = spawn(process.execPath, [entry], {
       cwd: options.cwd,
       env: {
         ...options.env,
         SPLIT_PROCESS_DSH_ANCHOR: options.anchor,
         SPLIT_PROCESS_PROFILE: options.profile,
-        SPLIT_PROCESS_SCRATCH: join(options.scratch, `${role}-${++sequence}`),
+        SPLIT_PROCESS_SCRATCH: effectiveScratch,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true,
@@ -735,13 +737,14 @@ async function main() {
         env: { ...base.env, SPLIT_PROCESS_SCRATCH: target },
       })
       const conflict = await foreign.waitFor(record => record.m4a0 === 'host-seat-conflict', 'RFL-012 foreign scratch seat conflict', 60_000)
+      assert(foreign.effectiveScratch === target, `RFL-012 foreign Host did not receive ${target}: ${foreign.effectiveScratch}`)
       assert(conflict.error === 'HOST_ALREADY_OWNED', `RFL-012 foreign scratch conflict was ${JSON.stringify(conflict.error)}`)
       const foreignExit = await foreign.waitForExit(30_000)
       assert(foreignExit.code === 0, `RFL-012 foreign scratch exit was ${JSON.stringify(foreignExit)}`)
     }
     assert(existsSync(mainScratch), 'a live Host scratch was deleted through SPLIT_PROCESS_SCRATCH')
     assert(existsSync(outsideScratch), 'a scope-outside directory was deleted through SPLIT_PROCESS_SCRATCH')
-    trace('t08-scratch', { winnerScratch: 1, liveHostScratchKept: true, outsideKept: true })
+    trace('t08-scratch', { winnerScratch: 1, liveHostScratchKept: true, outsideKept: true, foreignScratchTargets: 2 })
 
     // T09: two Clients race for the one kernel TUI seat. Only the winner may
     // create a Client Context or reach the Host.
@@ -1272,6 +1275,19 @@ async function main() {
     // RFL-010/F3: a real Client spawn whose Host fails before runProfile must
     // remove only its own launcher-created scratch. The main Host is already
     // dead, so ensureLocalHost actually spawns a candidate.
+    const removalFailure = new EntryProcess('host', entries.host, {
+      ...base,
+      env: { ...base.env, SPLIT_PROCESS_HOST_FORCE_SCRATCH_REMOVE_FAILURE: '1' },
+    })
+    const removalReady = await waitForOutcome(removalFailure, 'RFL-014 scratch-removal-failure Host', 120_000)
+    assert(removalReady.m4a0 === 'ready', `RFL-014 Host did not become ready: ${JSON.stringify(removalReady)}`)
+    removalFailure.send({ op: 'shutdown' })
+    const removalCleanup = await removalFailure.waitFor(record => record.m4a0 === 'cleanup-failure', 'RFL-014 cleanup failure', 60_000)
+    assert(removalCleanup.step === 'scratch-remove', `RFL-014 cleanup step was ${JSON.stringify(removalCleanup.step)}`)
+    const removalExit = await removalFailure.waitForExit(30_000)
+    assert(removalExit.code === 1, `RFL-014 Host exit was ${JSON.stringify(removalExit)}`)
+    trace('t15-removal-failure', { step: removalCleanup.step, exit: removalExit.code })
+
     const preProfileScratch = scopeScratchDirs().length
     const preProfile = new EntryProcess('client', entries.client, {
       ...base,
