@@ -675,3 +675,22 @@ test('a native interactive resume failure on the still-current Browser is visibl
   assert.ok(notices.some(message => message.includes('lease held')),
     'a failure on the still-current Browser must stay visible')
 })
+
+test('a cancelled PiTui direct switch settles the resume command instead of hanging', async (t) => {
+  const rows = [
+    { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => Promise.reject(Object.assign(new Error('switch aborted'), { name: 'AbortError' })))
+  t.after(() => h.app.stop())
+  const result = h.runResume('target') as Promise<{ kind: string; text?: string }>
+  assert.deepEqual(await result, { kind: 'error', text: 'resume cancelled' },
+    'a cancelled switch must settle the awaiting resume rather than leave it pending')
+})
