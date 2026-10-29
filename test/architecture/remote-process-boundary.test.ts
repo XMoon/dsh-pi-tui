@@ -112,9 +112,15 @@ test('the Client-only entry value closure never reaches the Host composition or 
     /^src\/tui-app\.ts$/u,
   ], 'the Client-only entry')
   assert.ok(closure.files.has('src/app/remote-process/client-bootstrap.ts'))
+  assert.ok(closure.files.has('src/app/remote-process/local-scope.ts'))
+  assert.ok(closure.files.has('src/app/remote-process/local-discovery.ts'))
+  assert.ok(closure.files.has('src/app/remote-process/local-transport.ts'))
   assert.ok(closure.files.has('src/app/remote/client-ui-runtime.ts'))
   assert.ok(closure.files.has('src/extensions.ts'), 'the Client entry must mount the real extension host')
   assert.ok(closure.files.has('src/builtins.ts'), 'the Client entry must mount the real first-party builtins')
+  assert.ok(closure.bare.has('ws'), 'the Client transport must declare its own WebSocket runtime dependency')
+  assert.ok(!closure.files.has('src/app/remote-process/local-host-entry.ts'))
+  assert.ok(!closure.files.has('src/app/remote-process/host-bootstrap.ts'))
 })
 
 test('the Host-only entry value closure never reaches the TUI renderer or the Client UI subtree', () => {
@@ -127,8 +133,14 @@ test('the Host-only entry value closure never reaches the TUI renderer or the Cl
     /^src\/builtins\.ts$/u,
   ], 'the Host-only entry')
   assert.ok(closure.files.has('src/app/remote-process/host-bootstrap.ts'))
+  assert.ok(closure.files.has('src/app/remote-process/local-scope.ts'))
+  assert.ok(closure.files.has('src/app/remote-process/local-discovery.ts'))
   assert.ok(closure.files.has('src/app/remote/host-prerequisites.ts'))
+  assert.ok(!closure.files.has('src/app/remote-process/local-transport.ts'))
+  assert.ok(!closure.files.has('src/app/remote-process/client-bootstrap.ts'))
+  assert.ok(!closure.files.has('src/app/remote/client-ui-runtime.ts'))
   assert.ok(![...closure.bare].some(specifier => specifier === '@xmoon76/pi-tui'))
+  assert.ok(![...closure.bare].some(specifier => specifier === 'ws'), 'the Host-only PID must not carry the Client socket runtime')
 })
 
 test('the package exposes no public Host/Client process entry or bin', () => {

@@ -1,12 +1,13 @@
 /**
- * Host-only readiness audit for the M4-A0 process entry.
+ * Host-only readiness audit for the M4-B1 process entry.
  *
  * The entry boots the ordinary DSH profile through the real launcher
  * (`@deepseek-ai/dsh/profile-boot`). This module runs after that boot and owns
- * only the M4-A0 Host verdict: the shared Remote Host prerequisite set must be
- * live, and the TUI/Client-UI rows the Host-only overlay disables must not be
- * active. It never composes a second Host graph and never mounts a Remote row
- * (B1 owns transport wiring).
+ * only the Host verdict: the shared Remote Host prerequisite set must be live,
+ * the B1-only Connection/API-remotes rows must be the sole active owners, the
+ * base Gateway must be active exactly once, the loopback webserver must be
+ * bound, and the TUI/Client-UI rows the Host-only overlay disables must not be
+ * active. It never composes a second Host graph.
  *
  * @module app/remote-process/host-bootstrap
  */
@@ -49,7 +50,7 @@ export interface HostEntryStatus {
   readonly phase: 'ready'
   readonly fiberOwner: 'dsh-profile-root'
   readonly rootFiberUid?: number
-  readonly transport: 'not-connected'
+  readonly transport: 'listening'
   readonly sessionOpen: false
   readonly profile: string
   readonly services: Record<string, boolean>
@@ -67,15 +68,27 @@ function fiberStateLabel(entry: LoaderEntryLike): string {
   return `state-${String(state)}`
 }
 
-/** Assert the disabled TUI rows did not activate despite the profile patch. */
+/**
+ * Assert the disabled TUI rows stayed disabled AND did not activate despite the
+ * profile patch. The declaration check is what makes an overlay mutation
+ * (`disabled: false`) a deterministic Host startup failure even when the
+ * re-enabled TUI plugin fails to mount without a terminal.
+ */
 export function assertHostOnlyComposition(context: Context): void {
   const entries = [...loaderOf(context).entries()]
-  const activeForbidden = entries
-    .filter(entry => FORBIDDEN_HOST_ENTRY_IDS.includes(entry.options.id as (typeof FORBIDDEN_HOST_ENTRY_IDS)[number]))
+  const forbidden = entries.filter(entry =>
+    FORBIDDEN_HOST_ENTRY_IDS.includes(entry.options.id as (typeof FORBIDDEN_HOST_ENTRY_IDS)[number]))
+  const activeForbidden = forbidden
     .filter(entry => entry.fiber?.state === FIBER_ACTIVE)
     .map(entry => entry.options.id)
   if (activeForbidden.length > 0) {
     throw new Error(`local host entry: forbidden TUI/Client-UI rows are active: ${activeForbidden.join(', ')}`)
+  }
+  const enabledForbidden = forbidden
+    .filter(entry => entry.options.disabled !== true)
+    .map(entry => entry.options.id)
+  if (enabledForbidden.length > 0) {
+    throw new Error(`local host entry: forbidden TUI/Client-UI rows are not disabled: ${enabledForbidden.join(', ')}`)
   }
 }
 
@@ -108,21 +121,42 @@ export function collectHostEntryStatus(
     agents: activeIds('agent'),
     sessions: activeIds('session'),
     jobController: activeIds('job-controller'),
-    // A0 does not mount the official Connection: B1 owns the authenticated
-    // loopback transport. Reporting the empty set keeps that absence explicit.
-    connection: activeIds('connection'),
+    // B1 mounts exactly one official Connection owner and one API-remotes
+    // event source on the Host-only overlay; the base Gateway is reused, not
+    // remounted.
+    connection: activeIds('split-host-connection'),
+    apiRemotes: activeIds('split-host-api-remotes'),
+    typertGateway: activeIds('typert-gateway'),
   }
   for (const [owner, ids] of Object.entries(ownerEntries)) {
-    if (owner === 'connection') {
-      if (ids.length !== 0) throw new Error(`local host entry: the A0 Host must not mount a Connection owner (found ${ids.join(', ')})`)
-      continue
-    }
     if (ids.length !== 1) {
-      throw new Error(`local host entry: expected exactly one active ${owner} owner row, found ${String(ids.length)}`)
+      const visible = entries.map(entry => `${entry.options.id}:${fiberStateLabel(entry)}`)
+      throw new Error(
+        `local host entry: expected exactly one active ${owner} owner row, found ${String(ids.length)}; entries=${visible.join(',')}`,
+      )
     }
   }
+  if (context.reflect.get('connection') === undefined) {
+    throw new Error('local host entry: the Host did not publish the official Connection service')
+  }
+  const webServer = context.reflect.get('webServer') as {
+    readonly host?: string
+    readonly port?: number
+    readonly protocol?: string
+    getOrigin(): string
+  } | undefined
+  if (webServer?.host !== '127.0.0.1' || webServer.port === undefined || webServer.port < 1) {
+    throw new Error('local host entry: the Host webserver must bind 127.0.0.1 on an OS-assigned port')
+  }
+  if (webServer.protocol === 'https:') {
+    throw new Error('local host entry: B1 requires the plain loopback HTTP webserver')
+  }
+  const origin = webServer.getOrigin()
+  const loopbackPrefix = 'http://127.0.0.1:'
+  if (!origin.startsWith(loopbackPrefix) || !/^\d+$/u.test(origin.slice(loopbackPrefix.length))) {
+    throw new Error(`local host entry: the Host webserver origin is not loopback HTTP (${origin})`)
+  }
   const rootFiber = (context as unknown as { readonly fiber?: { readonly uid?: number } }).fiber
-  const webServer = context.reflect.get('webServer') as { readonly host?: string; readonly port?: number } | undefined
   return {
     processRole: 'host',
     pid: process.pid,
@@ -130,7 +164,7 @@ export function collectHostEntryStatus(
     phase: 'ready',
     fiberOwner: 'dsh-profile-root',
     ...(rootFiber?.uid == null ? {} : { rootFiberUid: rootFiber.uid }),
-    transport: 'not-connected',
+    transport: 'listening',
     sessionOpen: false,
     profile: identity.profile,
     services,
@@ -141,8 +175,6 @@ export function collectHostEntryStatus(
       state: fiberStateLabel(entry),
     })),
     forbiddenActive: [],
-    ...(webServer?.host === undefined || webServer.port === undefined
-      ? {}
-      : { webServer: { host: webServer.host, port: webServer.port } }),
+    webServer: { host: webServer.host, port: webServer.port },
   }
 }
