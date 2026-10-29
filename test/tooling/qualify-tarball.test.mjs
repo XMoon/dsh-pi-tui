@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import test from 'node:test'
 
-import { SMOKE_SCRIPTS, selectCandidate } from '../../scripts/qualify-tarball.mjs'
+import { SMOKE_SCRIPTS, runQualification, selectCandidate } from '../../scripts/qualify-tarball.mjs'
 import { pnpmExecutable } from '../../scripts/lib/process.mjs'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 
@@ -96,4 +96,21 @@ test('the real pnpm CLI separator reaches the runner, not its usage guard', () =
   assert.notEqual(result.status, 0, output)
   assert.match(output, /does not exist/u)
   assert.doesNotMatch(output, /usage: node scripts\/qualify-tarball\.mjs/u)
+})
+
+test('the first non-zero smoke stops the run, and every child receives the same exact tarball', () => {
+  const candidate = '/tmp/xmoon76-dsh-pi-tui-0.5.4.tgz'
+  const calls = []
+  assert.throws(() => runQualification(candidate, {
+    scripts: ['smoke-a.mjs', 'smoke-b.mjs', 'smoke-c.mjs'],
+    root: '/tmp',
+    spawn(_command, args, options) {
+      calls.push({ args, options })
+      return { status: calls.length === 2 ? 7 : 0, signal: null }
+    },
+  }), /2\/3 smoke-b failed \(exit 7\)/u)
+  assert.equal(calls.length, 2)
+  assert.deepEqual(calls.map(call => call.args[1]), [candidate, candidate])
+  assert.deepEqual(calls.map(call => call.args[0]), ['/tmp/smoke-a.mjs', '/tmp/smoke-b.mjs'])
+  for (const call of calls) assert.equal(call.options.cwd, '/tmp')
 })
