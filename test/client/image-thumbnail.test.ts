@@ -1244,3 +1244,19 @@ test('a transcript PNG repaints after the async SIXEL encode settles (no invalid
   assert.ok(body!.rows >= 2, `the two-band raster is at least two cell rows, got ${body!.rows}`)
   assert.ok(body!.endCol > 0)
 })
+
+test('a derived SIXEL preview (JPEG/WebP) reads the last committed frame for its hit body', () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const loader = loaderOf(new Uint8Array([1]))
+  loader.load(REF)
+  const component = new ImageThumbnail(REF, loader, THEME, () => {})
+  // The derived preview creates a managed SIXEL instance under `preview-sixel`;
+  // its hit body must come from the owner's committed frame, not a component
+  // snapshot taken before the Screen materialized.
+  ;(component as unknown as { instanceKind: string }).instanceKind = 'preview-sixel'
+  ;(component as unknown as { instance: unknown }).instance = {
+    paintedBodyAt: (width: number) => (width === 80 ? { rows: 2, columns: 4 } : undefined),
+  }
+  assert.deepEqual(component.paintedImageBody(80), { rows: 2, endCol: 4 })
+  assert.equal(component.paintedImageBody(40), undefined, 'only the committed width answers')
+})
