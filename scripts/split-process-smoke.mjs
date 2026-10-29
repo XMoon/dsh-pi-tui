@@ -19,6 +19,7 @@
  *   T14/T16/T17 forged registry, unresponsive Host, build/auth failures
  *   T15 a dead Host leaves only a stale candidate; a Client safely starts a new one
  *   T18 installed package shape and Direct `--help` remain unchanged
+ *   T19 signal admission precedes discoverable publication (owner-governed stop, no ready)
  *
  * Usage: node scripts/split-process-smoke.mjs [path-to-candidate.tgz]
  *        pnpm smoke:split-process -- [path-to-candidate.tgz]
@@ -1368,7 +1369,75 @@ async function main() {
     assert(!alive(c6Outcome.host.hostPid), 'T17 spawned Host did not exit')
     assert(scopeScratchDirs().length === 1, 'the clean Host shutdown did not remove only its own scratch')
     trace('t15-scratch-clean', { afterCleanExit: scopeScratchDirs().length })
+
+    // T19/R1: signal admission precedes discoverable publication. The Host is
+    // held AFTER `instance.json` is committed but BEFORE it can report ready;
+    // SIGTERM/SIGINT in that window must take the ordinary owner-governed
+    // shutdown (official disposal + identity/scratch cleanup), never the
+    // default signal exit, and never emit ready afterwards.
     const scopeSuffix = hostReady.localHost.scopeId.slice(0, 40)
+    const r1BaselineScratch = new Set(scopeScratchDirs())
+    for (const [signal, expectedCode] of [['SIGTERM', 0], ['SIGINT', 130]]) {
+      const barrierPath = join(workDir, `r1-publish-barrier-${signal}`)
+      const r1Host = new EntryProcess('host', entries.host, {
+        ...base,
+        env: { ...base.env, SPLIT_PROCESS_HOST_PUBLISH_BARRIER: barrierPath },
+      })
+      let r1Registry
+      const barrierDeadline = Date.now() + 180_000
+      while (Date.now() < barrierDeadline) {
+        try {
+          const candidate = readJson(registryPath)
+          if (candidate.hostPid === r1Host.child.pid) {
+            r1Registry = candidate
+            break
+          }
+        } catch { /* the registry is not committed yet */ }
+        if (r1Host.exited) {
+          throw new Error(`T19 ${signal}: the Host exited before the registry commit; records=${JSON.stringify(r1Host.records.slice(-3))}; stderr=${r1Host.stderr.slice(-1500)}`)
+        }
+        await sleep(20)
+      }
+      assert(r1Registry !== undefined, `T19 ${signal}: the Host never committed a discoverable registry`)
+      assert(existsSync(launchPath), `T19 ${signal}: launch material is missing at the registry commit`)
+      assert(!r1Host.records.some(record => record.m4a0 === 'ready'), `T19 ${signal}: the Host reported ready while still held at the publication barrier`)
+      r1Host.kill(signal)
+      const stopRequested = await r1Host.waitFor(record => record.m4a0 === 'stop-requested', `T19 ${signal} admission`, 60_000)
+      assert(
+        stopRequested.signal === signal && stopRequested.phase === 'publication',
+        `T19 ${signal}: unexpected admission record ${JSON.stringify(stopRequested)}`,
+      )
+      writeFileSync(barrierPath, 'release\n', { mode: 0o600 })
+      const cleanup = await r1Host.waitFor(record => record.m4a0 === 'cleanup' || record.m4a0 === 'cleanup-failure', `T19 ${signal} cleanup`, 60_000)
+      assert(
+        cleanup.m4a0 === 'cleanup' && cleanup.status === 'completed' && cleanup.phase === 'shutdown',
+        `T19 ${signal}: cleanup was ${JSON.stringify(cleanup)}`,
+      )
+      const exit = await r1Host.waitForExit(60_000)
+      assert(exit.code === expectedCode && exit.signal === null, `T19 ${signal} exit was ${JSON.stringify(exit)}`)
+      assert(!r1Host.records.some(record => record.m4a0 === 'ready'), `T19 ${signal}: the Host emitted ready after a stop request`)
+      assert(!r1Host.records.some(record => record.m4a0 === 'failure'), `T19 ${signal}: the Host reported a boot failure`)
+      assert(!existsSync(registryPath), `T19 ${signal}: the registry survived the owner-governed shutdown`)
+      assert(!existsSync(launchPath), `T19 ${signal}: launch material survived the owner-governed shutdown`)
+      const remainingScratch = scopeScratchDirs()
+      assert(
+        remainingScratch.length === r1BaselineScratch.size
+          && remainingScratch.every(name => r1BaselineScratch.has(name)),
+        `T19 ${signal}: the Host's own scratch was not removed: ${JSON.stringify(remainingScratch)}`,
+      )
+      await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 10_000)
+      trace(`t19-${signal.toLowerCase()}`, {
+        signal,
+        exit: exit.code,
+        cleanup: cleanup.status,
+        readyEmitted: false,
+        registryRemoved: true,
+        launchRemoved: true,
+        scratchRemoved: true,
+        hostSeatFree: true,
+      })
+    }
+
     await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 10_000)
     await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 10_000)
     trace('seats-free', { hostSeat: 'free', clientSeat: 'free' })
