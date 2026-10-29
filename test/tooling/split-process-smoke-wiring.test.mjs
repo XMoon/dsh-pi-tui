@@ -38,6 +38,13 @@ test('the split-process smoke is a package script and a dedicated CI job', () =>
   const job = workflow.jobs['split-process']
   assert.ok(job, 'the split-process smoke must be its own CI job')
   assert.match(job.if, /outputs\.mode == 'npm'/u, 'the split-process job must only run in npm mode')
+  // The real npm run once skipped this job because its transitive
+  // prepare-dsh-source need is legitimately skipped; without always() the
+  // implicit all-needs success check propagates that skip and leaves the
+  // required proof unrun. The generic static check only inspects jobs that
+  // already use always(), so this exact assertion is the regression guard for
+  // that observed scheduling failure.
+  assert.match(job.if, /always\(\)/u, 'the split-process job must override the implicit transitive skip')
   const record = workflow.jobs.qualify.steps.find(step => step.name === 'Record the npm-only smoke on a source run')
   assert.ok(record, 'qualify must record the npm-only skip on a source run')
   assert.match(record.run, /startup strictness smoke is npm-only/u)
