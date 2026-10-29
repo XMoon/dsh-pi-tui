@@ -6101,6 +6101,7 @@ A SIXEL DCS is a device command, not cell content: a Screen that normalizes, tru
 - src/tui.ts: TuiBase.onCellSizeObserved(listener) exposes the reply its existing consumeCellSizeResponse() already parsed, and queryCellSizeForSixel() issues `CSI 16t` only after start(). No second parser, no new query type, no change to the startup probe.
 - src/tui.ts: overlayPaintedLineRange()/linesCoveredByOverlay() expose the placements the compositor already computed, so a screen can withhold a raster whose rows an overlay paints.
 - Every screen without a port (kitty, iTerm2, no-image terminals, every structural test fake) keeps byte-for-byte upstream behaviour.
+- src/terminal-image.ts: the SIXEL screen port also carries the RESIDENCY contract as STRUCTURAL types only — SixelCandidateInfo (per-occurrence id, fallback, conservative layoutRows), SixelVisibleCandidate (a frame demand with cropTopRows/visibleRows/physicalRow), SixelFrameRaster (line + exact DCS + window + emitted), and the port methods candidate(line) (exact inert-marker lookup), reconcileVisible(screen, demands) (grants the final layout's visible occurrences within the owner's budget), materialize(line, cropTopRows, visibleRows) (the ONLY token->DCS exit; never starts work) and framePainted(screen, retained) (release after a real write, then task the lane). footprint()/crop() keep their exact-DCS trust semantics and never become a syntax test for arbitrary DCS text.
 
 #### Dependency map
 
@@ -6138,6 +6139,7 @@ A SIXEL DCS is a device command, not cell content: a Screen that normalizes, tru
 - packages/pi-tui/test/tui-cell-size-input.test.ts: X072 - queryCellSizeForSixel() sends nothing before start() and exactly one `CSI 16t` after it; the real `CSI 6;40;20t` reply reaches an observer once with the parsed value; unsubscribe stops delivery; the single parser still updates getCellDimensions().
 - packages/pi-tui/test/tui-sixel-main.test.ts: an unregistered DCS is never treated as an image (the fallback/overlay cases), and a registered one is never normalized.
 - test/client/sixel-image.test.ts: the registry answers only exact encoded strings; an unrelated well-formed DCS is refused.
+- test/client/sixel-image.test.ts: a candidate is a per-occurrence identity bound BEFORE any encode; an inert marker round-trips only through the exact registry lookup; a frame that demands only the 17th occurrence releases the sixteen off-screen records and paints it (capacity starvation); a frame demanding seventeen visible blocks keeps the hard 16-variant budget with the newest content winning a contested slot; a direct crop request still schedules exactly one bounded variant.
 
 #### Upstream comparison
 
@@ -6191,6 +6193,7 @@ A SIXEL block is ONE command whose pixels cover every row of its footprint. TuiM
 - In the incremental path every trusted SIXEL anchor is DEFERRED: all text rows (with their `CSI 2K`) are written first, then each anchor is positioned from the clamped top margin (`CSI 999A` + bounded `CSI nB`), wrapped in DECSC/DECRC, and the frame cursor is restored to the last rendered row. A DCS whose post-command cursor is terminal-defined is therefore never assumed to leave the cursor at zero.
 - A block whose footprint would not fit inside the painted viewport keeps the existing full-redraw fallback; the first render, width/height changes and clearOnShrink keep the existing `2J`/`H`/`3J` contract.
 - An overlay that paints ANY row of a block withholds that block's DCS for the frame (the identity row above it stays); the block returns as soon as the overlay is gone.
+- TuiMainScreen projects candidate markers after the final viewport is known: projectSixelCandidates() turns each visible marker into the granted DCS (or its own fallback), preserves the previous physical line for a row above the viewport when the SAME occurrence is still there (a residency-only change must never become firstChanged / fullRender(true) / CSI 3J), and commitSixelFrame() reports the physical raster set (emitted DCS plus diff-kept old pixels) after every real write. A no-write frame keeps the previous set; getImageReservedRows()/declaredImageRows() accept a candidate's layoutRows before the raster exists.
 
 #### Dependency map
 
@@ -6227,6 +6230,7 @@ A SIXEL block is ONE command whose pixels cover every row of its footprint. TuiM
 - packages/pi-tui/test/tui-sixel-main.test.ts: X073 - the first frame reserves the whole block and writes ONE DCS wrapped in DECSC/DECRC; a replaced block clears every old footprint row and repaints no raster; the frame that makes a raster ready writes the trailing text change BEFORE the raster and nothing clears a covered row afterwards; a text-only frame emits no SIXEL control; an overlay over any block row withholds it and the block returns when the overlay is gone; a width change keeps the `2J`+`H`+`3J` contract.
 - packages/pi-tui/test/tui-render.test.ts, tui-render-cache.test.ts and the rest of the fork suite: the unchanged upstream cases stay green without a port.
 - packages/pi-tui/test/tui-sixel-main.test.ts: X073 three-frame case — a diff frame that paints a raster keeps the EXACT per-line footprint cache (the old-block expansion after a later frame cannot fall back to the blank-body scan), and the frame that replaces the block clears all three old rows.
+- packages/pi-tui/test/tui-sixel-main.test.ts: 24 candidate blocks, the viewport materializes only the visible tail; appending content never emits CSI 2J/3J for a residency-only change and the real text change is written. Candidate-mode port fixtures join the existing DCS trust fixtures.
 
 #### Upstream comparison
 
@@ -6280,6 +6284,7 @@ The alternate screen's layout engine paints into a clipped viewport and its own 
 - TuiAltScreen.doRender computes the frame's per-anchor footprint heights, erases every old and new covered row with `CSI 2K`, writes all text first and ONE DCS per visible uncovered block last at its own absolute row; a changed row inside a block forces the whole block to be cleared and repainted.
 - A block an overlay paints over is withheld for the frame; afterTerminalStop() projects a trusted anchor to an empty line so leaving the alt screen never replays a DCS into the main screen's restored history.
 - The alternate screen's own search index is built with every trusted anchor row emptied (row count and indices preserved), so a DCS substring can never match and a reveal can never target a row that shows no text; the highlight pass skips the same rows.
+- LayoutFrame.sixelDemands carries the final layout's visible candidates (including a bottom-clipped block and an anchor that scrolled above scrollTop); paintBox materializes each candidate through the port's single token->DCS exit and paints its fallback when nothing is granted; TuiAltScreen reconciles once after the final layout (at most one recompose) and commitSixelFrame() reports the physical raster set after the write, with emitted=false for a diff-kept row.
 
 #### Dependency map
 
@@ -6317,6 +6322,7 @@ The alternate screen's layout engine paints into a clipped viewport and its own 
 - packages/pi-tui/test/tui-alt-screen.test.ts: X074 - every text row is written before the ONE raster; retiring a block clears the old footprint and leaves no ghost row; an overlay over the block withholds it and the block returns afterwards; the alt screen's exit projection never replays a DCS into the main screen.
 - packages/pi-tui/test/tui-alt-screen.test.ts and layout.test.ts upstream groups: the Kitty crop, virtual-placement and iTerm2 cases stay green without a port.
 - packages/pi-tui/test/tui-alt-screen.test.ts: X074 review-round guards — a DCS wider than the terminal keeps its ST through the width clamp; the jump-to-end indicator yields an anchor row instead of splicing it; a press-drag selection across a block never rewrites the anchor row and never copies it; and the search INDEX never contains a trusted DCS, so a command substring finds nothing (the row is kept empty to preserve every other row's index).
+- test/integration/sixel-direct-screen.test.ts: 24 distinct transcript images — the newest visible image paints on both screens, scrolling to the top re-encodes the first source after its record was released, and scrolling back down paints the newest again; packages/pi-tui/test/tui-alt-screen.test.ts keeps the clear-vs-rewrite and crop/paint-order regressions on the candidate path.
 
 #### Upstream comparison
 

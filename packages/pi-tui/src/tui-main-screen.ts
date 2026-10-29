@@ -159,6 +159,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private hardwareCursorRow = 0;
 	private maxLinesRendered = 0;
 	private previousViewportTop = 0;
+	/** Per-row token -> DCS the current frame materialized (X073). */
+	private sixelFrameRasters = new Map<number, { line: string; dcs: string; cropTopRows: number; visibleRows: number }>();
 
 	/**
 	 * @param sixelScreen - the Client-local SIXEL trust port (X072). Absent for
@@ -241,11 +243,126 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	}
 
 	/**
+	 * Project the frame's candidate markers into what this Screen may write.
+	 *
+	 * The component tree only ever emits an inert candidate marker per block; the
+	 * final viewport decides which occurrences are granted residency. Rows above
+	 * the viewport keep their previous physical line when the SAME occurrence is
+	 * still there: a residency-only change must not rewrite committed scrollback
+	 * (a rewrite above the viewport would force `fullRender(true)` and `3J`).
+	 */
+	private projectSixelCandidates(
+		rawLines: readonly string[],
+		height: number,
+		reconcile: boolean,
+	): {
+		lines: string[];
+		rasters: Map<number, { line: string; dcs: string; cropTopRows: number; visibleRows: number }>;
+		preserved: Set<number>;
+		recompose: boolean;
+	} {
+		const port = this.sixelScreen;
+		const lines = [...rawLines];
+		const rasters = new Map<number, { line: string; dcs: string; cropTopRows: number; visibleRows: number }>();
+		const preserved = new Set<number>();
+		if (port === undefined) return { lines, rasters, preserved, recompose: false };
+		const viewportTop = Math.max(0, rawLines.length - height);
+		const visible: Array<{ row: number; fallback: string; cropTopRows: number; visibleRows: number }> = [];
+		for (let row = viewportTop; row < Math.min(rawLines.length, viewportTop + height); row += 1) {
+			const info = port.candidate(rawLines[row] ?? "");
+			if (info === undefined) continue;
+			const visibleRows = Math.min(info.layoutRows, viewportTop + height - row);
+			if (visibleRows <= 0) continue;
+			visible.push({ row, fallback: info.fallback, cropTopRows: 0, visibleRows });
+		}
+		// Bottom-up: the newest visible content wins a contested slot.
+		visible.sort((left, right) => right.row - left.row);
+		if (reconcile) {
+			const changed = port.reconcileVisible(
+				this,
+				visible.map((entry) => ({
+					line: rawLines[entry.row]!,
+					cropTopRows: entry.cropTopRows,
+					visibleRows: entry.visibleRows,
+					physicalRow: entry.row,
+				})),
+			);
+			if (changed) return { lines, rasters, preserved, recompose: true };
+		}
+		for (const entry of visible) {
+			const token = rawLines[entry.row]!;
+			const dcs = port.materialize(token, entry.cropTopRows, entry.visibleRows);
+			if (dcs === undefined) {
+				lines[entry.row] = entry.fallback;
+				continue;
+			}
+			lines[entry.row] = dcs;
+			const footprint = port.footprint(dcs);
+			rasters.set(entry.row, {
+				line: token,
+				dcs,
+				cropTopRows: entry.cropTopRows,
+				visibleRows: footprint?.rows ?? entry.visibleRows,
+			});
+		}
+		// Above the viewport: keep the previous physical line only for the SAME
+		// occurrence; anything else is ordinary text.
+		for (let row = 0; row < viewportTop && row < rawLines.length; row += 1) {
+			const token = rawLines[row] ?? "";
+			const info = port.candidate(token);
+			if (info === undefined) continue;
+			if (this.previousRawLines[row] === token) {
+				lines[row] = this.previousLines[row] ?? "";
+				preserved.add(row);
+			} else {
+				lines[row] = info.fallback;
+			}
+		}
+		return { lines, rasters, preserved, recompose: false };
+	}
+
+	/**
+	 * Report the frame's physical raster set to the owner after a real write.
+	 *
+	 * `emitted` rasters are the ones this frame materialized; a row the diff kept
+	 * (byte-identical to the previous frame) still shows its old pixels and pins
+	 * its occurrence. Rows above the viewport are never reported: their pixels are
+	 * native scrollback, not a frame reference.
+	 */
+	private commitSixelFrame(frameLines: readonly string[], viewportTop: number, height: number): void {
+		const port = this.sixelScreen;
+		if (port === undefined) return;
+		const retained: Array<{ line: string; dcs: string; cropTopRows: number; visibleRows: number; emitted: boolean }> = [];
+		for (const row of [...this.sixelFrameRasters.keys()].sort((left, right) => right - left)) {
+			const raster = this.sixelFrameRasters.get(row)!;
+			if (row < viewportTop || row >= viewportTop + height) continue;
+			retained.push({ ...raster, emitted: true });
+		}
+		const last = Math.min(frameLines.length, viewportTop + height) - 1;
+		for (let row = last; row >= viewportTop; row -= 1) {
+			if (this.sixelFrameRasters.has(row)) continue;
+			const token = this.previousRawLines[row];
+			if (token === undefined || port.candidate(token) === undefined) continue;
+			const previous = this.previousLines[row];
+			if (previous === undefined || previous !== frameLines[row]) continue;
+			const footprint = port.footprint(previous);
+			if (footprint === undefined) continue;
+			retained.push({ line: token, dcs: previous, cropTopRows: 0, visibleRows: footprint.rows, emitted: false });
+		}
+		this.sixelFrameRasters = new Map();
+		port.framePainted(this, retained);
+	}
+
+	/**
 	 * The image rows one line DECLARES: a Kitty `r=`/registered placement, or a
 	 * trusted SIXEL footprint. `0` for a non-image line, so callers can decide
 	 * "is an image" and "how tall" from one number.
 	 */
 	private declaredImageRows(line: string): number {
+		// A candidate block declares its conservative layout reserve; once the
+		// frame projects it, the DCS declares its real footprint. (X073.)
+		const candidate = this.sixelScreen?.candidate(line);
+		if (candidate !== undefined) return candidate.layoutRows;
 		const footprint = this.sixelFootprint(line);
 		if (footprint !== undefined) return footprint.rows;
 		return isImageLine(line) ? extractKittyImageRows(line) : 0;
@@ -254,6 +371,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	/** The trusted SIXEL footprint height of one line, or 0 when it is not a
 	 *  registered raster. */
 	private sixelBlockRows(line: string): number {
+		const candidate = this.sixelScreen?.candidate(line);
+		if (candidate !== undefined) return candidate.layoutRows;
 		return this.sixelFootprint(line)?.rows ?? 0;
 	}
 
@@ -425,19 +544,32 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return targetScreenRow - currentScreenRow;
 		};
 
-		// Render all components to get new lines
-		let newLines = this.render(width);
+		// Render all components to get new lines. In SIXEL mode these lines carry
+		// inert candidate markers, not device commands: the final viewport below
+		// decides which occurrences are granted pixels. (X073.)
+		let rawLines = this.render(width);
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {
-			newLines = this.compositeOverlays(newLines, width, height);
+			rawLines = this.compositeOverlays(rawLines, width, height);
 			// An overlay that paints ANY row of a SIXEL block must win the whole
 			// block: the raster is one command whose pixels cover every row, so a
 			// per-row decision would paint over the overlay's own text. This frame
 			// paints no pixels there; the image's identity row above stays visible
 			// and the block returns as soon as the overlay is gone. (X073.)
-			this.suppressOverlayCoveredSixelBlocks(newLines);
+			this.suppressOverlayCoveredSixelBlocks(rawLines);
 		}
+
+		let projection = this.projectSixelCandidates(rawLines, height, true);
+		if (projection.recompose) {
+			// The grant set changed with this frame's demands: the component lines
+			// are unchanged (they are markers), so one more projection is the whole
+			// recomposition. More than one would be a repaint storm.
+			projection = this.projectSixelCandidates(rawLines, height, false);
+		}
+		this.sixelFrameRasters = projection.rasters;
+		const preservedRows = projection.preserved;
+		let newLines = projection.lines;
 
 		// Extract cursor position before applying line resets (marker must be found first)
 		const cursorPos = this.extractCursorPosition(newLines, height);
@@ -458,22 +590,22 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// a steady frame only pays for lines whose values changed instead of
 		// re-normalizing and re-measuring the whole transcript. (dsh-pi-tui
 		// divergence X035.) A width change invalidates every cached truncation.
-		const rawLines = newLines;
 		const reuseProcessed = !widthChanged && this.previousRawLines.length > 0;
-		const processedLines: string[] = new Array(rawLines.length);
-		const lineImageIds: ReadonlyArray<number>[] = new Array(rawLines.length);
-		const lineImageRows: number[] = new Array(rawLines.length);
-		const lineSixelRows: number[] = new Array(rawLines.length);
-		for (let i = 0; i < rawLines.length; i++) {
-			const rawLine = rawLines[i]!;
-			if (reuseProcessed && rawLine === this.previousRawLines[i]) {
+		const processedLines: string[] = new Array(newLines.length);
+		const lineImageIds: ReadonlyArray<number>[] = new Array(newLines.length);
+		const lineImageRows: number[] = new Array(newLines.length);
+		const lineSixelRows: number[] = new Array(newLines.length);
+		for (let i = 0; i < newLines.length; i++) {
+			const marker = rawLines[i] ?? "";
+			const isCandidate = this.sixelScreen?.candidate(marker) !== undefined;
+			if (preservedRows.has(i) || (!isCandidate && reuseProcessed && marker === this.previousRawLines[i])) {
 				processedLines[i] = this.previousLines[i]!;
 				lineImageIds[i] = this.previousLineImageIds[i]!;
 				lineImageRows[i] = this.previousLineImageRows[i]!;
 				lineSixelRows[i] = this.previousLineSixelRows[i]!;
 				continue;
 			}
-			let line = rawLine;
+			let line = newLines[i]!;
 			let imageIds: readonly number[] = EMPTY_IMAGE_IDS;
 			const sixelRows = this.sixelBlockRows(line);
 			const declaredImageRows = this.declaredImageRows(line);
@@ -522,6 +654,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			output.append("\x1b[?2026l"); // End synchronized output
 			output.flush();
+			this.commitSixelFrame(newLines, Math.max(0, Math.max(height, newLines.length) - height), height);
 			this.cursorRow = Math.max(0, newLines.length - 1);
 			this.hardwareCursorRow = this.cursorRow;
 			// Reset max lines when clearing, otherwise track growth
@@ -672,6 +805,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				}
 				output.append("\x1b[?2026l");
 				output.flush();
+				this.commitSixelFrame(newLines, prevViewportTop, height);
 				this.cursorRow = targetRow;
 				this.hardwareCursorRow = targetRow;
 			}
@@ -859,6 +993,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		}
 
 		output.flush();
+		this.commitSixelFrame(newLines, Math.max(prevViewportTop, finalCursorRow - height + 1), height);
 
 		// Track cursor position for next render
 		// cursorRow tracks end of content (for viewport calculation)

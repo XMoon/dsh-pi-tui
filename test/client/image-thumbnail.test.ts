@@ -1026,6 +1026,10 @@ function sixelGraphics(paint: () => string[] | undefined, calls: string[] = []):
     screen: {
       footprint: (line: string) => (line === SIXEL_DCS ? { columns: 4, rows: 3 } : undefined),
       crop: () => undefined,
+      candidate: () => undefined,
+      reconcileVisible: () => false,
+      materialize: () => undefined,
+      framePainted: () => {},
     },
     observeScreen: () => {},
     resample: () => {},
@@ -1205,7 +1209,26 @@ test('a transcript PNG repaints after the async SIXEL encode settles (no invalid
   await until(() => loader.get(REF).state === 'ready', 'the attachment read')
   const component = new ImageThumbnail(REF, loader, THEME, () => {}, undefined, undefined, undefined, graphics)
 
-  const first = component.render(80)
+  // The Screen's frame: candidates are granted, materialized and committed. The
+  // component alone only ever emits the inert marker.
+  const frame = (width: number): string[] => {
+    const lines = component.render(width)
+    const port = graphics!.screen
+    const token = lines.find(line => port.candidate(line) !== undefined)
+    if (token === undefined) return lines
+    const info = port.candidate(token)!
+    port.reconcileVisible(screen, [{ line: token, cropTopRows: 0, visibleRows: info.layoutRows, physicalRow: 0 }])
+    const out = [...lines]
+    const dcs = port.materialize(token, 0, info.layoutRows)
+    if (dcs === undefined) {
+      port.framePainted(screen, [])
+      return out
+    }
+    out[out.indexOf(token)] = dcs
+    port.framePainted(screen, [{ line: token, dcs, cropTopRows: 0, visibleRows: port.footprint(dcs)?.rows ?? info.layoutRows, emitted: true }])
+    return out
+  }
+  const first = frame(80)
   assert.ok(!first.join('').includes('\x1bP'), `the first frame is the text fallback: ${JSON.stringify(first)}`)
   assert.equal(component.paintedImageBody(80), undefined, 'a pending raster is not a clickable body')
 
@@ -1214,7 +1237,7 @@ test('a transcript PNG repaints after the async SIXEL encode settles (no invalid
   const settledFrom = repaints
   await until(() => repaints > settledFrom, 'the owner settle')
   await new Promise(resolve => setImmediate(resolve))
-  const second = component.render(80)
+  const second = frame(80)
   assert.ok(second.join('').includes('\x1bP'), `the settled raster reaches the next frame: ${JSON.stringify(second)}`)
   const body = component.paintedImageBody(80)
   assert.notEqual(body, undefined, 'and it registers the REAL footprint as the click body')
