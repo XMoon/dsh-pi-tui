@@ -121,7 +121,9 @@ async function main() {
     // 2. The shipped bundle really contains the codec (I8-1 tree-shook it away).
     const bundle = join(packed, 'dist', 'index.mjs')
     const bundleSource = existsSync(bundle) ? spawnSync('sh', ['-c', `grep -c sixelEncode ${JSON.stringify(bundle)} || true`], { encoding: 'utf8' }).stdout.trim() : '0'
-    check('the shipped bundle references the codec', Number(bundleSource) > 0, `sixelEncode occurrences: ${bundleSource}`)
+    // The I8-1 regression was ZERO occurrences (the codec was tree-shaken away); the
+    // exact count is a build detail, so this asserts presence, not a number.
+    check('the shipped bundle references the codec at least once', Number(bundleSource) > 0, `sixelEncode occurrences: ${bundleSource}`)
 
     // 3. Load it through the real loader: an isolated profile, then the CLI.
     const profile = spawnSync(dsh, ['plugin', '--profile', 'i8-2a-packed', 'add', packed], {
