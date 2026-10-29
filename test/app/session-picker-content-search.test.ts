@@ -861,3 +861,27 @@ test('a raw edit that does not change the canonical query does not restart the s
   await new Promise<void>(resolve => setTimeout(resolve, 400))
   assert.equal(h.searchCalls.length, 1, 'an unchanged canonical query must not restart the Host search')
 })
+
+test('opening /sessions, filtering, closing and /search never switch the Session (read-only browsing)', async (t) => {
+  const h = harness({ rows: rows() })
+  t.after(() => h.app.stop())
+  // Opening the browser is a READ: it must not call switchSession at all, which
+  // is the only navigation path that can stop the old owner (the runtime does the
+  // exact-owner stop inside switchSession's admission).
+  await h.runSessions('')
+  await waitUntil(() => h.view().includes('alpha'))
+  assert.deepEqual(h.switched, [], 'opening /sessions must not switch or stop the current owner')
+  // Typing a live filter is still browsing.
+  h.vt.sendInput('beta')
+  await waitUntil(() => h.view().includes('beta'))
+  assert.deepEqual(h.switched, [], 'filtering the browser must never switch')
+  // Esc closes the picker (panel-local cancellation): still no Session change.
+  h.vt.sendInput('\x1b')
+  await h.vt.waitForRender()
+  assert.deepEqual(h.switched, [], 'closing the browser must never switch')
+  // /search is the SAME read-only browser: searching alone never switches, and
+  // opening it supersedes/closes the previous picker without a navigation.
+  await h.runSearch('alpha')
+  await waitUntil(() => h.view().includes('alpha'))
+  assert.deepEqual(h.switched, [], 'a /search alone must never switch')
+})

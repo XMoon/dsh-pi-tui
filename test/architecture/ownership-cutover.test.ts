@@ -143,8 +143,11 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'fork admission captures the navigation identity through the core')
   assert.ok(!forkAdmission.includes('agentNow('), 'fork admission must not read the Direct attachment')
 
-  // switch no-op (bound runtime)
-  const switchLocked = spanOf(sessionRuntimeSource, 'const switchSessionLocked = ', '// Draft cleanup happens ONLY after')
+  // switch no-op (bound runtime): it is decided BEFORE the navigation stop (a
+  // switch to the current Session replaces nothing and must not cancel its
+  // turn) and compares the CORE session id — never the Direct attachment, which
+  // the Remote branch does not even have.
+  const switchLocked = spanOf(sessionRuntimeSource, 'const switchSession = (sessionId: string, expectedScope?: SessionScope)', 'const switchSessionLocked = async (')
   assert.ok(switchLocked.includes('if (core.currentSessionId() === sessionId) {'),
     'the switch no-op compares the CORE session id')
   assert.ok(!switchLocked.includes('agentNow('), 'the switch no-op must not read the Direct attachment')

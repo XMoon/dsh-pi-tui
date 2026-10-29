@@ -16,6 +16,7 @@ import { createSessionBrowserReadOwner, type SessionBrowserReadOwner, type Sessi
 import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type SessionScope } from '../../app/session/scope.ts'
+import { SessionNavigationStopError, type NavigationIntent } from '../../app/session/transition.ts'
 import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { LifecycleError } from '../../runtime/session-lifecycle-port.ts'
@@ -932,89 +933,142 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     })
   }
 
+  /**
+   * The SYNCHRONOUS `/new` single-flight marker. It is set in the handler's
+   * first synchronous step — BEFORE the scope capture's first await and
+   * before the transition gate — and released at the transaction's true
+   * terminal settlement (success, failure or supersession), so a failed
+   * `/new` can always be retried and a later settled `/new` starts normally.
+   * A second intent that arrives while one is in flight is refused BEFORE any
+   * Host dispatch: it never reuses the first result, never creates a second
+   * Session and never consumes the old drafts.
+   *
+   * This is deliberately NOT `gate.busy`: the transition gate also serializes
+   * `/preset`, session switches and fork adoption, which are legitimate
+   * concurrent operations and must not refuse a `/new` that is merely queued.
+   */
+  let freshSessionInFlight = false
+
   const registerNew = (): void => {
     registerOne({
       name: 'new',
       description: 'Start a fresh session in this workspace',
-      handler: () => runner.withSessionTransition(async () => {
-        // The unified transaction: the old session is flushed BEFORE the
-        // fresh session is created, the commit is synchronous, and a failure
-        // anywhere before the create leaves the current session untouched
-        // (no published child to roll back).
-        const sessionId = newSessionId()
-        // The concrete preset id is resolved ONCE and rides the create (a
-        // rejected create is NEVER retried — the old session stays current).
-        // The preset COMPOSITION (setup callback) is resolved inside the
-        // Direct session lifecycle from this id — the command surface only
-        // ever sees the identity (migration M1.11).
-        let resolved
+      handler: async () => {
+        if (freshSessionInFlight) {
+          return { kind: 'error', text: 'a fresh session is already starting' }
+        }
+        freshSessionInFlight = true
+        // The ORIGINAL session generation/navigation identity, captured
+        // SYNCHRONOUSLY: the navigation stop must address exactly the owner
+        // the user chose to leave, never a replacement published while this
+        // intent waited behind another transition. The runtime fills in
+        // `admission.oldOwnerStopped` before the transaction body runs.
+        const navigation: NavigationIntent = {
+          scope: runner.captureSessionScope(),
+          admission: { oldOwnerStopped: false },
+        }
         try {
-          resolved = await runner.catalog.presets.resolve(runner.effectivePresetId, runner.signal)
-        } catch (error) {
-          // A lifecycle cancellation (exit/HMR) during the read aborts it: no
-          // create is dispatched, and the abort must not surface as an unhandled
-          // rejection. Any OTHER failure keeps its real diagnostic — never
-          // mislabeled as a cancellation.
-          if (runner.signal.aborted) {
-            return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}` }
-          }
-          return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}` }
-        }
-        // Coordinate with the newest sessionless `/model` global-default write
-        // BEFORE dispatching the create (v2 §0.8.3/§0.8.4): quiesce EVERY
-        // in-flight default write/correction so the Direct adapter captures the
-        // settled Host default. A failed latest intent is NOT seeded into the
-        // create — the fresh Session uses the actual Host default.
-        try {
-          await runner.awaitPendingDefaultWrite(signal)
-        } catch (error) {
-          // The lifetime signal aborted while waiting for the default write:
-          // no create is dispatched (the old session stays current).
-          return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}` }
-        }
-        const result = await runner.transitionTo({
-          target: { id: String(sessionId), header: { cwd } },
-          create: async () => {
-            // Re-wait immediately before dispatch: a newer sessionless /model may
-            // have started between the first wait and here, and the Direct
-            // adapter activates the Agent from the persisted Host default.
-            await runner.awaitPendingDefaultWrite(signal)
-            return runner.agents.create({
-              sessionId: String(sessionId),
-              // The semantic `agentPreset` is the SINGLE preset authority; the
-              // Direct adapter persists the actually composed preset into the
-              // durable header. Never duplicate it into generic meta.
-              cwd,
-              agentPreset: resolved.id,
+          return await runner.withSessionTransition(async () => {
+            // Everything below runs AFTER the navigation stop. When that stop
+            // was accepted the old Turn is already stopped and can never be
+            // resumed, so every failure must say so (a cancel is not a
+            // rollback and is not undone by a later create/open failure).
+            const stopped = navigation.admission.oldOwnerStopped
+              ? '; the previous turn was stopped and cannot be resumed'
+              : ''
+            // The unified transaction: the old session is flushed BEFORE the
+            // fresh session is created, the commit is synchronous, and a failure
+            // anywhere before the create leaves the current session untouched
+            // (no published child to roll back).
+            const sessionId = newSessionId()
+            // The concrete preset id is resolved ONCE and rides the create (a
+            // rejected create is NEVER retried — the old session stays current).
+            // The preset COMPOSITION (setup callback) is resolved inside the
+            // Direct session lifecycle from this id — the command surface only
+            // ever sees the identity (migration M1.11).
+            let resolved
+            try {
+              resolved = await runner.catalog.presets.resolve(runner.effectivePresetId, runner.signal)
+            } catch (error) {
+              // A lifecycle cancellation (exit/HMR) during the read aborts it: no
+              // create is dispatched, and the abort must not surface as an unhandled
+              // rejection. Any OTHER failure keeps its real diagnostic — never
+              // mislabeled as a cancellation.
+              if (runner.signal.aborted) {
+                return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopped}` }
+              }
+              return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}${stopped}` }
+            }
+            // Coordinate with the newest sessionless `/model` global-default write
+            // BEFORE dispatching the create (v2 §0.8.3/§0.8.4): quiesce EVERY
+            // in-flight default write/correction so the Direct adapter captures the
+            // settled Host default. A failed latest intent is NOT seeded into the
+            // create — the fresh Session uses the actual Host default.
+            try {
+              await runner.awaitPendingDefaultWrite(signal)
+            } catch (error) {
+              // The lifetime signal aborted while waiting for the default write:
+              // no create is dispatched (the old session stays current).
+              return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopped}` }
+            }
+            const result = await runner.transitionTo({
+              target: { id: String(sessionId), header: { cwd } },
+              create: async () => {
+                // Re-wait immediately before dispatch: a newer sessionless /model may
+                // have started between the first wait and here, and the Direct
+                // adapter activates the Agent from the persisted Host default.
+                await runner.awaitPendingDefaultWrite(signal)
+                return runner.agents.create({
+                  sessionId: String(sessionId),
+                  // The semantic `agentPreset` is the SINGLE preset authority; the
+                  // Direct adapter persists the actually composed preset into the
+                  // durable header. Never duplicate it into generic meta.
+                  cwd,
+                  agentPreset: resolved.id,
+                })
+              },
             })
-          },
-        })
-        if (!result.ok) {
-          if (result.error instanceof LifecycleError) {
-            // Preserve the machine-readable cause (incl. a published identity for
-            // D2.4 reconciliation) even on the UI-silent superseded path.
-            runner.diag.warn('fresh session create did not own the surface', {
-              settlement: result.error.settlement,
-              ownership: result.error.ownership,
-              publishedSessionId: result.error.publishedSessionId,
-              requestedSessionId: result.error.requestedSessionId,
-            })
-            // A locally SUPERSEDED create emits no error notice and NO
-            // user-visible success text (§0.2.1): the surface moved, so this
-            // result owns nothing. The machine-readable cause (incl. any
-            // published id) is already recorded in the diagnostic above.
-            if (result.error.ownership === 'superseded') return { kind: 'success' }
+            if (!result.ok) {
+              if (result.error instanceof LifecycleError) {
+                // Preserve the machine-readable cause (incl. a published identity for
+                // D2.4 reconciliation) even on the UI-silent superseded path.
+                runner.diag.warn('fresh session create did not own the surface', {
+                  settlement: result.error.settlement,
+                  ownership: result.error.ownership,
+                  publishedSessionId: result.error.publishedSessionId,
+                  requestedSessionId: result.error.requestedSessionId,
+                })
+                // A locally SUPERSEDED create emits no error notice and NO
+                // user-visible success text (§0.2.1): the surface moved, so this
+                // result owns nothing. The machine-readable cause (incl. any
+                // published id) is already recorded in the diagnostic above.
+                if (result.error.ownership === 'superseded') return { kind: 'success' }
+              }
+              return { kind: 'error', text: `${result.message}${stopped}` }
+            }
+            // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
+            // drop the unpinned ones now, never before (a failed create keeps
+            // the current session and its drafts intact; in-flight submissions
+            // keep their pinned drafts — review finding 2).
+            runner.imageStore.clearUnpinned()
+            runner.fileStore?.clearUnpinned()
+            return { kind: 'success', text: 'started a fresh session' }
+          }, navigation)
+        } catch (error) {
+          if (error instanceof SessionNavigationStopError) {
+            // A stale capture is a locally SUPERSEDED navigation (another
+            // navigation already published): the surface moved, so this result
+            // owns nothing — silent, exactly like the superseded create path.
+            // A refused/unproven stop aborts BEFORE any child work; the message
+            // already states whether the old Turn may have been stopped.
+            if (error.settlement === 'stale') return { kind: 'success' }
+            return { kind: 'error', text: `fresh session creation failed: ${error.message}` }
           }
-          return { kind: 'error', text: result.message }
+          throw error
+        } finally {
+          freshSessionInFlight = false
         }
-        // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
-        // drop the unpinned ones now, never before (a failed create keeps
-        // the current session and its drafts intact; in-flight submissions
-        // keep their pinned drafts — review finding 2).
-        runner.imageStore.clearUnpinned()
-        runner.fileStore?.clearUnpinned()
-        return { kind: 'success', text: 'started a fresh session' }
-      }),
+      },
     })
   }
 

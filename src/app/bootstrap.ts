@@ -117,6 +117,7 @@ import { createSessionStartupHelpers, quiesceResumedOwner } from './bootstrap/se
 import { createSessionOwnershipCore } from '../app/session/ownership-core.ts'
 import { bindSessionRuntime } from '../app/session/runtime.ts'
 import { createSessionScopeAuthority, type LiveSessionScope } from '../app/session/scope.ts'
+import type { NavigationIntent } from '../app/session/transition.ts'
 import { bindSubmissionRuntime, type SubmissionRuntime } from '../app/submission/runtime.ts'
 import type { SessionOwnerRef, SessionSubject } from '../app/session/subject.ts'
 import { createSurfaceRuntime } from '../app/surface/runtime.ts'
@@ -899,6 +900,7 @@ export function applyRunnerWithRuntime(
         },
       },
       isScopeCurrent: (scope) => sessionScope.isCurrent(scope),
+      captureScope: () => sessionScope.capture(),
       diag,
     })
     // The fatal startup catch reaches the ONE memoized retirement through this
@@ -1722,8 +1724,15 @@ export function applyRunnerWithRuntime(
       ownership,
       transition: {
         pending: () => ownership.gate.busy,
-        run: <T>(task: () => Promise<T> | T): Promise<T> =>
-          ownership.gate.run(() => ownership.barrier.runTransition(async () => task())),
+        // A user navigation goes through the session runtime's admission: the
+        // barrier stops the captured old generation BEFORE the admitted-writer
+        // drain. Everything else (`/preset`, and any transition that is not a
+        // user leaving its Session) keeps the plain admission and never
+        // cancels the owner it replaces.
+        run: <T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T> =>
+          navigation === undefined
+            ? ownership.gate.run(() => ownership.barrier.runTransition(async () => task()))
+            : sessionRuntime.withNavigation(navigation, task),
       },
       // PR4 §1.2: the Host-registry dependency is RETIRED on the Remote
       // branch — the TUI's OWN definitions register into the Client command

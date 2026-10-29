@@ -235,3 +235,93 @@ test('barrier: a transition exit while a control section is in flight leaves the
   // writer is admitted normally.
   await barrier.runWriter('session-a', async () => {})
 })
+
+// ── the user-navigation stop: frozen FIRST, stop SECOND, drain THIRD ───────
+
+test('barrier: the navigation stop runs exactly once, after the freeze and BEFORE the admitted writer drains', async () => {
+  const barrier = new SessionOperationBarrier()
+  const order: string[] = []
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const writer = barrier.runWriter('session-a', async () => {
+    order.push('writer-start')
+    await writerGate
+    order.push('writer-end')
+  })
+  let stopCalls = 0
+  // The stop must see the ALREADY frozen barrier: that is the guarantee that no
+  // new ordinary writer can enter while it is being sent.
+  let frozenDuringStop = false
+  const transition = barrier.runTransition(
+    async () => { order.push('transition') },
+    async () => {
+      stopCalls += 1
+      frozenDuringStop = barrier.inTransition
+      order.push('navigation-stop')
+    },
+  )
+  assert.equal(barrier.inTransition, true)
+  assert.equal(barrier.activeWriters, 1)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.deepEqual(order, ['writer-start', 'navigation-stop'],
+    'the stop settles while the admitted writer is still running and before the body')
+  assert.equal(frozenDuringStop, true, 'the stop observes the frozen barrier')
+  assert.equal(stopCalls, 1, 'the navigation stop runs exactly once')
+
+  releaseWriter()
+  await writer
+  await transition
+  assert.deepEqual(order, ['writer-start', 'navigation-stop', 'writer-end', 'transition'],
+    'the body still waits for the admitted writer after the stop')
+  assert.equal(stopCalls, 1)
+})
+
+test('barrier: a FAILED navigation stop aborts before the drain, never runs the body, and unfreezes', async () => {
+  const barrier = new SessionOperationBarrier()
+  const order: string[] = []
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const writer = barrier.runWriter('session-a', async () => {
+    order.push('writer-start')
+    await writerGate
+    order.push('writer-end')
+  })
+  const transition = barrier.runTransition(
+    async () => { order.push('transition') },
+    async () => { order.push('navigation-stop'); throw new Error('navigation stop refused') },
+  )
+  await assert.rejects(transition, /navigation stop refused/)
+  assert.deepEqual(order, ['writer-start', 'navigation-stop'],
+    'a failed stop must not wait for the drain and must not run the body')
+  assert.equal(barrier.inTransition, false, 'the aborted navigation unfreezes the barrier')
+  releaseWriter()
+  await writer
+  assert.deepEqual(order, ['writer-start', 'navigation-stop', 'writer-end'])
+  // The barrier is fully usable after the aborted navigation.
+  await barrier.runTransition(async () => { order.push('next-transition') })
+  assert.deepEqual(order, ['writer-start', 'navigation-stop', 'writer-end', 'next-transition'])
+})
+
+test('barrier: the navigation stop is not a writer admission (writers stay refused while frozen)', async () => {
+  const barrier = new SessionOperationBarrier()
+  let releaseStop!: () => void
+  const stopGate = new Promise<void>(resolve => { releaseStop = resolve })
+  const transition = barrier.runTransition(
+    async () => {},
+    () => stopGate,
+  )
+  // While the stop is in flight the barrier is frozen: an ordinary write is
+  // refused and a nested transition is refused loudly, exactly as during the
+  // drain.
+  await assert.rejects(
+    barrier.runWriter('session-a', async () => {}),
+    (error: unknown) => error instanceof TransitionInProgressError,
+  )
+  await assert.rejects(
+    barrier.runTransition(async () => {}),
+    /BUG: reentrant session transition/,
+  )
+  releaseStop()
+  await transition
+  await barrier.runWriter('session-a', async () => {})
+})

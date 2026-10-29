@@ -5746,11 +5746,15 @@ test('Busy Esc during a frozen /new transition cancels the EXACT live Agent with
   const originalRunTransition = SessionOperationBarrier.prototype.runTransition
   let frozen = false
   let bodyRan = false
-  SessionOperationBarrier.prototype.runTransition = function <T>(this: SessionOperationBarrier, fn: () => Promise<T>): Promise<T> {
+  SessionOperationBarrier.prototype.runTransition = function <T>(
+    this: SessionOperationBarrier,
+    fn: () => Promise<T>,
+    stopOldOwner?: () => Promise<void>,
+  ): Promise<T> {
     const promise = originalRunTransition.call(this, async () => {
       bodyRan = true
       return fn()
-    }) as Promise<T>
+    }, stopOldOwner) as Promise<T>
     if (this.activeWriters > 0) frozen = true
     return promise
   }
@@ -5762,13 +5766,20 @@ test('Busy Esc during a frozen /new transition cancels the EXACT live Agent with
   assert.equal(await drainUntil(() => frozen, 5_000), true,
     'the /new transition must freeze the barrier while the admitted writer is in flight')
   assert.equal(bodyRan, false, 'the transition body must still be waiting for the writer')
+  // The NAVIGATION stop is the first cancel: it lands at admission, before the
+  // admitted writer drains, and preserves the pending inbox.
+  assert.equal(await drainUntil(() => harness.host.cancelLog.length === 1, 5_000), true,
+    'the /new navigation stop must reach the Exact live Agent while frozen')
+  assert.equal(harness.host.cancelLog[0]!.keepInbox, true,
+    'the navigation stop is the user keepInbox semantic')
+  assert.equal(slowSettled, false, 'the navigation stop must not wait for the admitted writer')
 
   // The REAL busy-Esc gesture: the app's own interrupt mapping.
   vt.sendInput('\x1b')
-  assert.equal(await drainUntil(() => harness.host.cancelLog.length > 0, 5_000), true,
+  assert.equal(await drainUntil(() => harness.host.cancelLog.length === 2, 5_000), true,
     'the control Stop must reach the Exact live Agent while the barrier is frozen')
   order.push('cancel:control')
-  assert.equal(harness.host.cancelLog[0]!.keepInbox, true,
+  assert.equal(harness.host.cancelLog[1]!.keepInbox, true,
     'the Busy Esc control cancel must preserve the Host pending inbox')
   assert.equal(slowSettled, false, 'the control cancel must not wait for the admitted writer')
   assert.equal(bodyRan, false, 'the control cancel must not shortcut the writer drain')
@@ -5779,11 +5790,11 @@ test('Busy Esc during a frozen /new transition cancels the EXACT live Agent with
   await transition
   assert.equal(await drainUntil(() => harness.createdSessionIds.length === 1, 5_000), true,
     'the transition must commit the new Session after the drain')
-  assert.equal(await drainUntil(() => harness.host.cancelLog.length === 2, 5_000), true,
+  assert.equal(await drainUntil(() => harness.host.cancelLog.length === 3, 5_000), true,
     'the old-owner retirement must cancel once after the commit')
   assert.equal(slowSettled, true, 'the admitted writer settled before the commit')
-  assert.equal(harness.host.cancelLog[1]!.keepInbox, undefined,
-    'the retirement cancel is not the user keepInbox control cancel')
+  assert.equal(harness.host.cancelLog[2]!.keepInbox, undefined,
+    'the retirement cancel is not the user keepInbox cancel')
   assert.ok(order.indexOf('cancel:control') < order.indexOf('release:slow'),
     `the control cancel precedes the writer release: ${JSON.stringify(order)}`)
   assert.ok(order.indexOf('release:slow') < order.indexOf('flush:pra-esc-session')
@@ -5831,4 +5842,61 @@ test('a BUSY PiTui /new with a genuine Host /new keeps the Host sink', async (t)
     'the Host /new line must never become a queued prompt')
   assert.equal(harness.host.steered.length, 0,
     'the Host /new line must never become a steer')
+})
+
+test('two rapid composer /new submits are refused at the frozen surface (FORBIDDEN): one create, the draft restored', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-two-composer-new-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'two-new-a', events: sessionEvents('resumed answer') })
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'two-new-a' })
+  // A held gate always has a fallback release: no failure path may park the
+  // FIRST `/new`'s create (and the context teardown) on a promise nobody resolves.
+  life.defer(() => { harness.releaseCreateGate() })
+  try {
+    // Hold the FIRST create: the second composer submit then arrives while the
+    // transition owns the surface.
+    harness.armCreateGate()
+    mounted.app.setDraft('/new')
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    assert.equal(await drainUntil(() => harness.createdSessionIds.length === 1, 5_000), true,
+      'the first /new create must start')
+
+    // SURFACE CLASSIFICATION: from ONE composer the second `/new` never reaches
+    // the command plane — the frozen transition refuses it before dispatch (the
+    // single-flight marker is therefore reachable from another surface / the Host
+    // command plane, which the real-composition duplicate case covers).
+    mounted.app.setDraft('/new')
+    ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+    assert.equal(await drainUntil(() => false, 300), false)
+    assert.deepEqual(harness.executed.map(row => row.line), ['/new'],
+      'the overlapping composer /new must not reach the command plane')
+    assert.equal(harness.createdSessionIds.length, 1, 'no second Session is dispatched')
+  } finally {
+    harness.releaseCreateGate()
+  }
+  // The first transition settles; the refused second gesture's draft is restored
+  // by its own refusal policy, so the intent is never silently lost.
+  assert.equal(await drainUntil(() => mounted.app.getDraft() === '/new', 10_000), true,
+    'the refused /new is restored to the editor, so the intent is never silently lost')
+  assert.equal(harness.createdSessionIds.length, 1, 'only ONE Session exists after the overlap')
+
+  // The restored draft is a RETRY, not a duplicate of an in-flight intent: once
+  // the first transition reached its terminal settlement, submitting it creates
+  // exactly one more Session.
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => harness.createdSessionIds.length === 2, 10_000), true,
+    'the restored /new can be retried as a settled intent')
+  assert.deepEqual(harness.executed.map(row => row.line), ['/new', '/new'],
+    'each settled composer gesture reaches the command plane once')
 })

@@ -1731,7 +1731,7 @@ const B3_QUESTION: readonly B3Question[] = [
   { id: 'q-c', question: 'Which target?', options: [{ label: 'alpha' }, { label: 'beta' }] },
 ]
 
-test('the real /new quiesce parks on a LIVE Question — A keeps the presentation until the user really answers', async (t) => {
+test('the real /new stops a LIVE Question owner instead of parking until it is answered', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-b3-c-new-')
   const sessionA = fakeSession({
@@ -1745,54 +1745,59 @@ test('the real /new quiesce parks on a LIVE Question — A keeps the presentatio
   const idleGates = new Map<string, Promise<void>>()
   const releaseIdle = new Map<string, () => void>()
   const { owned, plane, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id, idleGates })
+  const abort = new AbortController()
   try {
     await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
     idleGates.set(sessionA.id, new Promise<void>(resolve => { releaseIdle.set(sessionA.id, resolve) }))
     // A held gate always has a fallback release: a failure path must never park
     // the Agent's `whenIdle` on a promise nobody resolves.
     life.defer(() => { releaseIdle.get(sessionA.id)?.() })
-    const abort = new AbortController()
     // The Host's own tool call: the busy gate ends with the request, and the
     // outcome is recorded (never a bare rejection that could mask a later
     // assertion failure as an unhandled rejection).
     const delivered = outcomeOf(plane.ask(
       liveAgentOf(harness, sessionA.id), sessionA.id, 'call-c-new', B3_QUESTION, abort.signal,
     ))
-    void delivered.then(() => { releaseIdle.get(sessionA.id)?.() })
+    // The question is NEVER answered in this witness: aborting the official
+    // request is the teardown's own settlement, not a user answer.
+    life.defer(() => { abort.abort() })
     await waitUntil('the live form on the pane', () => liveLayerModals(owned.pane.frames()).length === 1, 15_000)
     assert.ok(owned.pane.output.text().includes('Which target?'), 'the official question text is rendered')
 
-    // The REAL /new. It is the registered command ENTRY, not a composer draft:
-    // the modal seat owns every key while the question is live (the modal-first
-    // contract), so the command plane is the production path to a transition.
+    // The REAL /new. The navigation admission sends ONE exact-owner stop of A
+    // BEFORE the transition quiesce, so the fresh Session is created and A is
+    // retired while the question is still unanswered: a user navigation never
+    // depends on a modal answer to make progress.
     const transition = commandOf(owned, 'new')()
-    await waitUntil('the pre-commit quiesce', () => harness.retirementEvents.includes(`idle:${sessionA.id}`), 15_000)
-    await settle()
-
-    assert.equal(harness.createdSessions.length, 0, 'the parked quiesce must not have created B')
-    assert.deepEqual(
-      harness.retirementEvents.filter(entry => entry === `cancel:${sessionA.id}` || entry === `dispose:${sessionA.id}`),
-      [], 'A must not be retired while its Question is unanswered')
-    assert.deepEqual(presentedSessions(owned.pane), [sessionA.id], 'A still owns the presented Session')
-    assert.equal(liveLayerModals(owned.pane.frames()).length, 1, 'the live form still owns the modal seat')
-
-    // The REAL answer on the pane resolves the ORIGINAL official sink ...
-    owned.pane.key('\r')
-    owned.pane.key('\r')
-    assert.deepEqual(await delivered, { kind: 'answered', answer: { answers: [{ id: 'q-c', selected: ['alpha'] }] } },
-      'the official producer observed the real answer')
-
-    // ... which idles the Agent, so the SAME transition commits B and retires A.
     await transition
     await waitUntil('the /new child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
     await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
-    assert.ok(harness.retirementEvents.includes(`cancel:${sessionA.id}`), 'the committed switch cancels A')
-    assert.ok(harness.retirementEvents.includes(`dispose:${sessionA.id}`), 'the committed switch disposes A')
+    const events = harness.retirementEvents
+    assert.equal(events.filter(event => event === `cancel:keepInbox:${sessionA.id}`).length, 1,
+      'the navigation stop is ONE keepInbox user cancel of the exact captured owner')
+    // The startup resume and the /new quiesce both awaited this owner; the
+    // navigation stop must precede the SECOND (the pre-commit quiesce).
+    const idleIndexes = events.flatMap((event, index) => event === `idle:${sessionA.id}` ? [index] : [])
+    assert.ok(idleIndexes.length >= 2, `both quiesce waits must be recorded: ${JSON.stringify(events)}`)
+    assert.ok(events.indexOf(`cancel:keepInbox:${sessionA.id}`) < idleIndexes[1]!,
+      `the navigation stop must land BEFORE the pre-commit quiesce: ${JSON.stringify(events)}`)
+    assert.ok(events.includes(`cancel:${sessionA.id}`), 'the committed switch still runs the close-order cancel')
+    assert.ok(events.includes(`dispose:${sessionA.id}`), 'the committed switch disposes A without any answer')
+    assert.deepEqual(liveLayerModals(owned.pane.frames()), [],
+      'the replaced Question form must leave the modal seat at the owner publication')
+    assert.deepEqual(plane.answers, [], 'the navigation stop never fabricates an official answer')
+    // The never-answered official request settles through the TEST's abort
+    // (this fake plane does not wire Agent cancellation to it): it must never
+    // claim a user answer.
+    abort.abort()
+    assert.equal((await delivered).kind === 'answered', false,
+      'the never-answered Host request must not claim a user answer')
     // F-UX-06 control: a real /new transition never announces a fork.
     assert.ok(!liveDockNotices(owned.pane).includes('Forked to a new session'),
       'a /new transition must not emit the /fork success notice')
   } finally {
+    abort.abort()
     await owned.settle()
   }
 })
@@ -2640,6 +2645,126 @@ test('the commit-time withdrawal performs NO Host projection read (a throwing re
   } finally {
     releaseCreate?.()
     releaseChildIdle?.()
+    await owned.settle()
+  }
+})
+
+// ── duplicate `/new` intents: ONE semantic create per in-flight intent ─────
+
+test('two overlapping /new intents admit exactly ONE create; the duplicate is refused and a settled /new still creates', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-c-new-duplicate-')
+  const sessionA = fakeSession({
+    id: 'b3-c-new-dup-a',
+    header: { id: 'b3-c-new-dup-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  // Hold the FIRST create: both intents are admitted before either commits, so
+  // this is a genuine overlap (the Host command plane can be driven by another
+  // surface while the TUI is starting a fresh Session). The composer alone
+  // cannot produce this overlap: its submit FIFO serializes the intents.
+  let releaseCreate!: () => void
+  const createGate = new Promise<void>(resolve => { releaseCreate = resolve })
+  let createStarted!: () => void
+  const createStartedPromise = new Promise<void>(resolve => { createStarted = resolve })
+  const { owned, harness } = await bootB3Tsp({
+    life,
+    home,
+    standing: sessionA,
+    resume: sessionA.id,
+    createGate: () => { createStarted(); return createGate },
+  })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    const execute = (agent: unknown): Promise<{ result: { kind: string; text?: string } } | undefined> =>
+      (harness.commands as { execute(agent: unknown, line: string): Promise<{ result: { kind: string; text?: string } } | undefined> })
+        .execute(agent, '/new')
+    const agentOf = (sessionId: string): unknown => liveAgentOf(harness, sessionId)
+    const first = execute(agentOf(sessionA.id))
+    const duplicate = execute(agentOf(sessionA.id))
+    // The duplicate is refused BEFORE Host dispatch/create: it never reuses the
+    // first result and never fabricates a Session.
+    const duplicateResult = await duplicate
+    assert.equal(duplicateResult?.result.kind, 'error', 'the second concurrent /new must be a refusal')
+    assert.match(duplicateResult?.result.text ?? '', /a fresh session is already starting/,
+      'the refusal says the operation is already pending')
+    await createStartedPromise
+    assert.equal(harness.createdSessions.length, 0, 'neither intent has committed yet')
+    releaseCreate()
+    assert.equal((await first)?.result.kind, 'success', 'the first intent commits')
+    await waitUntil('exactly one fresh Session', () => harness.createdSessions.length === 1, 15_000)
+    const sessionB = harness.createdSessions[0]!.id
+    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    assert.equal(harness.createdSessions.length, 1, 'the overlap produced exactly ONE child Session')
+    assert.ok(!liveDockNotices(owned.pane).includes('already starting'),
+      'the refusal belongs to the duplicate command card, never a success notice')
+
+    // A LATER, settled /new starts normally: the in-flight marker was released
+    // at the true terminal settlement.
+    const retry = await execute(agentOf(sessionB))
+    assert.equal(retry?.result.kind, 'success', 'a settled /new still creates')
+    await waitUntil('the second fresh Session', () => harness.createdSessions.length === 2, 15_000)
+    const sessionC = harness.createdSessions[1]!.id
+    assert.notEqual(sessionC, sessionB)
+    await waitUntil('C publication', () => presentedSessions(owned.pane).at(-1) === sessionC, 15_000)
+  } finally {
+    releaseCreate()
+    await owned.settle()
+  }
+})
+
+test('a failed /new releases the in-flight marker, reports the stopped old Turn, and a retry commits', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-c-new-retry-')
+  const sessionA = fakeSession({
+    id: 'b3-c-new-retry-a',
+    header: { id: 'b3-c-new-retry-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  // A RUNNING old owner: the navigation stop is accepted, so the later create
+  // failure must say the old Turn was stopped and cannot be resumed.
+  const idleGates = new Map<string, Promise<void>>()
+  const releaseIdle = new Map<string, () => void>()
+  const { owned, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id, idleGates })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    idleGates.set(sessionA.id, new Promise<void>(resolve => { releaseIdle.set(sessionA.id, resolve) }))
+    life.defer(() => { releaseIdle.get(sessionA.id)?.() })
+    const agents = harness.agents as { create: (options: { sessionId: string }) => Promise<unknown> }
+    const originalCreate = agents.create
+    let failOnce = true
+    agents.create = async options => {
+      if (failOnce) {
+        failOnce = false
+        throw new Error('controlled create failure')
+      }
+      return originalCreate.call(agents, options)
+    }
+    life.defer(() => { agents.create = originalCreate })
+    const execute = (agent: unknown): Promise<{ result: { kind: string; text?: string } } | undefined> =>
+      (harness.commands as { execute(agent: unknown, line: string): Promise<{ result: { kind: string; text?: string } } | undefined> })
+        .execute(agent, '/new')
+
+    const failed = await execute(liveAgentOf(harness, sessionA.id))
+    assert.equal(failed?.result.kind, 'error', 'a failed create is a failure, never a silent success')
+    assert.match(failed?.result.text ?? '', /controlled create failure/)
+    assert.match(failed?.result.text ?? '', /the previous turn was stopped and cannot be resumed/,
+      'the failure must state that the cancelled old Turn is not rolled back')
+    assert.equal(harness.createdSessions.length, 0, 'no child was published')
+    await waitUntil('A stays current', () => presentedSessions(owned.pane).at(-1) === sessionA.id, 15_000)
+    assert.equal(harness.retirementEvents.filter(event => event === `dispose:${sessionA.id}`).length, 0,
+      'a pre-create failure must not retire the still-current old owner')
+
+    // The marker was released by the true terminal settlement: the retry works.
+    const retry = await execute(liveAgentOf(harness, sessionA.id))
+    assert.equal(retry?.result.kind, 'success', 'the retry after a failed /new starts normally')
+    await waitUntil('the retry child', () => harness.createdSessions.length === 1, 15_000)
+    const sessionB = harness.createdSessions[0]!.id
+    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    assert.equal(harness.retirementEvents.filter(event => event === `dispose:${sessionA.id}`).length, 1,
+      'the committed retry retires A exactly once')
+  } finally {
+    releaseIdle.get(sessionA.id)?.()
     await owned.settle()
   }
 })

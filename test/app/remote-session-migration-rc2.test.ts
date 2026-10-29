@@ -43,6 +43,7 @@ import {
   type SessionRuntimeSurface,
 } from '../../src/app/session/runtime.ts'
 import type { SessionOwnerRef } from '../../src/app/session/subject.ts'
+import type { SessionScope } from '../../src/app/session/scope.ts'
 import {
   LifecycleError,
   requireOpened,
@@ -242,6 +243,7 @@ test('a failed Remote open never replaces the current Session, its draft, or rep
     lifecycleSignal: controller.signal,
     surface,
     isScopeCurrent: () => true,
+    captureScope: () => ({ sessionId: core.currentSessionId() } as SessionScope),
     diag,
   })
   sessionRuntime.publishResumedOwner(handleA, () => undefined)

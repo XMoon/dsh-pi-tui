@@ -1255,6 +1255,87 @@ test('navigation: switch, same-id rollover and reconnect re-init the presentatio
   void app
 })
 
+test('a real Remote /new cancels the running old turn through the official Host cancel, then commits the fresh Session', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'm3-4-pr2-preset'
+  const mainId = 'm3-4-pr2-navigation-cancel'
+  const adapter = new StubStreamingLlmAdapter()
+  const seedHost = await mountRemotePresentationHost(life, presetId, { llmAdapter: adapter })
+  await seedHost.harness.create(
+    SessionId(mainId),
+    { provider: 'smoke', model: 'smoke-model' } as never,
+    { cwd: seedHost.anchorDir },
+  )
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host: seedHost })
+  const app = await waitForApp(fixture)
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId)) as unknown as {
+    session: {
+      getSnapshot(): { readonly running: boolean }
+      prompt(
+        content: readonly { readonly type: 'text'; readonly text: string }[],
+        mode: 'queue' | 'steer',
+        signal?: AbortSignal,
+        requestId?: unknown,
+      ): Promise<unknown>
+    }
+  }
+  assert.ok(binding !== undefined, 'the resumed session is retained through the official Client')
+  // Hold a REAL Host turn open. Only a cancellation can end it: the release is
+  // registered for teardown and is never called by the assertion path.
+  const release = adapter.hold()
+  life.defer(release)
+  await binding.session.prompt([{ type: 'text', text: 'hold the old turn open' }], 'queue')
+  await waitFor('the old Host turn running', () => binding.session.getSnapshot().running, 20_000)
+  const agents = seedHost.ctx.get('agents') as unknown as {
+    get(id: SessionId): { readonly status: string } | undefined
+  }
+  const oldAgent = agents.get(SessionId(mainId))
+  assert.ok(oldAgent !== undefined, 'the old Host Agent is live')
+  assert.equal(oldAgent.status, 'running')
+  const oldSession = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): readonly { type: string; data?: unknown }[]
+  }
+  // Wait for the real STEP: the held model request is then in flight, so only a
+  // cancellation can end the turn (the hold is never released by the assertions).
+  await waitFor('the old Host step started (the held model request is in flight)', () => {
+    return oldSession.snapshotEvents().some(event => event.type === 'step/start')
+  }, 20_000)
+  const hostIdsBefore = new Set(seedHost.ctx.sessions.list().map(session => String(session.id)))
+
+  // The REAL user gesture: a /new typed into the mounted Remote composer.
+  const mounted = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
+  mounted.setDraft('/new')
+  mounted.submitDraft()
+
+  // 1. The official Host cancel reached the EXACT old generation: the held turn
+  //    aborts WITHOUT the test releasing the hold, and the durable boundary is
+  //    the user-cancellation reason.
+  await waitFor('the old Host turn aborted by the navigation stop', () => oldAgent.status !== 'running', 20_000)
+  const lastEnd = oldSession.snapshotEvents().filter(event => event.type === 'turn/end').at(-1)?.data as
+    { reason?: { kind?: string; reason?: { kind?: string } } } | undefined
+  assert.equal(lastEnd?.reason?.kind, 'aborted', 'the old turn ended through the durable cancellation reason')
+  assert.equal(lastEnd?.reason?.reason?.kind, 'user', 'the cancellation is the user navigation stop, not a shutdown cancel')
+  assert.ok(oldSession.snapshotEvents().some(event => event.type === 'step/start'),
+    'the aborted step is the held model request that only the navigation stop could end')
+
+  // 2. Exactly ONE fresh Host Session is created and becomes the current Remote
+  //    owner; the old Session stays durable.
+  await waitFor('exactly one fresh Host session', () => {
+    return seedHost.ctx.sessions.list().filter(session => !hostIdsBefore.has(String(session.id))).length === 1
+  }, 20_000)
+  const createdIds = seedHost.ctx.sessions.list()
+    .map(session => String(session.id))
+    .filter(id => !hostIdsBefore.has(id))
+  assert.equal(createdIds.length, 1, 'one /new creates exactly one fresh Session')
+  const freshId = createdIds[0]!
+  await waitFor('the fresh Remote owner is retained', () => {
+    return fixture.aggregate.wire.client.sessions.binding(SessionId(freshId)) !== undefined
+  }, 20_000)
+  assert.ok(seedHost.ctx.sessions.list().some(session => String(session.id) === mainId),
+    'the old Session remains persisted (a cancel is not a delete)')
+  void app
+})
+
 test('pending: queued -> queue pane, steering -> tail lane, and the echo -> authoritative identity handoff', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'm3-4-pr2-pending-running'

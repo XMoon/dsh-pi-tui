@@ -49,6 +49,7 @@ import { draftHasImages } from '../../client/media/draft-attachments.ts'
 import { prepareUserMessage } from '../submission/direct-message-preparation.ts'
 import type { ModelSelectionValue } from '../../domain/session/model-selection.ts'
 import type { SessionScope } from '../session/scope.ts'
+import type { NavigationIntent } from '../session/transition.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { CommandRuntime } from './runtime.ts'
 import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
@@ -153,7 +154,16 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
    *  and sessionTransitionPending seams). */
   readonly transition: {
     pending(): boolean
-    run<T>(task: () => Promise<T> | T): Promise<T>
+    /**
+     * Run one gated session transition. `navigation` marks a USER NAVIGATION
+     * (`/new`, a selected-session switch): the runtime captures that scope
+     * before its first await and its transition admission stops the captured
+     * old generation BEFORE the admitted writers drain. `undefined` (e.g. the
+     * `/preset` swap) keeps the plain transition admission and never cancels.
+     * The intent's `admission.oldOwnerStopped` records what the admission
+     * established (always false without a navigation).
+     */
+    run<T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T>
   }
   /** The command registry lookup (the Host commands service), or undefined. */
   readonly commandsRegistry: () => CommandRegistryLike | undefined
@@ -1173,8 +1183,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // command-side switches run create AND commit inside one exclusive
       // section via this seam. Host fork dispatch is outside this FIFO;
       // forked-child adoption and rewind navigation use their own gated
-      // adoption path.
-      withSessionTransition: <T>(task: () => Promise<T> | T) =>
+      // adoption path. `navigation` opts a USER NAVIGATION into the runtime's
+      // exact-owner stop-before-drain admission; `/preset` and every other
+      // transition keep the plain admission.
+      withSessionTransition: <T>(task: () => Promise<T> | T, navigation?: NavigationIntent) =>
         deps.transition.run(async () => {
           try {
             return await task()
@@ -1183,7 +1195,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             // transitionTo; do not leave a deferred recall unresolved.
             deps.submission.settleQueueRecalls(false)
           }
-        }),
+        }, navigation),
       enterView: (childId: Id, label: string | undefined, mode: 'one-shot' | 'continuable', parentSessionId: Id, activity: 'running' | 'inactive') =>
         deps.viewer.enterView(childId, label, mode, parentSessionId, activity),
       requestExit: deps.requestExit,

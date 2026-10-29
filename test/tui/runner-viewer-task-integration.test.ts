@@ -3423,11 +3423,15 @@ test('PRA-L6: Task Stop is admitted through the control barrier while a /new tra
   const originalRunTransition = SessionOperationBarrier.prototype.runTransition
   let frozen = false
   let bodyRan = false
-  SessionOperationBarrier.prototype.runTransition = function <T>(this: SessionOperationBarrier, fn: () => Promise<T>): Promise<T> {
+  SessionOperationBarrier.prototype.runTransition = function <T>(
+    this: SessionOperationBarrier,
+    fn: () => Promise<T>,
+    stopOldOwner?: () => Promise<void>,
+  ): Promise<T> {
     const promise = originalRunTransition.call(this, async () => {
       bodyRan = true
       return fn()
-    }) as Promise<T>
+    }, stopOldOwner) as Promise<T>
     if (this.activeWriters > 0) frozen = true
     return promise
   }

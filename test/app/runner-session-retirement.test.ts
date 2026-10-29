@@ -132,13 +132,16 @@ test('a successful /new retires the OLD owner post-commit (cancel → idle → d
   assert.ok(newHandler, 'the real runner must register the /new transition command')
   await newHandler()
   await settle()
-  // The OLD owner was retired post-commit: cancel + drain + dispose exactly
-  // once each, and the drain happened before the old handle dispose.
+  // The OLD owner is stopped at the navigation ADMISSION (a keepInbox user
+  // cancel, before the create) and then retired post-commit with the official
+  // close order: cancel + drain + dispose exactly once each.
   const events = harness.retirementEvents
+  const navigationStops = events.filter(event => event === 'cancel:keepInbox:retire-switch-old')
   const oldCancel = events.filter(event => event === 'cancel:retire-switch-old')
   const oldDrain = events.filter(event => event === 'drain:retire-switch-old')
   const oldDispose = events.filter(event => event === 'dispose:retire-switch-old')
-  assert.equal(oldCancel.length, 1, 'the old agent must be cancelled exactly once post-commit')
+  assert.equal(navigationStops.length, 1, 'the /new navigation stop cancels the old agent exactly once')
+  assert.equal(oldCancel.length, 1, 'the retirement close order still cancels the old agent exactly once')
   assert.equal(oldDrain.length, 1, 'the old continuable descendants must be drained exactly once post-commit')
   assert.equal(oldDispose.length, 1, 'the old handle must be disposed exactly once post-commit')
   assert.ok(events.indexOf('drain:retire-switch-old') < events.indexOf('dispose:retire-switch-old'),
@@ -405,9 +408,9 @@ test('an interactive exit during a non-cooperative transition create cancels eac
     'the late committed child owner must be retired exactly once')
 })
 
-test('a throwing shutdown cancel inside the abort listener is contained and retried, never an uncaught exception', async (t) => {
+test('a throwing shutdown cancel after the navigation stop is contained and retried, never an uncaught exception', async (t) => {
   const life = testLifecycle(t)
-  /** One full shutdown run for the value thrown on the first cancel. */
+  /** One full shutdown run for the value thrown on the first shutdown cancel. */
   const scenario = async (label: string, thrown: unknown) => {
     const home = life.tempDir(`dsh-pi-tui-retire-abort-throw-${label}-`)
     const previousHome = process.env.DSH_HOME
@@ -429,8 +432,11 @@ test('a throwing shutdown cancel inside the abort listener is contained and retr
       events: sessionEvents('old answer'),
     })
     // The FIRST whenIdle (startup resume) settles; the SECOND (the /new
-    // pre-commit quiesce) hangs, so the transition parks in `whenIdleOrAbort`
-    // with its lifecycle-abort listener armed.
+    // pre-commit quiesce) hangs. The old Agent is deliberately NON-COOPERATIVE:
+    // the navigation stop below does not settle the pending whenIdle (a stuck
+    // tool/model request does not observe a cancel immediately), so the
+    // transition really parks in `whenIdleOrAbort` with its lifecycle-abort
+    // listener armed when the exit begins.
     let idleCalls = 0
     const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents, async () => {
       idleCalls += 1
@@ -440,24 +446,31 @@ test('a throwing shutdown cancel inside the abort listener is contained and retr
     fiber = await mountRunner(context, home, harness, { sessionId }, { sessionId })
     const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
     assert.ok(newHandler, 'the real runner must register the /new transition command')
-    const transition = newHandler()
-    await settle()
-    assert.equal(idleCalls, 2, 'the /new pre-commit quiesce must be awaiting the stuck whenIdle')
-
-    // The FIRST shutdown cancel throws — exactly the
-    // `cannot read inbox state: its projection registration is not active`
-    // failure the hardening exists for. An AbortSignal listener is a Node
-    // EventTarget: an escaping throw would become an uncaughtException that no
-    // `try { disposeSurface() } catch` can see.
     const liveAgent = (harness.agents as { get(id: string): { cancel(): void } | undefined }).get(sessionId)
     assert.ok(liveAgent, 'the resumed session must have a live Agent')
     const originalCancel = liveAgent.cancel.bind(liveAgent)
     let cancelAttempts = 0
+    let throwingShutdownCancelSeen = false
     liveAgent.cancel = () => {
       cancelAttempts += 1
-      if (cancelAttempts === 1) throw thrown
+      // Attempt 1 is the /new navigation stop. A non-cooperative Agent ignores
+      // it here, which is what leaves the transition parked in whenIdle.
+      if (cancelAttempts === 1) return
+      if (!throwingShutdownCancelSeen) {
+        throwingShutdownCancelSeen = true
+        throw thrown
+      }
       originalCancel()
     }
+    const transition = newHandler()
+    await settle()
+    assert.equal(idleCalls, 2, 'the /new pre-commit quiesce must be awaiting the stuck whenIdle')
+
+    // The FIRST SHUTDOWN cancel throws — exactly the
+    // `cannot read inbox state: its projection registration is not active`
+    // failure the hardening exists for. An AbortSignal listener is a Node
+    // EventTarget: an escaping throw would become an uncaughtException that no
+    // `try { disposeSurface() } catch` can see.
     const uncaught: unknown[] = []
     const onUncaught = (error: unknown): void => { uncaught.push(error) }
     process.on('uncaughtException', onUncaught)
@@ -481,9 +494,10 @@ test('a throwing shutdown cancel inside the abort listener is contained and retr
   ] as const) {
     const { sessionId, uncaught, cancelAttempts, events } = await scenario(label, thrown)
     assert.deepEqual(uncaught, [], `a ${label} shutdown cancel must never escape the abort listener`)
-    assert.equal(cancelAttempts, 2, `the failed ${label} cancel must be retried by the retirement cancel phase`)
+    assert.equal(cancelAttempts, 3,
+      `the navigation stop, the failed ${label} shutdown cancel and its successful retry are exactly three calls`)
     assert.equal(events.filter(event => event === `cancel:${sessionId}`).length, 1,
-      `only the successful ${label} retry cancels the fake agent`)
+      `only the successful ${label} retry reaches the fake agent's close-order cancel`)
     assert.equal(events.filter(event => event === `dispose:${sessionId}`).length, 1,
       `the ${label} owner must still be disposed exactly once`)
   }
@@ -655,7 +669,7 @@ test('exit after a transition COMMITTED retires the NEW current owner, never the
     'the new owner retirement must follow the old owner retirement')
 })
 
-test('exit during a transition stuck in pre-commit whenIdle: the pre-cancel unblocks it and the old owner is retired', async (t) => {
+test('the /new navigation stop releases a stuck whenIdle; an exit during the pending create retires the old owner exactly once', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-retire-whenidle-stuck-')
   const previousHome = process.env.DSH_HOME
@@ -676,8 +690,10 @@ test('exit during a transition stuck in pre-commit whenIdle: the pre-cancel unbl
     events: sessionEvents('old answer'),
   })
   // The FIRST whenIdle (startup resume) settles; the SECOND (the /new
-  // pre-commit quiesce) hangs — the old agent is "busy" and its whenIdle
-  // does not observe the lifecycle signal, exactly like a real LLM turn.
+  // pre-commit quiesce) would hang forever — the old agent is "busy" and its
+  // whenIdle does not observe the lifecycle signal, exactly like a real LLM
+  // turn. The navigation stop is what ends that wait: the stop's cancel breaks
+  // the pending whenIdle, so the transition proceeds to its create.
   let idleCalls = 0
   const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents, async () => {
     idleCalls += 1
@@ -702,11 +718,19 @@ test('exit during a transition stuck in pre-commit whenIdle: the pre-cancel unbl
   assert.ok(newHandler, 'the real runner must register the /new transition command')
   const transition = newHandler()
   await settle()
-  assert.equal(idleCalls, 2, 'the /new pre-commit quiesce must be awaiting the stuck whenIdle')
-  // Exit while the transition is stuck in its pre-commit quiesce: the
-  // retirement pre-cancel must unblock the whenIdle (no deadlock), the
-  // aborted create must fail the transition, and the still-current old
-  // owner must be retired.
+  // The navigation stop ends the pending turn, so the pre-commit quiesce never
+  // re-enters the hanging whenIdle gate: exactly the ONE startup-resume wait was
+  // gated, while both quiesce calls were made and the transition parks in its
+  // abort-aware create.
+  assert.equal(idleCalls, 1, 'the navigation stop must end the old turn before the quiesce wait')
+  assert.equal(harness.retirementEvents.filter(event => event === 'idle:retire-whenidle-stuck-old').length, 2,
+    'the startup resume AND the pre-commit quiesce both observed the owner idle')
+  assert.ok(harness.retirementEvents.includes('cancel:keepInbox:retire-whenidle-stuck-old'),
+    'the navigation stop must have cancelled the old agent before the quiesce')
+  assert.ok(!harness.retirementEvents.includes('cancel:retire-whenidle-stuck-old'),
+    'no shutdown close-order cancel may have run yet')
+  // Exit while the transition is parked in its abort-aware create: the aborted
+  // create fails the transition, and the still-current old owner is retired.
   await fiber.dispose()
   fiber = undefined
   await transition
@@ -714,7 +738,7 @@ test('exit during a transition stuck in pre-commit whenIdle: the pre-cancel unbl
   assert.equal(events.filter(event => event === 'dispose:retire-whenidle-stuck-old').length, 1,
     'the still-current old owner must be retired exactly once')
   assert.equal(events.filter(event => event === 'cancel:retire-whenidle-stuck-old').length, 1,
-    'the old owner must be cancelled EXACTLY once: the lifecycle-abort cancel and the shutdown pre-cancel are the same cancel')
+    'the shutdown close order cancels the old owner exactly once')
   assert.equal(harness.createdSessions.length, 0, 'the aborted create must not publish a child')
 })
 

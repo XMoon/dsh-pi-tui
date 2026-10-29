@@ -33,6 +33,13 @@
  * The session runtime owns their scope/owner fence; this hook only owns
  * the documented admission, so no ordinary business write can use it as
  * a bypass.
+ *
+ * A user NAVIGATION (`/new`, a selected-session switch) additionally stops
+ * the owner it is about to replace. That stop must land after the freeze but
+ * BEFORE the drain, because the drain can be held open by a writer the old
+ * owner is still executing; `runTransition`'s optional `stopOldOwner` hook is
+ * that one seam. It is not a writer admission either: ordinary writes stay
+ * refused while the transition is frozen.
  * @module @xmoon76/dsh-pi-tui/app/session/operation-barrier
  */
 
@@ -101,13 +108,25 @@ export class SessionOperationBarrier {
    * Run a whole session transition exclusively: freezes new writers,
    * waits for in-flight writers to drain, runs the transition, then
    * unfreezes. Reentrant transitions are a bug and are refused loudly.
+   *
+   * `stopOldOwner` is the NARROW user-navigation seam (a fresh Session or a
+   * selected-session switch), never a general hook: when supplied it runs
+   * EXACTLY ONCE, after the freeze and BEFORE the admitted-writer drain, and
+   * a throw aborts the transition with ZERO body side effects (the barrier
+   * unfreezes and the caller reports the precise failure). The drain must not
+   * come first: an admitted writer (e.g. a slow Host command) can keep the
+   * old Turn's owner busy, and a navigation that waited for it before
+   * stopping the old Turn would reintroduce the wait this seam exists to
+   * remove. The callback owns the exact-owner/currentness fence; the barrier
+   * only owns the documented order.
    */
-  async runTransition<T>(fn: () => Promise<T>): Promise<T> {
+  async runTransition<T>(fn: () => Promise<T>, stopOldOwner?: () => Promise<void>): Promise<T> {
     if (this.frozen) {
       throw new Error('BUG: reentrant session transition')
     }
     this.frozen = true
     try {
+      if (stopOldOwner !== undefined) await stopOldOwner()
       while (this.writers > 0) {
         await new Promise<void>(resolve => this.wait.push(resolve))
       }
