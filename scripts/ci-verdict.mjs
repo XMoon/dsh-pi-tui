@@ -167,9 +167,12 @@ export function verdict({ role, mode, ref, phases, release = false, started }) {
   }
 
   // The mode-dependent pair. A mode the pipeline does not know is itself a
-  // failure: defaulting it would let an unresolved run through.
-  const expected = MODE_STATUS[mode]
-  if (expected === undefined) {
+  // failure: defaulting it would let an unresolved run through. `Object.hasOwn`
+  // keeps prototype names (`constructor`, `toString`, `__proto__`) from being
+  // mistaken for known modes.
+  const modeKnown = Object.hasOwn(MODE_STATUS, mode)
+  const expected = modeKnown ? MODE_STATUS[mode] : undefined
+  if (!modeKnown) {
     failures.push(`the DSH mode '${mode}' is not one this verdict knows: the mode-dependent phases cannot be checked`)
   } else {
     for (const [name, wanted] of Object.entries(expected)) {
@@ -205,7 +208,7 @@ export function verdict({ role, mode, ref, phases, release = false, started }) {
   }
 
   const lines = ['phase                         result']
-  const modePhases = MODE_STATUS[mode] === undefined ? [] : [...Object.keys(MODE_STATUS[mode]), SPLIT_PROCESS_PHASE]
+  const modePhases = Object.hasOwn(MODE_STATUS, mode) ? [...Object.keys(MODE_STATUS[mode]), SPLIT_PROCESS_PHASE] : []
   const shown = [...required, ...modePhases, ...phases.map(phase => phase.name)]
   const seen = new Set()
   for (const name of shown) {
