@@ -225,11 +225,6 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
     ],
     append: (type, data) => ({ type, seq: nextOpeningSeq++, time: Date.now(), data }) as unknown as SessionEvent,
   })
-  let holdAIdle = false
-  let releaseAIdle!: () => void
-  const aIdle = new Promise<void>(resolve => { releaseAIdle = resolve })
-  let aIdleStarted!: () => void
-  const aIdleStartedPromise = new Promise<void>(resolve => { aIdleStarted = resolve })
   let releaseBResume!: () => void
   const bResume = new Promise<void>(resolve => { releaseBResume = resolve })
   let bResumeStarted!: () => void
@@ -246,10 +241,6 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
     undefined,
     undefined,
     async id => {
-      if (id === sessionA.id && holdAIdle) {
-        aIdleStarted()
-        await aIdle
-      }
       if (id === sessionB.id) {
         bIdleStarted()
         await bIdle
@@ -267,9 +258,12 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
   assert.ok(resumeHandler, 'the real runner must register /resume')
   const aAgent = liveAgentOf(harness, sessionA.id)
   ;(aAgent as { status: 'idle' | 'running' }).status = 'running'
-  holdAIdle = true
   const switchPromise = (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: sessionB.id })
-  await aIdleStartedPromise
+  // PR-B stops the old owner BEFORE the drain/quiesce. Hold the OPENING CUT at
+  // B's resume gate instead: the old A owner is still current and its
+  // bookkeeping must remain visible while B is being resumed, before the
+  // synchronous commit publishes B.
+  await bResumeStartedPromise
   const oldCallId = 'main-opening-old-tool' as ToolCallId
   context.emit('session/event', sessionA as never, event('tool/call', {
     turn: 1,
@@ -307,8 +301,6 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
     'the old tool/result cleanup must remove arguments before the target commits')
   assert.equal(probe.capturedApproval?.danger, undefined,
     'the old tool/result cleanup must remove danger state before the target commits')
-  releaseAIdle()
-  await bResumeStartedPromise
   assert.equal(harness.resumeSignals[1], harness.resumeSignals[0],
     'session switch resume must use the runner lifecycle signal')
 
