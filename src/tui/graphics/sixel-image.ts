@@ -43,7 +43,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/graphics/sixel-image
  */
 
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { getCapabilities, type Terminal, TuiMainScreen } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
 import { diagFromEnv, type Diag } from '../../runtime/process/diagnostics.ts'
@@ -277,6 +277,8 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
   private readonly candidates = new Map<string, Occurrence>()
   /** Monotonic occurrence identity (never reused within one app). */
   private occurrenceSeq = 0
+  /** Per-owner nonce: a candidate token must not be forgeable by ordinary text. */
+  private readonly occurrenceNonce = randomBytes(8).toString('hex')
   /** The current frame's granted occurrences, in bottom-up priority order. */
   private grantOrder: Occurrence[] = []
   private retainedBytes = 0
@@ -590,7 +592,7 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     const id = String(++this.occurrenceSeq)
     const occurrence: Occurrence = {
       id,
-      token: `\u2063SIXC:${id}\u2063`,
+      token: `\u2063SIXC:${this.occurrenceNonce}:${id}\u2063`,
       fallback: options.fallback,
       layoutRows: bounds.layoutRows,
       image,
@@ -618,7 +620,10 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
   private reconcileVisible(screen: object, demands: readonly ScreenVisibleCandidate[]): boolean {
     if (this.disposed || this.observer === undefined || screen !== this.observer) return false
     const wanted = new Map<Occurrence, { cropTopRows: number; visibleRows: number }>()
-    for (const demand of demands) {
+    // Bottom-up priority is the OWNER's rule, not the caller's: the newest visible
+    // content wins a contested slot on every screen.
+    const ordered = [...demands].sort((left, right) => right.physicalRow - left.physicalRow)
+    for (const demand of ordered) {
       const occurrence = this.candidates.get(demand.line)
       if (occurrence === undefined) continue
       wanted.set(occurrence, { cropTopRows: demand.cropTopRows, visibleRows: demand.visibleRows })
@@ -663,11 +668,9 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     let changed = false
     for (const occurrence of [...this.occurrences]) {
       if (occurrence.grant === undefined) {
-        const held = occurrence.full !== undefined || occurrence.crop !== undefined || occurrence.painted !== undefined
-        if (held) {
-          occurrence.image.releaseRecords()
-          changed = true
-        }
+        // Idempotent: aborts an in-flight encode too, so an off-screen occurrence
+        // can never register a record after its release.
+        occurrence.image.releaseRecords()
         continue
       }
       const raster = shown.get(occurrence.token)
@@ -698,7 +701,10 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     occurrence.grant = undefined
     occurrence.painted = undefined
     occurrence.full = undefined
-    occurrence.crop = undefined
+    // The crop record still lists this occurrence as an owner: dropping only the
+    // field would leave an unevictable phantom that refills the budget on every
+    // scroll round-trip.
+    this.releaseCropRecords(occurrence)
     if (full === undefined) return
     full.owners.delete(occurrence)
     if (full.owners.size === 0) this.unregister(full)

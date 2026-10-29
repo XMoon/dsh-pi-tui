@@ -254,6 +254,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	private projectSixelCandidates(
 		rawLines: readonly string[],
 		height: number,
+		viewportTop: number,
 		reconcile: boolean,
 	): {
 		lines: string[];
@@ -266,7 +267,6 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		const rasters = new Map<number, { line: string; dcs: string; cropTopRows: number; visibleRows: number }>();
 		const preserved = new Set<number>();
 		if (port === undefined) return { lines, rasters, preserved, recompose: false };
-		const viewportTop = Math.max(0, rawLines.length - height);
 		const visible: Array<{ row: number; fallback: string; cropTopRows: number; visibleRows: number }> = [];
 		for (let row = viewportTop; row < Math.min(rawLines.length, viewportTop + height); row += 1) {
 			const info = port.candidate(rawLines[row] ?? "");
@@ -311,8 +311,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			const token = rawLines[row] ?? "";
 			const info = port.candidate(token);
 			if (info === undefined) continue;
-			if (this.previousRawLines[row] === token) {
-				lines[row] = this.previousLines[row] ?? "";
+			const previous = this.previousLines[row] ?? "";
+			// Preserve the previous PHYSICAL line only while its raster is still in
+			// the trust table: a released record must never be replayed by a later
+			// full render (an unregistered DCS is not a command the Screen may write).
+			if (this.previousRawLines[row] === token && this.sixelFootprint(previous) !== undefined) {
+				lines[row] = previous;
 				preserved.add(row);
 			} else {
 				lines[row] = info.fallback;
@@ -557,15 +561,21 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			// per-row decision would paint over the overlay's own text. This frame
 			// paints no pixels there; the image's identity row above stays visible
 			// and the block returns as soon as the overlay is gone. (X073.)
+			// `compositeLineAt` already treats a candidate marker as an empty base,
+			// so a covered block yields its marker instead of compositing it as text.
 			this.suppressOverlayCoveredSixelBlocks(rawLines);
 		}
 
-		let projection = this.projectSixelCandidates(rawLines, height, true);
+		const frameViewportTop =
+			this.previousLines.length === 0
+				? Math.max(0, rawLines.length - height)
+				: Math.max(0, prevViewportTop + Math.max(0, rawLines.length - this.previousLines.length));
+		let projection = this.projectSixelCandidates(rawLines, height, frameViewportTop, true);
 		if (projection.recompose) {
 			// The grant set changed with this frame's demands: the component lines
 			// are unchanged (they are markers), so one more projection is the whole
 			// recomposition. More than one would be a repaint storm.
-			projection = this.projectSixelCandidates(rawLines, height, false);
+			projection = this.projectSixelCandidates(rawLines, height, frameViewportTop, false);
 		}
 		this.sixelFrameRasters = projection.rasters;
 		const preservedRows = projection.preserved;
@@ -654,7 +664,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			output.append("\x1b[?2026l"); // End synchronized output
 			output.flush();
-			this.commitSixelFrame(newLines, Math.max(0, Math.max(height, newLines.length) - height), height);
+			this.commitSixelFrame(newLines, frameViewportTop, height);
 			this.cursorRow = Math.max(0, newLines.length - 1);
 			this.hardwareCursorRow = this.cursorRow;
 			// Reset max lines when clearing, otherwise track growth
@@ -805,7 +815,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				}
 				output.append("\x1b[?2026l");
 				output.flush();
-				this.commitSixelFrame(newLines, prevViewportTop, height);
+				this.commitSixelFrame(newLines, frameViewportTop, height);
 				this.cursorRow = targetRow;
 				this.hardwareCursorRow = targetRow;
 			}
@@ -993,7 +1003,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		}
 
 		output.flush();
-		this.commitSixelFrame(newLines, Math.max(prevViewportTop, finalCursorRow - height + 1), height);
+		this.commitSixelFrame(newLines, frameViewportTop, height);
 
 		// Track cursor position for next render
 		// cursorRow tracks end of content (for viewport calculation)
