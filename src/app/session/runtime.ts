@@ -377,8 +377,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    *   refusal (`cancelled`) and a dispatched-unproven stop (`indeterminate`)
    *   all abort navigation. A `cancelled` result means the exact generation
    *   could not be addressed, NOT that the Host has no running work; a Remote
-   *   `whenIdleOrAbort` returning `false` for an unobservable binding is
-   *   likewise not proof of idle, and is never reached on this path. An
+   *   `whenIdleOrAbort` returning `'unobservable'` for a rolled/released
+   *   binding is likewise not proof of idle, and is never reached on this
+   *   path. An
    *   indeterminate stop is never retried.
    * A stale capture aborts FIRST: another navigation owns the surface, and
    * this intent must not stop the replacement's work.
@@ -487,11 +488,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // fire-and-forget retirement).
     let preCommitRelease: Promise<void> | undefined
     let transitionCommitted = false
-    // Whether the pre-commit OLD-owner quiesce (whenIdle + final flush)
-    // completed. A committed stop request alone does not prove this.
-    let oldOwnerQuiesced = false
     try {
-      const outcome = await runTransitionTo<T>({
+      return await runTransitionTo<T>({
         quiesceOld: async () => {
           const owner = core.owner()
           if (owner === undefined) return
@@ -501,14 +499,16 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // (which may be a NEW owner committed by an earlier queued transition),
           // so the transition settles instead of hanging past the appExit
           // watchdog.
-          const aborted = await deps.retirement.whenIdleOrAbort(owner, deps.lifecycleSignal)
-          if (aborted) return
+          const idle = await deps.retirement.whenIdleOrAbort(owner, deps.lifecycleSignal)
+          if (idle === true) return
           // Final flush before the switch. The owner is re-read AFTER the quiesce
           // (the abort path may have swapped it), matching the pre-cutover read.
           const flushOwner = core.owner()
           if (flushOwner === undefined) return
           await deps.retirement.flush(flushOwner)
-          oldOwnerQuiesced = true
+          // ONLY an OBSERVED settle proves the old Turn idle; 'unobservable'
+          // (a rolled Remote binding / missing attachment) is not idle.
+          if (idle === false) steps.onOldOwnerQuiesced?.()
         },
         commit: (next) => {
           // Map the NEW owner BEFORE the commit section can throw: the commit
@@ -643,7 +643,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // initialization below (it would repaint into the disposed app) and
           // let the committed child stand.
           const aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
-          if (aborted) {
+          if (aborted === true) {
             // The lifecycle is exiting: the committed child stands and the
             // retirement takes over. Skip the surface init AND the switch
             // report (the `finally` still clears the opening journal).
@@ -682,9 +682,6 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         deps.surface.clearOpening(opening)
       },
       }, steps)
-      return !outcome.ok && oldOwner !== undefined
-        ? { ...outcome, oldOwnerQuiesced }
-        : outcome
     } catch (error) {
       // The commit section started the exactly-once release of an acquired
       // but never-published NEW owner: AWAIT it before this transition
@@ -788,6 +785,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // returned ok): a refused/failed switch keeps the CURRENT session and its
     // staged drafts intact — clearing up front would orphan the editor's
     // placeholders on every failed switch.
+    let oldOwnerQuiesced = false
     try {
       // The unified transaction: the OLD session is flushed FIRST, then the
       // resume publishes the child. A failure anywhere before the create leaves
@@ -798,6 +796,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       if (deps.lifecycleSignal.aborted) return undefined
       const result = await transitionTo({
         target: { id: sessionId },
+        // The quiesce callback is the ONLY proof that the old Turn reached
+        // idle; the failure note below distinguishes it from a stop request.
+        onOldOwnerQuiesced: () => { oldOwnerQuiesced = true },
         // A rejected open leaves the target untouched: no pin, no retry — the
         // CURRENT session stays live and the user can retry the switch.
         create: async () => requireOpened(await deps.lifecycle.open({
@@ -819,7 +820,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           if (result.error.ownership === 'superseded') return undefined
         }
         // The resume failed: the CURRENT session is still live.
-        return `${result.message}${stopNote(result.oldOwnerQuiesced === true)}`
+        return `${result.message}${stopNote(oldOwnerQuiesced)}`
       }
       // The switch COMMITTED: staged drafts are per-session UI state — drop the
       // unpinned ones now (never durable attachments). In-flight submissions
@@ -837,7 +838,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       const message = safeErrorMessage(error)
       deps.surface.reportSwitchFailure(sessionId, message)
       // The CURRENT session is still live.
-      return `switch failed: ${message}${stopNote(false)}`
+      return `switch failed: ${message}${stopNote(oldOwnerQuiesced)}`
     }
   }
 
@@ -1152,13 +1153,13 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // that success would otherwise race its own retirement.
           if (retirement !== undefined) await retirement
         }
-        let aborted = false
+        let aborted: boolean | 'unobservable' = false
         try {
           aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
         } catch (error) {
           deps.diag.error('fork child quiescence failed after commit', { error: safeErrorMessage(error), session: nextSessionId })
         }
-        if (!aborted) {
+        if (aborted !== true) {
           try {
             await deps.surface.initLiveSession(nextOwner)
           } catch (error) {
@@ -1335,7 +1336,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       bumpGeneration: core.bumpGeneration,
       quiesceChild: async () => {
         try {
-          return await deps.retirement.whenIdleOrAbort(childOwner, deps.lifecycleSignal)
+          return (await deps.retirement.whenIdleOrAbort(childOwner, deps.lifecycleSignal)) === true
         } catch (error) {
           deps.diag.warn('first session whenIdle failed', { error: safeErrorMessage(error) })
           return false

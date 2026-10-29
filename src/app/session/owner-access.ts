@@ -70,10 +70,13 @@ export type NavigationCancelSettlement =
  */
 export interface SessionOwnerRetirement {
   /** Await the owner's quiescence and report which condition ended the wait:
-   *  `true` when `signal` aborted first, `false` when the owner settled by
-   *  itself. HOW an abort is reflected onto the owner is the backend's decision
-   *  (a backend may cancel it, or merely stop waiting). */
-  whenIdleOrAbort(owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean>
+   *  `true` when `signal` aborted first, `false` when the EXACT owner was
+   *  OBSERVED settling by itself, and `'unobservable'` when the exact owner
+   *  generation can no longer be observed (a replaced/retired Remote binding or
+   *  a missing Direct attachment). `'unobservable'` is NOT proof of idle and
+   *  must never be consumed as one. HOW an abort is reflected onto the owner is
+   *  the backend's decision (a backend may cancel it, or merely stop waiting). */
+  whenIdleOrAbort(owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean | 'unobservable'>
   /** ONE-SHOT user cancel of this EXACT owner's current work, preserving its
    *  pending inbox (the Busy Esc / Stop semantic). This is deliberately NOT
    *  {@link preCancel}: that one is the synchronous shutdown preparation and

@@ -15,6 +15,7 @@ import { createSessionOwnershipCore } from '../../src/app/session/ownership-core
 import { bindSessionRuntime, type SessionRuntimeSurface } from '../../src/app/session/runtime.ts'
 import { bindSubmissionRuntime } from '../../src/app/submission/runtime.ts'
 import type { SessionOwnerRef } from '../../src/app/session/subject.ts'
+import type { SessionOwnerRetirement } from '../../src/app/session/owner-access.ts'
 import {
   createSessionScopeAuthority,
   SessionScopeSupersededError,
@@ -88,7 +89,7 @@ interface OpenArm {
   fail?: boolean
 }
 
-function harness() {
+function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {}) {
   const events: string[] = []
   const diagnostics: Array<{ readonly message: string; readonly fields?: Record<string, unknown> }> = []
   const diag: Diag = {
@@ -283,7 +284,7 @@ function harness() {
   const controller = new AbortController()
   const runtime = bindSessionRuntime(core, {
     owners: countingOwners.owners,
-    retirement: services.retirement,
+    retirement: { ...services.retirement, ...options.retirement },
     lifecycle,
     lifecycleSignal: controller.signal,
     surface,
@@ -1876,4 +1877,29 @@ test('a recall deferred at a boundary is settled by the QUEUED stale navigation,
   assert.deepEqual(recallLog, ['abort'],
     'the queued stale navigation still closed the deferred-recall window instead of leaking it')
   assert.equal(binding.cancelCalls(), 1, 'only the first navigation stopped the old owner')
+})
+
+test('a binding rollover after an accepted cancel reports "requested, not confirmed", never a stopped Turn', async () => {
+  // The Host ACCEPTED the cancel (committed), then the exact Remote binding
+  // became unobservable before the quiesce: `whenIdleOrAbort` reports
+  // 'unobservable' (NOT idle). A subsequent open failure must use the weak
+  // claim.
+  const h = harness({
+    retirement: {
+      cancelForNavigation: async () => ({ kind: 'committed' }),
+      whenIdleOrAbort: async () => 'unobservable',
+      flush: async () => {},
+    },
+  })
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  h.arms.set('session-b', { fail: true })
+  const message = await h.runtime.switchSession('session-b', scope)
+  assert.match(String(message), /turn stop requested \(not yet confirmed\)/)
+  assert.doesNotMatch(String(message), /old turn stopped \(cannot resume\)/,
+    'an unobservable binding is not proof that the old Turn stopped')
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
+  assert.deepEqual(h.calls.opens, ['session-b'], 'the target open was attempted and failed')
 })

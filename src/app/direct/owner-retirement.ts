@@ -264,10 +264,11 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
     if (record !== undefined) deps.parkHandle(record.handle)
   }
 
-  const whenIdleOrAbort = async (owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean> => {
+  const whenIdleOrAbort = async (owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean | 'unobservable'> => {
     const record = attachmentOf(owner)
-    // No Direct attachment (a Remote generation): nothing to quiesce.
-    if (record === undefined) return false
+    // No Direct attachment (a Remote generation): the exact owner is not
+    // observable here; that is not proof of idle.
+    if (record === undefined) return 'unobservable'
     const agent = record.agent
     if (signal.aborted) {
       cancelShutdownAgent(agent)

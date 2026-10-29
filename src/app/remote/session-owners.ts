@@ -246,16 +246,16 @@ export function createRemoteSessionOwnerServices(
     }
   }
 
-  const whenIdleOrAbort = (owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean> => {
+  const whenIdleOrAbort = (owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean | 'unobservable'> => {
     const record = recordOf(owner)
     // Borrow the live binding and fence it by exact identity: a replaced or
     // fully retired generation is not observable through the official borrow,
     // and the wait must never observe a NEW same-id generation instead.
     const borrowed = source.binding(record.sessionId)
     if (borrowed === undefined || !Object.is(borrowed, record.bindingIdentity)) {
-      // Nothing of this owner's generation is observable client-side anymore;
-      // there is no running work this wait could see.
-      return Promise.resolve(false)
+      // The exact generation is no longer observable: this is NOT proof that
+      // its Host Turn is idle.
+      return Promise.resolve('unobservable')
     }
     const face = borrowed.session
     if (!face.getSnapshot().running) return Promise.resolve(false)

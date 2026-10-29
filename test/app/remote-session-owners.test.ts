@@ -308,7 +308,7 @@ test('a running generation settles when running flips to false, unsubscribing on
   const owner = h.ownerOf(handle)
   h.bindingOf('session-a')!.setRunning(true)
   const signal = fakeSignal()
-  let settled: boolean | undefined
+  let settled: boolean | 'unobservable' | undefined
   const pending = h.services.retirement.whenIdleOrAbort(owner, signal).then(result => { settled = result })
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(settled, undefined, 'a running generation must not settle early')
@@ -389,7 +389,7 @@ test('abort stops the LOCAL wait only — no cancel, no release, listeners remov
   const owner = h.ownerOf(handle)
   h.bindingOf('session-a')!.setRunning(true)
   const signal = fakeSignal()
-  let settled: boolean | undefined
+  let settled: boolean | 'unobservable' | undefined
   const pending = h.services.retirement.whenIdleOrAbort(owner, signal).then(result => { settled = result })
   await new Promise(resolve => setImmediate(resolve))
   signal.abortNow()
@@ -484,8 +484,9 @@ test('whenIdleOrAbort on a fully retired generation has nothing to wait for', as
   const { handle } = retainedHandle(h, 'session-a')
   const owner = h.ownerOf(handle)
   await h.services.retirement.retire(owner, 'transition')
-  // The generation is no longer observable through the official borrow.
-  assert.equal(await h.services.retirement.whenIdleOrAbort(owner, fakeSignal()), false)
+  // The generation is no longer observable through the official borrow:
+  // 'unobservable' is NOT proof of idle.
+  assert.equal(await h.services.retirement.whenIdleOrAbort(owner, fakeSignal()), 'unobservable')
 })
 
 test('whenIdleOrAbort refuses to observe a replaced same-id generation', async () => {
@@ -498,8 +499,9 @@ test('whenIdleOrAbort refuses to observe a replaced same-id generation', async (
   const second = retainedHandle(h, 'session-a')
   h.bindingOf('session-a')!.setRunning(true)
   // The old owner's binding identity is no longer the live generation: the
-  // wait must not observe the NEW generation's running state.
-  assert.equal(await h.services.retirement.whenIdleOrAbort(ownerA, fakeSignal()), false)
+  // wait must not observe the NEW generation's running state, and must not
+  // claim the old one is idle.
+  assert.equal(await h.services.retirement.whenIdleOrAbort(ownerA, fakeSignal()), 'unobservable')
   void second
 })
 

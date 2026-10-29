@@ -80,7 +80,16 @@ function stubRunner(
     displayWrites?: ('focus' | 'compact' | 'full')[]
   },
   diag: ReturnType<typeof createDiag> = createDiag({ filePath: undefined, stderrLevel: 'off' }),
-  options: { transitionPending?: boolean; busyEnter?: string; generation?: () => number; initialDisplayPreset?: 'focus' | 'compact' | 'full' } = {},
+  options: {
+    transitionPending?: boolean
+    busyEnter?: string
+    generation?: () => number
+    initialDisplayPreset?: 'focus' | 'compact' | 'full'
+    /** `/new` settlement tests: the preset read and the transaction seams. */
+    presetResolve?: () => Promise<{ id: string }>
+    navigationStopAccepted?: boolean
+    transitionThrows?: { readonly quiesced: boolean; readonly message: string }
+  } = {},
 ): TuiCommandRunner {
   let displayPreset: 'focus' | 'compact' | 'full' = options.initialDisplayPreset ?? 'full'
   // The scope-bound skill facades delegate to this REAL catalog port (exactly
@@ -119,7 +128,9 @@ function stubRunner(
       turnOutline: () => undefined,
       sessionStatus: () => undefined,
     },
-    catalog,
+    catalog: options.presetResolve === undefined
+      ? catalog
+      : { ...catalog, presets: { ...catalog.presets, resolve: options.presetResolve } } as never,
     config: new DirectConfigPort(ctx as never, undefined, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
@@ -165,7 +176,16 @@ function stubRunner(
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
     switchSession: async () => undefined,
-    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+    transitionTo: async <T>(steps: {
+      target?: { id: string; header?: { cwd?: string } }
+      prepare?: () => Promise<void> | void
+      onOldOwnerQuiesced?: () => void
+      create: () => Promise<T>
+    }) => {
+      if (options.transitionThrows !== undefined) {
+        if (options.transitionThrows.quiesced) steps.onOldOwnerQuiesced?.()
+        throw new Error(options.transitionThrows.message)
+      }
       await steps.prepare?.()
       return { ok: true, next: await steps.create() }
     },
@@ -196,7 +216,15 @@ function stubRunner(
     openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => options.transitionPending ?? false,
-    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withSessionTransition: async <T>(
+      task: () => T | Promise<T>,
+      navigation?: { admission: { oldStopAccepted: boolean } },
+    ) => {
+      if (options.navigationStopAccepted === true && navigation !== undefined) {
+        navigation.admission.oldStopAccepted = true
+      }
+      return task()
+    },
     // The scope-bound writer admission IS the transition refusal now (A3-4):
     // a pending transition makes withWriter throw before the task runs.
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => {
@@ -1825,4 +1853,42 @@ test('the built-in command decomposition preserves the exact primary set and reg
     skillInvocation: false,
   }).kind, 'host-command', 'a genuine Host claim still owns an argued /status line')
   app.stop()
+})
+
+test('/new keeps the accepted-stop phase when a commit throw escapes the transaction', async () => {
+  // The transition's synchronous commit can throw AFTER the OLD-owner quiesce.
+  // The handler must keep the phase fact instead of letting the generic
+  // command path drop it: the stronger "stopped (cannot resume)" only when the
+  // quiesce callback fired; otherwise the weaker "requested, not confirmed".
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const run = async (quiesced: boolean): Promise<{ kind: string; text?: string }> => {
+    const runner = stubRunner(ctx, app, { agent: undefined }, undefined, {
+      presetResolve: async () => ({ id: 'test-preset' }),
+      navigationStopAccepted: true,
+      transitionThrows: { quiesced, message: 'commit seam exploded' },
+    })
+    registerTuiCommandsWithDirectSeams(runner)
+    const definition = services.defs.filter(candidate => candidate.name === 'new').at(-1)
+    assert.ok(definition?.handler !== undefined, 'the /new handler must be registered')
+    return (definition.handler as (invocation: never) => Promise<{ kind: string; text?: string }>)({
+      commandId: 'cmd-new', agent: undefined, rawInput: '', signal: new AbortController().signal,
+    } as never)
+  }
+  const afterQuiesce = await run(true)
+  assert.equal(afterQuiesce.kind, 'error')
+  assert.match(afterQuiesce.text ?? '', /commit seam exploded/)
+  assert.match(afterQuiesce.text ?? '', /old turn stopped \(cannot resume\)/,
+    'a commit throw after the quiesce keeps the stronger proven fact')
+  const beforeQuiesce = await run(false)
+  assert.equal(beforeQuiesce.kind, 'error')
+  assert.match(beforeQuiesce.text ?? '', /turn stop requested \(not yet confirmed\)/,
+    'a throw before the quiesce must not claim a stopped Turn')
+  assert.doesNotMatch(beforeQuiesce.text ?? '', /old turn stopped \(cannot resume\)/)
 })
