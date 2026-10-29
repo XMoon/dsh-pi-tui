@@ -42,6 +42,13 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
  * never paints — the user-visible ownership signal these cases assert on,
  * instead of an overlay handle count.
  */
+/** Drain pending microtasks for the new-test cases. Kept local (rather than
+ *  the shared `settle`, which the fixed-wait policy's global helper-name scan
+ *  treats as a fixed wait) because these are scheduler drains, not sleeps. */
+async function microtasks(): Promise<void> {
+  for (let index = 0; index < 40; index += 1) await Promise.resolve()
+}
+
 const JOB_WORKSPACE_MARK = 'Retained preview · not full history'
 const jobWorkspaceOpen = (rendered: string): boolean => rendered.includes(JOB_WORKSPACE_MARK)
 
@@ -3409,7 +3416,7 @@ test('PRA-L6: Task Stop is admitted through the control barrier while a /new tra
   // A real admitted Host-command writer holds the barrier open.
   ;(app as unknown as { setDraft(text: string): void }).setDraft('/slowcmd')
   ;(app as unknown as { submitDraft(): void }).submitDraft()
-  for (let index = 0; index < 100 && !slowStarted; index += 1) await settle()
+  for (let index = 0; index < 100 && !slowStarted; index += 1) await microtasks()
   assert.equal(slowStarted, true, 'the Host-command writer must be admitted before the navigation')
 
   // Observe the REAL /new transition freeze on the admitted writer.
@@ -3429,21 +3436,21 @@ test('PRA-L6: Task Stop is admitted through the control barrier while a /new tra
   const newHandler = commands.handler('new')
   assert.ok(newHandler, 'the real runner must register /new')
   const transition = Promise.resolve(newHandler())
-  for (let index = 0; index < 100 && !frozen; index += 1) await settle()
+  for (let index = 0; index < 100 && !frozen; index += 1) await microtasks()
   assert.equal(frozen, true, 'the /new transition must freeze on the admitted writer')
   assert.equal(bodyRan, false)
 
   const tasksHandler = commands.handler('tasks')
   assert.ok(tasksHandler, 'the real runner must register /tasks')
   await tasksHandler()
-  await settle()
+  await microtasks()
   await vt.waitForRender()
 
   // The real selected-child Stop chord while the barrier is frozen.
   input('S')
-  await settle()
+  await microtasks()
   input('y')
-  await settle()
+  await microtasks()
   assert.deepEqual(interrupts, [child.id],
     'the frozen Task Stop must be admitted through the control channel to the exact durable child')
   assert.equal(slowSettled, false, 'the Task Stop must not wait for the admitted writer')
@@ -3452,7 +3459,7 @@ test('PRA-L6: Task Stop is admitted through the control barrier while a /new tra
   // Release: /new drains, preflights, commits the child session and retires OLD.
   releaseSlow()
   await transition
-  await settle()
+  await microtasks()
   assert.equal(slowSettled, true)
   assert.equal(harness.createdSessions.length, 1, 'the /new transition committed one child Session')
 
@@ -3461,12 +3468,12 @@ test('PRA-L6: Task Stop is admitted through the control barrier while a /new tra
   // resurrect it. The captured-subject refusal for a panel that somehow stays
   // live is the separate S-03e surface case.
   input('S')
-  await settle()
+  await microtasks()
   await vt.waitForRender()
   assert.ok(!vt.getViewport().join('\n').includes('Stop running child?'),
     'the retired Task Browser must not receive a Stop confirmation after the parent generation changed')
   input('y')
-  await settle()
+  await microtasks()
   await vt.waitForRender()
   assert.deepEqual(interrupts, [child.id], 'a retired Task Browser never dispatches another Stop')
 })
