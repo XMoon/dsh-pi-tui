@@ -12,6 +12,11 @@
  *   deterministic trigger exists through the public contract;
  * - output overflow (>8 MiB): the raster caps (800x600, 256 colors) bound the
  *   payload far below the 8 MiB guard, so the guard is unreachable by design.
+ *
+ * The worker DEADLINE is covered: for the first job only, the parent is made
+ * blind to that worker's `message` and `exit` events, so a real worker produces
+ * no observable answer before the deadline. That injects the fault at the port
+ * boundary without touching production code or adding a test-only parameter.
  * @module @xmoon76/dsh-pi-tui/client/sixel-worker-lifecycle.test
  */
 
@@ -19,6 +24,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   SixelEncodeBusyError,
+  SixelEncodeFailedError,
   SixelEncodeRejectedError,
   SixelEncoder,
 } from '../../src/client/media/sixel/encode.ts'
@@ -359,6 +365,77 @@ test('a concurrent second dispose waits for the same in-flight termination', asy
     await first
     const result = await outcome
     assert.ok(result instanceof SixelEncodeRejectedError, 'disposal must reject the request')
+  } finally {
+    workerThreads.Worker.prototype.once = originalOnce
+    workerThreads.Worker.prototype.terminate = originalTerminate
+    await encoder.dispose()
+  }
+})
+
+test('a worker that never replies fails the job at the deadline and frees the lane', async () => {
+  const workerThreads = await import('node:worker_threads')
+  type Once = typeof workerThreads.Worker.prototype.once
+  type Terminate = typeof workerThreads.Worker.prototype.terminate
+  const originalOnce: Once = workerThreads.Worker.prototype.once
+  const originalTerminate: Terminate = workerThreads.Worker.prototype.terminate
+  const created: unknown[] = []
+  const terminations: { worker: unknown; resolved: boolean }[] = []
+  // For the FIRST worker only, the parent is made blind to both its reply and
+  // its exit, which is exactly the state the deadline exists for: a worker that
+  // produced no observable answer. Nothing in production code changes.
+  let silentWorker = true
+
+  workerThreads.Worker.prototype.once = function patchedOnce(
+    this: InstanceType<typeof workerThreads.Worker>,
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ): InstanceType<typeof workerThreads.Worker> {
+    if (!created.includes(this)) created.push(this)
+    if (silentWorker && (event === 'message' || event === 'exit')) return this
+    return originalOnce.call(this, event, listener)
+  } as Once
+  workerThreads.Worker.prototype.terminate = function patchedTerminate(
+    this: InstanceType<typeof workerThreads.Worker>,
+  ): Promise<number> {
+    const record = { worker: this as unknown, resolved: false }
+    terminations.push(record)
+    return originalTerminate.call(this).then((code) => {
+      record.resolved = true
+      return code
+    })
+  } as Terminate
+
+  const encoder = new SixelEncoder()
+  const slowPng = await solidPng(120, 40, 200, 400, 300)
+  const nextPng = await solidPng(0, 0, 255, 20, 20)
+  try {
+    const startedAt = Date.now()
+    // Handler first: the deadline rejection must not be an unhandled rejection.
+    const outcome = encoder
+      .encode(request(slowPng, new AbortController().signal, { maxColumns: 60, maxRows: 20 }))
+      .then(
+        () => 'resolved' as const,
+        (error: unknown) => error,
+      )
+    await waitForWorker(workerThreads, created)
+    const stuckWorker = created[0]
+    silentWorker = false // every later worker behaves normally
+
+    const result = await outcome
+    const elapsed = Date.now() - startedAt
+    assert.ok(
+      result instanceof SixelEncodeFailedError,
+      `a missed deadline must fail the request, got ${String(result)}`,
+    )
+    assert.match(String(result.message), /worker encode exceeded/i)
+    assert.ok(elapsed >= 5000, `the deadline must really elapse, took ${elapsed} ms`)
+
+    // The lane must be free only AFTER the stuck worker terminated.
+    const next = await encoder.encode(request(nextPng, new AbortController().signal))
+    assert.notEqual(next, null, 'the following job must succeed once the lane is released')
+    const record = terminations.find((entry) => entry.worker === stuckWorker)
+    assert.ok(record !== undefined, 'the timed-out job must terminate its own worker')
+    assert.equal(record.resolved, true, 'the next job may only start after that termination finished')
   } finally {
     workerThreads.Worker.prototype.once = originalOnce
     workerThreads.Worker.prototype.terminate = originalTerminate
