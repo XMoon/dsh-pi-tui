@@ -2600,7 +2600,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		// must not keep a residency slot. The paint already dropped it; reconcile the
 		// filtered set so the owner revokes the grant for the NEXT frame.
 		if (this.sixelScreen !== undefined) {
-			const paintedDemands = nextLayout.sixelDemands.filter((demand) => (sixelRows[demand.physicalRow] ?? 0) > 0);
+			// Only an overlay/scrollbar that actually covers the block removes its
+			// demand; a merely PENDING block (no raster yet) must keep its grant so
+			// the owner can encode it.
+			const paintedDemands = nextLayout.sixelDemands.filter(
+				(demand) =>
+					!this.linesCoveredByOverlay(demand.physicalRow, demand.physicalRow + demand.visibleRows - 1, screen.length),
+			);
 			if (paintedDemands.length !== nextLayout.sixelDemands.length) {
 				this.sixelScreen.reconcileVisible(this, paintedDemands);
 			}
