@@ -19,7 +19,7 @@ import { symbols } from '@deepseek-ai/cordis'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
 import { SessionOperationBarrier } from '../../src/app/session/operation-barrier.ts'
-import { wireNodes } from '../support/tsp-picker-wire.ts'
+import { pickerNode, pickerProps, sendAction, sendActivate, wireNodes } from '../support/tsp-picker-wire.ts'
 
 // ── wire helpers ────────────────────────────────────────────────────────────
 
@@ -907,8 +907,24 @@ test('a /copy success that outlives its Session is not announced on the replacem
     life.defer(() => { agents.resume = originalResume })
     // The Browser settles its handler without waiting for the switch, so the
     // FIFO is free while the transition is still in flight.
-    await submitInput(fixture, '/resume f5-target-b')
+    // PR-C: direct `/resume` now waits for its tracked switch settlement. Use
+    // the independent Browser selection (a non-FIFO navigation entry) to start
+    // the gated switch, then close the Browser so `/copy` can run on A while
+    // the switch is still held.
+    await submitInput(fixture, '/sessions')
+    await waitFor('the Session Browser is ready', () => pickerNode(fixture.pane, 'session-browser-') !== undefined, 25_000)
+    const browserId = pickerNode(fixture.pane, 'session-browser-')!.id
+    sendAction(fixture.pane, 'scope', 'all', browserId)
+    await waitFor('the target row is listed', () => {
+      const items = (pickerProps(fixture.pane, 'session-browser-').items ?? []) as Array<{ id?: unknown }>
+      return items.some(item => String(item.id).includes('f5-target-b'))
+    }, 25_000)
+    const targetItem = (pickerProps(fixture.pane, 'session-browser-').items as Array<{ id?: unknown }>)
+      .find(item => String(item.id).includes('f5-target-b'))!
+    sendActivate(fixture.pane, String(targetItem.id), pickerNode(fixture.pane, 'session-browser-')!.id)
     await waitFor('the resume to be entered', () => resumeEntered, 25_000)
+    fixture.pane.key('\x1b')
+    await waitFor('the Browser closes while the switch stays held', () => pickerNode(fixture.pane, 'session-browser-') === undefined, 25_000)
     await submitInput(fixture, '/copy')
     // SYNCHRONIZATION PROOF: the copy is INSIDE the native clipboard helper and
     // already carries A's assistant text before the switch may publish. Without

@@ -637,3 +637,39 @@ test('a late native failure from a closed Browser never notifies the reopened co
   assert.ok(!h.app.notifyTextForTest().includes('lease held'),
     'the stale Browser operation must not paint its failure into the new context')
 })
+
+test('a native interactive resume failure on the still-current Browser is visible', async (t) => {
+  const rows = [
+    { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  let resolveSwitch!: (outcome: SessionSwitchOutcome) => void
+  const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
+  let request: SessionBrowserPanelRequest | undefined
+  let snapshot: SessionBrowserReadSnapshot | undefined
+  const presentation: SessionBrowserPresentation = {
+    open: (next) => {
+      request = next
+      snapshot = undefined
+      return { isDisposed: () => false, setSnapshot: (value) => { snapshot = value }, close: () => {} }
+    },
+    notify: () => {},
+  }
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => gate, presentation)
+  t.after(() => h.app.stop())
+  await h.runSessions()
+  await waitUntil(() => snapshot?.rows.some(row => row.id === 'session-other') === true)
+  request!.onResumeIntent({ sessionId: 'session-other', currentSessionId: undefined, source: 'enter' })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  resolveSwitch({ kind: 'failed', message: 'session open failed: lease held' })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.ok(h.app.notifyTextForTest().includes('lease held'),
+    'a failure on the still-current Browser must stay visible')
+})

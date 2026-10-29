@@ -84,6 +84,9 @@ export const TSP_SUPPORTED_TUI_BUILTINS: ReadonlySet<string> = new Set([
  */
 export const TSP_B2A_RESULT_NOTICE_COMMANDS: ReadonlySet<string> = new Set([
   ...TSP_SUPPORTED_TUI_BUILTINS,
+  // The Session Browser family is admitted only when its presenter is mounted,
+  // but its card-less error result still needs a visible owner.
+  'sessions', 'resume', 'search',
   'logout',
 ])
 

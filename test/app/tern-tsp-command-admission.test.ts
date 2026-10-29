@@ -261,11 +261,13 @@ test('a confirmed title write publishes its own notice only on the card-less TSP
   assert.equal(titleSuccessNoticeVisible({ pituiPresentation: true, backendKind: 'direct' }), false)
 })
 
-test('the card-less result-notice scope is the admitted set plus /logout', () => {
-  // The scope is derived from the ONE admission set (not a second routing list).
+test('the card-less result-notice scope covers admitted builtins, the Browser family and /logout', () => {
+  // The scope is derived from the ONE admission set (not a second routing list);
+  // the conditionally admitted Browser family is included because it has no
+  // command card on the card-less transport.
   assert.deepEqual([...TSP_B2A_RESULT_NOTICE_COMMANDS].sort(),
-    [...TSP_SUPPORTED_TUI_BUILTINS, 'logout'].sort())
-  for (const name of ['new', 'fork', 'title', 'rename', 'copy', 'yolo', 'logout']) {
+    [...TSP_SUPPORTED_TUI_BUILTINS, 'sessions', 'resume', 'search', 'logout'].sort())
+  for (const name of ['new', 'fork', 'title', 'rename', 'copy', 'yolo', 'sessions', 'resume', 'search', 'logout']) {
     assert.ok(TSP_B2A_RESULT_NOTICE_COMMANDS.has(name), `/${name} needs an owner on the card-less route`)
   }
   // The attachment intake's SYNCHRONOUS refusal (a bare command, a malformed
