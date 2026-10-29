@@ -149,6 +149,17 @@ async function waitForRefusal(url: string, timeoutMs = 10_000): Promise<void> {
   throw new Error(`local host entry: the official route did not become ready: ${url}`)
 }
 
+/** Qualification-only publication/stop barrier; production never sets either path. */
+async function waitForQualificationBarrier(path: string): Promise<void> {
+  const deadline = Date.now() + 30_000
+  while (!existsSync(path)) {
+    if (Date.now() > deadline) {
+      throw new Error(`local host entry: the qualification barrier was not released: ${path}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+}
+
 interface HostConnectionService {
   readonly fetch: {
     register(route: {
@@ -248,13 +259,7 @@ async function publishLocalHost(
     // the exact publication gap. Production never sets this variable.
     const barrier = process.env.SPLIT_PROCESS_HOST_PUBLISH_BARRIER
     if (barrier !== undefined && barrier !== '') {
-      const deadline = Date.now() + 30_000
-      while (!existsSync(barrier)) {
-        if (Date.now() > deadline) {
-          throw new Error('local host entry: the qualification publication barrier was not released')
-        }
-        await new Promise(resolve => setTimeout(resolve, 20))
-      }
+      await waitForQualificationBarrier(barrier)
     }
   } catch (error) {
     try {
@@ -372,10 +377,12 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       // second Host shutdown owner.
       let published: PublishedLocalHost | undefined
       let stopping: Promise<void> | undefined
+      let shuttingDown = false
       let resolveStopped: (() => void) | undefined
       const stopped = new Promise<void>(resolve => { resolveStopped = resolve })
       const stop = (code: number, owner: PublishedLocalHost): Promise<void> => {
         if (stopping !== undefined) return stopping
+        shuttingDown = true
         stopping = (async () => {
           const errors: Array<{ step: string; error: unknown }> = []
           // runProfile already consumed the Host-only overlay. Remove only this
@@ -422,21 +429,42 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
             })
             process.exitCode = code
           }
+          // Qualification barrier: hold the completed shutdown before the
+          // signal admission is released, so a launcher can prove that a
+          // repeated signal during shutdown is admitted and ignored instead of
+          // default-terminating the process. Production never sets this.
+          const stopBarrier = process.env.SPLIT_PROCESS_HOST_STOP_BARRIER
+          if (stopBarrier !== undefined && stopBarrier !== '') {
+            await waitForQualificationBarrier(stopBarrier)
+          }
           resolveStopped?.()
         })()
         return stopping
       }
       let pendingStop: number | undefined
       const requestStop = (code: number, signal: 'SIGTERM' | 'SIGINT'): void => {
-        if (pendingStop !== undefined) return
-        pendingStop = code
         const owner = published
+        if (pendingStop !== undefined) {
+          // The admission listeners stay installed for the whole process
+          // lifetime; a repeated signal (supervisor escalation or a second
+          // Ctrl-C) is observed and ignored by the single stop intent instead
+          // of falling through to Node's default termination.
+          writeEntryRecord({
+            m4a0: 'stop-repeat-ignored',
+            processRole: 'host',
+            pid: process.pid,
+            signal,
+            phase: shuttingDown ? 'shutdown' : owner === undefined ? 'publication' : 'running',
+          })
+          return
+        }
+        pendingStop = code
         writeEntryRecord({
           m4a0: 'stop-requested',
           processRole: 'host',
           pid: process.pid,
           signal,
-          phase: owner === undefined ? 'publication' : 'running',
+          phase: shuttingDown ? 'shutdown' : owner === undefined ? 'publication' : 'running',
         })
         if (owner !== undefined) {
           runDetached(`local host: ${signal} shutdown`, () => stop(code, owner), { diag: createEntryDiag('host') })
@@ -455,8 +483,17 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       if (launcherSigterm !== undefined) process.removeListener('SIGTERM', launcherSigterm)
       const launcherSigint = process.listeners('SIGINT').find(listener => !priorSigint.includes(listener))
       if (launcherSigint !== undefined) process.removeListener('SIGINT', launcherSigint)
-      process.once('SIGTERM', () => { requestStop(0, 'SIGTERM') })
-      process.once('SIGINT', () => { requestStop(130, 'SIGINT') })
+      const onSigterm = (): void => { requestStop(0, 'SIGTERM') }
+      const onSigint = (): void => { requestStop(130, 'SIGINT') }
+      process.on('SIGTERM', onSigterm)
+      process.on('SIGINT', onSigint)
+      // Released only once the owner-governed shutdown has completed, so every
+      // signal during startup, publication and shutdown is admitted by the
+      // persistent listener above rather than Node's default action.
+      const releaseSignalAdmission = (): void => {
+        process.removeListener('SIGTERM', onSigterm)
+        process.removeListener('SIGINT', onSigint)
+      }
 
       const publishedHost = await publishLocalHost(handle.ctx, scope, processStartIdentity)
       published = publishedHost
@@ -470,6 +507,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         // available, so run the ordinary owner-governed shutdown WITHOUT ever
         // advertising Ready.
         await stop(pendingStop, publishedHost)
+        releaseSignalAdmission()
         return
       }
       writeEntryRecord({ m4a0: 'ready', ...status, localHost: publishedHost.identity })
@@ -491,6 +529,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         return false
       })
       await stopped
+      releaseSignalAdmission()
     } catch (error) {
       writeEntryRecord({
         m4a0: 'failure',
