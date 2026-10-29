@@ -1604,7 +1604,7 @@ test('withNavigation writes the admission fact BEFORE the body and stops the cap
   const scopeAuthority = installScope(h)
   const intent = {
     scope: scopeAuthority.capture(),
-    admission: { oldOwnerStopped: false },
+    admission: { oldStopAccepted: false },
   }
   // A held writer keeps the drain open: the body must not run until it settles,
   // while the stop has already been dispatched.
@@ -1614,7 +1614,7 @@ test('withNavigation writes the admission fact BEFORE the body and stops the cap
   assert.ok(oldScope !== undefined)
   const writer = h.runtime.withWriter(oldScope, async () => { await writerGate })
   const task = h.runtime.withNavigation(intent, async () => {
-    assert.equal(intent.admission.oldOwnerStopped, true,
+    assert.equal(intent.admission.oldStopAccepted, true,
       'the body must observe the accepted stop fact')
     h.events.push('navigation-body')
     return 'created'
@@ -1634,7 +1634,7 @@ test('a refused navigation stop aborts withNavigation BEFORE its body (create is
   const scopeAuthority = installScope(h)
   const intent = {
     scope: scopeAuthority.capture(),
-    admission: { oldOwnerStopped: false },
+    admission: { oldStopAccepted: false },
   }
   h.bindingOf('session-a')!.setCancelResult({
     ok: false,
@@ -1649,7 +1649,7 @@ test('a refused navigation stop aborts withNavigation BEFORE its body (create is
     'the refused stop aborts the navigation with the typed failure',
   )
   assert.equal(bodyRan, false, 'the transition body never runs')
-  assert.equal(intent.admission.oldOwnerStopped, false, 'no stop may be reported')
+  assert.equal(intent.admission.oldStopAccepted, false, 'no stop may be reported')
   assert.equal(h.core.currentSessionId(), 'session-a')
   assert.equal(h.core.barrier.inTransition, false, 'the aborted admission unfreezes the barrier')
   assert.equal(h.core.barrier.activeWriters, 0)

@@ -2726,8 +2726,9 @@ test('a failed /new releases the in-flight marker, reports the stopped old Turn,
     header: { id: 'b3-c-new-retry-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
     events: sessionEvents('A standing state'),
   })
-  // A RUNNING old owner: the navigation stop is accepted, so the later create
-  // failure must say the old Turn was stopped and cannot be resumed.
+  // A RUNNING old owner: the navigation stop is accepted AND its quiesce
+  // completes before the create, so the later create failure may say the old
+  // Turn was stopped and cannot be resumed.
   const idleGates = new Map<string, Promise<void>>()
   const releaseIdle = new Map<string, () => void>()
   const { owned, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id, idleGates })
@@ -2753,8 +2754,10 @@ test('a failed /new releases the in-flight marker, reports the stopped old Turn,
     const failed = await execute(liveAgentOf(harness, sessionA.id))
     assert.equal(failed?.result.kind, 'error', 'a failed create is a failure, never a silent success')
     assert.match(failed?.result.text ?? '', /controlled create failure/)
-    assert.match(failed?.result.text ?? '', /the previous turn was stopped and cannot be resumed/,
-      'the failure must state that the cancelled old Turn is not rolled back')
+    assert.match(failed?.result.text ?? '', /old turn stopped \(cannot resume\)/,
+      'the failure must state that the quiesced old Turn is not rolled back')
+    assert.doesNotMatch(failed?.result.text ?? '', /turn stop requested \(not yet confirmed\)/,
+      'the quiesce completed before the failure, so the stronger claim is the true one')
     assert.equal(harness.createdSessions.length, 0, 'no child was published')
     await waitUntil('A stays current', () => presentedSessions(owned.pane).at(-1) === sessionA.id, 15_000)
     assert.equal(harness.retirementEvents.filter(event => event === `dispose:${sessionA.id}`).length, 0,
@@ -2770,6 +2773,38 @@ test('a failed /new releases the in-flight marker, reports the stopped old Turn,
       'the committed retry retires A exactly once')
   } finally {
     releaseIdle.get(sessionA.id)?.()
+    // Bounded fixture teardown (the owned runner is closed, not a timing window).
+    await owned.settle()
+  }
+})
+
+test('an accepted stop whose quiesce fails reports "requested, not confirmed" — never a stopped Turn', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-b3-c-new-quiesce-fail-')
+  const sessionA = fakeSession({
+    id: 'b3-c-new-quiesce-fail-a',
+    header: { id: 'b3-c-new-quiesce-fail-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const { owned, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
+  try {
+    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    const agent = liveAgentOf(harness, sessionA.id) as unknown as { whenIdle: () => Promise<void> }
+    const originalWhenIdle = agent.whenIdle
+    // The Host ACCEPTED the cancellation (committed) but the pre-commit
+    // quiesce fails: the old Turn's completion is NOT confirmed.
+    agent.whenIdle = async () => { throw new Error('controlled quiesce failure') }
+    life.defer(() => { agent.whenIdle = originalWhenIdle })
+    const result = await commandOf(owned, 'new')() as { kind: string; text?: string }
+    assert.equal(result.kind, 'error', 'the transition failure is reported')
+    assert.match(result.text ?? '', /controlled quiesce failure/)
+    assert.match(result.text ?? '', /turn stop requested \(not yet confirmed\)/,
+      'an accepted stop is only a request until the quiesce completes')
+    assert.doesNotMatch(result.text ?? '', /old turn stopped \(cannot resume\)/,
+      'the failure must not claim the old Turn already stopped')
+    assert.equal(harness.createdSessions.length, 0, 'no child is published on a quiesce failure')
+    assert.deepEqual(presentedSessions(owned.pane), [sessionA.id], 'A stays current')
+  } finally {
     // Bounded fixture teardown (the owned runner is closed, not a timing window).
     await owned.settle()
   }

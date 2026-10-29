@@ -962,20 +962,22 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
         // SYNCHRONOUSLY: the navigation stop must address exactly the owner
         // the user chose to leave, never a replacement published while this
         // intent waited behind another transition. The runtime fills in
-        // `admission.oldOwnerStopped` before the transaction body runs.
+        // `admission.oldStopAccepted` before the transaction body runs.
         const navigation: NavigationIntent = {
           scope: runner.captureSessionScope(),
-          admission: { oldOwnerStopped: false },
+          admission: { oldStopAccepted: false },
         }
         try {
           return await runner.withSessionTransition(async () => {
-            // Everything below runs AFTER the navigation stop. When that stop
-            // was accepted the old Turn is already stopped and can never be
-            // resumed, so every failure must say so (a cancel is not a
-            // rollback and is not undone by a later create/open failure).
-            const stopped = navigation.admission.oldOwnerStopped
-              ? '; the previous turn was stopped and cannot be resumed'
-              : ''
+            // An accepted stop is only a REQUEST until the transition's
+            // OLD-owner quiesce completes. Every failure states which of the
+            // two proven facts applies, never over-claiming a stopped Turn.
+            const stopNote = (quiesced: boolean): string => {
+              if (!navigation.admission.oldStopAccepted) return ''
+              return quiesced
+                ? '; old turn stopped (cannot resume)'
+                : '; turn stop requested (not yet confirmed)'
+            }
             // The unified transaction: the old session is flushed BEFORE the
             // fresh session is created, the commit is synchronous, and a failure
             // anywhere before the create leaves the current session untouched
@@ -995,9 +997,9 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               // rejection. Any OTHER failure keeps its real diagnostic — never
               // mislabeled as a cancellation.
               if (runner.signal.aborted) {
-                return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopped}` }
+                return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote(false)}` }
               }
-              return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}${stopped}` }
+              return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}${stopNote(false)}` }
             }
             // Coordinate with the newest sessionless `/model` global-default write
             // BEFORE dispatching the create (v2 §0.8.3/§0.8.4): quiesce EVERY
@@ -1009,7 +1011,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             } catch (error) {
               // The lifetime signal aborted while waiting for the default write:
               // no create is dispatched (the old session stays current).
-              return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopped}` }
+              return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote(false)}` }
             }
             const result = await runner.transitionTo({
               target: { id: String(sessionId), header: { cwd } },
@@ -1044,7 +1046,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
                 // published id) is already recorded in the diagnostic above.
                 if (result.error.ownership === 'superseded') return { kind: 'success' }
               }
-              return { kind: 'error', text: `${result.message}${stopped}` }
+              return { kind: 'error', text: `${result.message}${stopNote(result.oldOwnerQuiesced === true)}` }
             }
             // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
             // drop the unpinned ones now, never before (a failed create keeps
