@@ -30,3 +30,12 @@ no fd/fdfind on PATH
 # them, so a skip for either reason means the environment changed under us.
 # Accepting them here would report that change as a healthy run; leaving them
 # out makes it FAIL, which is the point.
+
+# The F6b packed-path case installs the shipped tarball into an isolated DSH
+# profile and drives the real `dsh` CLI under a PTY. The product lane provisions
+# NEITHER a packed tarball NOR the DSH CLI (`@deepseek-ai/dsh` is not a workspace
+# dependency), so the case cannot execute there. Its evidence is produced from the
+# packed artifact by the stage's recorded run (`temp/.../06-f6b-packed/`, quoted in
+# the PR), and provisioning the CLI inside the shard is a tracked follow-up — this
+# class names the missing artifact explicitly so it can never hide a broken build.
+BLOCKED: no packed tarball provisioned in this lane \(F6b runs from the packed artifact separately\)
