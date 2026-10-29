@@ -12,8 +12,9 @@
  *      NOT import `@xmoon76/pi-tui` externally (it is bundled);
  *   3. parse — every `.mjs` passes `node --check`; every `.d.mts` parses via
  *      the TypeScript compiler when available;
- *   4. install — the tarball installs standalone (`npm install --omit=dev`
- *      in a fresh temp project), both `exports` entries import, and
+ *   4. install — the tarball installs with the exact declared DSH Host
+ *      (`npm install --omit=dev` in a fresh temp project), public `exports`
+ *      entries import, and
  *      `@xmoon76/pi-tui` is NOT resolvable from the installed package.
  *
  * Usage: node scripts/tarball-smoke.mjs [path-to-tgz]
@@ -55,6 +56,7 @@ import {
   assertSourceResolution,
   isDshPackage,
   loadDshDistribution,
+  npmDshVersion,
   prepareDshInstall,
   restoreDshInstall,
   sourceInstallPackages,
@@ -194,12 +196,14 @@ function sourceInstallEnvironment() {
 }
 
 function resultDetail(result) {
-  return [result?.stderr, result?.stdout, result?.error?.message]
+  const lines = [result?.stderr, result?.stdout, result?.error?.message]
     .filter(value => typeof value === 'string' && value.length > 0)
-    .join(' ')
+    .join('\n')
     .split(/\r?\n/u)
-    .slice(-20)
-    .join(' ')
+  return (lines.length <= 120
+    ? lines
+    : [...lines.slice(0, 80), '[... output truncated ...]', ...lines.slice(-40)])
+    .join('\n')
 }
 
 function runSourceInstall(tarball, candidate, distribution, probeDir) {
@@ -442,15 +446,35 @@ function main() {
         installSucceeded = sourceInstall.installed
       } else {
         mkdirSync(probeDir)
-        writeFileSync(join(probeDir, 'package.json'), JSON.stringify({ name: 'tarball-smoke-probe', private: true }))
+        const dshPeers = Object.keys(pkg.peerDependencies ?? {}).filter(isDshPackage)
+        let installLabel = 'tarball installs standalone (npm install --omit=dev)'
+        if (dshPeers.length === 0) {
+          // A synthetic fixture without a DSH peer family is not a published
+          // DSH plugin; keep the plain standalone probe.
+          writeFileSync(join(probeDir, 'package.json'), JSON.stringify({ name: 'tarball-smoke-probe', private: true }))
+        } else {
+          // The published bundle is a DSH plugin: the Host owns its peer family.
+          // A bare npm project auto-installs each DSH peer independently, mixing
+          // stale/latest and next release trains instead of testing a real Host.
+          // Include the Host and the exact DSH peers this candidate requires;
+          // this is probe-only and does not alter the published peer ranges.
+          const dshVersion = npmDshVersion()
+          const dependencies = { '@deepseek-ai/dsh': dshVersion }
+          for (const name of dshPeers) dependencies[name] = dshVersion
+          writeFileSync(join(probeDir, 'package.json'), JSON.stringify({
+            name: 'tarball-smoke-probe',
+            private: true,
+            dependencies,
+          }))
+          installLabel = 'tarball installs with exact DSH Host (npm install --omit=dev)'
+        }
         const install = run('npm', [
           'install', '--omit=dev', '--no-save',
           '--cache', join(workDir, 'npm-cache'),
           tarball,
         ], { cwd: probeDir, timeout: 180_000 })
         installSucceeded = install.status === 0
-        check('tarball installs standalone (npm install --omit=dev)', installSucceeded,
-          installSucceeded ? '' : resultDetail(install))
+        check(installLabel, installSucceeded, installSucceeded ? '' : resultDetail(install))
       }
       if (installSucceeded) {
         const installed = join(probeDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')

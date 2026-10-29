@@ -888,7 +888,12 @@ test('a cross-owner gesture does nothing: a rail press released in the content c
   const h = open()
   await h.vt.waitForRender()
   ;(h as unknown as { invoke(line: string): unknown }).invoke('/login')
-  await h.vt.waitForRender()
+  await waitForFrame(
+    h.view,
+    frame => frame.includes('Acme Gateway'),
+    () => h.vt.waitForRender(),
+    'the Models provider row must be painted before the cross-owner gesture',
+  )
   const railModels = rowOf(h, 'Models')
   const providerRow = rowOf(h, 'Acme Gateway')
   // A press on the RAIL, released in the CONTENT column: neither owner may
