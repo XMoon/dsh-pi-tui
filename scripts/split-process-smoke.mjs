@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * M4-B1 real-OS split-process authenticated-link smoke.
+ * M4-B1/B2-HF real-OS split-process authenticated-link smoke.
  *
  * Installs the candidate tarball into an isolated `pi-tui` profile using the
  * published exact DSH family, then drives the two internal process entries
@@ -757,6 +757,7 @@ async function main() {
     ]) {
       assert(hostReady.services?.[service] === true, `T21 ${service} is not reported live`)
     }
+    assert(hostReady.terminalProgressWatches === 0, 'T21 the Host must start with no terminal-progress watchers')
     assert(hostReady.webServer?.host === '127.0.0.1' && hostReady.webServer.port > 0, 'T01 loopback webserver not ready')
     assert(hostReady.entries.filter(entry => entry.name === '@deepseek-ai/dsh-client-connection').length === 1, 'T01 duplicate Connection row')
     assert(hostReady.entries.filter(entry => entry.name === '@deepseek-ai/dsh-api-remotes').length === 1, 'T01 duplicate api-remotes row')
@@ -807,6 +808,7 @@ async function main() {
       builtInHostRuntimeRows: 1,
       performanceOwners: hostReady.ownerEntries.performance,
       visualToolOwners: hostReady.ownerEntries.visualTools,
+      terminalProgressWatches: hostReady.terminalProgressWatches,
     })
     const origin = hostReady.localHost.origin
     const scopeDir = join(dshHome, 'run', 'dsh-pi-tui', hostReady.localHost.scopeId)
@@ -966,6 +968,20 @@ async function main() {
     for (const field of ['officialSessionList', 'privateFileRpc', 'terminalSnapshot', 'cleaned']) {
       assert(repeatedProof[field] === true, `T25 repeat ${field} is not proven`)
     }
+    // T24 Host-side release evidence: the opening snapshot is produced by the
+    // Host watch() after registering its subscriber, so a Host status read
+    // after the proof must show that subscriber gone. A local Client iterator
+    // ending alone cannot satisfy this assertion.
+    let hostWatchStatus = await hostStatus(mainHost)
+    const watchReleaseDeadline = Date.now() + 5_000
+    while (hostWatchStatus.terminalProgressWatches !== 0 && Date.now() < watchReleaseDeadline) {
+      await sleep(25)
+      hostWatchStatus = await hostStatus(mainHost)
+    }
+    assert(
+      hostWatchStatus.terminalProgressWatches === 0,
+      `T24 the Host terminal-progress watcher leaked: ${JSON.stringify(hostWatchStatus.terminalProgressWatches)}`,
+    )
     trace('t22-t24-host-rpc-proof', {
       hostPid: hostRpcProof.hostPid,
       hostInstanceId: hostRpcProof.hostInstanceId,
@@ -974,6 +990,8 @@ async function main() {
       privateFileRpc: 'ok/unavailable',
       terminalSnapshot: 'snapshot:false:idle',
       cleaned: true,
+      hostTerminalProgressWatchesBefore: hostReady.terminalProgressWatches,
+      hostTerminalProgressWatchesAfter: hostWatchStatus.terminalProgressWatches,
     })
     trace('t25-repeat-probe', {
       hostPid: repeatedProof.hostPid,
@@ -1039,9 +1057,11 @@ async function main() {
     assert(noCookieFailure.code === 'HOST_UNRESPONSIVE', `T02 cookie omission code was ${JSON.stringify(noCookieFailure.code ?? noCookieFailure.error)}`)
     const noCookieCleanup = noCookie.records.find(record => record.m4a0 === 'cleanup' || record.m4a0 === 'cleanup-failure')
     assert(noCookieCleanup !== undefined, 'T02 cookie omission emitted no cleanup outcome')
+    const noCookieReady = noCookie.records.some(record => record.m4a0 === 'ready')
+    assert(!noCookieReady, 'T26 the no-Cookie Client must never emit ready')
     assert(alive(hostReady.pid), 'T02 cookie omission killed the Host')
     trace('t02-cookie-mutation', { code: 'HOST_UNRESPONSIVE', cleanup: noCookieCleanup.m4a0, hostAlive: true })
-    trace('t26-no-cookie', { code: 'HOST_UNRESPONSIVE', readyEmitted: false, hostAlive: true })
+    trace('t26-no-cookie', { code: 'HOST_UNRESPONSIVE', readyEmitted: noCookieReady, hostAlive: true })
 
     // T14 startup fatal probe: a fatal that arrives before startLocalTransport
     // returns must reject the startup exactly once, emit no ready, and release

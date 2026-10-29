@@ -12,7 +12,7 @@
  * @module app/remote-process/host-bootstrap
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import { symbols, type Context } from '@deepseek-ai/cordis'
 import {
   assertRemoteHostPrerequisites,
   REMOTE_HOST_PREREQUISITE_SERVICES,
@@ -57,6 +57,7 @@ export interface HostEntryStatus {
   readonly sessionOpen: false
   readonly profile: string
   readonly services: Record<string, boolean>
+  readonly terminalProgressWatches: number
   readonly ownerEntries: Record<string, readonly string[]>
   readonly entries: ReadonlyArray<{ id: string; name: string; state: string }>
   readonly forbiddenActive: readonly string[]
@@ -75,6 +76,37 @@ function fiberStateLabel(entry: LoaderEntryLike): string {
 interface TypertBindingLike {
   readonly serviceKey?: unknown
   readonly namespace?: unknown
+}
+
+/** Minimal structural view of the private terminal-progress watch registry. */
+interface TerminalProgressRecordLike {
+  readonly subscribers?: ReadonlySet<unknown>
+}
+
+interface TerminalProgressServiceLike {
+  readonly records?: ReadonlyMap<string, TerminalProgressRecordLike>
+}
+
+/**
+ * Count the Host-side terminal-progress subscribers that are still live. This
+ * is qualification evidence only: a Client-local iterator ending does not
+ * prove the Host watch was cancelled, so the split-process smoke reads this
+ * count from the Host status after the probe.
+ */
+function terminalProgressWatchCount(context: Context): number {
+  const service = context.reflect.get('piTuiTerminalProgress') as
+    (TerminalProgressServiceLike & { readonly [symbols.original]?: TerminalProgressServiceLike }) | undefined
+  if (service === undefined) {
+    throw new Error('local host entry: the private terminal-progress service is not readable')
+  }
+  const raw = service[symbols.original] ?? service
+  const records = raw.records
+  if (!(records instanceof Map)) {
+    throw new Error('local host entry: the private terminal-progress service has no watch registry')
+  }
+  let watches = 0
+  for (const record of records.values()) watches += record.subscribers?.size ?? 0
+  return watches
 }
 
 /** The official Session-serving services whose Typert namespace must be real. */
@@ -242,6 +274,7 @@ export function collectHostEntryStatus(
     sessionOpen: false,
     profile: identity.profile,
     services,
+    terminalProgressWatches: terminalProgressWatchCount(context),
     ownerEntries,
     entries: entries.map(entry => ({
       id: entry.options.id,

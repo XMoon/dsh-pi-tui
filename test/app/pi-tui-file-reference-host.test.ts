@@ -108,8 +108,8 @@ test('the composition registers the endpoint in its OWN fiber and disposal withd
   const deps = hostDeps(life, {})
   const ctx = new Context()
   await ctx.plugin(TypertRegistry)
-  // The composition owns the package contribution; the service row owns only
-  // its binding (see host-runtime.ts step 0a/0b).
+  // The built-in PiTui Host Runtime owns the package contribution; this
+  // fixture reproduces its two independent fibers (contribution + service row).
   const contribution = ctx.inject(['typert'], contributionCtx => {
     contributionCtx.effect(
       () => contributionCtx.typert.register(PI_TUI_HOST_CONTRIBUTION),

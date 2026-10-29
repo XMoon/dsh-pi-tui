@@ -123,7 +123,10 @@ function hostContext(rows: FixtureRow[], overrides: Record<string, unknown> = {}
   services.set('fileUploads', typertService('fileUploads', 'fileUploads'))
   services.set('settingsController', typertService('settingsController', 'settings'))
   services.set('piTuiFileReferences', typertService('piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE))
-  services.set('piTuiTerminalProgress', typertService('piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE))
+  services.set('piTuiTerminalProgress', {
+    ...typertService('piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE),
+    records: new Map(),
+  })
   services.set(PI_TUI_HOST_READY_SERVICE, {})
   services.set('piTuiPerformanceReady', {})
   for (const [name, value] of Object.entries(overrides)) services.set(name, value)
@@ -138,12 +141,27 @@ test('the readiness audit passes only when every owner row and binding is real',
   const status = collectHostEntryStatus(hostContext(baselineRows()), { profile: 'pi-tui' })
   assert.equal(status.phase, 'ready')
   assert.equal(status.sessionOpen, false, 'Host RPC readiness is not an open Client Session')
+  assert.equal(status.terminalProgressWatches, 0, 'the Host reports no live terminal-progress watch')
   assert.deepEqual(status.ownerEntries.piTuiHostRuntime, ['split-host-pi-tui-runtime'])
   assert.deepEqual(status.ownerEntries.performance, ['pi-tui-performance-host'])
   assert.deepEqual(status.ownerEntries.visualTools, ['pi-tui-visual-tools'])
   for (const { owner, id } of FOUNDATION_ROWS) {
     assert.deepEqual(status.ownerEntries[owner], [id], `${owner} owner row mismatch`)
   }
+})
+
+test('the Host status reports live terminal-progress subscribers, not a cached flag', () => {
+  const watched = hostContext(baselineRows(), {
+    piTuiTerminalProgress: {
+      ...typertService('piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE),
+      records: new Map([['watched-session', { subscribers: new Set([{}, {}]) }]]),
+    },
+  })
+  assert.equal(
+    collectHostEntryStatus(watched, { profile: 'pi-tui' }).terminalProgressWatches,
+    2,
+    'the status must count the actual subscribers in the Host service',
+  )
 })
 
 test('a missing foundation row, a missing binding or a duplicate row fails the audit', () => {
