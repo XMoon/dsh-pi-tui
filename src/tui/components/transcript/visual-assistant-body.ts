@@ -68,6 +68,17 @@ export interface VisualAssistantPaintedHits {
   readonly thumbnailBody?: { readonly startRow: number; readonly endRow: number; readonly endCol: number }
 }
 
+/** One figure's stable layout entry from the LAST render: the actual figure
+ *  object (so SIXEL hit state can be queried live later), its painted top and
+ *  its action-row snapshot. `thumbnailBody` is never frozen here. */
+interface PaintedFigureEntry {
+  readonly figure: VisualFigureComponent
+  readonly ref: string
+  readonly top: number
+  readonly height: number
+  readonly actions: readonly VisualFigureActionHit[]
+}
+
 /** The ordered Assistant body: no bullet, no row identity of its own. */
 export class VisualAssistantBody implements Component {
   private readonly children: Component[] = []
@@ -75,8 +86,10 @@ export class VisualAssistantBody implements Component {
    *  order, tail included). Selection order follows this, never the
    *  publication list, which is authority order only. */
   private readonly figureOrder: VisualFigureComponent[] = []
-  /** The hit geometry of the LAST render (width-fenced like every painted hit). */
-  private paintedHits: { readonly width: number; readonly hits: readonly VisualAssistantPaintedHits[] } | undefined
+  /** The hit geometry of the LAST render (width-fenced like every painted hit).
+   *  Only the stable row layout is stored; each figure's live pixel body is
+   *  queried at hit time. */
+  private paintedFigures: { readonly width: number; readonly entries: readonly PaintedFigureEntry[] } | undefined
 
   constructor(options: VisualAssistantBodyOptions) {
     const prefixByBlock = new Map<number, string>()
@@ -162,12 +175,28 @@ export class VisualAssistantBody implements Component {
    * The figure hit geometry of the LAST paint at `width` (Assistant-body row
    * coordinates), or an empty list when the body has not rendered at that
    * width. The row map and the release click both read this one projection.
+   *
+   * Only the STABLE layout (top/height/actions) comes from the last render:
+   * each figure's live `thumbnailBody` is queried from the SAME figure object
+   * now, so a SIXEL raster that committed after the render is visible without
+   * another component render. Kitty keeps its render-time snapshot.
    * @param width - the content width the body was last rendered at.
    * @returns the painted figure cells.
    */
   paintedVisualHits(width: number): readonly VisualAssistantPaintedHits[] {
-    if (this.paintedHits === undefined || this.paintedHits.width !== width) return []
-    return this.paintedHits.hits
+    const painted = this.paintedFigures
+    if (painted === undefined || painted.width !== width) return []
+    return painted.entries.map(entry => {
+      const live = entry.figure.paintedHitMap(width)
+      const thumbnailBody = live?.thumbnailBody
+      return {
+        ref: entry.ref,
+        top: entry.top,
+        height: entry.height,
+        actions: entry.actions,
+        ...(thumbnailBody === undefined ? {} : { thumbnailBody }),
+      }
+    })
   }
 
   invalidate(): void {
@@ -180,18 +209,21 @@ export class VisualAssistantBody implements Component {
 
   render(width: number): string[] {
     const lines: string[] = []
-    const hits: VisualAssistantPaintedHits[] = []
+    const entries: PaintedFigureEntry[] = []
     for (const child of this.children) {
       if (child instanceof VisualFigureComponent) {
         const childLines = child.render(width)
         const painted = child.paintedHitMap(width)
         if (painted !== undefined) {
-          hits.push({
+          // Snapshot ONLY the stable row layout. The pixel body is queried
+          // live by `paintedVisualHits` because a SIXEL raster is committed
+          // AFTER this render (the Screen materializes it).
+          entries.push({
+            figure: child,
             ref: child.ref,
             top: lines.length,
             height: painted.height,
             actions: painted.actions,
-            ...(painted.thumbnailBody === undefined ? {} : { thumbnailBody: painted.thumbnailBody }),
           })
         }
         lines.push(...childLines)
@@ -199,7 +231,7 @@ export class VisualAssistantBody implements Component {
       }
       lines.push(...child.render(width))
     }
-    this.paintedHits = { width, hits }
+    this.paintedFigures = { width, entries }
     return lines
   }
 }

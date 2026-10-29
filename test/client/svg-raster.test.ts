@@ -16,6 +16,8 @@ import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { createSvgRasterizer, rasterizeSvg, type SvgRasterize } from '../../src/client/media/svg/rasterize.ts'
 import { admitSvg } from '../../src/domain/visual/svg-admission.ts'
 import { SvgThumbnail } from '../../src/tui/components/media/svg-thumbnail.ts'
+import { MAX_IMAGE_ROWS } from '../../src/tui/components/media/image-thumbnail.ts'
+import type { ImageGraphics, PixelBody } from '../../src/tui/graphics/native-image.ts'
 
 const SVG_SOURCE = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'
   + '<rect width="64" height="32" fill="#3b82f6"/>'
@@ -479,3 +481,132 @@ test('an iTerm2 or image-less surface paints no SVG pixel body and never starts 
     resetCapabilitiesCache()
   }
 })
+
+// ── Image-8 / I8-2B: SIXEL SVG thumbnails ──────────────────────────────────
+
+const SVG_SIXEL_DCS = '\x1bP0;1;q"1;1;320;160#0;2;100;0;0~\x1b\\'
+
+/**
+ * A narrow Direct SIXEL owner face. Every bound occurrence renders the trusted
+ * DCS plus layout rows; `paintedBodyAt` answers only after the test says the
+ * Screen committed that frame, exactly like the real owner's last-committed
+ * footprint. The recorded calls prove the row ceiling the component requested.
+ */
+function sixelThumbnailGraphics(state: { committed: boolean; renderedWidth?: number }): {
+  graphics: ImageGraphics
+  calls: Array<{ readonly maxHeightCells: number; readonly maxWidthCells: number; readonly widthPx: number; readonly heightPx: number }>
+  disposals: () => number
+} {
+  const calls: Array<{ maxHeightCells: number; maxWidthCells: number; widthPx: number; heightPx: number }> = []
+  let disposals = 0
+  const graphics = {
+    mode: 'sixel',
+    canPaint: () => true,
+    image: (source: { widthPx: number; heightPx: number }, options: { maxHeightCells?: number; maxWidthCells: number }) => {
+      calls.push({
+        maxHeightCells: options.maxHeightCells ?? 0,
+        maxWidthCells: options.maxWidthCells,
+        widthPx: source.widthPx,
+        heightPx: source.heightPx,
+      })
+      const body: PixelBody = {
+        render: (width: number) => {
+          state.renderedWidth = width
+          return [SVG_SIXEL_DCS, '', '']
+        },
+        invalidate: () => {},
+        paintedBodyAt: (width: number) => (state.committed && state.renderedWidth === width ? { width, columns: 5, rows: 2 } : undefined),
+        dispose: () => { disposals += 1 },
+      }
+      return body
+    },
+    terminal: {} as never,
+    screen: {} as never,
+    observeScreen: () => {},
+    resample: () => {},
+    dispose: () => {},
+  } as unknown as ImageGraphics
+  return { graphics, calls, disposals: () => disposals }
+}
+
+/** Drive the real loader's settle chain to its promise continuation. */
+async function settleRaster(): Promise<void> {
+  for (let index = 0; index < 40; index += 1) await new Promise(resolve => setImmediate(resolve))
+}
+
+test('a SIXEL SVG thumbnail renders its candidate, and only the committed frame reports hits', async () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  try {
+    const state = { committed: false }
+    const { graphics, calls } = sixelThumbnailGraphics(state)
+    const loader = new SvgRasterLoader(async (_source, options) => ({
+      png: new Uint8Array(),
+      base64: TINY_PNG_BASE64,
+      widthPx: options.targetWidth,
+      heightPx: Math.max(1, Math.round(options.targetWidth / 2)),
+    }))
+    const thumbnail = new SvgThumbnail('sixel-digest', SVG_SOURCE, 320, loader, { fallbackColor: text => text }, () => {}, undefined, graphics)
+    const loading = thumbnail.render(100)
+    assert.ok(loading.join('\n').includes('Rendering SVG image'), loading.join('\n'))
+    assert.equal(thumbnail.paintedImageBody(100), undefined, 'a loading render is not a pixel body')
+    await settleRaster()
+    await settleRaster()
+    const ready = thumbnail.render(100)
+    assert.ok(ready.join('\n').includes(SVG_SIXEL_DCS), `the SIXEL candidate is painted: ${JSON.stringify(ready)}`)
+    assert.ok(!ready.join('\n').includes('\x1b_G'), 'no Kitty APC on the SIXEL path')
+    assert.deepEqual(calls.map(call => call.maxHeightCells), [MAX_IMAGE_ROWS],
+      'the component still grants the full image row budget')
+    // The Screen has not committed the raster yet: the candidate is not pixels.
+    assert.equal(thumbnail.paintedImageBody(100), undefined, 'an uncommitted candidate is not clickable')
+    assert.equal(thumbnail.paintedPixelSize(100), undefined, 'and it reports no painted pixel size')
+    state.committed = true
+    // No second render: the same occurrence answers from the committed frame.
+    assert.deepEqual(thumbnail.paintedImageBody(100), { rows: 2, endCol: 5 })
+    assert.deepEqual(thumbnail.paintedPixelSize(100), { widthPx: 320, heightPx: 160 })
+    assert.equal(thumbnail.paintedImageBody(80), undefined, 'the footprint is fenced to the painted width')
+    thumbnail.dispose()
+    assert.equal(thumbnail.paintedImageBody(100), undefined, 'dispose drops the occurrence and its hit')
+    loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('a fixed SIXEL row budget caps the encoder rows and never starts work for one row', async () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  try {
+    let rasterCalls = 0
+    const immediateLoader = (): SvgRasterLoader => new SvgRasterLoader(async (_source, options) => {
+      rasterCalls += 1
+      return { png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: options.targetWidth, heightPx: 32 }
+    })
+    const state = { committed: false }
+    const one = sixelThumbnailGraphics(state)
+    const oneRow = new SvgThumbnail('fixed-1', SVG_SOURCE, 320, immediateLoader(), { fallbackColor: text => text }, () => {}, 1, one.graphics)
+    assert.deepEqual(oneRow.render(100), [''], 'one fixed row paints exactly the spacer')
+    assert.equal(rasterCalls, 0, 'no raster starts without an image row grant')
+    assert.equal(one.calls.length, 0, 'no SIXEL occurrence is bound')
+    oneRow.dispose()
+
+    const zeroRow = new SvgThumbnail('fixed-0', SVG_SOURCE, 320, immediateLoader(), { fallbackColor: text => text }, () => {}, 0, sixelThumbnailGraphics(state).graphics)
+    assert.deepEqual(zeroRow.render(100), [], 'zero fixed rows paint nothing')
+    assert.equal(rasterCalls, 0)
+    zeroRow.dispose()
+
+    const five = sixelThumbnailGraphics(state)
+    const fiveRows = new SvgThumbnail('fixed-5', SVG_SOURCE, 320, immediateLoader(), { fallbackColor: text => text }, () => {}, 5, five.graphics)
+    fiveRows.render(100)
+    await settleRaster()
+    await settleRaster()
+    const lines = fiveRows.render(100)
+    assert.equal(lines.length, 5, 'the fixed row budget is preserved')
+    assert.equal(lines[0], '', 'the leading spacer stays first')
+    assert.ok(lines.join('\n').includes(SVG_SIXEL_DCS))
+    assert.equal(five.calls.length, 1)
+    assert.equal(five.calls[0]!.maxHeightCells, 4, 'fixedRows=5 grants four real image rows')
+    fiveRows.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+

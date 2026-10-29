@@ -15,6 +15,7 @@ import type { ChartFact } from '../../src/domain/visual/chart.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 import { VisualFigureComponent } from '../../src/tui/components/transcript/visual-figure.ts'
 import { color } from '../../src/tui/theme/runtime.ts'
+import type { ImageGraphics, PixelBody } from '../../src/tui/graphics/native-image.ts'
 
 const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 
@@ -249,4 +250,86 @@ test('a narrow action row drops whole labels instead of painting half a button',
   assert.ok(hits !== undefined)
   assert.deepEqual(hits.actions.map(hit => hit.action), ['view'])
   narrow.dispose()
+})
+
+// ── Image-8 / I8-2B: SIXEL post-commit pixel hit ──────────────────────────
+
+const SIXEL_PLACEMENT = '\x1bP0;1;q"1;1;320;160#0;2;100;0;0~\x1b\\'
+
+/** A Direct SIXEL owner face whose committed footprint is controlled by the
+ *  test: the component renders before the Screen materializes the raster. */
+function sixelFigureGraphics(state: { committed: boolean; rows: number; columns: number }): ImageGraphics {
+  return {
+    mode: 'sixel',
+    canPaint: () => true,
+    image: () => {
+      const body: PixelBody = {
+        render: () => [SIXEL_PLACEMENT, '', ''],
+        invalidate: () => {},
+        paintedBodyAt: (width: number) => (state.committed ? { width, columns: state.columns, rows: state.rows } : undefined),
+        dispose: () => {},
+      }
+      return body
+    },
+    terminal: {} as never,
+    screen: {} as never,
+    observeScreen: () => {},
+    resample: () => {},
+    dispose: () => {},
+  } as unknown as ImageGraphics
+}
+
+async function drainRaster(): Promise<void> {
+  for (let index = 0; index < 40; index += 1) await new Promise(resolve => setImmediate(resolve))
+}
+
+test('a SIXEL figure reports its pixel hit only after the Screen commits, without another render', async () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  try {
+    const state = { committed: false, rows: 3, columns: 8 }
+    const loader = new SvgRasterLoader(async (_source, options) => ({
+      png: new Uint8Array(),
+      base64: TINY_PNG_BASE64,
+      widthPx: options.targetWidth,
+      heightPx: Math.max(1, Math.round(options.targetWidth / 2)),
+    }))
+    const figure = figureOf(svgPublication(), {
+      svgLoader: loader,
+      svgTheme: { fallbackColor: text => text },
+      svgAdmissionWidth: 640,
+      graphics: sixelFigureGraphics(state),
+    })
+    figure.render(100)
+    await drainRaster()
+    await drainRaster()
+    const lines = figure.render(100)
+    const before = figure.paintedHitMap(100)
+    assert.ok(before !== undefined, 'the figure painted its action layout')
+    assert.equal(before.thumbnailBody, undefined, 'an uncommitted candidate registers no pixel body')
+    const stable = { height: before.height, actions: before.actions }
+
+    state.committed = true
+    // The SAME query, no render: the committed footprint is now the hit.
+    const after = figure.paintedHitMap(100)
+    assert.ok(after !== undefined)
+    assert.ok(after.thumbnailBody !== undefined, 'the committed frame reports a pixel body')
+    const body = after.thumbnailBody!
+    assert.ok(body.startRow > 0 && body.endRow > body.startRow)
+    assert.equal(body.endRow - body.startRow, 3, 'the footprint rows come from the owner')
+    assert.equal(body.endCol, 8)
+    assert.equal(after.height, stable.height, 'the asynchronous raster never changes the figure height')
+    assert.deepEqual(after.actions, stable.actions, 'action rows stay the render-time snapshot')
+    // The first painted row is the DCS candidate at the figure-relative index.
+    assert.ok(lines[body.startRow]!.includes(SIXEL_PLACEMENT), 'the hit starts at the real DCS row')
+
+    state.rows = 99
+    assert.equal(figure.paintedHitMap(100)?.thumbnailBody, undefined, 'an over-budget footprint is never a hit')
+    state.rows = 3
+    state.columns = 101
+    assert.equal(figure.paintedHitMap(100)?.thumbnailBody, undefined, 'a footprint wider than the grant is never a hit')
+    figure.dispose()
+    loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
 })
