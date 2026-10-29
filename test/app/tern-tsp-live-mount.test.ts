@@ -744,6 +744,19 @@ test('A-10b: an idle authoritative queue explains the next-prompt wake; local-on
       tail: [],
       running: true,
     } as never)
+    // Re-establish the parked state, then transition directly to running: this
+    // proves the parked → running retirement, not just local → running.
+    harness.surface.display.setPendingInputPresentation({
+      queued: [{ id: 'q-parked-again', text: 'parked again', mode: 'followup' }],
+      tail: [],
+      running: false,
+    } as never)
+    await waitUntil('the parked hint returns', () => foldWireNodes(harness.tern.frames).some(node => node.id === 'dock.queue-parked-hint'))
+    harness.surface.display.setPendingInputPresentation({
+      queued: [{ id: 'q-running', text: 'running queue text', mode: 'followup' }],
+      tail: [],
+      running: true,
+    } as never)
     await waitUntil('the running queue row', () => lastFrame(harness.tern.output.text()).includes('running queue text'))
     wire = harness.tern.output.text()
     const running = lastFrame(wire)
