@@ -610,3 +610,26 @@ test('a fixed SIXEL row budget caps the encoder rows and never starts work for o
   }
 })
 
+
+test('Kitty keeps its fixedRows=1 loading/status behavior while SIXEL uses the spacer rule', async () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  try {
+    let rasterCalls = 0
+    const loader = new SvgRasterLoader(async (_source, options) => {
+      rasterCalls += 1
+      return { png: new Uint8Array(), base64: TINY_PNG_BASE64, widthPx: options.targetWidth, heightPx: 32 }
+    })
+    const thumbnail = new SvgThumbnail('kitty-fixed-1', SVG_SOURCE, 320, loader, { fallbackColor: text => text }, () => {}, 1)
+    const loading = thumbnail.render(100)
+    assert.equal(loading.length, 1)
+    assert.ok(loading[0]!.includes('Rendering SVG image'), `Kitty keeps its loading row: ${JSON.stringify(loading)}`)
+    assert.equal(rasterCalls, 1, 'Kitty still starts the raster for its existing fixed-row behavior')
+    await settleRaster()
+    const ready = thumbnail.render(100)
+    assert.deepEqual(ready, [''], 'the settled Kitty body is the one reserved spacer row')
+    thumbnail.dispose()
+    loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})

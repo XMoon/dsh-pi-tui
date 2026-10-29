@@ -47,7 +47,7 @@ import type { TuiAppEvents } from '../../src/tui-app.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { rasterizeSvg } from '../../src/client/media/svg/rasterize.ts'
-import { setAssistantVisualPresentation, type VisualPresentationKey } from '../../src/domain/visual/presentation.ts'
+import { clearAssistantVisualPresentation, setAssistantVisualPresentation, type VisualPresentationKey } from '../../src/domain/visual/presentation.ts'
 import { SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
 import { svgFactFromArgs, svgHumanText } from '../../src/domain/visual/svg.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
@@ -131,6 +131,16 @@ async function until(predicate: () => boolean, label: string, timeoutMs = 30_000
  */
 function tick(ms = 25): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+/**
+ * Wait out the fork's DOUBLE_CLICK_INTERVAL_MS window before the next pointer
+ * gesture at the same cell. This is the surface's own contract (a second
+ * same-cell press within 500 ms is a word-selection double click and withholds
+ * the release callback), not a blind UI sleep.
+ */
+function settlePointerWindow(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 600))
 }
 
 function fill(width: number, height: number, color: (x: number, y: number) => [number, number, number, number]): Uint8Array {
@@ -328,7 +338,7 @@ function transcriptWith(ref: {
 
 interface TranscriptImageRef {
   readonly attachmentId: string
-  readonly mediaType: 'image/png' | 'image/jpeg' | 'image/webp'
+  readonly mediaType: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
   readonly bytes: number
   readonly width: number
   readonly height: number
@@ -368,6 +378,17 @@ function rowOf(text: string, needle: string): number {
 async function nextRaster(terminal: SixelAppTerminal, before: number, label: string): Promise<string> {
   await until(() => paintedRasters(terminal).length > before, label)
   return paintedRasters(terminal).at(-1)!
+}
+
+/** Wait until the flushed viewport no longer paints the needle. */
+async function waitViewportGone(terminal: SixelAppTerminal, needle: string, label: string, timeoutMs = 30_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const view = await viewportOf(terminal)
+    if (!view.includes(needle)) return
+    await tick()
+  }
+  assert.fail(`timed out waiting for ${label}`)
 }
 
 /** Wait until the flushed viewport paints the needle and return that text. */
@@ -714,7 +735,12 @@ test('E2-01: /view-image LIST→Viewer→Esc back→same list→Esc close restor
   terminal.sendInput('\r')
   const dcs = await nextRaster(terminal, beforeViewer, 'the viewer raster through the Direct SIXEL chain')
   const decoded = decodeSixel(dcs)
-  assert.ok(decoded.width > 0 && decoded.height > 0, 'the Viewer wrote a complete DCS')
+  assert.equal(decoded.width, 80, 'the Viewer paints the source width, not an enlarged variant')
+  assert.ok(decoded.height > 0 && decoded.height % 6 === 0, 'the Viewer raster is a complete band-aligned image')
+  const [topR, topG, topB] = pixelAt(decoded, 4, 4)
+  assert.ok(topR > 180 && topG < 80 && topB < 80, `the PNG top band is really red: ${topR},${topG},${topB}`)
+  const [, , bottomBlue] = pixelAt(decoded, 4, decoded.height - 8)
+  assert.ok(bottomBlue > 180, 'the PNG bottom band is really blue')
   assert.ok(!terminal.writes.join('').includes('\x1b_G'), 'no Kitty APC on the SIXEL Viewer')
   const viewer = await waitViewport(terminal, 'Image · bands.png', 'the Viewer identity row')
   assert.ok(viewer.includes('80×40 · image/png'), `the ORIGINAL metadata is painted:\n${viewer}`)
@@ -730,7 +756,7 @@ test('E2-01: /view-image LIST→Viewer→Esc back→same list→Esc close restor
   terminal.sendInput('\x1b')
   const closed = await waitViewport(terminal, '🖼️', 'the restored main screen')
   assert.ok(!closed.includes('Images · current transcript'), 'the list closed')
-  await tick(200)
+  assert.equal((app as unknown as { workspaceLease?: unknown }).workspaceLease, undefined, 'the workspace lease is closed')
   assert.ok(!terminal.writes.join('').includes('SIXC'), 'no internal candidate marker reaches Terminal.write')
   assert.ok(!terminal.writes.join('').includes(dcs), 'the closed Viewer raster is never replayed')
 })
@@ -755,19 +781,19 @@ test('E2-02: a fullscreen transcript body click opens the direct Viewer; text/bl
   // wide image never open a Viewer.
   terminal.sendInput(`\x1b[<0;2;${infoRow}M`)
   terminal.sendInput(`\x1b[<0;2;${infoRow}m`)
-  await tick(600)
-  assert.ok(!(await viewportOf(terminal)).includes('Image · bands.png'), 'the info row opens no Viewer')
+  assert.equal((app as unknown as { workspaceLease?: unknown }).workspaceLease, undefined, 'the info row opens no Viewer')
   terminal.sendInput(`\x1b[<0;30;${infoRow + 1}M`)
   terminal.sendInput(`\x1b[<0;30;${infoRow + 1}m`)
-  await tick(600)
-  assert.ok(!(await viewportOf(terminal)).includes('Image · bands.png'), 'blank cells right of the pixels open no Viewer')
+  assert.equal((app as unknown as { workspaceLease?: unknown }).workspaceLease, undefined, 'blank cells right of the pixels open no Viewer')
 
   // A real painted body cell opens the direct Viewer (no list below it).
   const beforeViewer = paintedRasters(terminal).length
   terminal.sendInput(`\x1b[<0;4;${infoRow + 1}M`)
   terminal.sendInput(`\x1b[<0;4;${infoRow + 1}m`)
   const dcs = await nextRaster(terminal, beforeViewer, 'the direct Viewer raster')
-  assert.ok(decodeSixel(dcs).width > 0)
+  const directDecoded = decodeSixel(dcs)
+  assert.equal(directDecoded.width, 80, 'the direct Viewer paints the source width')
+  assert.ok(pixelAt(directDecoded, 4, 4)[0] > 180, 'the direct Viewer paints the real red band')
   const viewer = await waitViewport(terminal, 'Image · bands.png', 'the direct Viewer')
   assert.ok(stripSgr(viewer).includes('Esc close'), 'a direct open advertises Esc close, never Esc back')
   assert.ok(!viewer.includes('Images · current transcript'), 'escapes directly, no hidden list')
@@ -775,7 +801,7 @@ test('E2-02: a fullscreen transcript body click opens the direct Viewer; text/bl
   terminal.writes.length = 0
   terminal.sendInput('\x1b')
   const restored = await waitViewport(terminal, '🖼️ bands.png · 80×40', 'the restored transcript')
-  await tick(200)
+  assert.equal((app as unknown as { workspaceLease?: unknown }).workspaceLease, undefined, 'Esc close leaves no lease')
   assert.ok(!restored.includes('Images · current transcript'), 'Esc close never opens a list')
   assert.ok(!restored.includes('Image · bands.png'), 'the Viewer chrome is gone after Esc')
 })
@@ -816,7 +842,9 @@ test('E2-03: JPEG and WebP refs paint their derived PNG while keeping the ORIGIN
   const beforeJpeg = paintedRasters(terminal).length
   terminal.sendInput('\r')
   const jpegDcs = await nextRaster(terminal, beforeJpeg, 'the JPEG derived-PNG raster')
-  assert.ok(decodeSixel(jpegDcs).width > 0)
+  const jpegDecoded = decodeSixel(jpegDcs)
+  assert.equal(jpegDecoded.width, 120, 'the JPEG Viewer paints the derived PNG width')
+  assert.ok(jpegDecoded.height > 0 && jpegDecoded.height % 6 === 0, 'the JPEG Viewer paints a complete band-aligned PNG')
   const jpegView = await waitViewport(terminal, 'Image · photo.jpg', 'the JPEG Viewer')
   assert.ok(jpegView.includes('120×80 · image/jpeg'), `original JPEG metadata stays: ${jpegView}`)
   assert.ok(jpegView.includes(`${SAMPLE_JPEG.byteLength} B`), jpegView)
@@ -828,7 +856,9 @@ test('E2-03: JPEG and WebP refs paint their derived PNG while keeping the ORIGIN
   const beforeWebp = paintedRasters(terminal).length
   terminal.sendInput('\r')
   const webpDcs = await nextRaster(terminal, beforeWebp, 'the WebP derived-PNG raster')
-  assert.ok(decodeSixel(webpDcs).width > 0)
+  const webpDecoded = decodeSixel(webpDcs)
+  assert.equal(webpDecoded.width, 120, 'the WebP Viewer paints its own derived PNG width')
+  assert.ok(webpDecoded.height > 0 && webpDecoded.height % 6 === 0, 'the WebP Viewer paints a complete band-aligned PNG')
   const webpView = await waitViewport(terminal, 'Image · shot.webp', 'the WebP Viewer')
   assert.ok(webpView.includes('120×80 · image/webp'), `original WebP metadata stays: ${webpView}`)
   assert.equal(reads.get('att-e2-03-jpeg'), 1, 'the JPEG raw read happened once')
@@ -837,14 +867,20 @@ test('E2-03: JPEG and WebP refs paint their derived PNG while keeping the ORIGIN
   // The viewer keeps the workspace restriction for iTerm2 only; SIXEL painted
   // real pixels above. (The iTerm2/GIF negative paths are component-tested.)
   terminal.sendInput('\x1b')
-  await tick(200)
+  await waitViewport(terminal, 'Images · current transcript', 'the list after the WebP Viewer')
+  terminal.sendInput('\x1b')
+  await waitViewport(terminal, '🖼️ photo.jpg · 120×80', 'the transcript after closing the list')
 })
 
 test('E2-04: the Viewer grant survives the frozen resize matrix and a Main↔Alt round trip', async (t) => {
   const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
   const ref: TranscriptImageRef = { attachmentId: 'att-e2-04', mediaType: 'image/png', bytes: png.byteLength, width: 80, height: 40, name: 'bands.png' }
+  let reads = 0
   const { terminal, app } = await startSixelApp(t, {
-    imageLoader: new ImageLoader(async () => ({ ref: {}, data: png })),
+    imageLoader: new ImageLoader(async () => {
+      reads += 1
+      return { ref: {}, data: png }
+    }),
     imageTheme: { fallbackColor: (text: string) => text },
   })
   app.setTranscript(transcriptWithMany([ref]).messages())
@@ -858,39 +894,43 @@ test('E2-04: the Viewer grant survives the frozen resize matrix and a Main↔Alt
   await waitViewport(terminal, 'Image · bands.png', 'the initial Viewer')
 
   // The frozen size matrix: every real terminal resize re-grants the Viewer's
-  // body rows. The raster must stay inside the body grant; two-row/one-row
-  // layouts paint chrome only and never start a new read.
+  // body rows. Each step looks at the bytes THIS resize's frame wrote (or the
+  // last committed raster when that frame reused it), never at an older frame
+  // that could accidentally satisfy the new ceiling.
+  let lastCommittedDcs = paintedRasters(terminal).at(-1)!
   for (const [cols, rows] of [[120, 40], [80, 24], [44, 12], [40, 8], [40, 2], [20, 1]] as const) {
+    terminal.writes.length = 0
     terminal.emitResize(cols, rows)
-    await tick(80)
+    await until(() => stripSgr(terminal.writes.join('')).includes('Esc'), `${cols}x${rows}: the resize frame with chrome`)
+    await terminal.flush()
     const view = await viewportOf(terminal)
     assert.equal(view.split('\n').length, rows, `${cols}x${rows}: the viewport really changed`)
     assert.ok(stripSgr(view).includes('Esc'), `${cols}x${rows}: the mandatory Esc hint survives`)
+    const frameRasters = paintedRasters(terminal)
     if (rows <= 2) {
-      const before = paintedRasters(terminal).length
-      await tick(150)
-      assert.equal(paintedRasters(terminal).length, before, `${cols}x${rows}: no body raster is encoded`)
+      assert.equal(frameRasters.length, 0, `${cols}x${rows}: the chrome-only frame writes no body raster`)
       continue
     }
-    await until(() => {
-      const dcs = paintedRasters(terminal).at(-1)
-      if (dcs === undefined) return false
+    assert.ok(frameRasters.length > 0 || lastCommittedDcs !== undefined, `${cols}x${rows}: a raster remains visible`)
+    for (const dcs of frameRasters.length > 0 ? frameRasters : [lastCommittedDcs]) {
       const decoded = decodeSixel(dcs)
-      return decoded.width <= cols * 10 && decoded.height <= (rows - 2) * 20
-    }, `${cols}x${rows}: a raster inside the body grant`)
+      assert.ok(decoded.width <= cols * 10, `${cols}x${rows}: raster width ${decoded.width} fits the grant`)
+      assert.ok(decoded.height <= (rows - 2) * 20, `${cols}x${rows}: raster height ${decoded.height} fits body rows`)
+    }
+    if (frameRasters.length > 0) lastCommittedDcs = frameRasters.at(-1)!
   }
+  assert.equal(reads, 1, 'the resize matrix never re-reads the attachment bytes')
 
   // Alt stop/resume: close, enter the fullscreen transcript, reopen the same
   // leased workspace and come back to the fullscreen surface before Main.
   terminal.emitResize(80, 24)
-  await tick(80)
+  await until(() => terminal.writes.length > 0, 'the restore frame')
   terminal.sendInput('\x1b')
   await waitViewport(terminal, 'Images · current transcript', 'the list after the matrix')
   terminal.sendInput('\x1b')
   await waitViewport(terminal, '🖼️ bands.png · 80×40', 'the main screen after the matrix')
   app.setFullscreen(true)
-  await tick(120)
-  const fullscreen = await viewportOf(terminal)
+  const fullscreen = await waitViewport(terminal, 'bands.png', 'the fullscreen transcript')
   assert.ok(fullscreen.includes('bands.png'), `the fullscreen transcript paints:\n${fullscreen}`)
   app.openTranscriptImagePicker()
   await waitViewport(terminal, 'Images · current transcript', 'the fullscreen workspace list')
@@ -903,11 +943,10 @@ test('E2-04: the Viewer grant survives the frozen resize matrix and a Main↔Alt
   await waitViewport(terminal, 'Images · current transcript', 'the list after the fullscreen Viewer')
   terminal.sendInput('\x1b')
   const back = await waitViewport(terminal, 'bands.png', 'the fullscreen transcript after the workspace')
-  await tick(200)
-  assert.ok(!back.includes('Images · current transcript'), 'the second Esc closed the workspace')
+  assert.equal((app as unknown as { workspaceLease?: unknown }).workspaceLease, undefined, 'the second Esc closed the workspace')
   assert.ok(!terminal.writes.join('').includes('SIXC'), 'no candidate marker survives the round trip')
   app.setFullscreen(false)
-  await tick(120)
+  await waitViewport(terminal, 'bands.png', 'the main transcript after leaving Alt')
 })
 
 test('E2-05: a real SVG tool card paints admitted pixels, and malformed SVG paints text only', async (t) => {
@@ -971,18 +1010,38 @@ test('E2-05: a real SVG tool card paints admitted pixels, and malformed SVG pain
   assert.ok(wideDecoded.width <= 40 * 10, `the over-wide drawing is cell-capped: ${wideDecoded.width}`)
   assert.ok(wideDecoded.height <= 12 * 20, `the over-wide drawing is row-capped: ${wideDecoded.height}`)
 
-  // Transparent background: uncovered pixels composite the real OSC 11 fact
-  // (#282c34), never a guessed white/black.
+  // Semi-transparent fill: the encoder composites over the terminal's REAL
+  // OSC 11 background #282c34, so the decoded pixel is a real blend, not a
+  // guessed white/black or a transparent hole.
   const transparent = await mountToolSvg(
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><circle cx="32" cy="16" r="8" fill="#22c55e"/></svg>',
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#22c55e" fill-opacity="0.5"/></svg>',
     'Transparent drawing',
     'A transparent drawing',
   )
   const transparentDecoded = decodeSixel(transparent)
-  const [cr, cg, cb] = pixelAt(transparentDecoded, 2, 2)
-  const [gr, gg, gb] = pixelAt(transparentDecoded, Math.floor(transparentDecoded.width / 2), Math.floor(transparentDecoded.height / 2))
-  assert.ok(!(cr > 150 && cg > 150), `a transparent corner is not painted as the green circle: ${cr},${cg},${cb}`)
-  assert.ok(gg > 120 && gr < 120, `the green circle itself paints: ${gr},${gg},${gb}`)
+  const [cr, cg, cb] = pixelAt(transparentDecoded, 8, 8)
+  assert.ok(Math.abs(cr - 37) <= 12 && Math.abs(cg - 120) <= 16 && Math.abs(cb - 73) <= 12,
+    `the semi-transparent fill composites the verified OSC11 background: ${cr},${cg},${cb}`)
+
+  // Tall and short aspects stay inside the same cell/row budget.
+  const tall = await mountToolSvg(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 128"><rect width="32" height="128" fill="#eab308"/></svg>',
+    'Tall drawing',
+    'A tall drawing',
+  )
+  const tallDecoded = decodeSixel(tall)
+  assert.ok(tallDecoded.width <= 40 * 10, `tall drawing width ${tallDecoded.width} fits`)
+  assert.ok(tallDecoded.height <= 12 * 20, `tall drawing height ${tallDecoded.height} fits`)
+  assert.ok(tallDecoded.height > tallDecoded.width, 'the tall aspect is preserved')
+  const short = await mountToolSvg(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 16"><rect width="640" height="16" fill="#dc2626"/></svg>',
+    'Short drawing',
+    'A short drawing',
+  )
+  const shortDecoded = decodeSixel(short)
+  assert.ok(shortDecoded.width <= 40 * 10, `short drawing width ${shortDecoded.width} fits`)
+  assert.ok(shortDecoded.height <= 12 * 20, `short drawing height ${shortDecoded.height} fits`)
+  assert.ok(shortDecoded.width > shortDecoded.height, 'the short aspect is preserved')
 
   // Malformed evidence: the app's own admission refuses it, paints no DCS and
   // keeps the readable description.
@@ -1003,64 +1062,139 @@ test('E2-05: a real SVG tool card paints admitted pixels, and malformed SVG pain
   const beforeBad = paintedRasters(terminal).length
   internals.setTranscript([badMessage])
   internals.toggleMessageExpanded(internals.messages[0])
-  await tick(400)
+  const badView = await waitViewport(terminal, 'Broken drawing', 'the malformed card description')
+  assert.ok(badView.includes('Broken drawing'))
   assert.equal(paintedRasters(terminal).length, beforeBad, 'malformed SVG emits no trusted DCS')
-  assert.ok((await viewportOf(terminal)).includes('Broken drawing'), 'the readable description survives')
 })
 
-test('E2-06: a published Assistant SIXEL figure opens the Viewer from real pixels only', async (t) => {
+test('E2-06: a published Assistant SIXEL figure exposes the committed hit and its exact boundaries', async (t) => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
-  const copies: string[] = []
   const svgLoader = new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options))
   const { terminal, app } = await startSixelApp(t, {
     svgLoader,
     imageTheme: { fallbackColor: (text: string) => text },
-    copySelection: async (text) => { copies.push(text); return true },
   })
   app.setFullscreen(true)
-  const { folder } = assistantSvgVisual(svg)
+  const { folder, assistant } = assistantSvgVisual(svg)
+  // Filler answers after the figure make it reachable by scroll and later
+  // off-screen, exactly like a real answer above later turns.
+  folder.apply(Array.from({ length: 6 }, (_, index) => ({
+    type: 'user/message',
+    seq: 3 + index,
+    time: 10 + index,
+    data: { content: [{ type: 'text', text: `filler ${index} ${'x'.repeat(120)}` }], source: { kind: 'user' } },
+  })) as never)
   app.setTranscript(folder.messages())
-  await waitViewport(terminal, 'Service topology', 'the published figure')
+  await waitViewport(terminal, 'filler 5', 'the later answers at the bottom')
+  app.scrollToTop()
+  const figure = await waitViewport(terminal, 'Service topology', 'the published figure')
+  const bodyRecord = (app as unknown as {
+    visualAssistantBodies: Map<unknown, {
+      indent: number
+      body: { paintedVisualHits(width: number): Array<{ actions: unknown[]; thumbnailBody?: { startRow: number; endRow: number; endCol: number; startCol?: number } }> }
+    }>
+  }).visualAssistantBodies.get(assistant)
+  assert.ok(bodyRecord !== undefined, 'the production Assistant body is mounted')
+  const innerWidth = (bodyRecord.body as unknown as { paintedFigures?: { width: number } }).paintedFigures?.width
+    ?? (terminal.columns - bodyRecord.indent)
+  // BEFORE the Screen commits: the same production body has no pixel body.
+  const beforeHits = bodyRecord.body.paintedVisualHits(innerWidth)
+  assert.equal(beforeHits.length, 1)
+  assert.equal(beforeHits[0]!.thumbnailBody, undefined, 'the render-time candidate declares no pixel body')
   await until(() => paintedRasters(terminal).length > 0, 'the figure thumbnail raster')
-  const view = await viewportOf(terminal)
-  const description = rowOf(view, 'SVG source available in the expanded tool call')
-  assert.ok(description > 0, view)
-  const pixelFirst = description + 2
-  const actionRow = rowOf(view, 'Copy SVG')
-  assert.ok(actionRow > pixelFirst, `the figure action row follows the image body:\n${view}`)
+  // AFTER the commit, without any new component render or layout call: the
+  // same body answers the real footprint.
+  const afterHits = bodyRecord.body.paintedVisualHits(innerWidth)
+  const committed = afterHits[0]!.thumbnailBody
+  assert.ok(committed !== undefined, 'the committed frame produces the real hit')
+  assert.equal(committed.startCol, 0, 'the Screen puts the DCS at column 1, so the hit starts at 0')
+  assert.ok(committed.endRow > committed.startRow)
+  assert.ok(committed.endCol > 0)
 
-  // Title/description and the spacer row are inert.
-  for (const row of [rowOf(view, 'Service topology'), description, description + 1]) {
-    terminal.sendInput(`\x1b[<0;8;${row}M`)
-    terminal.sendInput(`\x1b[<0;8;${row}m`)
-    await tick(600)
-    assert.ok(!(await viewportOf(terminal)).includes('SVG · Service topology'), `row ${row} is not a pixel hit`)
+  // The committed body reaches the fullscreen paint snapshot on the next
+  // frame boundary; wait for that snapshot (the press path reads it), then
+  // resolve the physical rows from the CURRENT viewport.
+  const snapshotHasBody = (): boolean => {
+    const rows = (app as unknown as {
+      fullscreenPaintSnapshot?: { rows: Array<{ visualHits?: Array<{ kind: string }> }> }
+    }).fullscreenPaintSnapshot?.rows ?? []
+    return rows.some(row => (row.visualHits ?? []).some(hit => hit.kind === 'body'))
   }
-  // A real committed pixel row opens the leased SVG Viewer.
-  terminal.sendInput(`\x1b[<0;8;${pixelFirst}M`)
-  terminal.sendInput(`\x1b[<0;8;${pixelFirst}m`)
-  const viewer = await waitViewport(terminal, 'SVG · Service topology', 'the clicked SVG Viewer')
-  assert.ok(viewer.includes('[Preview]'), 'the Viewer opens on Preview in the SAME leased screen')
-  assert.ok(!viewer.includes('Images · current transcript'), 'the figure opens the SVG Viewer directly, not the list')
-  const beforeClose = paintedRasters(terminal).length
-  terminal.sendInput('\x1b')
-  const restored = await waitViewport(terminal, 'Service topology', 'the transcript after the Viewer')
-  assert.ok(!restored.includes('SVG · Service topology'), 'Esc closed the Viewer')
-  // The workspace return re-encodes the transcript thumbnail: wait for that
-  // real frame before using its action row (the row moves while the body grows).
-  await nextRaster(terminal, beforeClose, 'the transcript thumbnail re-encode after the Viewer')
+  // The commit's own settle seam marks the row map dirty; request the frame
+  // that publishes it (the same path a real pixel settle uses).
+  ;(app as unknown as { settleThumbnailRender(): void }).settleThumbnailRender()
+  await until(snapshotHasBody, 'the fullscreen paint snapshot to include the committed pixel body')
+  const pressView = await viewportOf(terminal)
+  const pressTopRow = rowOf(pressView, 'Service topology')
+  const pressPixelFirst = pressTopRow + committed.startRow
+  assert.ok(pressPixelFirst > pressTopRow)
 
-  // The action row still owns its own semantics after the raster round trip.
-  const actionView = await viewportOf(terminal)
-  const copyRow = rowOf(actionView, 'Copy SVG')
-  const copyX = stripSgr(actionView.split('\n')[copyRow - 1]!).indexOf('Copy SVG') + 1
-  terminal.sendInput(`\x1b[<0;${copyX};${copyRow}M`)
-  terminal.sendInput(`\x1b[<0;${copyX};${copyRow}m`)
-  await tick(600)
-  assert.deepEqual(copies, [svg], 'the Copy SVG action copies the raw admitted source once')
-  assert.ok(!(await viewportOf(terminal)).includes('SVG · Service topology'), 'Copy never opens the Viewer')
+  const workspaceOpen = (): boolean => (app as unknown as { workspaceLease?: unknown }).workspaceLease !== undefined
+  // Title/description, the leading spacer, and the cell just RIGHT of the last
+  // painted pixel are all inert. The input path is synchronous, so the lease
+  // state is an authoritative immediate probe (no timing window).
+  for (const [row, x] of [
+    [pressTopRow, 1],
+    [pressTopRow + 1, 1],
+    [pressTopRow + 2, 1],
+    [pressPixelFirst, committed.endCol + 1],
+  ] as const) {
+    terminal.sendInput(`\x1b[<0;${x};${row}M`)
+    terminal.sendInput(`\x1b[<0;${x};${row}m`)
+    assert.equal(workspaceOpen(), false, `row ${row} col ${x} is not a pixel hit`)
+  }
+  await settlePointerWindow()
+  // The FIRST and LAST real pixel cells open the leased Viewer. After each
+  // close, wait for the transcript repaint and its refreshed press snapshot.
+  for (const x of [1, committed.endCol]) {
+    ;(app as unknown as { settleThumbnailRender(): void }).settleThumbnailRender()
+    await waitViewport(terminal, 'Service topology', `the transcript frame before pixel col ${x}`)
+    await until(snapshotHasBody, `the press snapshot before pixel col ${x}`)
+    const fresh = await viewportOf(terminal)
+    const freshPixelFirst = rowOf(fresh, 'Service topology') + committed.startRow
+    terminal.sendInput(`\x1b[<0;${x};${freshPixelFirst}M`)
+    terminal.sendInput(`\x1b[<0;${x};${freshPixelFirst}m`)
+    const viewer = await waitViewport(terminal, 'SVG · Service topology', `the Viewer from pixel col ${x}`)
+    assert.ok(viewer.includes('[Preview]'))
+    terminal.sendInput('\x1b')
+    await waitViewport(terminal, 'Service topology', 'the transcript after the Viewer')
+    await until(() => terminal.writes.join('').includes('\x1b[2K'), 'the screen erase after the Viewer')
+    await settlePointerWindow()
+  }
+
+  // A later answer scrolled into view releases the off-screen occurrence: the
+  // SAME body keeps its layout/actions but exposes no pixel body.
+  app.scrollToBottom()
+  await waitViewport(terminal, 'filler 5', 'the later answer')
+  const offscreen = bodyRecord.body.paintedVisualHits(innerWidth)
+  assert.equal(offscreen.length, 1, 'the figure layout entry remains')
+  assert.equal(offscreen[0]!.thumbnailBody, undefined, 'an off-screen occurrence offers no pixel hit')
+  assert.equal(offscreen[0]!.actions.length, 2, 'the action-row snapshot survives the body loss')
+
+  // Bring the figure back on screen, then let a second screen owner (Settings
+  // workspace) cover the transcript: the occurrence is released while the
+  // stable action layout is not re-derived.
+  app.scrollToTop()
+  await waitViewport(terminal, 'Service topology', 'the figure back on screen')
+  terminal.writes.length = 0
+  const handle = app.openSettingsWorkspace(
+    { readSnapshot: () => ({ configReadiness: 'ready' as const, rows: [], capturedAt: 0 }) },
+    { aboutVersionFacts: { tui: 'test-bundle', dsh: undefined } },
+  )
+  await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the covering screen to be observed')
+  const covered = bodyRecord.body.paintedVisualHits(innerWidth)
+  assert.equal(covered[0]?.thumbnailBody, undefined, 'a covered transcript exposes no pixel hit')
+  handle.close()
+  await waitViewport(terminal, 'Service topology', 'the transcript after the covering workspace')
+
+  // Revoking the publication's sidecar and rebuilding the answer removes the
+  // figure; the retired body no longer answers a pixel body.
+  clearAssistantVisualPresentation(assistant)
+  app.setTranscript(folder.messages())
+  await waitViewportGone(terminal, 'Service topology', 'the revoked figure to disappear')
+  assert.equal(bodyRecord.body.paintedVisualHits(innerWidth)[0]?.thumbnailBody, undefined,
+    'the revoked publication body offers no pixel hit')
 })
-
 test('E2-07: the SIXEL SVG Viewer Preview/Source/Copy/resize/release path', async (t) => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/><text x="4" y="20" font-size="12" fill="#ffffff">Gateway</text></svg>'
   const rasterWidths: number[] = []
@@ -1069,6 +1203,17 @@ test('E2-07: the SIXEL SVG Viewer Preview/Source/Copy/resize/release path', asyn
     rasterWidths.push(options.targetWidth)
     return rasterizeSvg(source, options)
   })
+  let viewerSubscriptions = 0
+  let viewerUnsubscriptions = 0
+  const originalSubscribe = svgLoader.subscribe.bind(svgLoader)
+  svgLoader.subscribe = (digest, width, listener) => {
+    if (width > 64) viewerSubscriptions += 1
+    const unsubscribe = originalSubscribe(digest, width, listener)
+    return () => {
+      if (width > 64) viewerUnsubscriptions += 1
+      unsubscribe()
+    }
+  }
   const { terminal, app } = await startSixelApp(t, {
     svgLoader,
     imageTheme: { fallbackColor: (text: string) => text },
@@ -1077,57 +1222,107 @@ test('E2-07: the SIXEL SVG Viewer Preview/Source/Copy/resize/release path', asyn
   app.setFullscreen(true)
   const { folder } = assistantSvgVisual(svg)
   app.setTranscript(folder.messages())
-  await waitViewport(terminal, 'Service topology', 'the published figure')
-  const view = await viewportOf(terminal)
-  const viewRow = rowOf(view, 'View')
-  assert.ok(viewRow > 0, view)
+  const figure = await waitViewport(terminal, 'Service topology', 'the published figure')
+  const viewRow = rowOf(figure, 'View')
+  const viewX = stripSgr(figure.split('\n')[viewRow - 1]!).indexOf('View') + 1
   const beforeViewer = paintedRasters(terminal).length
-  terminal.sendInput(`\x1b[<0;${stripSgr(view.split('\n')[viewRow - 1]!).indexOf('View') + 1};${viewRow}M`)
-  terminal.sendInput(`\x1b[<0;${stripSgr(view.split('\n')[viewRow - 1]!).indexOf('View') + 1};${viewRow}m`)
+  terminal.sendInput(`\x1b[<0;${viewX};${viewRow}M`)
+  terminal.sendInput(`\x1b[<0;${viewX};${viewRow}m`)
   const viewer = await waitViewport(terminal, 'SVG · Service topology', 'the View action opener')
   assert.ok(viewer.includes('[Preview]') && viewer.includes('Source'))
   const previewDcs = await nextRaster(terminal, beforeViewer, 'the SVG Viewer preview raster')
   const previewDecoded = decodeSixel(previewDcs)
   assert.ok(previewDecoded.width > 64, `the Viewer requested its OWN larger variant: ${previewDecoded.width}`)
+  assert.ok(pixelAt(previewDecoded, 8, 8)[2] > 180, 'the admitted SVG fill paints real blue pixels')
   const lastWidth = rasterWidths.at(-1)!
   assert.ok(lastWidth > 64, `the exact grant variant is wider than the thumbnail: ${lastWidth}`)
+  assert.equal(viewerSubscriptions, 1, 'one Viewer variant subscription')
+
   // Tab to Source: the image DCS disappears and the safe XML is painted.
   terminal.writes.length = 0
   terminal.sendInput('\t')
   const sourceView = await waitViewport(terminal, '<svg', 'the Source page')
   assert.ok(sourceView.includes('[Source]'), sourceView)
   assert.equal(paintedRasters(terminal).length, 0, 'Source paints no image DCS')
-  // C copies the raw source exactly once.
+  // C copies the raw source; the visible Source is the sanitized projection.
   terminal.sendInput('c')
   await until(() => copies.length === 1, 'the clipboard sink')
   assert.deepEqual(copies, [svg], 'Copy Source sends the raw admitted bytes')
-  // Back to Preview, then resize while the Viewer owns the lease: a new exact
-  // width variant is requested from the real grant.
+
+  // Back to Preview and resize: the new exact grant variant is requested and
+  // its DCS really lands after the resize frame.
   terminal.sendInput('\t')
   await waitViewport(terminal, '[Preview]', 'the Preview page before the resize')
   terminal.writes.length = 0
+  const beforeResize = rasterWidths.length
   terminal.emitResize(80, 24)
-  await tick(120)
-  await until(() => rasterWidths.length >= 2, 'the resized Viewer variant')
+  await until(() => rasterWidths.length > beforeResize, 'the resized Viewer variant')
+  const resizeDcs = await nextRaster(terminal, paintedRasters(terminal).length, 'the resized Viewer DCS')
+  const resizeDecoded = decodeSixel(resizeDcs)
+  assert.ok(resizeDecoded.height <= (24 - 2) * 20, 'the resized raster fits the body grant')
   assert.ok(rasterWidths.at(-1)! < lastWidth, `a narrower grant selects a smaller variant: ${rasterWidths.join(',')}`)
   const previewAgain = await waitViewport(terminal, 'SVG · Service topology', 'the Preview after resize')
   assert.ok(previewAgain.includes('[Preview]'))
-  // Esc releases the workspace; no late raster calls keep arriving.
+
+  // Esc releases the workspace and its exact variant subscription.
   terminal.writes.length = 0
   terminal.sendInput('\x1b')
   await waitViewport(terminal, 'Service topology', 'the transcript after the SVG Viewer')
+  assert.ok(viewerUnsubscriptions > 0, 'the Viewer released its variant subscription')
   const widthsAtClose = rasterWidths.length
-  await tick(300)
+  await terminal.flush()
   assert.equal(rasterWidths.length, widthsAtClose, 'no raster starts after the Viewer closes')
 })
 
-test('E2-08: SVG Viewer width variants, repeated pages, close/reopen and crop stay bounded', async (t) => {
+test('E2-07 source safety: the Viewer sanitizes Source while Copy keeps the raw bytes', async (t) => {
+  const hostile = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><!-- \u001b]52;c;SGVsbG8=\u0007 --><rect width="64" height="32" fill="#3b82f6"/></svg>'
+  const copies: string[] = []
+  const svgLoader = new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options))
+  const { terminal, app } = await startSixelApp(t, {
+    svgLoader,
+    imageTheme: { fallbackColor: (text: string) => text },
+    copySelection: async (text) => { copies.push(text); return true },
+  })
+  app.setFullscreen(true)
+  const { folder } = assistantSvgVisual(hostile, 'hostile', 'hostile description')
+  app.setTranscript(folder.messages())
+  const figure = await waitViewport(terminal, 'hostile', 'the refused figure description')
+  const viewRow = rowOf(figure, 'View')
+  const viewX = stripSgr(figure.split('\n')[viewRow - 1]!).indexOf('View') + 1
+  terminal.sendInput(`\x1b[<0;${viewX};${viewRow}M`)
+  terminal.sendInput(`\x1b[<0;${viewX};${viewRow}m`)
+  const viewer = await waitViewport(terminal, 'SVG · hostile', 'the Source-only Viewer')
+  assert.ok(viewer.includes('Preview unavailable'), 'the malformed admission states Preview unavailable')
+  terminal.sendInput('\t')
+  const source = await waitViewport(terminal, '<svg', 'the Source page')
+  assert.ok(source.includes('[Source]'), source)
+  // The Source projection drops the terminal-active bytes but Copy keeps the
+  // exact admitted source bytes (the same contract as the Kitty viewer).
+  assert.equal(source.includes('\u001b]52'), false, 'no OSC sequence reaches the terminal')
+  assert.equal(source.includes('\u0007'), false, 'no BEL reaches the terminal')
+  terminal.sendInput('c')
+  await until(() => copies.length === 1, 'the hostile-source clipboard sink')
+  assert.deepEqual(copies, [hostile], 'Copy sends the RAW source unchanged')
+  terminal.sendInput('\x1b')
+  await waitViewport(terminal, 'hostile', 'the transcript after the Source-only Viewer')
+})
+
+test('E2-08: SVG Viewer width variants, page switching, close/reopen and crop stay bounded', async (t) => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
   const rasterWidths: number[] = []
   const svgLoader = new SvgRasterLoader(async (source, options) => {
     rasterWidths.push(options.targetWidth)
     return rasterizeSvg(source, options)
   })
+  let viewerUnsubscriptions = 0
+  const originalSubscribe = svgLoader.subscribe.bind(svgLoader)
+  svgLoader.subscribe = (digest, width, listener) => {
+    const unsubscribe = originalSubscribe(digest, width, listener)
+    return () => {
+      if (width > 64) viewerUnsubscriptions += 1
+      unsubscribe()
+    }
+  }
   const { terminal, app } = await startSixelApp(t, {
     svgLoader,
     imageTheme: { fallbackColor: (text: string) => text },
@@ -1135,68 +1330,77 @@ test('E2-08: SVG Viewer width variants, repeated pages, close/reopen and crop st
   app.setFullscreen(true)
   const { folder } = assistantSvgVisual(svg)
   app.setTranscript(folder.messages())
-  await waitViewport(terminal, 'Service topology', 'the published figure')
-  const view = await viewportOf(terminal)
-  const viewRow = rowOf(view, 'View')
-  const viewX = stripSgr(view.split('\n')[viewRow - 1]!).indexOf('View') + 1
+  const figure = await waitViewport(terminal, 'Service topology', 'the published figure')
   const clickView = async (): Promise<void> => {
-    terminal.sendInput(`\x1b[<0;${viewX};${viewRow}M`)
-    terminal.sendInput(`\x1b[<0;${viewX};${viewRow}m`)
+    const view = await viewportOf(terminal)
+    const row = rowOf(view, 'View')
+    const x = stripSgr(view.split('\n')[row - 1]!).indexOf('View') + 1
+    terminal.sendInput(`\x1b[<0;${x};${row}M`)
+    terminal.sendInput(`\x1b[<0;${x};${row}m`)
   }
   await clickView()
   await waitViewport(terminal, 'SVG · Service topology', 'the first SVG Viewer')
 
-  // Wider and narrower grants select DIFFERENT exact target widths.
-  const firstWidths = () => new Set(rasterWidths.filter(width => width > 64))
+  // Wider and narrower grants select DIFFERENT exact target widths, and each
+  // resize frame really writes its new raster.
+  terminal.writes.length = 0
+  const beforeWide = rasterWidths.length
   terminal.emitResize(120, 40)
-  await tick(150)
-  await until(() => firstWidths().size >= 1, 'the wide Viewer variant')
+  await until(() => rasterWidths.length > beforeWide, 'the wide Viewer variant')
   const wideVariant = rasterWidths.at(-1)!
-  const beforeNarrowRaster = paintedRasters(terminal).length
+  const wideDcs = await nextRaster(terminal, 0, 'the wide Viewer DCS')
+  assert.ok(decodeSixel(wideDcs).width > 64)
+  terminal.writes.length = 0
+  const beforeNarrow = rasterWidths.length
   terminal.emitResize(44, 12)
-  await tick(150)
-  await until(() => rasterWidths.at(-1)! < wideVariant, 'the narrow Viewer variant')
+  await until(() => rasterWidths.length > beforeNarrow, 'the narrow Viewer variant')
   const narrowVariant = rasterWidths.at(-1)!
-  assert.ok(narrowVariant < wideVariant, `the resized grants produce distinct exact widths: ${wideVariant} -> ${narrowVariant}`)
-  // The narrow DCS is a complete, band-aligned command inside the body grant.
-  const narrowDcs = await nextRaster(terminal, beforeNarrowRaster, 'the narrow Viewer DCS')
+  const narrowDcs = await nextRaster(terminal, 0, 'the narrow Viewer DCS')
   const narrowDecoded = decodeSixel(narrowDcs)
-  assert.ok(narrowDecoded.height % 6 === 0, 'the crop stays SIXEL-band aligned')
-  assert.ok(narrowDecoded.height <= (12 - 2) * 20, 'the crop never crosses the body grant')
+  assert.ok(narrowVariant < wideVariant, `distinct exact widths: ${wideVariant} -> ${narrowVariant}`)
+  assert.ok(narrowDecoded.height <= (12 - 2) * 20, 'the crop fits the shorter body grant')
+  assert.ok(narrowDecoded.height % 6 === 0, 'the crop is SIXEL-band aligned')
   assert.ok(narrowDcs.endsWith('\x1b\\'), 'one complete DCS')
 
-  // Preview ↔ Source repeated: pixels return from the SAME variant cache and
-  // Source never carries image bytes.
-  const widthsBeforePages = rasterWidths.length
+  // Preview ↔ Source repeatedly: every Source frame paints no DCS, and every
+  // return to Preview re-commits its raster through the Screen.
   for (let round = 0; round < 3; round += 1) {
+    terminal.writes.length = 0
     terminal.sendInput('\t')
-    const source = await waitViewport(terminal, '[Source]', `the Source page round ${round}`)
-    assert.ok(!source.includes('\u2063SIXC'), 'no candidate marker leaks on Source')
+    await waitViewport(terminal, '[Source]', `the Source page round ${round}`)
+    assert.equal(paintedRasters(terminal).length, 0, `Source round ${round} paints no image DCS`)
+    terminal.writes.length = 0
     terminal.sendInput('\t')
     await waitViewport(terminal, '[Preview]', `the Preview page round ${round}`)
+    await nextRaster(terminal, 0, `the Preview raster round ${round}`)
   }
-  assert.equal(rasterWidths.length, widthsBeforePages, 'page switches never start another raster')
-  // Restore the original geometry before closing/reopening the Viewer.
+
+  // Restore the original geometry before closing so the transcript chrome is
+  // fully visible again, then close: the workspace releases the exact variant
+  // subscription; the transcript thumbnail re-encodes.
   terminal.emitResize(100, 24)
-  await tick(150)
-  await waitViewport(terminal, 'SVG · Service topology', 'the Viewer after restoring the geometry')
-  // Esc closes the Viewer; reopening it from the SAME figure paints again.
+  await until(() => rasterWidths.length > beforeNarrow + 1, 'the restored Viewer variant')
+  await waitViewport(terminal, 'SVG · Service topology', 'the Viewer after restoring geometry')
+  terminal.writes.length = 0
   terminal.sendInput('\x1b')
   await waitViewport(terminal, 'Service topology', 'the transcript after the first Viewer')
-  await tick(300)
-  const handles = [...(app as unknown as { visualFigureHandles: Map<unknown, Map<string, unknown>> }).visualFigureHandles.values()]
-    .flatMap(byRef => [...byRef.values()])
-  assert.equal(handles.length, 1)
-  ;(app as unknown as { openSvgViewer(handle: unknown): void }).openSvgViewer(handles[0])
+  await until(() => paintedRasters(terminal).length > 0, 'the transcript thumbnail re-encode')
+  assert.ok(viewerUnsubscriptions > 0, 'closing the Viewer releases its variant subscription')
+  assert.ok(!terminal.writes.join('').includes('SIXC'), 'no Viewer candidate marker survives the close')
+
+  // Reopen from the SAME figure through its real View action; the new Viewer
+  // paints a fresh raster instead of recycling the closed token.
+  terminal.writes.length = 0
+  await clickView()
   const reopened = await waitViewport(terminal, 'SVG · Service topology', 'the reopened SVG Viewer')
   assert.ok(reopened.includes('[Preview]'))
+  const reopenedDcs = await nextRaster(terminal, 0, 'the reopened Viewer DCS')
+  assert.ok(decodeSixel(reopenedDcs).width > 64, 'the reopened Viewer paints its own pixels')
   terminal.sendInput('\x1b')
   const back = await waitViewport(terminal, 'Service topology', 'the transcript after the reopened Viewer')
-  await tick(300)
-  assert.ok(!(await viewportOf(terminal)).includes('SIXC'), `no candidate marker after the round trip:\n${back}`)
+  assert.ok(back.includes('Service topology'), 'the transcript is restored after the reopened Viewer')
 })
-
-test('E2-09: a long 24-image transcript does not starve the image/SVG Viewer variants', async (t) => {
+test('E2-09: a long 24-image transcript fills the registry, then re-encodes old images and the SVG Viewer', async (t) => {
   const pngs: Uint8Array[] = []
   for (let index = 0; index < 24; index += 1) {
     pngs.push(await pngFromRgba(fill(80, 40, (x, y) => (y < 20 ? [255, (index * 7) % 255, x % 2 === 0 ? 0 : 8, 255] : [0, 0, 255, 255])), 80, 40))
@@ -1211,6 +1415,10 @@ test('E2-09: a long 24-image transcript does not starve the image/SVG Viewer var
     imageTheme: { fallbackColor: (text: string) => text },
     svgLoader,
   })
+  // A tall real terminal makes all 24 distinct messages visible at once: the
+  // owner can grant only its 16-variant budget, so the oldest images stay text.
+  terminal.emitResize(100, 200)
+  await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the tall-screen re-observation')
   const refs: TranscriptImageRef[] = pngs.map((png, index) => ({
     attachmentId: `att-e2-09-${index}`,
     mediaType: 'image/png' as const,
@@ -1220,38 +1428,64 @@ test('E2-09: a long 24-image transcript does not starve the image/SVG Viewer var
     name: `many-${index}.png`,
   }))
   const folder = transcriptWithMany(refs)
-  const { folder: svgFolder, publication } = assistantSvgVisual(svg)
+  const { folder: svgFolder } = assistantSvgVisual(svg)
   app.setTranscript([...folder.messages(), ...svgFolder.messages()])
   app.requestRender()
   await waitViewport(terminal, 'Service topology', 'the published SVG after the long image history')
-  await until(() => paintedRasters(terminal).length > 0, 'a visible transcript raster')
 
-  // Open an OLD occurrence through the real workspace direct-Viewer entry.
-  const occurrences = (app as unknown as { mountedImageOccurrences(): Array<Record<string, unknown>> }).mountedImageOccurrences()
-  assert.ok(occurrences.length >= 20, `the mounted window still holds the image candidates: ${occurrences.length}`)
-  const oldest = occurrences[0] as never
-  const beforeImage = paintedRasters(terminal).length
-  ;(app as unknown as { openImageViewer(occurrence: unknown): void }).openImageViewer(oldest)
-  const imageDcs = await nextRaster(terminal, beforeImage, 'the old image Viewer raster')
-  assert.ok(decodeSixel(imageDcs).width > 0, 'the older image still gets a real encoding')
-  terminal.sendInput('\x1b')
-  await waitViewport(terminal, 'Service topology', 'the transcript after the old image Viewer')
+  /** The green top-band value of every distinct image raster currently encoded. */
+  const encodedImageColors = (): Set<number> => {
+    const colors = new Set<number>()
+    for (const dcs of paintedRasters(terminal)) {
+      try {
+        const decoded = decodeSixel(dcs)
+        const [red, green] = pixelAt(decoded, 4, 4)
+        if (red > 180) colors.add(green)
+      } catch {
+        // A partial DCS fragment is not an encoded image.
+      }
+    }
+    return colors
+  }
+  // The visible SVG thumbnail also consumes one of the 16 slots, so 15
+  // distinct IMAGE variants + the SVG variant fill the budget exactly.
+  await until(() => encodedImageColors().size >= 15, '15 distinct visible image variants', 60_000)
+  assert.ok(encodedImageColors().size <= 16, 'the 16-variant registry cap is preserved')
+  assert.ok(paintedRasters(terminal).length < 300, `no unbounded retry storm: ${paintedRasters(terminal).length} rasters`)
 
-  // The SVG Viewer's own variant still encodes after the 24 image occurrences.
-  const handles = [...(app as unknown as { visualFigureHandles: Map<unknown, Map<string, unknown>> }).visualFigureHandles.values()]
-    .flatMap(byRef => [...byRef.values()])
-  assert.equal(handles.length, 1, 'the published SVG has one live handle')
-  const beforeSvg = paintedRasters(terminal).length
-  ;(app as unknown as { openSvgViewer(handle: unknown): void }).openSvgViewer(handles[0])
-  const svgDcs = await nextRaster(terminal, beforeSvg, 'the SVG Viewer raster after 24 images')
-  const svgDecoded = decodeSixel(svgDcs)
-  const [red, green, blue] = pixelAt(svgDecoded, 8, 8)
-  assert.ok(green > 120 && red < 120, `the SVG pixels still encode: ${red},${green},${blue}`)
-  // No unbounded encode retry: the whole journey stays in a bounded raster count.
-  assert.ok(paintedRasters(terminal).length < 80, `no encode storm: ${paintedRasters(terminal).length} rasters`)
+  // Open the OLDEST image through the REAL /view-image LIST journey; its slot
+  // was released under the 16-variant budget, so this must re-encode it.
+  app.openTranscriptImagePicker()
+  await waitViewport(terminal, 'Images · current transcript', 'the image list')
+  const beforeOldViewer = paintedRasters(terminal).length
+  terminal.sendInput('\r')
+  await waitViewport(terminal, 'Image · many-0.png', 'the oldest image Viewer')
+  await until(() => paintedRasters(terminal).length > beforeOldViewer, 'the oldest image re-encode')
+  const oldRaster = decodeSixel(paintedRasters(terminal).at(-1)!)
+  assert.ok(pixelAt(oldRaster, 4, 4)[0] > 180 && pixelAt(oldRaster, 4, 4)[1] === 0,
+    'the oldest image is re-encoded, not a stale/fallback raster')
   terminal.sendInput('\x1b')
-  await tick(200)
-  assert.equal(publication.source.svgSource, svg)
+  await waitViewport(terminal, 'Images · current transcript', 'the image list after the Viewer')
+  terminal.sendInput('\x1b')
+  await waitViewport(terminal, 'Service topology', 'the transcript after the image list')
+
+  // The published SVG Viewer still gets its OWN variant after the 24 image
+  // occurrences and the re-encode above.
+  app.setFullscreen(true)
+  const figure = await waitViewport(terminal, 'Service topology', 'the fullscreen published figure')
+  const viewRow = rowOf(figure, 'View')
+  const viewX = stripSgr(figure.split('\n')[viewRow - 1]!).indexOf('View') + 1
+  const beforeSvgViewer = paintedRasters(terminal).length
+  terminal.sendInput(`\x1b[<0;${viewX};${viewRow}M`)
+  terminal.sendInput(`\x1b[<0;${viewX};${viewRow}m`)
+  await waitViewport(terminal, 'SVG · Service topology', 'the SVG Viewer')
+  await until(() => paintedRasters(terminal).length > beforeSvgViewer, 'the SVG Viewer raster')
+  const svgDecoded = decodeSixel(paintedRasters(terminal).at(-1)!)
+  const [red, green] = pixelAt(svgDecoded, 8, 8)
+  assert.ok(green > 120 && red < 120, `the SVG pixels still encode: ${red},${green}`)
+  assert.ok(paintedRasters(terminal).length < 400, `the whole journey stays bounded: ${paintedRasters(terminal).length} rasters`)
+  terminal.sendInput('\x1b')
+  await waitViewport(terminal, 'Service topology', 'the transcript after the SVG Viewer')
 })
 
 test('E2 negative: PI_IMAGE_PROTOCOL=none fails closed with no raster, read or encode', async (t) => {
@@ -1281,9 +1515,36 @@ test('E2 negative: PI_IMAGE_PROTOCOL=none fails closed with no raster, read or e
   terminal.sendInput('\r')
   const viewer = await waitViewport(terminal, 'Image · denied.png', 'the Viewer metadata')
   assert.ok(stripSgr(viewer).includes('Preview unavailable'), 'the denied surface states it truthfully')
-  await tick(300)
   assert.equal(paintedRasters(terminal).length, before, 'no DCS is produced')
   assert.equal(reads, 0, 'no image bytes are read when the protocol is denied')
   terminal.sendInput('\x1b')
-  await tick(100)
+  await waitViewport(terminal, 'denied.png', 'the transcript after the denied Viewer')
+})
+
+test('E2-02 negative: an unsupported raster and a narrow layout expose no image body hit', async (t) => {
+  const png = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
+  const gifRef: TranscriptImageRef = { attachmentId: 'att-e2-gif', mediaType: 'image/gif', bytes: png.byteLength, width: 80, height: 40, name: 'anim.gif' }
+  const { terminal, app } = await startSixelApp(t, {
+    imageLoader: new ImageLoader(async () => ({ ref: {}, data: png })),
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  app.setFullscreen(true)
+  app.setTranscript(transcriptWithMany([gifRef]).messages())
+  const view = await waitViewport(terminal, 'anim.gif', 'the GIF fallback row')
+  const infoRow = rowOf(view, '🖼️ anim.gif')
+  assert.ok(infoRow > 0, view)
+  // The fallback row is informational: no painted pixel body may become a hit.
+  terminal.sendInput(`\x1b[<0;4;${infoRow + 1}M`)
+  terminal.sendInput(`\x1b[<0;4;${infoRow + 1}m`)
+  assert.equal((app as unknown as { workspaceLease?: unknown }).workspaceLease, undefined,
+    'the text fallback opens no Viewer')
+  // A narrow layout paints the info row only and keeps the same rule.
+  terminal.emitResize(40, 24)
+  await waitViewport(terminal, 'anim.gif', 'the narrow GIF row')
+  const narrow = await viewportOf(terminal)
+  const narrowInfo = rowOf(narrow, 'anim.gif')
+  terminal.sendInput(`\x1b[<0;4;${narrowInfo + 1}M`)
+  terminal.sendInput(`\x1b[<0;4;${narrowInfo + 1}m`)
+  assert.equal((app as unknown as { workspaceLease?: unknown }).workspaceLease, undefined,
+    'the narrow fallback opens no Viewer')
 })

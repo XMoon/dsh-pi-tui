@@ -42,11 +42,15 @@ export interface VisualFigurePaintedHits {
   /** Total painted rows of the figure (body + actions). */
   readonly height: number
   readonly actions: readonly VisualFigureActionHit[]
-  /** The SVG thumbnail's REAL pixel body, figure-relative rows/columns. */
+  /** The SVG thumbnail's REAL pixel body, figure-relative rows/columns.
+   *  `startCol` is present only when the painted left edge is NOT the host
+   *  bullet indent: a Direct SIXEL DCS is written by the Screen at column 1,
+   *  so its real pixels start at figure column 0. */
   readonly thumbnailBody?: {
     readonly startRow: number
     readonly endRow: number
     readonly endCol: number
+    readonly startCol?: number
   }
 }
 
@@ -229,7 +233,7 @@ export class VisualFigureComponent implements Component {
       if (live !== undefined && startRow !== undefined && maxRows !== undefined
         && live.rows > 0 && live.rows <= maxRows
         && live.endCol > 0 && live.endCol <= width) {
-        thumbnailBody = { startRow, endRow: startRow + live.rows, endCol: live.endCol }
+        thumbnailBody = { startRow, endRow: startRow + live.rows, endCol: live.endCol, startCol: 0 }
       }
     }
     return {

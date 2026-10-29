@@ -317,6 +317,7 @@ test('a SIXEL figure reports its pixel hit only after the Screen commits, withou
     assert.ok(body.startRow > 0 && body.endRow > body.startRow)
     assert.equal(body.endRow - body.startRow, 3, 'the footprint rows come from the owner')
     assert.equal(body.endCol, 8)
+    assert.equal(body.startCol, 0, 'the Screen writes the DCS at column 1, so the hit starts at 0')
     assert.equal(after.height, stable.height, 'the asynchronous raster never changes the figure height')
     assert.deepEqual(after.actions, stable.actions, 'action rows stay the render-time snapshot')
     // The first painted row is the DCS candidate at the figure-relative index.

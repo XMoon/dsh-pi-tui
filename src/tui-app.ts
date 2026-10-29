@@ -2677,8 +2677,10 @@ type TranscriptVisualHit = {
      *  band and left the painted pixels inert. */
     readonly startRow: number
     readonly endRow: number
-    /** Entry-relative first/last+1 column of the REAL pixels (the Assistant
-     *  bullet indent is part of the painted left boundary). */
+    /** Entry-relative first/last+1 column of the REAL pixels. Kitty placements
+     *  begin under the Assistant bullet indent; a Direct SIXEL DCS is
+     *  positioned by the Screen at column 1, so the figure reports startCol 0
+     *  and the host must not add the indent. */
     readonly startCol: number
     readonly endCol: number
   }
@@ -18553,8 +18555,11 @@ export class TuiApp {
               thumbnailBody: {
                 startRow: painted.thumbnailBody.startRow,
                 endRow: painted.thumbnailBody.endRow,
-                startCol: record.indent,
-                endCol: painted.thumbnailBody.endCol + record.indent,
+                // Kitty paints under the bullet indent; Direct SIXEL states its
+                // own figure-relative left edge because the Screen owns the DCS
+                // position (column 1).
+                startCol: painted.thumbnailBody.startCol ?? record.indent,
+                endCol: painted.thumbnailBody.endCol + (painted.thumbnailBody.startCol ?? record.indent),
               },
             }),
       })
