@@ -16,6 +16,7 @@
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { observeSettled, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import type { WriteOutcome } from '../../runtime/session-writer-port.ts'
 import {
   LifecycleError,
   requireCreated,
@@ -213,6 +214,26 @@ export interface SessionRuntime {
    * keeps the barrier's own refusal (no auto retry).
    */
   withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
+  /**
+   * Run one CONTROL operation against the captured live scope: a user
+   * interrupt or a selected subagent Stop. It is admitted while a navigation
+   * transition holds the barrier (the writer drain does NOT block it) but
+   * still refuses a stale scope synchronously, and it receives the EXACT
+   * owner captured in the same no-yield section. It is not a writer bypass:
+   * an admitted writer still drains before the transition commits, and this
+   * section never increments the writer count.
+   */
+  withControl<T>(
+    scope: LiveSessionScope,
+    task: (owner: SessionOwnerRef) => Promise<T> | T,
+  ): Promise<T>
+  /**
+   * Interrupt the captured session's current work through the control
+   * admission, preserving its pending inbox. A stale capture or an aborted
+   * runner is `cancelled` (confirmed not dispatched, never a generic error);
+   * a backend refusal/unknown carrier result keeps its typed settlement.
+   */
+  interrupt(scope: LiveSessionScope): Promise<WriteOutcome<undefined>>
   /** Run one ordinary session transition/switch (plan §4A). */
   transitionTo<T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>>
   /** Hand the TUI over to another persisted session (never throws). A scoped
@@ -280,6 +301,42 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   const withWriter = <T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T> => {
     if (!deps.isScopeCurrent(scope)) return Promise.reject(new SessionScopeSupersededError())
     return core.barrier.runWriter(scope.sessionId, async () => task())
+  }
+
+  /**
+   * The scope-bound CONTROL admission (Busy Esc / subagent Stop). The scope
+   * check, the EXACT owner capture and the barrier control section run in the
+   * same synchronous stack, so a stale capture can never address a newer
+   * owner and a transition that is about to publish one can never hand its
+   * cancel to the wrong generation. Unlike {@link withWriter}, a frozen
+   * transition does NOT refuse this section; unlike an ordinary writer, it
+   * does not delay the transition's drain or its commit.
+   */
+  const withControl = <T>(
+    scope: LiveSessionScope,
+    task: (owner: SessionOwnerRef) => Promise<T> | T,
+  ): Promise<T> => {
+    if (!deps.isScopeCurrent(scope)) return Promise.reject(new SessionScopeSupersededError())
+    const owner = core.owner()
+    // `isScopeCurrent` already proved an owner-bearing capture; the guard
+    // only narrows the type and is unreachable in production.
+    if (owner === undefined) return Promise.reject(new SessionScopeSupersededError())
+    return core.barrier.runControl(() => task(owner))
+  }
+
+  /**
+   * Interrupt the captured live session's current work. The backend cancel is
+   * addressed by the EXACT owner captured inside {@link withControl}; a stale
+   * capture and an exiting runner are both `cancelled` (the request provably
+   * never left the TUI) and therefore never surface as a spurious
+   * `agent interrupt` ERROR.
+   */
+  const interrupt = (scope: LiveSessionScope): Promise<WriteOutcome<undefined>> => {
+    if (deps.lifecycleSignal.aborted) return Promise.resolve({ kind: 'cancelled' })
+    return withControl(scope, owner => deps.retirement.cancel(owner)).catch((error: unknown) => {
+      if (error instanceof SessionScopeSupersededError) return { kind: 'cancelled' as const }
+      throw error
+    })
   }
 
   /**
@@ -1344,6 +1401,8 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
   return {
     withWriter,
+    withControl,
+    interrupt,
     transitionTo,
     switchSession,
     adoptFork,

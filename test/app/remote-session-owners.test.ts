@@ -10,6 +10,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ClientSessionOwner, SessionHandle } from '../../src/runtime/session-lifecycle-port.ts'
+import type { RemoteResultLike } from '../../src/runtime/remote/session-writer-remote.ts'
 import {
   createRemoteSessionOwnerServices,
   type RemoteOwnerBindingFace,
@@ -41,8 +42,11 @@ interface HarnessBinding extends RemoteOwnerBindingFace {
   setRunning(running: boolean): void
   /** Snapshot invalidation (the official subscribe contract). */
   notify(): void
+  /** Control the official `SessionFace.cancel()` settlement. */
+  setCancelResult(result: RemoteResultLike<{ readonly accepted: true }>): void
   subscribeCalls(): number
   unsubscribeCalls(): number
+  cancelCalls(): number
 }
 
 function harness() {
@@ -57,6 +61,8 @@ function harness() {
     let running = false
     let subscribes = 0
     let unsubscribes = 0
+    let cancels = 0
+    let cancelResult: RemoteResultLike<{ readonly accepted: true }> = { ok: true, value: { accepted: true } }
     const binding: HarnessBinding = {
       sessionId,
       session: {
@@ -69,6 +75,10 @@ function harness() {
             listeners.delete(fn)
           }
         },
+        cancel: async (): Promise<RemoteResultLike<{ readonly accepted: true }>> => {
+          cancels += 1
+          return cancelResult
+        },
       },
       setRunning: (next: boolean): void => {
         running = next
@@ -77,8 +87,10 @@ function harness() {
       notify: (): void => {
         for (const fn of [...listeners]) fn()
       },
+      setCancelResult: (result): void => { cancelResult = result },
       subscribeCalls: (): number => subscribes,
       unsubscribeCalls: (): number => unsubscribes,
+      cancelCalls: (): number => cancels,
     }
     return binding
   }
@@ -295,6 +307,7 @@ test('a synchronous snapshot notification during subscribe leaves no listener be
           listeners.delete(fn)
         }
       },
+      cancel: async () => ({ ok: true as const, value: { accepted: true as const } }),
     },
   }
   const services = createRemoteSessionOwnerServices({ binding: () => binding })
@@ -324,6 +337,7 @@ test('a running→false flip before the subscription registers cannot be lost', 
         listeners.add(fn)
         return () => { listeners.delete(fn) }
       },
+      cancel: async () => ({ ok: true as const, value: { accepted: true as const } }),
     },
   }
   const services = createRemoteSessionOwnerServices({ binding: () => binding })
@@ -454,4 +468,59 @@ test('whenIdleOrAbort refuses to observe a replaced same-id generation', async (
   // wait must not observe the NEW generation's running state.
   assert.equal(await h.services.retirement.whenIdleOrAbort(ownerA, fakeSignal()), false)
   void second
+})
+
+// ── the one-shot control cancel: exact binding, shared taxonomy ────────────
+
+test('a control cancel addresses the exact retained binding and never releases it', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'committed', value: undefined })
+  assert.equal(binding.cancelCalls(), 1, 'the official SessionFace.cancel runs exactly once')
+  assert.deepEqual(h.calls.releases, [], 'a control cancel never releases the Client reference')
+  assert.ok(h.isLive('session-a'), 'the owner generation stays retained after the cancel')
+})
+
+test('a control cancel refuses a replaced same-id generation and never cancels the new binding', async () => {
+  const h = harness()
+  const first = retainedHandle(h, 'session-a')
+  const ownerA = h.ownerOf(first.handle)
+  // Full release + re-retain: the same id now names a NEW binding generation.
+  await h.services.retirement.retire(ownerA, 'transition')
+  const second = retainedHandle(h, 'session-a')
+  const ownerB = h.ownerOf(second.handle)
+  const newBinding = h.bindingOf('session-a')!
+  assert.notEqual(ownerB, ownerA, 'a new binding object is a new owner generation')
+  assert.deepEqual(await h.services.retirement.cancel(ownerA), { kind: 'cancelled' },
+    'the old generation is not addressable client-side anymore')
+  assert.equal(newBinding.cancelCalls(), 0, 'the old owner must never cancel the new generation')
+  assert.deepEqual(await h.services.retirement.cancel(ownerB), { kind: 'committed', value: undefined })
+  assert.equal(newBinding.cancelCalls(), 1, 'the current owner cancels exactly its own binding')
+})
+
+test('a control cancel on a fully retired generation is cancelled without a Host call', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  await h.services.retirement.retire(owner, 'transition')
+  assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'cancelled' })
+  assert.deepEqual(h.calls.releases, ['session-a'], 'the retired reference was released exactly once')
+})
+
+test('a control cancel keeps the official write-failure taxonomy', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  binding.setCancelResult({ ok: false, error: { code: 'session/not-running', message: 'nothing to cancel' } })
+  assert.equal((await h.services.retirement.cancel(owner)).kind, 'rejected',
+    'a proven business refusal stays rejected')
+  binding.setCancelResult({ ok: false, error: { code: 'gateway/internal', message: 'carrier internal' } })
+  assert.equal((await h.services.retirement.cancel(owner)).kind, 'indeterminate',
+    'an unproven carrier failure must never be reported as rejected')
+  binding.setCancelResult({ ok: false, error: { code: 'gateway/cancelled', message: 'caller cancelled' } })
+  assert.equal((await h.services.retirement.cancel(owner)).kind, 'cancelled',
+    'an official caller cancellation keeps its own settlement')
 })

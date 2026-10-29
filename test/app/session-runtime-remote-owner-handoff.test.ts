@@ -16,6 +16,7 @@ import { bindSessionRuntime, type SessionRuntimeSurface } from '../../src/app/se
 import type { SessionOwnerRef } from '../../src/app/session/subject.ts'
 import {
   createSessionScopeAuthority,
+  SessionScopeSupersededError,
   type SessionScope,
   type SessionScopeAuthority,
   type SessionScopeLive,
@@ -28,6 +29,7 @@ import type {
   SessionLifecycle,
 } from '../../src/runtime/session-lifecycle-port.ts'
 import type { ClientSessionOwner } from '../../src/runtime/session-lifecycle-port.ts'
+import type { RemoteResultLike } from '../../src/runtime/remote/session-writer-remote.ts'
 
 const fakeDiag: Diag = {
   debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {},
@@ -39,13 +41,18 @@ interface FakeBinding {
   readonly session: {
     getSnapshot(): { readonly running: boolean }
     subscribe(fn: () => void): () => void
+    cancel(): Promise<RemoteResultLike<{ readonly accepted: true }>>
   }
   setRunning(running: boolean): void
+  setCancelResult(result: RemoteResultLike<{ readonly accepted: true }>): void
+  cancelCalls(): number
 }
 
 function makeBinding(sessionId: string): FakeBinding {
   const listeners = new Set<() => void>()
   let running = false
+  let cancels = 0
+  let cancelResult: RemoteResultLike<{ readonly accepted: true }> = { ok: true, value: { accepted: true } }
   return {
     sessionId,
     session: {
@@ -54,11 +61,17 @@ function makeBinding(sessionId: string): FakeBinding {
         listeners.add(fn)
         return () => { listeners.delete(fn) }
       },
+      cancel: async (): Promise<RemoteResultLike<{ readonly accepted: true }>> => {
+        cancels += 1
+        return cancelResult
+      },
     },
     setRunning: (next: boolean): void => {
       running = next
       for (const fn of [...listeners]) fn()
     },
+    setCancelResult: (result): void => { cancelResult = result },
+    cancelCalls: (): number => cancels,
   }
 }
 
@@ -778,6 +791,7 @@ test('a Direct-shaped owned fork handle adopts directly without any lifecycle op
     owners,
     retirement: {
       whenIdleOrAbort: async () => false,
+      cancel: async () => ({ kind: 'committed', value: undefined }),
       flush: async () => {},
       preCancel: () => {},
       retire: async () => ({ failures: [], durabilityFailure: undefined }),
@@ -921,6 +935,7 @@ test('a Direct pre-publication commit throw releases the child once and never re
     },
     retirement: {
       whenIdleOrAbort: async () => false,
+      cancel: async () => ({ kind: 'committed', value: undefined }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -1036,6 +1051,7 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
     },
     retirement: {
       whenIdleOrAbort: async () => false,
+      cancel: async () => ({ kind: 'committed', value: undefined }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -1126,6 +1142,7 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
     },
     retirement: {
       whenIdleOrAbort: async () => false,
+      cancel: async () => ({ kind: 'committed', value: undefined }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -1337,4 +1354,95 @@ test('no owner metadata re-read after the publication: the fork still retires th
   assert.ok(h.core.currentSessionId()!.startsWith('child-'), 'the child is current')
   assert.equal(h.countRefs('session-a'), 0, 'the source owner is retired exactly once')
   assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 1, 'the recalls stay committed exactly once')
+})
+
+// ── the control admission: Stop during a frozen navigation transition ─────
+
+/** Install the production scope authority over this harness's ownership core. */
+function installScope(h: ReturnType<typeof harness>): SessionScopeAuthority {
+  const authority = createSessionScopeAuthority({
+    current: (): SessionScopeLive => {
+      const sessionId = h.core.currentSessionId()
+      const subject = h.core.captureSubject()
+      if (sessionId === undefined || subject === undefined) {
+        assert.equal(sessionId, undefined)
+        assert.equal(subject, undefined)
+        return { subject: undefined, sessionId: undefined, generation: h.core.generation() }
+      }
+      return { subject, sessionId, generation: h.core.generation() }
+    },
+    isSubjectCurrent: (subject) => h.core.isSubjectCurrent(subject),
+  })
+  h.setScopeAuthority(authority)
+  return authority
+}
+
+test('the control interrupt reaches the EXACT old binding while a navigation transition is frozen, before its writer drains', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+
+  // An ordinary writer admitted BEFORE the navigation: it holds the barrier
+  // drain open while the transition is already frozen.
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const writer = h.runtime.withWriter(oldScope, async () => {
+    h.events.push('writer-start')
+    await writerGate
+    h.events.push(`writer-end@${h.core.currentSessionId() ?? '(none)'}`)
+  })
+  const transition = h.runtime.switchSession('session-b')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.core.barrier.inTransition, true, 'the navigation transition froze the writer barrier')
+  assert.equal(h.core.barrier.activeWriters, 1, 'the admitted writer is still outstanding')
+  assert.equal(h.events.includes('open:session-b'), false, 'the transition body has not run yet')
+
+  // The Busy Esc / Stop control entry: it is admitted while frozen, captures
+  // the exact OLD owner and cancels only that generation's binding.
+  assert.deepEqual(await h.runtime.interrupt(oldScope), { kind: 'committed', value: undefined })
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'the OLD exact binding received the cancel')
+  assert.equal(h.bindingOf('session-b'), undefined, 'the NEW binding was not even materialized by the control')
+  assert.equal(h.events.includes('open:session-b'), false, 'the control did not shortcut the writer drain')
+
+  releaseWriter()
+  await writer
+  assert.ok(h.events.includes('writer-end@session-a'),
+    'the admitted writer resumed while OLD was still the current owner: it could never address the NEW owner')
+  assert.equal(await transition, undefined)
+  assert.equal(h.core.currentSessionId(), 'session-b', 'the transition still committed the NEW owner')
+  assert.equal(h.bindingOf('session-b')!.cancelCalls(), 0, 'the control cancel never touched the NEW owner')
+  assert.equal(h.countRefs('session-a'), 0, 'the transition retirement released OLD exactly once')
+})
+
+test('the control interrupt refuses a stale captured scope before any backend cancel', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+
+  assert.equal(await h.runtime.switchSession('session-b'), undefined)
+  assert.equal(h.core.currentSessionId(), 'session-b')
+
+  assert.deepEqual(await h.runtime.interrupt(oldScope), { kind: 'cancelled' },
+    'a superseded capture is a confirmed pre-dispatch cancellation, never a generic failure')
+  assert.equal(h.bindingOf('session-b')!.cancelCalls(), 0, 'the stale capture never cancels the current generation')
+  await assert.rejects(
+    h.runtime.withControl(oldScope, () => { throw new Error('the control task must never run') }),
+    (error: unknown) => error instanceof SessionScopeSupersededError,
+    'the control admission keeps the same exact-scope refusal as a writer',
+  )
+})
+
+test('the control interrupt with an aborted runner is cancelled and never reaches the backend', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  h.controller.abort()
+  assert.deepEqual(await h.runtime.interrupt(scope), { kind: 'cancelled' })
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 0)
 })

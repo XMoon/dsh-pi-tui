@@ -3233,12 +3233,12 @@ test('PERF (plan §5): the Direct compat read adds no perceptible refresh cost o
 //
 // Independent fix PR: the ONE Task Browser Host-text terminal boundary. This
 // case drives the REAL production route end to end — `/tasks` → the row's
-// interrupt → bootstrap's `SessionRuntime.withWriter` writer admission →
+// interrupt → bootstrap's `SessionRuntime.withControl` control admission →
 // `DirectSubagentPort` → `ctx.subagents.interrupt` → the app's ONE transient
 // notice line — with a HOSTILE official label, and asserts on the RAW stream
 // the TUI writes to the terminal (never a `stripTerminalSequences()` shot).
 
-test('S-03 L6: the real /tasks Subagent interrupt admits through the session writer and a hostile label never reaches the terminal stream', async (t) => {
+test('S-03 L6: the real /tasks Subagent interrupt admits through the session control admission and a hostile label never reaches the terminal stream', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-task-interrupt-text-safety-')
   const previousHome = process.env.DSH_HOME

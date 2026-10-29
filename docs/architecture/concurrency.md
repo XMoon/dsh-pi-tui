@@ -246,6 +246,41 @@ a generic command failure.
   the future Remote writer-held recovery hangs off this ONE caller-side module
   rather than every writer site.
 
+### Control admission — Stop stays reachable during a transition
+
+A user Stop gesture is not a session write. Busy Esc / extension
+`cancel-activity` and the Task-Center selected-subagent Stop enter
+`SessionOperationBarrier.runControl` (through `SessionRuntime.withControl` /
+`interrupt`) instead of `runWriter`:
+
+- a frozen navigation transition does NOT refuse the control section: the
+  captured owner's turn can still be stopped while the transition is waiting
+  for admitted writers to drain;
+- the control section never increments the writer count, never waits for the
+  transition, and never releases an ordinary writer; every ordinary writer
+  keeps `withWriter` and is still refused while frozen;
+- the control admission is scope-bound and NO-YIELD exactly like `withWriter`:
+  the captured live scope is checked and the EXACT owner is captured in the
+  same synchronous stack before the backend cancel. A stale capture rejects
+  with `SessionScopeSupersededError`; the semantic `interrupt` maps that and an
+  aborted runner to `cancelled` (a confirmed pre-dispatch outcome, never a
+  generic `agent interrupt` ERROR). A same-id owner rollover can never address
+  the newer generation;
+- the backend cancel is the ONE-SHOT user interrupt of that exact owner
+  (`SessionOwnerRetirement.cancel`), never the shutdown `preCancel`: Direct
+  calls the captured `Agent.cancel(..., { keepInbox: true })`, Remote calls the
+  exact borrowed `SessionFace.cancel()`; both return the shared `WriteOutcome`
+  (`committed` / `rejected` / `indeterminate` / `cancelled`) and never retry an
+  indeterminate result;
+- Task-Center subagent Stop uses the same admission, while the durable
+  parent/child authority and the live activity/view fences still decide which
+  child may be stopped. A legitimate Stop is therefore not refused merely
+  because a navigation transition froze the ordinary writers.
+
+The transition's commit ordering is unchanged: an admitted ordinary writer
+still drains before the transition quiesces, flushes and commits, and the
+control cancel cannot turn a pre-publication failure into a commit.
+
 ### Known-rejection settlement inside the held writer
 
 The ordinary prompt's `WriteOutcome` settlement happens INSIDE the admitted

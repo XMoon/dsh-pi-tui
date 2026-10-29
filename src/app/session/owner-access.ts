@@ -13,6 +13,7 @@
  */
 
 import type { SessionHandle } from '../../runtime/session-lifecycle-port.ts'
+import type { WriteOutcome } from '../../runtime/session-writer-port.ts'
 import type { SessionOwnerRef } from './subject.ts'
 
 /** A backend's implementation of the opaque owner mapping. */
@@ -52,6 +53,15 @@ export interface SessionOwnerRetirement {
    *  itself. HOW an abort is reflected onto the owner is the backend's decision
    *  (a backend may cancel it, or merely stop waiting). */
   whenIdleOrAbort(owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean>
+  /** ONE-SHOT user cancel of this EXACT owner's current work, preserving its
+   *  pending inbox (the Busy Esc / Stop semantic). This is deliberately NOT
+   *  {@link preCancel}: that one is the synchronous shutdown preparation and
+   *  makes no keepInbox promise. The backend addresses the captured owner
+   *  generation itself and returns the shared write settlement — only
+   *  `committed` means the backend accepted the cancel; a stale/gone
+   *  generation is `cancelled`, a proven refusal is `rejected`, and an
+   *  unproven carrier failure is `indeterminate` (never retried). */
+  cancel(owner: SessionOwnerRef): Promise<WriteOutcome<undefined>>
   /** The final durable flush of the owner's session. */
   flush(owner: SessionOwnerRef): Promise<void>
   /** Synchronously cancel the owner's work BEFORE the surface is torn down. */

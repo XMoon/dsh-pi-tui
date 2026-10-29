@@ -2213,7 +2213,14 @@ export function applyRunnerWithRuntime(
       isCleanedUp: () => cleanedUp,
       liveAgent: () => agentNow(),
       ownership: { generation: () => ownership.generation() },
-      session: { withWriter: (scope, task) => sessionRuntime.withWriter(scope, task) },
+      session: {
+        withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
+        // The Busy Esc / extension `cancel-activity` turn cancel is the ONE
+        // scope-bound CONTROL admission: it must still reach the exact
+        // captured owner while a navigation transition holds the ordinary
+        // writer barrier.
+        interrupt: (scope) => sessionRuntime.interrupt(scope),
+      },
       requireLiveScope,
       captureLiveScope: () => sessionScope.captureLive(),
       writerSection: (task) => submission.withWriterSection(task),
@@ -3300,11 +3307,14 @@ export function applyRunnerWithRuntime(
       // defaulted at the composition seam.
       enterView: (childId: string, label: string | undefined, mode: 'one-shot' | 'continuable', parentSessionId: string, activity: 'running' | 'inactive', depth?: number) =>
         viewer.enterView(childId, label, mode, parentSessionId, activity, depth),
-      // The scope-bound writer admission (A3-4) stays in the runner: the
-      // Task-Center subagent interrupt is not a submission write, so only its
-      // admission moves through SessionRuntime.withWriter.
+      // The scope-bound CONTROL admission stays in the runner: the Task-Center
+      // subagent interrupt is not a submission write, and a legitimate Stop
+      // must not be refused merely because a navigation transition froze the
+      // ordinary writers. The exact parent/child authority stays with the
+      // backend's durable subagent relation; the captured live scope still
+      // refuses a superseded parent before dispatch.
       interruptSubagent: (parentSessionId, childSessionId) =>
-        sessionRuntime.withWriter(requireLiveScope(), () => backend.subagent.interrupt({
+        sessionRuntime.withControl(requireLiveScope(), () => backend.subagent.interrupt({
           parentSessionId: parentSessionId as SessionId,
           childSessionId: childSessionId as SessionId,
           mode: 'continuable',

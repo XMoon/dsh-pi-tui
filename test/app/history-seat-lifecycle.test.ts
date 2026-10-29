@@ -321,6 +321,7 @@ function buildSessionFixture(life: TestLifecycle, options: {
 
   const retirement: SessionOwnerRetirement = {
     whenIdleOrAbort: async () => false,
+    cancel: async () => ({ kind: 'committed', value: undefined }),
     flush: async () => {},
     preCancel: () => {},
     retire: async () => ({ failures: [], durabilityFailure: undefined }),

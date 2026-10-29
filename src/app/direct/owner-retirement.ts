@@ -15,6 +15,7 @@
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import type { WriteOutcome } from '../../runtime/session-writer-port.ts'
 import {
   retireDirectOwnedSession,
   type RetirementFailure,
@@ -86,6 +87,45 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
     const record = attachmentOf(owner)
     if (record === undefined) return
     await deps.flushSession(record.agent.session)
+  }
+
+  /**
+   * The ONE-SHOT user interrupt of an exact Direct owner. This is NOT the
+   * retirement cancel and NOT the shutdown `preCancel`: the live turn is
+   * stopped while the Host-owned pending inbox is preserved (`keepInbox`).
+   * The Agent OBJECT is the address, never a session-id re-resolution, so a
+   * same-id generation rollover can never receive this owner's interrupt.
+   */
+  const cancel = async (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> => {
+    const record = attachmentOf(owner)
+    if (record === undefined) {
+      // A Remote generation reaching the Direct port is a composition defect:
+      // report a real pre-dispatch refusal instead of a false committed.
+      return {
+        kind: 'rejected',
+        error: {
+          code: 'session/owner-unattached',
+          message: 'the session owner has no Direct attachment in this runtime',
+        },
+      }
+    }
+    if (deps.isLifecycleAborted()) {
+      // The shutdown path owns this Agent's cancel; dispatching a second one
+      // after the root teardown unregistered the inbox projection is exactly
+      // the late-cancel failure the exactly-once set exists to prevent.
+      return { kind: 'cancelled' }
+    }
+    try {
+      record.agent.cancel({ kind: 'user' }, { keepInbox: true })
+    } catch (error) {
+      // `cancel` is synchronous; a throw does not prove the turn was left
+      // running (it may have taken effect before the failure).
+      return {
+        kind: 'indeterminate',
+        error: { code: 'session/cancel-indeterminate', message: safeErrorMessage(error) },
+      }
+    }
+    return { kind: 'committed', value: undefined }
   }
 
   const preCancel = (owner: SessionOwnerRef): void => {
@@ -250,5 +290,5 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
     return aborted
   }
 
-  return { whenIdleOrAbort, flush, preCancel, retire, park, retireParked }
+  return { whenIdleOrAbort, cancel, flush, preCancel, retire, park, retireParked }
 }
