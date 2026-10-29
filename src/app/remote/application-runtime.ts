@@ -149,8 +149,12 @@ export async function createRemoteApplicationRuntime(
       ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
     })
     // ONE owner registry shared by owners + retirement (never constructed
-    // independently — that would create a second owner truth).
-    ownerServices = createRemoteSessionOwnerServices(wire.client.sessions)
+    // independently — that would create a second owner truth). The SAME
+    // official Connection generation source fences the owner mutation replies.
+    ownerServices = createRemoteSessionOwnerServices(
+      wire.client.sessions,
+      wire.client.connection.generation,
+    )
   } catch (error) {
     // Unwind the partial graph: the wire (Client first, then Host additive
     // fibers) must not survive a backend/owner construction failure after the

@@ -189,7 +189,7 @@ test('a failed Remote open never replaces the current Session, its draft, or rep
 
   const services = createRemoteSessionOwnerServices({
     binding: (id: string) => sessions.binding(SessionId(id)),
-  })
+  }, runtime.client.connection.generation)
   const core = createSessionOwnershipCore({
     isSurfaceDisposed: () => false,
     resetForGeneration: () => {},

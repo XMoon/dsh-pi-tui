@@ -271,7 +271,11 @@ A user Stop gesture is not a session write. Busy Esc / extension
   calls the captured `Agent.cancel(..., { keepInbox: true })`, Remote calls the
   exact borrowed `SessionFace.cancel()`; both return the shared `WriteOutcome`
   (`committed` / `rejected` / `indeterminate` / `cancelled`) and never retry an
-  indeterminate result;
+  indeterminate result. Remote captures the official Connection generation
+  before dispatch and re-checks it together with the exact binding after the
+  reply; a reply from a superseded owner or connection generation is
+  `indeterminate` (the call did dispatch, so it is never a definite
+  success/refusal for the current generation);
 - Task-Center subagent Stop uses the same admission, while the durable
   parent/child authority and the live activity/view fences still decide which
   child may be stopped. A legitimate Stop is therefore not refused merely

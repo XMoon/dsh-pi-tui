@@ -99,6 +99,8 @@ interface HarnessOptions {
   /** When set, a running continuable descendant row joins the browser. */
   readonly subagentLabel?: string
   readonly interrupt?: (request: SubagentInterruptRequest) => Promise<SubagentInterruptOutcome>
+  /** When false, the captured browser parent subject is superseded. */
+  readonly subjectCurrent?: () => boolean
 }
 
 function startHarness(options: HarnessOptions = {}): Harness {
@@ -144,7 +146,7 @@ function startHarness(options: HarnessOptions = {}): Harness {
   const source: TaskSurfaceSource = {
     sessionId: () => 'sess-main',
     captureSubject: () => subject,
-    subjectMatches: candidate => candidate === subject,
+    subjectMatches: candidate => candidate === subject && (options.subjectCurrent?.() ?? true),
     enterView: async () => {},
     interruptSubagent: async (parentSessionId, childSessionId) => {
       interrupts.push({ parentSessionId, childSessionId })
@@ -322,6 +324,30 @@ test('S-03d a hostile Subagent label never reaches the terminal through a THROWI
     'the onError notice is painted with the sanitized label and the real reason')
   assert.deepEqual(harness.notices, [{ text: `could not stop ${HOSTILE}: admission refused`, kind: 'error' }],
     'the onError notice keeps the raw label and its error level')
+  harness.app.stop()
+})
+
+test('S-03e a superseded parent subject never dispatches the selected child Stop', async () => {
+  let current = true
+  const harness = startHarness({
+    subagentLabel: 'plain child',
+    interrupt: async () => ({ kind: 'committed' }),
+    subjectCurrent: () => current,
+  })
+  await flush()
+  harness.tasks.openTasksBrowser('full')
+  await harness.vt.waitForRender()
+  harness.vt.sendInput('S')
+  await harness.vt.waitForRender()
+  // The owner generation moves between arming and confirming the Stop.
+  current = false
+  harness.vt.sendInput('y')
+  await flush()
+  await harness.vt.waitForRender()
+  assert.deepEqual([...harness.interrupts], [],
+    'a superseded parent subject must never dispatch the selected child Stop')
+  assert.deepEqual([...harness.notices], [],
+    'and it must not paint a fake success or failure')
   harness.app.stop()
 })
 
