@@ -68,12 +68,20 @@ check('fork repository.note records the vendored commit (single source of truth)
   typeof forkPkg.repository?.note === 'string' && forkPkg.repository.note.length > 20,
   forkPkg.repository?.note ?? 'missing')
 
-// 5. The tarball smoke + pack gate stay wired (stage G).
-check('bundle prepack gate exists', (rootPkg.scripts?.prepack ?? '').includes('pnpm build'))
-check('bundle postpack smoke exists', (rootPkg.scripts?.postpack ?? '').includes('tarball-smoke'))
-check('postpack keeps the pluginization smokes',
-  ['extension-fixture-smoke', 'vim-plugin-smoke', 'examples-plugin-smoke'].every(name =>
-    (rootPkg.scripts?.postpack ?? '').includes(name)))
+// 5. The single explicit pack path and its packed-artifact runner stay wired.
+const packArtifact = rootPkg.scripts?.['pack:artifact'] ?? ''
+check('bundle pack:artifact is a lifecycle-free pack',
+  packArtifact.includes('pnpm pack') && packArtifact.includes('--config.ignore-scripts=true'))
+check('bundle pack:artifact carries no build, test, typecheck or smoke stage',
+  !/\b(?:build|test|typecheck|smoke)\b/u.test(packArtifact))
+check('bundle has no implicit lifecycle hooks',
+  rootPkg.scripts?.prepack === undefined && rootPkg.scripts?.postpack === undefined && rootPkg.scripts?.prepare === undefined)
+check('bundle smoke:release runs the eight-smoke runner',
+  (rootPkg.scripts?.['smoke:release'] ?? '').includes('scripts/qualify-tarball.mjs'))
+check('bundle pack:release orchestrates pack:artifact and smoke:release',
+  (rootPkg.scripts?.['pack:release'] ?? '').includes('pack:artifact') && (rootPkg.scripts?.['pack:release'] ?? '').includes('smoke:release'))
+check('bundle verify:release is the release gate',
+  typeof rootPkg.scripts?.['verify:release'] === 'string' && rootPkg.scripts['verify:release'].includes('pack:release'))
 
 // 6. The workspace has no stray dist/ or tarballs COMMITTED (dist is
 //    gitignored by design; the gate checks git tracking, not the tree).

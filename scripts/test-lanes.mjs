@@ -14,10 +14,10 @@
  *
  *   - `product` — the tests of the PRODUCT's own behaviour (the bundle, the
  *     TUI, the application, the adapters, the package). It is the suite the
- *     packaging safety gate (`prepack`) runs.
+ *     explicit `pack:release` / `verify:release` orchestration runs.
  *   - `tooling` — the tests of the DEVELOPMENT AND RELEASE TOOLING itself
  *     (the scripts, the CI context, the static ownership gates). It is kept
- *     OUT of the packaging lifecycle so the artifact never depends on the
+ *     OUT of the packed artifact path so the artifact never depends on the
  *     developer git/CI environment.
  *   - `tmux` — the tmux terminal-tooling tests (the historical `test:docs`
  *     name: the lane never tested `docs/**`, it proves the tmux terminal

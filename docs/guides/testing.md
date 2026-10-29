@@ -286,11 +286,19 @@ manifest that has to be kept in sync with the tree.
 | `pnpm test:tmux` | the tmux terminal-tooling suite |
 | `pnpm test:fork` | the vendored `packages/pi-tui` suite |
 | `pnpm test` | all of the above |
-| `pnpm verify:prepush` | the full pre-push pipeline |
+| `pnpm verify:release` | the full explicit release pipeline |
 
-`pnpm test:product` is the lane the packaging lifecycle (`prepack`) runs.
-`pnpm test:tooling` is deliberately OUTSIDE that lifecycle: the artifact
-must never depend on the developer git/CI environment.
+`pnpm test:product` is run explicitly by `pack:release` (and therefore by
+`verify:release`). `pnpm test:tooling` is deliberately OUTSIDE the packed
+artifact path: the artifact must never depend on the developer git/CI
+environment.
+
+`pnpm smoke:split-process` is a Linux-only real two-process distribution
+proof, not part of `verify:release`. GitHub CI runs it automatically only on
+an npm release tag; an ordinary PR's `skipped` status is not the proof.
+Host/Client split-process development work must run it manually against the
+actual candidate tarball and record the package SHA, DSH version, command, and
+PASS/FAIL (or `NOT_RUN`).
 
 A single file:
 

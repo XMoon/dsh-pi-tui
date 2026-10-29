@@ -5,10 +5,11 @@
  *
  * The accelerated DAG has one job — `qualified` — whose only purpose is to
  * refuse publication unless the whole graph succeeded. That job cannot use
- * GitHub's implicit `success()` requirement, because three of its needs are
- * LEGITIMATELY skipped depending on the dependency mode, and `always()` /
- * `!cancelled()` suppress the implicit check. So the verdict is a script:
- * it is exercised by tests, it prints a table, and it fails closed.
+ * GitHub's implicit `success()` requirement, because some of its needs are
+ * LEGITIMATELY skipped depending on the dependency mode and the actual GitHub
+ * ref, and `always()` / `!cancelled()` suppress the implicit check. So the
+ * verdict is a script: it is exercised by tests, it prints a table, and it
+ * fails closed.
  *
  * Three things it enforces, and none of them is expressible as "not failed":
  *
@@ -17,16 +18,17 @@
  *     prove anything;
  *   - the MODE-DEPENDENT phases have the status their mode requires: in
  *     Source Mode the pinned distribution must have been built (`success`),
- *     and the npm-only client-family and split-process gates must be
- *     `skipped`; in npm mode the distribution must be `skipped` and both
- *     npm-only gates `success`. A source run whose distribution was skipped
- *     has no dependency graph to qualify against, and an npm run whose
- *     npm-only gate was skipped silently dropped a check;
+ *     and the npm-only client-family gate must be `skipped`; in npm mode the
+ *     distribution must be `skipped` and client-family `success`. The
+ *     split-process proof is npm-only AND release-tag-only: it is required on
+ *     a release tag in npm mode and must be exactly `skipped` on every
+ *     ordinary PR / branch ref (a job that unexpectedly runs is structural
+ *     drift, not a bonus);
  *   - on a RELEASE TAG the release phases are required too.
  *
  * Usage:
- *   node scripts/ci-verdict.mjs qualify --mode <npm|source> --phase <job>=<result>...
- *   node scripts/ci-verdict.mjs summary --mode <npm|source> [--release] [--started <epoch>] \
+ *   node scripts/ci-verdict.mjs qualify --mode <npm|source> --ref <github-ref> --phase <job>=<result>...
+ *   node scripts/ci-verdict.mjs summary --mode <npm|source> --ref <github-ref> [--release] [--started <epoch>] \
  *     --phase <job>=<result>...
  *
  * @module @xmoon76/dsh-pi-tui/scripts/ci-verdict
@@ -50,7 +52,6 @@ export const REQUIRED_PHASES = [
   'aggregate',
   'candidate',
   'qualify',
-  'equivalence',
   'source-checks',
   'compat-smoke',
   'ecosystem-compat',
@@ -65,10 +66,12 @@ export const SUMMARY_EXTRA_PHASES = ['qualified']
 /** Phases that exist only on a release tag. */
 export const RELEASE_PHASES = ['release-context', 'release-metadata', 'release-packed-check', 'publish', 'release']
 
+/** The npm-only proof whose expectation depends on the actual GitHub ref. */
+export const SPLIT_PROCESS_PHASE = 'split-process'
+
 /**
- * The status each MODE-DEPENDENT job must show.
+ * The status each MODE-DEPENDENT job (other than split-process) must show.
  *
- * These are the jobs whose presence is a function of the dependency mode.
  * `success` and `skipped` are both "expected"; what is forbidden is the WRONG
  * one, which is what a mis-gated job looks like.
  */
@@ -76,16 +79,42 @@ export const MODE_STATUS = {
   npm: {
     'prepare-dsh-source': 'skipped',
     'client-family-compat': 'success',
-    'split-process': 'success',
   },
   source: {
     'prepare-dsh-source': 'success',
     'client-family-compat': 'skipped',
-    'split-process': 'skipped',
   },
 }
 
 const RESULT_VALUES = new Set(['success', 'failure', 'cancelled', 'skipped'])
+
+/** A tag ref is the only ref on which the release-only split-process gate runs. */
+export function isReleaseTagRef(ref) {
+  return typeof ref === 'string' && /^refs\/tags\/\S+$/u.test(ref)
+}
+
+/**
+ * The refs this pipeline is defined for. A missing or malformed ref must fail
+ * instead of silently becoming "an ordinary branch, so skipped is fine".
+ */
+export function isSupportedRef(ref) {
+  return typeof ref === 'string' && (
+    /^refs\/heads\/\S+$/u.test(ref)
+    || isReleaseTagRef(ref)
+    || /^refs\/pull\/\d+\/merge$/u.test(ref)
+  )
+}
+
+/**
+ * The single expectation for the split-process phase.
+ *
+ * - npm release tag: the real smoke MUST have run and succeeded;
+ * - npm PR / branch: it MUST be skipped (an unexpected run is graph drift);
+ * - any Source Mode ref: skipped, because the smoke is npm-only.
+ */
+export function expectedSplitProcessStatus(mode, ref) {
+  return mode === 'npm' && isReleaseTagRef(ref) ? 'success' : 'skipped'
+}
 
 function fail(message) {
   throw new Error(message)
@@ -94,13 +123,18 @@ function fail(message) {
 /**
  * Decide whether this run qualifies.
  *
- * @param {{role: 'qualify'|'summary', mode: string, phases: Array<{name: string, result: string}>, release?: boolean, started?: string}} options
+ * @param {{role: 'qualify'|'summary', mode: string, ref: string, phases: Array<{name: string, result: string}>, release?: boolean, started?: string}} options
  * @returns {{ok: boolean, failures: string[], lines: string[], elapsedSeconds: number|null}} the verdict.
  */
-export function verdict({ role, mode, phases, release = false, started }) {
+export function verdict({ role, mode, ref, phases, release = false, started }) {
   const failures = []
   const byName = new Map()
   for (const phase of phases) byName.set(phase.name, phase.result)
+
+  const refOk = isSupportedRef(ref)
+  if (!refOk) {
+    failures.push(`the GitHub ref ${JSON.stringify(ref)} is missing or not a supported ref (expected refs/heads/..., refs/tags/... or refs/pull/<n>/merge): the split-process expectation cannot be decided`)
+  }
 
   const required = role === 'summary'
     ? [...REQUIRED_PHASES, ...SUMMARY_EXTRA_PHASES]
@@ -132,6 +166,17 @@ export function verdict({ role, mode, phases, release = false, started }) {
     }
   }
 
+  // split-process has exactly ONE expectation, decided by the actual ref and
+  // mode. When the ref is unusable the expectation is not guessed; the ref
+  // failure above is the verdict.
+  if (refOk && expected !== undefined) {
+    const wanted = expectedSplitProcessStatus(mode, ref)
+    const actual = byName.get(SPLIT_PROCESS_PHASE)
+    if (actual !== wanted) {
+      failures.push(`the phase '${SPLIT_PROCESS_PHASE}' is '${actual ?? '(absent)'}', but mode '${mode}' on '${ref}' requires '${wanted}'`)
+    }
+  }
+
   // The start instant is optional. When it IS given it must be usable: the
   // shell treats an empty operand as zero, which once produced a
   // plausible-looking elapsed time for a run that never started.
@@ -146,7 +191,8 @@ export function verdict({ role, mode, phases, release = false, started }) {
   }
 
   const lines = ['phase                         result']
-  const shown = [...required, ...(mode === undefined ? [] : Object.keys(MODE_STATUS[mode] ?? {})), ...phases.map(phase => phase.name)]
+  const modePhases = MODE_STATUS[mode] === undefined ? [] : [...Object.keys(MODE_STATUS[mode]), SPLIT_PROCESS_PHASE]
+  const shown = [...required, ...modePhases, ...phases.map(phase => phase.name)]
   const seen = new Set()
   for (const name of shown) {
     if (seen.has(name)) continue
@@ -184,7 +230,7 @@ function main() {
   const args = process.argv.slice(2)
   const role = args[0]
   if (role !== 'qualify' && role !== 'summary') {
-    console.error('usage: node scripts/ci-verdict.mjs <qualify|summary> --mode <npm|source> [--release] [--started <epoch>] --phase <job>=<result>...')
+    console.error('usage: node scripts/ci-verdict.mjs <qualify|summary> --mode <npm|source> --ref <github-ref> [--release] [--started <epoch>] --phase <job>=<result>...')
     process.exit(2)
   }
   const valueOf = (name) => {
@@ -193,11 +239,19 @@ function main() {
   }
   const mode = valueOf('--mode')
   if (mode === undefined) fail('--mode is required: the mode-dependent phases cannot be checked without it')
+  const ref = valueOf('--ref')
+  if (ref === undefined || ref === '') {
+    fail('--ref is required: the split-process expectation depends on the actual GitHub ref')
+  }
+  if (!isSupportedRef(ref)) {
+    fail(`--ref '${ref}' is not a supported GitHub ref (expected refs/heads/..., refs/tags/... or refs/pull/<n>/merge)`)
+  }
   const phases = parsePhases(args)
   if (phases.length === 0) fail('--phase is required: a verdict over no phases is not a verdict')
   const decision = verdict({
     role,
     mode,
+    ref,
     phases,
     release: args.includes('--release'),
     started: valueOf('--started'),

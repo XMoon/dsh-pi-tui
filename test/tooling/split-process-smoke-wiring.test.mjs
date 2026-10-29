@@ -2,10 +2,12 @@
  * M4-A0 split-process smoke wiring guard.
  *
  * The real OS qualification lives in `scripts/split-process-smoke.mjs` and is
- * driven by the dedicated CI split-process job. This tooling test keeps that
- * lane discoverable and prevents the script/CI/package wiring from silently
- * rotting while the heavy installation path stays out of the ordinary product
- * lane.
+ * driven by the dedicated CI split-process job on an npm release tag. An
+ * ordinary PR legally skips that job — that skip is NOT the full smoke
+ * passing: split-process development work runs `pnpm smoke:split-process`
+ * manually under its own task plan. This tooling test keeps the lane discoverable and prevents the
+ * script/CI/package wiring from silently rotting while the heavy installation
+ * path stays out of the ordinary product lane.
  *
  * @module split-process-smoke-wiring.test
  */
@@ -23,7 +25,7 @@ import { EntryProcess, statusMatches } from '../../scripts/split-process-smoke.m
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
 
-test('the split-process smoke is a package script and a dedicated CI job', () => {
+test('the split-process smoke is a package script and a release-tag-only CI job', () => {
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
   assert.equal(pkg.scripts?.['smoke:split-process'], 'node scripts/split-process-smoke.mjs')
   const ci = readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8')
@@ -32,12 +34,15 @@ test('the split-process smoke is a package script and a dedicated CI job', () =>
   assert.match(ci, /NOT_APPLICABLE: the startup strictness smoke is npm-only; the Host\/Client split-process job is also npm-only/u)
 
   // Parse the two jobs rather than only matching prose: the split-process job
-  // must own the npm gate, and `qualify` must explicitly record the source-mode
-  // skip for both npm-only surfaces. A text-only assertion could keep passing
-  // while the job-level gate or the source record was dropped.
+  // must own the npm release-tag gate, and `qualify` must explicitly record
+  // the source-mode skip for both npm-only surfaces. A text-only assertion
+  // could keep passing while the job-level gate or the source record was
+  // dropped.
   const workflow = parseYaml(ci)
   const job = workflow.jobs['split-process']
   assert.ok(job, 'the split-process smoke must be its own CI job')
+  assert.match(job.if, /startsWith\(github\.ref, 'refs\/tags\/'\)/u,
+    'the split-process job must only run on a release tag; an ordinary PR skips it')
   assert.match(job.if, /outputs\.mode == 'npm'/u, 'the split-process job must only run in npm mode')
   // The real npm run once skipped this job because its transitive
   // prepare-dsh-source need is legitimately skipped; without always() the

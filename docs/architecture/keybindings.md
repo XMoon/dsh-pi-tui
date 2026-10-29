@@ -231,7 +231,7 @@ rebuild alone.
     rejects any user binding with a diagnostic — never a bindable no-op
     key (convergence §7).
 11. **The static gate** (`scripts/check-host-keybindings.mts`, wired into
-    `verify:prepush`) forbids NEW hard-coded chord labels in user-facing
+    `verify:release`) forbids NEW hard-coded chord labels in user-facing
     strings across ALL quote styles (single/double/backtick, either
     casing) and new `matchesKey(data, 'ctrl+…'/'alt+…'/'shift+…')`
     chords in `src/tui-app.ts`, with a documented allowlist for the

@@ -158,7 +158,7 @@ function smokeEnvironment(fixture, registry = 'http://127.0.0.1:9/') {
     //
     // The scope is deliberately THIS synthetic fixture's subprocess
     // environment only. The real publish/security path never runs through
-    // it: `pnpm smoke:pack` / `postpack` / the CI tarball smokes invoke
+    // it: `pnpm smoke:pack` / `smoke:release` / the CI tarball smokes invoke
     // `scripts/tarball-smoke.mjs` with the ambient environment against the
     // real registry, and `pnpm audit --prod --audit-level high` is a
     // separate command that keeps the full advisory gate.

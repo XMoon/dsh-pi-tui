@@ -27,7 +27,7 @@
  * local DSH source-pack adapter for a truly fresh pnpm install. Without it,
  * the existing npm registry install path is used.
  *
- * Env: TARBALL_SMOKE_SKIP_INSTALL=1 skips the install step (offline postpack
+ * Env: TARBALL_SMOKE_SKIP_INSTALL=1 skips the install step (offline packed-artifact
  * structural checks) when no source distribution is supplied; it is rejected
  * for Source Mode so a fresh-install check cannot be bypassed. TARBALL_SMOKE_KEEP=1
  * keeps the temp dirs for inspection.

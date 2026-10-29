@@ -247,24 +247,24 @@ Adding or changing a test? Read `docs/guides/testing.md` first: it owns the
 test-tree ownership map, the new-test rules, the lane commands and the
 objective discovery guards.
 
-A stage-final validation must not run the same suite twice. `pnpm verify:prepush`
+A stage-final validation must not run the same suite twice. `pnpm verify:release`
 is the repository's full pipeline: `typecheck:fork` + `typecheck:bench`,
 `test:fork`, `test:tmux`, `test:tooling`, the architecture / boundary /
 keybinding / naming / session-event / installation-doc / pi-divergence /
 pi-vendor gates, `pnpm audit`, and finally `pnpm pack:release`. `pack:release`
-is NOT packaging-only: its `prepack` runs `clean` + `build` +
-`typecheck:bundle` + `test:product`, and its `postpack` runs the eight
-public-package smokes (tarball, extension fixture, advanced, phase4, unstable,
-vim, examples, composeAgent). So in one pass never also run `typecheck:bundle`,
-`test:product`, `scripts/tarball-smoke.mjs` or
+is the explicit local orchestrator: `clean` + `clean:fork` + `build` +
+`typecheck:bundle` + `test:product` + `pack:artifact` + `smoke:release`
+(the eight packed-artifact smokes: tarball, extension fixture, advanced,
+phase4, unstable, vim, examples, composeAgent). So in one pass never also run
+`typecheck:bundle`, `test:product`, `scripts/tarball-smoke.mjs` or
 `scripts/compose-agent-compat-smoke.mjs` by hand, and never invoke
-`pnpm pack`/`pack:release` while a build or an artifact-dependent gate is
-running. `pnpm test` already contains `test:fork` + `test:product` +
+`pnpm pack:artifact`/`pack:release` while a build or an artifact-dependent gate
+is running. `pnpm test` already contains `test:fork` + `test:product` +
 `test:tooling` + `test:tmux`; prefer it over the individual pieces. What a
-stage-final pass still needs ON TOP of `verify:prepush`: the migration contract
+stage-final pass still needs ON TOP of `verify:release`: the migration contract
 smokes (`smoke:remote-*`), `smoke:boundary`, `smoke:startup-strictness`, the
 published-DSH compatibility checks (`compat:dsh:npm`, `compat:dsh:client-family`
-— `verify:prepush` does NOT contain them), `git diff --check` (unstaged and
+— `verify:release` does NOT contain them), `git diff --check` (unstaged and
 staged), plus whatever stage-specific validation the authority plan for the
 current stage requires (e.g. the Pre-M3 plan's §35.5/§35.6 matrix).
 
@@ -297,10 +297,15 @@ of them only when the resolved DSH mode is `source`), `test:tmux`,
 `generate:pi-divergences` with a `git diff --exit-code` on `DIVERGENCES.md`,
 `gate:pi-divergence-ledger`, `gate:pi-vendor-diff --strict` and the naming gate;
 `Build and pack` runs the root `build`, `typecheck:bundle` and `test:product`
-through `pack`, the public-package smokes and `smoke:startup-strictness`; the
-remaining jobs run `smoke:boundary`, `smoke:official-presets`,
-`compat:dsh:client-family`, the tarball smokes and `pnpm audit`. The lanes CI
-does NOT run — therefore the only ones a stage-final pass must run locally — are
+in separate jobs, then a lifecycle-free `pack:artifact` candidate qualified by
+the eight packed-artifact smokes through `smoke:release`; the qualification job
+also runs `smoke:startup-strictness`. The remaining jobs
+run `smoke:boundary`, `smoke:official-presets`, `compat:dsh:client-family`, the
+tarball smokes and `pnpm audit`. `split-process` runs only for an npm release
+tag: PR, main and next runs legitimately report it as `skipped`, and
+Host/Client split-process development work must run `pnpm smoke:split-process`
+manually against the actual candidate tarball. The lanes CI does NOT run — therefore the only ones a stage-final pass
+must run locally — are
 `compat:dsh:npm`, `gate:keybindings`, `gate:boundary`, `gate:architecture`,
 `scripts/check-no-session-events.mjs`, `gate:dsh-preset-parity`,
 `smoke:remote-d2-fork` and `smoke:remote-session-lifecycle-parity`; a mode-gated
@@ -330,8 +335,8 @@ Validation mechanics for this toolchain:
   bundled `dist/*.d.mts` may only carry the top-level regions allowlisted in
   `scripts/tarball-smoke.mjs`. Run `pnpm build` and then
   `node scripts/tarball-smoke.mjs` before pushing — the ordinary product suite
-  does NOT cover this (it is a `postpack`/CI check), and a stale `dist` makes it
-  pass locally.
+  does NOT cover this (it is a `smoke:release`/CI check), and a stale `dist`
+  makes it pass locally.
 * A publicly-exported helper therefore follows the canonical owner-layer placement
   (`## Repository boundaries` → `### Source module placement`) and is exposed through
   the public entry (`src/index.ts`) or an existing documented facade. Do not create a

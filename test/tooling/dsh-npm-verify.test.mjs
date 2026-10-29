@@ -199,3 +199,24 @@ test('npm verification rejects a symlinked candidate tarball', (t) => {
   symlinkSync(target, candidate)
   assert.throws(() => npmVerifyCandidateTarball(directory), /expected one TUI candidate/u)
 })
+
+test('both DSH verifiers build once, then use the explicit pack entry and the eight-smoke runner', () => {
+  const npmVerify = readFileSync(new URL('../../scripts/dsh-npm-verify.mjs', import.meta.url), 'utf8')
+  const sourceVerify = readFileSync(new URL('../../scripts/dsh-source-verify.mjs', import.meta.url), 'utf8')
+  for (const [name, source] of [['npm', npmVerify], ['source', sourceVerify]]) {
+    assert.match(source, /\['TUI bundle typecheck', \['typecheck:bundle'\]\]/u, `${name} verifier must run the bundle typecheck explicitly`)
+    assert.match(source, /\['TUI product tests', \['test:product'\]\]/u, `${name} verifier must run the product suite explicitly`)
+    assert.match(source, /\['TUI candidate pack', \['pack:artifact'\]\]/u, `${name} verifier must use the single pack entry`)
+    assert.match(source, /\['TUI packed-artifact smokes', \['smoke:release'\]\]/u, `${name} verifier must run the eight-smoke runner`)
+    assert.doesNotMatch(source, /'pack:release'/u, `${name} verifier must not invoke the full local orchestrator (it would rebuild and retest)`)
+    // `attachGitMetadata` existed only to let the deleted pre-push hook test
+    // read the repository's git metadata; with the hook retired it must not
+    // remain as an unexplained compatibility shim.
+    assert.doesNotMatch(source, /attachGitMetadata/u, `${name} verifier must not keep the hook-only git metadata shim`)
+  }
+  // Source Mode keeps both halves of its packaged evidence: the offline
+  // eight-smoke run AND a separate real fresh-install proof.
+  assert.match(sourceVerify, /TARBALL_SMOKE_SKIP_INSTALL: '1'/u)
+  assert.match(sourceVerify, /TARBALL_SMOKE_SKIP_INSTALL: '0'/u)
+  assert.match(sourceVerify, /source tarball fresh install/u)
+})
