@@ -114,19 +114,23 @@ for (const { columns, rows, cardVisible, fragments } of SIZES) test(`the REAL Se
   // storage directory must not truncate the raw-log suffix removal and leave a
   // path fragment that scrolls the Session card out.
   const previousTmp = process.env.TMPDIR
-  const parenthesizedRoot = columns === 44 && rows === 20
-    ? join(tmpdir(), 'dsh-prb(archive)', 'dsh-pi-tui-test-run-bZMkpP-' + 'x'.repeat(150))
-    : undefined
-  if (parenthesizedRoot !== undefined) {
-    mkdirSync(parenthesizedRoot, { recursive: true })
-    process.env.TMPDIR = parenthesizedRoot
-  }
   const life = testLifecycle(t)
+  // A UNIQUE lifecycle-owned root (never a fixed shared path): two test
+  // processes must not share a temp directory, or one process's cleanup could
+  // delete the other's real Session artifacts. The prefix keeps the legal
+  // parentheses; the long subdirectory keeps the path shape that the raw-log
+  // suffix budget must survive.
+  const usesParenthesizedRoot = columns === 44 && rows === 20
+  if (usesParenthesizedRoot) {
+    const parenthesizedRoot = life.tempDir('dsh-prb(archive)-')
+    const longRoot = join(parenthesizedRoot, 'dsh-pi-tui-test-run-bZMkpP-' + 'x'.repeat(150))
+    mkdirSync(longRoot, { recursive: true })
+    process.env.TMPDIR = longRoot
+  }
   life.defer(() => {
-    if (parenthesizedRoot === undefined) return
+    if (!usesParenthesizedRoot) return
     if (previousTmp === undefined) delete process.env.TMPDIR
     else process.env.TMPDIR = previousTmp
-    rmSync(parenthesizedRoot, { recursive: true, force: true })
   })
   const root = life.tempDir('dsh-s2b-real-picker-')
   const home = life.tempDir('dsh-s2b-real-picker-home-')
