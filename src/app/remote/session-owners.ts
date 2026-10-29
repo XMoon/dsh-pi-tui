@@ -25,11 +25,13 @@
  * The ONE Host mutation here is `cancel`: the explicit user Stop addresses the
  * EXACT captured binding generation through the official `SessionFace.cancel`
  * verb; it never substitutes a same-id replacement and never releases the
- * Client reference.
+ * Client reference. The Connection generation is captured before dispatch and
+ * re-checked with the exact binding after the reply, so a superseded reply is
+ * `indeterminate`, never the current generation's definite result.
  *
- * Composition note: this provider is not wired into any production
- * bootstrap yet (M3-3B/M3-4 own the Remote runtime selection seam). Tests and
- * the future Remote composition construct it directly.
+ * Composition note: the Remote application runtime constructs this provider
+ * ONCE over the official Client's sessions and Connection generation source.
+ * Tests may construct it directly over a fake binding/generation source.
  *
  * @module @xmoon76/dsh-pi-tui/app/remote/session-owners
  */
@@ -37,6 +39,7 @@
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { clientOwnerOf, type ClientSessionOwner, type SessionHandle } from '../../runtime/session-lifecycle-port.ts'
 import type { WriteOutcome } from '../../runtime/session-writer-port.ts'
+import type { RemoteConnectionGenerationSource } from '../../runtime/remote/session-reader-remote.ts'
 import { classifyRemoteWriteFailure } from '../../runtime/remote/write-failure.ts'
 import type { RemoteResultLike } from '../../runtime/remote/session-writer-remote.ts'
 import type {
@@ -88,11 +91,17 @@ export interface RemoteSessionOwnerServices {
 }
 
 /**
- * Build the Remote Session owner services over one binding borrow source.
- * `owners` and `retirement` share the SAME registry state; constructing two
- * independent mappings would create a second owner truth.
+ * Build the Remote Session owner services over one binding borrow source and
+ * the Connection generation source. `owners` and `retirement` share the SAME
+ * registry state; constructing two independent mappings would create a second
+ * owner truth. The generation source is the SAME official pre-dispatch fence
+ * the Remote session writer uses: an owner mutation's reply is only a definite
+ * outcome for the generation it was dispatched on.
  */
-export function createRemoteSessionOwnerServices(source: RemoteOwnerBindingSource): RemoteSessionOwnerServices {
+export function createRemoteSessionOwnerServices(
+  source: RemoteOwnerBindingSource,
+  generation: RemoteConnectionGenerationSource,
+): RemoteSessionOwnerServices {
   // Identity is keyed by the exact binding object, never by session id.
   const byBinding = new WeakMap<object, SessionOwnerRef>()
   const byOwner = new WeakMap<SessionOwnerRef, RemoteOwnerRecord>()
@@ -152,21 +161,45 @@ export function createRemoteSessionOwnerServices(source: RemoteOwnerBindingSourc
   const sessionId = (owner: SessionOwnerRef): string => recordOf(owner).sessionId
 
   /**
-   * ONE-SHOT user interrupt of the exact Remote owner. The borrowed binding is
-   * fenced by OBJECT identity: a same-id replacement or a fully retired
-   * generation is `cancelled` (this exact owner's work is not addressable
-   * client-side anymore) and the NEW generation's cancel is never called. The
-   * official result branch keeps the shared write taxonomy; a Client reference
-   * release is never part of this operation.
+   * ONE-SHOT user interrupt of the exact Remote owner. The borrow, the
+   * Connection generation capture and the exact binding check form the
+   * pre-dispatch fence; the same two identities are re-checked AFTER the
+   * official reply. A reply carried by a replaced/retired owner generation or
+   * a superseded Connection generation is `indeterminate` — the call DID
+   * dispatch, so neither a definite `committed` nor a refusal may be claimed
+   * for the current generation, and it is never retried. The Client reference
+   * is never released by this operation.
    */
   const cancel = async (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> => {
     const record = recordOf(owner)
     if (record.currentWrapper === undefined) return { kind: 'cancelled' }
+    const capturedGeneration = generation.getSnapshot()
+    if (capturedGeneration === undefined) return { kind: 'cancelled' }
     const borrowed = source.binding(record.sessionId)
     if (borrowed === undefined || !Object.is(borrowed, record.bindingIdentity)) {
       return { kind: 'cancelled' }
     }
+    // The borrow and the generation re-read are synchronous; a replacement
+    // observed here proves the official call was never dispatched.
+    if (!Object.is(capturedGeneration, generation.getSnapshot())) return { kind: 'cancelled' }
     const result = await borrowed.session.cancel()
+    // Post-dispatch identity fence (host-client.md: every Remote async result
+    // is generation-bound; a superseded reply is never the current
+    // generation's definite outcome). The call happened, so this is
+    // indeterminate — not a refusal, not a success, never a replay.
+    const currentGeneration = generation.getSnapshot()
+    if (currentGeneration === undefined
+      || !Object.is(capturedGeneration, currentGeneration)
+      || record.currentWrapper === undefined
+      || !Object.is(source.binding(record.sessionId), record.bindingIdentity)) {
+      return {
+        kind: 'indeterminate',
+        error: {
+          code: 'session/cancel-superseded',
+          message: 'the session owner or connection generation changed while the cancel was in flight',
+        },
+      }
+    }
     if (result.ok) return { kind: 'committed', value: undefined }
     return classifyRemoteWriteFailure(result.error)
   }

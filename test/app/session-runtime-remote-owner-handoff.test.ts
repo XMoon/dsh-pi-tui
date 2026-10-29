@@ -29,6 +29,7 @@ import type {
   SessionLifecycle,
 } from '../../src/runtime/session-lifecycle-port.ts'
 import type { ClientSessionOwner } from '../../src/runtime/session-lifecycle-port.ts'
+import type { RemoteConnectionGenerationSource } from '../../src/runtime/remote/session-reader-remote.ts'
 import type { RemoteResultLike } from '../../src/runtime/remote/session-writer-remote.ts'
 
 const fakeDiag: Diag = {
@@ -129,9 +130,14 @@ function harness() {
     }
   }
 
+  const generationState = { id: 1 }
+  const generation: RemoteConnectionGenerationSource = {
+    getSnapshot: () => generationState,
+    subscribe: () => () => {},
+  }
   const services = createRemoteSessionOwnerServices({
     binding: (id: string) => live.get(id)?.binding,
-  })
+  }, generation)
   let failCompletionIdentity = false
   let currentScope = true
   let scopeAuthority: SessionScopeAuthority | undefined

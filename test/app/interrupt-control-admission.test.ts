@@ -90,6 +90,11 @@ test('Busy Esc uses the control admission while a frozen transition drains a wri
 
   shell.interrupt()
   await interrupted
+  // The barrier callback resolves before runOwned's result consumer runs;
+  // flush that owned settlement before asserting the diagnostic sink (the
+  // real runner/diag end-to-end proof lives in submit-hot-path's frozen-Esc
+  // case). A wrong implementation that rejected would log through diag.error.
+  await new Promise<void>(resolve => setImmediate(resolve))
   assert.equal(interruptCalls, 1, 'the control interrupt reached the backend seam')
   assert.equal(withWriterCalls, 0, 'the interrupt never entered the ordinary writer admission')
   assert.equal(writerCancelCalls, 0, 'the session writer cancel is not the control path anymore')

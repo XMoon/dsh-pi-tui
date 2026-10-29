@@ -11,7 +11,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test, { type TestContext } from 'node:test'
@@ -23,6 +23,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
+import { SessionOperationBarrier } from '../../src/app/session/operation-barrier.ts'
 import { apply as applyExtensionHost, PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { TuiApp } from '../../src/tui-app.ts'
@@ -152,6 +153,9 @@ interface FakeAgentHost {
   /** cancel() calls and the keepInbox argument the runner passed. */
   cancelCalls: number
   lastCancelKeepInbox: boolean | undefined
+  /** Every cancel call in order, with its raw keepInbox argument — the
+   * control Stop and the retirement cancel must be distinguishable. */
+  cancelLog: Array<{ keepInbox: boolean | undefined }>
   /** Test hook fired from the fake cancel (model the turn converging to idle). */
   onCancel?: () => void
   /** Test hook fired after a fake followup (model the next wake's claim). */
@@ -223,6 +227,7 @@ function fakeAgent(session: LiveSession, host: FakeAgentHost | undefined): Agent
     cancel: (_reason?: unknown, options?: { keepInbox?: boolean }) => {
       if (host === undefined) return
       host.cancelCalls += 1
+      host.cancelLog.push({ keepInbox: options?.keepInbox })
       if (options !== undefined) host.lastCancelKeepInbox = options.keepInbox
       // The interrupt transport: the test hook models the turn converging to
       // idle (the real Agent drains the turn and keeps the inbox).
@@ -319,6 +324,7 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     injected: [],
     cancelCalls: 0,
     lastCancelKeepInbox: undefined,
+    cancelLog: [],
   }
   const persisted = new Map<string, LiveSession>()
   const live = new Map<string, Agent>()
@@ -5660,4 +5666,141 @@ test('after /new fully settles, an ordinary submission is recalled by ↑ exactl
   vt.sendInput('\x1b[A')
   await waitForRenderView(vt)
   assert.equal(mounted.app.getDraft(), 'plain stable input', '↑ recalls the settled submission')
+})
+
+test('Busy Esc during a frozen /new transition cancels the EXACT live Agent with keepInbox before the admitted writer drains', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-pra-control-esc-')
+  const previousHome = process.env.DSH_HOME
+  const previousLog = process.env.DSH_PI_TUI_LOG
+  const previousLogLevel = process.env.DSH_PI_TUI_LOG_LEVEL
+  process.env.DSH_HOME = home
+  const logPath = join(home, 'logs', `pi-tui-${process.pid}.log`)
+  process.env.DSH_PI_TUI_LOG = logPath
+  process.env.DSH_PI_TUI_LOG_LEVEL = 'debug'
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+    if (previousLog === undefined) delete process.env.DSH_PI_TUI_LOG
+    else process.env.DSH_PI_TUI_LOG = previousLog
+    if (previousLogLevel === undefined) delete process.env.DSH_PI_TUI_LOG_LEVEL
+    else process.env.DSH_PI_TUI_LOG_LEVEL = previousLogLevel
+  })
+
+  const vt = new VirtualTerminal(100, 24)
+  const restoreTerminal = installVirtualProcessTerminal(vt)
+  life.defer(restoreTerminal)
+  const context = new Context()
+  life.defer(() => disposeContext(context))
+  const harness = makeHarness(home, { id: 'pra-esc-session', events: sessionEvents('resumed answer') })
+  const commands = harness.commands as {
+    register(def: { name: string; handler: () => unknown }): () => void
+    execute(agent: unknown, line: string, attachments?: readonly unknown[]): Promise<unknown>
+    handler(name: string): ((...args: never[]) => unknown) | undefined
+  }
+  const order: string[] = []
+  // A real admitted Host-command writer, held open: the transition must wait
+  // for it to drain before it quiesces/flushes/commits.
+  commands.register({ name: 'slowcmd', handler: () => ({ kind: 'success' }) })
+  let slowStarted = false
+  let releaseSlow!: () => void
+  const slowGate = new Promise<void>(resolve => { releaseSlow = resolve })
+  let slowSettled = false
+  const originalExecute = commands.execute.bind(commands)
+  commands.execute = async (agent, line, attachments) => {
+    if (line.trim().startsWith('/slowcmd')) {
+      slowStarted = true
+      await slowGate
+      slowSettled = true
+      return { commandId: CommandId('cmd-slow'), result: { kind: 'success' } }
+    }
+    return originalExecute(agent, line, attachments)
+  }
+
+  // Real Host-owned pending row: the user Stop must preserve it.
+  harness.host.nextTurn.push(queuedText('kept-queue-row', 'kept queue row'))
+
+  // Record the transition's pre-commit flush vs the child create.
+  const sessions = harness.sessions as { flush: (session?: unknown) => Promise<void> }
+  const originalFlush = sessions.flush.bind(sessions)
+  sessions.flush = async (session?: unknown) => {
+    order.push(`flush:${(session as { id?: string } | undefined)?.id ?? '?'}`)
+    return originalFlush(session)
+  }
+  const agents = harness.agents as { create: (options: { sessionId: string }) => Promise<unknown> }
+  const originalCreate = agents.create.bind(agents)
+  agents.create = async (options) => {
+    order.push('create')
+    return originalCreate(options)
+  }
+
+  const mounted = await mountRunner(context, home, harness, { sessionId: 'pra-esc-session' })
+  harness.host.status = 'running'
+  mounted.app.setBusy(true)
+  await vt.waitForRender()
+
+  // A holds a real writer admission open.
+  mounted.app.setDraft('/slowcmd')
+  ;(mounted.app as unknown as { submitDraft(): void }).submitDraft()
+  assert.equal(await drainUntil(() => slowStarted, 5_000), true,
+    'the Host-command writer must be admitted before the navigation')
+
+  // Instrument the REAL barrier to observe the freeze and the post-drain body.
+  const originalRunTransition = SessionOperationBarrier.prototype.runTransition
+  let frozen = false
+  let bodyRan = false
+  SessionOperationBarrier.prototype.runTransition = function <T>(this: SessionOperationBarrier, fn: () => Promise<T>): Promise<T> {
+    const promise = originalRunTransition.call(this, async () => {
+      bodyRan = true
+      return fn()
+    }) as Promise<T>
+    if (this.activeWriters > 0) frozen = true
+    return promise
+  }
+  life.defer(() => { SessionOperationBarrier.prototype.runTransition = originalRunTransition })
+
+  const newHandler = commands.handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = Promise.resolve(newHandler())
+  assert.equal(await drainUntil(() => frozen, 5_000), true,
+    'the /new transition must freeze the barrier while the admitted writer is in flight')
+  assert.equal(bodyRan, false, 'the transition body must still be waiting for the writer')
+
+  // The REAL busy-Esc gesture: the app's own interrupt mapping.
+  vt.sendInput('\x1b')
+  assert.equal(await drainUntil(() => harness.host.cancelLog.length > 0, 5_000), true,
+    'the control Stop must reach the Exact live Agent while the barrier is frozen')
+  order.push('cancel:control')
+  assert.equal(harness.host.cancelLog[0]!.keepInbox, true,
+    'the Busy Esc control cancel must preserve the Host pending inbox')
+  assert.equal(slowSettled, false, 'the control cancel must not wait for the admitted writer')
+  assert.equal(bodyRan, false, 'the control cancel must not shortcut the writer drain')
+  assert.deepEqual(harness.host.nextTurn.map(row => row.id), ['kept-queue-row'],
+    'the authoritative Host queued occurrence is preserved')
+
+  // Release the writer: drain → quiesce → flush old → create/commit → retire.
+  releaseSlow()
+  order.push('release:slow')
+  await transition
+  assert.equal(await drainUntil(() => harness.createdSessionIds.length === 1, 5_000), true,
+    'the transition must commit the new Session after the drain')
+  assert.equal(await drainUntil(() => harness.host.cancelLog.length === 2, 5_000), true,
+    'the old-owner retirement must cancel once after the commit')
+  assert.equal(slowSettled, true, 'the admitted writer settled before the commit')
+  assert.equal(harness.host.cancelLog[1]!.keepInbox, undefined,
+    'the retirement cancel is not the user keepInbox control cancel')
+  assert.deepEqual(harness.host.nextTurn.map(row => row.id), ['kept-queue-row'],
+    'the Host queue row survives the whole navigation')
+  assert.ok(order.indexOf('cancel:control') < order.indexOf('release:slow'),
+    `the control cancel precedes the writer release: ${JSON.stringify(order)}`)
+  assert.ok(order.indexOf('release:slow') < order.indexOf('flush:pra-esc-session')
+    && order.indexOf('flush:pra-esc-session') < order.indexOf('create'),
+    `the writer drain precedes the old flush, which precedes the child create: ${JSON.stringify(order)}`)
+
+  // Settled diagnostics: the sink is active (the switch was reported) and the
+  // normally admitted control Stop produced no misclassified ERROR.
+  assert.equal(existsSync(logPath), true, 'the diagnostics file sink must exist')
+  const log = readFileSync(logPath, 'utf8')
+  assert.ok(log.includes('switch ok'), `the committed switch must be reported: ${log.slice(-800)}`)
+  assert.ok(!log.includes('agent interrupt'), `no agent interrupt ERROR on a normally admitted Stop: ${log.slice(-800)}`)
 })
