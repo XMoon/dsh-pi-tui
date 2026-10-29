@@ -4712,6 +4712,51 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 			}
 		});
 
+		it("rewrites every row the SIXEL clear pass erased, even unchanged text (E3)", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const dcs = port.register(raster("A"), { columns: 4, rows: 3 });
+				let secondRow = "kept-1";
+				// The anchor declares a three-row footprint; rows 2 and 3 carry text. A
+				// scrollbar cell or a border inside the block has exactly this shape.
+				const block: Component = {
+					render: () => [dcs, secondRow, "kept-2"],
+					invalidate: () => {},
+				};
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+				assert.deepStrictEqual(
+					terminal.getViewport().slice(0, 3).map((line) => line.trimEnd()),
+					["", "kept-1", "kept-2"],
+					"the first frame paints the command and the text rows",
+				);
+
+				// Only row 2 changes. The anchor line is untouched, so the alt screen does
+				// NOT take a full text pass (`imagesNeedRedraw` is false); the clear pass
+				// still erases the whole footprint, so row 3 must be written again.
+				secondRow = "kept-1x";
+				terminal.events.length = 0;
+				tui.renderNow();
+				await terminal.waitForRender();
+				assert.deepStrictEqual(
+					terminal.getViewport().slice(0, 3).map((line) => line.trimEnd()),
+					["", "kept-1x", "kept-2"],
+					"the unchanged row inside the cleared footprint is redrawn",
+				);
+				assert.ok(wire(terminal).includes("kept-2"), "row 3 was written in this frame");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
 		it("never indexes a trusted DCS, so a command substring finds nothing", async () => {
 			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 			try {

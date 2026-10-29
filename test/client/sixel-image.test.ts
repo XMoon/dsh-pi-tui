@@ -23,9 +23,15 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { SixelEncoder } from '../../src/client/media/sixel/encode.ts'
+import {
+  SixelEncodeBusyError,
+  SixelEncodeRejectedError,
+  SixelEncoder,
+} from '../../src/client/media/sixel/encode.ts'
+import { SIXEL_MAX_QUEUED_JOBS } from '../../src/client/media/sixel/types.ts'
 import {
   createDirectSixelGraphics,
+  SIXEL_ENCODE_ATTEMPT_LIMIT,
   SIXEL_REGISTRY_MAX_VARIANTS,
   type DirectSixelGraphics,
   type SixelScreenObservation,
@@ -60,11 +66,18 @@ class ScriptedSixelTerminal extends VirtualTerminal {
  */
 class ScriptedScreen implements SixelScreenObservation {
   cellQueries = 0
+  cellWidthPx = 10
+  cellHeightPx = 20
+  /** Whether the terminal answers `CSI 16t` at all (a dead geometry reply is a case). */
+  autoReplyCell = true
   background: { r: number; g: number; b: number } | undefined
   private readonly listeners = new Set<(cell: { widthPx: number; heightPx: number }) => void>()
 
   queryCellSizeForSixel(): void {
     this.cellQueries += 1
+    // A real terminal ANSWERS `CSI 16t`; this one does too, on the next turn so the
+    // owner's query path is never re-entered synchronously.
+    if (this.autoReplyCell) setImmediate(() => this.replyCell(this.cellWidthPx, this.cellHeightPx))
   }
 
   onCellSizeObserved(listener: (cell: { widthPx: number; heightPx: number }) => void): () => void {
@@ -237,6 +250,8 @@ test('every missing fact paints text instead, and no geometry query precedes the
     const terminal = new ScriptedSixelTerminal()
     const screen = new ScriptedScreen()
     screen.background = { r: 0, g: 0, b: 0 }
+    // This terminal never answers `CSI 16t`, so the default 9x18 stays unverified.
+    screen.autoReplyCell = false
     const graphics = createDirectSixelGraphics(terminal, { TERM: 'xterm-256color' })!
     t.after(() => graphics.dispose())
     graphics.observeScreen(screen, terminal.columns, terminal.rows)
@@ -478,6 +493,13 @@ test('a settle that lands after disposal registers nothing', async (t) => {
   assert.equal(harness.notifications(), notifications, 'a disposed owner requests no repaint')
 })
 
+/**
+ * A BOUND test, not a correctness proof of the plan's capacity intent: it pins that
+ * the registry refuses the over-budget request instead of evicting a record a live
+ * component still renders. Whether off-screen occurrences SHOULD release their
+ * records is the open capacity question recorded in the module doc (it needs a
+ * component-visible invalidation channel the port does not have).
+ */
 test('the registry refuses a new raster instead of evicting a painted one', async (t) => {
   const harness = await readyHarness(t)
   t.after(() => harness.graphics.dispose())
@@ -682,4 +704,95 @@ test('a crop variant shared by two occurrences survives one owner leaving (RFL-0
   )
   // A crop OF a crop variant is refused: only a full raster has a source.
   assert.equal(harness.graphics.screen.crop(secondVariant, 0, 1), undefined)
+})
+
+test('a rejected encode settles the occurrence instead of leaving it pending (E2)', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const png = await TWO_BAND_PNG()
+
+  const originalEncode = SixelEncoder.prototype.encode
+  let encodes = 0
+  SixelEncoder.prototype.encode = function patched() {
+    encodes += 1
+    return Promise.reject(new SixelEncodeBusyError(SIXEL_MAX_QUEUED_JOBS))
+  }
+  t.after(() => {
+    SixelEncoder.prototype.encode = originalEncode
+  })
+
+  const image = harness.graphics.image({ pngBase64: png, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'fallback' })
+  // Frame 1 starts the encode; it rejects. Without settling the token every later
+  // frame would believe the encode is still running.
+  assert.deepEqual(image.render(40), ['fallback'])
+  await waitUntil(() => encodes === 1, 'the first attempt')
+  // reason: a NEGATIVE observation window — the retry is scheduled by the NEXT render.
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.deepEqual(image.render(40), ['fallback'])
+  await waitUntil(() => encodes === 2, 'a bounded retry after the failure')
+
+  // After the attempt budget the occurrence stops re-tasking the single lane.
+  for (let frame = 0; frame < 20; frame += 1) image.render(40)
+  await waitUntil(() => encodes === SIXEL_ENCODE_ATTEMPT_LIMIT, 'the attempt budget')
+  for (let frame = 0; frame < 20; frame += 1) image.render(40)
+  // reason: a NEGATIVE observation window — a further retry would appear during it.
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.equal(encodes, SIXEL_ENCODE_ATTEMPT_LIMIT, 'a permanent failure stops re-tasking the lane')
+})
+
+test('a rejected crop variant settles its token and stops after the budget (E2)', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const png = await pngFromRgba(fill(40, 60, (_x, y) => (y < 20 ? [255, 0, 0, 255] : y < 40 ? [0, 255, 0, 255] : [0, 0, 255, 255])), 40, 60)
+  const image = harness.graphics.image({ pngBase64: png, widthPx: 40, heightPx: 60 }, { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' })
+  image.render(40)
+  await waitForRepaint(harness, 'the full encode')
+  const full = image.render(40)[0]!
+
+  const originalEncode = SixelEncoder.prototype.encode
+  let encodes = 0
+  SixelEncoder.prototype.encode = function patched() {
+    encodes += 1
+    return Promise.reject(new SixelEncodeRejectedError('The encode request was aborted.'))
+  }
+  t.after(() => {
+    SixelEncoder.prototype.encode = originalEncode
+  })
+
+  // The first crop request is scheduled and rejects: the token must settle, or
+  // `crop()` would answer undefined for the rest of the session.
+  assert.equal(harness.graphics.screen.crop(full, 1, 1), undefined)
+  await waitUntil(() => encodes === 1, 'the first crop attempt')
+  // reason: a NEGATIVE observation window — the next frame schedules the retry.
+  await new Promise(resolve => setTimeout(resolve, 200))
+  assert.equal(harness.graphics.screen.crop(full, 1, 1), undefined)
+  await waitUntil(() => encodes >= 2, 'a bounded crop retry')
+  for (let frame = 0; frame < 20; frame += 1) harness.graphics.screen.crop(full, 1, 1)
+  // reason: a NEGATIVE observation window — a further retry would appear during it.
+  await new Promise(resolve => setTimeout(resolve, 300))
+  assert.ok(encodes <= 4, `the crop retry stays bounded, got ${encodes}`)
+})
+
+test('a same-width background change without an intermediate render never re-emits the old composite (E1)', async (t) => {
+  const harness = await readyHarness(t, { background: { r: 0, g: 0, b: 255 } })
+  t.after(() => harness.graphics.dispose())
+  const png = await pngFromRgba(fill(40, 40, () => [255, 0, 0, 128]), 40, 40)
+  const image = harness.graphics.image({ pngBase64: png, widthPx: 40, heightPx: 40 }, { maxWidthCells: 8, fallback: 'fallback' })
+  image.render(40)
+  await waitForRepaint(harness, 'the encode over the blue background')
+  const overBlue = image.render(40)[0]!
+  assert.ok(!overBlue.includes('fallback'))
+
+  // The terminal background changes and the NEW facts land BEFORE any frame is
+  // painted: a width-only frame cache would replay the blue composite here.
+  harness.screen.background = { r: 0, g: 255, b: 0 }
+  harness.graphics.resample()
+  await waitUntil(() => harness.graphics.canPaint(), 'the re-verified facts')
+  const frame = image.render(40)
+  assert.deepEqual(frame, ['fallback'], 'the stale composite must not be re-emitted at the same width')
+  await waitForRepaint(harness, 'the re-encode over the green background')
+  const overGreen = image.render(40)[0]!
+  assert.notEqual(overGreen, overBlue)
+  const [greenR, greenG] = pixelAt(decodeSixel(overGreen), 4, 4)
+  assert.ok(greenG > 100 && greenR > 60, `composited over green, got ${greenR},${greenG}`)
 })
