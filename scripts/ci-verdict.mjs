@@ -88,9 +88,24 @@ export const MODE_STATUS = {
 
 const RESULT_VALUES = new Set(['success', 'failure', 'cancelled', 'skipped'])
 
+// The characters `git check-ref-format` forbids anywhere (space and ASCII
+// controls included). The prefix rules below restrict the ref to the shapes
+// GitHub actually produces for this pipeline.
+const INVALID_REF_CHARACTERS = /[\x00-\x20\x7f~^:?*\[\\]/u
+
+/** Whether `ref` is a syntactically valid Git ref (not just a ref-like string). */
+export function isValidGitRef(ref) {
+  if (typeof ref !== 'string' || ref === '' || ref === '@' || ref.endsWith('/')) return false
+  if (INVALID_REF_CHARACTERS.test(ref)) return false
+  if (ref.includes('..') || ref.includes('@{') || ref.includes('//')) return false
+  if (ref.endsWith('.')) return false
+  return ref.split('/').every(component =>
+    component !== '' && !component.startsWith('.') && !component.endsWith('.lock'))
+}
+
 /** A tag ref is the only ref on which the release-only split-process gate runs. */
 export function isReleaseTagRef(ref) {
-  return typeof ref === 'string' && /^refs\/tags\/\S+$/u.test(ref)
+  return typeof ref === 'string' && /^refs\/tags\//u.test(ref) && isValidGitRef(ref)
 }
 
 /**
@@ -98,11 +113,10 @@ export function isReleaseTagRef(ref) {
  * instead of silently becoming "an ordinary branch, so skipped is fine".
  */
 export function isSupportedRef(ref) {
-  return typeof ref === 'string' && (
-    /^refs\/heads\/\S+$/u.test(ref)
-    || isReleaseTagRef(ref)
+  if (!isValidGitRef(ref)) return false
+  return /^refs\/heads\//u.test(ref)
+    || /^refs\/tags\//u.test(ref)
     || /^refs\/pull\/\d+\/merge$/u.test(ref)
-  )
 }
 
 /**

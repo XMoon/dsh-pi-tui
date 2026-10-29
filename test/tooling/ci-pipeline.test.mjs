@@ -175,11 +175,24 @@ test('split-process has exactly one expected status per mode and actual ref', ()
   assert.equal(expectedSplitProcessStatus('source', 'refs/tags/v0.5.5'), 'skipped')
   assert.equal(isSupportedRef(PR_REF), true)
   assert.equal(isSupportedRef('refs/heads/main'), true)
+  assert.equal(isSupportedRef('refs/heads/feature/nested-name'), true)
   assert.equal(isSupportedRef(RELEASE_REF), true)
   assert.equal(isSupportedRef('refs/pull/464'), false)
   assert.equal(isSupportedRef('main'), false)
   assert.equal(isSupportedRef(''), false)
   assert.equal(isSupportedRef(undefined), false)
+  // These are ref-format failures, not merely "unknown prefixes": Git itself
+  // rejects them, and a forged CLI value must not become a skipped PR proof.
+  for (const invalid of [
+    'refs/heads/a..b',
+    'refs/heads/..',
+    'refs/tags/v1.lock',
+    'refs/heads/@{bad',
+    'refs/heads/foo.',
+    'refs/heads/foo//bar',
+  ]) {
+    assert.equal(isSupportedRef(invalid), false, `${invalid} must be rejected`)
+  }
 })
 
 test('the split-process truth table is fail-closed in both directions', () => {
@@ -216,7 +229,18 @@ test('the split-process truth table is fail-closed in both directions', () => {
 })
 
 test('a missing or malformed GITHUB_REF is a failure, never an implicit PR skip', () => {
-  for (const ref of [undefined, '', 'main', 'refs/pull/123', 'refs/heads/', 'refs/pull/x/merge']) {
+  for (const ref of [
+    undefined,
+    '',
+    'main',
+    'refs/pull/123',
+    'refs/heads/',
+    'refs/pull/x/merge',
+    'refs/heads/a..b',
+    'refs/heads/..',
+    'refs/tags/v1.lock',
+    'refs/heads/@{bad',
+  ]) {
     const decision = verdict({ role: 'qualify', mode: 'npm', ref, phases: phasesAt('success') })
     assert.equal(decision.ok, false, `ref=${JSON.stringify(ref)} must fail`)
     assert.match(decision.failures.join('\n'), /missing or not a supported ref/u)
@@ -234,6 +258,10 @@ test('a missing or malformed GITHUB_REF is a failure, never an implicit PR skip'
   const invalid = cli(['qualify', '--mode', 'npm', '--ref', 'main', ...args])
   assert.equal(invalid.status, 1)
   assert.match(invalid.stderr, /not a supported GitHub ref/u)
+
+  const malformed = cli(['qualify', '--mode', 'npm', '--ref', 'refs/heads/a..b', ...args])
+  assert.equal(malformed.status, 1)
+  assert.match(malformed.stderr, /not a supported GitHub ref/u)
 
   const summaryArgs = cliPhases(phasesAt('success', { extra: { qualified: 'success' } }))
   const summaryMissing = cli(['summary', '--mode', 'npm', ...summaryArgs])
