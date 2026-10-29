@@ -419,6 +419,9 @@ it("keeps native scrollback when a painted image leaves the viewport (X073)", as
 	const fullWire = terminal.output();
 	assert.ok(!fullWire.includes("many-20"), "a released raster is never replayed by a full render");
 	assert.ok(!fullWire.includes("SIXC"), "no candidate marker reaches the terminal");
+	assert.ok(fullWire.includes("image 20"), "the released block is written as its ordinary fallback text");
+	const rows = (screen as unknown as { previousLineSixelRows: number[] }).previousLineSixelRows;
+	assert.equal(rows[60] ?? 0, 0, "the released history row is no longer recorded as a SIXEL block");
 });
 
 it("an overlay over a candidate block's body row yields the whole block (X073)", async () => {
