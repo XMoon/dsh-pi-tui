@@ -3456,11 +3456,17 @@ test('PRA-L6: Task Stop is admitted through the control barrier while a /new tra
   assert.equal(slowSettled, true)
   assert.equal(harness.createdSessions.length, 1, 'the /new transition committed one child Session')
 
-  // The old browser's captured parent subject is now superseded: the same
-  // chord must not dispatch a second Stop against the retired parent.
+  // The cross-owner publication withdraws the replaced Task Browser. The old
+  // confirmation therefore cannot reach a stale live panel: S must not
+  // resurrect it. The captured-subject refusal for a panel that somehow stays
+  // live is the separate S-03e surface case.
   input('S')
   await settle()
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('Stop running child?'),
+    'the retired Task Browser must not receive a Stop confirmation after the parent generation changed')
   input('y')
   await settle()
-  assert.deepEqual(interrupts, [child.id], 'a superseded Task Browser never dispatches another Stop')
+  await vt.waitForRender()
+  assert.deepEqual(interrupts, [child.id], 'a retired Task Browser never dispatches another Stop')
 })

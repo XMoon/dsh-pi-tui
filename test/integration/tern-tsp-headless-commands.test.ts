@@ -15,7 +15,9 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
+import { SessionOperationBarrier } from '../../src/app/session/operation-barrier.ts'
 import { wireNodes } from '../support/tsp-picker-wire.ts'
 
 // ── wire helpers ────────────────────────────────────────────────────────────
@@ -1092,6 +1094,153 @@ test('the post-boot wait observes the tty input DELIVERY boundary, not a fixed s
     fixture.pane.input.type('kept')
     await waitFor('the delivered key to reach the composer', () => composerText(fixture) === 'kept', 25_000)
   } finally {
+    await fixture.settle()
+  }
+})
+
+test('Busy Esc preserves the REAL Direct Host pending inbox while a REAL admitted Host-command writer holds a frozen /new transition', async (t) => {
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  let releaseHold!: () => void
+  const hold = new Promise<void>(resolve => { releaseHold = resolve })
+  let releaseSlow!: () => void
+  const slowGate = new Promise<void>(resolve => { releaseSlow = resolve })
+  let slowStarted = false
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['PR-A real host'],
+    streamHold: () => hold,
+    tuiConfig: { busyEnter: 'queue' },
+    hostCommands: [{
+      name: 'slowcmd',
+      description: 'hold the admitted writer',
+      handler: async () => {
+        slowStarted = true
+        await slowGate
+        return { kind: 'success' }
+      },
+    }],
+  })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    await submitInput(fixture, 'opener marker')
+    await waitFor('the real Direct session', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    const oldId = welcomeSessionIds(fixture)[0]!
+    const agents = fixture.ctx.get('agents') as unknown as {
+      get(id: SessionId): {
+        readonly status: string
+        readonly inbox: {
+          readonly nextTurn: readonly unknown[]
+          readonly nextStep: readonly unknown[]
+        }
+      } | undefined
+    }
+    await waitFor('the real turn running', () => agents.get(SessionId(oldId))?.status === 'running', 25_000)
+    const inboxHas = (sessionId: string, marker: string): boolean => {
+      const agent = agents.get(SessionId(sessionId))
+      if (agent === undefined) return false
+      return [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+        .some(item => JSON.stringify(item).includes(marker))
+    }
+
+    // The real Host-owned queue: Enter while the real Agent runs queues the
+    // message in the official inbox.
+    await submitInput(fixture, 'queued marker')
+    await waitFor('the real pending queue occurrence', () => inboxHas(oldId, 'queued marker'), 25_000)
+
+    // A real admitted Host-command writer holds the ordinary-writer barrier.
+    await submitInput(fixture, '/slowcmd')
+    await waitFor('the real Host command handler admitted', () => slowStarted, 25_000)
+
+    // Observe the real /new transition freeze on that writer.
+    const originalRunTransition = SessionOperationBarrier.prototype.runTransition
+    let frozen = false
+    let bodyRan = false
+    SessionOperationBarrier.prototype.runTransition = function <T>(this: SessionOperationBarrier, fn: () => Promise<T>): Promise<T> {
+      const promise = originalRunTransition.call(this, async () => {
+        bodyRan = true
+        return fn()
+      }) as Promise<T>
+      if (this.activeWriters > 0) frozen = true
+      return promise
+    }
+    life.defer(() => { SessionOperationBarrier.prototype.runTransition = originalRunTransition })
+
+    // Record the durable flush -> child create order on the REAL Host services.
+    const sessions = fixture.ctx.get('sessions') as unknown as { flush: (session?: unknown) => Promise<unknown> }
+    const originalFlush = sessions.flush
+    const order: string[] = []
+    sessions.flush = async function (this: unknown, session?: unknown) {
+      order.push(`flush:${(session as { id?: string } | undefined)?.id ?? '?'}`)
+      return originalFlush.call(this, session)
+    }
+    const realAgents = fixture.ctx.get('agents') as unknown as {
+      create: (options: { sessionId: string }) => Promise<unknown>
+    }
+    const originalCreate = realAgents.create
+    realAgents.create = async function (this: unknown, options) {
+      order.push(`create:${options.sessionId}`)
+      return originalCreate.call(this, options)
+    }
+    life.defer(() => {
+      sessions.flush = originalFlush
+      realAgents.create = originalCreate
+    })
+
+    // The real registered /new command entry (the production handler).
+    const commands = fixture.ctx.get('commands') as {
+      find(agent: unknown, name: string): { handler: (invocation: unknown) => unknown } | undefined
+    }
+    const newDefinition = commands.find(undefined, 'new')
+    assert.ok(newDefinition, 'the real TUI /new handler must be registered in the Host registry')
+    const transition = Promise.resolve(newDefinition.handler({
+      commandId: 'cmd-pra-real-new',
+      agent: undefined,
+      rawInput: '',
+      signal: new AbortController().signal,
+    }))
+    await waitFor('the real /new transition froze on the admitted writer', () => frozen, 25_000)
+    assert.equal(bodyRan, false, 'the transition body must still be waiting for the real writer')
+
+    // The real Busy Esc: TSP pane input -> application onCancel -> the real
+    // SessionRuntime.interrupt -> the exact real Direct Agent cancel.
+    fixture.pane.key('\x1b')
+    await waitFor('the real held model request observed the cancel', () => fixture.cancellations() === 1, 25_000)
+    assert.equal(bodyRan, false, 'the control cancel must not shortcut the real writer drain')
+    assert.ok(inboxHas(oldId, 'queued marker'),
+      'the REAL Direct Host pending inbox preserves the queued occurrence across the control cancel')
+
+    // Release the real writer: drain -> old flush -> child create/commit.
+    releaseSlow()
+    await transition
+    await waitFor('the /new child session', () => {
+      const ids = welcomeSessionIds(fixture)
+      return ids.length === 1 && ids[0] !== oldId
+    }, 25_000)
+    const newId = welcomeSessionIds(fixture)[0]!
+    assert.notEqual(newId, oldId)
+    assert.ok(order.includes(`flush:${oldId}`), `the old session must be flushed: ${JSON.stringify(order)}`)
+    assert.ok(order.includes(`create:${newId}`), `the child session must be created: ${JSON.stringify(order)}`)
+    assert.ok(order.indexOf(`flush:${oldId}`) < order.indexOf(`create:${newId}`),
+      `the old flush must precede the child create: ${JSON.stringify(order)}`)
+    assert.ok(agents.get(SessionId(newId)) !== undefined, 'the new owner Agent must be live')
+    assert.equal(inboxHas(newId, 'queued marker'), false,
+      'the old queue is never transferred to the new Session')
+
+    // The old durable history survives the retirement; the new Session exists.
+    const headers = await sessionHeaders(fixture)
+    assert.ok(headers.some(row => row.id === oldId), 'the old Session history remains persisted')
+    assert.ok(headers.some(row => row.id === newId), 'the new Session is persisted')
+    const query = fixture.ctx.get('sessionQuery') as unknown as {
+      observeSession(id: SessionId): Promise<{ events: readonly { type: string; data?: unknown }[] }>
+    }
+    const oldLog = await query.observeSession(SessionId(oldId))
+    assert.ok(oldLog.events.some(event => event.type === 'user/message'
+      && JSON.stringify(event.data).includes('opener marker')),
+      'the old Session keeps its durable user history')
+    assert.ok(oldLog.events.some(event => event.type === 'turn/end'),
+      'the cancelled old turn has a durable terminal boundary')
+  } finally {
+    releaseHold()
+    releaseSlow()
     await fixture.settle()
   }
 })
