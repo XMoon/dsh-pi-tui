@@ -542,6 +542,32 @@ test('a control cancel on a fully retired generation is cancelled without a Host
   assert.deepEqual(h.calls.releases, ['session-a'], 'the retired reference was released exactly once')
 })
 
+test('the navigation cancel resolves the dispatch phase without changing the control taxonomy', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  // Pre-dispatch, unaddressable: BOTH audiences keep PR-A's `cancelled`.
+  h.generation.set(undefined)
+  assert.deepEqual(await h.services.retirement.cancelForNavigation(owner), { kind: 'cancelled' })
+  assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'cancelled' })
+  assert.equal(binding.cancelCalls(), 0, 'a local fence never dispatches an official call')
+  h.generation.set({ id: 2 })
+  // Committed: navigation may proceed.
+  assert.deepEqual(await h.services.retirement.cancelForNavigation(owner), { kind: 'committed' })
+  // A DISPATCHED caller/carrier cancellation: the control audience keeps
+  // PR-A's `cancelled`, while navigation learns the call WAS dispatched.
+  binding.setCancelResult({ ok: false, error: { code: 'gateway/cancelled', message: 'caller cancelled' } })
+  assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'cancelled' })
+  const dispatched = await h.services.retirement.cancelForNavigation(owner)
+  assert.equal(dispatched.kind, 'indeterminate')
+  assert.match(dispatched.kind === 'indeterminate' ? dispatched.detail : '', /caller\/carrier cancellation/)
+  // A proven business refusal stays rejected for navigation.
+  binding.setCancelResult({ ok: false, error: { code: 'session/not-running', message: 'nothing to cancel' } })
+  assert.equal((await h.services.retirement.cancelForNavigation(owner)).kind, 'rejected')
+  assert.equal(binding.cancelCalls(), 4, 'each audience addressed the exact binding once per call')
+})
+
 test('a control cancel keeps the official write-failure taxonomy', async () => {
   const h = harness()
   const { handle } = retainedHandle(h, 'session-a')

@@ -370,14 +370,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    *   old Turn is stopped (a later failure must say it cannot be resumed);
    * - `nothing` — the surface is sessionless (there is no old owner to stop),
    *   or the runner is exiting (the transition is moot);
-   * - `failed` — the stop did not happen or its state is unknown. ONLY a
-   *   `committed` cancellation is permission to enter the next phase: a
-   *   proven pre-dispatch refusal (`rejected`/`cancelled`) and an unproven
-   *   dispatched call (`indeterminate`) all abort navigation. A `cancelled`
-   *   result means the exact generation could not be addressed, NOT that the
-   *   Host has no running work; a Remote `whenIdleOrAbort` returning `false`
-   *   for an unobservable binding is likewise not proof of idle, and is never
-   *   reached on this path. An indeterminate stop is never retried.
+   * - `failed` — ONLY a `committed` cancellation is permission to enter the
+   *   next phase. A proven refusal (`rejected`), a confirmed pre-dispatch
+   *   refusal (`cancelled`) and a dispatched-unproven stop (`indeterminate`)
+   *   all abort navigation. A `cancelled` result means the exact generation
+   *   could not be addressed, NOT that the Host has no running work; a Remote
+   *   `whenIdleOrAbort` returning `false` for an unobservable binding is
+   *   likewise not proof of idle, and is never reached on this path. An
+   *   indeterminate stop is never retried.
    * A stale capture aborts FIRST: another navigation owns the surface, and
    * this intent must not stop the replacement's work.
    */
@@ -392,21 +392,16 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     }
     const owner = core.owner()
     if (owner === undefined) return { kind: 'nothing' }
-    const outcome = await deps.retirement.cancel(owner)
-    if (outcome.kind === 'committed') return { kind: 'stopped' }
-    if (outcome.kind === 'cancelled') {
-      return {
-        kind: 'failed',
-        failure: {
-          settlement: 'cancelled',
-          detail: 'the exact session generation could not be addressed for the cancel',
-        },
-      }
+    // The PHASE-RESOLVED navigation settlement: a pre-dispatch refusal is
+    // `cancelled`; a dispatched reply whose effect is unproven (including a
+    // caller/carrier cancellation) is `indeterminate`. Only `committed` may
+    // proceed.
+    const settlement = await deps.retirement.cancelForNavigation(owner)
+    if (settlement.kind === 'committed') return { kind: 'stopped' }
+    if (settlement.kind === 'cancelled') {
+      return { kind: 'failed', failure: { settlement: 'cancelled', detail: '' } }
     }
-    if (outcome.kind === 'unsupported') {
-      return { kind: 'failed', failure: { settlement: 'rejected', detail: outcome.reason } }
-    }
-    return { kind: 'failed', failure: { settlement: outcome.kind, detail: outcome.error.message } }
+    return { kind: 'failed', failure: { settlement: settlement.kind, detail: settlement.detail } }
   }
 
   /**
