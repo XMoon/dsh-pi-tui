@@ -333,10 +333,11 @@ Validation mechanics for this toolchain:
 * Changing WHAT the public entry re-exports (moving or re-exporting a
   publicly-exported type/function) changes the emitted declaration graph: the
   bundled `dist/*.d.mts` may only carry the top-level regions allowlisted in
-  `scripts/tarball-smoke.mjs`. Run `pnpm build` and then
-  `node scripts/tarball-smoke.mjs` before pushing — the ordinary product suite
-  does NOT cover this (it is a `smoke:release`/CI check), and a stale `dist`
-  makes it pass locally.
+  `scripts/tarball-smoke.mjs`. Run `pnpm build`, then `pnpm pack:artifact`, then
+  `pnpm smoke:release -- ./xmoon76-dsh-pi-tui-<version>.tgz` before pushing —
+  the ordinary product suite does NOT cover this (it is a `smoke:release`/CI
+  check), and a stale `dist` or an old tgz makes it pass locally. For the full
+  local route use `pnpm pack:release` instead.
 * A publicly-exported helper therefore follows the canonical owner-layer placement
   (`## Repository boundaries` → `### Source module placement`) and is exposed through
   the public entry (`src/index.ts`) or an existing documented facade. Do not create a
