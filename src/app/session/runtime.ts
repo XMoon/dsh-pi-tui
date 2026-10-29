@@ -27,6 +27,7 @@ import {
 import { isRewindIdentityCurrent, type RewindNavigationIdentity } from './navigation-identity.ts'
 import { runFirstSessionCommit, runForkCommit, runOrdinaryCommit, runResumeCommit } from './commit-order.ts'
 import type {
+  NavigationStopReceipt,
   SessionOwnerAccess,
   SessionOwnerRetirement,
   SessionRetirementReport,
@@ -384,8 +385,13 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * A stale capture aborts FIRST: another navigation owns the surface, and
    * this intent must not stop the replacement's work.
    */
+  /** The receipt of the LAST navigation stop in this gate task; read by
+   *  `transitionTo` so the OLD-owner quiesce validates the SAME generation the
+   *  accepted cancel was addressed to (never a later reconnect). */
+  let navigationReceipt: NavigationStopReceipt | undefined
+
   const navigationStop = async (scope: SessionScope): Promise<
-    | { readonly kind: 'stopped' }
+    | { readonly kind: 'stopped'; readonly receipt?: NavigationStopReceipt }
     | { readonly kind: 'nothing' }
     | { readonly kind: 'failed'; readonly failure: NavigationStopFailure }
   > => {
@@ -400,7 +406,11 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // caller/carrier cancellation) is `indeterminate`. Only `committed` may
     // proceed.
     const settlement = await deps.retirement.cancelForNavigation(owner)
-    if (settlement.kind === 'committed') return { kind: 'stopped' }
+    if (settlement.kind === 'committed') {
+      return settlement.receipt === undefined
+        ? { kind: 'stopped' }
+        : { kind: 'stopped', receipt: settlement.receipt }
+    }
     if (settlement.kind === 'cancelled') {
       return { kind: 'failed', failure: { settlement: 'cancelled', detail: '' } }
     }
@@ -414,15 +424,28 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * is written from the stop callback, before the body runs; a stop failure
    * aborts with ZERO body side effects.
    */
-  const runNavigationTransition = <T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T> =>
-    core.barrier.runTransition(
-      async () => task(),
+  const runNavigationTransition = <T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T> => {
+    let stopReceipt: NavigationStopReceipt | undefined
+    return core.barrier.runTransition(
+      async () => {
+        // Publish the accepted stop's exact generation for the transition body
+        // (and only for it): the quiesce must not re-capture a later
+        // generation after a writer-drain reconnect.
+        navigationReceipt = stopReceipt
+        try {
+          return await task()
+        } finally {
+          navigationReceipt = undefined
+        }
+      },
       async () => {
         const stop = await navigationStop(intent.scope)
         if (stop.kind === 'failed') throw new SessionNavigationStopError(stop.failure)
         intent.admission.oldStopAccepted = stop.kind === 'stopped'
+        stopReceipt = stop.kind === 'stopped' ? stop.receipt : undefined
       },
     )
+  }
 
   /**
    * Run one navigation task through the gate and ALWAYS close the
@@ -465,6 +488,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * retirement takes over) and the outcome stays successful.
    */
   const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
+    // The accepted navigation stop's generation receipt, if this transition is
+    // the body of a user navigation. Non-navigation transitions have none.
+    const stopReceipt = navigationReceipt
     core.bumpNavigationEpoch()
     const from = core.currentSessionId()
     const opening = deps.surface.beginOpening(steps.target.id)
@@ -499,7 +525,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // (which may be a NEW owner committed by an earlier queued transition),
           // so the transition settles instead of hanging past the appExit
           // watchdog.
-          const idle = await deps.retirement.whenIdleOrAbort(owner, deps.lifecycleSignal)
+          const idle = await deps.retirement.whenIdleOrAbort(owner, deps.lifecycleSignal, stopReceipt)
           if (idle === true) return
           if (idle === 'unobservable') {
             // The exact OLD generation can no longer be observed: we cannot

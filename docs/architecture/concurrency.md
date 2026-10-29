@@ -252,7 +252,9 @@ UI intent captures the OLD generation (scope)
   Connection generation, a replaced binding or a released owner reference
   leaves the old Host Turn unproven, and `whenIdleOrAbort` returning
   `'unobservable'` for a rolled/released binding or a changed Connection
-  generation is not proof of idle —
+  generation is not proof of idle — the accepted stop carries its EXACT
+  generation receipt into the quiesce, so a reconnect during the writer drain
+  can never make the quiesce observe a later generation —
   navigation never reaches that quiesce without a `committed` stop. Only
   `indeterminate` states that the old Turn may already have stopped. The phase
   distinction comes from `SessionOwnerRetirement.cancelForNavigation`, which
