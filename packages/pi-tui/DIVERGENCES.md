@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 71
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 55, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 72
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 56, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -163,6 +163,7 @@
 | X068 | ACTIVE | MEDIUM | LOCAL_UX | NO |
 | X069 | ACTIVE | LOW | BUGFIX_MISSING_UPSTREAM | NO |
 | X070 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
+| X071 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 
 ## Divergences
 
@@ -5992,3 +5993,87 @@ Image-7C admits a managed Native Kitty handle for a Zellij pane when its live a=
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Owner-approved RFL-001 scope extension after a real Alt ghost-placement defect: Zellij live OK can exceed the static fork capability, so the Alt screen needs an instance-level protocol value from the one managed graphics handle. Confirmed against the pinned v1.1.0 tree that TuiAltScreen has no such option and that host-only global cache mutation would affect unrelated consumers.
+
+### X071 — Passive DA1 SIXEL observation exposed to the host capability candidate
+
+- Status: `ACTIVE`
+- Category: `HARD_HOST_API`
+- Risk: `MEDIUM`
+- Files: `src/terminal.ts`
+- Last audited: `2026-10-29`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+Windows Terminal advertises SIXEL only through the SIXEL attribute (4) of its primary DA1 reply: the XTSMGRAPHICS query went unanswered in nine attempts. ProcessTerminal already parses that reply, and while a Kitty keyboard-negotiation DA is owed it CONSUMES the reply inside handleKeyboardProtocolNegotiationSequence() before any input listener can see it; when no reply is owed it forwards the sequence to the editor instead. A host-only seam therefore cannot observe the capability reliably: it would miss every owed reply, would have to add a second stdin parser, and would still race the downstream TUI color-query sentinel. The minimal correct seam is one passive observer on the fork's existing parse boundary, which adds no query and changes no consumption rule.
+
+#### Changed surface
+
+- Terminal.onSixelSupport?(listener: (supported: boolean) => void): () => void - optional passive observation; returns an idempotent unsubscribe.
+- ProcessTerminal observes a COMPLETE primary DA1 before handleKeyboardProtocolNegotiationSequence() may consume it, and reports true only when a whole `4` parameter token is present.
+- The observer store is per instance and the last answer is retained across stop()/start() because it belongs to the physical terminal; a new instance starts unknown again.
+- No DA1 query, CSI 16t query or XTSMGRAPHICS probe is added; keyboard negotiation, program status and the TUI color sentinel keep their existing ownership and ordering.
+- Other Terminal implementations simply omit the optional method, so their behavior is unchanged.
+
+#### Dependency map
+
+**Vendor internal**
+- readKeyboardProtocolNegotiationSequence() already reassembles fragmented DA1 and returns the full sequence; the observer reuses that result instead of adding parser state.
+- pendingKeyboardProtocolDeviceAttributes, keyboardProtocolPushed and programStatusQueryPending keep their existing decrement/clear rules; the observation runs before, and never replaces, the sentinel accounting.
+- The sixel observer set and the last observed answer are the only new private state; no DA1 text is cached and no replay buffer is introduced.
+- Audit note: One optional interface member plus two private fields and a pure parameter-token check.
+
+**Inheritance / structural**
+- Terminal is an interface, and the new member is optional, so TestTerminal and every structural fake stay type-compatible without changes.
+- TuiBase and the screen implementations never call the hook; only the host capability candidate does.
+- Audit note: The hook is inert unless a caller subscribes.
+
+**Host**
+- src/tui/graphics/sixel-capability.ts: createDirectSixelCapability() subscribes and derives pending/admitted/denied; it is the only consumer in I8-1.
+- No product media consumer, screen, transcript or extension reads the hook in this stage; effectiveImageProtocol() and getCapabilities().images are untouched.
+- Audit note: The host keeps a single observation fact and derives the verdict from it; there is no second mutable capability flag.
+
+**Public / extension**
+- The package already exports the Terminal type, so no new entry point or export list changes.
+- Adding an optional member is additive for third-party implementers; existing implementations remain valid.
+- Audit note: Additive optional member only; no extension API semantics change.
+
+**Behavioral coupling**
+- With no subscriber the runtime behavior is byte-for-byte unchanged: the same DA1 is consumed or forwarded by the same owner.
+- A subscriber receives one notification per CHANGED answer; a repeated identical DA1 does not notify again, so a keyboard fallback cannot double-fire.
+- stop() publishes nothing new because no stdin listener exists while stopped; the retained answer is only replayed synchronously to a later subscriber of the same physical terminal.
+- Audit note: Observation only: it never selects a protocol, writes bytes, or issues a query.
+
+#### Guarding tests
+
+- packages/pi-tui/test/terminal.test.ts: X071 - the DA1 the keyboard sentinel consumes still yields exactly one positive observation; 14/42 without a whole 4 token is negative; a late subscriber receives the known answer; a repeated answer does not notify twice; stop()/start() keeps one physical-terminal fact; unsubscribe is idempotent; CSI 16t, OSC 11 and plain keys never change the observation; a fragmented DA1 is reassembled into one observation and never leaks to the editor.
+- test/tui/sixel-capability.test.ts: the real ProcessTerminal DA1 stream drives createDirectSixelCapability through the production hook (positive, negative, and no-reply), and static denials (PI_IMAGE_PROTOCOL none/0, explicit legacy, detected legacy, tmux/Zellij/Screen/Herdr) attach no observer.
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- src/terminal.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream ProcessTerminal parses the primary DA1 solely to settle the Kitty keyboard-negotiation sentinel and forwards unclaimed replies to the input handler; it exposes no capability observation. The fork adds one optional passive observer plus the retention of the last answer for the physical terminal. The sentinel accounting, forwarding behavior, fragment timeout and stop/start rules are unchanged.
+
+#### Retirement conditions
+
+- Retire when upstream exposes an equivalent passive terminal-capability observation on the DA1 parse boundary, or when the Direct SIXEL capability path is removed and no host consumer reads the hook.
+- Retirement must re-run the X071 fork group in packages/pi-tui/test/terminal.test.ts and the production-path cases in test/tui/sixel-capability.test.ts.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Image-8 I8-1A: the WT/WSL evidence rounds established DA1 attribute 4 as the only reliable SIXEL positive, and a controlled runtime probe on the production ProcessTerminal confirmed that an owed keyboard DA consumes ANY primary DA1 before the host input callback. Confirmed against the pinned v1.1.0 tree that upstream has no observation seam and that a host-only listener cannot see consumed replies.

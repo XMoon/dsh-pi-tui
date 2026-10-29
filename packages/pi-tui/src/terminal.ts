@@ -46,6 +46,19 @@ function isKeyboardProtocolNegotiationSequencePrefix(sequence: string): boolean 
 	return sequence === "\x1b[" || /^\x1b\[\?[\d;]*$/.test(sequence);
 }
 
+/**
+ * Whether a complete PRIMARY device-attributes reply (`CSI ? ... c`) declares
+ * the SIXEL attribute (`4`), or `undefined` when this is not a primary DA1.
+ *
+ * Parameters are compared as whole tokens: a substring test would wrongly
+ * accept `14`, `42` or `24` as evidence of SIXEL support (X071).
+ */
+function primaryDeviceAttributesDeclareSixel(sequence: string): boolean | undefined {
+	const match = /^\x1b\[\?([\d;]*)c$/.exec(sequence);
+	if (!match) return undefined;
+	return match[1]!.split(";").some((token) => token !== "" && Number.parseInt(token, 10) === 4);
+}
+
 export function isAppleTerminalSession(): boolean {
 	return process.platform === "darwin" && process.env.TERM_PROGRAM === "Apple_Terminal";
 }
@@ -104,6 +117,17 @@ export interface Terminal {
 
 	// Whether Kitty keyboard protocol is active
 	get kittyProtocolActive(): boolean;
+
+	/**
+	 * Passive observation of this terminal's primary DA1 SIXEL attribute (X071).
+	 *
+	 * It never issues a query and never selects an image protocol: it only
+	 * reports replies the terminal already sent. `supported` is `true` when a
+	 * complete primary DA1 declares the SIXEL attribute (4) and `false` when a
+	 * complete primary DA1 omits it. Registering after an observation delivers
+	 * the known value synchronously; the returned unsubscribe is idempotent.
+	 */
+	onSixelSupport?(listener: (supported: boolean) => void): () => void;
 
 	// Cursor positioning (relative to current position)
 	moveBy(lines: number): void; // Move cursor up (negative) or down (positive) by N lines
@@ -204,6 +228,14 @@ export class ProcessTerminal implements Terminal {
 	private pendingKeyboardProtocolDeviceAttributes = 0;
 	private keyboardProtocolNegotiationBuffer = "";
 	private keyboardProtocolBufferFlushTimer?: ReturnType<typeof setTimeout>;
+	/** Passive DA1 SIXEL observers (X071). One store; no reply replay buffer. */
+	private readonly sixelObservers = new Set<(supported: boolean) => void>();
+	/**
+	 * Last observed primary-DA1 SIXEL answer for the PHYSICAL terminal this
+	 * instance represents (X071). Survives `stop()` and `start()`: the same
+	 * hardware cannot un-learn the capability between a Main and an Alt screen.
+	 */
+	private lastObservedSixel: boolean | undefined = undefined;
 	private stdinBuffer?: StdinBuffer;
 	private stdinDataHandler?: (data: string) => void;
 	private progressInterval?: ReturnType<typeof setInterval>;
@@ -329,6 +361,11 @@ export class ProcessTerminal implements Terminal {
 				this.scheduleKeyboardProtocolNegotiationBufferFlush();
 				return; // Wait briefly for the rest of a split Kitty response.
 			}
+			// Observe BEFORE the keyboard sentinel can consume this very reply:
+			// an owed Kitty DA must not hide the capability from the host (X071).
+			if (negotiation?.parsed.type === "device-attributes") {
+				this.observeSixelDeviceAttributes(negotiation.sequence);
+			}
 			if (negotiation && this.handleKeyboardProtocolNegotiationSequence(negotiation.parsed)) {
 				return;
 			}
@@ -383,6 +420,35 @@ export class ProcessTerminal implements Terminal {
 		const programStatusQuery = this.programStatusQueryPending ? PROGRAM_STATUS_QUERY : "";
 		process.stdout.write(`${KITTY_KEYBOARD_PROTOCOL_QUERY}${programStatusQuery}${DEVICE_ATTRIBUTES_QUERY}`);
 		this.writeProgramStatus();
+	}
+
+	/**
+	 * Passive DA1 observation; see `Terminal.onSixelSupport` (X071). The
+	 * registration is committed BEFORE any synchronous delivery so a listener
+	 * that unsubscribes itself (or disposes its owner) inside the callback
+	 * observes the already-committed state.
+	 */
+	onSixelSupport(listener: (supported: boolean) => void): () => void {
+		this.sixelObservers.add(listener);
+		const known = this.lastObservedSixel;
+		if (known !== undefined) listener(known);
+		return () => {
+			this.sixelObservers.delete(listener);
+		};
+	}
+
+	/**
+	 * Record the SIXEL attribute of one COMPLETE primary DA1 reply (X071).
+	 *
+	 * Called before the keyboard-negotiation sentinel may consume the same
+	 * reply. A repeated identical answer does not notify again.
+	 */
+	private observeSixelDeviceAttributes(sequence: string): void {
+		const supported = primaryDeviceAttributesDeclareSixel(sequence);
+		if (supported === undefined) return;
+		if (this.lastObservedSixel === supported) return;
+		this.lastObservedSixel = supported;
+		for (const listener of [...this.sixelObservers]) listener(supported);
 	}
 
 	private handleKeyboardProtocolNegotiationSequence(
