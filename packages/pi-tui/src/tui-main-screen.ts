@@ -260,15 +260,13 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		lines: string[];
 		rasters: Map<number, { line: string; dcs: string; cropTopRows: number; visibleRows: number }>;
 		preserved: Set<number>;
-		historyFallbacks: Map<number, string>;
 		recompose: boolean;
 	} {
 		const port = this.sixelScreen;
 		const lines = [...rawLines];
 		const rasters = new Map<number, { line: string; dcs: string; cropTopRows: number; visibleRows: number }>();
 		const preserved = new Set<number>();
-		const historyFallbacks = new Map<number, string>();
-		if (port === undefined) return { lines, rasters, preserved, historyFallbacks, recompose: false };
+		if (port === undefined) return { lines, rasters, preserved, recompose: false };
 		const visible: Array<{ row: number; fallback: string; cropTopRows: number; visibleRows: number }> = [];
 		for (let row = viewportTop; row < Math.min(rawLines.length, viewportTop + height); row += 1) {
 			const info = port.candidate(rawLines[row] ?? "");
@@ -289,7 +287,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 					physicalRow: entry.row,
 				})),
 			);
-			if (changed) return { lines, rasters, preserved, historyFallbacks, recompose: true };
+			if (changed) return { lines, rasters, preserved, recompose: true };
 		}
 		for (const entry of visible) {
 			const token = rawLines[entry.row]!;
@@ -316,20 +314,22 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			const previous = this.previousLines[row] ?? "";
 			// A committed history row is decoupled from the registry's CURRENT
 			// residency: the pixels are already in native scrollback, so a same-
-			// occurrence row keeps its previous physical line for the diff even
-			// after the record was released (otherwise a release would become
-			// `firstChanged` and force a 3J). A LATER full render must not replay
-			// the untrusted DCS though: the projection records that row's fallback
-			// separately and `fullRender` writes it.
-			if (this.previousRawLines[row] === token) {
+			// occurrence row must not become `firstChanged` (that would force a 3J).
+			// Once the record is released, the full DCS string leaves the history
+			// cache too: the row's bookkeeping becomes its lightweight fallback, and
+			// the diff sees the same text, so nothing is WRITTEN to scrollback.
+			if (this.previousRawLines[row] === token && this.sixelFootprint(previous) !== undefined) {
 				lines[row] = previous;
 				preserved.add(row);
-				if (this.sixelFootprint(previous) === undefined) historyFallbacks.set(row, info.fallback);
+			} else if (this.previousRawLines[row] === token) {
+				this.previousLines[row] = info.fallback;
+				lines[row] = info.fallback;
+				preserved.add(row);
 			} else {
 				lines[row] = info.fallback;
 			}
 		}
-		return { lines, rasters, preserved, historyFallbacks, recompose: false };
+		return { lines, rasters, preserved, recompose: false };
 	}
 
 	/**
@@ -587,7 +587,6 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		}
 		this.sixelFrameRasters = projection.rasters;
 		const preservedRows = projection.preserved;
-		const historyFallbacks = projection.historyFallbacks;
 		let newLines = projection.lines;
 
 		// Extract cursor position before applying line resets (marker must be found first)
@@ -655,9 +654,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			for (let i = 0; i < newLines.length; i++) {
 				if (i > 0) output.append("\r\n");
-				const historyFallback = historyFallbacks.get(i);
-				const line = historyFallback ?? newLines[i];
-				const isSixel = historyFallback === undefined && (lineSixelRows[i] ?? 0) > 0;
+				const line = newLines[i];
+				const isSixel = (lineSixelRows[i] ?? 0) > 0;
 				const isImage = isSixel || isImageLine(line);
 				const imageReservedRows = isImage ? this.getImageReservedRows(newLines, lineImageRows, lineSixelRows, i) : 1;
 				if (imageReservedRows > 1 && imageReservedRows <= height) {
@@ -682,15 +680,6 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				this.maxLinesRendered = newLines.length;
 			} else {
 				this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
-			}
-			// The bookkeeping records what was actually written: a history row whose
-			// record was released is text again after the clear.
-			for (const [row, fallback] of historyFallbacks) {
-				if (row >= newLines.length) continue;
-				newLines[row] = fallback;
-				// The row is TEXT again: drop the stale SIXEL row count so a later
-				// diff never expands a range over it as an image block.
-				lineSixelRows[row] = 0;
 			}
 			const bufferLength = Math.max(height, newLines.length);
 			this.previousViewportTop = Math.max(0, bufferLength - height);
