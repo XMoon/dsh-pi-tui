@@ -85,7 +85,10 @@ const captured = (isCurrent?: () => boolean) => ({
 function ownerFor(
   presentation: PresentationProbe,
   value: SessionReader,
-  options: { readonly isCurrent?: () => boolean; readonly onResumeIntent?: (intent: SessionBrowserResumeIntent) => void } = {},
+  options: {
+    readonly isCurrent?: () => boolean
+    readonly onResumeIntent?: (intent: SessionBrowserResumeIntent, scope: SessionScope, settle: (outcome: import('../../src/app/command/session-browser-read.ts').SessionBrowserResumeSettlement) => void) => void
+  } = {},
 ) {
   const diag = DIAG()
   const owner = createSessionBrowserReadOwner({
@@ -673,4 +676,21 @@ test('an already-disposed presentation handle starts NO listing and leaves the o
   assert.equal(listCalls, 1, 'exactly the admitted panel read the listing')
   assert.deepEqual(await admitted.settlement, { kind: 'ready' },
     'the admitted panel settles its own listing outcome')
+})
+
+test('a direct resume accepts the intent but the resume settlement carries the real switch outcome', async () => {
+  const presentation = new PresentationProbe()
+  let settleResume!: (outcome: import('../../src/app/command/session-browser-read.ts').SessionBrowserResumeSettlement) => void
+  const { owner } = ownerFor(presentation, reader({ list: async () => [row('session-target')] }), {
+    onResumeIntent: (_intent, _scope, settle) => { settleResume = settle },
+  })
+  const handle = owner.open({ directMatch: { query: 'target', find: findSessionMatch } })
+  assert.deepEqual(await handle.settlement, { kind: 'matched', sessionId: 'session-target' },
+    'the read owner accepts the matched row')
+  let resolved: import('../../src/app/command/session-browser-read.ts').SessionBrowserResumeSettlement | undefined
+  void handle.resumeSettlement.then(outcome => { resolved = outcome })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(resolved, undefined, 'acceptance is not a committed switch')
+  settleResume({ kind: 'failed', text: 'session open failed: lease held' })
+  assert.deepEqual(await handle.resumeSettlement, { kind: 'failed', text: 'session open failed: lease held' })
 })

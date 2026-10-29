@@ -21492,7 +21492,7 @@ export class TuiApp {
       const scope = hasLocalRows ? 'accepted' : 'all'
       const steerHint = this.queueRunning
         ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer ${scope}`
-        : 'queued until the current task resumes'
+        : 'waiting for the next prompt — send a message to continue'
       const hint = this.viewerMode === undefined
         ? `${steerHint} · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to recall ${scope}`
         : steerHint

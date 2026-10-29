@@ -1816,6 +1816,7 @@ export function applyRunnerWithRuntime(
         ensureSession: () => sessionRuntime.ensureSession(),
         withWriter: (scope, task) => sessionRuntime.withWriter(scope, task),
         switchSession: (sessionId, expectedScope) => sessionRuntime.switchSession(sessionId, expectedScope),
+        switchSessionOutcome: (sessionId, expectedScope) => sessionRuntime.switchSessionOutcome(sessionId, expectedScope),
         forkSession: (sourceSessionId) => sessionRuntime.forkSession(sourceSessionId),
         // The `/fork` success notice's currentness fence: the command surface
         // reads the SAME navigation authority the fork adopted against, never a

@@ -215,6 +215,19 @@ interface ForkAdoptionLedger {
 }
 
 /** The narrow entries the runner consumes. */
+/** The SETTLED result of a tracked session switch. `matched`/accepted is not
+ *  success: only `committed` means the target own the visible surface.
+ *  `superseded` is a locally stale intent (definitely not applied);
+ *  `indeterminate` is a Host-side open/commit whose local currentness was lost
+ *  (the target may be active — never report it as "not executed"). */
+export type SessionSwitchOutcome =
+  | { readonly kind: 'committed'; readonly sessionId: string }
+  | { readonly kind: 'already-current'; readonly message: string }
+  | { readonly kind: 'failed'; readonly message: string }
+  | { readonly kind: 'superseded'; readonly message: string }
+  | { readonly kind: 'indeterminate'; readonly message: string }
+  | { readonly kind: 'cancelled' }
+
 export interface SessionRuntime {
   /**
    * Run one scope-bound TUI writer. The admission is a NO-YIELD section:
@@ -261,6 +274,8 @@ export interface SessionRuntime {
    *  UI intent can supply its captured scope so a queued stale request is
    *  refused inside the transition gate before navigation side effects. */
   switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
+  /** The tracked settled switch outcome used by `/resume` (acceptance is not success). */
+  switchSessionOutcome(sessionId: string, expectedScope?: SessionScope): Promise<SessionSwitchOutcome>
   /** Adopt one forked child inside the gate (plan §4B). Resolves to the
    * navigation identity captured INSIDE the publication commit (PR5 v2
    * §3C — the caller's final settlement consumes exactly this saved
@@ -746,13 +761,13 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * and never inherits an older generation. A refused or unproven stop keeps the
    * CURRENT session live and says why.
    */
-  const switchSession = (sessionId: string, expectedScope?: SessionScope): Promise<string | undefined> => {
+  const switchSessionOutcome = (sessionId: string, expectedScope?: SessionScope): Promise<SessionSwitchOutcome> => {
     /** The barrier half of this switch (the gate wrapper is added below). */
-    const runLocked = (scope: SessionScope): Promise<string | undefined> => {
+    const runLocked = (scope: SessionScope): Promise<SessionSwitchOutcome> => {
       const intent: NavigationIntent = { scope, admission: { oldStopAccepted: false } }
       return runNavigationTransition(intent, async () => {
         try {
-          return await switchSessionLocked(sessionId, intent.admission)
+          return await switchSessionLockedOutcome(sessionId, intent.admission)
         } finally {
           // Preflight can fail before `transitionTo` is reached; settle any
           // recall that was waiting on this transition in that case.
@@ -760,12 +775,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         }
       })
     }
-    const mapStopFailure = (error: unknown): string | undefined => {
+    const mapStopFailure = (error: unknown): SessionSwitchOutcome => {
       if (!(error instanceof SessionNavigationStopError)) throw error
-      // A stale capture is a locally superseded navigation: the surface already
-      // moved, so nothing is reported (the existing superseded path is silent).
-      if (error.settlement === 'stale') return undefined
-      return `${error.message}; the session was not switched`
+      // A stale capture is a locally superseded navigation: the surface
+      // already moved, so the intent is definitely not applied here.
+      if (error.settlement === 'stale') {
+        return { kind: 'superseded', message: 'the session changed before this switch could start' }
+      }
+      return { kind: 'failed', message: `${error.message}; the session was not switched` }
     }
     /**
      * A switch INTO the session already current is a NO-OP: it replaces nothing,
@@ -773,14 +790,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
      * so a queued intent whose target became current in the meantime skips the
      * stop too — on BOTH the scoped and the unscoped admission.
      */
-    const noOpSwitch = (): string | undefined => {
+    const noOpSwitch = (): SessionSwitchOutcome | undefined => {
       if (core.currentSessionId() !== sessionId) return undefined
       deps.surface.settlePendingQueueRecalls(false)
-      return 'already on this session'
+      return { kind: 'already-current', message: 'already on this session' }
     }
     if (expectedScope === undefined) {
       core.bumpNavigationEpoch()
-      return runNavigationGate(() => {
+      return runNavigationGate((): SessionSwitchOutcome | Promise<SessionSwitchOutcome> => {
         const noOp = noOpSwitch()
         if (noOp !== undefined) return noOp
         // Capture the owner this queued selection is actually leaving WHEN ITS
@@ -789,11 +806,15 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         return runLocked(deps.captureScope())
       }).catch(mapStopFailure)
     }
-    if (!deps.isScopeCurrent(expectedScope)) return Promise.resolve(undefined)
-    return runNavigationGate(() => {
+    if (!deps.isScopeCurrent(expectedScope)) {
+      return Promise.resolve<SessionSwitchOutcome>({ kind: 'superseded', message: 'the session changed before this switch could start' })
+    }
+    return runNavigationGate((): SessionSwitchOutcome | Promise<SessionSwitchOutcome> => {
       // A previous queued transition may have published a new owner while this
       // intent waited. Recheck before this request bumps navigation or opens B.
-      if (!deps.isScopeCurrent(expectedScope)) return undefined
+      if (!deps.isScopeCurrent(expectedScope)) {
+        return { kind: 'superseded', message: 'the session changed before this switch could start' }
+      }
       const noOp = noOpSwitch()
       if (noOp !== undefined) return noOp
       core.bumpNavigationEpoch()
@@ -801,10 +822,27 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     }).catch(mapStopFailure)
   }
 
-  const switchSessionLocked = async (
+  /** Compatibility projection for callers that only need the old error string
+   *  (`undefined` = committed or a silent superseded intent). New navigation
+   *  settlement code must use {@link switchSessionOutcome}. */
+  const switchSession = async (sessionId: string, expectedScope?: SessionScope): Promise<string | undefined> => {
+    const outcome = await switchSessionOutcome(sessionId, expectedScope)
+    switch (outcome.kind) {
+      case 'committed':
+      case 'cancelled':
+      case 'superseded':
+        return undefined
+      case 'already-current':
+      case 'failed':
+      case 'indeterminate':
+        return outcome.message
+    }
+  }
+
+  const switchSessionLockedOutcome = async (
     sessionId: string,
     admission: NavigationAdmission,
-  ): Promise<string | undefined> => {
+  ): Promise<SessionSwitchOutcome> => {
     // Every failure AFTER an ACCEPTED stop distinguishes the two proven
     // states: the old Turn is stopped and can never be resumed only once the
     // pre-commit quiesce completed; before that, the stop is merely requested.
@@ -820,13 +858,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     // placeholders on every failed switch.
     let oldOwnerQuiesced = false
     try {
-      // The unified transaction: the OLD session is flushed FIRST, then the
-      // resume publishes the child. A failure anywhere before the create leaves
-      // the current session live — there is nothing to re-acquire (the DSH
-      // SessionWriteLease is the only writer authority). The recorded preset
-      // drives the Direct adapter's internal resume composition; the
-      // cross-backend open request carries only the Session identity.
-      if (deps.lifecycleSignal.aborted) return undefined
+      if (deps.lifecycleSignal.aborted) return { kind: 'cancelled' }
       const result = await transitionTo({
         target: { id: sessionId },
         // The quiesce callback is the ONLY proof that the old Turn reached
@@ -841,16 +873,26 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       })
       if (!result.ok) {
         if (result.error instanceof LifecycleError) {
-          // Preserve the machine-readable cause even on the silent path.
           deps.diag.warn('session switch did not own the surface', {
             settlement: result.error.settlement,
             ownership: result.error.ownership,
             publishedSessionId: result.error.publishedSessionId,
             requestedSessionId: result.error.requestedSessionId,
           })
-          // A locally SUPERSEDED open/switch emits no error notice: the surface
-          // moved, so the message belongs to a stale operation.
-          if (result.error.ownership === 'superseded') return undefined
+          if (result.error.ownership === 'superseded') {
+            // A superseded OPEN that already published/opened its target is
+            // an INDETERMINATE switch, not a silent success and not a proven
+            // non-execution: the Host may already have opened it.
+            return result.error.publishedSessionId !== undefined
+              ? {
+                  kind: 'indeterminate',
+                  message: `${result.message}${stopNote(oldOwnerQuiesced)}`,
+                }
+              : { kind: 'superseded', message: 'the session changed before this switch completed' }
+          }
+          if (result.error.settlement === 'indeterminate') {
+            return { kind: 'indeterminate', message: `${result.message}${stopNote(oldOwnerQuiesced)}` }
+          }
         }
         // The resume failed: the CURRENT session is still live. The full
         // official message (including its raw-log path) stays in the
@@ -859,25 +901,19 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // current Session card away.
         deps.diag.warn('session switch refused', { sessionId, message: result.message })
         const displayMessage = result.message.replace(/\s+\(raw log: .*\)$/u, '')
-        return `${displayMessage}${stopNote(oldOwnerQuiesced)}`
+        return { kind: 'failed', message: `${displayMessage}${stopNote(oldOwnerQuiesced)}` }
       }
       // The switch COMMITTED: staged drafts are per-session UI state — drop the
       // unpinned ones now (never durable attachments). In-flight submissions
       // keep their pinned drafts so a stale submission can still restore its
       // text with a live backing draft.
       deps.surface.clearUnpinnedDrafts()
-      // (PR3-B §7.3: the ACTIVE-draft drop moved onto the publication's
-      // synchronous commit block — see the publishOwner seam in
-      // `transitionTo`. Keeping it here left the race the review probed: the
-      // new session's hydration had already lifted the input fence, so a
-      // post-hydration keystroke was wiped by this late clear, and the old
-      // text stayed in the composer through B's first editable frames.)
-      return undefined
+      return { kind: 'committed', sessionId }
     } catch (error) {
       const message = safeErrorMessage(error)
       deps.surface.reportSwitchFailure(sessionId, message)
       // The CURRENT session is still live.
-      return `switch failed: ${message}${stopNote(oldOwnerQuiesced)}`
+      return { kind: 'failed', message: `switch failed: ${message}${stopNote(oldOwnerQuiesced)}` }
     }
   }
 
@@ -1616,6 +1652,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     withNavigation,
     transitionTo,
     switchSession,
+    switchSessionOutcome,
     adoptFork,
     forkSession,
     parkForkOwner,

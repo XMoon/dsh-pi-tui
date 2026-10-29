@@ -112,7 +112,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
   const diag = createDiag({ stderrLevel: 'off' })
   t.after(() => diag.dispose())
   const resumeIntents: Array<{ sessionId: string; currentSessionId: string | undefined; source: string }> = []
-  const resumeSettlements: Array<() => void> = []
+  const resumeSettlements: Array<(outcome: import('../../src/app/command/session-browser-read.ts').SessionBrowserResumeSettlement) => void> = []
   let current = true
   const owner = createSessionBrowserReadOwner({
     reader: read,
@@ -265,7 +265,7 @@ test('native Browser is one workspace tree, then a global cards union with Host-
   sendActivate(pane, 'session:session-other', pickerId)
   await new Promise<void>((resolve) => setImmediate(resolve))
   assert.equal(m.resumeIntents.length, 1, 'Footer and row repeats during pending cannot dispatch twice')
-  m.resumeSettlements[0]!()
+  m.resumeSettlements[0]!({ kind: 'switched', sessionId: 'session-other' })
   await waitUntil('settling the operation re-enables Resume', () =>
     pickerActionByBase(pane, 'resume', BROWSER)?.disabled === undefined)
 
@@ -631,7 +631,7 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
     currentSessionId: 'session-current',
     source: 'activate',
   })
-  m.resumeSettlements[0]!()
+  m.resumeSettlements[0]!({ kind: 'switched', sessionId: 'session-content' })
   await waitUntil('activation settlement clears the pending state', () =>
     pickerActionByBase(pane, 'resume', BROWSER)?.disabled === undefined)
   pane.key('\r')

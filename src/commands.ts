@@ -39,6 +39,7 @@ import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefini
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
+import type { SessionSwitchOutcome } from './app/session/runtime.ts'
 import type { NavigationIntent } from './app/session/transition.ts'
 import type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
 import type { Component } from '@xmoon76/pi-tui'
@@ -499,6 +500,8 @@ export interface TuiCommandRunner {
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
   switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
+  /** Tracked switch settlement for `/resume`; optional for narrow legacy fakes. */
+  switchSessionOutcome?(sessionId: string, expectedScope?: SessionScope): Promise<SessionSwitchOutcome>
   /** Host-owned /fork navigation. The runner dispatches the semantic fork
    * outside the destructive transition FIFO and only commits the visible child
    * while the captured navigation intent is still current. Optional keeps
