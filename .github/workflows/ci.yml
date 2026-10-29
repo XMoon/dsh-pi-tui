@@ -1011,7 +1011,12 @@ jobs:
     needs:
       - dsh-context
       - candidate
-    if: ${{ needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
+    # `always()` suppresses the implicit all-needs success check: in npm mode
+    # the transitive `prepare-dsh-source` need is legitimately skipped, and
+    # without `always()` that skip propagates into this job and leaves the
+    # required split-process proof unrun. The explicit result checks below and
+    # the `ci-verdict` mode status keep the gate fail-closed.
+    if: ${{ always() && needs.dsh-context.result == 'success' && needs.candidate.result == 'success' && needs.dsh-context.outputs.mode == 'npm' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
