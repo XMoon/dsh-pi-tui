@@ -280,8 +280,9 @@ for (const { columns, rows, cardVisible, fragments } of SIZES) test(`the REAL Se
   for (const line of vt.getViewport()) {
     assert.ok(visibleWidth(line) <= columns, `no refused frame row overflows ${columns} cells: ${JSON.stringify(line)}`)
   }
-  // The production notice slot carries the official refusal verbatim (the
-  // narrow-width assertion cannot rely on the painted line alone).
+  // The production notice slot carries the official refusal body (the raw
+  // diagnostic log path is logged separately, never part of the narrow-width
+  // card-visibility contract).
   const noticeText = currentNoticeText()
   assert.ok(noticeText !== undefined && noticeText.includes(UNKNOWN_EVENT) && noticeText.includes('unknown to this harness'),
     `the refusal notice is the official message, got: ${String(noticeText)}`)
