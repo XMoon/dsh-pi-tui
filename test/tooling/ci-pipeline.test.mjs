@@ -130,9 +130,10 @@ test('an ABSENT phase is a failure, not a pass', () => {
 })
 
 test('a mode-dependent phase with the WRONG status is a failure', () => {
-  // The two directions are different bugs and both must be caught: a source
-  // run whose pinned pack was skipped has no graph to qualify against, and an
-  // npm run whose client-family gate was skipped dropped a check.
+  // The directions are different bugs and all must be caught: a source run
+  // whose pinned pack was skipped has no graph to qualify against, an npm run
+  // whose client-family gate was skipped dropped a check, and the npm-only
+  // split-process gate must not be skipped in npm nor "succeed" in source.
   const sourceWrong = phasesAt('success', { mode: 'source' })
   sourceWrong.find(phase => phase.name === 'prepare-dsh-source').result = 'skipped'
   assert.equal(verdict({ role: 'qualify', mode: 'source', phases: sourceWrong }).ok, false)
@@ -142,6 +143,18 @@ test('a mode-dependent phase with the WRONG status is a failure', () => {
   const decision = verdict({ role: 'qualify', mode: 'npm', phases: npmWrong })
   assert.equal(decision.ok, false)
   assert.match(decision.failures.join('\n'), /requires 'success'/u)
+
+  const npmSplitWrong = phasesAt('success')
+  npmSplitWrong.find(phase => phase.name === 'split-process').result = 'skipped'
+  const npmSplitDecision = verdict({ role: 'qualify', mode: 'npm', phases: npmSplitWrong })
+  assert.equal(npmSplitDecision.ok, false)
+  assert.match(npmSplitDecision.failures.join('\n'), /'split-process' is 'skipped', but mode 'npm' requires 'success'/u)
+
+  const sourceSplitWrong = phasesAt('success', { mode: 'source' })
+  sourceSplitWrong.find(phase => phase.name === 'split-process').result = 'success'
+  const sourceSplitDecision = verdict({ role: 'qualify', mode: 'source', phases: sourceSplitWrong })
+  assert.equal(sourceSplitDecision.ok, false)
+  assert.match(sourceSplitDecision.failures.join('\n'), /'split-process' is 'success', but mode 'source' requires 'skipped'/u)
 })
 
 test('an UNKNOWN mode cannot be qualified', () => {
