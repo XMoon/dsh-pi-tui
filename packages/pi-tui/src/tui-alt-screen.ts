@@ -2641,7 +2641,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				}
 			}
 			for (let row = 0; row < height; row++) {
-				if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
+				// A row the SIXEL clear pass erased has lost whatever text it carried,
+				// even when the new frame's text is byte-identical to the old one: it
+				// must be written again before the raster. Skipping it here would leave
+				// a blank hole where unchanged text (a scrollbar cell, a border) used to
+				// be. (X074.)
+				const clearedBySixel = sixelNeedRedraw && sixelCoveredRows.has(row);
+				if (!fullRedraw && !imagesNeedRedraw && !clearedBySixel && screen[row] === this.previousScreen[row]) continue;
 				// An anchor is a device command, not cell text: text (border,
 				// overlay, scrollbar, search highlight) is written first, and the
 				// command follows in the pass below.
