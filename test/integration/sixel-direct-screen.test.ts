@@ -22,6 +22,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
+import type { TuiAppEvents } from '../../src/tui-app.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
@@ -43,6 +44,20 @@ class SixelAppTerminal extends VirtualTerminal {
   }
 
   private readonly sixelListeners = new Set<(supported: boolean) => void>()
+  private terminalResize: (() => void) | undefined
+
+  override start(onInput: (data: string) => void, onResize: () => void): void {
+    this.terminalResize = onResize
+    super.start(onInput, onResize)
+  }
+
+  /** Drive one real terminal resize through the app's own callback chain. */
+  emitResize(columns: number): void {
+    // `VirtualTerminal.columns` is a getter over its own private field: a real
+    // terminal resizes underneath, so the fixture must too.
+    ;(this as unknown as { _columns: number })._columns = columns
+    this.terminalResize?.()
+  }
 
   onSixelSupport(listener: (supported: boolean) => void): () => void {
     this.sixelListeners.add(listener)
@@ -144,7 +159,11 @@ interface AppFixture {
  */
 async function startSixelApp(
   t: test.TestContext,
-  options: { imageLoader?: ImageLoader; imageTheme?: { fallbackColor: (text: string) => string } } = {},
+  options: {
+    imageLoader?: ImageLoader
+    imageTheme?: { fallbackColor: (text: string) => string }
+    openExternalEditor?: (draft: string) => Promise<string>
+  } = {},
 ): Promise<AppFixture> {
   const home = testLifecycle(t).tempDir('sixel-app-')
   const previousHome = process.env.DSH_HOME
@@ -158,7 +177,22 @@ async function startSixelApp(
   const store = new DraftImageStore()
   const app = new TuiApp(
     terminal,
-    { onSubmit: () => {}, onExit: () => {}, onCancel: () => {} },
+    {
+      onSubmit: () => {},
+      onExit: () => {},
+      onCancel: () => {},
+      // The external-editor capability is a BOUND pair: the action flow routes
+      // through the owned-task entry, so a test that stubs the editor must stub
+      // BOTH (the constructor fails fast otherwise).
+      ...(options.openExternalEditor === undefined
+        ? {}
+        : {
+            openExternalEditor: options.openExternalEditor,
+            runOwned: (_label: string, task: () => unknown) => {
+              void Promise.resolve(task()).catch(() => {})
+            },
+          }),
+    } as TuiAppEvents,
     {
       draftImagePreviewSource: { values: () => store.values() },
       ...(options.imageLoader === undefined ? {} : { imageLoader: options.imageLoader }),
@@ -356,4 +390,43 @@ test('a workspace lease re-binds the owner, and closing it re-certifies the retu
     () => paintedRasters(terminal).some(dcs => dcs.includes('"1;1;80;')),
     'the transcript raster to return on the restored screen',
   )
+})
+
+test('returning from the external editor re-observes the facts and repaints (RFL-015)', async (t) => {
+  const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
+  const ref = {
+    attachmentId: 'att-editor-1',
+    mediaType: 'image/png' as const,
+    bytes: png.byteLength,
+    width: 80,
+    height: 40,
+    name: 'bands.png',
+  }
+  let resizedDuringSuspend = false
+  const { terminal, app } = await startSixelApp(t, {
+    imageLoader: new ImageLoader(async () => ({ ref: {}, data: png })),
+    imageTheme: { fallbackColor: (text: string) => text },
+    // While $EDITOR owns the tty the terminal resizes: the resize hook observes
+    // the STOPPED return screen, which invalidates the verified facts.
+    openExternalEditor: async (draft: string) => {
+      terminal.emitResize(90)
+      resizedDuringSuspend = true
+      // A bounded window so the resize hook's queries really time out while the
+      // editor owns the tty (the contract under test is the later recovery).
+      // reason: a NEGATIVE observation window (the failure is the absence of facts).
+      await new Promise(resolve => setTimeout(resolve, 150))
+      return draft
+    },
+  })
+  app.setTranscript(transcriptWith(ref).messages())
+  app.requestRender()
+  await until(() => paintedRasters(terminal).length > 0, 'the raster before the editor round trip')
+
+  terminal.writes.length = 0
+  await app.launchExternalEditor()
+  assert.equal(resizedDuringSuspend, true, 'the terminal really resized while the editor owned it')
+  // The resume must re-bind and re-sample: a fresh geometry query and then the
+  // raster again, with no other input.
+  await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the resume re-observation')
+  await until(() => paintedRasters(terminal).length > 0, 'the raster after the resume')
 })
