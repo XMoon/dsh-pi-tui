@@ -247,15 +247,52 @@ test('composer actions: Send runs the EXACT Enter path — one submit, draft cle
   assert.equal(calls.submits[1]!.text, 'second')
 })
 
-test('composer actions: Send refuses an empty wire-form draft (the client does not enforce disabled)', async (t) => {
+test('composer actions: Send refuses an empty wire-form draft AND paints the disabled state', async (t) => {
   const m = await mountComposerActions({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'] })
   t.after(() => { void m.dispose() })
   const { pane, calls } = m
   const send = composerButtons(pane).get('composer-send')
   assert.ok(send)
+  // The VISIBLE disabled fact rides the button's own attributes (the client
+  // paints muted from them) — plus the semantic reason in the tooltip.
+  assert.deepEqual(send!.p['attrs'], { 'aria-disabled': 'true', disabled: 'disabled' },
+    'the empty-draft Send carries the disabled presentation')
+  assert.equal(send!.p['title'], 'Type a message to send')
   click(pane, send!)
   await settle(200) // window: let the pane ack the frame before reading the wire
-  assert.equal(calls.submits.length, 0, 'an empty draft never submits')
+  assert.equal(calls.submits.length, 0, 'an empty draft never submits (the handler re-check holds)')
+  // A non-empty draft clears the disabled presentation on the next frame.
+  pane.key('text')
+  await waitUntil('Send is enabled again', () => {
+    const next = composerButtons(pane).get('composer-send')
+    const attrs = next?.p['attrs'] as Record<string, unknown> | undefined
+    return next !== undefined && attrs?.['aria-disabled'] !== 'true'
+  })
+})
+
+test('composer actions: hostile model facts never reach the wire raw (labels AND titles)', async (t) => {
+  const m = await mountComposerActions({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'] })
+  t.after(() => { void m.dispose() })
+  const { pane } = m
+  // A model name/effort carrying OSC/escape/control content: every EXTERNAL
+  // component of the tooltip passes the same physical-line sanitization as the
+  // visible label (the terminal-output contract covers the title too).
+  await m.commitStatus(snapshotFor({
+    model: {
+      displayName: 'evil\u001b]52;c;YXR0YWNr\u0007name\u000bline\u001b[2J',
+      id: 'x',
+      reasoningEffort: 'high\u0000ctrl\u001b',
+    },
+  }))
+  const buttons = composerButtons(pane)
+  const modelTitle = String(buttons.get('composer-model')?.p['title'] ?? '')
+  const effortTitle = String(buttons.get('composer-effort')?.p['title'] ?? '')
+  for (const title of [modelTitle, effortTitle]) {
+    assert.ok(!title.includes('YXR0YWNr'), 'no OSC payload in the tooltip')
+    assert.ok(!title.includes('\u001b'), 'no raw ESC reaches the tooltip')
+    assert.ok(!title.includes('\u000b') && !title.includes('\u0000'), 'no control byte reaches the tooltip')
+  }
+  assert.ok(modelTitle.includes('name'), 'the readable part of the name survives')
 })
 
 test('composer actions: Send stays the ONLY submit path — a busy turn still allows queueing through it', async (t) => {

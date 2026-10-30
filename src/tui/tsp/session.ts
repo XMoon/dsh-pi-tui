@@ -2313,6 +2313,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         outline: 1px solid var(--accent);
         outline-offset: 1px;
       }
+      [data-role="${COMPOSER_SEND_ROLE}"][aria-disabled] {
+        opacity: 0.55;
+        cursor: not-allowed;
+        background: var(--card);
+      }
+      [data-role="${COMPOSER_SEND_ROLE}"][aria-disabled]:hover {
+        background: var(--card);
+      }
     `)
   }
 
@@ -2413,9 +2421,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // Stop exists ONLY while the CURRENT formally-committed snapshot says the
     // main subject is busy; a non-busy subject never paints a dead control.
     const busy = presentedStatus?.activity.busy === true && !hydrating
+    // The title interpolates EXTERNAL facts (a provider's model name/effort):
+    // every component passes the SAME physical-line sanitization as the
+    // visible labels, so a hostile name cannot smuggle control bytes into the
+    // tooltip (terminal-output contract).
+    const safeName = model === undefined ? undefined : sanitizedPhysicalLine(model.displayName).trim()
+    const safeEffort = model === undefined || model.reasoningEffort === undefined
+      ? undefined
+      : sanitizedPhysicalLine(model.reasoningEffort).trim()
     const modelTitle = model === undefined
       ? 'Model — type /model to switch'
-      : `Model ${model.displayName}${model.reasoningEffort === undefined ? '' : ` · effort ${model.reasoningEffort}`} — type /model to switch`
+      : `Model ${safeName}${safeEffort === undefined ? '' : ` · effort ${safeEffort}`} — type /model to switch`
     const submittable = composerDraftSubmittable()
     return ui.row(
       { key: 'composer-actions', wrap: true, justify: 'between', gap: 'xs', role: 'dsh-composer-actions' },
@@ -2431,9 +2447,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         html.button({
           key: 'composer-effort',
           role: COMPOSER_EFFORT_ROLE,
-          title: model === undefined
+          title: safeEffort === undefined
             ? 'Reasoning effort — type /model to change'
-            : `Reasoning effort ${model.reasoningEffort ?? 'unset'} — type /model to change`,
+            : `Reasoning effort ${safeEffort} — type /model to change`,
           aria: 'Change reasoning effort',
           onClick: () => { composerModelClicked('effort') },
         }, `Effort${effortValue === undefined ? '' : ` · ${effortValue}`} ▾`),
@@ -2445,6 +2461,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           role: COMPOSER_SEND_ROLE,
           title: submittable ? `Send — ${TSP_COMPOSER_SEND_LABEL}` : 'Type a message to send',
           aria: 'Send message',
+          // The VISIBLE disabled state: the client does not ENFORCE disabled on
+          // an `el` button (measured), so this attribute paints the muted
+          // presentation while the handler's own re-check stays the real gate.
+          ...(submittable ? {} : { attrs: { 'aria-disabled': 'true', disabled: 'disabled' } as Readonly<Record<string, string>> }),
           onClick: () => { composerSendClicked() },
         }, 'Send'),
         ...(busy ? [html.button({

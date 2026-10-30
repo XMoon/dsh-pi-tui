@@ -1451,6 +1451,86 @@ test('official Direct Agent: native /model makes exactly one durable Session sel
   }
 })
 
+/**
+ * PR-C (TSP-7): the composer Model/Effort buttons drive the REAL production
+ * chain over the official Direct composition — the registered `/model`
+ * command owner, the real `DirectModelCatalog` directory read, the native
+ * picker and the ONE durable Session selection writer — from the wire click
+ * to the settled `model/selection` append. The `effort` entry additionally
+ * lands the first hydrated catalogue on the current row's Reasoning Effort
+ * strip with effort-bearing fixtures (covered by the effort-entry suite);
+ * here the CHAIN (same owner, same real directory, truthful absence, no
+ * second write) is the assertion.
+ */
+test('PR-C production chain: composer Model and Effort clicks reach the real command owner and writer', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    modelPicker: true,
+    composerActions: true,
+    deltas: ['model-live-ok'],
+  })
+  const original = DirectModelCatalog.prototype.selectSessionModel
+  const records: Array<{ sessionId: string; selection: unknown }> = []
+  DirectModelCatalog.prototype.selectSessionModel = async function (...args) {
+    const result = await original.apply(this, args)
+    records.push({ sessionId: args[0], selection: args[1] })
+    return result
+  }
+  t.after(() => {
+    DirectModelCatalog.prototype.selectSessionModel = original
+  })
+  const clickComposerButton = async (key: string): Promise<void> => {
+    const button = nodes(fixture.pane).find(node => node.k === 'el' && String(node.id).endsWith(`.${key}`))
+    assert.ok(button, `the composer ${key} button is on the wire`)
+    fixture.pane.event({ ev: 'action', sf: fixture.pane.frames().at(-1)!.sf, id: button!.id, act: 'click' })
+  }
+  try {
+    await waitFor('booted', () => fixture.pane.output.text().includes('dock.composer'))
+    fixture.pane.key('create live session\r')
+    await waitFor('real Agent turn', () => fixture.pane.output.text().includes('model-live-ok'))
+    // ── The MODEL entry: click → the registered handler's own catalog read →
+    //    the native picker hydrates from the REAL directory.
+    await clickComposerButton('composer-model')
+    await waitFor('the real catalog hydrated the picker', () => props(fixture.pane).state === 'ready')
+    assert.equal(props(fixture.pane).title, 'Switch model')
+    assert.ok(((props(fixture.pane).items ?? []) as unknown[]).length >= 2,
+      'the REAL advertised models are listed (the scripted directory)')
+    assert.equal(records.length, 0, 'opening through the button never writes')
+    // Select the other real model and commit through the picker's ONE write.
+    browse(fixture.pane, JSON.stringify(['scripted', DIRECT_TSP_MODEL_TWO]))
+    await waitFor('second model highlighted', () =>
+      props(fixture.pane).selected === JSON.stringify(['scripted', DIRECT_TSP_MODEL_TWO]))
+    fixture.pane.key('\u001b[Z')
+    fixture.pane.key('\r')
+    await waitFor('the real writer settled', () => records.length === 1)
+    const agent = fixture.ctx.agents.get(records[0]!.sessionId as never)
+    assert.ok(agent, 'the write targeted the REAL live session')
+    const events = agent!.session.snapshotEvents().filter((e) => e.type === 'model/selection')
+    assert.equal(events.length, 1, 'exactly ONE durable selection append')
+    assert.deepEqual(events[0]!.data, { provider: 'scripted', model: DIRECT_TSP_MODEL_TWO })
+    await waitFor('committed closes the picker', () => picker(fixture.pane) === undefined)
+
+    // ── The EFFORT entry: click → the SAME owner re-reads; the real scripted
+    //    models advertise no effort metadata, so the truthful notice states
+    //    the absence — no fabricated value and no second write.
+    await clickComposerButton('composer-effort')
+    await waitFor('the effort entry re-opened the real picker', () => props(fixture.pane).state === 'ready')
+    assert.equal(props(fixture.pane).title, 'Switch model')
+    assert.equal(props(fixture.pane).message, 'Reasoning effort is unavailable for this model',
+      'the real models advertise no efforts: the absence is stated, never guessed')
+    assert.equal(records.length, 1, 'the effort entry never writes either')
+    for (let step = 0; step < 20 && picker(fixture.pane) !== undefined; step += 1) {
+      fixture.pane.key('\u001b')
+      await settle(30)
+    }
+    assert.equal(picker(fixture.pane), undefined, 'the picker closed')
+    assert.equal(fixture.modelCalls(), 1, 'the whole chain dispatched no extra prompt')
+  } finally {
+    DirectModelCatalog.prototype.selectSessionModel = original
+    await fixture.settle()
+  }
+})
+
 /* ---------------------------------------------------------------- K2/zone map */
 
 test('native Model: Esc clears the search filter first, then closes', async (t) => {
@@ -2613,7 +2693,45 @@ test('official Host same-name /model keeps the original Host route even with nat
     assert.deepEqual(calls, [''], 'the Host receives the original parsed argument string')
     assert.equal(picker(fixture.pane), undefined)
   } finally {
-    await fixture.settle()
+    await fixture.settle() // window: bounded teardown settle for the real Direct composition fixture
+  }
+})
+
+test('PR-C: a Host-owned /model registration leaves the composer UI opener unavailable', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    modelPicker: true,
+    composerActions: true,
+    hostCommands: [
+      { name: 'model', description: 'Host owns model', handler: () => undefined },
+    ],
+  })
+  try {
+    await waitFor('booted', () => fixture.pane.output.text().includes('dock.composer'))
+    // The composer action row still paints (the pane is capable), but its
+    // Model/Effort buttons must be dead: the Host-owned name degraded the
+    // TUI registration, so the UI entry does not exist and the click is
+    // refused WITHOUT reading the TUI catalog or opening a picker.
+    // Click the Model button through the wire node id the dock really built.
+    const { wireNodes } = await import('../support/tsp-picker-wire.ts')
+    const nodes = wireNodes(fixture.pane)
+    const modelButton = nodes.find(node => node.k === 'el' && String(node.id).endsWith('.composer-model'))
+    assert.ok(modelButton, 'the composer Model button is on the wire (the row still paints)')
+    const before = fixture.pane.output.text()
+    fixture.pane.event({
+      ev: 'action',
+      sf: fixture.pane.frames().at(-1)!.sf,
+      id: modelButton!.id,
+      act: 'click',
+    })
+    await waitFor('the refusal notice', () =>
+      fixture.pane.output.text().includes('model selection is unavailable'))
+    assert.equal(picker(fixture.pane), undefined, 'no TUI picker opened')
+    assert.ok(fixture.pane.output.text().length >= before.length, 'no catalog read replaced the dock')
+    // The Host sink is untouched too: the UI entry never dispatched anything.
+    assert.equal(fixture.modelCalls(), 0)
+  } finally {
+    await fixture.settle() // window: bounded teardown settle for the real Direct composition fixture
   }
 })
 

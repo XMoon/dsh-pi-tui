@@ -950,9 +950,12 @@ export function registerTuiCommands(
    * handler the typed command runs — the composer's high-frequency Model and
    * Effort controls call this, never a fabricated submission. `entry` changes
    * only the panel's initial presentation focus; the read/scope/writer owners
-   * stay the registered command's own.
+   * stay the registered command's own. UNDEFINED when the `/model`
+   * registration itself degraded (a Host-owned same-name command): the UI
+   * opener then does not exist and the composer control is refused by the
+   * command surface's own notice path.
    */
-  openModelPicker(entry: 'models' | 'effort'): Promise<CommandResult>
+  openModelPicker?(entry: 'models' | 'effort'): Promise<CommandResult>
 } {
   const { ctx, app } = runner
   // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal
@@ -2356,8 +2359,13 @@ export function registerTuiCommands(
     // PR-C (TSP-7): the narrow UI entry over the SAME registered `/model`
     // handler. The registrars object is captured ONCE here — the closure owns
     // the command identity — and the caller receives only this method, never
-    // the whole registrar surface.
-    openModelPicker: (entry: 'models' | 'effort'): Promise<CommandResult> => modelCommands.openModel(entry),
+    // the whole registrar surface. It exists ONLY where the `/model`
+    // registration itself succeeded: a Host-owned duplicate name leaves the
+    // entry undefined, so the composer control is told the truth instead of
+    // bypassing the Host route.
+    ...(registrationFailures.some(failure => failure.startsWith('/model:'))
+      ? {}
+      : { openModelPicker: (entry: 'models' | 'effort'): Promise<CommandResult> => modelCommands.openModel(entry) }),
     takeCommandDraftDisposition: (commandId?: string): CommandDraftDisposition | undefined => {
       if (commandId !== undefined) {
         const disposition = commandDraftDispositions.get(commandId)

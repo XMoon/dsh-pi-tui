@@ -130,10 +130,15 @@ export default async function (h) {
     String(modelStyle?.backgroundColor ?? '') !== '' && String(modelStyle?.backgroundColor ?? 'transparent') !== 'rgba(0, 0, 0, 0)',
     String(modelStyle?.backgroundColor ?? ''))
   if (send !== undefined) {
-    h.check('the PRIMARY (Send) resolves its own raised background and bolder weight',
-      String(sendStyle?.backgroundColor ?? '') !== String(modelStyle?.backgroundColor ?? 'x')
-        && Number(sendStyle?.fontWeight ?? 0) > Number(modelStyle?.fontWeight ?? 0),
-      `model=${modelStyle?.backgroundColor}/${modelStyle?.fontWeight} send=${sendStyle?.backgroundColor}/${sendStyle?.fontWeight}`)
+    // The PRIMARY (Send) is distinguishable from the secondary Model button:
+    // a bolder font weight ALWAYS, and — while an empty draft disables it —
+    // the muted opacity of the disabled presentation. (The raised background
+    // only applies once submittable; the empty-draft pane deliberately paints
+    // the disabled card background instead.)
+    const sendDisabled = Number(sendStyle?.opacity ?? 1) < 1
+    h.check('the PRIMARY (Send) is visually distinguishable (bolder weight, or the disabled mute)',
+      Number(sendStyle?.fontWeight ?? 0) > Number(modelStyle?.fontWeight ?? 0) || sendDisabled,
+      `model=${modelStyle?.backgroundColor}/${modelStyle?.fontWeight} send=${sendStyle?.backgroundColor}/${sendStyle?.fontWeight}/${sendStyle?.opacity}`)
     h.check('the sheet padding lifts the button box above the text line',
       Number(model?.rect?.[3] ?? 0) >= 20, JSON.stringify(model?.rect))
   }
@@ -157,6 +162,16 @@ export default async function (h) {
   if (runCase === 'busy') {
     h.check('Send is NOT replaced by Stop while busy', buttons.has('composer-send'))
     h.check('Stop coexists with Send', stop !== undefined)
+  }
+  if (runCase === 'idle' || runCase === 'nomodel' || runCase === 'long') {
+    // The empty-draft Send paints the DISABLED presentation on the wide pane:
+    // muted opacity via the scoped sheet (the computed dump proves the rule
+    // applied to the button itself).
+    const idleSendStyle = await styleOf(h, send)
+    h.check('idle-paints-disabled: the empty-draft Send is visibly muted',
+      Number(idleSendStyle?.opacity ?? 1) < 1,
+      `opacity=${idleSendStyle?.opacity} style=${JSON.stringify(idleSendStyle && { bg: idleSendStyle.backgroundColor, fw: idleSendStyle.fontWeight })}`)
+    h.measure('idle-send-disabled-style', JSON.stringify(idleSendStyle && { opacity: idleSendStyle.opacity, bg: idleSendStyle.backgroundColor, fw: idleSendStyle.fontWeight }))
   }
 
   // The two native status rows remain BELOW the action row.
@@ -244,12 +259,19 @@ export default async function (h) {
   }
 
   if (runCase === 'negative') {
-    // 1) The EMPTY-draft Send click: refused by the handler (the client does
-    //    not enforce `disabled`).
+    // 1) The EMPTY-draft Send: the button CARRIES the visible disabled state
+    //    (attributes + muted chrome), and the handler still refuses the
+    //    submit — the client does not ENFORCE disabled, so both halves are
+    //    proven separately.
     const fresh = h.snapshot()
     const freshSend = composerButtons(h, fresh).get('composer-send')
+    const sendStyle = await styleOf(h, freshSend)
+    h.check('the empty-draft Send paints the disabled presentation',
+      String(freshSend?.attrs?.['aria-disabled'] ?? freshSend?.attr?.['aria-disabled'] ?? freshSend?.['aria-disabled'] ?? '') === 'true'
+        || String(sendStyle?.opacity ?? '1') !== '1',
+      `attrs=${JSON.stringify(freshSend?.attrs ?? freshSend?.attr ?? null)} opacity=${sendStyle?.opacity}`)
     const clicked = freshSend !== undefined && await h.click(fresh.chains, freshSend)
-    h.check('the empty-draft Send click landed', clicked === true)
+    h.check('the empty-draft Send click landed (the client does not block it)', clicked === true)
     await h.sleep(900)
     h.check('the empty draft never submitted',
       subjectEvents(h).filter(e => e.submit).length === 0,

@@ -289,6 +289,8 @@ export interface DirectTspFixtureOptions {
   }>
   readonly startup?: { readonly sessionId?: string; readonly presetId?: string }
   readonly modelPicker?: boolean
+  /** Advertise the `el` kind so the native composer action row mounts. */
+  readonly composerActions?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
   /**
@@ -424,6 +426,7 @@ export async function createDirectTspFixture(
         sessionBrowser: options.sessionBrowser,
         nativeImages: options.nativeImages,
         nativeChart: options.nativeChart,
+        composerActions: options.composerActions,
       })
   // OWNERSHIP, not success-contingency: scripted mode replaces the PROCESS tty
   // and clears five env vars; external-Tern and PiTui modes must leave the
