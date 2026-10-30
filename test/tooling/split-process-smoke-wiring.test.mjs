@@ -104,7 +104,7 @@ test('a completed waitForExit does not leave its deadline holding the process', 
 
 test('the upgraded smoke carries every B1/B2-HF gate and the critical negative controls', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26']) {
+  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T37', 'T38', 'T39', 'T40']) {
     assert.match(source, new RegExp(`\\b${gate}\\b`, 'u'), `missing ${gate}`)
   }
   for (const marker of [
@@ -114,6 +114,16 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     'qualification-host-foundation',
     'host-rpc-watch-open',
     'host-rpc-proof',
+    'SPLIT_PROCESS_CLIENT_MODE',
+    'SPLIT_PROCESS_CLIENT_RECORD_FILE',
+    'SPLIT_PROCESS_CLIENT_SESSION',
+    'surfaceMounted',
+    'sessionOpen',
+    'SurfaceEntryProcess',
+    'm4b2s-stub-llm',
+    'm4b2s',
+    't34-t36',
+    'NOT_VERIFIED',
     'SPLIT_PROCESS_CLIENT_FORCE_FAILURE',
     'SPLIT_PROCESS_CLIENT_OMIT_COOKIE',
     'SPLIT_PROCESS_CLIENT_FORCE_STARTUP_FATAL',
@@ -149,10 +159,13 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     assert.ok(source.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 5, 'the extra patch may only implement the two child mutations, the T26 official-row mutation and the whole-smoke mutation mode')
+  assert.equal(extraPatchUses.length, 7,
+    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row mutations, the whole-smoke mutation mode and the isolated surface LLM overlay')
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
+  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm\.patchPath/u)
+  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: hostRuntimeMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(source, /mutationEnv/u)

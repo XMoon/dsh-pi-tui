@@ -27,9 +27,9 @@ import { createRemoteBackend } from '../../runtime/remote/backend-remote.ts'
 import { createRemoteClientRuntime, type RemoteClientRuntime } from './client-runtime.ts'
 import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
 import { RemoteHostUserShellPort } from '../../runtime/remote/host-user-shell-remote.ts'
-import { createRemoteHostRuntime, type InProcessHostCarrier, type RemoteHostRuntime } from './host-runtime.ts'
+import { createRemoteHostRuntime, type RemoteHostRuntime } from './host-runtime.ts'
 import { mergeCause } from './dispose-cause.ts'
-import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ASemantics } from './m3a-semantics.ts'
+import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ARuntimeSource, type RemoteM3ASemantics } from './m3a-semantics.ts'
 
 /**
  * Run one disposal step with per-step error isolation: the step's failures
@@ -121,24 +121,33 @@ export async function createExperimentalRemoteRuntime(
   }
 }
 
-/** Compile-time proof that the ONE M3-1 Client runtime satisfies the Remote
- *  ConfigPort's narrow source face (never called; referenced by the
- *  official-contract gate). */
-export function remoteConfigRuntimeSourceOf(runtime: RemoteClientRuntime): RemoteConfigRuntimeSource {
+/** Compile-time proof that the shared Client runtime source satisfies the
+ *  Remote ConfigPort's narrow source face (never called; referenced by the
+ *  official-contract gate). The M3-1 Client runtime AND the real split
+ *  Client's Domain mount are the same structural source; the config-plane
+ *  namespaces stay part of the ONE `remote` service, never a second object. */
+export function remoteConfigRuntimeSourceOf(runtime: RemoteM3ARuntimeSource): RemoteConfigRuntimeSource {
   return runtime
 }
 
+/** The composition-owned unary Fetch face the archive adapter addresses:
+ *  exactly `typeof fetch` structurally (the M3 in-process carrier and the B1
+ *  authenticated Cookie carrier both satisfy it). */
+export type RemoteBackendFetch = (input: string | URL, init?: RequestInit) => Promise<Response>
+
 /** Inputs for the complete experimental Remote `Backend` assembly. */
 export interface RemoteBackendRuntimeOptions {
-  /** The ONE M3-1 Client runtime every adapter shares. */
-  readonly runtime: RemoteClientRuntime
+  /** The ONE shared Client runtime source every adapter consumes: the M3-1
+   *  Client runtime or the real split Client's mounted official Domains —
+   *  never a second graph. */
+  readonly runtime: RemoteM3ARuntimeSource
   /** The application-owned prompt serializer (the D2.2 writer dependency).
    * Absent selects the PRODUCTION serializer (M3-4 PR3): the PreparedPrompt
    * → official PromptContentPart mapping over the same Client sessions face.
    * Composition tests may still inject an explicit stub. */
   readonly promptSerializer?: RemotePromptSerializer
   /** The composition-owned fetch the archive adapter addresses. */
-  readonly fetch: InProcessHostCarrier['fetch']
+  readonly fetch: RemoteBackendFetch
   /** The composition-owned pre-dispatch dispatch admission (the surface-stop
    *  fence the Remote session writer consults immediately before dispatch).
    *  Absent = every pre-dispatch write is admissible (the pre-fence behavior). */

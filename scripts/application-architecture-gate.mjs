@@ -183,6 +183,17 @@ export const REMOTE_DYNAMIC_IMPORT_TARGET = 'app/remote/runtime.ts'
 export const ARCHITECTURE_ALLOWLIST = []
 
 /**
+ * The ONE internal split-Client process-composition entry allowed to lazily
+ * import the application composition facade (`app/bootstrap.ts`), and the ONE
+ * target that edge may name. The edge is a VALUE dynamic import, executed only
+ * after the official `PluginPackages` resolution is live; it is the second
+ * real OS process root and does NOT share a Context or plugin service object
+ * with the Direct `src/index.ts -> app/bootstrap.ts` edge.
+ */
+export const PROCESS_COMPOSITION_BOOTSTRAP_ENTRY = 'app/remote-process/local-client-entry.ts'
+export const PROCESS_COMPOSITION_BOOTSTRAP_TARGET = 'app/bootstrap.ts'
+
+/**
  * True when `srcRel` belongs to the ONE application composition zone (TS2):
  * the facade (`src/app/bootstrap.ts`) and its cohesive wiring-only helper
  * modules (`src/app/bootstrap/**`). The zone is defined by DIRECTORY, not by
@@ -519,6 +530,27 @@ export const ARCHITECTURE_RULES = [
       + 'composition-helper zone (index -> facade -> helpers -> owners)',
     applies: (srcRel) => srcRel !== 'index.ts' && !isBootstrapCompositionFile(srcRel),
     forbids: (resolved) => isBootstrapCompositionFile(resolved),
+  },
+  {
+    // B2-S: the ONE split-Client process-composition lazy edge. Static imports
+    // of the bootstrap facade/helpers remain forbidden for every owner by
+    // `owner-imports-bootstrap`; this rule is the ONLY exception, and it admits
+    // exactly one value dynamic import of the facade from the single process
+    // entry. `findProcessCompositionEdgeViolations` proves the target set,
+    // the owner identity, the single-expression budget and the
+    // PluginPackages-first ordering.
+    id: 'owner-dynamic-imports-bootstrap',
+    message:
+      'only app/remote-process/local-client-entry.ts may lazily import app/bootstrap.ts — every other '
+      + 'owner must not reach the composition facade or its helper zone dynamically either',
+    applies: (srcRel) => srcRel !== 'index.ts' && !isBootstrapCompositionFile(srcRel),
+    forbids: (resolved, specifier, meta) => meta?.dynamic === true
+      && isBootstrapCompositionFile(resolved)
+      && !(
+        meta?.rel === PROCESS_COMPOSITION_BOOTSTRAP_ENTRY
+        && resolved === PROCESS_COMPOSITION_BOOTSTRAP_TARGET
+      ),
+    checksValueDynamicImport: true,
   },
   {
     // TS4: the TUI implementation layer (`src/tui/**`) may be selected only by
@@ -965,6 +997,83 @@ export function findRemoteDynamicImportViolations(entries) {
   return violations
 }
 
+/** The 0-based character offset at which a 1-based source line starts. */
+function lineOffset(source, line) {
+  let offset = 0
+  for (let index = 1; index < line; index += 1) {
+    const next = source.indexOf('\n', offset)
+    if (next < 0) return source.length
+    offset = next + 1
+  }
+  return offset
+}
+
+/**
+ * Rule: the split-Client process composition edge into `app/bootstrap.ts` is
+ * EXACTLY ONE lazy dynamic import, owned by
+ * {@link PROCESS_COMPOSITION_BOOTSTRAP_ENTRY}, and it appears in source order
+ * AFTER the official `PluginPackages` mount. It admits no other owner, no
+ * other bootstrap target (the facade only), no second expression, and no
+ * pre-resolution import. A missing edge also fails closed: the surface
+ * composition must not silently lose its only runner mount.
+ * @param {Array<{ rel: string, source: string }>} entries
+ * @returns {Array<{ file: string, line: number, rule: string, detail: string }>}
+ */
+export function findProcessCompositionEdgeViolations(entries) {
+  const known = new Set(entries.map(entry => entry.rel))
+  const violations = []
+  const edges = []
+  for (const { rel, source } of entries) {
+    for (const { specifier, line } of parseValueDynamicImports(source, rel)) {
+      const resolved = resolveRelativeImport(rel, specifier)
+      if (resolved === undefined) continue
+      const target = staticImportCandidates(resolved).find(candidate => known.has(candidate)) ?? resolved
+      if (target !== PROCESS_COMPOSITION_BOOTSTRAP_TARGET) continue
+      edges.push({ rel, line, specifier, source })
+    }
+  }
+  const entryEdges = edges.filter(edge => edge.rel === PROCESS_COMPOSITION_BOOTSTRAP_ENTRY)
+  for (const edge of edges) {
+    if (edge.rel === PROCESS_COMPOSITION_BOOTSTRAP_ENTRY) continue
+    violations.push({
+      file: edge.rel,
+      line: edge.line,
+      rule: 'process-composition-bootstrap-edge',
+      detail: `only ${PROCESS_COMPOSITION_BOOTSTRAP_ENTRY} may lazily import ${PROCESS_COMPOSITION_BOOTSTRAP_TARGET} `
+        + `(found ${edge.rel} -> ${edge.specifier})`,
+    })
+  }
+  if (entryEdges.length !== 1) {
+    violations.push({
+      file: PROCESS_COMPOSITION_BOOTSTRAP_ENTRY,
+      line: entryEdges[1]?.line ?? 1,
+      rule: 'process-composition-bootstrap-edge',
+      detail: `${PROCESS_COMPOSITION_BOOTSTRAP_ENTRY} must carry exactly ONE lazy dynamic import of `
+        + `${PROCESS_COMPOSITION_BOOTSTRAP_TARGET} (found ${entryEdges.length})`,
+    })
+  }
+  const sanctioned = entryEdges[0]
+  if (sanctioned !== undefined) {
+    const pluginPackages = sanctioned.source.indexOf('PluginPackages')
+    if (pluginPackages < 0) {
+      violations.push({
+        file: sanctioned.rel,
+        line: sanctioned.line,
+        rule: 'process-composition-bootstrap-edge',
+        detail: 'the lazy bootstrap import must follow the official PluginPackages resolution mount',
+      })
+    } else if (lineOffset(sanctioned.source, sanctioned.line) < pluginPackages) {
+      violations.push({
+        file: sanctioned.rel,
+        line: sanctioned.line,
+        rule: 'process-composition-bootstrap-edge',
+        detail: 'the lazy bootstrap import must execute AFTER PluginPackages is mounted (official resolution first)',
+      })
+    }
+  }
+  return violations
+}
+
 /**
  * Names constructed via `new Direct<...>(...)` in `source` (AST-based: comments
  * never match, and parenthesized / `as`-cast / non-null constructor references
@@ -1116,14 +1225,21 @@ function reachableFrom(root, edges) {
  */
 export function findViolations(entries, options = {}) {
   const allowlist = new Set(options.allowlist ?? ARCHITECTURE_ALLOWLIST)
-  const violations = [...findRemoteDynamicImportViolations(entries)]
+  const known = new Set(entries.map(entry => entry.rel))
+  const violations = [
+    ...findRemoteDynamicImportViolations(entries),
+    // The split-Client edge assertion only runs when the production entry is
+    // part of the scanned tree; synthetic rule fixtures that merely include an
+    // `app/bootstrap.ts` target must not fail for a missing process entry.
+    // `main()` asserts the entry's presence against the real tree.
+    ...known.has(PROCESS_COMPOSITION_BOOTSTRAP_ENTRY) ? findProcessCompositionEdgeViolations(entries) : [],
+  ]
   const imports = new Map()
   const sourceByRel = new Map()
   for (const { rel, source } of entries) {
     imports.set(rel, parseImportSpecifiers(source, rel))
     sourceByRel.set(rel, source)
   }
-  const known = new Set(entries.map(entry => entry.rel))
 
   for (const { rel } of entries) {
     for (const { specifier, line, typeOnly, moduleTypeOnly } of imports.get(rel)) {
@@ -1171,7 +1287,7 @@ export function findViolations(entries, options = {}) {
         const target = dynamicRelative === undefined
           ? specifier
           : staticImportCandidates(dynamicRelative).find(candidate => known.has(candidate)) ?? dynamicRelative
-        if (!rule.forbids(target, specifier)) continue
+        if (!rule.forbids(target, specifier, { dynamic: true, rel })) continue
         violations.push({ file: rel, line, rule: rule.id, detail: `${rule.message} (${specifier})` })
       }
     }
@@ -1626,6 +1742,14 @@ function main() {
     return
   }
   const violations = findViolations(entries)
+  if (!entries.some(entry => entry.rel === PROCESS_COMPOSITION_BOOTSTRAP_ENTRY)) {
+    violations.push({
+      file: PROCESS_COMPOSITION_BOOTSTRAP_ENTRY,
+      line: 1,
+      rule: 'process-composition-bootstrap-edge',
+      detail: 'the split-Client process composition entry is missing from the production tree',
+    })
+  }
   if (retiredViolations.length > 0) {
     console.error('application-architecture-gate: retired source directory recreated:')
     for (const detail of retiredViolations) console.error(`  ${detail}`)

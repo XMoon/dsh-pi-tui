@@ -74,6 +74,16 @@ export interface LocalTransportStatus {
 export interface LocalClientTransport {
   readonly connection: LocalTransportConnection
   status(): LocalTransportStatus
+  /**
+   * Borrow the SAME authenticated HTTP fetch the official Connection owns:
+   * the verified Host origin, the live per-peer Cookie and the no-store /
+   * manual-redirect policy from `cookieFetch`. It creates no second
+   * Connection, Peer or persistent Cookie copy; before every call it refuses
+   * when the transport was disposed/went fatal or has no current Host
+   * generation, then refreshes the per-peer Cookie exactly like a later socket
+   * attempt. A real HTTP/transport failure propagates unchanged.
+   */
+  authenticatedFetch(input: string | URL, init?: RequestInit): Promise<Response>
   /** Qualification-only physical carrier drop: closes the live mux socket. */
   dropWebSocketsForQualification(): void
   dispose(): Promise<void>
@@ -499,6 +509,9 @@ export async function startLocalTransport(
   // performs the discovery identity probe, then omits its Cookie from the
   // official transport carrier.
   const includeCookie = process.env.SPLIT_PROCESS_CLIENT_OMIT_COOKIE !== '1'
+  // The borrowed HTTP fetch for the Remote archive adapter: the SAME origin
+  // and Cookie policy the official Connection's unary carrier uses.
+  const fetchAuthenticated = cookieFetch(origin, () => cookie, includeCookie)
 
   let typertFiber: Fiber | undefined
   let connectionFiber: Fiber | undefined
@@ -601,6 +614,24 @@ export async function startLocalTransport(
           activeWrappers: wrappers.size,
           liveSockets: sockets.size,
         }
+      },
+      async authenticatedFetch(input: string | URL, init?: RequestInit): Promise<Response> {
+        if (disposed || !live) {
+          throw new Error('local transport: the authenticated fetch is unavailable before connection or after disposal')
+        }
+        if (fatalError !== undefined) throw fatalError
+        // The generation gate: a rolled-over/absent generation means this
+        // borrowed origin/Cookie pair no longer speaks for the current Host.
+        if (installed.generation.getSnapshot() === undefined) {
+          throw new LocalScopeError('HOST_UNRESPONSIVE', 'local transport: no current authenticated Host generation')
+        }
+        // A later peer always needs the refreshed Cookie (the Host releases the
+        // old peer when its mux socket closed); the archive call is a one-shot
+        // user action, never a hot-loop path.
+        await refreshCookie()
+        if (disposed) throw new Error('local transport: the authenticated fetch is unavailable after disposal')
+        if (fatalError !== undefined) throw fatalError
+        return await fetchAuthenticated(input, init)
       },
       dropWebSocketsForQualification(): void {
         for (const socket of [...sockets]) {

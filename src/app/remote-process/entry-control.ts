@@ -13,9 +13,17 @@
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { readProcessStarttime } from './local-scope.ts'
 
-/** One structured line emitted by a process entry. */
-export function writeEntryRecord(record: Record<string, unknown>): void {
+/** One structured record sink owned by the process entry. */
+export type EntryRecordSink = (record: Record<string, unknown>) => void
+
+/** The default JSONL sink: the qualification control channel on stdout. */
+const stdoutRecordSink: EntryRecordSink = record => {
   process.stdout.write(`${JSON.stringify(record)}\n`)
+}
+
+/** One structured line emitted by a process entry. */
+export function writeEntryRecord(record: Record<string, unknown>, sink: EntryRecordSink = stdoutRecordSink): void {
+  sink(record)
 }
 
 /**
@@ -27,11 +35,13 @@ export function readProcessStartIdentity(pid: number = process.pid): string | un
   return readProcessStarttime(pid)
 }
 
-/** A role-labelled structured diagnostics sink for the entry's detached work. */
-export function createEntryDiag(processRole: 'host' | 'client'): Diag {
+/** A role-labelled structured diagnostics sink for the entry's detached work.
+ *  The surface entry supplies its private JSONL file sink; the qualification
+ *  entries keep the default stdout control channel. */
+export function createEntryDiag(processRole: 'host' | 'client', sink?: EntryRecordSink): Diag {
   const emit = (level: 'debug' | 'info' | 'warn' | 'error') =>
     (message: string, fields?: Record<string, unknown>): void => {
-      writeEntryRecord({ m4a0: 'diag', processRole, level, message, ...fields })
+      writeEntryRecord({ m4a0: 'diag', processRole, level, message, ...fields }, sink)
     }
   return { debug: emit('debug'), info: emit('info'), warn: emit('warn'), error: emit('error'), dispose: () => {} }
 }

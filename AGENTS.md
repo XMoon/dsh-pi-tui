@@ -148,6 +148,19 @@ issues/PRs, not in repository docs.
   `docs/architecture/host-client.md` only when the durable coupling/authority
   contract actually changes. Stage status and qualification records belong to
   GitHub issues/PRs, not repository docs.
+- The application composition facade `src/app/bootstrap.ts` has exactly TWO
+  real OS process composition roots. The Direct root is
+  `src/index.ts -> app/bootstrap.ts` (the Host process; the runner shares the
+  Host Context and its services). The internal split Client root is
+  `src/app/remote-process/local-client-entry.ts -> app/bootstrap.ts`: ONE
+  lazy dynamic import, executed only after the official `PluginPackages`
+  resolution is live, with the Client process's own Context, `appExit`,
+  transport and mounted Client domains. It is the only
+  `app/** -> app/bootstrap.ts` dynamic exception; never make it static, never
+  extend it to another owner, and never let the two roots share a Context,
+  plugin service object or Host service instance. See
+  `docs/architecture/overview.md` (composition zone) and
+  `docs/architecture/host-client.md`.
 - Every Host-touching feature declares locality (Client-local, Host-owned, or
   split), its narrow semantic-port owner, and its wire story. Never assume
   Client cwd/filesystem equals Host cwd/filesystem. Host workspace semantics —

@@ -102,6 +102,7 @@ import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, type SteerSubjectLike } from './submission/steer.ts'
 import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '../app/direct/runtime.ts'
 import type { RemoteApplicationOverride, RemoteTransportLifetime } from '../app/application-runtime.ts'
+import type { ModelSelectionDto } from '../runtime/catalog-port.ts'
 import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
 import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
 import { createTaskSource } from './bootstrap/task-source.ts'
@@ -176,6 +177,45 @@ function presetErrorCode(error: unknown): string | undefined {
   return typeof code === 'string' && code !== '' ? code : undefined
 }
 
+/**
+ * The narrow Host-DTO -> Host `ModelSelection` mapping at the composition root
+ * (M4-B2-S §7.3.3). The Remote branch's default comes from the official
+ * Host-authoritative `catalog.models` directory read; the only structural
+ * difference is the branded reasoning-effort id, whose wire value is the same
+ * plain string. No fabricated default: an unavailable directory yields
+ * `undefined` and the UI shows the truthful unavailable state.
+ */
+function detachedModelSelection(selection: ModelSelectionDto | undefined): ModelSelection | undefined {
+  if (selection === undefined) return undefined
+  return {
+    provider: selection.provider,
+    model: selection.model,
+    ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+  } as ModelSelection
+}
+
+/**
+ * The internal startup-settlement seam for the split Client's ONE real
+ * Surface composition (M4-B2-S §7.1). `applyRunnerWithRuntime` is synchronous
+ * and starts an asynchronous runner root, so the caller cannot learn from its
+ * return value whether a physical surface was actually mounted:
+ *
+ * - `surfaceReady()` fires exactly once, after `surface.start(...)` returned
+ *   successfully and the renderer/terminal ownership transfer settled — i.e.
+ *   the real tty is owned by the mounted TUI;
+ * - `surfaceFailed(error)` fires instead when the runner's startup root (or
+ *   the surface acquisition) fails before `surfaceReady`, with the ORIGINAL
+ *   error so the caller can unwind its whole Client graph in reverse order.
+ *
+ * Omitted by the Direct package entry (`applyRunner`) and every test that does
+ * not observe real mount readiness; internal split-Client composition is the
+ * only caller.
+ */
+export interface RunnerStartupSettlement {
+  surfaceReady(): void
+  surfaceFailed(error: unknown): void
+}
+
 export function applyRunner(ctx: Context, config: Config): void {
   applyRunnerWithRuntime(ctx, config, undefined)
 }
@@ -195,6 +235,7 @@ export function applyRunnerWithRuntime(
   ctx: Context,
   config: Config,
   override: RemoteApplicationOverride | undefined,
+  startupSettlement?: RunnerStartupSettlement,
 ): void {
   // Read through the global service store, not the property proxy: appExit is
   // an optional host value, never an injected dependency.
@@ -203,7 +244,16 @@ export function applyRunnerWithRuntime(
     throw new Error('tui-runner: the launcher must provide ctx.appExit before the tree mounts')
   }
   const startup = ctx.get(TUI_STARTUP_SERVICE)
-  if (startup === undefined) return
+  if (startup === undefined) {
+    // Direct keeps the frozen loader-row shape (a pending startup service is
+    // the launcher's own failure to report). A split-Client runner has no
+    // loader row: a missing startup service there is a real composition break
+    // and reporting it as "ready" would be a fabricated surface.
+    if (override !== undefined) {
+      throw new Error('tui-runner: the split Client runner requires the Client-local tuiStartup service')
+    }
+    return
+  }
   // The semantic backend (server/client migration M1): the TUI consumes
   // Host domains through narrow ports, never ctx.* directly. Direct is the
   // only backend today; remote/wire adapters join in later milestones
@@ -328,43 +378,80 @@ export function applyRunnerWithRuntime(
     exit,
   })
 
+  /**
+   * Settle the internal split-Client startup seam as CANCELLED: the runtime
+   * aborted/disposed this boot before a physical surface existed. The caller's
+   * bridge must not hang on a startup that will never mount; no fake surface
+   * readiness is published.
+   */
+  const settleSurfaceCancelled = (stage: string): void => {
+    startupSettlement?.surfaceFailed(new Error(`tui-runner: startup was cancelled before the surface mounted (${stage})`))
+  }
+
   const startRunner = async (): Promise<void> => {
     // The TUI required surface is committed to running: synchronous init
     // succeeded and this async root is established, so the startup row's
     // readiness handshake must not report a missing surface. A later failure
-    // in this root is owned by its own catch below.
+    // in this root is owned by its own catch below. (The split Client's ACTUAL
+    // physical-surface readiness is settled through `startupSettlement` once
+    // `surface.start` returned; this Host handshake is not that proof.)
     startup.markSurfaceMounted?.()
-    // Loader siblings mount concurrently. Await the complete application before
-    // creating an Agent so its scoped tools and adapters are not half-composed.
-    // The wait is unbounded and must stay unbounded (no TUI timeout, no
-    // skipping a pending row, no half-composed Agent): the only thing this
-    // layer owes the user is that the wait is VISIBLE.
-    startupStatus.show('Starting DSH…')
-    try {
-      await ctx.get('loader')?.await()
-    } finally {
-      // The barrier owns the terminal row only while it is waiting: release it
-      // on EVERY exit, including a rejected Loader. Leaving it up would let the
-      // fatal log land on the same row (`Starting DSH…[tui] … ERROR fatal …`)
-      // and the later clear would then erase part of that error line — a TTY
-      // shares one cursor between stdout and stderr.
-      startupStatus.clear()
+    const isRemote = override !== undefined
+    if (!isRemote) {
+      // Loader siblings mount concurrently. Await the complete application
+      // before creating an Agent so its scoped tools and adapters are not
+      // half-composed. The wait is unbounded and must stay unbounded (no TUI
+      // timeout, no skipping a pending row, no half-composed Agent): the only
+      // thing this layer owes the user is that the wait is VISIBLE.
+      //
+      // The split Client has NO Host Profile Loader: its official Client
+      // domains and Client UI subtree were mounted and awaited by the Client
+      // process composition root BEFORE this runner started. A missing Loader
+      // there is correct, never a missing Host to fabricate or wait for.
+      startupStatus.show('Starting DSH…')
+      try {
+        await ctx.get('loader')?.await()
+      } finally {
+        // The barrier owns the terminal row only while it is waiting: release
+        // it on EVERY exit, including a rejected Loader. Leaving it up would
+        // let the fatal log land on the same row (`Starting DSH…[tui] … ERROR
+        // fatal …`) and the later clear would then erase part of that error
+        // line — a TTY shares one cursor between stdout and stderr.
+        startupStatus.clear()
+      }
     }
     if (lifecycleController.signal.aborted) {
       // Pre-mount unload before any Agent existed: nothing to retire; close
       // the diagnostics handle (the early cancellation disposer no longer
       // owns it — see the effect registration above).
       diag.dispose()
+      settleSurfaceCancelled('pre-runner abort')
       return
     }
-    const agents = ctx.get('agents')
-    const defaultModel = ctx.get('agentDefaultModel')
-    const sessions = ctx.get('sessions')
+    if (isRemote) {
+      // The split Client's ONE authority is the pre-mounted official Client
+      // data plane plus the adopted Remote selected core. Never resolve (or
+      // fabricate) Host agents/sessions/default-model services here.
+      const selected = override.selected
+      if (selected.kind !== 'remote' || selected.backend.kind !== 'remote') {
+        throw new Error('tui-runner: the split Client runner requires the selected Remote application runtime')
+      }
+    }
+    const hostAgents = isRemote ? undefined : ctx.get('agents')
+    const hostDefaultModel = isRemote ? undefined : ctx.get('agentDefaultModel')
+    const hostSessions = isRemote ? undefined : ctx.get('sessions')
     // Early process shutdown can dispose the tree while settlement is pending.
-    if (agents === undefined || defaultModel === undefined || sessions === undefined) {
+    if (!isRemote && (hostAgents === undefined || hostDefaultModel === undefined || hostSessions === undefined)) {
       diag.dispose()
       return
     }
+    // Direct-only Host authorities. On the Remote selection these are absent
+    // BY CONSTRUCTION; every consumer below is either branch-guarded, reads
+    // them inside a Direct-only callback, or resolves the Remote equivalent
+    // from `remoteSources`/the semantic backend.
+    const agents = hostAgents as NonNullable<typeof hostAgents>
+    const defaultModel = hostDefaultModel as NonNullable<typeof hostDefaultModel>
+    const sessions = hostSessions as NonNullable<typeof hostSessions>
     // The transition gate / operation barrier are declared BEFORE the
     // first Agent can exist so the retirement coordinator below (and the
     // fatal catch through retireOwnedSessionRef) is installed before any
@@ -447,23 +534,30 @@ export function applyRunnerWithRuntime(
     ctx.inject(['settings'], (child) => {
       child.effect(() => child.settings.configure({ auto: false }, ctx.fiber))
     })
-    await migrateLegacySettings({
-      home: (ctx.get('profileContext') as { readonly home: string } | undefined)?.home ?? dshHome(process.env),
-      forms: settingsForms,
-      resolvePreset: async (id) => {
-        const presets = ctx.get('agentPresets') as { resolve(id?: string): Promise<{ broken?: string }> } | undefined
-        if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
-        // §8.8: the current registry validates BOTH existence and
-        // usability — a declared-but-broken preset is not a valid legacy
-        // default (the official resolve returns it carrying `broken`).
-        const resolved = await presets.resolve(id)
-        if (resolved.broken !== undefined) {
-          throw Object.assign(new Error(resolved.broken), { code: 'agent-preset/invalid' })
-        }
-      },
-      migrationMarker: config.legacySettingsMigrationVersion,
-      diag,
-    })
+    // The retired settings.yaml migration is a HOST-profile concern: it reads
+    // the Host profile home and writes the Host Settings service. The split
+    // Client has neither (its config plane is the Remote ConfigPort), so this
+    // step is Direct-only; running it there would report a missing Host
+    // service on every Client start and read a Host-profile path Client-side.
+    if (override === undefined) {
+      await migrateLegacySettings({
+        home: (ctx.get('profileContext') as { readonly home: string } | undefined)?.home ?? dshHome(process.env),
+        forms: settingsForms,
+        resolvePreset: async (id) => {
+          const presets = ctx.get('agentPresets') as { resolve(id?: string): Promise<{ broken?: string }> } | undefined
+          if (presets === undefined) throw new Error('agent presets unavailable in this deployment')
+          // §8.8: the current registry validates BOTH existence and
+          // usability — a declared-but-broken preset is not a valid legacy
+          // default (the official resolve returns it carrying `broken`).
+          const resolved = await presets.resolve(id)
+          if (resolved.broken !== undefined) {
+            throw Object.assign(new Error(resolved.broken), { code: 'agent-preset/invalid' })
+          }
+        },
+        migrationMarker: config.legacySettingsMigrationVersion,
+        diag,
+      })
+    }
     // Resolve the canonical display state before the first compose/resume so
     // the first model prompt and the first transcript frame agree.
     const persistedTuiSettings = tuiSettings?.get() as unknown as TuiSettingsDoc | undefined
@@ -751,7 +845,13 @@ export function applyRunnerWithRuntime(
     const model = createModelSelectionOwner<ModelSelection>({
       liveAgent: () => agentNow(),
       generation: () => ownership.generation(),
-      currentDefault: () => defaultModel.currentSelection() as ModelSelection | undefined,
+      // Direct reads the live Host default-model service. Remote reads the
+      // SAME Host-authoritative default through the official Client model
+      // directory (`catalog.models`, already a semantic port over the ONE
+      // Client data plane); no Host service, no guessed default.
+      currentDefault: () => remoteSources === undefined
+        ? defaultModel.currentSelection() as ModelSelection | undefined
+        : detachedModelSelection(backend.catalog.models.defaultSelection()),
       currentOf: (agent) => directRuntime()?.modelSelections.current(agent as Agent),
       setCurrentOf: (agent, next) => directRuntime()?.modelSelections.setCurrent(agent as Agent, next),
     })
@@ -1035,6 +1135,7 @@ export function applyRunnerWithRuntime(
           // No owner exists yet and the full fiber disposer is not
           // registered: close the diagnostics handle (idempotent).
           diag.dispose()
+          settleSurfaceCancelled('resume admission')
           return
         }
         // The Direct adapter resolves the recorded preset and the Host
@@ -1152,6 +1253,7 @@ export function applyRunnerWithRuntime(
           // No owner was published and the full fiber disposer is not
           // registered: close the diagnostics handle (idempotent).
           diag.dispose()
+          settleSurfaceCancelled('resume cancelled')
           return
         }
         // Suspend the pre-mount status BEFORE the failure logs: the
@@ -2335,6 +2437,7 @@ export function applyRunnerWithRuntime(
       // M3-4 PR1: the selected transport disposes after the session
       // retirement on this pre-mount path too (Direct: no-op).
       await disposeSelectedTransport()
+      settleSurfaceCancelled('pre-mount unload')
       return
     }
     // Stop the TUI when this fiber is disposed (a loader hot-reload unloads
@@ -2576,7 +2679,10 @@ export function applyRunnerWithRuntime(
     if (extensionService !== undefined) surface.attachExtensionHost(extensionService)
     // The TUI is about to mount: the pre-mount status line must be gone
     // before the first frame (no stale scrollback line after mount).
-    if (lifecycleController.signal.aborted) return
+    if (lifecycleController.signal.aborted) {
+      settleSurfaceCancelled('pre-mount abort')
+      return
+    }
     startupStatus.clear()
     // ── Plugin Manager (P1-A) ──────────────────────────────────────────────
     // ONE controller/panel for both entries (`/plugins` and
@@ -2709,7 +2815,10 @@ export function applyRunnerWithRuntime(
     // An accepted cancellation has ALREADY completed its teardown transaction
     // (against the inert acquisition stage): this boot must never acquire the
     // tty afterwards — that would hand the renderer to an already-finished exit.
-    if (cleanedUp) return
+    if (cleanedUp) {
+      settleSurfaceCancelled('cancelled before renderer acquisition')
+      return
+    }
     // The attempt STARTS here: from this point the pending stage has a real
     // producer (the ownership transfer, the cancellation release, or a failure).
     rendererAcquisition = new Promise<void>((resolve, reject) => {
@@ -2780,6 +2889,7 @@ export function applyRunnerWithRuntime(
       } else {
         settleAcquisition?.()
       }
+      settleSurfaceCancelled('cancelled during renderer acquisition')
       return
     }
     // PR3-B B2 (§3.3): the renderer CAPABILITY settles here, before the mount
@@ -3017,6 +3127,11 @@ export function applyRunnerWithRuntime(
     // acquired no renderer at all. The exit/fatal/HMR transaction may proceed.
     rendererTransferred = rendererMount !== undefined
     settleAcquisition?.()
+    // The physical surface now exists and owns the tty (PiTui mount returned,
+    // or the TSP renderer transferred ownership). This — not the synchronous
+    // Host handshake at the top of this root — is the split Client's real
+    // surface-readiness proof.
+    startupSettlement?.surfaceReady()
     // The mounted surface is now live. On the PiTui branch the runner borrows
     // the TuiApp reference (the surface owner keeps the lifetime); the TSP
     // renderer branch has NO TuiApp (the slot stays undefined: command
@@ -3130,7 +3245,12 @@ export function applyRunnerWithRuntime(
       // request-header consume, the call-args cache, the pending-subagent feed
       // and the viewed-child settle map all stay runner-owned.
       observeMainEvent: (sessionId, event) => {
-        const runtimeAgent = agents.get(SessionId(sessionId)) as Agent | undefined
+        // Direct-only: the Host Agent registry. The Remote branch's events
+        // carry no in-process Agent; the presentation/viewer bookkeeping below
+        // is transport-neutral and still runs for them.
+        const runtimeAgent = remoteSources !== undefined
+          ? undefined
+          : agents.get(SessionId(sessionId)) as Agent | undefined
         let settledViewChildId: string | undefined
         let refreshAgents = false
         const selectionEvent = event as unknown as { type?: unknown; data?: unknown }
@@ -3267,7 +3387,11 @@ export function applyRunnerWithRuntime(
       viewedChildAgent: () => viewer.viewedChildAgent(),
       setViewedChildAgent: (agent) => viewer.setViewedChildAgent(agent),
       setViewedQueueAgent: (agent) => viewer.setViewedQueueAgent(agent),
-      agentForSession: (sessionId) => agents.get(SessionId(sessionId)),
+      // Direct-only Host Agent registry read (the assistant-stream admission);
+      // the Remote branch's live input arrives through the eventSource ingress.
+      agentForSession: (sessionId) => remoteSources !== undefined
+        ? undefined
+        : agents.get(SessionId(sessionId)),
       applyViewedChildAssistantInput: (input) => viewer.applyAssistantInput(input),
       applyMainAssistantInput: (input, sessionId) => {
         presentation.applyAssistantInput(input)
@@ -3295,7 +3419,10 @@ export function applyRunnerWithRuntime(
       jobs: jobs === undefined ? undefined : {
         list: (caller) => jobs.list(caller as SessionId) ?? [],
       },
-      agents: { get: (sessionId) => agents.get(SessionId(sessionId)) },
+      // Constructed for both branches; only the Direct reader ever calls it.
+      agents: {
+        get: (sessionId) => remoteSources !== undefined ? undefined : agents.get(SessionId(sessionId)),
+      },
       currentSessionId: () => ownership.currentSessionId(),
       generation: () => ownership.generation(),
       isCleanedUp: () => cleanedUp,
@@ -3488,10 +3615,21 @@ export function applyRunnerWithRuntime(
     const startupAgent = agentNow()
     if (remoteSources !== undefined) {
       // M3-4 PR2: the startup resume published a Remote owner — initialize
-      // its whole presentation through the reader window + live ingress
-      // (the deferred/sessionless branch stays below otherwise).
+      // its whole presentation through the reader window + live ingress.
       const startupSessionId = ownership.currentSessionId()
-      if (startupSessionId !== undefined) await initRemoteLiveSurface(startupSessionId)
+      if (startupSessionId !== undefined) {
+        await initRemoteLiveSurface(startupSessionId)
+      } else {
+        // Sessionless Remote start (no `--session`): the split Client's real
+        // surface opens on the same Welcome invitation the Direct deferred
+        // start shows. The Remote branch must NOT fall through to the Direct
+        // `else` (there is no Agent), and an empty transcript would otherwise
+        // look like a dead surface.
+        surface.display.setWelcomeIdle(true)
+        status.refresh()
+        status.refreshTerminalTitle()
+        status.refreshTerminalCwd()
+      }
     } else if (startupAgent !== undefined) {
       // The initial owner's catalog was prefetched before mount: no
       // duplicate refresh.
@@ -3616,5 +3754,12 @@ export function applyRunnerWithRuntime(
     })
   }
 
-  void startRunner().catch(fatalLifecycle.handleStartupFailure) // allowlist: startup lifecycle root — see AGENTS.md
+  void startRunner().catch(error => {
+    // The split Client composition must learn about a startup root failure
+    // BEFORE the fatal lifecycle tears the tree down: it owns the reverse
+    // unwind of its Domain/UI/transport graph, and the ORIGINAL error is what
+    // its bridge reports.
+    startupSettlement?.surfaceFailed(error)
+    return fatalLifecycle.handleStartupFailure(error)
+  }) // allowlist: startup lifecycle root — see AGENTS.md
 }
