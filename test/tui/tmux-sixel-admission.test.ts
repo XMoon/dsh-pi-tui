@@ -171,6 +171,8 @@ test('N06: the whole list-clients report must be strict six-column records', (t)
       'main\t/dev/pts/12\twork\txterm-kitty\tkitty\t0\n\n',
       '\t/dev/pts/12\twork\txterm-kitty\tkitty\t0\n',
       'main\t\twork\txterm-kitty\tkitty\t0\n',
+      'main\t/dev/pts/12\twork\t\tkitty\t0\n',
+      'main\t/dev/pts/12\twork\txterm-kitty\t\t0\n',
     ]
     for (const report of rejected) {
       cli.setReply('list-clients', { text: report })

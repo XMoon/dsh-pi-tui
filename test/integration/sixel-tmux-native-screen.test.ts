@@ -40,10 +40,19 @@ import { createFakeTmuxCli, type FakeTmuxCli } from '../support/fake-tmux-cli.ts
 
 /** A real terminal face; the Screen's cell/background queries are answered. */
 class TmuxSixelAppTerminal extends VirtualTerminal {
+  private readonly cellWidthPx: number
+  private readonly cellHeightPx: number
+
+  constructor(columns: number, rows: number, cellWidthPx = 10, cellHeightPx = 20) {
+    super(columns, rows)
+    this.cellWidthPx = cellWidthPx
+    this.cellHeightPx = cellHeightPx
+  }
+
   override write(data: string): void {
     super.write(data)
     if (data.includes('\x1b[16t')) {
-      setImmediate(() => this.sendInput('\x1b[6;20;10t'))
+      setImmediate(() => this.sendInput(`\x1b[6;${this.cellHeightPx};${this.cellWidthPx}t`))
     }
     if (data.includes('\x1b]11;?')) {
       setImmediate(() => this.sendInput('\x1b]11;rgb:2828/2c2c/3434\x07'))
@@ -158,6 +167,8 @@ async function startTmuxSixelApp(
     imageTheme?: { fallbackColor: (text: string) => string }
     svgLoader?: SvgRasterLoader
     clientReport?: string
+    cellWidthPx?: number
+    cellHeightPx?: number
   } = {},
 ): Promise<AppFixture> {
   const cli = createFakeTmuxCli(t)
@@ -179,7 +190,12 @@ async function startTmuxSixelApp(
   })
 
   resetCapabilitiesCache()
-  const terminal = new TmuxSixelAppTerminal(100, 24)
+  const terminal = new TmuxSixelAppTerminal(
+    100,
+    24,
+    options.cellWidthPx ?? 10,
+    options.cellHeightPx ?? 20,
+  )
   const store = new DraftImageStore()
   const app = new TuiApp(
     terminal,
@@ -467,6 +483,8 @@ test('E05: a >1 MiB raster split by the main-screen writer is reassembled before
   const { terminal, app } = await startTmuxSixelApp(t, {
     imageLoader: new ImageLoader(async () => ({ ref: {}, data: png })),
     imageTheme: { fallbackColor: (text: string) => text },
+    cellWidthPx: 20,
+    cellHeightPx: 40,
   })
   const ref = { attachmentId: 'att-e05-noise', mediaType: 'image/png' as const, bytes: png.byteLength, width: 800, height: 600, name: 'noise.png' }
 
@@ -474,10 +492,8 @@ test('E05: a >1 MiB raster split by the main-screen writer is reassembled before
   app.requestRender()
   await until(() => terminal.getViewport().join('\n').includes('🖼️'), 'the transcript identity row')
   terminal.writes.length = 0
-  app.openTranscriptImagePicker()
-  await until(() => terminal.getViewport().join('\n').includes('Images · current transcript'), 'the image picker')
-  terminal.sendInput('\r')
-  await until(() => paintedRasters(terminal).length > 0, 'the large noise viewer raster')
+  app.requestRender()
+  await until(() => paintedRasters(terminal).length > 0, 'the large noise main-screen raster')
   const rasters = paintedRasters(terminal)
   const dcs = rasters.at(-1)!
   const decodedProbe = decodeSixel(dcs)
@@ -532,26 +548,32 @@ test('E07: a client change before a split DCS completes writes zero managed pref
   const { terminal, app, cli } = await startTmuxSixelApp(t, {
     imageLoader: new ImageLoader(async () => ({ ref: {}, data: png })),
     imageTheme: { fallbackColor: (text: string) => text },
+    cellWidthPx: 20,
+    cellHeightPx: 40,
   })
   const ref = { attachmentId: 'att-e07-noise', mediaType: 'image/png' as const, bytes: png.byteLength, width: 800, height: 600, name: 'noise.png' }
   const facade = (app as unknown as { graphics: { terminal: { write(data: string): void } } }).graphics.terminal
   let changed = false
+  let prefixLeakedBeforeChange = false
   const original = facade.write.bind(facade)
   facade.write = (data: string): void => {
+    // Feed the FIRST 1 MiB chunk through the production facade BEFORE changing
+    // the client: at this point the facade has held the partial managed DCS
+    // (its introducer is not on the sink) and no DCS bytes were written. Only
+    // then flip Sxl, so the remaining chunk must be refused by the write-time
+    // forced re-probe, not by an initial admission failure.
+    original(data)
     if (!changed && data.includes('\x1bP0;1;q')) {
+      prefixLeakedBeforeChange = terminal.writes.join('').includes('\x1bP0;1;q')
       changed = true
       cli.setReply('show-messages', { text: '  1: Sxl: (flag) false\n' })
     }
-    original(data)
   }
+  terminal.writes.length = 0
   app.setTranscript(transcriptWith(ref).messages())
   app.requestRender()
-  await until(() => terminal.getViewport().join('\n').includes('🖼️'), 'the transcript identity row')
-  terminal.writes.length = 0
-  app.openTranscriptImagePicker()
-  await until(() => terminal.getViewport().join('\n').includes('Images · current transcript'), 'the image picker')
-  terminal.sendInput('\r')
-  await until(() => changed, 'the first chunk that carries the managed introducer')
+  await until(() => changed, 'the first chunk to be processed and held by the facade')
+  assert.equal(prefixLeakedBeforeChange, false, 'the first held prefix never reached the sink before the change')
   await tick(300)
   assert.equal(paintedRasters(terminal).length, 0, 'no managed DCS byte reached the sink')
   assert.equal(terminal.writes.join('').includes('\x1bP0;1;q'), false, 'not even the first physical prefix leaked')
