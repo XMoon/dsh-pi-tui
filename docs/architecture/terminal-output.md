@@ -489,10 +489,12 @@ therefore have different authorities and must never be collapsed:
   `ESC P0;1;q … ESC \` DCS. The fork's `BoundedTerminalWriter` can split a
   frame at 1 MiB, so a partial command is held (bounded by the owner's 32 MiB
   registry budget) and never reaches the sink; a complete string is accepted
-  only when the owner's exact registry reports its footprint, and then a forced
-  live admission probe runs BEFORE its first byte. A refused command writes zero
-  managed bytes, throws `TmuxGraphicsRevokedError`, drops the owner's paintable
-  facts, and the app boundary schedules one full text repaint. Ordinary text and
+  only when the owner's exact registry reports its footprint; an unregistered
+  complete DCS is a refusal with zero managed bytes, never ordinary text. After
+  registry acceptance a forced live admission probe runs BEFORE the first byte.
+  A refused command writes zero managed bytes, throws
+  `TmuxGraphicsRevokedError`, drops the owner's paintable facts, and the app
+  boundary schedules one full text repaint. Ordinary text and
   other ANSI sequences pass through in order; ordinary IO errors propagate
   unchanged. No unwrapped or partially wrapped command ever escapes, and no
   `DCS tmux;` envelope is added.
