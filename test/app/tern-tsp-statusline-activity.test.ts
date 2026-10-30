@@ -108,6 +108,12 @@ interface Harness {
    * projection entry (the same path `publishAttention`/`commitSummary` take).
    */
   commitActivityOnly(facts: { questionAttention?: number }): void
+  /**
+   * The interaction owner's post-admission activity publish (the production
+   * `presentedModalFacts()` → display-commit path), re-reading the REAL
+   * presenter's active seat.
+   */
+  publishPresentedModal(): void
   dispose(): Promise<void>
 }
 
@@ -264,6 +270,24 @@ async function mountActivityHarness(): Promise<Harness> {
         diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         isCleanedUp: () => false,
       })
+    },
+    publishPresentedModal() {
+      // The REAL presenter read (the production presentedModalFacts source).
+      const presented = bound.interaction.presentedModalKind?.()
+      const working = surface.status.snapshot().activity.phase === 'working'
+      const activity = deriveActivityStatus(
+        {
+          working,
+          compacting: false,
+          applyingCompaction: false,
+          approvalOpen: presented === 'approval',
+          questionOpen: presented === 'question',
+        },
+        false,
+        { queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 },
+      )
+      surface.status.update({ activity } as never)
+      bound.display.commitDisplaySubject({ activity } as never, {}, undefined)
     },
     commitActivityOnly(facts) {
       // The REAL publish shape the interaction runtime's publishAttention
@@ -1318,6 +1342,54 @@ test('PR-B EXT-F3: a parked-Question arrival publishes the dock line and the nat
       wireNodes(harness.pane).some(node => typeof node.p.text === 'string' && node.p.text.includes('Continued questions')))
     await drawn('the native attention badge', () =>
       segText(harness.pane, 'status-r1-attention')?.includes('?1') === true)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── EXT-F5: a modal admission and its waiting phase land in ONE wire frame ──
+
+test('PR-B EXT-F5: an approval admission paints the modal and waiting-approval in ONE frame', async () => {
+  const harness = await mountActivityHarness()
+  try {
+    await drawn('the initial dock frame', () => harness.pane.frames().length > 0)
+    // A live run row exists first (the witness needs prior dock content, the
+    // same rule EXT-F3 established).
+    harness.surface.display.commitStatusFacts({ working: true, busy: true })
+    await drawn('the run seg on the wire', () => segText(harness.pane, 'status-r1-run') !== undefined)
+
+    // The REAL production sequence: the presenter call (the TSP seat takes the
+    // approval), then the runtime's post-admission activity publish through
+    // the display commit. Both fact families must reach the wire in ONE frame.
+    const presenter = harness.renderer.interaction
+    const framesBefore = harness.pane.frames().length
+    const lifetime = new AbortController()
+    const prompt = presenter.showApprovalPrompt({
+      toolName: 'bash', reason: 'probe', signal: lifetime.signal,
+    }, true)
+    prompt.catch(() => {})
+    // The interaction owner's post-admission publish (the production path the
+    // runtime drives through publishActivity → commitStatus).
+    harness.publishPresentedModal()
+    await new Promise(resolve => setTimeout(resolve, 30))
+    // The CONTENT frames (ops beyond the SDK's focus protocol): the modal and
+    // its waiting phase must share exactly ONE content frame. A bare
+    // `["focus",…]` op after it is the SDK's caret protocol, not a split
+    // presentation (measured: the admission frame carries the `w-approval` seg
+    // AND the modal overlay together; the focus op follows separately).
+    const newFrames = harness.pane.frames().slice(framesBefore)
+    const contentFrames = newFrames.filter(frame =>
+      !(Array.isArray(frame.ops) && frame.ops.length === 1 && String(frame.ops[0]?.[0]) === 'focus'))
+    assert.equal(contentFrames.length, 1,
+      `the modal admission and its waiting phase published exactly ONE content frame (got ${contentFrames.length} of ${newFrames.length} total)`)
+    const frame = JSON.stringify(contentFrames[0])
+    assert.ok(frame.includes('w-approval'), 'the one content frame carries the native waiting-approval phase')
+    assert.ok(frame.includes('modal'), 'the one content frame carries the modal overlay')
+
+    lifetime.abort()
+    await prompt.catch(() => {})
+    harness.publishPresentedModal()
+    await new Promise(resolve => setTimeout(resolve, 30))
   } finally {
     await harness.dispose()
   }

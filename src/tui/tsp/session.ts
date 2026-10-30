@@ -541,8 +541,42 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * `supportsModals` capability only flips once `bindInput` has installed the
    * application callbacks the seat routes Alt+Q through (never before).
    */
+  /**
+   * TSP-7 PR-B (external review F5): the seat-change repaint coalesces into
+   * the same tick's display commit. The surface publishes the waiting-phase
+   * activity right after the presenter call returns (`publishActivity` → the
+   * display commit), so a synchronous render here would paint the new modal
+   * beside the OLD native phase — the same split F2/F3 closed for the status
+   * facts and the attention line. The deferral is OUTSIDE the seat: the seat's
+   * own fail-fast presentation contract (a throwing render retires the slot
+   * synchronously) is untouched — a THROWING render still propagates
+   * synchronously to the seat's fatal path; only the successful repaint waits
+   * for the same-tick commit (or its own microtask when none follows).
+   */
+  let seatPresentationFlushScheduled = false
+  let seatFailure: ((error: unknown) => void) | undefined
+  const seatRender = (): void => {
+    if (seatPresentationFlushScheduled) return
+    seatPresentationFlushScheduled = true
+    queueMicrotask(() => {
+      if (!seatPresentationFlushScheduled) { return }
+      seatPresentationFlushScheduled = false
+      if (disposed) return
+      try {
+        render()
+      } catch (error) {
+        // The deferred frame failed: route it back through the seat's own
+        // presentation-failure path (retire the slot, settle its promise,
+        // reach the fatal sink) — the same contract a synchronous throw kept.
+        seatFailure?.(error)
+      }
+    })
+  }
+  /** The display commit absorbs the pending seat-change repaint (F3/F5). */
+  const absorbSeatFlush = (): void => { seatPresentationFlushScheduled = false }
   const seat: TspInteractionSeat = createTspInteractionSeat({
-    render: () => render(),
+    render: seatRender,
+    reportPresentationFailure: error => { seatFailure = undefined; seat.failPresentationForRenderer(error) },
     // A frame/focus failure while settling a prompt must reach the runner's
     // fatal lifecycle (the tty owner is broken), never become a silent modal
     // cancellation; a repeated failure keeps the FIRST fatal (exitRequested).
@@ -2092,6 +2126,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // one frame, every fact family of the batch).
       statusFactsFlushScheduled = false
       seat.absorbAttentionFlush()
+      absorbSeatFlush()
       render()
     },
     commitStatusFacts(facts) {

@@ -107,6 +107,14 @@ export interface TspInteractionSeatOptions {
    * seat, and it is idempotent (a promoted slot may run it again).
    */
   readonly beforeModalSeat?: () => void
+  /**
+   * TSP-7 PR-B (F5): when the owning renderer DEFERS the seat-change repaint
+   * (so the modal and the waiting-phase activity land in one display commit),
+   * a later frame failure is routed back through here so the seat keeps its
+   * presentation-failure contract (retire the slot, settle its promise, fatal
+   * sink) — the same outcome a synchronous throw produced.
+   */
+  readonly reportPresentationFailure?: (error: unknown) => void
 }
 
 /** The seat's narrow surface for its owning renderer. */
@@ -135,6 +143,11 @@ export interface TspInteractionSeat {
   desiredFocusId(): string | null
   /** The parked-Question count projected into the dock (`0` hides the line). */
   attentionCount(): number
+  /**
+   * TSP-7 PR-B (F5): the renderer's deferred-frame failure entry — the same
+   * retire/settle/fatal path a synchronous presentation failure took.
+   */
+  failPresentationForRenderer(error: unknown): void
   /**
    * TSP-7 PR-B (F4): the ACTIVE slot's kind — the ONE authority for the
    * waiting phases. A FIFO-queued request behind another modal is alive but
@@ -1344,6 +1357,11 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
      * dock count and the native badge in ONE frame).
      */
     absorbAttentionFlush(): void { attentionFlushScheduled = false },
+    failPresentationForRenderer(error: unknown): void {
+      const slot = active
+      if (slot !== undefined) failPresentation(slot, error)
+      else options.onFatal(error)
+    },
     closeTransientList,
     withdrawPresentations,
     withdrawPresentation,
