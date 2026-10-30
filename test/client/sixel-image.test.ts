@@ -422,6 +422,48 @@ test('a bottom-clipped block is a NEW encode of its own source, never a sliced D
   assert.equal(harness.graphics.screen.crop(full, 0, 1.5), undefined)
 })
 
+test('the painted crop offset comes from the retained raster, not the current variant', async (t) => {
+  const harness = await readyHarness(t)
+  t.after(() => harness.graphics.dispose())
+  const image = harness.graphics.image(
+    { pngBase64: await pngFromRgba(fill(40, 80, () => [0, 0, 0, 255]), 40, 80), widthPx: 40, heightPx: 80 },
+    { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' },
+  )
+
+  // Establish the full raster, then two different top-crop windows that both
+  // encode to the SAME DCS because the source is solid. The owner's current
+  // variant will end on top=2 while the retained raster from the old frame was
+  // top=1; the committed offset must follow the raster.
+  const fullRepaint = harness.notifications()
+  assert.equal(paint(harness, image, 40)[0], 'fallback')
+  await waitUntil(() => harness.notifications() > fullRepaint, 'the full encode')
+  const full = paint(harness, image, 40)[0]!
+  assert.ok(full.startsWith('\x1bP'))
+  const token = image.render(40)[0]!
+
+  const cropVariant = async (top: number): Promise<string> => {
+    const before = harness.notifications()
+    let dcs = harness.graphics.screen.crop(full, top, 1)
+    if (dcs === undefined) {
+      await waitUntil(() => harness.notifications() > before, `the top-crop variant ${top}`)
+      dcs = harness.graphics.screen.crop(full, top, 1)
+    }
+    assert.notEqual(dcs, undefined, `the top-crop variant ${top} is ready`)
+    return dcs!
+  }
+  const first = await cropVariant(1)
+  const second = await cropVariant(2)
+  assert.equal(second, first, 'different offsets of a solid source encode to the same DCS')
+
+  // The Screen retained the FIRST raster (top=1) while the owner's current
+  // variant has advanced to top=2. framePainted must use the raster's offset.
+  const port = harness.graphics.screen
+  port.reconcileVisible(harness.screen, [{ line: token, cropTopRows: 1, visibleRows: 1, physicalRow: 0 }])
+  port.framePainted(harness.screen, [{ line: token, dcs: first, cropTopRows: 1, visibleRows: 1, emitted: true }])
+  assert.equal(image.paintedBodyAt?.(40)?.cropTopRows, 1,
+    'the committed offset is the retained raster offset, not the current variant offset')
+})
+
 test('a superseded crop variant never paints', async (t) => {
   const harness = await readyHarness(t)
   t.after(() => harness.graphics.dispose())

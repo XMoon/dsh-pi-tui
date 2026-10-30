@@ -681,15 +681,18 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
             : crop?.record.dcs === raster.dcs
               ? crop.record
               : undefined
+      // The retained raster is the Screen's committed fact: once the exact DCS
+      // is verified, the offset comes from THIS frame's raster, never from the
+      // owner's current variant (a different window can encode to the same
+      // DCS, and the variant may already have advanced past the painted frame).
+      const committedCropTopRows = raster?.cropTopRows ?? 0
       occurrence.painted = record === undefined
         ? undefined
         : {
             width: occurrence.width,
             columns: record.columns,
             rows: record.rows,
-            ...(record === crop?.record && crop.cropTopRows !== undefined
-              ? { cropTopRows: crop.cropTopRows }
-              : {}),
+            ...(committedCropTopRows > 0 ? { cropTopRows: committedCropTopRows } : {}),
           }
     }
     // Bottom-up order is the caller's contract: the newest content wins a

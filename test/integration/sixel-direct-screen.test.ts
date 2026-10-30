@@ -1620,6 +1620,43 @@ function transcriptAboveFiller(ref: TranscriptImageRef): TranscriptFolder {
   return folder
 }
 
+/** Observe the real owner's granted-but-uncommitted crop frame and send a real
+ *  pointer press while that exact frame is the last painted snapshot. This is
+ *  not a hit-map injection: the wrapper only reads the production owner state
+ *  after its own framePainted and clicks through the normal terminal input. */
+function observePendingCropClick(
+  terminal: SixelAppTerminal,
+  app: TuiApp,
+  topRow: number,
+): { clicked(): boolean; restore(): void } {
+  const graphics = (app as unknown as {
+    graphics?: {
+      occurrences: Set<{ grant?: unknown; pendingCrop?: unknown; painted?: unknown }>
+      screen: { framePainted(screen: object, retained: readonly unknown[]): void }
+    }
+  }).graphics
+  if (graphics === undefined) return { clicked: () => false, restore: () => {} }
+  const port = graphics.screen
+  const original = port.framePainted
+  let clicked = false
+  port.framePainted = function (screen: object, retained: readonly unknown[]): void {
+    original.call(this, screen, retained)
+    if (clicked) return
+    const pending = [...graphics.occurrences].some(occurrence =>
+      occurrence.grant !== undefined && occurrence.pendingCrop !== undefined && occurrence.painted === undefined)
+    if (!pending) return
+    clicked = true
+    queueMicrotask(() => {
+      terminal.sendInput(`\x1b[<0;1;${topRow}M`)
+      terminal.sendInput(`\x1b[<0;1;${topRow}m`)
+    })
+  }
+  return {
+    clicked: () => clicked,
+    restore: () => { port.framePainted = original },
+  }
+}
+
 test('E2-10a: a real top-cropped transcript image maps the visible rows and opens the direct Viewer', async (t) => {
   const png = await bandedBandsPng()
   const ref: TranscriptImageRef = {
@@ -1663,6 +1700,8 @@ test('E2-10a: a real top-cropped transcript image maps the visible rows and open
   }
 
   const initial = readImage()
+  const pendingObserver = observePendingCropClick(terminal, app, projection.fullscreenPaintSnapshot.headerHeight + 1)
+  t.after(() => pendingObserver.restore())
   assert.equal(initial.attachment.bodyEnd, initial.attachment.bodyStart,
     'the image body is not committed yet at follow-end')
   const tokenRow = projection.fullscreenPaintSnapshot.welcomeHeight + initial.entryTop + initial.attachment.bodyStart
@@ -1699,6 +1738,10 @@ test('E2-10a: a real top-cropped transcript image maps the visible rows and open
   // carry the crop DCS on the scroll viewport's first physical row.
   await new Promise(resolve => setTimeout(resolve, 1500)) // reason: ScrollView scrollbarHideDelayMs=1000 contract
   await terminal.waitForRender()
+  await until(() => pendingObserver.clicked(), 'the granted crop encode to be pending', 30_000)
+  await tick(30)
+  assert.equal(workspaceOpen(), false, 'a granted but uncommitted crop click opens no Viewer')
+  await settlePointerWindow()
 
   const painted = readImage()
   const paintedRows = painted.attachment.bodyEnd - painted.attachment.bodyStart
@@ -1740,6 +1783,12 @@ test('E2-10a: a real top-cropped transcript image maps the visible rows and open
   assert.equal(bodyHits.at(-1)!.row, painted.attachment.bodyEnd - 1, 'the last body hit is the last visible row')
   assert.equal((snapshot.imageHits ?? []).filter(hit => hit.kind === 'body' && hit.row < painted.attachment.bodyStart).length, 0,
     'no hidden top row is clickable')
+
+  // The row after the last visible body row is filler, not a pixel hit.
+  const boundaryRow = painted.screenRow + paintedRows + 1
+  terminal.sendInput(`\x1b[<0;1;${boundaryRow}M`)
+  terminal.sendInput(`\x1b[<0;1;${boundaryRow}m`)
+  assert.equal(workspaceOpen(), false, 'the row after the visible image body opens no Viewer')
 
   // A real painted pixel cell opens the direct Viewer.
   const clickRow = painted.screenRow + 1
@@ -1875,6 +1924,8 @@ test('E2-10b: a real top-cropped Assistant SVG maps the visible pixel rows and k
   }
 
   const initial = readVisual()
+  const pendingObserver = observePendingCropClick(terminal, app, projection.fullscreenPaintSnapshot.headerHeight + 1)
+  t.after(() => pendingObserver.restore())
   assert.equal(initial.visual.thumbnailBody, undefined, 'the SVG thumbnail has no committed pixel body at follow-end')
   const tokenRow = projection.fullscreenPaintSnapshot.welcomeHeight + initial.entryTop + initial.visual.top + bodyRows + 1
   const targetScrollTop = tokenRow + 5
@@ -1896,6 +1947,10 @@ test('E2-10b: a real top-cropped Assistant SVG maps the visible pixel rows and k
 
   await new Promise(resolve => setTimeout(resolve, 1500)) // reason: ScrollView scrollbarHideDelayMs=1000 contract
   app.requestRender()
+  await until(() => pendingObserver.clicked(), 'the granted SVG crop encode to be pending', 30_000)
+  await tick(30)
+  assert.equal(workspaceOpen(), false, 'a granted but uncommitted SVG crop click opens no Viewer')
+  await settlePointerWindow()
   // The SVG raster loader can settle once after the first paint and replace its
   // SixelImage instance. Wait for the NEW instance's committed crop body, not
   // merely for an earlier raster that the replacement then revokes.
@@ -2059,6 +2114,9 @@ test('E2-10c: a bottom-cropped image hit survives resize, a capturing overlay an
   assert.ok(bottomR < 40 && bottomG > 200, 'the bottom-cropped DCS still starts at band 0')
 
   const clickBottomRow = bottom.screenRow + bottom.rows
+  terminal.sendInput(`\x1b[<0;1;${clickBottomRow + 1}M`)
+  terminal.sendInput(`\x1b[<0;1;${clickBottomRow + 1}m`)
+  assert.equal(workspaceOpen(), false, 'the row after the bottom-cropped body opens no Viewer')
   const beforeBottomViewer = paintedRasters(terminal).length
   terminal.sendInput(`\x1b[<0;1;${clickBottomRow}M`)
   terminal.sendInput(`\x1b[<0;1;${clickBottomRow}m`)
