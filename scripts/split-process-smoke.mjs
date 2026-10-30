@@ -980,6 +980,10 @@ async function main() {
         180_000,
       )
       const during = await waitForHostWatchCount(1, `${label} live watch`)
+      trace('host-rpc-watch-open', {
+        requestId,
+        hostTerminalProgressWatches: during.terminalProgressWatches,
+      })
       writeFileSync(hostFoundationBarrier, 'release\n', { mode: 0o600 })
       const proof = await client.waitFor(
         record => record.m4b2hf === 'host-rpc-proof' && record.requestId === requestId,
