@@ -695,18 +695,54 @@ describe("trusted SIXEL screen port (X074)", () => {
 		assert.ok(!frame.lines.join("").includes(dcs), "the DCS is dropped, never sliced into a cell row");
 	});
 
-	it("yields the anchor row to a visible scrollbar instead of cutting the DCS", () => {
+	it("keeps a non-overlapping SIXEL anchor when an auto scrollbar is visible", () => {
 		const port = new RecordingSixelPort();
 		const dcs = port.register(raster("E"), { columns: 4, rows: 3 });
 		const scroll = new ScrollView(
 			{ render: () => ["a", dcs, "", "", "tail"], invalidate: () => {} },
-			{ primary: true, follow: "none", scrollbar: "always" },
+			{ primary: true, follow: "none", scrollbar: "auto" },
 		);
 		scroll.updateLayout(5, 4, () => {});
 		scroll.scrollTo(0);
-		const frame = renderLayoutFrame(scroll, 20, 4, () => {}, port);
+		scroll.setScrollbarActive(true);
+		assert.strictEqual(scroll.isScrollbarVisible, true, "the auto scrollbar is really visible");
 
-		assert.ok(!frame.lines.join("").includes(dcs), "the anchor yields to the reserved scrollbar column");
+		const frame = renderLayoutFrame(scroll, 20, 4, () => {}, port);
+		assert.strictEqual(frame.lines[1], dcs, "the trusted DCS remains intact on its anchor row");
+		assert.ok(frame.lines[1]!.startsWith("\x1bP") && frame.lines[1]!.endsWith("\x1b\\"), "the DCS is never sliced");
+		assert.ok(
+			frame.lines.some((line, row) => row !== 1 && stripTerminalSequences(line).trimEnd().endsWith("│")),
+			"other track rows still paint the scrollbar",
+		);
+	});
+
+	it("still withholds an overlapping SIXEL anchor from the scrollbar column", () => {
+		const port = new RecordingSixelPort();
+		const dcs = port.register(raster("F"), { columns: 20, rows: 3 });
+		const scroll = new ScrollView(
+			{ render: () => ["a", dcs, "", "", "tail"], invalidate: () => {} },
+			{ primary: true, follow: "none", scrollbar: "auto" },
+		);
+		scroll.updateLayout(5, 4, () => {});
+		scroll.scrollTo(0);
+		scroll.setScrollbarActive(true);
+
+		const frame = renderLayoutFrame(scroll, 20, 4, () => {}, port);
+		assert.ok(!frame.lines.join("").includes(dcs), "the overlapping DCS is withheld");
+		assert.ok(!frame.lines.join("").includes("\x1bP"), "no truncated SIXEL fragment is emitted");
 		assert.ok(frame.lines.some((line) => stripTerminalSequences(line).trimEnd().endsWith("│")), "the scrollbar is still painted");
+
+		// A very narrow auto track is a real horizontal overlap too: fail closed.
+		const narrowPort = new RecordingSixelPort();
+		const narrowDcs = narrowPort.register(raster("G"), { columns: 2, rows: 1 });
+		const narrow = new ScrollView(
+			{ render: () => [narrowDcs, "x", "y", "z"], invalidate: () => {} },
+			{ primary: true, follow: "none", scrollbar: "auto" },
+		);
+		narrow.updateLayout(4, 2, () => {});
+		narrow.scrollTo(0);
+		narrow.setScrollbarActive(true);
+		const narrowFrame = renderLayoutFrame(narrow, 2, 2, () => {}, narrowPort);
+		assert.ok(!narrowFrame.lines.join("").includes(narrowDcs), "a narrow raster reaching the track column is withheld");
 	});
 });

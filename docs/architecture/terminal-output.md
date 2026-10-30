@@ -447,9 +447,12 @@ Core. What the Client may rely on is one observed terminal fact and one gate:
   protected by DECSC/DECRC because a DCS's post-command cursor is
   terminal-defined. The alternate screen (X074) re-encodes the visible window
   for a bottom-clipped or top-scrolled block, erases the old footprint, writes
-  text/border/overlay/scrollbar first and one command per visible block last, and
-  yields a block whose anchor row a visible scrollbar or an overlay claims. The
-  image's identity row above the body stays text in every case.
+  text/border/overlay/scrollbar first and one command per visible block last. A
+  trusted anchor whose registered raster columns do not reach the scrollbar's
+  single track column keeps its intact command and only that anchor row loses the
+  bar glyph; a real horizontal overlap still yields the column, and an overlay
+  that claims the block still withholds it. The image's identity row above the
+  body stays text in every case.
 - **Untrusted text never becomes SIXEL.** The sanitizers accept no DCS; only a
   codec operating on authorized image bytes may produce a sequence, and only the
   owner's registry can make the Screen treat it as an image.

@@ -4805,6 +4805,72 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 			}
 		});
 
+		/** The LAST synchronized frame only: an earlier write in the same action
+		 *  must not satisfy a later frame that dropped the raster. */
+		function lastFrame(terminal: RecordingTerminal): string {
+			const all = wire(terminal);
+			const start = all.lastIndexOf("\x1b[?2026h");
+			return start === -1 ? all : all.slice(start);
+		}
+
+		it("auto scrollbar hover does not retire a trusted SIXEL block", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const dcs = port.register(raster("H"), { columns: 4, rows: 3 });
+				const scroll = new ScrollView(
+					{
+						render: () => ["header", dcs, "", "", "tail-1", "tail-2", "tail-3", "tail-4", "tail-5", "tail-6"],
+						invalidate: () => {},
+					},
+					{ primary: true, follow: "none", scrollbar: "auto", scrollbarHideDelayMs: 20 },
+				);
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				tui.setLayoutRoot(scroll);
+				tui.start();
+				await terminal.waitForRender();
+				assert.ok(wire(terminal).includes(dcs), "the initial frame paints the trusted raster");
+				const fakeDcs = "\x1bP0;1;q\"1;1;40;6#0;2;100;0;0FAKE\x1b\\";
+				assert.strictEqual(port.footprint(fakeDcs), undefined, "an unregistered lookalike is never a trusted footprint");
+
+				// A real SGR hover on the rightmost track column really shows the
+				// transient auto scrollbar; the raster must not be retired.
+				terminal.events.length = 0;
+				terminal.sendInput("\x1b[<35;40;3M");
+				await terminal.waitForRender();
+				assert.strictEqual(scroll.isScrollbarActive, true, "the auto scrollbar is hovered");
+				assert.strictEqual(scroll.isScrollbarVisible, true, "the transient auto scrollbar is visible");
+				assert.ok(lastFrame(terminal).includes(dcs), "hovering the scrollbar keeps the full trusted DCS in the latest frame");
+
+				// A real press + drag + release on the bar may scroll the viewport, but
+				// must not corrupt or fabricate the raster.
+				terminal.events.length = 0;
+				terminal.sendInput("\x1b[<0;40;2M");
+				terminal.sendInput("\x1b[<32;40;4M");
+				await terminal.waitForRender();
+				terminal.sendInput("\x1b[<0;40;4m");
+				await terminal.waitForRender();
+				assert.ok(scroll.scrollTop >= 0, "the drag keeps a valid scroll position");
+				assert.ok(lastFrame(terminal).includes(dcs), "the still-visible block is repainted after the drag");
+
+				// Leaving the track hides the transient bar; the image survives.
+				terminal.events.length = 0;
+				terminal.sendInput("\x1b[<35;10;3M");
+				// reason: the ScrollView auto-hide contract under test is 20 ms.
+				await new Promise((resolve) => setTimeout(resolve, 40));
+				await terminal.waitForRender();
+				assert.strictEqual(scroll.isScrollbarVisible, false, "the transient bar auto-hid");
+				assert.ok(lastFrame(terminal).includes(dcs), "the raster survives the bar's auto hide");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
 		it("never replays a SIXEL DCS into the main screen's restored document", async () => {
 			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
 			try {
