@@ -15,7 +15,7 @@
  * @module app/remote-process/host-foundation-probe
  */
 
-import { realpathSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -23,6 +23,7 @@ import type { RemoteStreamHandle, TypertRemoteContribution } from '@deepseek-ai/
 import { PI_TUI_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import type { PiTuiTerminalProgressFrame } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
 import { mergeCause } from '../remote/dispose-cause.ts'
+import { writeEntryRecord } from './entry-control.ts'
 import type { VerifiedLocalHost } from './local-discovery.ts'
 
 /** The no-live-Agent Session id every negative business probe names. */
@@ -54,6 +55,8 @@ export interface HostFoundationProbeOptions {
   readonly dshAnchor: string
   /** The authenticated Host candidate the Client transport already verified. */
   readonly host: VerifiedLocalHost
+  /** Qualification correlation id used by the split-process harness. */
+  readonly requestId?: string
 }
 
 /** The structured proof written as one `m4b2hf: 'host-rpc-proof'` record. */
@@ -94,6 +97,21 @@ function remoteOf(context: Context): HostFoundationRemote {
     throw new Error('host foundation probe: the Client Context has no official Remote service')
   }
   return remote
+}
+
+/**
+ * Wait at the qualification hold point so the split-process harness can read
+ * the live Host subscriber count while the watch is still open. Production
+ * never sets this environment variable.
+ */
+async function waitForQualificationBarrier(path: string): Promise<void> {
+  const deadline = Date.now() + 30_000
+  while (!existsSync(path)) {
+    if (Date.now() > deadline) {
+      throw new Error(`host foundation probe: the qualification barrier was not released: ${path}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
 }
 
 /** Validate the opening terminal-progress snapshot required by T24. */
@@ -161,6 +179,16 @@ export async function runHostFoundationProbe(
       throw new Error('host foundation probe: the terminal-progress watch ended before its snapshot')
     }
     assertOpeningSnapshot(opening.value)
+    if (options.requestId !== undefined) {
+      writeEntryRecord({
+        m4b2hf: 'host-rpc-watch-open',
+        processRole: 'client',
+        pid: process.pid,
+        requestId: options.requestId,
+      })
+    }
+    const barrier = process.env.SPLIT_PROCESS_HOST_FOUNDATION_BARRIER
+    if (barrier !== undefined && barrier !== '') await waitForQualificationBarrier(barrier)
     watch.dispose()
     const ended = await watchIterator.next()
     if (ended.done !== true) {

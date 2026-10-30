@@ -310,6 +310,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         const proof = await runHostFoundationProbe(context, {
           dshAnchor: options.dshAnchor,
           host,
+          ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
         })
         writeEntryRecord({
           ...proof,
