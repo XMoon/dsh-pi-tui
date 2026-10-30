@@ -373,6 +373,7 @@ export function apply(ctx) {
   // delegates with `next()`, so the real C2 PiTui answerer remains the only
   // consumer. Durable `tool/call` / `tool/result` / `approval/asked` /
   // `approval/decided` events remain the final authority.
+  let lastQuestionCallId
   const questionProjection = () => {
     try {
       const agent = ctx.agents.roots()[0]
@@ -386,6 +387,7 @@ export function apply(ctx) {
   }
   ctx.on('user-questions/request', async (request, next) => {
     const callId = request?.wait?.callId
+    if (typeof callId === 'string') lastQuestionCallId = callId
     const sessionId = request?.agent?.id === undefined ? undefined : String(request.agent.id)
     record('question-request', {
       callId: callId === undefined ? undefined : String(callId),
@@ -497,12 +499,16 @@ export function apply(ctx) {
           return
         }
         const call = userQuestions.continued(agent)[0]
-        if (call === undefined) {
-          record('answer-probe', { phase, error: 'not-continued', value: false })
+        const callId = call?.callId ?? lastQuestionCallId
+        if (callId === undefined) {
+          record('answer-probe', { phase, error: 'no-call-id' })
           return
         }
-        const value = userQuestions.answer(agent, call.callId, { answers: [{ id: 'c1-question', selected: ['Proceed'] }] })
-        record('answer-probe', { phase, callId: call.callId, value })
+        // Call the official Host answer service even when the Projection no
+        // longer lists the call: the settled-call classification must come
+        // from the service return, never from local projection absence.
+        const value = userQuestions.answer(agent, callId, { answers: [{ id: 'c1-question', selected: ['Proceed'] }] })
+        record('answer-probe', { phase, callId, value })
       } catch (error) {
         record('answer-probe', {
           phase,
