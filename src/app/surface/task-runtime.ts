@@ -29,7 +29,7 @@ import { isTaskItemActive, projectTaskItems, rowGroup, taskRowLabel, taskTreePre
 import { fullQuestionRows, questionIdentityOf, quickQuestionRows } from './task-attention.ts'
 import type { QuestionAttentionRow } from './question-controller.ts'
 import type { JobInspectorHandle, TuiApp, WorkflowAction } from '../../tui-app.ts'
-import type { SurfaceDisplaySeam } from './display-seam.ts'
+import type { SurfaceDisplaySeam, DisplayActivityFacts } from './display-seam.ts'
 import type { TaskBrowserPresentationHandle, TaskCenterPresentationPort } from './task-presentation-port.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { SessionSubject } from '../session/subject.ts'
@@ -193,6 +193,15 @@ export interface TaskRuntimeOptions {
   readonly isCleanedUp: () => boolean
   /** The injected Question-attention read/subscription (never the controller). */
   readonly attention: TaskQuestionAttention
+  /**
+   * TSP-7 PR-B: the ONE read-only projection of the GLOBAL summary onto the
+   * surface's activity status. The surface (never this owner) is the
+   * `StatusStore` writer; this callback carries the SAME already-settled
+   * projection `commitSummary` receives, and it runs BEFORE the
+   * `supportsTaskCenter` gate — a renderer that presents no Task Center must
+   * still not discard a Status fact its owner already proved.
+   */
+  readonly publishActivity: (facts: DisplayActivityFacts) => void
 }
 
 /** The Task Center / Job viewer owner `createSurfaceRuntime()` consumes. */
@@ -648,6 +657,18 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // scope filters the rows, so it stays the catalog scale for a scoped
     // browser too — and it excludes the Job rows that `rows()` carries.
     taskCatalogDescendants = summary.totalAgents
+    // TSP-7 PR-B: project the SAME GLOBAL summary onto the surface's activity
+    // status BEFORE the Task Center capability gate. The summary is already
+    // fenced by this runtime's own session/catalog generation, so a renderer
+    // that presents no Task Center still must not discard a fact its owner
+    // proved. This is a READ-ONLY projection: no catalog walk, no ack.
+    options.publishActivity({
+      taskCount: summary.runningJobs,
+      taskTotalCount: summary.totalJobs,
+      childAgentCount: summary.runningAgents,
+      childAgentTotalCount: summary.totalAgents,
+      failedTaskCount: summary.failedAttention,
+    })
     if (options.isCleanedUp()) return
     if (!options.display().supportsTaskCenter) return
     options.presentation().setTaskSummary(summary)
@@ -1379,6 +1400,24 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
           // with a stale status (the subagents path commits through
           // TaskBrowserRuntime) and the below-editor window goes stale.
           if (taskRuntime === undefined) {
+            // TSP-7 PR-B: a jobs-only session has no catalog coordinator, so the
+            // roster read is the ONLY Jobs authority — project it from THIS
+            // successful read (the same `isActiveJobStatus` semantic the browser
+            // rows use) and never from a failed read (a failure keeps the
+            // retained last-good value instead of publishing zero).
+            //
+            // The failed-ATTENTION half is deliberately NOT filled here: `!N`
+            // means "unacknowledged", and the jobs-only path has no owner with
+            // an ack lifetime equivalent to `TaskBrowserRuntime`'s. Publishing
+            // `failedTaskCount = failed rows` would paint an unacknowledged
+            // count nobody can clear, so only the proven running/total facts go
+            // out (§8.5).
+            options.publishActivity({
+              taskCount: snapshots.filter(job => isActiveJobStatus(job.status)).length,
+              taskTotalCount: snapshots.length,
+              childAgentCount: 0,
+              childAgentTotalCount: 0,
+            })
             // No coordinator means no dataset scope either: the jobs-only
             // projection IS the global one.
             taskBrowserRows = buildTaskRows(snapshots, [])
@@ -1497,6 +1536,17 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
       return taskRuntime?.has(childId) === true
     },
     resetTasks() {
+      // TSP-7 PR-B: the old session's summary leaves the Status projection with
+      // the rest of the Task Center state — the new session must never inherit
+      // its counts (a failed/absent listing is UNKNOWN, never the old value and
+      // never a fabricated zero).
+      options.publishActivity({
+        taskCount: 0,
+        taskTotalCount: 0,
+        childAgentCount: 0,
+        childAgentTotalCount: 0,
+        failedTaskCount: 0,
+      })
       // A session switch drops the old session's Question attention with the
       // rest of the Task Center state: its parked count must not arm the new
       // session's footer trigger.

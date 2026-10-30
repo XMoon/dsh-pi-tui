@@ -627,6 +627,7 @@ function mountSurface(
     diag: () => SILENT_DIAG,
     isCleanedUp: () => false,
     onAttentionChanged: () => {},
+    publishActivity: () => {},
   })
   agentInteraction.attach(interactionPort, { lookupCallArgs: () => undefined, dangerCommand: () => false })
 

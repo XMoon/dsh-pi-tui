@@ -226,6 +226,7 @@ async function startQuick(options: {
         return reopenResult
       },
     },
+    publishActivity: () => {},
   })
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
   runtimeRef = tasks
@@ -802,6 +803,7 @@ test('a parked Question enters the projection; a refused reopen reports no surfa
         return allowReopen
       },
     },
+    publishActivity: () => {},
   })
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
   runtimeRef = tasks

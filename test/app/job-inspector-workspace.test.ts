@@ -188,6 +188,7 @@ function attachTasks(app: TuiApp, options: { jobIds?: readonly string[] } = {}):
     presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
   // Capture the real production browser handle and the owner-retire signal at

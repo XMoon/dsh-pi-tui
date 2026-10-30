@@ -127,8 +127,10 @@ import { SvgRasterLoader } from '../../client/media/svg/raster-loader.ts'
 import { isolatedSvgRasterSupported, rasterizeSvg } from '../../client/media/svg/rasterize.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { StatusStore } from '../../domain/status/store.ts'
-import type { StatusPatch, StatusSnapshotReader } from '../../domain/status/types.ts'
+import type { ActivityStatus, StatusPatch, StatusSnapshot, StatusSnapshotReader } from '../../domain/status/types.ts'
 import { initialStatusSnapshot } from '../../domain/status/snapshot.ts'
+import { deriveActivityStatus, type ActivityFacts } from '../../domain/status/derive-activity.ts'
+import { plainSectionEqual } from '../../domain/status/equal.ts'
 import { assistantPresentationRevision, assistantStepOf, type TranscriptFolder } from '../../domain/transcript/folder.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
@@ -176,7 +178,7 @@ import {
   type RoutedSessionEvent,
   type SurfaceEventRoutingSource,
 } from './event-routing.ts'
-import type { SurfaceDisplaySeam } from './display-seam.ts'
+import type { DisplayStatusFacts, SurfaceDisplaySeam, DisplayActivityFacts } from './display-seam.ts'
 import { pituiDisplaySeam } from './display-seam-pitui.ts'
 import { pituiTaskCenterPresentation } from './task-presentation-pitui.ts'
 import type { TaskCenterPresentationPort } from './task-presentation-port.ts'
@@ -946,6 +948,45 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   dispose(): void
 }
 
+/**
+ * TSP-7 PR-B: wrap the TSP renderer's display seam with a NARROW surface-side
+ * proxy over `commitStatusFacts`.
+ *
+ * The proxy registers ONLY the machine activity facts the surface's ONE
+ * activity projection consumes (`busy`, `working`, `compactionPhase`, and the
+ * todo count the display subject owns) and then calls the renderer's own commit
+ * verbatim — so the renderer's legacy banner keeps working exactly as PR-A left
+ * it, and the surface never becomes a second presenter.
+ *
+ * Every other member is forwarded by delegation and the capability getters stay
+ * DYNAMIC: a spread such as `{ ...seam }` would freeze `supportsTaskCenter` at
+ * mount time and break the negotiated capability contract.
+ */
+function tspActivityFactsProxy(
+  seam: SurfaceDisplaySeam,
+  commit: (facts: DisplayActivityFacts) => void,
+): SurfaceDisplaySeam {
+  // PROTOTYPE delegation, never a spread: the seam's capability flags are
+  // GETTERS (`supportsTaskCenter` is negotiated, `supportsModals` follows the
+  // input binding), and `{ ...seam }` would evaluate them once at mount time
+  // and freeze the results.
+  return Object.assign(Object.create(seam) as SurfaceDisplaySeam, {
+    commitStatusFacts(facts: DisplayStatusFacts): void {
+      const activity: DisplayActivityFacts = {
+        ...(facts.busy === undefined ? {} : { busy: facts.busy }),
+        ...(facts.working === undefined ? {} : { working: facts.working }),
+        ...(facts.compactionPhase === undefined ? {} : { compactionPhase: facts.compactionPhase }),
+        ...(facts.todos === undefined ? {} : { todoCount: facts.todos.length }),
+      }
+      seam.commitStatusFacts(facts)
+      // The registration runs AFTER the renderer's own commit, so the renderer's
+      // legacy banner text and the surface's store projection always describe the
+      // same fact batch — and the activity publish rides the same display commit.
+      if (Object.keys(activity).length > 0) commit(activity)
+    },
+  })
+}
+
 /** Create the surface owner; the status store and journal exist immediately. */
 export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: SurfaceRuntimeOptions): SurfaceRuntime<Event> {
   const status = new StatusStore(initialStatusSnapshot(options.tuiVersion))
@@ -1061,6 +1102,149 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
 
   /**
+   * TSP-7 PR-B: the ONE atomic display-subject commit (M3-5 PR1 §9.7), named so
+   * the surface's own activity projection and the status runtime publish through
+   * the identical path.
+   *
+   * OWNERSHIP (R2-2): the PiTui branch's ONE atomic commit lives INSIDE
+   * `TuiApp.commitDisplaySubject` (store patch + activity section + legacy
+   * projection published together). Committing the patch here as well would
+   * SPLIT that transaction into two publications (an observer would see the
+   * child view beside the parent activity/presentation). So the surface only
+   * supplies the store commit for a renderer that has no such chrome projection
+   * — the TSP mount — keeping exactly ONE store update per commit on BOTH
+   * branches.
+   */
+  const commitStatus = (
+    patch: StatusPatch,
+    legacyFacts: Partial<StatusData>,
+    presentation: DisplaySubjectPresentation | undefined,
+  ): void => {
+    // TSP-7 PR-B: a commit that REPLACES the display subject must re-derive the
+    // activity section in the SAME transaction — the surface is that section's
+    // writer on this branch, so publishing a `view=child` patch beside the
+    // parent's activity would be exactly the mixed snapshot the R2-2 atomicity
+    // rule forbids (a child must never borrow the main run phase or its work
+    // counts).
+    let effective = patch
+    if (app === undefined && display !== undefined && patch.view !== undefined) {
+      const next = deriveForSubject(patch.view.subject, presentation?.todos?.length)
+      if (next !== undefined) effective = { ...patch, activity: next }
+    }
+    if (app === undefined) status.update(effective)
+    displaySeam().commitDisplaySubject(effective, legacyFacts, presentation)
+  }
+
+  /**
+   * TSP-7 PR-B: derive the activity section for the display subject a commit is
+   * about to publish, from the SAME mirror {@link publishTspActivity} reads. It
+   * is scoped to the subject of THAT commit (never to the store's previous
+   * subject), so a child keeps only the facts its own authority answers.
+   *
+   * RFL-003: the mirror's `todoCount`/`queuedCount` are MAIN-session facts (the
+   * `commitStatusFacts({todos})` producers and the pending-input join belong to
+   * the main subject). A child's todo count comes from the SAME commit's child
+   * `presentation.todos` (the display-subject authority), and a child carries no
+   * queue projection at all — never the parent's numbers.
+   */
+  type DisplaySubject = StatusSnapshot['view']['subject']
+  const deriveForSubject = (
+    subject: DisplaySubject,
+    childTodoCount: number | undefined,
+  ): ActivityStatus | undefined => {
+    // `run-state`/`tasks` are MAIN-only (the builtins refuse a child subject), so
+    // the run phase and the work counts are MAIN-only too: a child never shows
+    // the parent's working/compaction/waiting state or its job/agent totals — it
+    // keeps only the facts the child's own authority answers (the display
+    // subject's todo list and its queued input).
+    const isMain = subject.kind === 'main'
+    return deriveActivityStatus(
+      {
+        working: isMain && tspActivityFacts.working === true,
+        compacting: isMain && tspActivityFacts.compactionPhase === 'summarizing',
+        applyingCompaction: isMain && tspActivityFacts.compactionPhase === 'applying',
+        approvalOpen: isMain && tspActivityFacts.approvalOpen === true,
+        questionOpen: isMain && tspActivityFacts.questionOpen === true,
+      },
+      isMain && tspActivityFacts.busy === true,
+      {
+        queuedCount: isMain ? tspActivityFacts.queuedCount ?? 0 : 0,
+        taskCount: isMain ? tspActivityFacts.taskCount ?? 0 : 0,
+        childAgentCount: isMain ? tspActivityFacts.childAgentCount ?? 0 : 0,
+        ...isMain && tspActivityFacts.taskTotalCount !== undefined
+          ? { taskTotalCount: tspActivityFacts.taskTotalCount }
+          : {},
+        ...isMain && tspActivityFacts.childAgentTotalCount !== undefined
+          ? { childAgentTotalCount: tspActivityFacts.childAgentTotalCount }
+          : {},
+        ...isMain && tspActivityFacts.failedTaskCount !== undefined
+          ? { failedTaskCount: tspActivityFacts.failedTaskCount }
+          : {},
+        ...isMain && tspActivityFacts.questionAttention !== undefined
+          ? { questionAttentionCount: tspActivityFacts.questionAttention }
+          : {},
+        todoCount: isMain ? tspActivityFacts.todoCount ?? 0 : childTodoCount ?? 0,
+      },
+    )
+  }
+
+  /**
+   * TSP-7 PR-B: the ONE activity projection of the TSP branch — the surface's
+   * single writer of `StatusStore.activity` on that branch.
+   *
+   * It reads only the mirrors above (facts the real owners already committed),
+   * derives through the SHARED `deriveActivityStatus()` (never a second
+   * precedence), and publishes through the SAME atomic display commit every
+   * other status section uses.
+   */
+  const publishTspActivity = (): void => {
+    if (app !== undefined || display === undefined || disposed || isCleanedUp()) return
+    const current = status.snapshot()
+    // RFL-003: while a CHILD is the display subject, the mirror's main-session
+    // todo/queue facts must not touch the child's activity (a main `todo/write`
+    // mid-view is not the child's fact). The child's own todo count is already
+    // IN the committed activity section — carried there by the view-switch
+    // commit from the child presentation — so a main-only fact change derives a
+    // content-equal child section and publishes nothing.
+    const subject = current.view.subject
+    const next = deriveForSubject(
+      subject,
+      subject.kind === 'subagent' ? current.activity.todoCount : undefined,
+    )
+    if (next === undefined) return
+    if (plainSectionEqual(current.activity, next)) return
+    commitStatus({ activity: next }, {}, undefined)
+  }
+
+  /**
+   * TSP-7 PR-B: the SURFACE's own machine-activity mirror for the branch that
+   * has no `TuiApp` (the PiTui app mints its own `activity` section inside
+   * `commitDisplaySubject`, so this state must never be read there).
+   *
+   * It is a NARROW PROJECTION, never a second owner: every field is a fact an
+   * existing authority already committed to this surface (the display seam's
+   * `busy/working/compactionPhase` writers, the Task Center's GLOBAL summary,
+   * the Question controller's parked count and its live foreground flows). No
+   * Host read, no catalog walk and no clock lives here.
+   *
+   * Field PRESENCE is the write authority: an absent field keeps the last
+   * committed value, so a title-only update can never clear `working`.
+   */
+  let tspActivityFacts: DisplayActivityFacts = {}
+
+  /**
+   * TSP-7 PR-B: register ONE partial activity fact and re-publish. Presence is
+   * the write authority (a `false`/`'idle'` really ENDS the fact it names; an
+   * absent field changes nothing), so an unrelated commit can never clear the
+   * run phase or the work counts.
+   */
+  const commitActivityFacts = (facts: DisplayActivityFacts): void => {
+    if (app !== undefined || display === undefined || disposed || isCleanedUp()) return
+    tspActivityFacts = { ...tspActivityFacts, ...facts }
+    publishTspActivity()
+  }
+
+  /**
    * PR3-A: the live display seam. Sub-owners that only commit display facts
    * read this; PiTui-only owners keep {@link mounted}.
    */
@@ -1165,6 +1349,11 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       return taskPresentation
     },
     isCleanedUp: () => isCleanedUp(),
+    // TSP-7 PR-B: the Task Center's read-only projection onto the surface's
+    // activity status. `commitActivityFacts` is defined above this owner, so
+    // this is a plain forward reference in the same closure, never a second
+    // writer: the surface stays the ONE `StatusStore.activity` publisher.
+    publishActivity: facts => commitActivityFacts(facts),
     attention: {
       rows: () => interaction.attentionRows(),
       reconcile: () => interaction.controller()?.reconcile(),
@@ -1208,6 +1397,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     diag: () => task.diag(),
     isCleanedUp: () => isCleanedUp(),
     onAttentionChanged: () => task.refreshAttentionRows(),
+    // TSP-7 PR-B: this owner's modal/parked facts ride the surface's ONE
+    // activity projection (the surface stays the `StatusStore` writer).
+    publishActivity: facts => commitActivityFacts(facts),
   })
 
   // The application-level presentation event router (TS3 §36) owns the routing
@@ -1662,12 +1854,19 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // never yank a reader out of history) and is PiTui-only chrome (the TSP
     // pane owns its scrolling).
     displaySeam().setPendingInputPresentation({ queued, tail, running })
+    // TSP-7 PR-B: the queued-input COUNT is taken from THIS join — the ONE
+    // authoritative pending-input presentation — so no second Queue/Inbox read
+    // exists. Only the OFFICIAL queued rows count (a local-only optimistic
+    // echo is filtered out), and `pending.running` is NOT the run phase: it is a
+    // pending-input display state, never `working` (§8.4).
+    commitActivityFacts({ queuedCount: queued.filter(item => item.local !== true).length })
     if (hasNewOwnInput) app?.scrollToBottom()
   }
   /** Clear the pending-input presentation + own-input memory (generation bump). */
   const resetPendingPresentation = (): void => {
     pendingOwnInputBySubject.clear()
     displaySeam().setPendingInputPresentation({ queued: [], tail: [], running: false })
+    commitActivityFacts({ queuedCount: 0 })
   }
 
   // ── A4-8 search/transcript presentation wiring (plan §17) ───────────────
@@ -1751,7 +1950,25 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     searchProfiler.stage('search.resolve-representatives')
   }
   const resetSubjectStatus = (): void => {
-    status.update({ access: {}, composition: {}, collaboration: { plan: { effective: false } } })
+    // TSP-7 PR-B: the ACTIVITY section is display-subject-scoped too (its
+    // run phase, work counts and parked Questions belong to the subject that
+    // produced them). On the TSP branch the surface is the section's writer, so
+    // the outgoing subject's activity mirror is dropped HERE — before any later
+    // refresh can re-sample it — and the new owner re-derives from its own
+    // authorities. The PiTui branch keeps its own `commitDisplaySubject`
+    // activity mint (R2-2): writing the section here as well would split that
+    // transaction into two publications.
+    if (app === undefined) tspActivityFacts = {}
+    status.update({
+      access: {},
+      composition: {},
+      collaboration: { plan: { effective: false } },
+      ...(app === undefined ? { activity: deriveActivityStatus(
+        { working: false, compacting: false, applyingCompaction: false, approvalOpen: false, questionOpen: false },
+        false,
+        { queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 },
+      ) } : {}),
+    })
   }
 
   const resetSearchPresentation = (options: { preserveCurrentReveal?: boolean; rebuild?: boolean } = {}): void => {
@@ -2216,21 +2433,25 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // subject and the identity fence an already-open panel re-checks.
     deliveredFilesSnapshot,
     isDeliveredFilesSnapshotCurrent,
+    /**
+     * A4-4 (plan §13.1): the semantic derivation stays with the runner; the
+     * commit coordination is surface-owned. The three parts are ONE atomic
+     * display-subject commit (M3-5 PR1 §9.7).
+     *
+     * OWNERSHIP (R2-2): the PiTui branch's ONE atomic commit lives INSIDE
+     * `TuiApp.commitDisplaySubject` (store patch + activity section + legacy
+     * projection published together). Committing the patch here as well
+     * would SPLIT that transaction into two publications (an observer would
+     * see the child view beside the parent activity/presentation). So the
+     * surface only supplies the store commit for a renderer that has no such
+     * chrome projection — the TSP mount — keeping exactly ONE store update
+     * per commit on BOTH branches.
+     *
+     * TSP-7 PR-B: it is a named closure (not only the interface member) so the
+     * surface's own activity projection publishes through the SAME commit.
+     */
     commitStatus(patch, legacyFacts, presentation) {
-      // A4-4 (plan §13.1): the semantic derivation stays with the runner; the
-      // commit coordination is surface-owned. The three parts are ONE atomic
-      // display-subject commit (M3-5 PR1 §9.7).
-      //
-      // OWNERSHIP (R2-2): the PiTui branch's ONE atomic commit lives INSIDE
-      // `TuiApp.commitDisplaySubject` (store patch + activity section + legacy
-      // projection published together). Committing the patch here as well
-      // would SPLIT that transaction into two publications (an observer would
-      // see the child view beside the parent activity/presentation). So the
-      // surface only supplies the store commit for a renderer that has no such
-      // chrome projection — the TSP mount — keeping exactly ONE store update
-      // per commit on BOTH branches.
-      if (app === undefined) status.update(patch)
-      displaySeam().commitDisplaySubject(patch, legacyFacts, presentation)
+      commitStatus(patch, legacyFacts, presentation)
     },
     setNotificationMode(mode) {
       notification.setMode(mode)
@@ -2377,7 +2598,16 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           { imageLoader, imageScope: deps.imageScope, draftImages },
           { snapshot: () => status.snapshot() },
         )
-        display = mounted.display
+        // TSP-7 PR-B: the TSP branch's seam is the renderer's own, wrapped by a
+        // NARROW surface-side proxy over `commitStatusFacts` only. The proxy
+        // registers the machine facts the surface's ONE activity projection needs
+        // and then calls the renderer's own commit verbatim — the renderer keeps
+        // every other member, and its capability getters stay DYNAMIC (a spread
+        // such as `{ ...mounted.display }` would freeze `supportsTaskCenter`).
+        //
+        // This is the single narrow coordination point the plan asks for: no
+        // second DSH event subscription, no Host read, and no second writer.
+        display = tspActivityFactsProxy(mounted.display, commitActivityFacts)
         taskPresentation = mounted.taskPresentation
         composerPort = mounted.composer
         modelPresentation = mounted.modelPresentation

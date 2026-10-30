@@ -254,6 +254,7 @@ function startRuntime(options: {
       publish: () => {},
       reopen: options.reopen ?? (() => false),
     },
+    publishActivity: () => {},
   })
   tasks.attachTasks(options.source ?? makeSource(), {
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
@@ -370,6 +371,7 @@ test('a Task Runtime notice reaches the PiTui display seam exactly once', async 
     presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   tasks.attachTasks(makeSource({ descendants: [taskChild('ext-1', 'external run', 'external', 'inactive')] }), {
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
@@ -423,6 +425,7 @@ test('the real Task Runtime seeds, opens and repaints ONE browser through the Pi
     presentation: () => adapter,
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
   await flush()
@@ -491,6 +494,7 @@ test('a PiTui Job selection still routes through the original Job viewer', async
     presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   tasks.attachTasks(makeSource({ roster: [jobInput('j1', 'build')], openedJobs }), {
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false,
@@ -517,6 +521,7 @@ test('a PiTui subagent selection still routes through the original transcript vi
     presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   tasks.attachTasks(makeSource({
     roster: [],
@@ -561,6 +566,7 @@ test('a PiTui Question selection still reopens the ONE Question controller', asy
         return true
       },
     },
+    publishActivity: () => {},
   })
   tasks.attachTasks(makeSource({ roster: [] }), {
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false,

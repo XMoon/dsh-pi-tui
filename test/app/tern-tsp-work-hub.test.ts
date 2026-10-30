@@ -683,6 +683,7 @@ test('real Task Runtime task facts commit through the TSP presentation port to t
     presentation: () => h.renderer.taskPresentation,
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   t.after(() => tasks.resetTasks())
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
