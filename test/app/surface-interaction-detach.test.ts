@@ -52,6 +52,7 @@ function createPort(): {
     questionProvider?: UserQuestionProvider
   } = {}
   const questions = {
+    preservesHostPendingOnDetach: true,
     onRequest: (provider: UserQuestionProvider) => { captured.questionProvider = provider; return true },
     subscribe: () => () => {},
     snapshot: () => undefined,
@@ -59,6 +60,7 @@ function createPort(): {
     answerContinued: async () => 'queued' as const,
   } as unknown as QuestionInteractionPort
   const port = {
+    preservesHostPendingOnDetach: true,
     questions,
     onApprovalRequest: (listener: unknown) => {
       captured.approvalListener = listener as typeof captured.approvalListener

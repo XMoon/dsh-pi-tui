@@ -126,6 +126,8 @@ export interface QuestionControllerDeps {
    * an ordinary poll.
    */
   readonly isAdmissibleSession: (sessionId: string) => boolean
+  /** M4-C1: leave a Host-owned forwarded wait pending at surface teardown. */
+  readonly preservesHostPendingOnDetach?: boolean
   /** Monotonic-enough local clock (tests inject). */
   readonly now?: () => number
   /** Countdown tick interval (tests inject a short one). */
@@ -756,7 +758,7 @@ export class QuestionSurfaceController {
       // question waterfall. The official Gateway keeps the pending event and
       // re-delivers it to the next Client; rejecting here would turn a local
       // surface retirement into a Host cancellation the human never made.
-      if (this.disposed && request.signal !== undefined) {
+      if (this.deps.preservesHostPendingOnDetach === true && this.disposed && request.signal !== undefined) {
         return await new Promise<never>(() => {})
       }
       // A Host/delivery abort, a claim the Host ended, or our own teardown is

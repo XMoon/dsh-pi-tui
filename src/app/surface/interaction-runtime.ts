@@ -157,6 +157,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    * continuation model, so this registry is what lets a published replacement
    * retire its presentation (B3 findings C/F6).
    */
+  let portPreservesHostPendingOnDetach = false
   const liveApprovals = new Map<AbortSignal, {
     readonly sessionId: string
     /**
@@ -378,6 +379,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
 
   return {
     attach(port, deps) {
+      portPreservesHostPendingOnDetach = port.preservesHostPendingOnDetach === true
       // PR3-A: a renderer that cannot present interactive modals (the
       // read-only TSP renderer) still registers BOTH answerers, but
       // fail-closed: approvals resolve `'unavailable'` (the official
@@ -461,9 +463,11 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         // legal re-delivery; the Host signal still owns its real end.
         const surfaceDetached = (): Promise<never> => new Promise<never>(() => {})
         const guardedPrompt = settledPrompt.then(
-          outcome => (ended || options.isCleanedUp()) && req.signal !== undefined ? surfaceDetached() : outcome,
+          outcome => portPreservesHostPendingOnDetach && (ended || options.isCleanedUp()) && req.signal !== undefined
+            ? surfaceDetached()
+            : outcome,
           error => {
-            if ((ended || options.isCleanedUp()) && req.signal !== undefined) return surfaceDetached()
+            if (portPreservesHostPendingOnDetach && (ended || options.isCleanedUp()) && req.signal !== undefined) return surfaceDetached()
             throw error
           },
         )
@@ -511,6 +515,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         repaint: () => options.schedulePaint(),
         currentSessionId: () => options.currentSessionId(),
         isAdmissibleSession: sessionId => options.isAdmissibleSession(sessionId),
+        preservesHostPendingOnDetach: port.questions.preservesHostPendingOnDetach === true,
         diag: options.diag(),
       })
       controller.attach()
