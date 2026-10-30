@@ -145,6 +145,8 @@ export interface SplitRemoteApplicationRuntimeOptions {
   readonly delivery?: SplitClientInteractionDelivery
   /** Split-Client only: the surface revision identity attached to `delivery`. */
   readonly surfaceRevision?: number
+  /** Qualification-only telemetry forwarded to the Remote interaction port. */
+  readonly onQualification?: (record: Record<string, unknown>) => void
 }
 
 /** The ONE shared composition stage: Backend + owner registry + presentation. */
@@ -198,6 +200,7 @@ async function composeRemoteApplicationStage(input: {
   readonly promptSerializer?: RemotePromptSerializer
   readonly delivery?: SplitClientInteractionDelivery
   readonly surfaceRevision?: number
+  readonly onQualification?: (record: Record<string, unknown>) => void
 }): Promise<ComposedRemoteApplicationStage> {
   let backendRuntime: RemoteBackendRuntime | undefined
   let ownerServices: ReturnType<typeof createRemoteSessionOwnerServices> | undefined
@@ -219,6 +222,7 @@ async function composeRemoteApplicationStage(input: {
       ...(input.promptSerializer === undefined ? {} : { promptSerializer: input.promptSerializer }),
       ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
       ...(input.surfaceRevision === undefined ? {} : { surfaceRevision: input.surfaceRevision }),
+      ...(input.onQualification === undefined ? {} : { onQualification: input.onQualification }),
     })
     // ONE owner registry shared by owners + retirement (never constructed
     // independently — that would create a second owner truth). The SAME
@@ -386,6 +390,7 @@ export async function createRemoteApplicationRuntimeFromClient(
     ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
     ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
     ...(options.surfaceRevision === undefined ? {} : { surfaceRevision: options.surfaceRevision }),
+    ...(options.onQualification === undefined ? {} : { onQualification: options.onQualification }),
   })
   let transportDisposed = false
   return {

@@ -22,6 +22,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import * as connectionClient from '@deepseek-ai/dsh-client-connection/client'
 import * as gatewayClient from '@deepseek-ai/dsh-api-gateway/client'
 import * as typertClient from '@deepseek-ai/dsh-typert-registry/client'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { createRemoteHostRuntime, type InProcessHostCarrier } from '../../src/app/remote/host-runtime.ts'
 import { mountRemoteClientDomainPrerequisites } from '../../src/app/remote/client-runtime.ts'
 import { createSplitClientInteractionDelivery } from '../../src/app/remote-process/client-interaction-delivery.ts'
@@ -37,7 +38,7 @@ const PROCEED = { answers: [{ id: 'q1', selected: ['Proceed'] }] }
 async function installClientTransport(
   ctx: Context,
   carrier: InProcessHostCarrier,
-  onOpenStream: () => void,
+  onOpenStream: (endpoint: string) => void,
 ): Promise<{ gatewayFiber: Awaited<ReturnType<Context['plugin']>> }> {
   await ctx.plugin(typertClient)
   await ctx.plugin(connectionCtx => {
@@ -46,9 +47,9 @@ async function installClientTransport(
       transport: {
         ownsHost: true,
         fetch: carrier.fetch,
-        openStream: (...args: Parameters<InProcessHostCarrier['openStream']>) => {
-          onOpenStream()
-          return carrier.openStream(...args)
+        openStream: (endpoint, ...args) => {
+          onOpenStream(endpoint)
+          return carrier.openStream(endpoint, ...args)
         },
       },
     })
@@ -75,7 +76,7 @@ test('the official Gateway does not start until the Loader gate, Session resolve
   life.defer(() => ctx.fiber.dispose())
   let openStreams = 0
   const gate = await installGate(ctx)
-  await installClientTransport(ctx, hostRuntime.carrier, () => { openStreams += 1 })
+  await installClientTransport(ctx, hostRuntime.carrier, endpoint => { if (endpoint === '$events') openStreams += 1 })
   assert.equal(openStreams, 0, 'the official Gateway must not open its event stream while the Loader gate is pending')
   assert.equal((ctx.get('loader') as Loader).getTasks().length, 1, 'the gate entry must remain a pending Loader task')
 
@@ -89,19 +90,39 @@ test('the official Gateway does not start until the Loader gate, Session resolve
 
   // The root delivery owner registers its two `$on` listeners exactly once
   // before the official pump can consume a Host-pending forwarded event.
+  let observedQuestion = false
   const delivery = createSplitClientInteractionDelivery({
     remote: ctx.get('remote') as never,
     sessions: prerequisites.sessions,
   })
   delivery.attachSurface(1, {
-    onQuestion: async () => PROCEED,
+    onQuestion: async () => {
+      observedQuestion = true
+      return PROCEED
+    },
     onApproval: () => 'rejected',
   })
   gate.release()
   const domains = await prerequisites.complete()
-  assert.ok(openStreams > 0, 'the official Gateway must start its event stream after the gate opens')
+  assert.equal(openStreams, 1, 'the official Gateway must start exactly one event stream after the gate opens')
   assert.ok(domains.connection.generation.getSnapshot() !== undefined, 'the first real Connection generation must exist after readiness')
   assert.equal(domains.sessions.list.getSnapshot().phase, 'ready')
+
+  // REAL producer -> official resolver -> root listener -> official result:
+  // a pending Host question is forwarded to the mounted dispatcher and the
+  // answer settles the Host waterfall. A missing `next` fallback would reject
+  // this ask with NO_PROVIDER instead.
+  const userQuestions = host.ctx.get('userQuestions') as unknown as {
+    ask(request: unknown): Promise<{ readonly answers: readonly { readonly id: string; readonly selected: readonly string[] }[] }>
+  }
+  const agent = await host.harness.create(SessionId('m4-c1b-loader-answer'))
+  const answer = await userQuestions.ask({
+    agent,
+    questions: [{ id: 'q1', question: 'Continue?', options: [{ label: 'Proceed' }] }],
+  })
+  assert.equal(observedQuestion, true, 'the real Host pending question was not forwarded to the root listener')
+  assert.deepEqual(answer.answers, [{ id: 'q1', selected: ['Proceed'] }])
+
   delivery.dispose()
   await domains.dispose()
   await hostRuntime.dispose()
@@ -115,7 +136,7 @@ test('a cancelled startup disposes the Gateway before the Loader barrier settles
   life.defer(() => ctx.fiber.dispose())
   let openStreams = 0
   const gate = await installGate(ctx)
-  const { gatewayFiber } = await installClientTransport(ctx, hostRuntime.carrier, () => { openStreams += 1 })
+  const { gatewayFiber } = await installClientTransport(ctx, hostRuntime.carrier, endpoint => { if (endpoint === '$events') openStreams += 1 })
   // Production stop order: the official Gateway/Connection is disposed
   // BEFORE the cancelled gate settles, so the pending upstream `loader.await`
   // can never call a live `connection.start()` afterwards.
@@ -126,24 +147,36 @@ test('a cancelled startup disposes the Gateway before the Loader barrier settles
   await hostRuntime.dispose()
 })
 
-test('a gate that fails before the Gateway is installed never starts it', async t => {
+test('a forwarded Host question without the Session resolver fails closed instead of delegating', async t => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 'preset')
   const hostRuntime = await createRemoteHostRuntime(host.ctx)
   const ctx = new Context()
   life.defer(() => ctx.fiber.dispose())
+  let openStreams = 0
   const gate = await installGate(ctx)
-  gate.cancel(new Error('gate activation failed'))
-  assert.equal(gate.pending, false)
-  // The production entry checks the gate state before installing the Gateway;
-  // a failed gate therefore leaves no official pump to start.
-  const { gatewayFiber } = await (async () => {
-    assert.throws(() => {
-      if (!gate.pending) throw new Error('local client entry: the interaction startup gate failed before the transport install')
-    }, /gate failed before the transport install/u)
-    return { gatewayFiber: undefined }
-  })()
-  assert.equal(gatewayFiber, undefined)
-  await (ctx.get('loader') as Loader).await()
+  await installClientTransport(ctx, hostRuntime.carrier, endpoint => { if (endpoint === '$events') openStreams += 1 })
+  gate.release()
+  const deadline = Date.now() + 15_000
+  const connection = ctx.get('connection') as unknown as {
+    generation: { getSnapshot(): unknown }
+  }
+  while (connection.generation.getSnapshot() === undefined) {
+    if (Date.now() > deadline) throw new Error('the Gateway never reached its first generation')
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  const userQuestions = host.ctx.get('userQuestions') as unknown as {
+    ask(request: unknown): Promise<unknown>
+  }
+  const agent = await host.harness.create(SessionId('m4-c1b-loader-no-resolver'))
+  await assert.rejects(
+    userQuestions.ask({ agent, questions: [{ id: 'q1', question: 'Continue?' }] }),
+    (error: unknown) => {
+      assert.equal((error as { code?: string }).code, 'NO_PROVIDER')
+      return true
+    },
+    'a missing official Session resolver must fail closed with NO_PROVIDER',
+  )
+  assert.equal(openStreams, 1, 'the missing-resolver negative must still start the real Gateway once')
   await hostRuntime.dispose()
 })

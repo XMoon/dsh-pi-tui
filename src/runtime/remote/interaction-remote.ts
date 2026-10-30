@@ -137,6 +137,8 @@ export interface RemoteInteractionRuntimeSource {
   readonly delivery?: SplitClientInteractionDelivery
   /** Split-Client only: the surface revision token attached to the delivery. */
   readonly surfaceRevision?: number
+  /** Qualification-only telemetry for the Remote continued-answer result. */
+  readonly onQualification?: (record: Record<string, unknown>) => void
 }
 
 const USER_QUESTIONS_PROJECTION_KEY = 'userQuestions'
@@ -202,6 +204,7 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
   private readonly sessions: RemoteQuestionSessionsSource
   private readonly remote: RemoteUserQuestionRemotes & RemoteInteractionEventsSource
   private readonly generation: RemoteConnectionGenerationSource
+  private readonly onQualification: ((record: Record<string, unknown>) => void) | undefined
   /** Every subscription this adapter owns, released exactly once. */
   private readonly owned: Array<() => void> = []
 
@@ -214,6 +217,7 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
     this.sessions = source.sessions
     this.remote = source.remote
     this.generation = source.connection.generation
+    this.onQualification = source.onQualification
     this.registerDelivery = registerDelivery
   }
 
@@ -416,6 +420,8 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
     // dispatch-then-classify). Convergence is authoritative: the queued
     // reply lands in the inbox projection and reconcile withdraws the
     // entry.
+    const classification = result.ok ? (result.value ? 'queued' : 'not-continued') : 'error'
+    this.onQualification?.({ op: 'question-answer-continued', callId, result: classification })
     if (!result.ok) {
       // Preserve the Host taxonomy (REPLY_QUEUED / BAD_ANSWER / transport) in
       // the shared port vocabulary so both backends recover identically.

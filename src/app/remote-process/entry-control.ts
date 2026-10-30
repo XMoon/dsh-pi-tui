@@ -54,6 +54,9 @@ export interface EntryControlRequest {
   /** Qualification-only non-TUI answering Peer payload. */
   readonly kind?: string
   readonly callId?: string
+  readonly eventId?: string
+  readonly clientId?: string
+  readonly sessionId?: string
   readonly value?: unknown
 }
 
