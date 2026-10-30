@@ -1,12 +1,12 @@
 /**
  * TSP-7 PR-B real-client evidence flow.
  *
- * It mounts the PRODUCTION statusline projection (`scripts/tsp7-statusline-subject.mts`
+ * It mounts the PRODUCTION statusline projection (`scripts/tern-pane-statusline-subject.mts`
  * imports the shipped `nativeStatuslineRows`) in a real Tern pane and records what the
  * CLIENT laid out — node boxes, clipping ancestors, the viewport and a PNG — for the
  * sizes and fact sets the plan's B-19/B-20/B-23 ask about.
  *
- *   node scripts/tern-pane-drive.mjs scripts/tsp7-prb-statusline-pane.mjs
+ *   node scripts/tern-pane-drive.mjs scripts/tern-pane-statusline-activity.mjs
  *
  * Cases:
  *   prb       400×600 and a 260×600 split: the run seg + the rich attention badge
@@ -17,7 +17,7 @@
  *   160/120   the KNOWN-LIMITED heights (G-H): recorded, never claimed as PASS.
  *
  * The flow records facts; it does not decide visual acceptance.
- * @module scripts/tsp7-prb-statusline-pane
+ * @module scripts/tern-pane-statusline-activity
  */
 import { join } from 'node:path'
 import { writeFileSync } from 'node:fs'
@@ -30,7 +30,7 @@ import { containedXY, visibleBox } from './tern-pane-geometry.mjs'
  */
 function useCase(h, name) {
   writeFileSync(join(h.root, 'case'), `${name}\n`)
-  return `tsp7 ${name}`
+  return `statusline ${name}`
 }
 
 /** The REAL client paints each `ui.status` as one `sf sf-status` group. */
@@ -71,7 +71,7 @@ function allSegments(h, snap) {
 }
 
 export default async function (h) {
-  const subject = join(h.repo, 'scripts', 'tsp7-statusline-subject.mts')
+  const subject = join(h.repo, 'scripts', 'tern-pane-statusline-subject.mts')
   // ONE case per run: the pane driver's `launch` starts the subject in the SAME
   // pane, so a second launch would race the first one's ready marker. The flow
   // therefore runs once per fixture (`TERN_TSP7_PRB_CASE`), exactly like the

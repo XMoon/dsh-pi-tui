@@ -627,6 +627,10 @@ function mountQuestionOwner(options: {
   readonly deliverApproval: (request: Record<string, unknown>) => Promise<void>
   /** Deliver ONE live question request through the REAL registered provider. */
   readonly deliverQuestion: (request: Record<string, unknown>) => Promise<unknown>
+  /** Hold the NEXT timed Host claim open until the returned release runs. */
+  holdClaim(): { entered: Promise<void>; release: () => void }
+  /** Resolve when the presenter received a Question form (this flow). */
+  whenAskEntered(): Promise<void>
   readonly dispose: () => void
 } {
   const published: DisplayActivityFacts[] = []
@@ -637,6 +641,8 @@ function mountQuestionOwner(options: {
   let approvalListener: ((request: unknown, next: () => Promise<unknown>) => Promise<unknown>) | undefined
   /** The REAL provider the controller registered (drives `handleLive`). */
   let questionProvider: ((request: unknown, next: () => Promise<unknown>) => Promise<unknown>) | undefined
+  /** A gate holding the NEXT `claimTimedWait` open (the Host claim in flight). */
+  let claimGate: Promise<void> | undefined
   const port: QuestionInteractionPort = {
     onRequest: provider => { questionProvider = provider as typeof questionProvider; return true },
     subscribe: (_sessionId, listener) => {
@@ -644,7 +650,10 @@ function mountQuestionOwner(options: {
       return () => { subscribers = subscribers.filter(entry => entry !== listener) }
     },
     snapshot: () => snapshot,
-    claimTimedWait: async () => undefined,
+    claimTimedWait: async () => {
+      if (claimGate !== undefined) await claimGate
+      return undefined
+    },
     answerContinued: async () => 'queued',
   }
   const runtime = createInteractionRuntime({
@@ -659,12 +668,17 @@ function mountQuestionOwner(options: {
     onAttentionChanged: () => {},
     publishActivity: facts => { published.push(facts) },
   })
+  /** Resolves when the presenter actually received a Question form. */
+  let askEntered: (() => void) | undefined
   const presenter: SurfaceInteractionPresenter = {
     showApprovalPrompt: () => Promise.resolve('cancelled' as never),
-    // A mounted Question form STAYS mounted (a real form waits for the user):
-    // an immediately-resolving ask would submit and retire the entry, which is
-    // not the state the RFL-002 coexistence case asserts.
-    askQuestions: () => new Promise(() => {}),
+    // A mounted Question form stays mounted until its lifetime aborts (a real
+    // form waits for the user and rejects on abort — the RFL-002 coexistence
+    // case needs the held-open form, and the process needs every flow settleable).
+    askQuestions: (_questions, signal) => new Promise((_resolve, reject) => {
+      askEntered?.()
+      signal?.addEventListener('abort', () => reject(new Error('question flow cancelled')), { once: true })
+    }),
     setSettledQuestionAnswersLookup: () => {},
     notify: () => {},
     setQuestionAttention: () => { presented += 1 },
@@ -689,6 +703,13 @@ function mountQuestionOwner(options: {
     setSnapshot: next => { snapshot = next },
     notifyChange: () => { for (const listener of [...subscribers]) listener() },
     publish: () => runtime.publishAttention(),
+    holdClaim(): { entered: Promise<void>; release: () => void } {
+      let release: () => void = () => {}
+      const entered = new Promise<void>(resolve => { claimGate = new Promise<void>(r => { release = r }) })
+      void entered
+      return { entered: Promise.resolve(), release: () => { release(); claimGate = undefined } }
+    },
+    whenAskEntered: () => new Promise<void>(resolve => { askEntered = resolve }),
     /** Deliver ONE live question request through the REAL registered provider. */
     deliverQuestion: (request: Record<string, unknown>) => {
       assert.ok(questionProvider !== undefined, 'the controller registered its live provider')
@@ -978,6 +999,112 @@ test('PR-B RFL-003: a child subject keeps its own todo count; main todo writes d
     assert.equal(harness.snapshot().activity.todoCount, 1,
       'a main todo write mid-view never leaks into the child activity')
     assert.equal(harness.snapshot().activity.queuedCount, 0, 'no main queue borrow either')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── EXT-F1: a registered flow whose Host claim is still opening does NOT
+// paint waiting-question; the phase arrives only when the form is presented ──
+
+test('PR-B EXT-F1: a blocked timed claim never paints waiting-question until the form presents', async () => {
+  const owner = mountQuestionOwner()
+  try {
+    owner.setSnapshot({
+      sessionId: SESSION_ID,
+      active: [],
+      settled: [],
+      queuedReplyCallIds: new Set(),
+    } as never)
+    // Hold the timed Host claim OPEN: the request is registered and admissible,
+    // but its form has NOT reached the presenter yet.
+    const claim = owner.holdClaim()
+    const hostLifetime = new AbortController()
+    const flow = owner.deliverQuestion({
+      sessionId: SESSION_ID,
+      callId: 'c1',
+      questions: [{ id: 'q1', question: 'q', options: [] }],
+      signal: hostLifetime.signal,
+      timed: true,
+    })
+    // While the claim is in flight the flow is ALIVE but NOT presented.
+    await new Promise(resolve => setTimeout(resolve, 30))
+    assert.equal(owner.controller.hasPresentedQuestion(), false,
+      'a registered-but-claiming flow is not a presented Question')
+    assert.equal(owner.activity.some(facts => facts.questionOpen === true), false,
+      '…and it never published the waiting-question fact')
+
+    // Release the claim: the flow reaches the presenter and the phase arrives.
+    claim.release()
+    await owner.whenAskEntered()
+    assert.equal(owner.controller.hasPresentedQuestion(), true,
+      'the form reaching the presenter presents the Question')
+    assert.equal(owner.activity.some(facts => facts.questionOpen === true), true,
+      '…and the waiting-question fact is published in the same step')
+
+    hostLifetime.abort()
+    await flow.catch(() => {})
+  } finally {
+    owner.dispose()
+  }
+})
+
+// ── EXT-F2: one business fact batch produces no mixed legacy/native frame ──
+
+test('PR-B EXT-F2: the Working→Compacting transition paints ONE consistent frame, never new legacy beside old native', async () => {
+  const harness = await mountActivityHarness()
+  try {
+    await drawn('the initial dock frame', () => harness.pane.frames().length > 0)
+    harness.surface.display.commitStatusFacts({ working: true, busy: true })
+    await drawn('the working seg on the wire', () => segText(harness.pane, 'status-r1-run')?.includes('work') === true)
+
+    // The transition: the SAME business batch updates the legacy compaction word
+    // and the native run state. Watch EVERY frame the wire actually sends.
+    const framesBefore = harness.pane.frames().length
+    harness.surface.display.commitStatusFacts({ compactionPhase: 'summarizing', busy: true })
+    await drawn('the compacting seg on the wire', () => segText(harness.pane, 'status-r1-run')?.includes('compact') === true)
+    // Drain the same-tick microtask flush (a facts-only repaint would land here).
+    await new Promise(resolve => setTimeout(resolve, 30))
+
+    // Every frame SINCE the transition must be internally consistent: a frame
+    // whose dock carries the NEW `compacting` word must also carry the NEW
+    // native phase — the mixed pair (new legacy + old `work` seg) is exactly
+    // the non-atomic intermediate frame F2 forbids.
+    const newFrames = harness.pane.frames().slice(framesBefore)
+    // The wire's frames are DELTAS (an unchanged seg is not re-sent), so a
+    // mixed intermediate frame cannot be detected by string containment. The
+    // discriminating witness is the FRAME COUNT: a synchronous legacy repaint
+    // followed by the activity's display commit sends TWO frames for ONE
+    // business fact batch (verified: 2 frames before the deferred-flush fix,
+    // 1 after); the coalesced batch publishes the SAME facts in ONE frame.
+    assert.equal(newFrames.length, 1,
+      `one business fact batch publishes exactly ONE frame (got ${newFrames.length}: a synchronous legacy repaint followed by the display commit would split it)`)
+    assert.ok(newFrames.length > 0, 'the transition produced at least one frame')
+    const settled = JSON.stringify(newFrames[0])
+    assert.ok(settled.includes('compacting'), 'the single frame carries the new legacy compaction word')
+    assert.ok(settled.includes('compact'), 'the single frame carries the new native phase')
+
+    // And the final wire state is the settled one.
+    assert.ok(segText(harness.pane, 'status-r1-run')?.includes('compact') === true,
+      'the native run state is the compacting phase')
+    harness.surface.display.commitStatusFacts({ compactionPhase: 'applying' })
+    await drawn('the applying seg', () => segText(harness.pane, 'status-r1-run')?.includes('apply-compact') === true)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── EXT-F2b: a facts-only commit still repaints its legacy line ─────────────
+
+test('PR-B EXT-F2b: a title-only facts commit still updates the legacy dock line', async () => {
+  const harness = await mountActivityHarness()
+  try {
+    await drawn('the initial dock frame', () => harness.pane.frames().length > 0)
+    harness.surface.display.commitStatusFacts({ sessionTitle: 'FACTS_ONLY_TITLE' })
+    // The scheduled flush is a microtask: the wire shows the line without any
+    // formal display commit following.
+    await drawn('the legacy title line on the wire', () =>
+      wireNodes(harness.pane).some(node => typeof node.p.text === 'string' && node.p.text.includes('FACTS_ONLY_TITLE')))
   } finally {
     await harness.dispose()
   }

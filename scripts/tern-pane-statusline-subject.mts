@@ -19,8 +19,8 @@
  *   prb-attn  — PR-B: attention + context only (the statistics facts absent)
  *   prb-idle  — PR-B: environment + context only (no run phase, no badge)
  *
- * Usage: node --import tsx/esm scripts/tsp7-statusline-subject.mts
- * @module scripts/tsp7-statusline-subject
+ * Usage: node --import tsx/esm scripts/tern-pane-statusline-subject.mts
+ * @module scripts/tern-pane-statusline-subject
  */
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { connect } from '@stencil-hq/tern'
@@ -48,7 +48,7 @@ function snapshotFor(name: string): StatusSnapshot {
   if (name === 'notokens') {
     return {
       ...base,
-      workspace: { cwd: '/workspaces/tsp7-pane', branch: 'pra-statusline' },
+      workspace: { cwd: '/workspaces/status-line', branch: 'statusline-evidence' },
       access: { permissionPreset: { id: 'workspace-write' } },
       usage: { ...base.usage, tokens: undefined, context: { usedTokens: 250_000, windowTokens: 1_000_000, percent: 25 } },
     } as unknown as StatusSnapshot
@@ -69,7 +69,7 @@ function snapshotFor(name: string): StatusSnapshot {
     const rich = name === 'prb'
     return {
       ...base,
-      workspace: { cwd: '/workspaces/tsp7-pane', branch: 'pra-statusline' },
+      workspace: { cwd: '/workspaces/status-line', branch: 'statusline-evidence' },
       access: { permissionPreset: { id: 'workspace-write' } },
       collaboration: { plan: { effective: true } },
       activity: deriveActivityStatus(
@@ -107,7 +107,7 @@ function snapshotFor(name: string): StatusSnapshot {
   }
   return {
     ...base,
-    workspace: { cwd: '/workspaces/tsp7-pane', branch: 'pra-statusline' },
+    workspace: { cwd: '/workspaces/status-line', branch: 'statusline-evidence' },
     access: { permissionPreset: { id: 'workspace-write' } },
     collaboration: { plan: { effective: true } },
     usage: {
@@ -118,7 +118,7 @@ function snapshotFor(name: string): StatusSnapshot {
   } as unknown as StatusSnapshot
 }
 
-const session = await connect({ app: 'tsp7-statusline', timeout: 2000 })
+const session = await connect({ app: 'statusline-evidence', timeout: 2000 })
 if (!session) throw new Error('this subject must run inside a real Tern pane')
 
 /** ONE shutdown latch: the renderer's exit intent and the run's signal share it. */
@@ -143,7 +143,7 @@ const current = snapshotFor(testCase)
 renderer.bindStatusReader({ snapshot: () => current })
 // The production display seam: the legacy facts line + the ONE display commit
 // that samples the reader and repaints the dock.
-renderer.display.commitStatusFacts({ sessionTitle: `tsp7 ${testCase}` })
+renderer.display.commitStatusFacts({ sessionTitle: `statusline ${testCase}` })
 renderer.display.commitDisplaySubject({}, {}, undefined)
 note({ ready: true, case: testCase })
 

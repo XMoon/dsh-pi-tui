@@ -209,6 +209,14 @@ export class QuestionSurfaceController {
     readonly hasHostLifetime: boolean
     /** The owner-retirement settlement for a request with no Host lifetime. */
     readonly retire: () => void
+    /**
+     * TSP-7 PR-B: whether the flow has actually reached the PRESENTER
+     * (`deps.ask`). A registered-but-still-claiming flow (its timed Host claim
+     * `claimTimedWait` has not completed) is ALIVE but NOT presented — the
+     * waiting-question phase must be proven by a mounted form, never inferred
+     * from the request merely surviving (external review F1).
+     */
+    presented: boolean
   }>()
   private disposal: (() => void) | undefined
   private disposed = false
@@ -493,7 +501,7 @@ export class QuestionSurfaceController {
     // request this controller merely keeps alive until its Host lifetime ends
     // (TSP-7 PR-B RFL-001). Only what may still take THIS surface's seat counts.
     for (const live of this.livePresentations.values()) {
-      if (this.deps.isAdmissibleSession(live.sessionId)) return true
+      if (live.presented && this.deps.isAdmissibleSession(live.sessionId)) return true
     }
     const sessionId = this.deps.currentSessionId()
     if (sessionId !== undefined) {
@@ -699,6 +707,9 @@ export class QuestionSurfaceController {
         retiredByAdmission = true
         local.abort()
       },
+      // Presented is set ONLY at the `deps.ask` call below: a flow whose timed
+      // Host claim is still opening is alive but not yet a mounted form.
+      presented: false,
     })
     // ADMISSION currentness (B3 finding F10): a request whose Session the surface
     // no longer shows never presents — and never takes a Host claim either.
@@ -772,6 +783,14 @@ export class QuestionSurfaceController {
       // opening: the presenter then refuses the mount by itself (the lifetime is
       // on its retirement list) and the request keeps its own lifetime — so the
       // SAME call is harmless here and there is no second presentation path.
+      // The flow is NOW in the presenter: mark it presented and publish the
+      // waiting-question fact in the same synchronous step (external review F1 —
+      // registration alone must never paint the phase).
+      const live = this.livePresentations.get(signal)
+      if (live !== undefined) {
+        live.presented = true
+        this.notifyAttention()
+      }
       const answers = await this.deps.ask(request.questions.map(toTuiQuestion), signal, status, true)
       return { answers: answers.map(toAnswerItem) }
     } catch (error) {
