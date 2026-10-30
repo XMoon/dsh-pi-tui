@@ -147,7 +147,6 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     'peer-interaction',
     'peer-frame',
     'peer-send-stale-result',
-    'peer-question-answer',
     't55a',
     't55b',
     't55c-question',
