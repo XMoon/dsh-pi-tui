@@ -435,8 +435,12 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           dshAnchor: options.dshAnchor,
           authenticatedFetch: transport.authenticatedFetch,
           mountRunner,
+          diag,
           onStatus: status => {
             emit({ m4b2s: 'surface-status', ...traceStatus(status) })
+          },
+          onQualification: record => {
+            emit({ m4b2s: 'qualification', ...record })
           },
         }
       : { mode: 'qualification', transport, host: host.identity }

@@ -104,7 +104,7 @@ test('a completed waitForExit does not leave its deadline holding the process', 
 
 test('the upgraded smoke carries every B1/B2-HF gate and the critical negative controls', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T37', 'T38', 'T39', 'T40']) {
+  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40']) {
     assert.match(source, new RegExp(`\\b${gate}\\b`, 'u'), `missing ${gate}`)
   }
   for (const marker of [
@@ -122,8 +122,14 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     'SurfaceEntryProcess',
     'm4b2s-stub-llm',
     'm4b2s',
-    't34-t36',
-    'NOT_VERIFIED',
+    'SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK',
+    'SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE',
+    'SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF',
+    'SIGUSR2',
+    'waitForComposerDraft',
+    't34',
+    't35',
+    't36',
     'SPLIT_PROCESS_CLIENT_FORCE_FAILURE',
     'SPLIT_PROCESS_CLIENT_OMIT_COOKIE',
     'SPLIT_PROCESS_CLIENT_FORCE_STARTUP_FATAL',

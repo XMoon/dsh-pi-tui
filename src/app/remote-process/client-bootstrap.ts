@@ -28,6 +28,7 @@
  * @module app/remote-process/client-bootstrap
  */
 
+import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../extensions.ts'
 import type { RemoteApplicationOverride } from '../application-runtime.ts'
@@ -43,6 +44,10 @@ import {
 import { createRemoteClientUiRuntime, type RemoteClientUiRuntime } from '../remote/client-ui-runtime.ts'
 import { mergeCause } from '../remote/dispose-cause.ts'
 import type { RemoteBackendFetch } from '../remote/runtime.ts'
+import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
+import { RemotePromptSerializerProduction } from '../../runtime/remote/prompt-serializer-remote.ts'
+import { runDetached } from '../../runtime/process/tasks.ts'
+import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { LocalInstanceRecord } from './local-discovery.ts'
 import type { LocalClientTransport } from './local-transport.ts'
 
@@ -160,6 +165,14 @@ export interface LocalClientComposition {
    * JSONL file; there is no global emitter and no publication on the tty.
    */
   readonly onStatus?: (status: LocalClientStatus) => void
+  /**
+   * Surface-mode qualification records that are NOT a status change (the T34
+   * admission-stop notification, the T36 private-RPC proof). Routed to the same
+   * private sink; production never emits them.
+   */
+  readonly onQualification?: (record: Record<string, unknown>) => void
+  /** Client diagnostics sink for detached qualification work. */
+  readonly diag?: Diag
 }
 
 /** A live Client composition with its own disposal owner. */
@@ -193,6 +206,17 @@ function startupFactsOf(startup: LocalClientStartupFacts): { readonly sessionId?
   return {
     ...(startup.sessionId === undefined ? {} : { sessionId: startup.sessionId }),
     ...(startup.presetId === undefined ? {} : { presetId: startup.presetId }),
+  }
+}
+
+/** Wait for the qualification barrier file; a bounded wait, never a timer. */
+async function waitForQualificationBarrier(path: string): Promise<void> {
+  const deadline = Date.now() + 60_000
+  while (!existsSync(path)) {
+    if (Date.now() > deadline) {
+      throw new Error(`local client entry: the qualification barrier was not released: ${path}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
   }
 }
 
@@ -326,11 +350,89 @@ async function startSurfaceLocalClient(
     domains = await mountRemoteClientDomains({ context, dshAnchor })
     domainsOpen = true
     ui = await createRemoteClientUiRuntime({ context, startup: startupFactsOf(startup) })
+    // T34 qualification input: hold ONE write between its real serialization
+    // and the writer's dispatch-admission check. Production never sets this
+    // variable; the production serializer stays the default.
+    const holdPath = process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE
+    let promptSerializer: RemotePromptSerializer | undefined
+    if (holdPath !== undefined && holdPath !== '') {
+      const production = RemotePromptSerializerProduction.overSessions(domains.sessions)
+      promptSerializer = {
+        preflight: message => production.preflight(message),
+        async serialize(message) {
+          const serialized = await production.serialize(message)
+          await waitForQualificationBarrier(holdPath)
+          return serialized
+        },
+      }
+    }
     application = await createRemoteApplicationRuntimeFromClient({
       domains,
       fetch: authenticatedFetch,
       clientUi: ui,
+      ...(promptSerializer === undefined ? {} : { promptSerializer }),
     })
+    // T36 qualification input: probe the private Host RPCs through the ALREADY
+    // mounted Domain namespaces (no second private contribution).
+    if (process.env.SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF === '1') {
+      if (composition.diag === undefined) {
+        throw new Error('local client entry: the private RPC qualification requires the Client diagnostics sink')
+      }
+      const diag = composition.diag
+      process.on('SIGUSR2', () => {
+        const target = openSessionId() ?? domains?.sessions.list.getSnapshot().ids[0]
+        if (target === undefined || domains === undefined) {
+          composition.onQualification?.({ op: 'private-rpc-proof', error: 'no retained Session' })
+          return
+        }
+        const currentDomains = domains
+        runDetached('surface private RPC proof', async () => {
+          const remote = currentDomains.remote as unknown as {
+            readonly piTuiFileReferences: {
+              list(sessionId: string, query: string): Promise<{ readonly ok: boolean; readonly value?: { readonly kind?: unknown } }>
+            }
+            readonly piTuiTerminalProgress: {
+              watch(sessionId: string): {
+                dispose(): void
+                [Symbol.asyncIterator](): AsyncIterator<{ readonly kind?: unknown }>
+              }
+            }
+          }
+          const sessionId = String(target)
+          const file = await remote.piTuiFileReferences.list(sessionId, 'notes')
+          const watch = remote.piTuiTerminalProgress.watch(sessionId)
+          const iterator = watch[Symbol.asyncIterator]()
+          let terminalKind: unknown
+          try {
+            const first = await iterator.next()
+            terminalKind = first.done === true ? 'ended' : first.value?.kind
+          } finally {
+            watch.dispose()
+          }
+          composition.onQualification?.({
+            op: 'private-rpc-proof',
+            sessionId,
+            fileOk: file.ok === true,
+            fileKind: file.ok ? file.value?.kind : undefined,
+            terminalKind,
+            owners: status().owners,
+            privateNamespaces: status().privateNamespaces,
+          })
+        }, { diag })
+      })
+    }
+    // T34 qualification input: close the writer's pre-dispatch admission while
+    // the serializer barrier holds the write; the surface stays mounted so the
+    // restored draft is observable.
+    if (holdPath !== undefined && holdPath !== '') {
+      // SIGUSR2 is the T34 admission-stop trigger; the private-RPC proof above
+      // uses the same signal in its own process (the two env flags never
+      // coexist), keeping the qualification surface to standard POSIX signals.
+      process.on('SIGUSR2', () => {
+        application?.selected.stopSurfaceAdmission?.()
+        composition.onQualification?.({ op: 'stop-surface-admission' })
+      })
+    }
     const override: RemoteApplicationOverride = {
       selected: application.selected,
       presentation: application.presentation,

@@ -193,11 +193,12 @@ Typert/Connection/Gateway graph. Its Domain plane is mounted by one
 package's ONE private contribution, then the official fileUpload -> Sessions ->
 Jobs Client plugins. This function never creates or disposes the Context,
 Connection or Gateway. The official Client bundles and generated `/remote`
-descriptors are resolved from the installed DSH anchor; the browser-form
-`/client` bundles' platform statics (`@deepseek-ai/cordis`,
-`@deepseek-ai/dsh-client-store`) come from the same installed Harness family
-through the profile's runtime resolution. No source-tree descriptor may mix
-with that installation.
+descriptors are resolved from the installed DSH anchor. The Client shell also
+supplies the official web seed's platform static `@deepseek-ai/dsh-client-store`
+from the installed Harness family (its declared DSH peer); the browser-form
+`/client` bundles' `require` therefore resolves the SAME singleton the web shell
+shares, while `@deepseek-ai/cordis` resolves as a normal import. No source-tree
+descriptor may mix with that installation.
 
 Above the Domains, the Client mounts exactly one Client UI subtree (extension
 host + first-party builtins), one split application runtime (Backend + the ONE

@@ -134,6 +134,10 @@ export interface SplitRemoteApplicationRuntimeOptions {
   readonly clientUi: RemoteClientUiRuntime
   /** Lifecycle signal observed by the Backend composition. */
   readonly signal?: AbortSignal
+  /** Internal qualification input: a serializer wrapper used only to hold one
+   *  write between serialization and dispatch admission (T34). Absent in
+   *  production, where the production serializer is the default. */
+  readonly promptSerializer?: RemotePromptSerializer
 }
 
 /** The ONE shared composition stage: Backend + owner registry + presentation. */
@@ -368,7 +372,7 @@ export async function createRemoteApplicationRuntimeFromClient(
   const stage = await composeRemoteApplicationStage({
     client: options.domains,
     fetch: options.fetch,
-    ...(options.signal === undefined ? {} : {}),
+    ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
   })
   let transportDisposed = false
   return {
