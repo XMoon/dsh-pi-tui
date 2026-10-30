@@ -55,6 +55,7 @@ import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { TranscriptFolder, type TranscriptMessage } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
+import { formatBytes } from '../../src/domain/media/format.ts'
 import { decodeSixel, pixelAt } from '../support/sixel-oracle.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -1586,7 +1587,13 @@ interface TopCropProjection {
     readonly viewportHeight: number
     readonly rows: readonly {
       readonly height: number
-      readonly imageHits?: readonly { readonly row: number; readonly kind: 'info' | 'body' }[]
+      readonly imageHits?: readonly {
+        readonly row: number
+        readonly kind: 'info' | 'body'
+        readonly controlStartCol?: number
+        readonly controlEndCol?: number
+        readonly hitId?: string
+      }[]
       readonly visualHits?: readonly { readonly row: number; readonly kind: 'action' | 'body' | 'inert' }[]
     }[]
   }
@@ -2173,4 +2180,505 @@ test('E2-10c: a bottom-cropped image hit survives resize, a capturing overlay an
   await waitViewport(terminal, 'Image · bands12.png', 'the Viewer after the Screen switch')
   terminal.sendInput('\x1b')
   await waitViewportGone(terminal, 'Image · bands12.png', 'the final transcript')
+})
+
+// ── Image-8 / I8-3 AUTO: the four targeted SIXEL product E2 cases ─────────
+// Plan cases E2-I8-3-01..04 (temp/image/8-3/...kitty-parity-automation-first).
+// Each composes the SAME real TuiApp/DirectSixelGraphics/Screen chain as the
+// cases above; nothing here is a new harness or a second decoding path.
+
+/** The first body row of one attachment in the LAST painted fullscreen frame. */
+function fullscreenImageBodyRow(
+  projection: TopCropProjection,
+  entryIndex: number,
+  bodyOffset = 0,
+): { readonly bodyRow: number; readonly infoRow: number } {
+  const entry = projection.messageRows[entryIndex]!
+  const attachment = entry.attachments[0]
+  assert.ok(attachment !== undefined, 'the image occurrence is mounted')
+  const entryTop = projection.messageRows.slice(0, entryIndex).reduce((sum, row) => sum + row.height, 0)
+  const infoRow = projection.fullscreenPaintSnapshot.headerHeight
+    + projection.fullscreenPaintSnapshot.welcomeHeight
+    + entryTop
+    + attachment.infoRow
+    - projection.fullscreenPaintSnapshot.scrollTop
+    + 1
+  return { infoRow, bodyRow: infoRow + (attachment.bodyStart - attachment.infoRow) + bodyOffset }
+}
+
+/** Wait until the LAST painted fullscreen row map has a committed body hit. */
+async function waitCommittedImageBody(projection: TopCropProjection, entryIndex: number, label: string): Promise<void> {
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
+    const hits = projection.fullscreenPaintSnapshot?.rows?.[entryIndex]?.imageHits ?? []
+    if (hits.some(hit => hit.kind === 'body')) return
+    ;(projection as unknown as { requestRender?: (force?: boolean) => void }).requestRender?.(true)
+    await tick()
+  }
+  assert.fail(`timed out waiting for ${label}`)
+}
+
+/**
+ * Walk one main-screen write frame and return the PHYSICAL rows it erased with
+ * `CSI 2K` (`'all'` when the frame used `CSI 2J`/`3J`). The tracker follows the
+ * frame's own cursor movement (`CR/LF`, `A/B`, `H`), so a clear count alone can
+ * never stand in for "this exact old footprint row was cleared".
+ */
+function erasedPhysicalRows(wire: string, startRow: number): 'all' | Set<number> {
+  let row = startRow
+  const erased = new Set<number>()
+  let index = 0
+  while (index < wire.length) {
+    const character = wire[index]!
+    if (character === '\x1b') {
+      if (wire[index + 1] === '[') {
+        const match = /^\x1b\[([0-9;?]*)([A-Za-z])/.exec(wire.slice(index))
+        if (match !== null) {
+          const params = match[1]!.replaceAll('?', '').split(';').filter(part => part !== '').map(Number)
+          const first = params[0] ?? 1
+          if (match[2] === 'A') row = Math.max(0, row - first)
+          else if (match[2] === 'B') row += first
+          else if (match[2] === 'H' || match[2] === 'f') row = (params[0] ?? 1) - 1
+          else if (match[2] === 'K' && first === 2) erased.add(row)
+          else if (match[2] === 'J' && (first === 2 || first === 3)) return 'all'
+          index += match[0].length
+          continue
+        }
+      } else if (wire[index + 1] === ']') {
+        const bell = wire.indexOf('\x07', index + 2)
+        const st = wire.indexOf('\x1b\\', index + 2)
+        const end = bell === -1 ? st : st === -1 ? bell : Math.min(bell, st)
+        index = end === -1 ? wire.length : end + 1
+        continue
+      } else if (wire[index + 1] === 'P') {
+        const end = wire.indexOf('\x1b\\', index + 2)
+        index = end === -1 ? wire.length : end + 2
+        continue
+      }
+      index += 2
+      continue
+    }
+    if (character === '\n') row += 1
+    index += 1
+  }
+  return erased
+}
+
+test('a JPEG or WebP draft paints its derived SIXEL body and leaves no footprint after removal', async (t) => {
+  const { terminal, store } = await startSixelApp(t)
+  const variants = [
+    { label: 'JPEG', mediaType: 'image/jpeg' as const, bytes: SAMPLE_JPEG, name: 'photo.jpg' },
+    { label: 'WebP', mediaType: 'image/webp' as const, bytes: SAMPLE_WEBP, name: 'shot.webp' },
+  ] as const
+  for (const variant of variants) {
+    const image = store.add({
+      bytes: variant.bytes,
+      mediaType: variant.mediaType,
+      width: 120,
+      height: 80,
+      name: variant.name,
+    })
+    // The staged draft is the submission authority and keeps the ORIGINAL
+    // ref: the derived PNG is only this card's presentation.
+    const staged = store.get(image.id)
+    assert.equal(staged?.mediaType, variant.mediaType, `the staged ${variant.label} MIME is not rewritten`)
+    assert.equal(staged?.name, variant.name, `the staged ${variant.label} file name is not rewritten`)
+    assert.equal(staged?.width, 120, `the staged ${variant.label} width is not rewritten`)
+    assert.equal(staged?.height, 80, `the staged ${variant.label} height is not rewritten`)
+    assert.equal(staged?.byteLength, variant.bytes.byteLength, `the staged ${variant.label} bytes are not rewritten`)
+
+    terminal.writes.length = 0
+    terminal.sendInput(image.placeholder)
+    const dcs = await nextRaster(terminal, 0, `the derived ${variant.label} SIXEL body`)
+    const decoded = decodeSixel(dcs)
+    assert.ok(decoded.width > 0 && decoded.height > 0, `the ${variant.label} body is a non-empty raster`)
+    assert.equal(decoded.height % 6, 0, `the ${variant.label} body is band aligned`)
+    assert.ok(decoded.paintedBounds !== null, `the ${variant.label} body really paints pixels`)
+    const colours = new Set<string>()
+    for (let y = 0; y < decoded.height; y += 6) {
+      for (let x = 0; x < decoded.width; x += 2) {
+        const [r, g, b, a] = pixelAt(decoded, x, y)
+        if (a > 0) colours.add(`${r},${g},${b}`)
+      }
+    }
+    assert.ok(colours.size >= 2, `the derived ${variant.label} body paints the real image content (got ${colours.size} colours)`)
+    const identity = await waitViewport(terminal, '🖼️ #', `the ${variant.label} draft identity row`)
+    assert.ok(identity.includes('120×80'), `the identity row keeps the ORIGINAL dimensions:\n${identity}`)
+    assert.ok(identity.includes(formatBytes(variant.bytes.byteLength)), `the identity row keeps the ORIGINAL byte length:\n${identity}`)
+
+    // Remove the draft AND clear the editor text: the next committed frame must
+    // erase every row the raster really covered and never replay the old DCS.
+    const footprintRows = Math.ceil(decoded.height / 20)
+    terminal.writes.length = 0
+    store.remove(image.id)
+    terminal.sendInput('\x15') // Ctrl+U: clear the whole editor line
+    await until(() => terminal.writes.length > 0, `the frame that retires the ${variant.label} draft`)
+    await tick(300)
+    const wire = terminal.writes.join('')
+    assert.ok(!wire.includes(dcs), `the retired ${variant.label} raster is never repainted`)
+    const clears = (wire.match(/\x1b\[2K/g) ?? []).length
+    assert.ok(
+      clears >= footprintRows || wire.includes('\x1b[2J'),
+      `the ${variant.label} footprint (${footprintRows} rows) is cleared (${clears} line clears) or full-redrawn`,
+    )
+    await waitViewportGone(terminal, '🖼️ #', `the ${variant.label} draft band to disappear`)
+  }
+})
+
+test('replacing a large Main transcript raster with plain text erases its whole footprint before the neighbour text', async (t) => {
+  const large = await bandedBandsPng()
+  const ref: TranscriptImageRef = {
+    attachmentId: 'att-i8-3-02',
+    mediaType: 'image/png',
+    bytes: large.byteLength,
+    width: 200,
+    height: 240,
+    name: 'bands12.png',
+  }
+  const green = await pngFromRgba(fill(40, 20, () => [0, 255, 0, 255]), 40, 20)
+  const bytesById = new Map<string, Uint8Array>([
+    ['att-i8-3-02', large],
+    ['att-i8-3-02-green', green],
+  ])
+  const { terminal, app } = await startSixelApp(t, {
+    imageLoader: new ImageLoader(async (ref) => ({ ref: {}, data: bytesById.get(ref.attachmentId)! })),
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  const withImage = new TranscriptFolder()
+  withImage.apply([
+    { type: 'user/message', seq: 1, time: 1, data: { content: [{ type: 'image', attachment: ref }], source: { kind: 'user' } } },
+    { type: 'user/message', seq: 2, time: 2, data: { content: [{ type: 'text', text: 'NEIGHBOUR-AFTER-PIXELS' }], source: { kind: 'user' } } },
+  ] as never)
+  terminal.writes.length = 0
+  app.setTranscript(withImage.messages())
+  app.requestRender()
+  const dcs = await nextRaster(terminal, 0, 'the large Main transcript raster')
+  const decoded = decodeSixel(dcs)
+  const footprintRows = Math.ceil(decoded.height / 20)
+  assert.ok(footprintRows >= 3, `the large raster covers multiple rows (${footprintRows})`)
+  await waitViewport(terminal, 'NEIGHBOUR-AFTER-PIXELS', 'the neighbour text beside the image')
+  const [oldR, oldG, oldB] = pixelAt(decoded, 4, 4)
+  assert.ok(oldG > 200 && oldR < 40, `the old image really paints band 0: ${oldR},${oldG},${oldB}`)
+  // The Screen's OWN committed facts: which buffer lines declared a trusted
+  // SIXEL footprint, and the viewport they were drawn in. The replacement
+  // frame must erase every one of those physical rows, not merely emit enough
+  // `2K` bytes somewhere.
+  const screen = (app as unknown as {
+    tui: { previousLineSixelRows: number[]; previousViewportTop: number; hardwareCursorRow: number }
+  }).tui
+  const oldSixelRows = [...screen.previousLineSixelRows]
+  const oldViewportTop = screen.previousViewportTop
+  const frameStartRow = screen.hardwareCursorRow - oldViewportTop
+  const oldFootprintRows = new Set<number>()
+  oldSixelRows.forEach((rows, line) => {
+    for (let offset = 0; offset < rows; offset += 1) oldFootprintRows.add(line - oldViewportTop + offset)
+  })
+  assert.ok(oldFootprintRows.size >= footprintRows, `the committed Screen declares the whole ${footprintRows}-row footprint`)
+
+  // The production transcript update replaces the SAME message with pure text:
+  // the Main screen owns the whole old raster footprint and must erase it.
+  const textOnly = new TranscriptFolder()
+  textOnly.apply([
+    { type: 'user/message', seq: 1, time: 1, data: { content: [{ type: 'text', text: 'REPLACED-WITH-TEXT' }], source: { kind: 'user' } } },
+    { type: 'user/message', seq: 2, time: 2, data: { content: [{ type: 'text', text: 'NEIGHBOUR-AFTER-PIXELS' }], source: { kind: 'user' } } },
+  ] as never)
+  terminal.writes.length = 0
+  app.setTranscript(textOnly.messages())
+  app.requestRender()
+  await waitViewport(terminal, 'REPLACED-WITH-TEXT', 'the replacement text frame')
+  await tick(300)
+  const wire = terminal.writes.join('')
+  assert.ok(!wire.includes(dcs), 'the replaced raster is never replayed')
+  const clears = (wire.match(/\x1b\[2K/g) ?? []).length
+  assert.ok(
+    clears >= footprintRows || wire.includes('\x1b[2J'),
+    `the ${footprintRows}-row image footprint is cleared (${clears} line clears) or full-redrawn`,
+  )
+  const erased = erasedPhysicalRows(wire, frameStartRow)
+  const missingRows = [...oldFootprintRows].filter(row => erased !== 'all' && !erased.has(row))
+  assert.deepEqual(missingRows, [], `every old footprint physical row is erased; missing ${missingRows.join(',')}`)
+  assert.ok(screen.previousLineSixelRows.every(rows => rows === 0),
+    'the committed Screen no longer declares a SIXEL footprint after the replacement')
+  assert.ok(wire.includes('NEIGHBOUR-AFTER-PIXELS'), 'the adjacent text is rewritten by the same committed frame')
+  const replacedView = await viewportOf(terminal)
+  assert.ok(replacedView.includes('REPLACED-WITH-TEXT'), `the replacement text is committed:\n${replacedView}`)
+  assert.ok(replacedView.includes('NEIGHBOUR-AFTER-PIXELS'), `the neighbour text is committed:\n${replacedView}`)
+  assert.ok(!wire.includes('SIXC'), 'no candidate marker reaches Terminal.write')
+
+  // A later DIFFERENT image paints its own colours; the old 12-band source can
+  // never be reused as a stale raster.
+  const newRef: TranscriptImageRef = {
+    attachmentId: 'att-i8-3-02-green',
+    mediaType: 'image/png',
+    bytes: green.byteLength,
+    width: 40,
+    height: 20,
+    name: 'green.png',
+  }
+  const withGreen = new TranscriptFolder()
+  withGreen.apply([
+    { type: 'user/message', seq: 3, time: 3, data: { content: [{ type: 'image', attachment: newRef }], source: { kind: 'user' } } },
+    { type: 'user/message', seq: 4, time: 4, data: { content: [{ type: 'text', text: 'AFTER-THE-GREEN' }], source: { kind: 'user' } } },
+  ] as never)
+  terminal.writes.length = 0
+  app.setTranscript(withGreen.messages())
+  app.requestRender()
+  const frameRasters = (text: string): string[] => {
+    const start = text.lastIndexOf('\x1b[?2026h')
+    const frame = start === -1 ? text : text.slice(start)
+    const found: string[] = []
+    let cursor = frame.indexOf('\x1bP')
+    while (cursor >= 0) {
+      const end = frame.indexOf('\x1b\\', cursor + 2)
+      if (end < 0) break
+      found.push(frame.slice(cursor, end + 2))
+      cursor = frame.indexOf('\x1bP', end + 2)
+    }
+    return found
+  }
+  const deadline = Date.now() + 30_000
+  let freshDcs: string | undefined
+  while (Date.now() < deadline) {
+    for (const candidate of frameRasters(terminal.writes.join(''))) {
+      try {
+        const decodedCandidate = decodeSixel(candidate)
+        if (decodedCandidate.width === 40 && decodedCandidate.height > 0) { freshDcs = candidate; break }
+      } catch {
+        // A partial DCS fragment in the live write buffer is not a raster.
+      }
+    }
+    if (freshDcs !== undefined) break
+    await tick(50)
+  }
+  assert.ok(freshDcs !== undefined, 'the later image paints its own raster')
+  const fresh = decodeSixel(freshDcs)
+  const [r, g, b] = pixelAt(fresh, 2, 2)
+  assert.ok(g > 180 && r < 80 && b < 80, `the later image paints its OWN green band: ${r},${g},${b}`)
+  const finalFrame = terminal.writes.join('').slice(terminal.writes.join('').lastIndexOf('\x1b[?2026h'))
+  assert.ok(!finalFrame.includes(dcs), 'the final frame does not reuse the old raster for the new source')
+  assert.ok(!finalFrame.includes('SIXC'), 'no candidate marker reaches Terminal.write')
+})
+
+test('an image occurrence folds and unfolds in Full, Compact and Focus while its committed hit follows the same source', async (t) => {
+  const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
+  const ref: TranscriptImageRef = {
+    attachmentId: 'att-i8-3-03',
+    mediaType: 'image/png',
+    bytes: png.byteLength,
+    width: 80,
+    height: 40,
+    name: 'bands.png',
+  }
+  const { terminal, app } = await startSixelApp(t, {
+    imageLoader: new ImageLoader(async () => ({ ref: {}, data: png })),
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  const folder = new TranscriptFolder()
+  folder.apply([
+    { type: 'user/message', seq: 50, time: 50, data: { content: [{ type: 'image', attachment: ref }], source: { kind: 'user' } } },
+    ...Array.from({ length: 8 }, (_, index) => ({
+      type: 'user/message' as const,
+      seq: 100 + index,
+      time: 100 + index,
+      data: { content: [{ type: 'text' as const, text: `after ${index} ${'x'.repeat(100)}` }], source: { kind: 'user' as const } },
+    })),
+  ] as never)
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages())
+  app.requestRender()
+  await waitViewport(terminal, 'after 7', 'the bottom filler')
+  app.scrollToTop()
+  await tick(200)
+
+  const projection = app as unknown as TopCropProjection
+  const workspaceOpen = (): boolean => (app as unknown as { workspaceLease?: unknown }).workspaceLease !== undefined
+  const imageEntry = (): { index: number; height: number; bodyRows: number } => {
+    const index = projection.messageRows.findIndex(entry => entry.attachments.length > 0)
+    assert.notEqual(index, -1, 'the image occurrence is mounted')
+    const entry = projection.messageRows[index]!
+    const attachment = entry.attachments[0]!
+    return { index, height: entry.height, bodyRows: attachment.bodyEnd - attachment.bodyStart }
+  }
+
+  for (const preset of ['full', 'compact', 'focus'] as const) {
+    const applied = app.setDisplayPreset(preset)
+    assert.ok(applied.kind === 'applied' || applied.kind === 'unchanged', `the ${preset} preset is a real projection`)
+    await tick(100)
+    const initial = imageEntry()
+    await waitCommittedImageBody(projection, initial.index, `the ${preset} committed image body`)
+    const before = imageEntry()
+    assert.ok(before.bodyRows > 0, `the ${preset} frame commits body rows`)
+    const info = fullscreenImageBodyRow(projection, before.index)
+    const scrollTopBefore = projection.fullscreenPaintSnapshot.scrollTop
+
+    // Click the painted 3-cell fold control (the info row's `[-]`).
+    const hits = projection.fullscreenPaintSnapshot.rows[before.index]!.imageHits ?? []
+    const control = hits.find(hit => hit.kind === 'info')
+    assert.ok(control !== undefined, `the ${preset} frame paints the info control`)
+    await settlePointerWindow()
+    terminal.sendInput(`\x1b[<0;${control.controlStartCol! + 1};${info.infoRow}M`)
+    terminal.sendInput(`\x1b[<0;${control.controlStartCol! + 1};${info.infoRow}m`)
+    await until(() => {
+      const entry = projection.messageRows[before.index]
+      return entry !== undefined && entry.height === before.height - before.bodyRows
+        && (projection.fullscreenPaintSnapshot.rows[before.index]?.imageHits ?? []).every(hit => hit.kind === 'info')
+    }, `${preset}: the fold to remove exactly the body rows`)
+    assert.equal(projection.fullscreenPaintSnapshot.scrollTop, scrollTopBefore, `${preset}: folding keeps the scroll anchor`)
+    assert.equal(fullscreenImageBodyRow(projection, before.index).infoRow, info.infoRow,
+      `${preset}: the info row does not move when its own body folds`)
+    const foldedView = await viewportOf(terminal)
+    assert.ok(foldedView.includes('[+]'), `${preset}: the folded occurrence advertises the expand control:\n${foldedView}`)
+    assert.ok(!workspaceOpen(), `${preset}: folding opens no Viewer`)
+
+    // Expand again: the same occurrence restores its exact body rows and the
+    // committed hit resolves the SAME source; a real body click opens it. The
+    // DCS must be a NEW write of THIS frame: a stale raster from the initial
+    // paint (or an earlier preset) cannot satisfy the re-expand evidence.
+    await settlePointerWindow()
+    const rasterBaseline = paintedRasters(terminal).length
+    terminal.sendInput(`\x1b[<0;${control.controlStartCol! + 1};${info.infoRow}M`)
+    terminal.sendInput(`\x1b[<0;${control.controlStartCol! + 1};${info.infoRow}m`)
+    await waitCommittedImageBody(projection, before.index, `${preset}: the re-expanded body`)
+    const expanded = imageEntry()
+    assert.equal(expanded.height, before.height, `${preset}: expanding restores the exact row height`)
+    assert.equal(expanded.bodyRows, before.bodyRows, `${preset}: expanding restores the exact body row count`)
+    const expandedDcs = await nextRaster(terminal, rasterBaseline, `${preset}: the re-expanded raster`)
+    const expandedDecoded = decodeSixel(expandedDcs)
+    assert.equal(expandedDecoded.width, 80, `${preset}: the re-expanded raster keeps the source width`)
+    const [topR, topG, topB] = pixelAt(expandedDecoded, 4, 4)
+    assert.ok(topR > 180 && topG < 80 && topB < 80, `${preset}: the first re-expanded band is the same red band`)
+    const [, , bottomBlue] = pixelAt(expandedDecoded, 4, expandedDecoded.height - 8)
+    assert.ok(bottomBlue > 180, `${preset}: the last re-expanded band is the same blue band`)
+    const body = fullscreenImageBodyRow(projection, before.index)
+    const beforeViewer = paintedRasters(terminal).length
+    await settlePointerWindow()
+    terminal.sendInput(`\x1b[<0;1;${body.bodyRow}M`)
+    terminal.sendInput(`\x1b[<0;1;${body.bodyRow}m`)
+    await nextRaster(terminal, beforeViewer, `${preset}: the Viewer raster from the committed body`)
+    const viewer = await waitViewport(terminal, 'Image · bands.png', `${preset}: the direct Viewer`)
+    assert.ok(stripSgr(viewer).includes('Esc close'), `${preset}: the body hit is the direct Viewer target`)
+    terminal.sendInput('\x1b')
+    await waitViewportGone(terminal, 'Image · bands.png', `${preset}: the Viewer to close`)
+    assert.equal(projection.fullscreenPaintSnapshot.scrollTop, scrollTopBefore, `${preset}: the Viewer round trip keeps the anchor`)
+  }
+})
+
+test('a press released after a real scroll or resize never transfers the image Viewer gesture', async (t) => {
+  const bands = await bandedBandsPng()
+  const green = await pngFromRgba(fill(80, 40, () => [0, 255, 0, 255]), 80, 40)
+  const bytesById = new Map<string, Uint8Array>([
+    ['att-i8-3-04-bands', bands],
+    ['att-i8-3-04-green', green],
+  ])
+  const { terminal, app } = await startSixelApp(t, {
+    imageLoader: new ImageLoader(async (ref) => ({ ref: {}, data: bytesById.get(ref.attachmentId)! })),
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  const folder = new TranscriptFolder()
+  folder.apply([
+    {
+      type: 'user/message', seq: 1, time: 1,
+      data: { content: [{ type: 'image', attachment: { attachmentId: 'att-i8-3-04-bands', mediaType: 'image/png', bytes: bands.byteLength, width: 200, height: 240, name: 'bands12.png' } }], source: { kind: 'user' } },
+    },
+    {
+      type: 'user/message', seq: 2, time: 2,
+      data: { content: [{ type: 'image', attachment: { attachmentId: 'att-i8-3-04-green', mediaType: 'image/png', bytes: green.byteLength, width: 80, height: 40, name: 'green.png' } }], source: { kind: 'user' } },
+    },
+    ...Array.from({ length: 8 }, (_, index) => ({
+      type: 'user/message' as const, seq: 10 + index, time: 10 + index,
+      data: { content: [{ type: 'text' as const, text: `filler ${index} ${'x'.repeat(100)}` }], source: { kind: 'user' as const } },
+    })),
+  ] as never)
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages())
+  app.requestRender()
+  await waitViewport(terminal, 'filler 7', 'the bottom filler')
+  app.scrollToTop()
+  await tick(200)
+
+  const projection = app as unknown as TopCropProjection
+  const snapshot = (): typeof projection.fullscreenPaintSnapshot => projection.fullscreenPaintSnapshot
+  const workspaceOpen = (): boolean => (app as unknown as { workspaceLease?: unknown }).workspaceLease !== undefined
+  const entryIndexOf = (attachmentId: string): number =>
+    projection.messageRows.findIndex(entry =>
+      (entry.message as { content?: readonly { type: string; attachment?: { attachmentId?: string } }[] } | undefined)
+        ?.content?.some(block => block.type === 'image' && block.attachment?.attachmentId === attachmentId) === true)
+  await waitCommittedImageBody(projection, entryIndexOf('att-i8-3-04-bands'), 'the bands image body')
+
+  // 1) A real user wheel scroll between press and release. The pressed cell
+  //    really moves onto the OTHER occurrence's body; the release must open no
+  //    Viewer and must not transfer to that occurrence.
+  const bandsIndex = entryIndexOf('att-i8-3-04-bands')
+  const bandsBody = fullscreenImageBodyRow(projection, bandsIndex).bodyRow
+  terminal.sendInput(`\x1b[<0;1;${bandsBody}M`) // press only
+  for (let step = 0; step < 16; step += 1) {
+    terminal.sendInput('\x1b[<65;10;5M')
+    await terminal.waitForRender()
+  }
+  const movedEntry = (() => {
+    const current = snapshot()
+    const abs = bandsBody - 1 - current.headerHeight - current.welcomeHeight + current.scrollTop
+    let top = 0
+    for (let index = 0; index < projection.messageRows.length; index += 1) {
+      const row = projection.messageRows[index]!
+      if (abs >= top && abs < top + row.height) {
+        return { index }
+      }
+      top += row.height
+    }
+    return { index: -1 }
+  })()
+  assert.equal(movedEntry.index, entryIndexOf('att-i8-3-04-green'),
+    'the pressed cell really moved onto the other occurrence after the wheel scroll')
+  terminal.sendInput(`\x1b[<0;1;${bandsBody}m`) // release on the OLD cell
+  await terminal.waitForRender()
+  await tick(200)
+  assert.equal(workspaceOpen(), false, 'a scrolled press/release opens no Viewer and does not transfer to the new occurrence')
+  assert.ok(snapshot().scrollTop > 0, 'the wheel really scrolled the transcript viewport')
+
+  // 2) A real resize between press and release: the app must reject the stale
+  //    frame gesture even when the synthesized click still reaches it.
+  app.scrollToTop()
+  await tick(300)
+  await waitCommittedImageBody(projection, bandsIndex, 'the bands body before the resize gesture')
+  const beforeResize = fullscreenImageBodyRow(projection, bandsIndex).bodyRow
+  await settlePointerWindow()
+  terminal.sendInput(`\x1b[<0;1;${beforeResize}M`) // press only
+  terminal.emitResize(100, 30)
+  await until(() => (snapshot() as unknown as { termRows: number }).termRows === 30, 'the resized frame to commit')
+  await tick(200)
+  terminal.sendInput(`\x1b[<0;1;${beforeResize}m`) // release on the stale cell
+  await terminal.waitForRender()
+  assert.equal(workspaceOpen(), false, 'a resize between press and release cannot act on the stale frame')
+
+  // 3) Positive control: on the NEW frame the same source's painted pixel body
+  //    opens the correct Viewer; the green occurrence opens its own source.
+  await waitCommittedImageBody(projection, bandsIndex, 'the bands body after the resize')
+  const freshBands = fullscreenImageBodyRow(projection, bandsIndex).bodyRow
+  await settlePointerWindow()
+  terminal.sendInput(`\x1b[<0;1;${freshBands}M`)
+  terminal.sendInput(`\x1b[<0;1;${freshBands}m`)
+  await waitViewport(terminal, 'Image · bands12.png', 'the Viewer for the bands source')
+  terminal.sendInput('\x1b')
+  await waitViewportGone(terminal, 'Image · bands12.png', 'the bands Viewer to close')
+
+  app.scrollToBottom()
+  await tick(300)
+  app.scrollToTop()
+  await tick(200)
+  for (let step = 0; step < 16; step += 1) {
+    terminal.sendInput('\x1b[<65;10;5M')
+    await terminal.waitForRender()
+  }
+  const greenIndex = entryIndexOf('att-i8-3-04-green')
+  assert.notEqual(greenIndex, -1, 'the green occurrence is mounted')
+  await waitCommittedImageBody(projection, greenIndex, 'the green image body')
+  const greenBody = fullscreenImageBodyRow(projection, greenIndex).bodyRow
+  await settlePointerWindow()
+  terminal.sendInput(`\x1b[<0;1;${greenBody}M`)
+  terminal.sendInput(`\x1b[<0;1;${greenBody}m`)
+  const greenViewer = await waitViewport(terminal, 'Image · green.png', 'the Viewer for the green source')
+  assert.ok(stripSgr(greenViewer).includes('Esc close'), 'the green body opens its OWN direct Viewer')
+  terminal.sendInput('\x1b')
+  await waitViewportGone(terminal, 'Image · green.png', 'the green Viewer to close')
 })
