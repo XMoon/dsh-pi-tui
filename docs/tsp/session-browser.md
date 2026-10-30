@@ -133,10 +133,17 @@ production default; TSP keeps the experimental opt-in described in
   and pending latch. Browser events and native typed direct matches are admitted
   only for this read's listed main rows; typed direct matching is suppressed
   when the user changed the query during listing. Both routes carry the captured
-  `SessionScope`; `SessionRuntime.switchSession(target, expectedScope)` checks
-  that exact owner/generation again inside the existing transition gate before
-  navigation side effects. It never opens a nested gate or trusts a Session ID,
-  `Picker.current`, `selected` or a `live` badge as currentness authority.
+  `SessionScope`; `SessionRuntime.switchSessionOutcome(target, expectedScope)`
+  checks that exact owner/generation again inside the existing transition gate
+  before navigation side effects, and its SETTLED outcome is what the command
+  owner reports. An accepted `requestResume` intent and a closed panel are not
+  switch success: only a `committed` outcome settles the command as switched,
+  while `superseded`, `cancelled`, `failed` and `indeterminate` stay distinct
+  (an `indeterminate` outcome is never restored or retried automatically). The
+  legacy `switchSession(target, expectedScope)` projection remains for callers
+  that only consume an error string. It never opens a nested gate or trusts a
+  Session ID, `Picker.current`, `selected` or a `live` badge as currentness
+  authority.
 - Flush, lifecycle open, publication, old-owner retirement, hydration, catalog
   refresh and reporting remain owned by the existing Session runtime. An
   open/refusal failure leaves the old owner current, keeps the Browser retryable,
