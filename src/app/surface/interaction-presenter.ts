@@ -77,6 +77,19 @@ export interface SurfaceInteractionPresenter {
    */
   setQuestionAttention(parkedCount: number): void
   /**
+   * TSP-7 PR-B (external review F4): which official modal KIND is actually
+   * PRESENTED on the seat right now — the ONE authority for the
+   * `waiting-approval`/`waiting-question` phases. A request that is merely
+   * REGISTERED or FIFO-QUEUED behind another modal is NOT presented and must
+   * never claim the phase.
+   *
+   * Implementations: the PiTui adapter mirrors `TuiApp.activityStatus()`'s own
+   * facts (`approvals.isActive()` / `activeQuestions` — the ACTIVE slot, never
+   * the queue); the TSP seat reads its active slot the same way. Optional so a
+   * narrow test double can omit it; `undefined` means "no modal presented".
+   */
+  presentedModalKind?(): 'approval' | 'question' | undefined
+  /**
    * Synchronously end this presenter's queued/active promises on surface
    * teardown, so no caller is left hanging. Called by the interaction owner
    * AFTER its controller is retired (the controller's own disposal classifies
@@ -113,7 +126,10 @@ export interface SurfaceInteractionPresenter {
 export type PiTuiInteractionApp = Pick<
   TuiApp,
   'showApprovalPrompt' | 'askQuestions' | 'setSettledQuestionAnswersLookup' | 'notify' | 'setQuestionAttention'
->
+> & {
+/** The ACTIVE-slot modal read `TuiApp.activityStatus()` derives phases from. */
+  readonly presentedModalKindForStatus: () => 'approval' | 'question' | undefined
+}
 
 /**
  * The PiTui presenter: a narrow delegating adapter over the ONE mounted
@@ -133,6 +149,9 @@ export function pituiSurfaceInteractionPresenter(app: PiTuiInteractionApp): Surf
     setSettledQuestionAnswersLookup: lookup => { app.setSettledQuestionAnswersLookup(lookup) },
     notify: (text, kind) => { app.notify(text, kind) },
     setQuestionAttention: parkedCount => { app.setQuestionAttention(parkedCount) },
+    // The same ACTIVE-slot facts `TuiApp.activityStatus()` derives its phases
+    // from (PR-B F4): the presented modal, never the queued requests.
+    presentedModalKind: () => app.presentedModalKindForStatus(),
     withdrawPending: () => {},
     withdrawPresentations: () => {},
     closeTransientList: () => {},

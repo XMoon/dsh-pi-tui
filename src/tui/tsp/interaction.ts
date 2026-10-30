@@ -136,6 +136,12 @@ export interface TspInteractionSeat {
   /** The parked-Question count projected into the dock (`0` hides the line). */
   attentionCount(): number
   /**
+   * TSP-7 PR-B (F4): the ACTIVE slot's kind — the ONE authority for the
+   * waiting phases. A FIFO-queued request behind another modal is alive but
+   * NOT presented.
+   */
+  presentedModalKind(): 'approval' | 'question' | undefined
+  /**
    * TSP-7 PR-B (F3): the renderer's display commit absorbs the pending
    * attention-line repaint (the same-tick activity publish carries BOTH the
    * dock count and the native badge in ONE frame).
@@ -1262,6 +1268,11 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     notify(text, kind) {
       options.notify(text, kind)
     },
+    presentedModalKind() {
+      // PR-B F4: the seat's ACTIVE slot is the presented truth (a queued
+      // request never claims the waiting phase).
+      return active?.kind
+    },
     setQuestionAttention(parkedCount) {
       if (disposed || parkedCount === attention) return
       attention = parkedCount
@@ -1326,6 +1337,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     renderEmptyLayer,
     desiredFocusId,
     attentionCount: () => attention,
+    presentedModalKind: () => active?.kind,
     /**
      * TSP-7 PR-B (F3): the renderer's display commit absorbs the pending
      * attention-line repaint (the same-tick activity publish carries BOTH the

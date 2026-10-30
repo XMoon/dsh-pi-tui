@@ -192,6 +192,21 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    * the renderer's own presenter (PiTui app chrome, TSP dock line) instead of a
    * PiTui-only `TuiApp` read — the read-only renderer has no app at all.
    */
+  /**
+   * TSP-7 PR-B (F4): the presented modal facts from the PRESENTER's own
+   * active-slot read — the ONE authority for the waiting phases. A request
+   * that is registered or FIFO-queued behind another modal is alive but NOT
+   * presented; a settle promotes the queue BEFORE the promise resolves, so the
+   * republish below always reads the already-promoted seat.
+   */
+  const presentedModalFacts = (): { approvalOpen: boolean; questionOpen: boolean } => {
+    const presented = options.presenter().presentedModalKind?.()
+    return {
+      approvalOpen: presented === 'approval',
+      questionOpen: presented === 'question',
+    }
+  }
+
   const publishAttention = (): void => {
     if (options.isCleanedUp()) return
     const rows = questionController?.attentionRows() ?? []
@@ -201,13 +216,12 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
     // fact together, so the two can never disagree on screen.
     //
     // `parked` is "still answerable but not on screen" — it is NEVER a
-    // `waiting-question` phase. `questionOpen` needs the Controller's own
-    // presented-form/live-flow fact (§8.2): a mounted modal is the only proof
-    // the user is actually being waited on.
+    // `waiting-question` phase by itself; the phase comes from the presenter's
+    // ACTIVE slot (F4): the actually-presented form is the only proof the user
+    // is being waited on.
     options.publishActivity({
       questionAttention: parked,
-      questionOpen: questionController?.hasPresentedQuestion() === true,
-      approvalOpen: liveApprovals.size > 0,
+      ...presentedModalFacts(),
     })
   }
 
@@ -422,36 +436,30 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
             : waitForLifetime(lifetime, release)
         }
         if (sessionId !== undefined) liveApprovals.set(lifetime, { sessionId, retire })
-        // TSP-7 PR-B: the request now has a PRESENTED prompt. An `ask` policy or
-        // a `read-only` preset is NOT an open approval — only a prompt this owner
-        // actually handed to the seat is. The Question fact is RE-READ from the
-        // controller (RFL-002): a Question that is still presented keeps its own
-        // fact — the shared derive decides which phase wins, never this publish.
-        if (sessionId !== undefined) {
-          options.publishActivity({
-            approvalOpen: true,
-            questionOpen: questionController?.hasPresentedQuestion() === true,
-          })
-        }
-        return options.presenter().showApprovalPrompt({
+        // TSP-7 PR-B (F4): the presented facts are read AFTER the presenter
+        // call takes (or queues) the seat — a FIFO-queued approval behind a
+        // Question is alive but NOT presented, so the phase stays with the
+        // Question until the approval is actually promoted. The publish runs
+        // inside the SAME synchronous admission below.
+        const settledPrompt = options.presenter().showApprovalPrompt({
           toolName: req.toolName,
           reason: req.reason,
           signal: lifetime,
           ...args === undefined ? {} : { arguments: args },
           ...args !== undefined && req.toolName === 'bash' && deps.dangerCommand(args) ? { danger: true } : {},
-        }, true).finally(() => {
+        }, true)
+        // The synchronous admission already ran (TSP: enqueue→activate→render);
+        // publish the post-admission truth. A presenter that defers its mount
+        // would still be read here as its current truth — never a guess.
+        if (sessionId !== undefined) options.publishActivity(presentedModalFacts())
+        return settledPrompt.finally(() => {
           liveApprovals.delete(lifetime)
           // The settle/abort/withdraw ends the wait: the phase must fall back
           // immediately instead of waiting for the next model token (§3.3). The
-          // Question fact is re-read here too, so a Question that OUTLIVED the
-          // approval is restored in the SAME step (RFL-002) — never left as a
-          // stale `false` until some later event.
-          if (sessionId !== undefined) {
-            options.publishActivity({
-              approvalOpen: liveApprovals.size > 0,
-              questionOpen: questionController?.hasPresentedQuestion() === true,
-            })
-          }
+          // settle PROMOTED the queue before resolving this promise, so this
+          // re-read already names the successor (F4/RFL-002) — a Question that
+          // outlived the approval is restored in the SAME step.
+          if (sessionId !== undefined) options.publishActivity(presentedModalFacts())
           release()
         })
       })
@@ -473,8 +481,17 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         port: port.questions,
         // The controller decides per presentation whether the Agent is blocked
         // on the answer: a LIVE foreground wait is, a CONTINUED late answer is not.
-        ask: (questions, signal, status, agentInputWait) =>
-          options.presenter().askQuestions(questions, signal, status, agentInputWait),
+        ask: (questions, signal, status, agentInputWait) => {
+          const settled = options.presenter().askQuestions(questions, signal, status, agentInputWait)
+          // PR-B F4: the presenter's synchronous admission already ran (TSP:
+          // enqueue→activate→render); publish the post-admission truth so a
+          // flow QUEUED behind another modal publishes THAT modal's phase, and
+          // a flow that TOOK the seat publishes waiting-question in the same
+          // step (the controller's pre-ask notify already published the
+          // pre-admission state — this is the completing half).
+          options.publishActivity(presentedModalFacts())
+          return settled
+        },
         notify: (message, level) => { options.presenter().notify(message, level) },
         repaint: () => options.schedulePaint(),
         currentSessionId: () => options.currentSessionId(),
