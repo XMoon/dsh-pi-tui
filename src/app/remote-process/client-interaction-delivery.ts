@@ -105,6 +105,30 @@ function onceNext<T>(next: () => T): () => T {
   }
 }
 
+/**
+ * Race one provider result against the official request lifetime. A presenter
+ * that never settles on local teardown must not keep the official Gateway's
+ * delivery task alive; the abandoned provider promise gets a rejection
+ * observer so its late settlement cannot become an unhandled rejection.
+ */
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return promise
+  if (signal.aborted) {
+    promise.catch(() => {})
+    return Promise.reject(abortReason(signal))
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      cleanup()
+      promise.catch(() => {})
+      reject(abortReason(signal))
+    }
+    const cleanup = (): void => { signal.removeEventListener('abort', onAbort) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(value => { cleanup(); resolve(value) }, error => { cleanup(); reject(error) })
+  })
+}
+
 /** Build one abort error without inventing a Host decision. */
 function abortReason(signal: AbortSignal | undefined): Error {
   const reason = signal?.reason
@@ -176,7 +200,7 @@ export function createSplitClientInteractionDelivery(
     for (;;) {
       const attachment = await waitForSurface(request.signal)
       try {
-        const result = await attachment.onQuestion(view, nextOnce)
+        const result = await raceWithAbort(Promise.resolve().then(() => attachment.onQuestion(view, nextOnce)), request.signal)
         if (current === attachment) return result
         if (request.signal?.aborted === true) return result
       } catch (error) {
@@ -204,7 +228,7 @@ export function createSplitClientInteractionDelivery(
     for (;;) {
       const attachment = await waitForSurface(request.signal)
       try {
-        const result = await attachment.onApproval(view, nextOnce)
+        const result = await raceWithAbort(Promise.resolve().then(() => attachment.onApproval(view, nextOnce)), request.signal)
         if (current === attachment) return result
         if (request.signal?.aborted === true) return result
       } catch (error) {

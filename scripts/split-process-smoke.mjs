@@ -2491,6 +2491,55 @@ async function main() {
         })
       }
 
+      // T41-gate: a SIGTERM while the REAL Cordis Loader gate is still pending
+      // must enter the ONE stop coordinator before any Gateway start. The
+      // process must exit cleanly, release the seat, leave no fake ready and
+      // keep the Host alive; the same Host then accepts a fresh Client.
+      {
+        const gateBarrier = join(workDir, 't41-gate-barrier')
+        rmSync(gateBarrier, { force: true })
+        const gateStopping = new SurfaceEntryProcess(entries.client, {
+          ...base,
+          workDir,
+          env: { ...base.env, SPLIT_PROCESS_CLIENT_HOLD_STARTUP_GATE: gateBarrier },
+        })
+        surfaceClients.push(gateStopping)
+        const gateHeld = await gateStopping.waitFor(
+          record => record.m4b2s === 'qualification' && record.op === 'startup-gate-hold' && record.stage === 'loader-gate',
+          'T41-gate loader gate hold',
+          180_000,
+        )
+        gateStopping.signalBusiness('SIGTERM')
+        writeFileSync(gateBarrier, 'release\n', { mode: 0o600 })
+        const gateExit = await gateStopping.waitForExit(60_000)
+        assert(gateExit.code === 0, `T41-gate stop exit was ${JSON.stringify(gateExit)}`)
+        assert(!gateStopping.records.some(record => record.m4a0 === 'ready'),
+          'T41-gate stop still published a ready surface')
+        assert(!gateStopping.records.some(record => record.m4a0 === 'cleanup-failure'),
+          'T41-gate stop reported a cleanup failure')
+        assert(!gateStopping.records.some(record => record.m4a0 === 'transport-ready'),
+          'T41-gate stop allowed transport readiness after the signal')
+        await gateStopping.dispose()
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        assert(alive(surfaceHostPid), 'T41-gate the Host died on the gate stop')
+        const gateReusable = new SurfaceEntryProcess(entries.client, { ...base, workDir })
+        surfaceClients.push(gateReusable)
+        const gateReusableReady = await gateReusable.waitFor(record => record.m4a0 === 'ready', 'T41-gate reusable Client ready', 180_000)
+        assert(gateReusableReady.surfaceMounted === true, 'T41-gate the reusable Client did not mount')
+        gateReusable.send('/exit\r')
+        const gateReusableExit = await gateReusable.waitForExit(60_000)
+        assert(gateReusableExit.code === 0, `T41-gate reusable Client exit was ${JSON.stringify(gateReusableExit)}`)
+        await gateReusable.dispose()
+        trace('t41-gate', {
+          heldAt: gateHeld.stage,
+          readyEmitted: false,
+          transportReady: false,
+          cleanupFailures: 0,
+          seatReusable: true,
+          hostAlive: true,
+        })
+      }
+
       // T43: a signal in the PRE-STARTUP assignment window (after the lazy
       // client-bootstrap import, before `startupPromise` exists) must wait for
       // the ONE startup gate and never dispose the root underneath a late
@@ -3103,7 +3152,12 @@ async function main() {
 
           const startedPeer = await startPeer('T51 old peer')
           peer = startedPeer.peer
-          const peerQuestion = await peer.waitFor(record => record.m4a0 === 'peer-interaction' && record.kind === 'question', 'T51 old peer held the stale question delivery', 120_000)
+          await peer.waitFor(record => record.m4a0 === 'peer-interaction' && record.kind === 'question', 'T51 old peer held the stale question delivery', 120_000)
+          const peerFrame = await peer.waitFor(record => record.m4a0 === 'peer-frame' && record.event === 'user-questions/request', 'T51 old peer captured the official question frame', 120_000)
+          assert(typeof peerFrame.eventId === 'string' && peerFrame.eventId.length > 0,
+            'T51 the old question frame has no eventId')
+          assert(typeof peerFrame.clientId === 'string' && peerFrame.clientId.length > 0,
+            'T51 the old question frame has no clientId')
 
           const { client: c2 } = await startC1Client('T51 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
           assertInteractionGate(c2, 'T51 C2')
@@ -3118,8 +3172,17 @@ async function main() {
           // The old Peer's frame was issued BEFORE the Host settled the new
           // answer. Its `$events/result` must be ignored by the Host stale
           // delivery fence, never delegated into a second settlement.
-          peer.send({ op: 'peer-answer', kind: 'question', callId: peerQuestion.peerKey, value: { answers: [{ id: 'c1-question', selected: ['Cancel'] }] } })
-          await peer.waitFor(record => record.m4a0 === 'peer-answer-sent' && record.callId === peerQuestion.peerKey, 'T51 stale peer answer sent', 30_000)
+          // The old legal frame is submitted through the official
+          // `$events/result` RPC AFTER C2 settled. The Host must receive the
+          // frame (RPC ok) and ignore it through the stale-delivery fence.
+          peer.send({
+            op: 'peer-send-stale-result',
+            eventId: peerFrame.eventId,
+            clientId: peerFrame.clientId,
+            value: { kind: 'result', value: { answers: [{ id: 'c1-question', selected: ['Cancel'] }] } },
+          })
+          const staleSent = await peer.waitFor(record => record.m4a0 === 'peer-stale-result-sent' && record.eventId === peerFrame.eventId, 'T51 stale peer frame sent to Host', 30_000)
+          assert(staleSent.ok === true, 'T51 the Host did not receive the old question result frame')
 
           const { client: c3 } = await startC1Client('T51 C3', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
           await c3.waitForScreen('question answered', 'T51 C3 settled transcript')
@@ -3131,7 +3194,7 @@ async function main() {
           assert(settlements.length === 1 && toolResults.length === 1, 'T51 the settled question produced a second answer/result')
           await exitC1Client(c3, 'T51 C3')
           await stopC1Host(host)
-          trace('t51', { hostPid: ready.pid, sessionId, callId, noResurrection: true, staleLegalFrameReplay: 'protocol-peer-negative' })
+          trace('t51', { hostPid: ready.pid, sessionId, callId, noResurrection: true, staleLegalFrameReplay: 'protocol-peer-negative', eventId: peerFrame.eventId, clientId: peerFrame.clientId })
         } finally {
           if (peer !== undefined) {
             await peer.shutdown().catch(() => {})
@@ -3143,7 +3206,17 @@ async function main() {
       // C2 reopens it from the Task Quick projection, submits a late answer,
       // and the Host queues exactly one `user-question-reply` message.
       {
-        const { host, ready, workRoot } = await startC1Host('question', 't52', { C1_TIMED_QUESTION: '1', SPLIT_PROCESS_EXTRA_PATCH: c1Work.timedPatchPath })
+        const afterTimedBarrier = join(workDir, 't52-after-timed.release')
+        const duplicateProbeBarrier = join(workDir, 't52-duplicate-probe.release')
+        const expiredProbeBarrier = join(workDir, 't52-expired-probe.release')
+        for (const barrier of [afterTimedBarrier, duplicateProbeBarrier, expiredProbeBarrier]) rmSync(barrier, { force: true })
+        const { host, ready, workRoot } = await startC1Host('question', 't52', {
+          C1_TIMED_QUESTION: '1',
+          SPLIT_PROCESS_EXTRA_PATCH: c1Work.timedPatchPath,
+          C1_HOLD_AFTER_TIMED: afterTimedBarrier,
+          C1_ANSWER_PROBE_DUPLICATE: duplicateProbeBarrier,
+          C1_ANSWER_PROBE_EXPIRED: expiredProbeBarrier,
+        })
         const { client: c1 } = await startC1Client('T52 C1')
         const sessionId = await openC1Session(c1, 't52 prompt', 'T52')
         const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', 'T52 timed question tool/call')
@@ -3157,6 +3230,7 @@ async function main() {
         const projection = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-projection' && event.callId === callId
           && Array.isArray(event.active) && event.active.some(item => item?.callId === callId && item?.state === 'continued'), 'T52 official continued projection', 120_000)
         await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId, 'T52 pending tool result', 120_000)
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'after-timed-held' && event.sessionId === sessionId, 'T52 Agent held after the timed question', 120_000)
         c1.signalBusiness('SIGTERM')
         const cleanExit = await c1.waitForExit(60_000)
         assert(cleanExit.code === 0 && cleanExit.signal === null, `T52 C1 clean exit was ${JSON.stringify(cleanExit)}`)
@@ -3172,9 +3246,19 @@ async function main() {
         c2.send('1')
         await c2.waitForScreen('Submit', 'T52 continued form review', 60_000)
         c2.send('\r')
-        // The queued answer is a durable Host fact (the inbox user message
-        // whose source names the call); the transient local notice is not the
-        // authority and may already have been replaced by the next turn.
+        c2.send('\r')
+        // The C2 UI's `answerContinued` return is observable through the
+        // controller's queued notice; the Host-side probe then calls the
+        // official `ctx.userQuestions.answer` service while the Agent is
+        // still held, proving the duplicate REPLY_QUEUED classification.
+        await c2.waitFor(record => record.m4b2s === 'qualification' && record.op === 'question-answer-continued'
+          && record.result === 'queued', 'T52 queued answer classification', 60_000)
+        writeFileSync(duplicateProbeBarrier, 'release\n', { mode: 0o600 })
+        const duplicate = await waitForC1WorkEvent(workRoot, event => event.kind === 'answer-probe' && event.phase === 'duplicate', 'T52 duplicate continued answer probe', 60_000)
+        assert(duplicate.code === 'REPLY_QUEUED', `T52 duplicate continued answer classification was ${JSON.stringify(duplicate)}`)
+
+        writeFileSync(afterTimedBarrier, 'release\n', { mode: 0o600 })
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T52 queued reply turn/end', 120_000)
         const replyDeadline = Date.now() + 60_000
         let queuedMessages = []
         while (Date.now() < replyDeadline) {
@@ -3185,6 +3269,13 @@ async function main() {
           await sleep(50)
         }
         assert(queuedMessages.length === 1, `T52 expected exactly one durable queued reply, got ${String(queuedMessages.length)}`)
+        const queuedSource = queuedMessages[0].data?.source
+        assert(queuedSource?.kind === 'user-question-reply' && queuedSource?.callId === callId,
+          `T52 the durable inbox source does not name the continued call: ${JSON.stringify(queuedSource)}`)
+
+        writeFileSync(expiredProbeBarrier, 'release\n', { mode: 0o600 })
+        const expired = await waitForC1WorkEvent(workRoot, event => event.kind === 'answer-probe' && event.phase === 'expired', 'T52 expired continued answer probe', 60_000)
+        assert(expired.value === false, `T52 expired continued answer classification was ${JSON.stringify(expired)}`)
         await exitC1Client(c2, 'T52 C2')
         await stopC1Host(host)
         trace('t52', {
@@ -3194,6 +3285,8 @@ async function main() {
           projectedState: projection.active.find(item => item?.callId === callId)?.state,
           continuedAnswer: 'queued',
           durableReplies: queuedMessages.length,
+          duplicateAnswer: 'REPLY_QUEUED',
+          expiredAnswer: 'not-continued',
         })
       }
 
@@ -3263,21 +3356,32 @@ async function main() {
           await c1.dispose()
           const startedPeer = await startPeer('T55a old peer')
           peer = startedPeer.peer
-          const peerRequest = await peer.waitFor(record => record.m4a0 === 'peer-interaction' && record.kind === 'approval', 'T55a old peer held approval delivery', 120_000)
+          await peer.waitFor(record => record.m4a0 === 'peer-interaction' && record.kind === 'approval', 'T55a old peer held approval delivery', 120_000)
+          const peerFrame = await peer.waitFor(record => record.m4a0 === 'peer-frame' && record.event === 'approval/request', 'T55a old peer captured the official approval frame', 120_000)
+          assert(typeof peerFrame.eventId === 'string' && peerFrame.eventId.length > 0,
+            'T55a the old approval frame has no eventId')
+          assert(typeof peerFrame.clientId === 'string' && peerFrame.clientId.length > 0,
+            'T55a the old approval frame has no clientId')
           const { client: c2 } = await startC1Client('T55A C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
           assertInteractionGate(c2, 'T55A C2')
           await c2.waitForScreen('Reject', 'T55a C2 approval sheet', 120_000)
           c2.send('n')
           const decided = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/decided' && String(event.data?.id) === requestId, 'T55a approval/decided', 120_000)
           assert(decided.data.outcome === 'rejected', 'T55a the legal Client did not reject the approval')
-          peer.send({ op: 'peer-answer', kind: 'approval', callId: peerRequest.peerKey, value: 'allowed-once' })
-          await peer.waitFor(record => record.m4a0 === 'peer-answer-sent' && record.kind === 'approval', 'T55a stale peer allow sent', 30_000)
+          peer.send({
+            op: 'peer-send-stale-result',
+            eventId: peerFrame.eventId,
+            clientId: peerFrame.clientId,
+            value: { kind: 'result', value: 'allowed-once' },
+          })
+          const staleSent = await peer.waitFor(record => record.m4a0 === 'peer-stale-result-sent' && record.eventId === peerFrame.eventId, 'T55a stale approval frame sent to Host', 30_000)
+          assert(staleSent.ok === true, 'T55a the Host did not receive the old approval result frame')
           const decisions = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'approval/decided' && String(event.data?.id) === requestId)
           assert(decisions.length === 1 && decisions[0].data.outcome === 'rejected', 'T55a the stale old-peer allow produced a second decision')
           assert(!existsSync(join(workRoot, 'approval-allow.marker')), 'T55a the stale old-peer allow executed the tool')
           await exitC1Client(c2, 'T55A C2')
           await stopC1Host(host)
-          trace('t55a', { hostPid: ready.pid, sessionId, requestId, oldPeerHeld: true, staleAllow: 'ignored', decisions: 1, marker: false })
+          trace('t55a', { hostPid: ready.pid, sessionId, requestId, oldPeerHeld: true, staleAllow: 'ignored', decisions: 1, marker: false, eventId: peerFrame.eventId, clientId: peerFrame.clientId })
         } finally {
           if (peer !== undefined) {
             await peer.shutdown().catch(() => {})
@@ -3318,7 +3422,7 @@ async function main() {
       // The root delivery survives the revision swap; the new surface shows
       // the SAME Host pending and only the new surface's answer settles it.
       for (const [kind, scenario, label, confirmText, answer, expectedCount] of [
-        ['question', 'question', 't55c-question', 'Continue the C1 test?', '1\r', 1],
+        ['question', 'question', 't55c-question', 'Continue the C1 test?', '1', 1],
         ['approval', 'approval-allow', 't55c-approval', '[y] Allow once', 'y', 1],
       ]) {
         const { host, ready, workRoot } = await startC1Host(scenario, label)
@@ -3524,24 +3628,6 @@ async function main() {
         trace('t59-stop', { hostPid: stopReady.pid, exit: stopExit.code, cleanupFailures: 0, hostAlive: true })
       }
 
-      // T60: final qualification inventory. The real stage-final lane runs the
-      // release gates; this record proves the exact candidate stayed unchanged
-      // across the whole REAL_SPLIT_PROCESS run and names the known gaps.
-      assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
-        'T60 the candidate artifact changed during the M4-C1 qualification')
-      trace('t60', {
-        candidate: basename(tarball),
-        sha256: candidateSha256,
-        dshVersion: targetDshVersion,
-        m4c1: 'PASS',
-        t44t48: 'pass',
-        t49t55: 'pass (T49-T55, including the old-peer protocol negatives and same-PID HMR pending question/approval)',
-        t56t59: 'pass',
-        t60Status: 'PASS: complete T01-T60 qualification ran on this exact candidate',
-        t26aArtifactMissing: 'pass (current main real artifact-absent + restored authenticated identity)',
-        t12PtyHup: 'pass (real PTY master close)',
-        releaseGates: 'run by the stage-final lane, not by this smoke',
-      })
     } finally {
       for (const client of c1Clients) await client.dispose()
       for (const host of c1Hosts) await stopC1Host(host)
@@ -3610,6 +3696,27 @@ async function main() {
     assert(!Object.keys(manifest.exports ?? {}).includes('./local-host'), 'T18 public Host entry appeared')
     assert(!Object.keys(manifest.exports ?? {}).includes('./local-client'), 'T18 public Client entry appeared')
     trace('t18', { packageShape: 'internal entries only', directHelp: 'pass', roleOnlyNegative: 'pass' })
+
+    // T60: the REAL_SPLIT_PROCESS inventory is emitted only after every smoke
+    // sub-check above (including T26a restored identity and T18 package shape)
+    // has completed on the SAME candidate. The cross-lane release gates are
+    // NOT claimed by this script; the stage-final lane records their verdict
+    // separately before the overall T60 status is final.
+    assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
+      'T60 the candidate artifact changed during the M4-C1 qualification')
+    trace('t60', {
+      candidate: basename(tarball),
+      sha256: candidateSha256,
+      dshVersion: targetDshVersion,
+      m4c1: 'PASS_REAL_SPLIT_PROCESS',
+      t44t48: 'pass',
+      t49t55: 'pass (T49-T55, including the old-peer protocol negatives and same-PID HMR pending question/approval)',
+      t56t59: 'pass',
+      t60Status: 'PASS_REAL_SPLIT_PROCESS: T01-T60 split-process inventory and T26a restored identity completed; release gates pending the stage-final lane verdict',
+      t26aArtifactMissing: 'pass (current main real artifact-absent + restored authenticated identity)',
+      t12PtyHup: 'pass (real PTY master close)',
+      releaseGates: 'not run by this smoke; stage-final lane records the separate release-gate verdict',
+    })
 
     console.log(`split-process B1/B2-S authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}`)
   } finally {

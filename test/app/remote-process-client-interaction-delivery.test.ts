@@ -138,6 +138,23 @@ test('an aborted request lifetime settles without delegating or leaking a pendin
   delivery.dispose()
 })
 
+test('an uncooperative provider is released by the official request abort', async () => {
+  const { seat, delivery } = createDelivery()
+  const controller = new AbortController()
+  const result = seat.emitQuestion(
+    { questions: QUESTIONS, wait: { callId: 'call-abort-provider' }, signal: controller.signal },
+    async () => PROCEED,
+  )
+  delivery.attachSurface(1, {
+    onQuestion: async () => await new Promise<never>(() => {}),
+    onApproval: () => 'rejected',
+  })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  controller.abort(new Error('host lifetime ended'))
+  await assert.rejects(result, /host lifetime ended/u)
+  delivery.dispose()
+})
+
 test('a stale revision result is discarded and the replacement revision settles the SAME question', async () => {
   const { seat, delivery } = createDelivery()
   const first = deferred<AskUserQuestionAnswer>()

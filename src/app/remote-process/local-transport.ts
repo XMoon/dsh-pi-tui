@@ -738,5 +738,18 @@ export async function startLocalTransport(
   options: StartLocalTransportOptions,
 ): Promise<LocalClientTransport> {
   const installed = await installLocalTransport(context, options)
-  return await awaitLocalTransportReady(installed, options.signal === undefined ? {} : { signal: options.signal })
+  try {
+    return await awaitLocalTransportReady(installed, options.signal === undefined ? {} : { signal: options.signal })
+  } catch (error) {
+    // The caller assigns this transport only after the wrapper resolves. A
+    // readiness/fatal/identity failure therefore still belongs to THIS
+    // function: release the installed carrier and fibers here, preserving the
+    // original failure and attaching cleanup failures to its cause chain.
+    const cleanupErrors: unknown[] = []
+    try { await installed.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
+    const primary = error instanceof Error ? error : new Error(String(error))
+    for (const cleanupError of cleanupErrors) mergeCause(primary, cleanupError)
+    if (cleanupErrors.length > 0) (primary as Error & { cleanupFailed?: boolean }).cleanupFailed = true
+    throw primary
+  }
 }

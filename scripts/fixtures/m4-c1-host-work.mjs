@@ -253,6 +253,10 @@ class C1Model extends LlmAdapter {
         yield { type: 'finish', reason: { kind: 'tool-calls' } }
         return
       }
+      if (process.env.C1_HOLD_AFTER_TIMED !== undefined && process.env.C1_HOLD_AFTER_TIMED !== '') {
+        this.record('after-timed-held', { sessionId })
+        await waitForBarrier(process.env.C1_HOLD_AFTER_TIMED, signal)
+      }
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: `question answered ${token}` }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `question answered ${token}` } }
@@ -466,6 +470,45 @@ export function apply(ctx) {
       for (const agent of ctx.agents.roots()) {
         record('agent-cancel-requested', { agentId: String(agent.id) })
         agent.cancel({ kind: 'user' })
+      }
+    }, 20)
+    ctx.effect(() => () => clearInterval(timer))
+  }
+
+  // Qualification-only Host-side continued-answer probe. It calls the
+  // official `ctx.userQuestions.answer` service (the same authority behind the
+  // Remote namespace) at a smoke-controlled barrier and records the exact
+  // boolean/error taxonomy. It never writes a question event itself.
+  for (const [envName, phase] of [
+    ['C1_ANSWER_PROBE_DUPLICATE', 'duplicate'],
+    ['C1_ANSWER_PROBE_EXPIRED', 'expired'],
+  ]) {
+    const probePath = process.env[envName]
+    if (probePath === undefined || probePath === '') continue
+    record('answer-probe-armed', { phase, probePath })
+    const timer = setInterval(() => {
+      if (!existsSync(probePath)) return
+      clearInterval(timer)
+      try {
+        const agent = ctx.agents.roots()[0]
+        const userQuestions = ctx.get('userQuestions')
+        if (agent === undefined || userQuestions === undefined) {
+          record('answer-probe', { phase, error: agent === undefined ? 'no-root-agent' : 'no-user-questions' })
+          return
+        }
+        const call = userQuestions.continued(agent)[0]
+        if (call === undefined) {
+          record('answer-probe', { phase, error: 'not-continued', value: false })
+          return
+        }
+        const value = userQuestions.answer(agent, call.callId, { answers: [{ id: 'c1-question', selected: ['Proceed'] }] })
+        record('answer-probe', { phase, callId: call.callId, value })
+      } catch (error) {
+        record('answer-probe', {
+          phase,
+          code: error?.code,
+          message: error instanceof Error ? error.message : String(error),
+        })
       }
     }, 20)
     ctx.effect(() => () => clearInterval(timer))

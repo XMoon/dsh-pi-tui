@@ -539,6 +539,7 @@ async function startSurfaceLocalClient(
       clientUi: revision.ui,
       delivery,
       surfaceRevision: revision.id,
+      ...(composition.onQualification === undefined ? {} : { onQualification: composition.onQualification }),
       ...(signal === undefined ? {} : { signal }),
       ...(promptSerializer === undefined ? {} : { promptSerializer }),
     })

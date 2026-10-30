@@ -142,6 +142,8 @@ export interface RemoteBackendRuntimeOptions {
   readonly delivery?: SplitClientInteractionDelivery
   /** Split-Client only: the surface revision identity attached to `delivery`. */
   readonly surfaceRevision?: number
+  /** Qualification-only telemetry forwarded to the Remote interaction port. */
+  readonly onQualification?: (record: Record<string, unknown>) => void
   /** The ONE shared Client runtime source every adapter consumes: the M3-1
    *  Client runtime or the real split Client's mounted official Domains —
    *  never a second graph. */
@@ -216,6 +218,7 @@ export async function createRemoteBackendRuntime(
       ...(options.isDispatchAllowed === undefined ? {} : { isDispatchAllowed: options.isDispatchAllowed }),
       ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
       ...(options.surfaceRevision === undefined ? {} : { surfaceRevision: options.surfaceRevision }),
+      ...(options.onQualification === undefined ? {} : { onQualification: options.onQualification }),
     })
     unwind.push(() => semantics.dispose())
     const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))

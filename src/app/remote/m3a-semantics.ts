@@ -107,6 +107,8 @@ export interface RemoteM3ASemanticsOptions {
   readonly delivery?: SplitClientInteractionDelivery
   /** Split-Client only: the surface revision token attached to `delivery`. */
   readonly surfaceRevision?: number
+  /** Qualification-only telemetry forwarded to the Remote interaction port. */
+  readonly onQualification?: (record: Record<string, unknown>) => void
 }
 
 /** The ONE shared Client sessions service: the intersection of every
@@ -202,6 +204,7 @@ export function createRemoteM3ASemantics(
     connection: { generation },
     ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
     ...(options.surfaceRevision === undefined ? {} : { surfaceRevision: options.surfaceRevision }),
+    ...(options.onQualification === undefined ? {} : { onQualification: options.onQualification }),
   })
   const presetCatalog = new RemotePresetCatalog(remote.agentPresets, generation)
   let disposed = false

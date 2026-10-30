@@ -217,6 +217,16 @@ export function createInteractionStartupGate(): InteractionStartupGate {
   }
 }
 
+/** The official Remote service subset the qualification Peer observes. */
+interface PeerRemoteService {
+  readonly events?: {
+    answer?: (frame: { readonly event: string; readonly eventId: string }, clientId: string, signal?: AbortSignal) => Promise<unknown>
+  }
+  readonly userQuestions?: {
+    answer(sessionId: string, callId: string, answer: unknown): Promise<{ readonly ok: boolean; readonly value?: boolean; readonly error?: { readonly code?: string } }>
+  }
+}
+
 /** One pending forwarded interaction held by the non-TUI answering Peer. */
 interface PeerInteractionSeat {
   answer(kind: 'question' | 'approval', callId: string, value: unknown): boolean
@@ -421,7 +431,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         // A stop can land during the dynamic client-bootstrap import or before
         // `startupPromise` is assigned. Wait for the startup gate so the root
         // is never disposed underneath a late `startLocalClient` call.
-        if (startupPromise === undefined && !compositionDone) await startupReady
+        // A stop before the Client Context exists has no startup graph to
+        // wait for. Once the Context exists, the in-flight staged startup owns
+        // the partial graph; wait for its single startup gate so the root is
+        // never disposed underneath a late `startLocalClient` call.
+        if (startupPromise === undefined && context !== undefined && !compositionDone) await startupReady
         // Wait for the in-flight assembly to settle: a success publishes the
         // ONE handle, a failure has already unwound the graph it created.
         if (startupPromise !== undefined && handle === undefined) {
@@ -490,6 +504,19 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     return stopping
   }
 
+  // Install the process-lifetime shutdown handlers BEFORE the first staged
+  // startup resource exists. The Loader gate, transport fibers and Domain
+  // prerequisites are all created below; a SIGTERM/SIGINT during any of those
+  // stages must enter the ONE stop coordinator instead of the default action.
+  process.on('SIGTERM', () => {
+    emit({ m4a0: 'signal', processRole: 'client', pid: process.pid, signal: 'SIGTERM' })
+    runDetached('local client: SIGTERM shutdown', () => stop(0), { diag })
+  })
+  process.on('SIGINT', () => {
+    emit({ m4a0: 'signal', processRole: 'client', pid: process.pid, signal: 'SIGINT' })
+    runDetached('local client: SIGINT shutdown', () => stop(130), { diag })
+  })
+
   /**
    * The structured status of the transport for a record. Surface mode strips
    * the private Host home path; the qualification channel keeps its frozen
@@ -519,6 +546,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       dshAnchor: options.dshAnchor,
       profile: options.profile,
     })
+    startupAbort.signal.throwIfAborted()
     emit({
       m4a0: 'host-authenticated',
       processRole: 'client',
@@ -568,6 +596,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       await loader.create({ name: `cordis:${INTERACTION_STARTUP_GATE}` })
       startupAbort.signal.throwIfAborted()
       if (!startupGate.pending) throw new Error('local client entry: the interaction startup gate failed before the transport install')
+      const gateHold = process.env.SPLIT_PROCESS_CLIENT_HOLD_STARTUP_GATE
+      if (gateHold !== undefined && gateHold !== '') {
+        emit({ m4b2s: 'qualification', op: 'startup-gate-hold', stage: 'loader-gate', barrier: gateHold })
+        await waitForStartupHold(gateHold, startupAbort.signal)
+      }
       // 2. Install typert/connection/gateway. Gateway applies its service but
       // its event pump waits for the Loader gate above.
       installedTransport = await transportModule.installLocalTransport(clientContext, {
@@ -585,6 +618,27 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       domainPrerequisites = await mountSurfaceClientDomainPrerequisites(clientContext, { dshAnchor: options.dshAnchor })
       const remote = clientContext.get('remote') as unknown as import('./client-interaction-delivery.ts').SplitClientInteractionEventsSource | undefined
       if (remote === undefined) throw new Error('local client entry: the official Client Remote service did not install')
+      const remoteService = clientContext.get('remote') as unknown as PeerRemoteService | undefined
+      const peerFrames = new Map<string, { readonly clientId: string; readonly event: string }>()
+      if (options.mode === 'peer' && remoteService?.events?.answer !== undefined) {
+        // Test-only protocol observer: capture the official forwarded-event
+        // identity (clientId/eventId) and the frame before the real answerer
+        // runs. It never replaces the official dispatcher: the original method
+        // is called unbound on its own owner.
+        const events = remoteService.events
+        const originalAnswer = events.answer
+        if (originalAnswer === undefined) throw new Error('local client entry: the official Remote event dispatcher is unavailable')
+        events.answer = async function (frame, clientId, signal) {
+          peerFrames.set(String(frame.eventId), { clientId, event: frame.event })
+          emit({
+            m4a0: 'peer-frame',
+            event: frame.event,
+            eventId: String(frame.eventId),
+            clientId,
+          })
+          return await originalAnswer.call(events, frame, clientId, signal)
+        }
+      }
       // 4. Register the TWO official listeners EXACTLY ONCE for this Client
       // root, then release the gate. Only now may the Gateway start. The
       // surface mode borrows the root delivery owner; the qualification-only
@@ -656,6 +710,50 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
             emit({ m4a0: 'peer-answer-sent', kind, callId, delivered })
             return false
           }
+          if (request.op === 'peer-send-stale-result') {
+            const eventId = request.eventId
+            const clientId = request.clientId
+            const outcome = request.value
+            if (typeof eventId !== 'string' || typeof clientId !== 'string' || outcome === undefined) {
+              emit({ m4a0: 'control-error', error: 'peer-send-stale-result requires eventId/clientId/value' })
+              return false
+            }
+            const connection = clientContext.get('connection') as unknown as {
+              rpc: { call(channel: string, endpoint: string, payload: unknown, signal?: AbortSignal): Promise<{ readonly ok: boolean; readonly error?: { readonly code?: string; readonly message?: string } }> }
+            } | undefined
+            if (connection === undefined) throw new Error('local client entry: the qualification Peer has no Connection RPC')
+            const response = await connection.rpc.call('/api', '$events/result', {
+              args: { clientId, eventId, outcome },
+            })
+            emit({
+              m4a0: 'peer-stale-result-sent',
+              eventId,
+              clientId,
+              ok: response.ok === true,
+              ...(response.error?.code === undefined ? {} : { errorCode: response.error.code }),
+            })
+            return false
+          }
+          if (request.op === 'peer-question-answer') {
+            const sessionId = request.sessionId
+            const callId = request.callId
+            const value = request.value
+            if (typeof sessionId !== 'string' || typeof callId !== 'string' || value === undefined) {
+              emit({ m4a0: 'control-error', error: 'peer-question-answer requires sessionId/callId/value' })
+              return false
+            }
+            if (remoteService?.userQuestions === undefined) throw new Error('local client entry: the qualification Peer has no userQuestions namespace')
+            const result = await remoteService.userQuestions.answer(sessionId, callId, value)
+            emit({
+              m4a0: 'peer-question-answer',
+              sessionId,
+              callId,
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
+              ok: result.ok === true,
+              ...(result.ok ? { value: result.value === true } : { errorCode: result.error?.code, error: result.error }),
+            })
+            return false
+          }
           if (request.op === 'shutdown') {
             await stop(0)
             return true
@@ -694,17 +792,6 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     if (process.env.SPLIT_PROCESS_CLIENT_FORCE_FAILURE === 'client-bootstrap') {
       throw new Error('local client entry: qualification forced client bootstrap failure')
     }
-    // Install the process-lifetime shutdown handlers BEFORE the ready record:
-    // the qualification harness sends SIGTERM as soon as it observes ready, and
-    // a handler installed afterwards loses that race to the default action.
-    process.on('SIGTERM', () => {
-      emit({ m4a0: 'signal', processRole: 'client', pid: process.pid, signal: 'SIGTERM' })
-      runDetached('local client: SIGTERM shutdown', () => stop(0), { diag })
-    })
-    process.on('SIGINT', () => {
-      emit({ m4a0: 'signal', processRole: 'client', pid: process.pid, signal: 'SIGINT' })
-      runDetached('local client: SIGINT shutdown', () => stop(130), { diag })
-    })
     const clientContext = context
     if (clientContext === undefined) throw new Error('local client entry: the Client root Context is missing')
     const surfaceFacts = surfaceStartupFacts(options)
@@ -894,6 +981,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     // aborted by `stop`). Wait for that ONE coordinator and do not report a
     // second cleanup or a duplicate failure for the expected cancellation.
     if (stopping !== undefined) {
+      // Release a stop that is waiting for the one startup gate; this path is
+      // the startup chain's own failure exit, so no `startLocalClient` call
+      // can still arrive.
+      startupReadyResolve?.()
       await stopping
       return
     }
