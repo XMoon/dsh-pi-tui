@@ -359,10 +359,18 @@ function paintScrollbar(
 			? box.scrollView.scrollbarThumbStyle(box.scrollView.isScrollbarActive ? "█" : "┃")
 			: box.scrollView.scrollbarTrackStyle("│");
 		// A trusted SIXEL anchor is a device command: slicing it to place one glyph
-		// would emit a corrupted command, so the glyph is drawn on a blank row
-		// instead and the caller has already withheld the block's DCS because its
-		// columns reach this reserved column. (X074.)
-		const base = sixelScreen?.footprint(screen[row] ?? "") === undefined ? (screen[row] ?? "") : "";
+		// would emit a corrupted command. A raster that does NOT reach the reserved
+		// scrollbar column keeps its intact DCS; only this anchor row has no bar
+		// glyph. A real horizontal overlap still yields to the scrollbar and is
+		// never composited, cut or shifted. (X074.)
+		const line = screen[row] ?? "";
+		const footprint = sixelScreen?.footprint(line);
+		if (footprint !== undefined && footprint.columns <= geometry.column) {
+			// The raster spans [0, columns); the one-cell track begins at column,
+			// so columns === column means the last pixel cell ends at column - 1.
+			continue;
+		}
+		const base = footprint === undefined ? line : "";
 		screen[row] = replaceScrollbarCell(
 			base,
 			geometry.column,

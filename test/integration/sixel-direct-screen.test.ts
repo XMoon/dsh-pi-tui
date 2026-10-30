@@ -1728,23 +1728,21 @@ test('E2-10a: a real top-cropped transcript image maps the visible rows and open
   const hidden = scrolled.scrollTop - tokenRow
   assert.ok(hidden >= 3 && hidden < 12, `the viewport top is inside the image (hidden ${hidden}): ${JSON.stringify(scrolled)}`)
 
-  // Pending: the crop DCS has not been written yet (the transient scrollbar
-  // owns the top track row for its 1000 ms hide delay), so the snapshot has no
-  // body hit and a press on the viewport's first row must stay inert.
+  // The crop encode is still pending: no committed body exists yet, and a press
+  // on the viewport's first row must stay inert. The visible auto scrollbar is
+  // no longer a paint prerequisite (X074 fix).
   const pending = readImage()
   assert.equal(pending.attachment.bodyEnd, pending.attachment.bodyStart, 'no crop body is committed while it is pending')
   assert.equal(pending.attachment.bodyStart, pending.attachment.infoRow + 1,
     'the row map still starts at the un-cropped body')
-  assert.equal(paintedRasters(terminal).length, 0, 'no crop DCS is written while the scrollbar owns the top row')
   const topRow = projection.fullscreenPaintSnapshot.headerHeight + 1
   terminal.sendInput(`\x1b[<0;1;${topRow}M`)
   terminal.sendInput(`\x1b[<0;1;${topRow}m`)
   assert.equal(workspaceOpen(), false, 'a pending crop row opens no Viewer')
 
-  // Let the transient scrollbar auto-hide; the next frame is the first that can
-  // carry the crop DCS on the scroll viewport's first physical row.
-  await new Promise(resolve => setTimeout(resolve, 1500)) // reason: ScrollView scrollbarHideDelayMs=1000 contract
-  await terminal.waitForRender()
+  // Wait for the REAL pending observation (a framePainted with grant+pendingCrop
+  // and no painted body). Scrollbar visibility is irrelevant: the committed crop
+  // may land while the transient bar is still visible.
   await until(() => pendingObserver.clicked(), 'the granted crop encode to be pending', 30_000)
   await tick(30)
   assert.equal(workspaceOpen(), false, 'a granted but uncommitted crop click opens no Viewer')
@@ -1752,7 +1750,9 @@ test('E2-10a: a real top-cropped transcript image maps the visible rows and open
 
   const painted = readImage()
   const paintedRows = painted.attachment.bodyEnd - painted.attachment.bodyStart
-  assert.ok(paintedRows > 0, 'the hidden scrollbar lets the crop DCS commit')
+  assert.ok(paintedRows > 0, 'the visible-scrollbar frame lets the crop DCS commit')
+  assert.equal((app as unknown as { fullscreenScroll: { isScrollbarVisible: boolean } }).fullscreenScroll.isScrollbarVisible, true,
+    'the crop DCS commits while the auto scrollbar is still visible')
   assert.ok(painted.crop >= 3, `the top crop really hides at least three rows (got ${painted.crop})`)
   assert.equal(painted.attachment.bodyStart, painted.attachment.infoRow + 1 + painted.crop,
     'the hit starts at the first VISIBLE body row')
@@ -1769,6 +1769,21 @@ test('E2-10a: a real top-cropped transcript image maps the visible rows and open
   const [wantR, wantG, wantB] = bandColour(painted.crop)
   assert.ok(Math.abs(topR - wantR) <= 24 && Math.abs(topG - wantG) <= 24 && Math.abs(topB - wantB) <= 24,
     `the first decoded row is band ${painted.crop}, not band 0: got ${topR},${topG},${topB}`)
+
+  // Hovering the right track must NOT retire the committed crop: the auto
+  // scrollbar shows above the image without taking the raster away.
+  const fullscreenScroll = (app as unknown as { fullscreenScroll: { isScrollbarVisible: boolean } }).fullscreenScroll
+  const hoverBaseline = terminal.writes.length
+  terminal.sendInput('\x1b[<35;100;5M')
+  await terminal.waitForRender()
+  assert.equal(fullscreenScroll.isScrollbarVisible, true, 'the hover really shows the auto scrollbar')
+  await tick(50)
+  const hoverWire = terminal.writes.slice(hoverBaseline).join('')
+  const hoverFrame = hoverWire.slice(hoverWire.lastIndexOf('\x1b[?2026h'))
+  assert.ok(hoverFrame.includes(cropDcs), 'the hover frame keeps the committed crop DCS')
+  const hovered = readImage()
+  assert.ok(hovered.attachment.bodyEnd > hovered.attachment.bodyStart,
+    'the committed crop body survives a scrollbar hover')
 
   // The DCS is positioned by the Screen at the scroll viewport's FIRST physical
   // row (header + 1), not at the original image row.
@@ -1946,13 +1961,13 @@ test('E2-10b: a real top-cropped Assistant SVG maps the visible pixel rows and k
 
   const pending = readVisual()
   assert.equal(pending.visual.thumbnailBody, undefined, 'no SVG thumbnail body is committed while it is pending')
-  assert.equal(paintedRasters(terminal).length, 0, 'no SVG crop DCS is written while the scrollbar owns the top row')
   const topRow = projection.fullscreenPaintSnapshot.headerHeight + 1
   terminal.sendInput(`\x1b[<0;1;${topRow}M`)
   terminal.sendInput(`\x1b[<0;1;${topRow}m`)
   assert.equal(workspaceOpen(), false, 'a pending SVG crop row opens no Viewer')
 
-  await new Promise(resolve => setTimeout(resolve, 1500)) // reason: ScrollView scrollbarHideDelayMs=1000 contract
+  // The real pending observation is the authority; the transient scrollbar may
+  // remain visible while the committed SVG crop paints (X074 fix).
   app.requestRender()
   await until(() => pendingObserver.clicked(), 'the granted SVG crop encode to be pending', 30_000)
   await tick(30)
@@ -1965,7 +1980,9 @@ test('E2-10b: a real top-cropped Assistant SVG maps the visible pixel rows and k
   await terminal.waitForRender()
 
   const painted = readVisual()
-  assert.ok(painted.visual.thumbnailBody !== undefined, 'the hidden scrollbar lets the SVG crop DCS commit')
+  assert.ok(painted.visual.thumbnailBody !== undefined, 'the visible-scrollbar frame lets the SVG crop DCS commit')
+  assert.equal((app as unknown as { fullscreenScroll: { isScrollbarVisible: boolean } }).fullscreenScroll.isScrollbarVisible, true,
+    'the SVG crop DCS commits while the auto scrollbar is still visible')
   assert.ok(painted.crop >= 3, `the SVG top crop hides at least three rows (got ${painted.crop})`)
   const visibleRows = painted.visual.thumbnailBody!.endRow - painted.visual.thumbnailBody!.startRow
   assert.ok(visibleRows > 0, 'the SVG hit covers real visible rows')
@@ -1983,6 +2000,19 @@ test('E2-10b: a real top-cropped Assistant SVG maps the visible pixel rows and k
   const [wantR, wantG, wantB] = bandColour(painted.crop)
   assert.ok(Math.abs(topR - wantR) <= 30 && Math.abs(topG - wantG) <= 30 && Math.abs(topB - wantB) <= 30,
     `the first visible SVG row is band ${painted.crop}, not band 0: got ${topR},${topG},${topB}`)
+
+  // Hovering the right track must NOT retire the committed SVG crop either.
+  const hoverScroll = (app as unknown as { fullscreenScroll: { isScrollbarVisible: boolean } }).fullscreenScroll
+  const hoverBaseline = terminal.writes.length
+  terminal.sendInput('\x1b[<35;100;5M')
+  await terminal.waitForRender()
+  assert.equal(hoverScroll.isScrollbarVisible, true, 'the hover really shows the auto scrollbar')
+  await tick(50)
+  const hoverWire = terminal.writes.slice(hoverBaseline).join('')
+  const hoverFrame = hoverWire.slice(hoverWire.lastIndexOf('\x1b[?2026h'))
+  assert.ok(hoverFrame.includes(cropDcs), 'the hover frame keeps the committed SVG crop DCS')
+  assert.ok(readVisual().visual.thumbnailBody !== undefined,
+    'the committed SVG crop body survives a scrollbar hover')
 
   const wire = terminal.writes.join('')
   const dcsAt = wire.lastIndexOf(cropDcs)
