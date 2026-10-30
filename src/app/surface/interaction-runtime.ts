@@ -157,7 +157,6 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    * continuation model, so this registry is what lets a published replacement
    * retire its presentation (B3 findings C/F6).
    */
-  let portPreservesHostPendingOnDetach = false
   const liveApprovals = new Map<AbortSignal, {
     readonly sessionId: string
     /**
@@ -168,8 +167,6 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
      * end that one, and the presentation retirement never does.
      */
     readonly retire: (() => void) | undefined
-    /** Detach the borrowed Host-signal listener without settling the Host. */
-    readonly release: () => void
   }>()
   /**
    * Whether THIS owner is ended. Combined with the surface's own cleanup latch it
@@ -379,7 +376,6 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
 
   return {
     attach(port, deps) {
-      portPreservesHostPendingOnDetach = port.preservesHostPendingOnDetach === true
       // PR3-A: a renderer that cannot present interactive modals (the
       // read-only TSP renderer) still registers BOTH answerers, but
       // fail-closed: approvals resolve `'unavailable'` (the official
@@ -439,7 +435,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
             ? Promise.resolve<ApprovalOutcome>('cancelled')
             : waitForLifetime(lifetime, release)
         }
-        if (sessionId !== undefined) liveApprovals.set(lifetime, { sessionId, retire, release })
+        if (sessionId !== undefined) liveApprovals.set(lifetime, { sessionId, retire })
         // TSP-7 PR-B (F4): the presented facts are read AFTER the presenter
         // call takes (or queues) the seat — a FIFO-queued approval behind a
         // Question is alive but NOT presented, so the phase stays with the
@@ -456,22 +452,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         // publish the post-admission truth. A presenter that defers its mount
         // would still be read here as its current truth — never a guess.
         if (sessionId !== undefined) options.publishActivity(presentedModalFacts())
-        // M4-C1: a SURFACE teardown settles the local prompt (`cancelled` on
-        // the PiTui path, a rejection on the TSP path) but must NOT settle the
-        // Host-owned forwarded approval. Keeping this promise pending leaves
-        // the official Gateway pending event available for the next Client's
-        // legal re-delivery; the Host signal still owns its real end.
-        const surfaceDetached = (): Promise<never> => new Promise<never>(() => {})
-        const guardedPrompt = settledPrompt.then(
-          outcome => portPreservesHostPendingOnDetach && (ended || options.isCleanedUp()) && req.signal !== undefined
-            ? surfaceDetached()
-            : outcome,
-          error => {
-            if (portPreservesHostPendingOnDetach && (ended || options.isCleanedUp()) && req.signal !== undefined) return surfaceDetached()
-            throw error
-          },
-        )
-        return guardedPrompt.finally(() => {
+        return settledPrompt.finally(() => {
           liveApprovals.delete(lifetime)
           // The settle/abort/withdraw ends the wait: the phase must fall back
           // immediately instead of waiting for the next model token (§3.3). The
@@ -515,7 +496,6 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         repaint: () => options.schedulePaint(),
         currentSessionId: () => options.currentSessionId(),
         isAdmissibleSession: sessionId => options.isAdmissibleSession(sessionId),
-        preservesHostPendingOnDetach: port.questions.preservesHostPendingOnDetach === true,
         diag: options.diag(),
       })
       controller.attach()
@@ -568,13 +548,8 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         // it. Nothing may outlive the surface as an unowned pending promise.
         () => { for (const finish of [...refusedPresentations]) finish() },
         // The pending approvals were settled by the withdrawal above; the
-        // registry must not outlive the presenter it addresses. Detach every
-        // borrowed Host-signal listener WITHOUT settling the Host event: a
-        // Client surface retirement is not a Host approval decision.
-        () => {
-          for (const live of liveApprovals.values()) live.release()
-          liveApprovals.clear()
-        },
+        // registry must not outlive the presenter it addresses.
+        () => { liveApprovals.clear() },
         () => options.livePresenter()?.setSettledQuestionAnswersLookup(undefined),
       ])
     },

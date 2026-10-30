@@ -152,8 +152,6 @@ export interface RemoteBackendRuntimeOptions {
    *  fence the Remote session writer consults immediately before dispatch).
    *  Absent = every pre-dispatch write is admissible (the pre-fence behavior). */
   readonly isDispatchAllowed?: () => boolean
-  /** Split Client Host-owned forwarded interactions (M4-C1). */
-  readonly preservesHostPendingOnDetach?: boolean
 }
 
 /** The complete experimental Remote `Backend` plus its disposal owner. */
@@ -211,7 +209,6 @@ export async function createRemoteBackendRuntime(
       promptSerializer: options.promptSerializer
         ?? RemotePromptSerializerProduction.overSessions(options.runtime.sessions),
       ...(options.isDispatchAllowed === undefined ? {} : { isDispatchAllowed: options.isDispatchAllowed }),
-      ...(options.preservesHostPendingOnDetach === true ? { preservesHostPendingOnDetach: true } : {}),
     })
     unwind.push(() => semantics.dispose())
     const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))

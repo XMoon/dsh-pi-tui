@@ -2885,20 +2885,19 @@ async function main() {
         // and keep the default lane green for the delivered subset rather than
         // claiming a false PASS.
         trace('t49-t55', {
-          status: 'BLOCKED_UPSTREAM',
+          status: 'PARTIAL',
           dshVersion: targetDshVersion,
           blockers: {
-            t49: 'BLOCKED_UPSTREAM: a fresh C2 cannot receive the original pending question after C1 death',
-            t50: 'BLOCKED_UPSTREAM: a fresh C2 cannot receive the original pending question after clean C1 exit',
-            t51: 'BLOCKED_UPSTREAM: stale legal event replay depends on the same pending-forwarded-event path',
-            t52: 'BLOCKED_UPSTREAM: timed/continued C2 answer depends on the same pending-forwarded-event path',
-            t53: 'BLOCKED_UPSTREAM: a fresh C2 cannot receive the original pending approval (allow)',
-            t54: 'BLOCKED_UPSTREAM: a fresh C2 cannot receive the original pending approval (reject)',
-            t55: 'BLOCKED_UPSTREAM: delayed old-peer/Host-abort races depend on the same pending-forwarded-event path',
+            t49: 'BLOCKED_BY_CLIENT_STARTUP_ORDERING: fresh C2 pending Question handoff after C1 death',
+            t50: 'BLOCKED_BY_CLIENT_STARTUP_ORDERING: fresh C2 pending Question handoff after clean C1 exit',
+            t51: 'DEFERRED_TO_C1_B: stale legal event replay/duplicate-answer negative controls',
+            t52: 'DEFERRED_TO_C1_B: timed Question continued answer via the official projection/userQuestions.answer path; independent of the original pending waterfall',
+            t53: 'BLOCKED_BY_CLIENT_STARTUP_ORDERING: fresh C2 pending Approval handoff (allow)',
+            t54: 'BLOCKED_BY_CLIENT_STARTUP_ORDERING: fresh C2 pending Approval handoff (reject)',
+            t55: 'DEFERRED_TO_C1_B: delayed old-peer and Host-abort negative controls',
           },
-          rootCause: 'the rc.4 Client event pump consumes Host-pending forwarded waterfall events when the Connection generation opens, before the fresh Client interaction owner attaches; no public pre-pump registration, replay buffer or restore API exists',
-          requiredUpstreamApi: 'pre-pump answerer registration/replay buffer or an explicit Client pending-event restore API',
-          reentry: 'upgrade to a DSH release with that public capability and rerun T49-T55 against the exact candidate',
+          rootCause: 'the PiTui split Client currently starts the official Gateway before its interaction owner is attached, so a fresh Client can consume a Host-pending forwarded event before the answerer exists; official Web uses the existing DSH Loader readiness gate to order its plugin graph before Gateway start. The equivalent PiTui split ordering is not yet verified; this is not established evidence that rc.4 lacks a public capability.',
+          reentry: 'verify the official DSH Loader readiness gate in the PiTui split composition, then execute T49-T55; T52 uses the independent continued-answer path',
         })
       } else {
         // T49/T50: an official pending Question survives C1 SIGKILL and a clean
@@ -3257,9 +3256,9 @@ async function main() {
         dshVersion: targetDshVersion,
         m4c1: 'PARTIAL (Owner-approved scope split)',
         t44t48: 'pass',
-        t49t55: 'BLOCKED_UPSTREAM: rc.4 Client event-pump pre-answerer delivery gap',
+        t49t55: 'PARTIAL: T49/T50/T53/T54 BLOCKED_BY_CLIENT_STARTUP_ORDERING; T51/T52/T55 DEFERRED_TO_C1_B',
         t56t59: 'pass',
-        t60Status: 'BLOCKED_UPSTREAM: complete T01-T60 qualification is not claimed',
+        t60Status: 'PARTIAL: complete T01-T60 qualification is not claimed',
         t26aArtifactMissing: 'NOT_VERIFIED (#474)',
         t12PtyHup: 'NOT_RUN',
         releaseGates: 'run by the stage-final lane, not by this smoke',

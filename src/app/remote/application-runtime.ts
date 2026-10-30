@@ -189,7 +189,6 @@ async function composeRemoteApplicationStage(input: {
   readonly client: RemotePresentationClientSource
   readonly fetch: RemoteBackendFetch
   readonly promptSerializer?: RemotePromptSerializer
-  readonly preservesHostPendingOnDetach?: boolean
 }): Promise<ComposedRemoteApplicationStage> {
   let backendRuntime: RemoteBackendRuntime | undefined
   let ownerServices: ReturnType<typeof createRemoteSessionOwnerServices> | undefined
@@ -374,7 +373,6 @@ export async function createRemoteApplicationRuntimeFromClient(
     client: options.domains,
     fetch: options.fetch,
     ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
-    preservesHostPendingOnDetach: true,
   })
   let transportDisposed = false
   return {
