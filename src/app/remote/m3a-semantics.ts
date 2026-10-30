@@ -100,6 +100,8 @@ export interface RemoteM3ASemantics {
 export interface RemoteM3ASemanticsOptions {
   readonly promptSerializer: RemotePromptSerializer
   readonly isDispatchAllowed?: () => boolean
+  /** Split Client Host-owned forwarded interactions (M4-C1). */
+  readonly preservesHostPendingOnDetach?: boolean
 }
 
 /** The ONE shared Client sessions service: the intersection of every
@@ -193,6 +195,7 @@ export function createRemoteM3ASemantics(
     sessions,
     remote: { userQuestions: remote.userQuestions, $on: forwardedEvents },
     connection: { generation },
+    ...(options.preservesHostPendingOnDetach === true ? { preservesHostPendingOnDetach: true } : {}),
   })
   const presetCatalog = new RemotePresetCatalog(remote.agentPresets, generation)
   let disposed = false
