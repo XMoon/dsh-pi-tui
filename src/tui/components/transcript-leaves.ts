@@ -185,6 +185,10 @@ export class BulletedComponent implements Component {
       // The token is invisible, so skipping the indent changes nothing the user
       // sees; every real text/image row still indents under the bullet.
       if (index > 0 && line.startsWith('\u2063SIXC:')) return line
+      // Keep blank rows EMPTY: the Screen's top-crop scan walks upward through
+      // empty content lines to a SIXEL anchor, and an indent-only row reads as
+      // non-empty content, hiding the anchor. Whitespace is invisible here.
+      if (line === '') return line
       return (index === 0 ? this.prefix : this.indent) + line
     })
     return this.cached

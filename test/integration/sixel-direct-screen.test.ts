@@ -49,7 +49,7 @@ import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { rasterizeSvg } from '../../src/client/media/svg/rasterize.ts'
 import { clearAssistantVisualPresentation, setAssistantVisualPresentation, type VisualPresentationKey } from '../../src/domain/visual/presentation.ts'
 import { SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
-import { svgFactFromArgs, svgHumanText } from '../../src/domain/visual/svg.ts'
+import { svgDetailRows, svgFactFromArgs, svgHumanText } from '../../src/domain/visual/svg.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -405,7 +405,7 @@ async function waitViewport(terminal: SixelAppTerminal, needle: string, label: s
 }
 
 /** One Assistant answer with one published SVG (the real sidecar path). */
-function assistantSvgVisual(svg: string, title = 'Service topology', description = 'Gateway -> App'): {
+function assistantSvgVisual(svg: string, title = 'Service topology', description = 'Gateway -> App', admissionWidth = 64): {
   readonly folder: TranscriptFolder
   readonly assistant: TranscriptMessage & { kind: 'assistant' }
   readonly publication: PublishedVisual
@@ -457,7 +457,7 @@ function assistantSvgVisual(svg: string, title = 'Service topology', description
       chart: undefined,
       svg: fact,
       svgSource: svg,
-      svgAdmissionWidth: 64,
+      svgAdmissionWidth: admissionWidth,
     },
   }
   const key: VisualPresentationKey = {
@@ -1552,4 +1552,567 @@ test('E2-02 negative: an unsupported raster and a narrow layout expose no image 
   terminal.sendInput(`\x1b[<0;4;${narrowInfo + 1}m`)
   assert.equal((app as unknown as { workspaceLease?: unknown }).workspaceLease, undefined,
     'the narrow fallback opens no Viewer')
+})
+
+
+/** Entry-level image hit projected from the LAST committed fullscreen frame. */
+interface TopCropImageHit {
+  readonly infoRow: number
+  readonly bodyStart: number
+  readonly bodyEnd: number
+  readonly bodyEndCol: number
+}
+
+interface TopCropVisualHit {
+  readonly top: number
+  readonly height: number
+  readonly thumbnailBody?: { readonly startRow: number; readonly endRow: number; readonly startCol: number; readonly endCol: number }
+  readonly actions: readonly { readonly action: 'copy' | 'view'; readonly row: number; readonly startCol: number; readonly endCol: number }[]
+}
+
+interface TopCropRowEntry {
+  readonly message?: unknown
+  readonly height: number
+  readonly attachments: readonly TopCropImageHit[]
+  readonly visuals?: readonly TopCropVisualHit[]
+}
+
+interface TopCropProjection {
+  readonly messageRows: readonly TopCropRowEntry[]
+  readonly fullscreenPaintSnapshot: {
+    readonly headerHeight: number
+    readonly welcomeHeight: number
+    readonly scrollTop: number
+    readonly viewportHeight: number
+    readonly rows: readonly {
+      readonly height: number
+      readonly imageHits?: readonly { readonly row: number; readonly kind: 'info' | 'body' }[]
+      readonly visualHits?: readonly { readonly row: number; readonly kind: 'action' | 'body' | 'inert' }[]
+    }[]
+  }
+}
+
+/** The hard 12-band source: band N is exactly cell row N at 10x20 cells. */
+function bandedBandsPng(): Promise<Uint8Array> {
+  return pngFromRgba(fill(200, 240, (_x, y) => {
+    const band = Math.floor(y / 20)
+    return [band * 20, 255 - band * 20, (band * 37) % 255, 255]
+  }), 200, 240)
+}
+
+function bandColour(band: number): [number, number, number] {
+  return [band * 20, 255 - band * 20, (band * 37) % 255]
+}
+
+/** One user image message followed by enough real turns to scroll it up. */
+function transcriptAboveFiller(ref: TranscriptImageRef): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  folder.apply([
+    {
+      type: 'user/message', seq: 1, time: 1,
+      data: { content: [{ type: 'image', attachment: ref }], source: { kind: 'user' } },
+    },
+    ...Array.from({ length: 8 }, (_, index) => ({
+      type: 'user/message' as const, seq: 2 + index, time: 2 + index,
+      data: { content: [{ type: 'text' as const, text: `filler ${index} ${'x'.repeat(120)}` }], source: { kind: 'user' as const } },
+    })),
+  ] as never)
+  return folder
+}
+
+test('E2-10a: a real top-cropped transcript image maps the visible rows and opens the direct Viewer', async (t) => {
+  const png = await bandedBandsPng()
+  const ref: TranscriptImageRef = {
+    attachmentId: 'att-e2-topcrop-image', mediaType: 'image/png', bytes: png.byteLength,
+    width: 200, height: 240, name: 'bands12.png',
+  }
+  const { terminal, app } = await startSixelApp(t, {
+    imageLoader: new ImageLoader(async () => ({ ref: {}, data: png })),
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  app.setFullscreen(true)
+  const folder = transcriptAboveFiller(ref)
+  const message = folder.messages()[0]!
+  app.setTranscript(folder.messages())
+  app.requestRender()
+  await waitViewport(terminal, 'filler 7', 'the bottom of the transcript')
+  await terminal.waitForRender()
+
+  const projection = app as unknown as TopCropProjection
+  const workspaceOpen = (): boolean => (app as unknown as { workspaceLease?: unknown }).workspaceLease !== undefined
+  const readImage = (): {
+    entryIndex: number
+    entry: TopCropRowEntry
+    attachment: TopCropImageHit
+    crop: number
+    entryTop: number
+    screenRow: number
+  } => {
+    const entryIndex = projection.messageRows.findIndex(entry => entry.message === message)
+    assert.notEqual(entryIndex, -1, 'the image message is mounted')
+    const entry = projection.messageRows[entryIndex]!
+    const attachment = entry.attachments[0]
+    assert.ok(attachment !== undefined, 'the image occurrence is mounted')
+    const entryTop = projection.messageRows.slice(0, entryIndex).reduce((sum, row) => sum + row.height, 0)
+    const screenRow = projection.fullscreenPaintSnapshot.headerHeight
+      + projection.fullscreenPaintSnapshot.welcomeHeight
+      + entryTop
+      + attachment.bodyStart
+      - projection.fullscreenPaintSnapshot.scrollTop
+    return { entryIndex, entry, attachment, crop: attachment.bodyStart - attachment.infoRow - 1, entryTop, screenRow }
+  }
+
+  const initial = readImage()
+  assert.equal(initial.attachment.bodyEnd, initial.attachment.bodyStart,
+    'the image body is not committed yet at follow-end')
+  const tokenRow = projection.fullscreenPaintSnapshot.welcomeHeight + initial.entryTop + initial.attachment.bodyStart
+  const targetScrollTop = tokenRow + 5
+
+  // The first real user scroll: wheel UP from follow-end. A positive scrollBy
+  // is a no-op at the end, so this direction is load-bearing.
+  terminal.writes.length = 0
+  let moves = 0
+  while (app.fullscreenScrollForTest()!.scrollTop > targetScrollTop && moves < 60) {
+    terminal.sendInput('\x1b[<64;10;5M')
+    await terminal.waitForRender()
+    moves += 1
+  }
+  assert.ok(moves > 0, 'the wheel really moved the viewport')
+  const scrolled = app.fullscreenScrollForTest()!
+  const hidden = scrolled.scrollTop - tokenRow
+  assert.ok(hidden >= 3 && hidden < 12, `the viewport top is inside the image (hidden ${hidden}): ${JSON.stringify(scrolled)}`)
+
+  // Pending: the crop DCS has not been written yet (the transient scrollbar
+  // owns the top track row for its 1000 ms hide delay), so the snapshot has no
+  // body hit and a press on the viewport's first row must stay inert.
+  const pending = readImage()
+  assert.equal(pending.attachment.bodyEnd, pending.attachment.bodyStart, 'no crop body is committed while it is pending')
+  assert.equal(pending.attachment.bodyStart, pending.attachment.infoRow + 1,
+    'the row map still starts at the un-cropped body')
+  assert.equal(paintedRasters(terminal).length, 0, 'no crop DCS is written while the scrollbar owns the top row')
+  const topRow = projection.fullscreenPaintSnapshot.headerHeight + 1
+  terminal.sendInput(`\x1b[<0;1;${topRow}M`)
+  terminal.sendInput(`\x1b[<0;1;${topRow}m`)
+  assert.equal(workspaceOpen(), false, 'a pending crop row opens no Viewer')
+
+  // Let the transient scrollbar auto-hide; the next frame is the first that can
+  // carry the crop DCS on the scroll viewport's first physical row.
+  await new Promise(resolve => setTimeout(resolve, 1500)) // reason: ScrollView scrollbarHideDelayMs=1000 contract
+  await terminal.waitForRender()
+
+  const painted = readImage()
+  const paintedRows = painted.attachment.bodyEnd - painted.attachment.bodyStart
+  assert.ok(paintedRows > 0, 'the hidden scrollbar lets the crop DCS commit')
+  assert.ok(painted.crop >= 3, `the top crop really hides at least three rows (got ${painted.crop})`)
+  assert.equal(painted.attachment.bodyStart, painted.attachment.infoRow + 1 + painted.crop,
+    'the hit starts at the first VISIBLE body row')
+  assert.equal(painted.attachment.bodyEndCol, 20, 'the thumbnail is 20 real pixel columns wide')
+
+  const rasters = paintedRasters(terminal)
+  assert.ok(rasters.length > 0, 'the crop DCS reached Terminal.write')
+  const cropDcs = rasters.at(-1)!
+  const decoded = decodeSixel(cropDcs)
+  assert.equal(decoded.width, 200, 'the cropped DCS keeps the source width')
+  assert.equal(Math.ceil(decoded.height / 20), paintedRows, 'the decoded height is exactly the visible rows')
+  assert.equal(decoded.height % 6, 0, 'the SIXEL bands are whole 6 px bands')
+  const [topR, topG, topB] = pixelAt(decoded, 4, 4)
+  const [wantR, wantG, wantB] = bandColour(painted.crop)
+  assert.ok(Math.abs(topR - wantR) <= 24 && Math.abs(topG - wantG) <= 24 && Math.abs(topB - wantB) <= 24,
+    `the first decoded row is band ${painted.crop}, not band 0: got ${topR},${topG},${topB}`)
+
+  // The DCS is positioned by the Screen at the scroll viewport's FIRST physical
+  // row (header + 1), not at the original image row.
+  const wire = terminal.writes.join('')
+  const dcsAt = wire.lastIndexOf(cropDcs)
+  assert.ok(dcsAt > 0, 'the crop DCS is in the terminal wire')
+  const cursorMoves = [...wire.slice(0, dcsAt).matchAll(/\x1b\[(\d+);1H/g)]
+  const writtenRow = Number(cursorMoves.at(-1)![1])
+  assert.equal(writtenRow, painted.screenRow + 1, 'the DCS is written at the crop viewport row')
+  assert.equal(writtenRow, projection.fullscreenPaintSnapshot.headerHeight + 1,
+    'the crop is on the first transcript row, immediately under the header')
+
+  // The committed snapshot must expose exactly the visible body rows, never the
+  // hidden top rows.
+  const snapshot = projection.fullscreenPaintSnapshot.rows[painted.entryIndex]!
+  const bodyHits = (snapshot.imageHits ?? []).filter(hit => hit.kind === 'body')
+  assert.equal(bodyHits.length, paintedRows, 'one body hit per visible pixel row')
+  assert.equal(bodyHits[0]!.row, painted.attachment.bodyStart, 'the first body hit is the first visible row')
+  assert.equal(bodyHits.at(-1)!.row, painted.attachment.bodyEnd - 1, 'the last body hit is the last visible row')
+  assert.equal((snapshot.imageHits ?? []).filter(hit => hit.kind === 'body' && hit.row < painted.attachment.bodyStart).length, 0,
+    'no hidden top row is clickable')
+
+  // A real painted pixel cell opens the direct Viewer.
+  const clickRow = painted.screenRow + 1
+  assert.equal(clickRow, projection.fullscreenPaintSnapshot.headerHeight + 1, 'the click is on the first visible pixel row')
+  const beforeViewer = paintedRasters(terminal).length
+  terminal.sendInput(`\x1b[<0;1;${clickRow}M`)
+  terminal.sendInput(`\x1b[<0;1;${clickRow}m`)
+  const viewerDcs = await nextRaster(terminal, beforeViewer, 'the direct Viewer raster from the cropped pixel')
+  const viewer = await waitViewport(terminal, 'Image · bands12.png', 'the direct Viewer')
+  assert.ok(stripSgr(viewer).includes('Esc close'), 'the direct open advertises Esc close')
+  const viewerDecoded = decodeSixel(viewerDcs)
+  assert.equal(viewerDecoded.width, 200, 'the Viewer paints the source width')
+  const [fullR, fullG] = pixelAt(viewerDecoded, 4, 4)
+  assert.ok(fullR < 40 && fullG > 200, `the Viewer paints the full image from band 0, not the cropped window: ${fullR},${fullG}`)
+
+  // Esc restores the same cropped transcript frame; the crop DCS is reused, not
+  // replaced by a full image or a stale row.
+  const beforeRestore = paintedRasters(terminal).length
+  terminal.sendInput('\x1b')
+  await waitViewport(terminal, 'filler 0', 'the transcript after the Viewer')
+  const restoredDcs = await nextRaster(terminal, beforeRestore, 'the crop after the Viewer closes')
+  assert.equal(restoredDcs, cropDcs, 'the same crop window is repainted, not the full image')
+  assert.equal(readImage().crop, painted.crop, 'the cropped hit survives the Viewer round trip')
+
+  // A pure scroll must refresh the cropped hit from the committed frame without
+  // re-rendering the whole transcript (Owner adjudication 2026-10-30 item 4).
+  const fullRendersBefore = app.searchPresentationDiagnosticsForTest().fullRenders
+  const heightsBefore = projection.messageRows.map(entry => entry.height)
+  const beforePureScroll = paintedRasters(terminal).length
+  terminal.sendInput('\x1b[<65;10;5M')
+  await new Promise(resolve => setTimeout(resolve, 1500)) // reason: ScrollView scrollbarHideDelayMs=1000 contract
+  await until(() => paintedRasters(terminal).length > beforePureScroll, 'the pure-scroll crop DCS', 30_000)
+  await terminal.waitForRender()
+  const scrolledCrop = readImage()
+  assert.equal(app.searchPresentationDiagnosticsForTest().fullRenders, fullRendersBefore,
+    'a pure scroll does not remeasure the whole transcript')
+  assert.deepEqual(projection.messageRows.map(entry => entry.height), heightsBefore,
+    'a pure scroll preserves every message height')
+  assert.ok(scrolledCrop.crop > painted.crop, 'the new viewport starts deeper inside the image')
+  assert.equal(scrolledCrop.attachment.bodyStart - painted.attachment.bodyStart, scrolledCrop.crop - painted.crop,
+    'the hit moves by exactly the additional hidden rows')
+  const pureDcs = paintedRasters(terminal).at(-1)!
+  const pureDecoded = decodeSixel(pureDcs)
+  const [pureR, pureG, pureB] = pixelAt(pureDecoded, 4, 4)
+  const [pureWantR, pureWantG, pureWantB] = bandColour(scrolledCrop.crop)
+  assert.ok(Math.abs(pureR - pureWantR) <= 24 && Math.abs(pureG - pureWantG) <= 24 && Math.abs(pureB - pureWantB) <= 24,
+    `the pure-scroll DCS starts at band ${scrolledCrop.crop}`)
+  const beforePureViewer = paintedRasters(terminal).length
+  terminal.sendInput(`\x1b[<0;1;${scrolledCrop.screenRow + 1}M`)
+  terminal.sendInput(`\x1b[<0;1;${scrolledCrop.screenRow + 1}m`)
+  await nextRaster(terminal, beforePureViewer, 'the Viewer from the pure-scroll crop')
+  await waitViewport(terminal, 'Image · bands12.png', 'the Viewer after a pure scroll')
+  terminal.sendInput('\x1b')
+  await waitViewport(terminal, 'filler 0', 'the transcript after the pure-scroll Viewer')
+
+  // Scroll restore: a fully visible image has cropTopRows=0 and its first body
+  // row is a real pixel target again.
+  const beforeRestoreTop = paintedRasters(terminal).length
+  app.scrollToTop()
+  await until(() => paintedRasters(terminal).length > beforeRestoreTop, 'the full image after scrollToTop', 30_000)
+  await terminal.waitForRender()
+  const restoredTop = readImage()
+  assert.equal(restoredTop.crop, 0, 'a fully visible image has no top crop')
+  assert.equal(restoredTop.attachment.bodyStart, restoredTop.attachment.infoRow + 1,
+    'the restored hit starts at the image body first row')
+  assert.ok(restoredTop.attachment.bodyEnd > restoredTop.attachment.bodyStart,
+    'the restored image still has a real pixel body')
+  const restoredTopDcs = paintedRasters(terminal).at(-1)!
+  const restoredTopDecoded = decodeSixel(restoredTopDcs)
+  assert.ok(Math.ceil(restoredTopDecoded.height / 20) >= 12, 'the restored frame is the full 12-row image')
+  const beforeRestoredViewer = paintedRasters(terminal).length
+  terminal.sendInput(`\x1b[<0;1;${restoredTop.screenRow + 1}M`)
+  terminal.sendInput(`\x1b[<0;1;${restoredTop.screenRow + 1}m`)
+  await nextRaster(terminal, beforeRestoredViewer, 'the Viewer from the restored full image')
+  await waitViewport(terminal, 'Image · bands12.png', 'the Viewer from the restored full image')
+  terminal.sendInput('\x1b')
+  await waitViewport(terminal, 'filler 0', 'the transcript after the restored Viewer')
+})
+
+test('E2-10b: a real top-cropped Assistant SVG maps the visible pixel rows and keeps the action row separate', async (t) => {
+  const bands = Array.from({ length: 12 }, (_, band) =>
+    `<rect x="0" y="${band * 25}" width="500" height="25" fill="rgb(${band * 20},${255 - band * 20},${(band * 37) % 255})"/>`).join('')
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 300">${bands}</svg>`
+  const svgLoader = new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options))
+  const { terminal, app } = await startSixelApp(t, {
+    svgLoader,
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  const { folder, assistant } = assistantSvgVisual(svg, 'Service topology', 'Gateway -> App', 640)
+  folder.apply(Array.from({ length: 8 }, (_, index) => ({
+    type: 'user/message',
+    seq: 100 + index,
+    time: 100 + index,
+    data: { content: [{ type: 'text', text: `filler ${index} ${'x'.repeat(120)}` }], source: { kind: 'user' } },
+  })) as never)
+  app.setFullscreen(true)
+  app.setTranscript(folder.messages())
+  app.requestRender()
+  await waitViewport(terminal, 'filler 7', 'the bottom of the SVG transcript')
+  // The Assistant card is collapsed while it is off-screen; bring it into the
+  // viewport first so its figure body (and token rows) is really mounted.
+  app.scrollToTop()
+  await waitViewport(terminal, 'Service topology', 'the expanded Assistant SVG figure')
+  await terminal.waitForRender()
+
+  const fact = svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App', svg })
+  const bodyRows = svgDetailRows(fact).length
+  const projection = app as unknown as TopCropProjection
+  const workspaceOpen = (): boolean => (app as unknown as { workspaceLease?: unknown }).workspaceLease !== undefined
+  const readVisual = (): {
+    entryIndex: number
+    entry: TopCropRowEntry
+    visual: TopCropVisualHit
+    entryTop: number
+    startRow: number
+    crop: number
+    screenRow: number
+  } => {
+    const entryIndex = projection.messageRows.findIndex(entry => entry.message === assistant)
+    assert.notEqual(entryIndex, -1, 'the Assistant message is mounted')
+    const entry = projection.messageRows[entryIndex]!
+    const visual = entry.visuals?.[0]
+    assert.ok(visual !== undefined, 'the published SVG figure is mounted')
+    const entryTop = projection.messageRows.slice(0, entryIndex).reduce((sum, row) => sum + row.height, 0)
+    const startRow = visual.thumbnailBody?.startRow ?? bodyRows + 1
+    const screenRow = projection.fullscreenPaintSnapshot.headerHeight
+      + projection.fullscreenPaintSnapshot.welcomeHeight
+      + entryTop
+      + visual.top
+      + startRow
+      - projection.fullscreenPaintSnapshot.scrollTop
+    return { entryIndex, entry, visual, entryTop, startRow, crop: startRow - (bodyRows + 1), screenRow }
+  }
+
+  const initial = readVisual()
+  assert.equal(initial.visual.thumbnailBody, undefined, 'the SVG thumbnail has no committed pixel body at follow-end')
+  const tokenRow = projection.fullscreenPaintSnapshot.welcomeHeight + initial.entryTop + initial.visual.top + bodyRows + 1
+  const targetScrollTop = tokenRow + 5
+
+  terminal.writes.length = 0
+  const scrollView = (app as unknown as { fullscreenScroll: { scrollTo(top: number, options?: { disableFollow?: boolean }): void } }).fullscreenScroll
+  scrollView.scrollTo(Math.min(targetScrollTop, app.fullscreenScrollForTest()!.maxScrollTop), { disableFollow: true })
+  await terminal.waitForRender()
+  const hidden = app.fullscreenScrollForTest()!.scrollTop - tokenRow
+  assert.ok(hidden >= 3 && hidden < 12, `the SVG viewport top is inside the thumbnail (hidden ${hidden})`)
+
+  const pending = readVisual()
+  assert.equal(pending.visual.thumbnailBody, undefined, 'no SVG thumbnail body is committed while it is pending')
+  assert.equal(paintedRasters(terminal).length, 0, 'no SVG crop DCS is written while the scrollbar owns the top row')
+  const topRow = projection.fullscreenPaintSnapshot.headerHeight + 1
+  terminal.sendInput(`\x1b[<0;1;${topRow}M`)
+  terminal.sendInput(`\x1b[<0;1;${topRow}m`)
+  assert.equal(workspaceOpen(), false, 'a pending SVG crop row opens no Viewer')
+
+  await new Promise(resolve => setTimeout(resolve, 1500)) // reason: ScrollView scrollbarHideDelayMs=1000 contract
+  app.requestRender()
+  // The SVG raster loader can settle once after the first paint and replace its
+  // SixelImage instance. Wait for the NEW instance's committed crop body, not
+  // merely for an earlier raster that the replacement then revokes.
+  await until(() => readVisual().crop >= 3, 'the committed SVG crop body', 30_000)
+  await terminal.waitForRender()
+
+  const painted = readVisual()
+  assert.ok(painted.visual.thumbnailBody !== undefined, 'the hidden scrollbar lets the SVG crop DCS commit')
+  assert.ok(painted.crop >= 3, `the SVG top crop hides at least three rows (got ${painted.crop})`)
+  const visibleRows = painted.visual.thumbnailBody!.endRow - painted.visual.thumbnailBody!.startRow
+  assert.ok(visibleRows > 0, 'the SVG hit covers real visible rows')
+  assert.equal(painted.visual.thumbnailBody!.startRow, bodyRows + 1 + painted.crop,
+    'the SVG hit starts at the first visible row below the description')
+  assert.equal(painted.visual.thumbnailBody!.startCol, 0, 'the Direct SIXEL DCS is positioned at column 1')
+
+  const rasters = paintedRasters(terminal)
+  assert.ok(rasters.length > 0, 'the SVG crop DCS reached Terminal.write')
+  const cropDcs = rasters.at(-1)!
+  const decoded = decodeSixel(cropDcs)
+  assert.equal(decoded.width, 400, 'the SVG thumbnail is scaled to its 40-cell pixel width')
+  assert.equal(Math.ceil(decoded.height / 20), visibleRows, 'the decoded SVG height is exactly the visible rows')
+  const [topR, topG, topB] = pixelAt(decoded, 8, 4)
+  const [wantR, wantG, wantB] = bandColour(painted.crop)
+  assert.ok(Math.abs(topR - wantR) <= 30 && Math.abs(topG - wantG) <= 30 && Math.abs(topB - wantB) <= 30,
+    `the first visible SVG row is band ${painted.crop}, not band 0: got ${topR},${topG},${topB}`)
+
+  const wire = terminal.writes.join('')
+  const dcsAt = wire.lastIndexOf(cropDcs)
+  assert.ok(dcsAt > 0, 'the SVG crop DCS is in the wire')
+  const cursorMoves = [...wire.slice(0, dcsAt).matchAll(/\x1b\[(\d+);1H/g)]
+  assert.equal(Number(cursorMoves.at(-1)![1]), painted.screenRow + 1, 'the SVG crop is on the crop viewport row')
+  assert.equal(painted.screenRow + 1, projection.fullscreenPaintSnapshot.headerHeight + 1,
+    'the SVG crop is on the first transcript row under the header')
+
+  const snapshot = projection.fullscreenPaintSnapshot.rows[painted.entryIndex]!
+  const visualHits = snapshot.visualHits ?? []
+  const bodyHits = visualHits.filter(hit => hit.kind === 'body')
+  assert.equal(bodyHits.length, visibleRows, 'one SVG body hit per visible pixel row')
+  assert.equal(bodyHits[0]!.row, painted.visual.top + painted.visual.thumbnailBody!.startRow,
+    'the first SVG body hit is the first visible pixel row')
+
+  const clickRow = painted.screenRow + 1
+  const beforeViewer = paintedRasters(terminal).length
+  terminal.sendInput(`\x1b[<0;1;${clickRow}M`)
+  terminal.sendInput(`\x1b[<0;1;${clickRow}m`)
+  await nextRaster(terminal, beforeViewer, 'the SVG Viewer raster from the cropped pixel')
+  const viewer = await waitViewport(terminal, 'SVG · Service topology', 'the SVG Viewer from the cropped pixel')
+  assert.ok(stripSgr(viewer).includes('[Preview]'), 'the direct SVG Viewer opens on Preview')
+  const viewerDcs = paintedRasters(terminal).at(-1)!
+  const viewerDecoded = decodeSixel(viewerDcs)
+  assert.ok(viewerDecoded.width > decoded.width, `the Viewer paints the full SVG variant, not the cropped thumbnail (got ${viewerDecoded.width} vs ${decoded.width})`)
+  const [fullR, fullG] = pixelAt(viewerDecoded, 8, 4)
+  assert.ok(fullR < 40 && fullG > 200, `the SVG Viewer paints band 0, not the cropped window: ${fullR},${fullG}`)
+  terminal.sendInput('\x1b')
+  await waitViewport(terminal, 'filler 0', 'the SVG transcript after the Viewer')
+
+  // The action row is a separate target: scroll until it is visible and click
+  // the painted `View` cell, not the thumbnail pixels.
+  let actionTries = 0
+  while (!(await viewportOf(terminal)).includes('Copy SVG') && actionTries < 30) {
+    terminal.sendInput('\x1b[<65;10;5M')
+    await terminal.waitForRender()
+    actionTries += 1
+  }
+  assert.ok(actionTries < 30, 'the action row becomes visible when scrolling down')
+  const atAction = readVisual()
+  const viewAction = atAction.visual.actions.find(action => action.action === 'view')
+  assert.ok(viewAction !== undefined, 'the SVG figure paints its View action')
+  const actionScreenRow = projection.fullscreenPaintSnapshot.headerHeight
+    + projection.fullscreenPaintSnapshot.welcomeHeight
+    + atAction.entryTop
+    + atAction.visual.top
+    + viewAction.row
+    - projection.fullscreenPaintSnapshot.scrollTop
+    + 1
+  const beforeAction = paintedRasters(terminal).length
+  terminal.sendInput(`\x1b[<0;${viewAction.startCol + 1};${actionScreenRow}M`)
+  terminal.sendInput(`\x1b[<0;${viewAction.startCol + 1};${actionScreenRow}m`)
+  await nextRaster(terminal, beforeAction, 'the SVG Viewer raster from the View action')
+  const fromAction = await waitViewport(terminal, 'SVG · Service topology', 'the SVG Viewer from the View action')
+  assert.ok(stripSgr(fromAction).includes('[Preview]'), 'the action row still opens the same Viewer')
+  terminal.sendInput('\x1b')
+  await waitViewport(terminal, 'filler 0', 'the SVG transcript after the action Viewer')
+})
+
+/** Six real turns above the image, then enough filler below to bottom-crop it. */
+function transcriptBracketed(ref: TranscriptImageRef): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  const before = Array.from({ length: 6 }, (_, index) => ({
+    type: 'user/message' as const, seq: 1 + index, time: 1 + index,
+    data: { content: [{ type: 'text' as const, text: `before ${index} ${'x'.repeat(120)}` }], source: { kind: 'user' as const } },
+  }))
+  const after = Array.from({ length: 8 }, (_, index) => ({
+    type: 'user/message' as const, seq: 100 + index, time: 100 + index,
+    data: { content: [{ type: 'text' as const, text: `after ${index} ${'x'.repeat(120)}` }], source: { kind: 'user' as const } },
+  }))
+  folder.apply([
+    ...before,
+    {
+      type: 'user/message', seq: 50, time: 50,
+      data: { content: [{ type: 'image', attachment: ref }], source: { kind: 'user' } },
+    },
+    ...after,
+  ] as never)
+  return folder
+}
+
+test('E2-10c: a bottom-cropped image hit survives resize, a capturing overlay and a Screen switch', async (t) => {
+  const png = await bandedBandsPng()
+  const ref: TranscriptImageRef = {
+    attachmentId: 'att-e2-bottomcrop', mediaType: 'image/png', bytes: png.byteLength,
+    width: 200, height: 240, name: 'bands12.png',
+  }
+  const { terminal, app } = await startSixelApp(t, {
+    imageLoader: new ImageLoader(async () => ({ ref: {}, data: png })),
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  app.setFullscreen(true)
+  const folder = transcriptBracketed(ref)
+  const message = folder.messages().find(candidate => candidate.kind === 'user' && candidate.content?.some(block => block.type === 'image'))!
+  app.setTranscript(folder.messages())
+  app.requestRender()
+  await waitViewport(terminal, 'after 7', 'the bottom filler after the bracketed image')
+  await terminal.waitForRender()
+
+  const projection = app as unknown as TopCropProjection
+  const workspaceOpen = (): boolean => (app as unknown as { workspaceLease?: unknown }).workspaceLease !== undefined
+  const readImage = (): { entryIndex: number; attachment: TopCropImageHit; entryTop: number; screenRow: number; rows: number } => {
+    const entryIndex = projection.messageRows.findIndex(entry => entry.message === message)
+    assert.notEqual(entryIndex, -1, 'the bracketed image message is mounted')
+    const entry = projection.messageRows[entryIndex]!
+    const attachment = entry.attachments[0]
+    assert.ok(attachment !== undefined, 'the bracketed image occurrence is mounted')
+    const entryTop = projection.messageRows.slice(0, entryIndex).reduce((sum, row) => sum + row.height, 0)
+    const screenRow = projection.fullscreenPaintSnapshot.headerHeight
+      + projection.fullscreenPaintSnapshot.welcomeHeight
+      + entryTop
+      + attachment.bodyStart
+      - projection.fullscreenPaintSnapshot.scrollTop
+    return { entryIndex, attachment, entryTop, screenRow, rows: attachment.bodyEnd - attachment.bodyStart }
+  }
+
+  // Put the image's top at the viewport row 10: the bottom four rows are
+  // clipped, and the Screen must materialize a bottom-cropped DCS.
+  const initial = readImage()
+  const tokenRow = projection.fullscreenPaintSnapshot.welcomeHeight + initial.entryTop + initial.attachment.bodyStart
+  const target = Math.max(0, projection.fullscreenPaintSnapshot.headerHeight + tokenRow - 10)
+  terminal.writes.length = 0
+  ;(app as unknown as { fullscreenScroll: { scrollTo(top: number, options?: { disableFollow?: boolean }): void } }).fullscreenScroll
+    .scrollTo(target, { disableFollow: true })
+  await terminal.waitForRender()
+  await until(() => readImage().rows > 0 && paintedRasters(terminal).length > 0, 'the bottom-cropped image body', 30_000)
+  await terminal.waitForRender()
+  const bottom = readImage()
+  assert.equal(bottom.attachment.bodyStart - bottom.attachment.infoRow - 1, 0, 'the bottom crop has no top offset')
+  assert.ok(bottom.rows > 0 && bottom.rows < 12, `the image bottom is really clipped (${bottom.rows} of 12 rows)`)
+  const bottomDcs = paintedRasters(terminal).at(-1)!
+  const bottomDecoded = decodeSixel(bottomDcs)
+  assert.equal(Math.ceil(bottomDecoded.height / 20), bottom.rows, 'the bottom-cropped DCS has exactly the visible rows')
+  const [bottomR, bottomG] = pixelAt(bottomDecoded, 4, 4)
+  assert.ok(bottomR < 40 && bottomG > 200, 'the bottom-cropped DCS still starts at band 0')
+
+  const clickBottomRow = bottom.screenRow + bottom.rows
+  const beforeBottomViewer = paintedRasters(terminal).length
+  terminal.sendInput(`\x1b[<0;1;${clickBottomRow}M`)
+  terminal.sendInput(`\x1b[<0;1;${clickBottomRow}m`)
+  await nextRaster(terminal, beforeBottomViewer, 'the Viewer from the last visible bottom-cropped row')
+  await waitViewport(terminal, 'Image · bands12.png', 'the Viewer from the bottom-cropped image')
+  terminal.sendInput('\x1b')
+  await waitViewportGone(terminal, 'Image · bands12.png', 'the transcript after the bottom-cropped Viewer')
+
+  // A real resize re-lays out the same crop; the hit must follow the new frame.
+  const beforeResize = paintedRasters(terminal).length
+  terminal.emitResize(80, 24)
+  await until(() => readImage().rows > 0 && paintedRasters(terminal).length > beforeResize, 'the resized bottom-cropped body', 30_000)
+  await terminal.waitForRender()
+  const resized = readImage()
+  assert.ok(resized.rows > 0 && resized.rows < 12, 'the resized frame keeps the bottom crop')
+  const beforeResizedViewer = paintedRasters(terminal).length
+  terminal.sendInput(`\x1b[<0;1;${resized.screenRow + resized.rows}M`)
+  terminal.sendInput(`\x1b[<0;1;${resized.screenRow + resized.rows}m`)
+  await nextRaster(terminal, beforeResizedViewer, 'the Viewer after the resize')
+  await waitViewport(terminal, 'Image · bands12.png', 'the Viewer after the resize')
+  terminal.sendInput('\x1b')
+  await waitViewportGone(terminal, 'Image · bands12.png', 'the transcript after the resized Viewer')
+
+  // A capturing overlay owns the pointer: the hit behind it must not open.
+  const picker = app.openPicker([{ value: 'probe', label: 'overlay probe' }], () => {}, () => {})
+  await waitViewport(terminal, 'overlay probe', 'the capturing picker overlay')
+  const overlaid = readImage()
+  terminal.sendInput(`\x1b[<0;1;${overlaid.screenRow + overlaid.rows}M`)
+  terminal.sendInput(`\x1b[<0;1;${overlaid.screenRow + overlaid.rows}m`)
+  assert.equal(workspaceOpen(), false, 'a capturing overlay consumes the pixel press')
+  picker.close()
+  await waitViewportGone(terminal, 'overlay probe', 'the transcript after the picker')
+  await terminal.waitForRender()
+
+  // A covering Settings screen releases the transcript occurrence; returning
+  // restores the same bottom-cropped hit.
+  const handle = app.openSettingsWorkspace(
+    { readSnapshot: () => ({ configReadiness: 'ready' as const, rows: [], capturedAt: 0 }) },
+    { aboutVersionFacts: { tui: 'test-bundle', dsh: undefined } },
+  )
+  await until(() => readImage().rows === 0, 'the covered transcript to release its image body', 30_000)
+  terminal.sendInput(`\x1b[<0;1;${overlaid.screenRow + overlaid.rows}M`)
+  terminal.sendInput(`\x1b[<0;1;${overlaid.screenRow + overlaid.rows}m`)
+  assert.equal(workspaceOpen(), true, 'the Settings screen still owns the workspace lease')
+  handle.close()
+  // The transcript returns when the covering Settings screen closes.
+  await until(() => readImage().rows > 0, 'the restored bottom-cropped body', 30_000)
+  await terminal.waitForRender()
+  const restored = readImage()
+  const beforeRestoredViewer = paintedRasters(terminal).length
+  terminal.sendInput(`\x1b[<0;1;${restored.screenRow + restored.rows}M`)
+  terminal.sendInput(`\x1b[<0;1;${restored.screenRow + restored.rows}m`)
+  await nextRaster(terminal, beforeRestoredViewer, 'the Viewer after the Screen switch')
+  await waitViewport(terminal, 'Image · bands12.png', 'the Viewer after the Screen switch')
+  terminal.sendInput('\x1b')
+  await waitViewportGone(terminal, 'Image · bands12.png', 'the final transcript')
 })

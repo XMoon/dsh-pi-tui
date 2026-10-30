@@ -179,7 +179,11 @@ export class SvgThumbnail implements Component {
     // none, and its revocation must not reuse a cached PUA frame.
     const protocol = effectiveImageProtocol(this.graphics)
     const key = `${width}:${protocol ?? 'none'}`
-    if (this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines
+    // Direct SIXEL readiness and the owner's bound occurrence are live facts:
+    // caching the lines would leave a token row pointing at an occurrence the
+    // owner already dropped. Re-derive the candidate on every paint, exactly
+    // like ImageThumbnail's SIXEL branch.
+    if (protocol !== 'sixel' && this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines
     const rendered = this.renderLines(width, protocol)
     // A nested card reserves a FIXED image row budget: a loading placeholder
     // and the settled image must not move later child headers/search rows.
@@ -187,6 +191,11 @@ export class SvgThumbnail implements Component {
     if (this.fixedRows !== undefined && rendered.length > 0) {
       lines = rendered.slice(0, this.fixedRows)
       while (lines.length < this.fixedRows) lines.push('')
+    }
+    if (protocol === 'sixel') {
+      this.cachedLines = undefined
+      this.cachedKey = undefined
+      return lines
     }
     this.cachedLines = lines
     this.cachedKey = key
