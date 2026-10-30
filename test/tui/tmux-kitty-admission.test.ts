@@ -670,6 +670,23 @@ test('StdinBuffer rebuilds a split U1 feature reply into one consumed sequence',
   probe.dispose()
 })
 
+test('the legacy tmux Kitty path still accepts a client with empty optional terminfo fields', (t) => {
+  const cli = createFakeTmuxCli(t)
+  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\t\t\t0\n' })
+  try {
+    const identity = probeTmuxKittyIdentity(cli.env)
+    assert.ok(identity, 'the shared identity layer must preserve the old Kitty acceptance')
+    assert.equal(identity.clientTermtype, '')
+    assert.equal(identity.clientTermname, '')
+    assert.ok(createTmuxKittyGraphics(new VirtualTerminal(), {}, {
+      ...cli.env,
+      PI_TUI_TMUX_KITTY_PLACEHOLDERS: '1',
+    }), 'the explicit U1 assertion still reaches the virtual Kitty factory')
+  } finally {
+    cli.dispose()
+  }
+})
+
 test('native tmux SIXEL never displaces a trustworthy tmux Kitty U1 positive', (t) => {
   const cli = createFakeTmuxCli(t)
   cli.setArgvReply(['display-message', '-p', '-t', '%7', '#{sixel_support}'], { text: '1\n' })
