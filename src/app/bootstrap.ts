@@ -826,6 +826,11 @@ export function applyRunnerWithRuntime(
     // write barrier.
     const model = createModelSelectionOwner<ModelSelection>({
       liveAgent: () => agentNow(),
+      // The marker follows the SESSION owner: Direct's live Agent or the split
+      // Remote Client's retained main Session (which has no in-process Agent).
+      hasSession: () =>
+        agentNow() !== undefined
+        || (remoteSources !== undefined && ownership.currentSessionId() !== undefined),
       generation: () => ownership.generation(),
       // Direct reads the live Host default-model service. Remote reads the
       // SAME Host-authoritative default through the official Client model

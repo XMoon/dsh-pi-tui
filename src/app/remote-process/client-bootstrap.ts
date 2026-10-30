@@ -173,6 +173,12 @@ export interface LocalClientComposition {
   readonly onQualification?: (record: Record<string, unknown>) => void
   /** Client diagnostics sink for detached qualification work. */
   readonly diag?: Diag
+  /**
+   * Surface-mode startup cancellation. A process stop closes this signal; every
+   * in-flight mount/readiness wait observes it and the ONE startup chain
+   * unwinds what it created before the caller disposes the transport/root.
+   */
+  readonly signal?: AbortSignal
 }
 
 /** A live Client composition with its own disposal owner. */
@@ -209,6 +215,54 @@ function startupFactsOf(startup: LocalClientStartupFacts): { readonly sessionId?
   }
 }
 
+/**
+ * Qualification-only assembly hold: pause ONE startup stage until a barrier
+ * file is released OR the caller aborts the startup. It is the deterministic
+ * seam for the "stop during Domain readiness / Surface mount" tests; production
+ * never sets `SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY`.
+ */
+async function waitForAssemblyHold(
+  stage: 'domain' | 'surface',
+  signal: AbortSignal | undefined,
+  onHold: ((record: Record<string, unknown>) => void) | undefined,
+): Promise<void> {
+  const spec = process.env.SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY
+  if (spec === undefined || spec === '') return
+  const [name, path] = spec.split('@')
+  if (name !== stage || path === undefined || path === '') return
+  onHold?.({ op: 'assembly-hold', stage, barrier: path })
+  const deadline = Date.now() + 60_000
+  while (!existsSync(path)) {
+    signal?.throwIfAborted()
+    if (Date.now() > deadline) {
+      throw new Error(`local client entry: the ${stage} assembly barrier was not released`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  signal?.throwIfAborted()
+}
+
+/** A never-resolving promise that rejects on abort, plus its listener cleanup. */
+function abortable(signal: AbortSignal | undefined): { promise: Promise<never>; cancel(): void } {
+  let listener: (() => void) | undefined
+  const promise = new Promise<never>((_resolve, reject) => {
+    if (signal === undefined) return
+    const abort = (): void => { reject(signal.reason ?? new Error('local client entry: startup aborted')) }
+    if (signal.aborted) {
+      abort()
+      return
+    }
+    listener = abort
+    signal.addEventListener('abort', abort, { once: true })
+  })
+  return {
+    promise,
+    cancel: () => {
+      if (listener !== undefined) signal?.removeEventListener('abort', listener)
+    },
+  }
+}
+
 /** Wait for the qualification barrier file; a bounded wait, never a timer. */
 async function waitForQualificationBarrier(path: string): Promise<void> {
   const deadline = Date.now() + 60_000
@@ -241,6 +295,7 @@ async function startSurfaceLocalClient(
   composition: LocalClientComposition,
 ): Promise<LocalClientHandle> {
   const { transport, host, dshAnchor, authenticatedFetch, mountRunner } = composition
+  const signal = composition.signal
   if (transport === undefined || host === undefined) {
     throw new Error('local client entry: surface mode requires the official transport and the authenticated Host')
   }
@@ -294,9 +349,10 @@ async function startSurfaceLocalClient(
     } else if (domains !== undefined) {
       try { await domains.dispose() } catch (error) { errors.push(error) }
     }
-    try { await transport.dispose() } catch (error) { errors.push(error) }
-    try { await context.fiber.dispose() } catch (error) { errors.push(error) }
-    throwDisposalErrors(errors, 'local client surface')
+    // The borrowed transport and the Client root are the ENTRY coordinator's
+    // ownership: this function unwinds only the graph it created, so a stop
+    // during startup and the final handle disposal never race two root owners.
+    throwDisposalErrors(errors, 'local client surface graph')
   }
 
   const base = {
@@ -347,9 +403,17 @@ async function startSurfaceLocalClient(
   }
 
   try {
-    domains = await mountRemoteClientDomains({ context, dshAnchor })
+    signal?.throwIfAborted()
+    domains = await mountRemoteClientDomains({
+      context,
+      dshAnchor,
+      ...(signal === undefined ? {} : { signal }),
+    })
     domainsOpen = true
+    await waitForAssemblyHold('domain', signal, composition.onQualification)
+    signal?.throwIfAborted()
     ui = await createRemoteClientUiRuntime({ context, startup: startupFactsOf(startup) })
+    signal?.throwIfAborted()
     // T34 qualification input: hold ONE write between its real serialization
     // and the writer's dispatch-admission check. Production never sets this
     // variable; the production serializer stays the default.
@@ -370,8 +434,10 @@ async function startSurfaceLocalClient(
       domains,
       fetch: authenticatedFetch,
       clientUi: ui,
+      ...(signal === undefined ? {} : { signal }),
       ...(promptSerializer === undefined ? {} : { promptSerializer }),
     })
+    signal?.throwIfAborted()
     // T36 qualification input: probe the private Host RPCs through the ALREADY
     // mounted Domain namespaces (no second private contribution).
     if (process.env.SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF === '1') {
@@ -443,15 +509,24 @@ async function startSurfaceLocalClient(
     const config = TuiConfigSchema({
       ...(startup.sessionId === undefined ? {} : { sessionId: startup.sessionId }),
     } as never)
+    signal?.throwIfAborted()
     runner = await mountRunner({ context, config, override })
+    await waitForAssemblyHold('surface', signal, composition.onQualification)
+    signal?.throwIfAborted()
     // Wait for the physical surface, not merely the mounted runner fiber. An
     // exit request raised during startup is CANCELLATION, never a silent hang.
-    await Promise.race([
-      runner.ready,
-      runner.stopped.then(code => {
-        throw new Error(`local client entry: the surface startup was cancelled by exit request ${String(code)}`)
-      }),
-    ])
+    const abortReady = abortable(signal)
+    try {
+      await Promise.race([
+        runner.ready,
+        runner.stopped.then(code => {
+          throw new Error(`local client entry: the surface startup was cancelled by exit request ${String(code)}`)
+        }),
+        abortReady.promise,
+      ])
+    } finally {
+      abortReady.cancel()
+    }
     surfaceMounted = true
     // The qualification-visible projection of the REAL `tuiMainView`
     // ownership: the official Session list names the candidate ids and each
@@ -512,7 +587,11 @@ async function startSurfaceLocalClient(
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true
-      await unwind()
+      const errors: unknown[] = []
+      try { await unwind() } catch (error) { errors.push(error) }
+      try { await transport.dispose() } catch (error) { errors.push(error) }
+      try { await context.fiber.dispose() } catch (error) { errors.push(error) }
+      throwDisposalErrors(errors, 'local client surface')
     },
   }
 }
