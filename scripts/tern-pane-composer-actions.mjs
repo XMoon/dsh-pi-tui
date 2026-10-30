@@ -119,7 +119,8 @@ export default async function (h) {
 
   let snap = h.snapshot()
   let buttons = composerButtons(h, snap)
-  const expected = runCase === 'busy'
+  const busyShape = runCase === 'busy' || runCase === 'narrow'
+  const expected = busyShape
     ? ['composer-effort', 'composer-model', 'composer-send', 'composer-stop']
     : ['composer-effort', 'composer-model', 'composer-send']
   h.check('the row mounts every expected button (and no Stop while idle)',
@@ -239,6 +240,8 @@ export default async function (h) {
 
   // ── The 260-wide narrow pane: the short-label rule ───────────────────────
   if (runCase === 'narrow') {
+    // The BUSY shape comes from the subject's own case snapshot (C-V3), so
+    // both delivery controls are painted in the narrowest pane.
     if (gui) {
       // The window's measured minimum (~720px) bounds the split pane at ~360px
       // — the narrowest this lane reaches. The PRODUCT rule under test is the
@@ -255,11 +258,12 @@ export default async function (h) {
       label(h, buttons.get('composer-model')) === 'Model ▾' &&
       label(h, buttons.get('composer-effort')) === 'Effort ▾',
       `${label(h, buttons.get('composer-model'))} / ${label(h, buttons.get('composer-effort'))}`)
-    h.check('Send/Stop stay reachable at 260px',
+    h.check('Send AND Stop both stay reachable in the narrowest pane',
       visiblePoint(snap.chains, buttons.get('composer-send')) !== undefined &&
-      (runCase !== 'narrow' || true),
-      JSON.stringify(visibleBox(snap.chains, buttons.get('composer-send'))))
-    h.capture('prc-narrow-260x600', 'PR-C narrow: the short labels at 260x600')
+      visiblePoint(snap.chains, buttons.get('composer-stop')) !== undefined,
+      `send=${JSON.stringify(visibleBox(snap.chains, buttons.get('composer-send')))} `
+      + `stop=${JSON.stringify(visibleBox(snap.chains, buttons.get('composer-stop')))}`)
+    h.capture('prc-narrow-260x600', 'PR-C narrow (C-V3): busy, short labels, both delivery controls reachable')
   }
 
   // ── Real clicks: the business record is the positive control ─────────────

@@ -2433,19 +2433,27 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       ? 'Model — type /model to switch'
       : `Model ${safeName}${safeEffort === undefined ? '' : ` · effort ${safeEffort}`} — type /model to switch`
     const submittable = composerDraftSubmittable()
+    // PR-C external review F2: the row's node keys carry the presentation-scope
+    // EPOCH, so a click minted under one display subject can never land on the
+    // same-named button of its successor — after a session switch the old node
+    // id simply does not exist in the new view, and the SDK's own dispatch
+    // drops it. The epoch advances ONLY on a subject change (never per status
+    // revision), which keeps §4.1's stable-key contract: within one subject
+    // the identity is continuous, so the client never remounts the row.
+    const actionScope = `s${scopeEpoch}`
     return ui.row(
-      { key: 'composer-actions', wrap: true, justify: 'between', gap: 'xs', role: 'dsh-composer-actions' },
+      { key: `composer-actions-${actionScope}`, wrap: true, justify: 'between', gap: 'xs', role: 'dsh-composer-actions' },
       ui.row(
-        { key: 'composer-selectors', wrap: true, gap: 'xs' },
+        { key: `composer-selectors-${actionScope}`, wrap: true, gap: 'xs' },
         html.button({
-          key: 'composer-model',
+          key: `composer-model-${actionScope}`,
           role: COMPOSER_MODEL_ROLE,
           title: modelTitle,
           aria: 'Switch model',
           onClick: () => { composerModelClicked('models') },
         }, `Model${modelValue === undefined ? '' : ` · ${modelValue}`} ▾`),
         html.button({
-          key: 'composer-effort',
+          key: `composer-effort-${actionScope}`,
           role: COMPOSER_EFFORT_ROLE,
           title: safeEffort === undefined
             ? 'Reasoning effort — type /model to change'
@@ -2455,9 +2463,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         }, `Effort${effortValue === undefined ? '' : ` · ${effortValue}`} ▾`),
       ),
       ui.row(
-        { key: 'composer-delivery', gap: 'xs' },
+        { key: `composer-delivery-${actionScope}`, gap: 'xs' },
         html.button({
-          key: 'composer-send',
+          key: `composer-send-${actionScope}`,
           role: COMPOSER_SEND_ROLE,
           title: submittable ? `Send — ${TSP_COMPOSER_SEND_LABEL}` : 'Type a message to send',
           aria: 'Send message',
@@ -2468,7 +2476,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           onClick: () => { composerSendClicked() },
         }, 'Send'),
         ...(busy ? [html.button({
-          key: 'composer-stop',
+          key: `composer-stop-${actionScope}`,
           role: COMPOSER_STOP_ROLE,
           title: `Stop — ${TSP_COMPOSER_STOP_LABEL}`,
           aria: 'Stop the running turn',

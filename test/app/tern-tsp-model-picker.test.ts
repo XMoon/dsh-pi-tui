@@ -1480,7 +1480,8 @@ test('PR-C production chain: composer Model and Effort clicks reach the real com
     DirectModelCatalog.prototype.selectSessionModel = original
   })
   const clickComposerButton = async (key: string): Promise<void> => {
-    const button = nodes(fixture.pane).find(node => node.k === 'el' && String(node.id).endsWith(`.${key}`))
+    // The composer keys carry the presentation-scope epoch (composer-*-s<N>).
+    const button = nodes(fixture.pane).find(node => node.k === 'el' && new RegExp(`\\.${key}-s\\d+$`).test(String(node.id)))
     assert.ok(button, `the composer ${key} button is on the wire`)
     fixture.pane.event({ ev: 'action', sf: fixture.pane.frames().at(-1)!.sf, id: button!.id, act: 'click' })
   }
@@ -2715,7 +2716,7 @@ test('PR-C: a Host-owned /model registration leaves the composer UI opener unava
     // Click the Model button through the wire node id the dock really built.
     const { wireNodes } = await import('../support/tsp-picker-wire.ts')
     const nodes = wireNodes(fixture.pane)
-    const modelButton = nodes.find(node => node.k === 'el' && String(node.id).endsWith('.composer-model'))
+    const modelButton = nodes.find(node => node.k === 'el' && /\.composer-model-s\d+$/.test(String(node.id)))
     assert.ok(modelButton, 'the composer Model button is on the wire (the row still paints)')
     const before = fixture.pane.output.text()
     fixture.pane.event({

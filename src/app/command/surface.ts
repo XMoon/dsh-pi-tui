@@ -749,11 +749,15 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     }
     // The registered handler's own runOwned/diag/sessionId wiring owns this
     // promise (see createModelCommands); the surface adds no second owner. A
-    // rejection is already reported by the handler's own paths — this entry
-    // observes it for diagnostics only, never a bare floating promise.
-    // (allowlist: the diagnostics-only observer over the command-owned promise)
+    // resolved ERROR result is surfaced through the existing notice path (the
+    // typed `/model` route shows the same text through the command card);
+    // a rejection is diagnostics only — never a bare floating promise.
     const opened = modelPickerOpener(entry)
-    void opened.catch((error: unknown) => { // allowlist: diagnostics observer, the command owns the task
+    void opened.then((result) => { // allowlist: result observer — the command owns the task
+      if (result.kind === 'error' && typeof result.text === 'string' && result.text !== '') {
+        deps.notify(result.text, 'error')
+      }
+    }, (error: unknown) => { // allowlist: diagnostics observer, the command owns the task
       deps.logError(`tui-runner: model picker UI entry failed: ${safeErrorMessage(error)}`)
     })
   }
