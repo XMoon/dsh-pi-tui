@@ -468,8 +468,9 @@ therefore have different authorities and must never be collapsed:
   `src/tui/graphics/tmux-sixel-admission.ts` admits only when the live tmux
   server reports `#{sixel_support}=1`, exactly one ordinary display client
   (Control Mode excluded) owns the pane's session with valid
-  name/tty/termname/termtype and is not a nested multiplexer, and
-  `show-messages -T -t <exact client>` reports exactly
+  name/tty/termname and is not a nested multiplexer; `termtype` may be empty
+  when the client does not answer XTVERSION, and `show-messages -T -t <exact
+  client>` reports exactly
   one complete `Sxl: (flag) true`. A pane DA1 SIXEL attribute, `TERM_PROGRAM`,
   `WT_SESSION`, `KITTY_WINDOW_ID` or a terminal brand is never proof. The
   binding is immutable for the TUI lifetime; any later mismatch, lost server
