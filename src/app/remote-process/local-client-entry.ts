@@ -417,9 +417,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     // the qualification harness sends SIGTERM as soon as it observes ready, and
     // a handler installed afterwards loses that race to the default action.
     process.on('SIGTERM', () => {
+      emit({ m4a0: 'signal', processRole: 'client', pid: process.pid, signal: 'SIGTERM' })
       runDetached('local client: SIGTERM shutdown', () => stop(0), { diag })
     })
     process.on('SIGINT', () => {
+      emit({ m4a0: 'signal', processRole: 'client', pid: process.pid, signal: 'SIGINT' })
       runDetached('local client: SIGINT shutdown', () => stop(130), { diag })
     })
     const clientContext = context
