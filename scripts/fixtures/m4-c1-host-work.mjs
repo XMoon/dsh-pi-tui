@@ -369,6 +369,17 @@ export function apply(ctx) {
   // delegates with `next()`, so the real C2 PiTui answerer remains the only
   // consumer. Durable `tool/call` / `tool/result` / `approval/asked` /
   // `approval/decided` events remain the final authority.
+  const questionProjection = () => {
+    try {
+      const agent = ctx.agents.roots()[0]
+      if (agent === undefined) return undefined
+      const projections = ctx.get('sessionProjections')
+      const state = projections?.stateOf(agent.session, 'userQuestions')
+      return state?.questions?.active
+    } catch {
+      return undefined
+    }
+  }
   ctx.on('user-questions/request', async (request, next) => {
     const callId = request?.wait?.callId
     const sessionId = request?.agent?.id === undefined ? undefined : String(request.agent.id)
@@ -385,6 +396,11 @@ export function apply(ctx) {
         sessionId,
         answers: answer?.answers,
       })
+      record('question-projection', {
+        callId: callId === undefined ? undefined : String(callId),
+        sessionId,
+        active: questionProjection(),
+      })
       return answer
     } catch (error) {
       record('question-failed', {
@@ -392,6 +408,31 @@ export function apply(ctx) {
         sessionId,
         error: error instanceof Error ? error.message : String(error),
       })
+      record('question-projection', {
+        callId: callId === undefined ? undefined : String(callId),
+        sessionId,
+        active: questionProjection(),
+      })
+      // The projection settles asynchronously after the timed tool result is
+      // written. Poll briefly for the official `continued` transition; this is
+      // evidence capture only and never drives the Host flow.
+      if (callId !== undefined) {
+        const started = Date.now()
+        const timer = setInterval(() => {
+          const active = questionProjection()
+          if (Array.isArray(active) && active.some(item => item?.callId === String(callId) && item?.state === 'continued')) {
+            clearInterval(timer)
+            record('question-projection', {
+              callId: String(callId),
+              sessionId,
+              active,
+              phase: 'continued',
+            })
+          } else if (Date.now() - started > 5_000) {
+            clearInterval(timer)
+          }
+        }, 100)
+      }
       throw error
     }
   }, { prepend: true })
@@ -413,6 +454,22 @@ export function apply(ctx) {
       throw error
     }
   }, { prepend: true })
+
+  // Qualification-only Host Agent cancel trigger: the smoke writes the
+  // barrier file, and the fixture calls the official Agent cancel. It never
+  // writes an approval/question event itself.
+  const cancelBarrier = process.env.C1_CANCEL_AGENT
+  if (cancelBarrier !== undefined && cancelBarrier !== '') {
+    const timer = setInterval(() => {
+      if (!existsSync(cancelBarrier)) return
+      clearInterval(timer)
+      for (const agent of ctx.agents.roots()) {
+        record('agent-cancel-requested', { agentId: String(agent.id) })
+        agent.cancel({ kind: 'user' })
+      }
+    }, 20)
+    ctx.effect(() => () => clearInterval(timer))
+  }
 
   if (scenario === 'foreground-tool') {
     ctx.effect(() => ctx.tools.register(defineTool({

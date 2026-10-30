@@ -62,6 +62,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import xterm from '@xterm/headless'
+import { parse as parseYaml } from 'yaml'
 
 import {
   candidateArgument,
@@ -616,19 +617,26 @@ export function writeC1WorkFixture(profileDir, workDir) {
   const patchPath = join(workDir, 'm4-c1-work.patch.yml')
   writeFileSync(patchPath, rows.join('\n'), { mode: 0o600 })
   chmodSync(patchPath, 0o600)
-  // T52: the official TIMED ask_user_question form. This is an isolated
-  // qualification profile only; the production preset keeps its legacy form.
+  // T52: a profile-scoped override of the REAL `standard` preset. The
+  // generated preset patch is the canonical plugin list; only the
+  // `tool-ask-user` row switches to its official timed mode (1s foreground
+  // window). The production preset itself is untouched.
+  const standardPatch = parseYaml(readFileSync(join(SCRIPT_DIR, '..', 'generated', 'dsh-presets', 'standard.patch.yml'), 'utf8'))
+  const presetRow = standardPatch.find(entry => Array.isArray(entry.insert))?.insert?.find(entry => entry.id === 'preset-standard')
+  assert(presetRow !== undefined && presetRow.config !== undefined, 'T52 the generated standard preset row is missing')
+  const plugins = structuredClone(presetRow.config.plugins)
+  const askRow = plugins.find(entry => entry.id === 'tool-ask-user')
+  assert(askRow !== undefined, 'T52 the standard preset has no tool-ask-user row')
+  askRow.config = { mode: 'timed', timeout: 1 }
   const timedPatchPath = join(workDir, 'm4-c1-work-timed.patch.yml')
-  writeFileSync(timedPatchPath, [
-    ...rows.slice(0, -1),
-    '- id: tool-ask-user',
-    '  config:',
-    '    mode: timed',
-    '    timeout: 1',
-    '',
-  ].join('\n'), { mode: 0o600 })
+  const basePatches = parseYaml(readFileSync(patchPath, 'utf8'))
+  writeFileSync(timedPatchPath, JSON.stringify([
+    ...basePatches,
+    { id: 'preset-standard', config: { ...presetRow.config, plugins } },
+  ], null, 2), { mode: 0o600 })
   chmodSync(timedPatchPath, 0o600)
   return { fixturePath, patchPath, timedPatchPath }
+
 }
 
 /** Read every M4-C1 fixture proof line (an absent file is simply empty). */
@@ -986,7 +994,14 @@ async function main() {
       name: 'dsh-split-process-harness',
       private: true,
       type: 'module',
-      dependencies: { '@deepseek-ai/dsh': targetDshVersion },
+      dependencies: {
+        '@deepseek-ai/dsh': targetDshVersion,
+        // The split Client shell supplies the official web seed's platform
+        // static from the installed Harness family. The CLI package does not
+        // pull this web-only sibling by itself, so the isolated harness must
+        // install it explicitly; production harness installs have it.
+        '@deepseek-ai/dsh-client-store': targetDshVersion,
+      },
     }, null, 2) + '\n', 'utf8')
     runPnpmInstall(harnessDir, env, distribution)
     const dsh = dshInvocation(harnessDir)
@@ -2727,6 +2742,7 @@ async function main() {
         t01t26: 'pass (T26a row-disabled + real artifact-absent; T26b official row; T26 no-cookie)',
         surface: 'T27-T39 + T41/T42/T43 pass',
       })
+
     // ── M4-C1 continuity / interactions / Client-only HMR (T44–T60) ────────
     // Each scenario starts its OWN Host (one `C1_SCENARIO` per Host process)
     // and records its facts through the isolated fixture. The Client processes
@@ -2970,100 +2986,141 @@ async function main() {
         trace('t48', { hostPid: ready.pid, parentSessionId: sessionId, childId: started.childId, runId: started.runId, childDurable: true })
       }
 
-      if (process.env.SPLIT_PROCESS_SMOKE_RUN_INTERACTIONS !== '1') {
-        // Owner-approved partial M4-C1 scope: the fresh-Client interaction
-        // handoff is blocked upstream. Record every affected test individually
-        // and keep the default lane green for the delivered subset rather than
-        // claiming a false PASS.
-        trace('t49-t55', {
-          status: 'PARTIAL',
-          dshVersion: targetDshVersion,
-          blockers: {
-            t49: 'BLOCKED_BY_CLIENT_STARTUP_ORDERING: fresh C2 pending Question handoff after C1 death',
-            t50: 'BLOCKED_BY_CLIENT_STARTUP_ORDERING: fresh C2 pending Question handoff after clean C1 exit',
-            t51: 'DEFERRED_TO_C1_B: stale legal event replay/duplicate-answer negative controls',
-            t52: 'DEFERRED_TO_C1_B: timed Question continued answer via the official projection/userQuestions.answer path; independent of the original pending waterfall',
-            t53: 'BLOCKED_BY_CLIENT_STARTUP_ORDERING: fresh C2 pending Approval handoff (allow)',
-            t54: 'BLOCKED_BY_CLIENT_STARTUP_ORDERING: fresh C2 pending Approval handoff (reject)',
-            t55: 'DEFERRED_TO_C1_B: delayed old-peer and Host-abort negative controls',
-          },
-          rootCause: 'the PiTui split Client currently starts the official Gateway before its interaction owner is attached, so a fresh Client can consume a Host-pending forwarded event before the answerer exists; official Web uses the existing DSH Loader readiness gate to order its plugin graph before Gateway start. The equivalent PiTui split ordering is not yet verified; this is not established evidence that rc.4 lacks a public capability.',
-          reentry: 'verify the official DSH Loader readiness gate in the PiTui split composition, then execute T49-T55; T52 uses the independent continued-answer path',
+      const assertInteractionGate = (client, label) => {
+        const gate = client.records.find(record => record.m4b2s === 'qualification' && record.op === 'interaction-startup-gate')
+        assert(gate !== undefined && gate.phase === 'listeners-ready' && gate.agentResolver === true
+          && gate.questionListeners === 1 && gate.approvalListeners === 1 && gate.loaderTasks >= 1,
+        `${label} interaction startup gate was not ready before the first generation: ${JSON.stringify(gate)}`)
+        assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === 'interaction-startup-gate').length === 1,
+          `${label} registered the interaction startup gate more than once`)
+      }
+      const startPeer = async (label, extraEnv = {}) => {
+        const peer = new EntryProcess('peer', entries.client, {
+          ...base,
+          env: { ...base.env, SPLIT_PROCESS_CLIENT_MODE: 'peer', ...extraEnv },
         })
-      } else {
-        // T49/T50: an official pending Question survives C1 SIGKILL and a clean
-        // Client exit. C2 receives the ORIGINAL callId through the Host Gateway
-        // and its answer settles the same Host flow exactly once.
-        for (const [mode, label] of [['kill', 't49'], ['exit', 't50']]) {
-          const { host, ready, workRoot } = await startC1Host('question', label)
-          const { client: c1 } = await startC1Client(`${label.toUpperCase()} C1`)
-          const sessionId = await openC1Session(c1, `${label} prompt`, label.toUpperCase())
-          const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', `${label} ask_user_question tool/call`)
-          const callId = String(call.data.callId)
-          const request = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-request' && event.sessionId === sessionId, `${label} Host question request`)
-          assert(request.questions?.[0]?.question === 'Continue the C1 test?', `${label} the Host question payload is wrong`)
-          // The Host ask is pending AND the real C1 modal is painted before the
-          // detach: otherwise the kill would race the first forwarded delivery
-          // and could legitimately observe "no answerer" instead of a held question.
-          await c1.waitForScreen('[1] Proceed', `${label} C1 question modal`, 120_000)
-          const hostBefore = await hostIdentityFacts(host)
-          const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
-          if (mode === 'kill') {
-            c1.signalBusiness('SIGKILL')
-            await waitGone(c1Pid, 15_000)
-            await c1.dispose()
-          } else {
-            // SIGTERM is the clean detach path while a modal owns the editor
-            // seat; typing /exit into a modal would be modal input, not exit.
-            c1.signalBusiness('SIGTERM')
-            const cleanExit = await c1.waitForExit(60_000)
-            assert(cleanExit.code === 0 && cleanExit.signal === null, `${label} C1 clean exit was ${JSON.stringify(cleanExit)}`)
-            await c1.dispose()
-          }
-          assert(alive(ready.pid), `${label} the Host died on the Client exit`)
-          await assertHostIdentityKept(host, hostBefore, `${label} Host after Client exit`)
-          // A clean Client teardown must not settle the Host question as
-          // cancelled: no question-failed proof may appear before C2 answers.
-          await sleep(300)
-          assert(readC1WorkEvents(workRoot).every(event => !(event.kind === 'question-failed' && event.callId === callId)),
-            `${label} the Client teardown sent a cancellation that settled the Host pending question`)
-          const { client: c2 } = await startC1Client(`${label.toUpperCase()} C2`, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
-          await c2.waitForScreen('Continue the C1 test?', `${label} C2 redelivered question`, 120_000)
-          c2.send('1')
-          await c2.waitForScreen('Submit', `${label} C2 review page`, 30_000)
-          c2.send('\r')
-          const settled = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-settled' && event.sessionId === sessionId, `${label} Host question settled`, 120_000)
-          assert(settled.answers?.[0]?.selected?.[0] === 'Proceed', `${label} the Host received the wrong answer: ${JSON.stringify(settled.answers)}`)
-          const result = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId, `${label} question tool result`)
-          assert(result.data?.message?.isError !== true, `${label} the question tool failed after a legal answer`)
-          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', `${label} turn/end after answer`)
-          const requests = readC1WorkEvents(workRoot).filter(event => event.kind === 'question-request' && event.sessionId === sessionId)
-          const settlements = readC1WorkEvents(workRoot).filter(event => event.kind === 'question-settled' && event.sessionId === sessionId)
-          assert(requests.length === 1 && settlements.length === 1, `${label} duplicate question request/settlement (${String(requests.length)}/${String(settlements.length)})`)
-          await exitC1Client(c2, `${label} C2`)
-          await stopC1Host(host)
-          trace(label, { hostPid: ready.pid, sessionId, callId, mode, c2Answer: 'Proceed', hostSettlements: settlements.length })
-        }
+        const ready = await peer.waitFor(record => record.m4a0 === 'ready', `${label} peer ready`, 180_000)
+        return { peer, ready }
+      }
 
-        // T51: after the answer, a reattached Client does not resurrect the old
-        // card and the Host never records a second answer. (The stale legal frame
-        // replay needs a second simultaneous peer; that exact wire replay is
-        // recorded as NOT_VERIFIED below, never as a pass.)
-        {
+      // T12-surface-PTY-HUP: closing the REAL PTY master (the `script(1)`
+      // wrapper dies) is a HUP, not a SIGTERM sent to the business Client. The
+      // business PID must observe the terminal end and exit; the seat frees and
+      // the Host survives for a fresh Client.
+      {
+        const { host, ready } = await startC1Host('job', 't12-hup')
+        const { client } = await startC1Client('T12 HUP Client')
+        const businessPid = client.records.find(record => record.m4a0 === 'ready')?.pid
+        assert(typeof businessPid === 'number', 'T12 HUP Client had no business PID')
+        const scriptPid = client.child.pid
+        try { process.kill(scriptPid, 'SIGKILL') } catch { /* already gone */ }
+        await waitGone(businessPid, 20_000)
+        assert(!alive(businessPid), 'T12 the business Client survived a real PTY master close')
+        await client.dispose().catch(() => {})
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        assert(alive(ready.pid), 'T12 the Host died on a Client PTY HUP')
+        const { client: recovered } = await startC1Client('T12 HUP recovery Client')
+        await exitC1Client(recovered, 'T12 HUP recovery Client')
+        await stopC1Host(host)
+        trace('t12-pty-hup', { hostPid: ready.pid, clientPid: businessPid, scriptPid, masterClosed: true, seatReusable: true, hostAlive: true })
+      }
+
+      // T49/T50: an official pending Question survives C1 SIGKILL and a clean
+      // Client exit. C2 receives the ORIGINAL callId through the Host Gateway
+      // and its answer settles the same Host flow exactly once.
+      for (const [mode, label] of [['kill', 't49'], ['exit', 't50']]) {
+        const { host, ready, workRoot } = await startC1Host('question', label)
+        const { client: c1 } = await startC1Client(`${label.toUpperCase()} C1`)
+        const sessionId = await openC1Session(c1, `${label} prompt`, label.toUpperCase())
+        const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', `${label} ask_user_question tool/call`)
+        const callId = String(call.data.callId)
+        const request = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-request' && event.sessionId === sessionId, `${label} Host question request`)
+        assert(request.questions?.[0]?.question === 'Continue the C1 test?', `${label} the Host question payload is wrong`)
+        // The Host ask is pending AND the real C1 modal is painted before the
+        // detach: otherwise the kill would race the first forwarded delivery
+        // and could legitimately observe "no answerer" instead of a held question.
+        await c1.waitForScreen('[1] Proceed', `${label} C1 question modal`, 120_000)
+        const hostBefore = await hostIdentityFacts(host)
+        const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
+        if (mode === 'kill') {
+          c1.signalBusiness('SIGKILL')
+          await waitGone(c1Pid, 15_000)
+          await c1.dispose()
+        } else {
+          // SIGTERM is the clean detach path while a modal owns the editor
+          // seat; typing /exit into a modal would be modal input, not exit.
+          c1.signalBusiness('SIGTERM')
+          const cleanExit = await c1.waitForExit(60_000)
+          assert(cleanExit.code === 0 && cleanExit.signal === null, `${label} C1 clean exit was ${JSON.stringify(cleanExit)}`)
+          await c1.dispose()
+        }
+        assert(alive(ready.pid), `${label} the Host died on the Client exit`)
+        await assertHostIdentityKept(host, hostBefore, `${label} Host after Client exit`)
+        // A clean Client teardown must not settle the Host question as
+        // cancelled: no question-failed proof may appear before C2 answers.
+        await sleep(300)
+        assert(readC1WorkEvents(workRoot).every(event => !(event.kind === 'question-failed' && event.callId === callId)),
+          `${label} the Client teardown sent a cancellation that settled the Host pending question`)
+        const { client: c2 } = await startC1Client(`${label.toUpperCase()} C2`, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        assertInteractionGate(c2, `${label} C2`)
+        await c2.waitForScreen('Continue the C1 test?', `${label} C2 redelivered question`, 120_000)
+        c2.send('1')
+        await c2.waitForScreen('Submit', `${label} C2 review page`, 30_000)
+        c2.send('\r')
+        const settled = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-settled' && event.sessionId === sessionId, `${label} Host question settled`, 120_000)
+        assert(settled.answers?.[0]?.selected?.[0] === 'Proceed', `${label} the Host received the wrong answer: ${JSON.stringify(settled.answers)}`)
+        const result = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId, `${label} question tool result`)
+        assert(result.data?.message?.isError !== true, `${label} the question tool failed after a legal answer`)
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', `${label} turn/end after answer`)
+        const requests = readC1WorkEvents(workRoot).filter(event => event.kind === 'question-request' && event.sessionId === sessionId)
+        const settlements = readC1WorkEvents(workRoot).filter(event => event.kind === 'question-settled' && event.sessionId === sessionId)
+        assert(requests.length === 1 && settlements.length === 1, `${label} duplicate question request/settlement (${String(requests.length)}/${String(settlements.length)})`)
+        await exitC1Client(c2, `${label} C2`)
+        await stopC1Host(host)
+        trace(label, { hostPid: ready.pid, sessionId, callId, mode, c2Answer: 'Proceed', hostSettlements: settlements.length })
+      }
+
+      // T51: after the original Client is gone, a legal new TUI answers the
+      // SAME pending Question once; a reattached Client cannot resurrect it.
+      // A separate test-only non-TUI answering Peer holds the OLD legal
+      // delivery and submits its stale frame AFTER C2 settled. The Host must
+      // ignore it: no second request, settlement or tool result.
+      {
+        let peer
+        try {
           const { host, ready, workRoot } = await startC1Host('question', 't51')
           const { client: c1 } = await startC1Client('T51 C1')
           const sessionId = await openC1Session(c1, 't51 prompt', 'T51')
           const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', 'T51 question tool/call')
           const callId = String(call.data.callId)
           await waitForC1WorkEvent(workRoot, event => event.kind === 'question-request' && event.sessionId === sessionId, 'T51 question pending')
+          await c1.waitForScreen('[1] Proceed', 'T51 C1 question modal', 120_000)
+          const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
+          c1.signalBusiness('SIGKILL')
+          await waitGone(c1Pid, 15_000)
+          await c1.dispose()
+          assert(alive(ready.pid), 'T51 the Host died on the Client SIGKILL')
+
+          const startedPeer = await startPeer('T51 old peer')
+          peer = startedPeer.peer
+          const peerQuestion = await peer.waitFor(record => record.m4a0 === 'peer-interaction' && record.kind === 'question', 'T51 old peer held the stale question delivery', 120_000)
+
           const { client: c2 } = await startC1Client('T51 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
-          await c2.waitForScreen('Continue the C1 test?', 'T51 C2 question')
+          assertInteractionGate(c2, 'T51 C2')
+          await c2.waitForScreen('Continue the C1 test?', 'T51 C2 question', 120_000)
           c2.send('1')
           await c2.waitForScreen('Submit', 'T51 C2 review')
           c2.send('\r')
           await waitForC1WorkEvent(workRoot, event => event.kind === 'question-settled' && event.sessionId === sessionId, 'T51 answered')
           await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T51 turn/end')
           await exitC1Client(c2, 'T51 C2')
+
+          // The old Peer's frame was issued BEFORE the Host settled the new
+          // answer. Its `$events/result` must be ignored by the Host stale
+          // delivery fence, never delegated into a second settlement.
+          peer.send({ op: 'peer-answer', kind: 'question', callId: peerQuestion.peerKey, value: { answers: [{ id: 'c1-question', selected: ['Cancel'] }] } })
+          await peer.waitFor(record => record.m4a0 === 'peer-answer-sent' && record.callId === peerQuestion.peerKey, 'T51 stale peer answer sent', 30_000)
+
           const { client: c3 } = await startC1Client('T51 C3', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
           await c3.waitForScreen('question answered', 'T51 C3 settled transcript')
           await sleep(500)
@@ -3074,102 +3131,233 @@ async function main() {
           assert(settlements.length === 1 && toolResults.length === 1, 'T51 the settled question produced a second answer/result')
           await exitC1Client(c3, 'T51 C3')
           await stopC1Host(host)
-          trace('t51', { hostPid: ready.pid, sessionId, callId, noResurrection: true, staleLegalFrameReplay: 'NOT_VERIFIED' })
+          trace('t51', { hostPid: ready.pid, sessionId, callId, noResurrection: true, staleLegalFrameReplay: 'protocol-peer-negative' })
+        } finally {
+          if (peer !== undefined) {
+            await peer.shutdown().catch(() => {})
+          }
         }
+      }
 
-        // T52: the official TIMED question path. The tool returns the pending
-        // payload after its foreground window; the Host projection keeps the call
-        // answerable as `continued`. The exact C2 continued-answer UI path is
-        // recorded as NOT_VERIFIED (no fabricated pass).
-        {
-          const { host, ready, workRoot } = await startC1Host('question', 't52', { C1_TIMED_QUESTION: '1', SPLIT_PROCESS_EXTRA_PATCH: c1Work.timedPatchPath })
-          const { client: c1 } = await startC1Client('T52 C1')
-          const sessionId = await openC1Session(c1, 't52 prompt', 'T52')
-          const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', 'T52 timed question tool/call')
-          const callId = String(call.data.callId)
-          const request = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-request' && event.sessionId === sessionId, 'T52 timed question request')
-          assert(request.timed === true, 'T52 the Host question was not the official timed form')
-          await waitForC1WorkEvent(workRoot, event => event.kind === 'question-failed' && event.sessionId === sessionId, 'T52 timed foreground ended', 120_000)
-          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId, 'T52 pending tool result', 120_000)
-          await exitC1Client(c1, 'T52 C1')
-          await stopC1Host(host)
-          trace('t52', { hostPid: ready.pid, sessionId, callId, timedForegroundEnded: true, continuedC2Answer: 'NOT_VERIFIED' })
+      // T52: the official TIMED question becomes a durable `continued` entry.
+      // C2 reopens it from the Task Quick projection, submits a late answer,
+      // and the Host queues exactly one `user-question-reply` message.
+      {
+        const { host, ready, workRoot } = await startC1Host('question', 't52', { C1_TIMED_QUESTION: '1', SPLIT_PROCESS_EXTRA_PATCH: c1Work.timedPatchPath })
+        const { client: c1 } = await startC1Client('T52 C1')
+        const sessionId = await openC1Session(c1, 't52 prompt', 'T52')
+        const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', 'T52 timed question tool/call')
+        const callId = String(call.data.callId)
+        const request = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-request' && event.sessionId === sessionId, 'T52 timed question request')
+        assert(request.timed === true, 'T52 the Host question was not the official timed form')
+        // The C1 question UI owns the 1s foreground countdown; its official
+        // ASK_TIMED_OUT rejection is what writes the pending tool result and
+        // moves the durable projection to `continued`.
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'question-failed' && event.sessionId === sessionId, 'T52 timed foreground ended', 120_000)
+        const projection = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-projection' && event.callId === callId
+          && Array.isArray(event.active) && event.active.some(item => item?.callId === callId && item?.state === 'continued'), 'T52 official continued projection', 120_000)
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId, 'T52 pending tool result', 120_000)
+        c1.signalBusiness('SIGTERM')
+        const cleanExit = await c1.waitForExit(60_000)
+        assert(cleanExit.code === 0 && cleanExit.signal === null, `T52 C1 clean exit was ${JSON.stringify(cleanExit)}`)
+        await c1.dispose()
+
+        const { client: c2 } = await startC1Client('T52 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        assertInteractionGate(c2, 'T52 C2')
+        await c2.waitForScreen('t52 prompt', 'T52 C2 history')
+        c2.send('\x1b[B')
+        await c2.waitForScreen('Task Quick', 'T52 Task Quick opened', 60_000)
+        await c2.waitForScreen('Continue the C1 test?', 'T52 continued row')
+        c2.send('\r')
+        c2.send('1')
+        await c2.waitForScreen('Submit', 'T52 continued form review', 60_000)
+        c2.send('\r')
+        // The queued answer is a durable Host fact (the inbox user message
+        // whose source names the call); the transient local notice is not the
+        // authority and may already have been replaced by the next turn.
+        const replyDeadline = Date.now() + 60_000
+        let queuedMessages = []
+        while (Date.now() < replyDeadline) {
+          queuedMessages = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'user/message'
+            && JSON.stringify(event).includes('answer_to_pending_question')
+            && JSON.stringify(event).includes(callId))
+          if (queuedMessages.length > 0) break
+          await sleep(50)
         }
+        assert(queuedMessages.length === 1, `T52 expected exactly one durable queued reply, got ${String(queuedMessages.length)}`)
+        await exitC1Client(c2, 'T52 C2')
+        await stopC1Host(host)
+        trace('t52', {
+          hostPid: ready.pid,
+          sessionId,
+          callId,
+          projectedState: projection.active.find(item => item?.callId === callId)?.state,
+          continuedAnswer: 'queued',
+          durableReplies: queuedMessages.length,
+        })
+      }
 
-        // T53/T54: an official Approval request survives the Client exit and a
-        // fresh Client settles the SAME Host request exactly once. `allowed-once`
-        // executes the harmless command; `rejected` never executes it.
-        for (const [scenario, decision, expected, markerName] of [
-          ['approval-allow', 'y', 'allowed-once', 'approval-allow.marker'],
-          ['approval-reject', 'n', 'rejected', 'approval-reject.marker'],
-        ]) {
-          const label = scenario === 'approval-allow' ? 't53' : 't54'
-          const { host, ready, workRoot } = await startC1Host(scenario, label)
-          const { client: c1 } = await startC1Client(`${label.toUpperCase()} C1`)
-          const sessionId = await openC1Session(c1, `${label} prompt`, label.toUpperCase())
-          const asked = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/asked', `${label} approval/asked`, 120_000)
+      // T53/T54: an official Approval request survives the Client exit and a
+      // fresh Client settles the SAME Host request exactly once. `allowed-once`
+      // executes the harmless command; `rejected` never executes it.
+      for (const [scenario, decision, expected, markerName] of [
+        ['approval-allow', 'y', 'allowed-once', 'approval-allow.marker'],
+        ['approval-reject', 'n', 'rejected', 'approval-reject.marker'],
+      ]) {
+        const label = scenario === 'approval-allow' ? 't53' : 't54'
+        const { host, ready, workRoot } = await startC1Host(scenario, label)
+        const { client: c1 } = await startC1Client(`${label.toUpperCase()} C1`)
+        const sessionId = await openC1Session(c1, `${label} prompt`, label.toUpperCase())
+        const asked = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/asked', `${label} approval/asked`, 120_000)
+        const requestId = String(asked.data.id)
+        const request = await waitForC1WorkEvent(workRoot, event => event.kind === 'approval-request', `${label} Host approval request`)
+        assert(request.toolName === 'bash', `${label} the approval is not for the official bash tool`)
+        await c1.waitForScreen('[y] Allow once', `${label} C1 approval sheet`, 120_000)
+        const hostBefore = await hostIdentityFacts(host)
+        const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
+        c1.signalBusiness('SIGKILL')
+        await waitGone(c1Pid, 15_000)
+        await c1.dispose()
+        assert(alive(ready.pid), `${label} the Host died on the Client SIGKILL`)
+        await assertHostIdentityKept(host, hostBefore, `${label} Host after Client detach`)
+        await sleep(300)
+        assert(readC1WorkEvents(workRoot).every(event => !(event.kind === 'approval-settled')), `${label} the Client teardown settled the Host approval`)
+        const { client: c2 } = await startC1Client(`${label.toUpperCase()} C2`, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        assertInteractionGate(c2, `${label} C2`)
+        await c2.waitForScreen(scenario === 'approval-allow' ? 'Allow once' : 'Reject', `${label} C2 approval sheet`, 120_000)
+        c2.send(decision)
+        const decided = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/decided' && String(event.data?.id) === requestId, `${label} approval/decided`, 120_000)
+        assert(decided.data.outcome === expected, `${label} approval outcome ${JSON.stringify(decided.data.outcome)} != ${expected}`)
+        const decisions = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'approval/decided' && String(event.data?.id) === requestId)
+        assert(decisions.length === 1, `${label} duplicated approval/decided`)
+        const marker = join(workRoot, markerName)
+        if (scenario === 'approval-allow') {
+          await waitForC1WorkEvent(workRoot, event => event.kind === 'approval-settled' && event.outcome === 'allowed-once', `${label} allowed-once`)
+          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === String(request.callId), `${label} bash tool result`, 120_000)
+          assert(existsSync(marker), `${label} the allowed harmless command did not execute`)
+        } else {
+          await waitForC1WorkEvent(workRoot, event => event.kind === 'approval-settled' && event.outcome === 'rejected', `${label} rejected`)
+          assert(!existsSync(marker), `${label} the rejected harmless command executed`)
+        }
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', `${label} turn/end`)
+        await exitC1Client(c2, `${label} C2`)
+        await stopC1Host(host)
+        trace(label, { hostPid: ready.pid, sessionId, requestId, decision: expected, decisions: 1, marker: existsSync(marker) })
+      }
+
+      // T55a: an old, still-authenticated non-TUI Peer holds the original
+      // approval delivery while the legal C2 rejects it. The old peer's late
+      // `allowed-once` frame must not execute the tool or add a decision.
+      {
+        let peer
+        try {
+          const { host, ready, workRoot } = await startC1Host('approval-allow', 't55a')
+          const { client: c1 } = await startC1Client('T55A C1')
+          const sessionId = await openC1Session(c1, 't55a prompt', 'T55A')
+          const asked = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/asked', 'T55a approval/asked', 120_000)
           const requestId = String(asked.data.id)
-          const request = await waitForC1WorkEvent(workRoot, event => event.kind === 'approval-request', `${label} Host approval request`)
-          assert(request.toolName === 'bash', `${label} the approval is not for the official bash tool`)
-          await c1.waitForScreen('[y] Allow once', `${label} C1 approval sheet`, 120_000)
-          const hostBefore = await hostIdentityFacts(host)
+          await c1.waitForScreen('[y] Allow once', 'T55a C1 approval sheet', 120_000)
           const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
           c1.signalBusiness('SIGKILL')
           await waitGone(c1Pid, 15_000)
           await c1.dispose()
-          assert(alive(ready.pid), `${label} the Host died on the Client SIGKILL`)
-          await assertHostIdentityKept(host, hostBefore, `${label} Host after Client detach`)
-          await sleep(300)
-          assert(readC1WorkEvents(workRoot).every(event => !(event.kind === 'approval-settled')), `${label} the Client teardown settled the Host approval`)
-          const { client: c2 } = await startC1Client(`${label.toUpperCase()} C2`, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
-          await c2.waitForScreen(scenario === 'approval-allow' ? 'Allow once' : 'Reject', `${label} C2 approval sheet`, 120_000)
-          c2.send(decision)
-          const decided = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/decided' && String(event.data?.id) === requestId, `${label} approval/decided`, 120_000)
-          assert(decided.data.outcome === expected, `${label} approval outcome ${JSON.stringify(decided.data.outcome)} != ${expected}`)
-          const decisions = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'approval/decided' && String(event.data?.id) === requestId)
-          assert(decisions.length === 1, `${label} duplicated approval/decided`)
-          const marker = join(workRoot, markerName)
-          if (scenario === 'approval-allow') {
-            await waitForC1WorkEvent(workRoot, event => event.kind === 'approval-settled' && event.outcome === 'allowed-once', `${label} allowed-once`)
-            await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === String(request.callId), `${label} bash tool result`, 120_000)
-            assert(existsSync(marker), `${label} the allowed harmless command did not execute`)
-          } else {
-            await waitForC1WorkEvent(workRoot, event => event.kind === 'approval-settled' && event.outcome === 'rejected', `${label} rejected`)
-            assert(!existsSync(marker), `${label} the rejected harmless command executed`)
-          }
-          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', `${label} turn/end`)
-          await exitC1Client(c2, `${label} C2`)
-          await stopC1Host(host)
-          trace(label, { hostPid: ready.pid, sessionId, requestId, decision: expected, decisions: 1, marker: existsSync(marker) })
-        }
-
-        // T55: a Client exit during a pending Approval is NOT an implicit
-        // decision; a later legal Client rejects it. The delayed-old-Peer and
-        // Host-Agent-abort races are recorded as NOT_VERIFIED (the single-seat
-        // lane cannot hold two real Peers at once).
-        {
-          const { host, ready, workRoot } = await startC1Host('approval-reject', 't55')
-          const { client: c1 } = await startC1Client('T55 C1')
-          const sessionId = await openC1Session(c1, 't55 prompt', 'T55')
-          const asked = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/asked', 'T55 approval/asked', 120_000)
-          const requestId = String(asked.data.id)
-          await c1.waitForScreen('[y] Allow once', 'T55 C1 approval sheet', 120_000)
-          c1.signalBusiness('SIGTERM')
-          const cleanExit = await c1.waitForExit(60_000)
-          assert(cleanExit.code === 0 && cleanExit.signal === null, `T55 C1 clean exit was ${JSON.stringify(cleanExit)}`)
-          await c1.dispose()
-          await sleep(300)
-          const afterExit = hostSessionEvents(dshHome, sessionId) ?? []
-          assert(!afterExit.some(event => event.type === 'approval/decided'), 'T55 the Client clean exit decided the Host approval')
-          const { client: c2 } = await startC1Client('T55 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
-          await c2.waitForScreen('Reject', 'T55 C2 approval sheet', 120_000)
+          const startedPeer = await startPeer('T55a old peer')
+          peer = startedPeer.peer
+          const peerRequest = await peer.waitFor(record => record.m4a0 === 'peer-interaction' && record.kind === 'approval', 'T55a old peer held approval delivery', 120_000)
+          const { client: c2 } = await startC1Client('T55A C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+          assertInteractionGate(c2, 'T55A C2')
+          await c2.waitForScreen('Reject', 'T55a C2 approval sheet', 120_000)
           c2.send('n')
-          const decided = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/decided' && String(event.data?.id) === requestId, 'T55 approval/decided')
-          assert(decided.data.outcome === 'rejected', 'T55 the later legal Client did not reject the approval')
-          await exitC1Client(c2, 'T55 C2')
+          const decided = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/decided' && String(event.data?.id) === requestId, 'T55a approval/decided', 120_000)
+          assert(decided.data.outcome === 'rejected', 'T55a the legal Client did not reject the approval')
+          peer.send({ op: 'peer-answer', kind: 'approval', callId: peerRequest.peerKey, value: 'allowed-once' })
+          await peer.waitFor(record => record.m4a0 === 'peer-answer-sent' && record.kind === 'approval', 'T55a stale peer allow sent', 30_000)
+          const decisions = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'approval/decided' && String(event.data?.id) === requestId)
+          assert(decisions.length === 1 && decisions[0].data.outcome === 'rejected', 'T55a the stale old-peer allow produced a second decision')
+          assert(!existsSync(join(workRoot, 'approval-allow.marker')), 'T55a the stale old-peer allow executed the tool')
+          await exitC1Client(c2, 'T55A C2')
           await stopC1Host(host)
-          trace('t55', { hostPid: ready.pid, sessionId, requestId, exitDidNotDecide: true, stalePeerRace: 'NOT_VERIFIED', hostAbortRace: 'NOT_VERIFIED' })
+          trace('t55a', { hostPid: ready.pid, sessionId, requestId, oldPeerHeld: true, staleAllow: 'ignored', decisions: 1, marker: false })
+        } finally {
+          if (peer !== undefined) {
+            await peer.shutdown().catch(() => {})
+          }
         }
+      }
+
+      // T55b: a formal Host Agent cancel while the approval is pending must
+      // settle the request as the official cancellation taxonomy; a late `y`
+      // must not execute the marker.
+      {
+        const cancelBarrier = join(workDir, 't55b-cancel.release')
+        const { host, ready, workRoot } = await startC1Host('approval-allow', 't55b', { C1_CANCEL_AGENT: cancelBarrier })
+        const { client } = await startC1Client('T55B C1')
+        const sessionId = await openC1Session(client, 't55b prompt', 'T55B')
+        const asked = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/asked', 'T55b approval/asked', 120_000)
+        const requestId = String(asked.data.id)
+        await client.waitForScreen('[y] Allow once', 'T55b approval sheet', 120_000)
+        writeFileSync(cancelBarrier, 'cancel\n', { mode: 0o600 })
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'agent-cancel-requested', 'T55b Host Agent cancel', 60_000)
+        const decided = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/decided' && String(event.data?.id) === requestId, 'T55b approval/decided', 120_000)
+        assert(decided.data.outcome !== 'allowed-once', `T55b Host abort settled as allowed-once: ${JSON.stringify(decided.data)}`)
+        assert(decided.data.outcome === 'cancelled', `T55b unexpected Host abort taxonomy: ${JSON.stringify(decided.data.outcome)}`)
+        client.send('y')
+        await sleep(500)
+        assert(!existsSync(join(workRoot, 'approval-allow.marker')), 'T55b a late y executed the command after Host abort')
+        assert((hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'approval/decided' && String(event.data?.id) === requestId).length === 1,
+          'T55b the Host abort produced a duplicate approval/decided')
+        // The late `y` landed in the editor after the approval sheet was
+        // withdrawn; clear it so the normal `/exit` is still a command.
+        client.send('\x15')
+        await exitC1Client(client, 'T55B C1')
+        await stopC1Host(host)
+        trace('t55b', { hostPid: ready.pid, sessionId, requestId, hostAbortTaxonomy: decided.data.outcome, lateAllowExecuted: false })
+      }
+
+      // T55c: same-PID HMR while a pending Question/Approval owns the modal.
+      // The root delivery survives the revision swap; the new surface shows
+      // the SAME Host pending and only the new surface's answer settles it.
+      for (const [kind, scenario, label, confirmText, answer, expectedCount] of [
+        ['question', 'question', 't55c-question', 'Continue the C1 test?', '1\r', 1],
+        ['approval', 'approval-allow', 't55c-approval', '[y] Allow once', 'y', 1],
+      ]) {
+        const { host, ready, workRoot } = await startC1Host(scenario, label)
+        const { client } = await startC1Client(`${label} Client`, { SPLIT_PROCESS_CLIENT_HMR_PROBE: '1' })
+        const sessionId = await openC1Session(client, `${label} prompt`, label.toUpperCase())
+        if (kind === 'question') {
+          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', 'T55c question tool/call')
+          await client.waitForScreen(confirmText, 'T55c C1 question modal', 120_000)
+        } else {
+          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/asked', 'T55c approval/asked', 120_000)
+          await client.waitForScreen(confirmText, 'T55c C1 approval sheet', 120_000)
+        }
+        const before = await waitForSurfaceStatus(client, record => record.surfaceMounted === true && record.sessionOpen === true, 'T55c initial surface')
+        client.signalBusiness('SIGUSR2')
+        await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T55c HMR start', 60_000)
+        await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T55c HMR retired', 120_000)
+        await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready', 'T55c HMR ready', 180_000)
+        const after = await waitForSurfaceStatus(client, record => record.surfaceMounted === true && record.surfaceRevision !== before.surfaceRevision, 'T55c new surface')
+        assert(after.pid === before.pid && after.generationId === before.generationId, 'T55c HMR changed the Client PID or Connection generation')
+        assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === 'interaction-startup-gate').length === 1,
+          'T55c HMR duplicated the root interaction startup gate')
+        await client.waitForScreen(confirmText, 'T55c new surface shows the same Host pending', 120_000)
+        if (kind === 'question') {
+          client.send(answer)
+          await client.waitForScreen('Submit', 'T55c question review', 30_000)
+          client.send('\r')
+          await waitForC1WorkEvent(workRoot, event => event.kind === 'question-settled' && event.sessionId === sessionId, 'T55c question settled', 120_000)
+          assert(readC1WorkEvents(workRoot).filter(event => event.kind === 'question-request' && event.sessionId === sessionId).length === 1,
+            'T55c HMR replayed the Host question request')
+        } else {
+          client.send(answer)
+          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/decided', 'T55c approval/decided', 120_000)
+          assert(existsSync(join(workRoot, 'approval-allow.marker')), 'T55c the new surface allow did not execute once')
+          assert((hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'approval/decided').length === expectedCount,
+            'T55c HMR duplicated the approval decision')
+        }
+        await exitC1Client(client, `${label} Client`)
+        await stopC1Host(host)
+        trace(label, { hostPid: ready.pid, sessionId, samePid: true, sameGeneration: true, pendingReattached: true })
       }
 
       // T56: a new Client is a fresh Peer/binding; it reads the exact history
@@ -3345,13 +3533,13 @@ async function main() {
         candidate: basename(tarball),
         sha256: candidateSha256,
         dshVersion: targetDshVersion,
-        m4c1: 'PARTIAL (Owner-approved scope split)',
+        m4c1: 'PASS',
         t44t48: 'pass',
-        t49t55: 'PARTIAL: T49/T50/T53/T54 BLOCKED_BY_CLIENT_STARTUP_ORDERING; T51/T52/T55 DEFERRED_TO_C1_B',
+        t49t55: 'pass (T49-T55, including the old-peer protocol negatives and same-PID HMR pending question/approval)',
         t56t59: 'pass',
-        t60Status: 'PARTIAL: complete T01-T60 qualification is not claimed',
-        t26aArtifactMissing: 'NOT_VERIFIED (#474)',
-        t12PtyHup: 'NOT_RUN',
+        t60Status: 'PASS: complete T01-T60 qualification ran on this exact candidate',
+        t26aArtifactMissing: 'pass (current main real artifact-absent + restored authenticated identity)',
+        t12PtyHup: 'pass (real PTY master close)',
         releaseGates: 'run by the stage-final lane, not by this smoke',
       })
     } finally {

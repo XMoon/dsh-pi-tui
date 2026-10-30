@@ -38,7 +38,8 @@ import {
   type SplitRemoteApplicationRuntime,
 } from '../remote/application-runtime.ts'
 import {
-  mountRemoteClientDomains,
+  mountRemoteClientDomainPrerequisites,
+  type MountedRemoteClientDomainPrerequisites,
   type MountedRemoteClientDomains,
 } from '../remote/client-runtime.ts'
 import { createRemoteClientUiRuntime, type RemoteClientUiRuntime } from '../remote/client-ui-runtime.ts'
@@ -50,6 +51,12 @@ import { runDetached } from '../../runtime/process/tasks.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import type { LocalInstanceRecord } from './local-discovery.ts'
 import type { LocalClientTransport } from './local-transport.ts'
+import type { SplitClientInteractionDeliveryOwner } from './client-interaction-delivery.ts'
+
+export type {
+  MountedRemoteClientDomainPrerequisites,
+  MountedRemoteClientDomains,
+} from '../remote/client-runtime.ts'
 
 /** Client-local startup facts handed to the pre-connection subtree. */
 export interface LocalClientStartupFacts {
@@ -158,6 +165,18 @@ export interface LocalClientComposition {
   readonly mode?: 'qualification' | 'surface'
   /** Installed DSH anchor; REQUIRED in surface mode (official module source). */
   readonly dshAnchor?: string
+  /**
+   * Surface mode: the ONE root official Client Domain graph mounted before the
+   * Gateway's first generation. Every surface revision borrows it; an HMR
+   * replacement never remounts the Session resolver or the root delivery.
+   */
+  readonly domains?: MountedRemoteClientDomains
+  /**
+   * Surface mode: the ONE root interaction delivery owner registered before
+   * the official event pump starts. Every revision attaches its two providers
+   * to it; an HMR replacement re-attaches without duplicating `$on`.
+   */
+  readonly interactionDelivery?: SplitClientInteractionDeliveryOwner
   /** The SAME B1 authenticated Cookie fetch; REQUIRED in surface mode. */
   readonly authenticatedFetch?: RemoteBackendFetch
   /**
@@ -324,7 +343,6 @@ export class SurfaceRevisionTasks {
 /** One mounted surface revision: the complete graph one runner owns. */
 interface SurfaceRevision {
   readonly id: number
-  domains?: MountedRemoteClientDomains
   ui?: RemoteClientUiRuntime
   application?: SplitRemoteApplicationRuntime
   runner?: MountedLocalClientRunner
@@ -376,6 +394,14 @@ async function startSurfaceLocalClient(
   if (mountRunner === undefined) {
     throw new Error('local client entry: surface mode requires the process composition runner mount')
   }
+  if (composition.domains === undefined) {
+    throw new Error('local client entry: surface mode requires the mounted official Client Domain graph')
+  }
+  if (composition.interactionDelivery === undefined) {
+    throw new Error('local client entry: surface mode requires the root interaction delivery owner')
+  }
+  const domains = composition.domains
+  const delivery = composition.interactionDelivery
 
   let currentRevision: SurfaceRevision | undefined
   let revisionSequence = 0
@@ -396,10 +422,9 @@ async function startSurfaceLocalClient(
   const status = (): LocalClientStatus => {
     const observed = transport.status()
     const revision = currentRevision
-    const domains = revision?.domains
-    const domainsOpen = revision !== undefined && domains !== undefined
+    const domainsOpen = revision !== undefined
     const current = domainsOpen ? openSessionIdFor(domains) : undefined
-    const privateRemote = domains?.remote as unknown as {
+    const privateRemote = domains.remote as unknown as {
       readonly piTuiFileReferences?: unknown
       readonly piTuiTerminalProgress?: unknown
     } | undefined
@@ -423,9 +448,7 @@ async function startSurfaceLocalClient(
         sessions: context.reflect.get('sessions') === undefined ? 0 : 1,
         jobs: context.reflect.get('jobs') === undefined ? 0 : 1,
       },
-      ...(domainsOpen && domains !== undefined
-        ? { sessionsListPhase: domains.sessions.list.getSnapshot().phase }
-        : {}),
+      ...(domainsOpen ? { sessionsListPhase: domains.sessions.list.getSnapshot().phase } : {}),
       privateNamespaces: domainsOpen
         && privateRemote?.piTuiFileReferences !== undefined
         && privateRemote.piTuiTerminalProgress !== undefined
@@ -454,8 +477,6 @@ async function startSurfaceLocalClient(
 
   /** Attach the revision-local official status subscriptions. */
   const subscribeRevisionStatus = (revision: SurfaceRevision): void => {
-    const domains = revision.domains
-    if (domains === undefined) return
     const watched = new Map<string, () => void>()
     const watchListedSessions = (): void => {
       for (const id of domains.sessions.list.getSnapshot().ids) {
@@ -487,11 +508,6 @@ async function startSurfaceLocalClient(
     signal?.throwIfAborted()
     const revision: SurfaceRevision = { id: ++revisionSequence, surfaceMounted: false }
     currentRevision = revision
-    revision.domains = await mountRemoteClientDomains({
-      context,
-      dshAnchor,
-      ...(signal === undefined ? {} : { signal }),
-    })
     await waitForAssemblyHold('domain', signal, composition.onQualification)
     signal?.throwIfAborted()
     const revisionStartup = {
@@ -499,6 +515,7 @@ async function startSurfaceLocalClient(
       ...(sessionIdOverride === undefined ? {} : { sessionId: sessionIdOverride }),
     }
     revision.ui = await createRemoteClientUiRuntime({ context, startup: revisionStartup })
+    composition.onQualification?.({ op: 'startup-stage', stage: 'ui-mounted', revision: revision.id })
     signal?.throwIfAborted()
     // T34 qualification input: hold ONE write between its real serialization
     // and the writer's dispatch-admission check. Production never sets this
@@ -506,7 +523,7 @@ async function startSurfaceLocalClient(
     const holdPath = process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE
     let promptSerializer: RemotePromptSerializer | undefined
     if (holdPath !== undefined && holdPath !== '') {
-      const production = RemotePromptSerializerProduction.overSessions(revision.domains.sessions)
+      const production = RemotePromptSerializerProduction.overSessions(domains.sessions)
       promptSerializer = {
         preflight: message => production.preflight(message),
         async serialize(message) {
@@ -517,12 +534,15 @@ async function startSurfaceLocalClient(
       }
     }
     revision.application = await createRemoteApplicationRuntimeFromClient({
-      domains: revision.domains,
+      domains,
       fetch: authenticatedFetch,
       clientUi: revision.ui,
+      delivery,
+      surfaceRevision: revision.id,
       ...(signal === undefined ? {} : { signal }),
       ...(promptSerializer === undefined ? {} : { promptSerializer }),
     })
+    composition.onQualification?.({ op: 'startup-stage', stage: 'application-ready', revision: revision.id })
     signal?.throwIfAborted()
     // T59 qualification input: force the NEW revision's UI mount to fail after
     // the old revision was already retired. Production never sets this.
@@ -542,6 +562,7 @@ async function startSurfaceLocalClient(
     } as never)
     signal?.throwIfAborted()
     revision.runner = await mountRunner({ context, config, override })
+    composition.onQualification?.({ op: 'startup-stage', stage: 'runner-fiber-mounted', revision: revision.id })
     // T59 mid-HMR hold: a replacement-only barrier between the new runner
     // fiber mount and its physical surface readiness. Production never sets it.
     await waitForAssemblyHold(
@@ -565,13 +586,14 @@ async function startSurfaceLocalClient(
     } finally {
       abortReady.cancel()
     }
+    composition.onQualification?.({ op: 'startup-stage', stage: 'surface-ready', revision: revision.id })
     revision.surfaceMounted = true
     subscribeRevisionStatus(revision)
     emitStatus()
     return revision
   }
 
-  /** Reverse-dispose exactly one revision: runner -> UI -> application/Domains. */
+  /** Reverse-dispose exactly one revision: runner -> UI -> application adapters. */
   const disposeRevision = async (revision: SurfaceRevision): Promise<void> => {
     revision.surfaceMounted = false
     emitStatus()
@@ -586,16 +608,13 @@ async function startSurfaceLocalClient(
     }
     // The runner may already have released the selected adapters; this is the
     // SAME memoized release. When the runner never mounted, this is the first
-    // release.
+    // release. The root Domain graph and B1 transport stay root-owned.
     if (revision.application !== undefined) {
       try { await revision.application.selected.disposeTransport() } catch (error) { errors.push(error) }
-    } else if (revision.domains !== undefined) {
-      try { await revision.domains.dispose() } catch (error) { errors.push(error) }
     }
     revision.runner = undefined
     revision.ui = undefined
     revision.application = undefined
-    revision.domains = undefined
     throwDisposalErrors(errors, 'local client surface revision')
   }
 
@@ -608,9 +627,7 @@ async function startSurfaceLocalClient(
     }
     const diag = composition.diag
     process.on('SIGUSR2', () => {
-      const revision = currentRevision
-      const domains = revision?.domains
-      if (domains === undefined) {
+      if (currentRevision === undefined) {
         composition.onQualification?.({ op: 'private-rpc-proof', error: 'no retained Session' })
         return
       }
@@ -675,6 +692,7 @@ async function startSurfaceLocalClient(
     if (partial !== undefined) {
       try { await disposeRevision(partial) } catch (cleanupError) { cleanupErrors.push(cleanupError) }
     }
+    try { delivery.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
     let primary = error instanceof Error ? error : new Error(String(error))
     for (const cleanupError of cleanupErrors) primary = mergeCause(primary, cleanupError)
     throw primary
@@ -689,7 +707,7 @@ async function startSurfaceLocalClient(
         if (disposed) throw new Error('local client entry: the surface revision owner is already disposed')
         const previous = currentRevision
         if (previous === undefined) throw new Error('local client entry: no mounted surface revision to replace')
-        const previousSessionId = previous.domains === undefined ? undefined : openSessionIdFor(previous.domains)
+        const previousSessionId = openSessionIdFor(domains)
         composition.onQualification?.({ op: 'hmr-revision-start', revision: revisionSequence + 1 })
         previous.surfaceMounted = false
         emitStatus()
@@ -746,11 +764,34 @@ async function startSurfaceLocalClient(
       if (revision !== undefined) {
         try { await disposeRevision(revision) } catch (error) { errors.push(error) }
       }
+      // Root order: revoke the interaction token/listeners, release the
+      // Domain graph, then the official transport (which aborts any remaining
+      // forwarded invocation through its generation signal), then the root.
+      try { delivery.dispose() } catch (error) { errors.push(error) }
+      // Stop the official Gateway/Connection BEFORE the Session Client goes
+      // away: while the pump is live its Agent resolver must stay mounted; the
+      // transport disposal is what aborts any remaining delivery task.
       try { await transport.dispose() } catch (error) { errors.push(error) }
+      try { await domains.dispose() } catch (error) { errors.push(error) }
       try { await context.fiber.dispose() } catch (error) { errors.push(error) }
       throwDisposalErrors(errors, 'local client surface')
     },
   }
+}
+
+/**
+ * Mount the split surface's official Client Domain prerequisites on the root
+ * `Context` BEFORE the Gateway's first generation: the generated `/remote`
+ * contributions, the private pi-tui contribution, fileUpload and the official
+ * Session Client (the Agent scope resolver). The caller then registers the
+ * root interaction listeners, releases the official Loader gate, awaits the
+ * first generation and calls `complete()`.
+ */
+export async function mountSurfaceClientDomainPrerequisites(
+  context: Context,
+  options: { readonly dshAnchor: string },
+): Promise<MountedRemoteClientDomainPrerequisites> {
+  return await mountRemoteClientDomainPrerequisites({ context, dshAnchor: options.dshAnchor })
 }
 
 /**

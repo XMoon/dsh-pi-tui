@@ -1274,7 +1274,16 @@ export function applyRunnerWithRuntime(
     const resumeQuiesce = quiesceResumedOwner<SessionOwnerRef>(handle, {
       publishResumedOwner: (handle, preMountQuiesce) => sessionRuntime.publishResumedOwner(handle, preMountQuiesce),
       showPreparingStage: () => startupStatus.show('Preparing conversation…'),
-      whenIdleOrAbort: (owner, signal) => selectedRuntime.retirement.whenIdleOrAbort(owner, signal),
+      // A Remote Client resumes against the official live Session binding: a
+      // Host Turn that is waiting on a pending Question/Approval must NOT
+      // block the pre-mount quiesce, because the newly mounted Client is the
+      // surface that answers it. The wait would deadlock (Turn running →
+      // surface not mounted → no answer → Turn still running). Direct keeps
+      // its in-process pre-mount idle wait unchanged; the Remote binding is
+      // observable through the official event stream after mount.
+      whenIdleOrAbort: (owner, signal) => selectedRuntime.kind === 'remote'
+        ? Promise.resolve('unobservable' as const)
+        : selectedRuntime.retirement.whenIdleOrAbort(owner, signal),
       signal: lifecycleController.signal,
     })
     if (resumeQuiesce !== undefined) await resumeQuiesce

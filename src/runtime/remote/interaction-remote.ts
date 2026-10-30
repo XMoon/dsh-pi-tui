@@ -88,6 +88,21 @@ export interface RemoteInteractionEventsSource {
   ): () => void
 }
 
+/**
+ * The split Client's root interaction-delivery seam. ONE implementation lives
+ * for the whole Client root and borrows the CURRENT surface revision's two
+ * providers. The revision number is a local identity token, never Host or
+ * Question authority.
+ */
+export interface SplitClientSurfaceInteraction {
+  readonly onQuestion: UserQuestionProvider
+  readonly onApproval: ApprovalRequestListener
+}
+
+export interface SplitClientInteractionDelivery {
+  attachSurface(revision: number, input: SplitClientSurfaceInteraction): () => void
+}
+
 /** One Client projection face (value deliberately `unknown`). */
 export interface RemoteQuestionProjectionFace {
   getSnapshot(): unknown
@@ -117,6 +132,11 @@ export interface RemoteInteractionRuntimeSource {
   readonly sessions: RemoteQuestionSessionsSource
   readonly remote: RemoteUserQuestionRemotes & RemoteInteractionEventsSource
   readonly connection: { readonly generation: RemoteConnectionGenerationSource }
+  /** Split-Client only: the root delivery owner. Absent keeps the M3
+   *  per-runtime `remote.$on` path byte-for-byte unchanged. */
+  readonly delivery?: SplitClientInteractionDelivery
+  /** Split-Client only: the surface revision token attached to the delivery. */
+  readonly surfaceRevision?: number
 }
 
 const USER_QUESTIONS_PROJECTION_KEY = 'userQuestions'
@@ -185,13 +205,20 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
   /** Every subscription this adapter owns, released exactly once. */
   private readonly owned: Array<() => void> = []
 
-  constructor(source: RemoteInteractionRuntimeSource) {
+  private readonly registerDelivery: ((provider: UserQuestionProvider) => boolean) | undefined
+
+  constructor(
+    source: RemoteInteractionRuntimeSource,
+    registerDelivery?: (provider: UserQuestionProvider) => boolean,
+  ) {
     this.sessions = source.sessions
     this.remote = source.remote
     this.generation = source.connection.generation
+    this.registerDelivery = registerDelivery
   }
 
   onRequest(provider: UserQuestionProvider): boolean {
+    if (this.registerDelivery !== undefined) return this.registerDelivery(provider)
     // The official Client scope is the ONLY Session identity source on the
     // wire: the forwarded request's Agent became the resolved owner Context.
     const sessions = this.sessions
@@ -408,19 +435,59 @@ export class RemoteInteractionPort implements InteractionPort {
   /** Every subscription this port owns, released exactly once. */
   private readonly owned: Array<() => void> = []
   private readonly questionsPort: RemoteQuestionInteractionPort
+  private readonly delivery: SplitClientInteractionDelivery | undefined
+  private readonly surfaceRevision: number
+  /** The split-delivery providers supplied by the CURRENT surface revision. */
+  private pendingQuestion: UserQuestionProvider | undefined
+  private pendingApproval: ApprovalRequestListener | undefined
+  private deliveryDisposer: (() => void) | undefined
 
   constructor(source: RemoteInteractionRuntimeSource) {
     this.remote = source.remote
-    this.questionsPort = new RemoteQuestionInteractionPort(source)
+    this.delivery = source.delivery
+    this.surfaceRevision = source.surfaceRevision ?? 0
+    this.questionsPort = new RemoteQuestionInteractionPort(
+      source,
+      this.delivery === undefined ? undefined : provider => this.registerQuestion(provider),
+    )
     this.questions = this.questionsPort
   }
 
+  private registerQuestion(provider: UserQuestionProvider): boolean {
+    this.pendingQuestion = provider
+    this.attachDeliveryWhenComplete()
+    return true
+  }
+
+  private attachDeliveryWhenComplete(): void {
+    if (this.delivery === undefined || this.deliveryDisposer !== undefined) return
+    if (this.pendingQuestion === undefined || this.pendingApproval === undefined) return
+    this.deliveryDisposer = this.delivery.attachSurface(this.surfaceRevision, {
+      onQuestion: this.pendingQuestion,
+      onApproval: this.pendingApproval,
+    })
+  }
+
   onApprovalRequest(listener: ApprovalRequestListener): void {
-    // Approval rides the forwarded `approval/request` waterfall; the
-    // transport-neutral listener receives the same Agent-free shape.
-    this.owned.push(this.remote.$on('approval/request', function (this: unknown, request: unknown, next: unknown) {
-      return listener(request as Parameters<ApprovalRequestListener>[0], next)
-    }))
+    if (this.delivery === undefined) {
+      this.owned.push(this.remote.$on('approval/request', function (this: unknown, request: unknown, next: unknown) {
+        return listener(request as Parameters<ApprovalRequestListener>[0], next)
+      }))
+      return
+    }
+    this.pendingApproval = listener
+    this.attachDeliveryWhenComplete()
+  }
+
+  /**
+   * Revoke the current surface's presentation token BEFORE the surface owner
+   * withdraws its modal promises. A local teardown result must never be
+   * forwarded as a Host decision; the root delivery then holds the official
+   * invocation for a replacement surface (or the request lifetime).
+   */
+  detachSurface(): void {
+    this.deliveryDisposer?.()
+    this.deliveryDisposer = undefined
   }
 
   /**
@@ -429,6 +496,7 @@ export class RemoteInteractionPort implements InteractionPort {
    * forwarded-event listener never outlives its owner.
    */
   dispose(): void {
+    this.detachSurface()
     this.questionsPort.dispose()
     for (const off of this.owned.splice(0)) off()
   }

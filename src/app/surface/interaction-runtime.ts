@@ -177,6 +177,13 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    */
   let ended = false
   /**
+   * The attached backend port. The split-Client adapter exposes an optional
+   * `detachSurface()`: revoking its current presentation token BEFORE the
+   * modal withdrawals is what keeps a local teardown result from reaching the
+   * Host as a user decision.
+   */
+  let attachedPort: InteractionPort | undefined
+  /**
    * The refused admissions' waits (F11): they never reached the seat, so THIS
    * owner is their teardown owner.
    */
@@ -376,6 +383,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
 
   return {
     attach(port, deps) {
+      attachedPort = port
       // PR3-A: a renderer that cannot present interactive modals (the
       // read-only TSP renderer) still registers BOTH answerers, but
       // fail-closed: approvals resolve `'unavailable'` (the official
@@ -531,8 +539,10 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       // can never strand the later ones, and a second dispose is inert.
       const questionAttention = questionAttentionDisposal
       const controller = questionController
+      const port = attachedPort
       questionAttentionDisposal = undefined
       questionController = undefined
+      attachedPort = undefined
       // PR3-B B3 (§3.2.4): the ORDER is part of the contract. The controller
       // retires FIRST, so a live question/approval is still classified by the
       // Host's own ASK_ABORTED / ASK_CANCELLED path; only then does the
@@ -540,6 +550,10 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       // dies with the surface), and the settled lookup is cleared last so no
       // late repaint can reach through it.
       runSyncDisposalSteps('interaction runtime disposal', [
+        // FIRST: revoke the split delivery token while the surface is still
+        // logically current; the modal withdrawal below then produces a
+        // LOCAL result the root owner discards instead of a Host decision.
+        () => port?.detachSurface?.(),
         () => questionAttention?.(),
         () => controller?.dispose(),
         () => options.livePresenter()?.withdrawPending(),

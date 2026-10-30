@@ -681,11 +681,14 @@ Where it runs:
   replaces its surface, ONE serial revision task slot owns the transition:
   close the old revision's input/admission, await the old runner's physical
   tty release and Session-reference retirement, dispose its UI and memoized
-  application/Domain graph in reverse, mount the new revision on the same
-  Client Context/transport, and await its real `surfaceReady`. A stop request
-  aborts the in-flight revision and waits for that slot before releasing the
-  Client root; a failed revision disposes its partial graph and exits the
-  Client. The Host identity and Host business objects never change.
+  application adapters in reverse, mount the new revision on the same Client
+  Context/transport, and await its real `surfaceReady`. The root Domain plane,
+  root interaction delivery owner and B1 transport stay alive across the
+  revision; the same Host Question/Approval invocation is handed to the new
+  surface at most once. A stop request aborts the in-flight revision and waits
+  for that slot before releasing the Client root; a failed revision disposes
+  its partial graph and exits the Client. The Host identity and Host business
+  objects never change.
 - **Successful ordinary session transition** (`/new`, `/sessions` switch,
   or open): a USER NAVIGATION first sends its one exact-owner stop at the
   transition admission (before the drain), then the pre-commit quiesce

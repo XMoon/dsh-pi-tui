@@ -89,9 +89,24 @@ export interface LocalClientTransport {
   dispose(): Promise<void>
 }
 
+/** The installed-but-not-yet-ready official Client transport.
+ *
+ * `installLocalTransport` mounts the three official Node Client halves and
+ * returns this handle BEFORE the first Connection generation exists. That is
+ * what lets the surface composition mount the official Session resolver and
+ * the root interaction listeners while the official Loader still holds the
+ * Gateway's `connection.start()` back. The caller then releases the Loader
+ * gate and awaits {@link InstalledLocalClientTransport.awaitReady}. */
+export interface InstalledLocalClientTransport extends LocalClientTransport {
+  /** Await the first real generation and the authenticated identity audit. */
+  awaitReady(options?: { readonly signal?: AbortSignal }): Promise<LocalClientTransport>
+}
+
 export interface StartLocalTransportOptions {
   /** Installed `@deepseek-ai/dsh/package.json` anchor. */
   readonly dshAnchor: string
+  /** Optional lifecycle signal for the first-generation wait. */
+  readonly signal?: AbortSignal
   /** Authenticated Host candidate and this Client process's Cookie. */
   readonly host: VerifiedLocalHost
   /** Client scope used to re-check the authenticated Host identity. */
@@ -469,14 +484,15 @@ async function closeRemainingSockets(sockets: Set<RawSocket>): Promise<void> {
  * unwinds the recorded fibers in reverse order while the root stays with the
  * caller.
  */
-export async function startLocalTransport(
+export async function installLocalTransport(
   context: Context,
   options: StartLocalTransportOptions,
-): Promise<LocalClientTransport> {
+): Promise<InstalledLocalClientTransport> {
   const { dshAnchor, host, scope, diag } = options
   const modules = await loadLocalTransportModules(dshAnchor)
   const origin = host.record.origin
   let disposed = false
+  const disposal = new AbortController()
   let fatalReported = false
   let live = false
   let fatalError: unknown
@@ -540,6 +556,7 @@ export async function startLocalTransport(
 
   const unwind = async (): Promise<unknown[]> => {
     disposed = true
+    disposal.abort(new Error('local transport: disposed'))
     const errors: unknown[] = []
     // Close the carrier before the official fibers: a fiber disposing while a
     // lazy socket is still connecting can otherwise wait on a close event that
@@ -577,8 +594,10 @@ export async function startLocalTransport(
   }
 
   try {
+    options.signal?.throwIfAborted()
     typertFiber = context.plugin(modules.typert)
     await typertFiber
+    options.signal?.throwIfAborted()
 
     connectionFiber = context.plugin(connectionContext => {
       modules.connection.installConnection(connectionContext, {
@@ -591,9 +610,11 @@ export async function startLocalTransport(
       })
     })
     await connectionFiber
+    options.signal?.throwIfAborted()
 
     gatewayFiber = context.plugin(modules.gateway)
     await gatewayFiber
+    options.signal?.throwIfAborted()
 
     const installed = context.get('connection') as LocalTransportConnection | undefined
     if (installed === undefined) {
@@ -605,18 +626,9 @@ export async function startLocalTransport(
       // startup wait returns. It must reject this startup exactly once.
       reportFatal(new LocalScopeError('HOST_IDENTITY_MISMATCH', 'local transport: qualification forced startup identity failure'))
     }
-    const startupLifetime = new AbortController()
-    try {
-      await Promise.race([waitForFirstGeneration(installed, startupLifetime.signal), fatal])
-    } finally {
-      startupLifetime.abort()
-    }
-    if (fatalError !== undefined) throw fatalError
-    assertIdentityStillCurrent(scope, host.identity)
-    if (fatalError !== undefined) throw fatalError
-    live = true
+    let readyPromise: Promise<LocalClientTransport> | undefined
 
-    return {
+    const handle: InstalledLocalClientTransport = {
       connection: installed,
       status(): LocalTransportStatus {
         const state = installed.state.getSnapshot()
@@ -634,6 +646,30 @@ export async function startLocalTransport(
           activeWrappers: wrappers.size,
           liveSockets: sockets.size,
         }
+      },
+      async awaitReady(readyOptions: { readonly signal?: AbortSignal } = {}): Promise<LocalClientTransport> {
+        readyPromise ??= (async () => {
+          if (disposed) throw new Error('local transport: disposed before readiness')
+          const startupLifetime = new AbortController()
+          const aborted = (): void => { startupLifetime.abort(readyOptions.signal?.reason) }
+          if (readyOptions.signal?.aborted === true) aborted()
+          else readyOptions.signal?.addEventListener('abort', aborted, { once: true })
+          const readySignal = readyOptions.signal === undefined
+            ? AbortSignal.any([startupLifetime.signal, disposal.signal])
+            : AbortSignal.any([startupLifetime.signal, disposal.signal, readyOptions.signal])
+          try {
+            await Promise.race([waitForFirstGeneration(installed, readySignal), fatal])
+          } finally {
+            readyOptions.signal?.removeEventListener('abort', aborted)
+            startupLifetime.abort()
+          }
+          if (fatalError !== undefined) throw fatalError
+          assertIdentityStillCurrent(scope, host.identity)
+          if (fatalError !== undefined) throw fatalError
+          live = true
+          return handle
+        })()
+        return await readyPromise
       },
       async authenticatedFetch(input: string | URL, init?: RequestInit): Promise<Response> {
         if (disposed || !live) {
@@ -669,6 +705,7 @@ export async function startLocalTransport(
         throw primary
       },
     }
+    return handle
   } catch (error) {
     const cleanupErrors = await unwind()
     const primary = error instanceof Error ? error : new Error(String(error))
@@ -676,4 +713,30 @@ export async function startLocalTransport(
     if (cleanupErrors.length > 0) (primary as Error & { cleanupFailed?: boolean }).cleanupFailed = true
     throw primary
   }
+}
+
+/**
+ * Wait for the installed transport's first real generation and identity audit.
+ * The official Gateway may only start after the interaction-owner Loader gate
+ * has been released; this is the caller's second startup stage.
+ */
+export async function awaitLocalTransportReady(
+  transport: InstalledLocalClientTransport,
+  options: { readonly signal?: AbortSignal } = {},
+): Promise<LocalClientTransport> {
+  return await transport.awaitReady(options)
+}
+
+/**
+ * The frozen B1/qualification convenience wrapper: install the official
+ * transport and immediately await its first generation. The staged surface
+ * composition uses {@link installLocalTransport} + {@link awaitLocalTransportReady}
+ * so the Domain prerequisites and interaction listeners exist first.
+ */
+export async function startLocalTransport(
+  context: Context,
+  options: StartLocalTransportOptions,
+): Promise<LocalClientTransport> {
+  const installed = await installLocalTransport(context, options)
+  return await awaitLocalTransportReady(installed, options.signal === undefined ? {} : { signal: options.signal })
 }

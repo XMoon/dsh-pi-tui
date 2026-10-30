@@ -51,6 +51,10 @@ export interface EntryControlRequest {
   readonly op: string
   /** Optional qualification correlation id; status responses echo it. */
   readonly requestId?: string
+  /** Qualification-only non-TUI answering Peer payload. */
+  readonly kind?: string
+  readonly callId?: string
+  readonly value?: unknown
 }
 
 /** Handles one control request; `true` means the process should stop reading. */

@@ -188,11 +188,14 @@ identity is published.
 ### Client composition, Session references and the real surface
 
 The split Client keeps ONE Cordis root and ONE official
-Typert/Connection/Gateway graph. Its Domain plane is mounted by one
-`mountRemoteClientDomains()` call: the generated `/remote` contributions, the
-package's ONE private contribution, then the official fileUpload -> Sessions ->
-Jobs Client plugins. This function never creates or disposes the Context,
-Connection or Gateway. The official Client bundles and generated `/remote`
+Typert/Connection/Gateway graph. Its Domain plane is mounted in two stages by
+one owner: `mountRemoteClientDomainPrerequisites()` mounts the generated
+`/remote` contributions, the package's ONE private contribution, the official
+fileUpload Client and the official Session Client (including its `agent` scope
+resolver) BEFORE the Gateway's first generation; `complete()` then mounts the
+Jobs Client and awaits the official initial readiness. The M3 in-process path
+keeps the one-call `mountRemoteClientDomains()` wrapper. These functions never
+create or dispose the Context, Connection or Gateway. The official Client bundles and generated `/remote`
 descriptors are resolved from the installed DSH anchor. The Client shell also
 supplies the official web seed's platform static `@deepseek-ai/dsh-client-store`
 from the installed Harness family (its declared DSH peer); the browser-form
@@ -212,8 +215,8 @@ an open history.
 Disposal is one reverse chain, owned by `LocalClientHandle.dispose()`: runner
 surface (TUI state + the owned `tuiMainView` reference + session retirement +
 the selected presentation/backend adapters) -> Client UI subtree -> the SAME
-memoized presentation/backend/Domain release -> the borrowed B1 transport ->
-the Client root. The runner may trigger the memoized adapter release during its
+memoized presentation/backend adapter release -> the root interaction delivery
+owner -> the borrowed B1 transport -> the root Domain plane -> the Client root. The runner may trigger the memoized adapter release during its
 own teardown; the bootstrap's later call never unmounts a second time. A Client
 exit, SIGTERM/SIGKILL, terminal EOF or surface teardown never calls the Host's
 shutdown, cancels a Host Agent, or releases a Host Session on the UI's behalf.
@@ -254,12 +257,20 @@ before that owner is attached. Use the official Loader readiness contract for
 that ordering. A private PiTui pending store, permanent pending promise or
 Gateway monkey-patch is not a substitute for this composition contract.
 
+A Remote Client may resume a Session whose Host Turn is still running, because
+a pending Question or Approval is exactly such a Turn. Its startup therefore
+does not wait for Host idle before mounting the surface: the official live
+binding is hydrated and the mounted interaction owner settles the pending
+event. Direct keeps its in-process pre-mount idle wait.
+
 The internal split mode also supports one Client-only surface revision
 replacement on the SAME Client PID, Client Context and B1 transport: the
-current runner, Client UI subtree and memoized application/Domain graph are
-retired in reverse order, then a fresh revision is mounted and must reach a
-real TTY-ready state before it is reported mounted. Host `runProfile`, Agent,
-Job and service fibers are untouched. Revision identity and status are
+current runner, Client UI subtree and memoized application adapters are retired
+in reverse order; the root Domain plane, root interaction delivery owner and B1
+transport stay alive; then a fresh revision is mounted and must reach a real
+TTY-ready state before it is reported mounted. A pending Host Question or
+Approval survives that revision change and is handed to the new surface
+exactly once. Host `runProfile`, Agent, Job and service fibers are untouched. Revision identity and status are
 qualification observations only; they grant no Host authority, and no second
 runner may ever hold the tty at the same time.
 
