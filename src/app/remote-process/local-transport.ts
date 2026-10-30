@@ -187,6 +187,12 @@ function cookieFetch(
   currentCookie: () => string,
   includeCookie: boolean,
 ): (input: string | URL, init?: RequestInit) => Promise<Response> {
+  // Qualification-only post-dispatch prompt ACK drop (T35): the request reaches
+  // the Host, then the response is discarded so the caller observes a real
+  // post-write transport failure. It fires exactly once and never replays the
+  // write. Production never sets this variable.
+  const dropPromptAck = process.env.SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK === '1'
+  let promptAckDropped = false
   return async (input, init = {}) => {
     const url = new URL(typeof input === 'string' ? input : input.href, `${origin}/`)
     if (url.origin !== origin) {
@@ -195,6 +201,20 @@ function cookieFetch(
     const headers = new Headers(init.headers)
     if (includeCookie) headers.set('cookie', currentCookie())
     const request: LocalRequestInit = { ...init, headers, redirect: 'manual', cache: 'no-store' }
+    if (dropPromptAck && !promptAckDropped && typeof init.body === 'string') {
+      let method: unknown
+      try {
+        method = (JSON.parse(init.body) as { readonly method?: unknown }).method
+      } catch {
+        method = undefined
+      }
+      if (method === 'session/prompt') {
+        promptAckDropped = true
+        const response = await fetch(url, request)
+        await response.body?.cancel()
+        throw new Error('local transport: qualification dropped the session/prompt ACK after Host receipt')
+      }
+    }
     return await fetch(url, request)
   }
 }

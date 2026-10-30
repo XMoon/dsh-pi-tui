@@ -28,6 +28,7 @@ import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
 import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
+import * as clientStore from '@deepseek-ai/dsh-client-store'
 import type * as typertRegistryClient from '@deepseek-ai/dsh-typert-registry/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { IJobs } from '@deepseek-ai/dsh-api-job-controller/client'
@@ -86,6 +87,30 @@ type ModuleLoader = (registration: { id: string; factory: ModuleFactory }) => vo
 
 /** Expected registration ids, in dependency order. */
 const EXPECTED_REGISTRATION_IDS: readonly ClientBundleId[] = OFFICIAL_CLIENT_BUNDLES.map(bundle => bundle.id)
+
+/**
+ * The official web shell's platform static modules, which the browser-form
+ * `/client` bundles resolve through the Loader's `require` (the published web
+ * seed shares exactly these singletons). The Node Client shell is that shell:
+ * it supplies the installed Harness-family `@deepseek-ai/dsh-client-store`
+ * instance instead of relying on a transitive resolution from a bundle's own
+ * package graph. `@deepseek-ai/cordis` is imported directly by this module and
+ * therefore already resolves normally.
+ */
+const CLIENT_PLATFORM_MODULES: Readonly<Record<string, unknown>> = {
+  '@deepseek-ai/dsh-client-store': clientStore,
+}
+
+/** The loader's bare-dependency resolver: platform statics first, then the
+ *  CALLER's installation resolver. The real Client passes the DSH anchor
+ *  resolver so every non-platform dependency of a browser-form bundle also
+ *  resolves from the anchored installation, never from an unrelated source
+ *  tree. */
+function createPlatformRequire(fallback: (specifier: string) => unknown): (specifier: string) => unknown {
+  return specifier => Object.hasOwn(CLIENT_PLATFORM_MODULES, specifier)
+    ? CLIENT_PLATFORM_MODULES[specifier]
+    : fallback(specifier)
+}
 
 /** Process-wide single-flight capture; module code evaluates once per process. */
 let officialClientModulesPromise: Promise<OfficialClientModules> | undefined
@@ -263,7 +288,10 @@ export function installScopedModuleLoaderShim(load: ModuleLoader): () => void {
 }
 
 async function captureOfficialClientModules(): Promise<OfficialClientModules> {
-  const loader = createScopedClientModuleLoader(EXPECTED_REGISTRATION_IDS)
+  const loader = createScopedClientModuleLoader(
+    EXPECTED_REGISTRATION_IDS,
+    createPlatformRequire(createRequire(import.meta.url)),
+  )
 
   const restoreShim = installScopedModuleLoaderShim(loader.load)
   try {
@@ -354,14 +382,14 @@ const installedClientDomainModules = new Map<string, Promise<InstalledClientDoma
 
 /** Capture the six official `/client` bundles through the installation anchor. */
 async function captureInstalledOfficialClientModules(requireFromAnchor: NodeJS.Require): Promise<OfficialClientModules> {
-  // The bundle FILES resolve from the installed DSH anchor, but the loader
-  // shim's bare package dependencies must resolve through THIS module's own
-  // installation location: inside a real Client process that path sits in the
-  // profile tree, so the official PluginPackages runtime interception (the
-  // profile's complete bundle package table) routes them. Resolving those deps
-  // from the anchor would bypass that table and miss package-graph siblings
-  // such as `@deepseek-ai/dsh-client-store`.
-  const loader = createScopedClientModuleLoader(EXPECTED_REGISTRATION_IDS)
+  // The bundle FILES and their non-platform dependencies resolve from the
+  // installed DSH anchor. The browser-form bundles' platform statics come from
+  // the seed above; resolving the remaining deps from the anchor keeps the
+  // whole captured module graph on that installation.
+  const loader = createScopedClientModuleLoader(
+    EXPECTED_REGISTRATION_IDS,
+    createPlatformRequire(requireFromAnchor),
+  )
   const restoreShim = installScopedModuleLoaderShim(loader.load)
   try {
     for (const bundle of OFFICIAL_CLIENT_BUNDLES) {

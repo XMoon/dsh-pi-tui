@@ -59,6 +59,7 @@ import { createRequire } from 'node:module'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { zstdDecompressSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import xterm from '@xterm/headless'
 
@@ -432,6 +433,33 @@ export class SurfaceEntryProcess {
     throw new Error(`${this.role}: timed out waiting for the ${label} frame; viewport=${JSON.stringify(viewport)}`)
   }
 
+  /** Wait until the COMPOSER line (after the last separator) holds the text. */
+  async waitForComposerDraft(text, timeoutMs = 30_000) {
+    const started = Date.now()
+    while (Date.now() - started < timeoutMs) {
+      const viewport = await this.viewport()
+      const separators = []
+      for (let index = 0; index < viewport.length; index += 1) {
+        if (/^─+$/u.test(viewport[index].trim())) separators.push(index)
+      }
+      if (separators.length > 0) {
+        // The input box is drawn between its top and bottom rule; use the
+        // SECOND-TO-LAST rule so the footer rule below it is not mistaken for
+        // the box top.
+        const top = separators.length >= 2 ? separators[separators.length - 2] : separators[separators.length - 1]
+        const bottom = separators.length >= 2 ? separators[separators.length - 1] : viewport.length
+        const composer = viewport.slice(top + 1, bottom).join('\n')
+        if (composer.includes('❯') && composer.includes(text)) return
+      }
+      if (this.exited) {
+        throw new Error(`${this.role}: exited while waiting for the composer draft; raw=${JSON.stringify(this.raw.slice(-2000))}`)
+      }
+      await sleep(50)
+    }
+    const viewport = await this.viewport()
+    throw new Error(`${this.role}: timed out waiting for the composer draft ${JSON.stringify(text)}; viewport=${JSON.stringify(viewport)}`)
+  }
+
   /** Send terminal input to the Client through the pty master. */
   send(data) {
     this.child.stdin.write(data)
@@ -459,6 +487,74 @@ export class SurfaceEntryProcess {
     try { process.kill(-this.child.pid, 'SIGKILL') } catch { /* already gone */ }
     try { await this.waitForExit(15_000) } catch { /* best effort */ }
   }
+}
+
+/**
+ * Decode a session log file: the Host appends one independently compressed
+ * zstd frame per write, and Node's one-shot decoder reads only the first frame.
+ * Splitting at the frame magic (a torn final frame is skipped) reconstructs the
+ * whole durable log.
+ */
+function decodeZstdFrames(buffer) {
+  const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd])
+  const offsets = []
+  for (let index = 0; index + 4 <= buffer.length; index += 1) {
+    if (buffer.compare(magic, 0, 4, index, index + 4) === 0) offsets.push(index)
+  }
+  if (offsets.length === 0 || offsets[0] !== 0) throw new Error('session log is not a zstd frame stream')
+  const parts = []
+  for (let index = 0; index < offsets.length; index += 1) {
+    const end = offsets[index + 1] ?? buffer.length
+    try {
+      parts.push(zstdDecompressSync(buffer.subarray(offsets[index], end)))
+    } catch (error) {
+      if (index === offsets.length - 1) break // a torn append tail
+      throw new Error(`session log frame ${String(index)} is corrupt: ${String(error)}`)
+    }
+  }
+  return Buffer.concat(parts).toString('utf8')
+}
+
+/** Locate one persisted Host Session log under the isolated DSH home. */
+function findHostSessionLog(dshHome, sessionId) {
+  const sessionsRoot = join(dshHome, 'sessions')
+  if (!existsSync(sessionsRoot)) return undefined
+  for (const dirent of readdirSync(sessionsRoot, { withFileTypes: true })) {
+    if (!dirent.isDirectory()) continue
+    const sessionDir = join(sessionsRoot, dirent.name, sessionId)
+    if (!existsSync(sessionDir)) continue
+    for (const file of readdirSync(sessionDir)) {
+      if (file.endsWith('.jsonl.zstd')) return join(sessionDir, file)
+    }
+  }
+  return undefined
+}
+
+/** The durable Host Session events of one Session (undefined before any log). */
+function hostSessionEvents(dshHome, sessionId) {
+  const path = findHostSessionLog(dshHome, sessionId)
+  if (path === undefined) return undefined
+  return decodeZstdFrames(readFileSync(path)).split('\n').filter(Boolean)
+    .map(line => {
+      try {
+        return JSON.parse(line)
+      } catch {
+        return undefined // a torn tail line while the Host appends
+      }
+    })
+    .filter(event => event !== undefined)
+}
+
+/** The human-authored `user/message` texts of one persisted Host Session. */
+function hostUserTexts(events) {
+  return events
+    .filter(event => event.type === 'user/message' && Array.isArray(event.data?.content))
+    .map(event => event.data.content.map(part => typeof part?.text === 'string' ? part.text : '').join(''))
+}
+
+/** Whether the durable log carries one assistant message containing the text. */
+function hostAssistantHasText(events, text) {
+  return events.some(event => event.type === 'assistant/message' && JSON.stringify(event).includes(text))
 }
 
 /** The test-only offline Host LLM route (official Loader row + patch override). */
@@ -1987,7 +2083,11 @@ async function main() {
     try {
       // T27/T28: ONE real surface over the SAME B1 connection; sessionless
       // Welcome painted on the real pty, no JSON on the terminal.
-      const c1 = new SurfaceEntryProcess(entries.client, { ...base, workDir })
+      const c1 = new SurfaceEntryProcess(entries.client, {
+        ...base,
+        workDir,
+        env: { ...base.env, SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF: '1' },
+      })
       surfaceClients.push(c1)
       const c1Ready = await c1.waitFor(record => record.m4a0 === 'ready', 'T27 surface Client ready', 180_000)
       assert(c1Ready.processRole === 'client', 'T27 surface Client role mismatch')
@@ -2025,7 +2125,31 @@ async function main() {
       sessionA = openedA.openSessionId
       await c1.waitForScreen('session a', 'T29 user message')
       await c1.waitForScreen('stub answer', 'T30 assistant answer')
-      trace('t29-t30', { sessionId: sessionA, userMessage: 'painted', assistant: 'painted' })
+      // T30's durable half: the Host's authoritative session log must carry
+      // exactly ONE accepted human write and the assistant message; the painted
+      // echo alone is not accepted-write evidence.
+      const durableA = await (async () => {
+        const deadline = Date.now() + 60_000
+        while (Date.now() < deadline) {
+          const events = hostSessionEvents(dshHome, sessionA)
+          if (events !== undefined) {
+            const users = hostUserTexts(events).filter(message => message === 'session a').length
+            const assistant = hostAssistantHasText(events, 'stub answer')
+            if (users === 1 && assistant) return { users, assistant }
+          }
+          await sleep(100)
+        }
+        return undefined
+      })()
+      assert(durableA !== undefined,
+        'T30 the Host durable log did not carry exactly one accepted "session a" write and its assistant message')
+      trace('t29-t30', {
+        sessionId: sessionA,
+        userMessage: 'painted',
+        assistant: 'painted',
+        hostUserMessages: durableA.users,
+        hostAssistant: durableA.assistant,
+      })
 
       // T31: Session switch A -> B -> A, each with retained-window hydration.
       c1.send('/new\r')
@@ -2062,6 +2186,29 @@ async function main() {
       await c1.waitForScreen('session a', 'T31 final Session A hydration')
       trace('t31', { first: sessionA, second: sessionB, switches: 'A->B->A' })
 
+      // T36: the private PiFile + terminal-progress RPCs through the ALREADY
+      // mounted Domain namespaces on the SAME Client Context (no second
+      // contribution, no Host service).
+      c1.signalBusiness('SIGUSR2')
+      const privateProof = await c1.waitFor(
+        record => record.m4b2s === 'qualification' && record.op === 'private-rpc-proof',
+        'T36 private RPC proof',
+        60_000,
+      )
+      assert(privateProof.error === undefined, `T36 private RPC proof failed: ${JSON.stringify(privateProof)}`)
+      assert(privateProof.fileOk === true, 'T36 the private PiFile RPC did not succeed')
+      assert(typeof privateProof.fileKind === 'string', 'T36 the private PiFile RPC returned no business kind')
+      assert(privateProof.terminalKind === 'snapshot', 'T36 the terminal-progress watch did not open with a snapshot')
+      assert(privateProof.owners?.sessions === 1 && privateProof.privateNamespaces === 2,
+        'T36 the private proof observed a duplicate/absent Domain owner')
+      trace('t36', {
+        sessionId: privateProof.sessionId,
+        fileOk: privateProof.fileOk,
+        fileKind: privateProof.fileKind,
+        terminalKind: privateProof.terminalKind,
+        owners: privateProof.owners,
+      })
+
       // T32/T38: normal surface exit releases every Client-owned resource and
       // leaves the Host PID/instance/build untouched.
       c1.send('/exit\r')
@@ -2089,6 +2236,112 @@ async function main() {
         sockets: closed.liveSockets,
       })
       await c1.dispose()
+
+      // T34: close the writer's pre-dispatch admission while a REAL
+      // serialization barrier holds the write. The writer must return
+      // not-dispatched, the draft must return to the composer, and the Host must
+      // never see the prompt. The signal only closes the SAME admission gate the
+      // surface-stop path owns; the surface stays mounted so the draft is visible.
+      const holdBarrier = join(workDir, 't34-serializer-barrier')
+      rmSync(holdBarrier, { force: true })
+      const cHold = new SurfaceEntryProcess(entries.client, {
+        ...base,
+        workDir,
+        env: {
+          ...base.env,
+          SPLIT_PROCESS_CLIENT_SESSION: sessionA,
+          SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE: holdBarrier,
+        },
+      })
+      surfaceClients.push(cHold)
+      const cHoldReady = await cHold.waitFor(record => record.m4a0 === 'ready', 'T34 hold Client ready', 180_000)
+      assert(cHoldReady.sessionOpen === true && cHoldReady.openSessionId === sessionA,
+        'T34 the hold Client did not open the retained Session')
+      cHold.send('holdme\r')
+      await cHold.waitForScreen('holdme', 'T34 pending echo', 60_000)
+      cHold.signalBusiness('SIGUSR2')
+      await cHold.waitFor(
+        record => record.m4b2s === 'qualification' && record.op === 'stop-surface-admission',
+        'T34 admission stop',
+        30_000,
+      )
+      writeFileSync(holdBarrier, 'release\n', { mode: 0o600 })
+      await cHold.waitForComposerDraft('holdme', 60_000)
+      // The writer settled BEFORE dispatch (the admission record and the
+      // restored composer draft are both observed). One bounded observation
+      // window then proves the Host received nothing; a real dispatch would
+      // persist immediately.
+      await sleep(1_000)
+      const holdEvents = hostSessionEvents(dshHome, sessionA)
+      assert(holdEvents !== undefined, 'T34 no Host Session log is readable')
+      assert(hostUserTexts(holdEvents).filter(message => message === 'holdme').length === 0,
+        'T34 the refused pre-dispatch write still reached the Host')
+      cHold.signalBusiness('SIGTERM')
+      const holdExit = await cHold.waitForExit(60_000)
+      assert(holdExit.code === 0, `T34 hold Client exit was ${JSON.stringify(holdExit)}`)
+      await cHold.dispose()
+      trace('t34', { preDispatch: 'not dispatched', hostWrites: 0, draft: 'restored' })
+
+      // T35: the Host receives and commits ONE prompt, but the response ACK is
+      // dropped after the write. The Client must report the write as
+      // indeterminate (never committed), never replay it, and the NEXT Client
+      // must reconcile from the Host's durable log.
+      const c4 = new SurfaceEntryProcess(entries.client, {
+        ...base,
+        workDir,
+        env: {
+          ...base.env,
+          SPLIT_PROCESS_CLIENT_SESSION: sessionA,
+          SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK: '1',
+        },
+      })
+      surfaceClients.push(c4)
+      const c4Ready = await c4.waitFor(record => record.m4a0 === 'ready', 'T35 ACK-drop Client ready', 180_000)
+      assert(c4Ready.sessionOpen === true && c4Ready.openSessionId === sessionA,
+        'T35 the ACK-drop Client did not open the retained Session')
+      c4.send('ackdrop\r')
+      await c4.waitForScreen('indeterminate', 'T35 indeterminate notice', 120_000)
+      const committedAckdrop = async (expected) => {
+        const deadline = Date.now() + 60_000
+        while (Date.now() < deadline) {
+          const events = hostSessionEvents(dshHome, sessionA)
+          if (events !== undefined) {
+            const count = hostUserTexts(events).filter(message => message === 'ackdrop').length
+            if (count >= expected) return count
+          }
+          await sleep(100)
+        }
+        return undefined
+      }
+      const hostCommits = await committedAckdrop(1)
+      assert(hostCommits === 1,
+        `T35 expected exactly ONE Host-committed ackdrop message, got ${String(hostCommits)}`)
+      c4.signalBusiness('SIGTERM')
+      const c4Exit = await c4.waitForExit(60_000)
+      assert(c4Exit.code === 0, `T35 ACK-drop Client exit was ${JSON.stringify(c4Exit)}`)
+      await c4.dispose()
+
+      const c5 = new SurfaceEntryProcess(entries.client, {
+        ...base,
+        workDir,
+        env: { ...base.env, SPLIT_PROCESS_CLIENT_SESSION: sessionA },
+      })
+      surfaceClients.push(c5)
+      const c5Ready = await c5.waitFor(record => record.m4a0 === 'ready', 'T35 reconciliation Client ready', 180_000)
+      assert(c5Ready.sessionOpen === true && c5Ready.openSessionId === sessionA,
+        'T35 the reconciliation Client did not open the retained Session')
+      await c5.waitForScreen('ackdrop', 'T35 reconciled Host log')
+      await sleep(500)
+      const reconciledEvents = hostSessionEvents(dshHome, sessionA)
+      assert(reconciledEvents !== undefined, 'T35 no persisted Host Session log is readable')
+      assert(hostUserTexts(reconciledEvents).filter(message => message === 'ackdrop').length === 1,
+        'T35 the next Client replayed the indeterminate prompt instead of reconciling the Host log')
+      c5.send('/exit\r')
+      const c5Exit = await c5.waitForExit(60_000)
+      assert(c5Exit.code === 0, `T35 reconciliation Client exit was ${JSON.stringify(c5Exit)}`)
+      await c5.dispose()
+      assert(alive(surfaceHostPid), 'T35 the Host died on the ACK-drop flow')
+      trace('t35', { hostCommits: 1, indeterminate: 'painted', replayed: false, reconcile: 'Host log' })
 
       // T29 resume + T33 SIGKILL survival: a NEW Client reads the committed
       // Session; killing it leaves the same Host instance alive; a THIRD Client
@@ -2178,18 +2431,13 @@ async function main() {
       assert(!existsSync(join(scopeDir, 'instance.json')), 'T40 the Host registry survived its owner-governed shutdown')
       assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
         'T40 the candidate artifact changed during qualification')
-      trace('t34-t36', {
-        t34: 'NOT_VERIFIED: no faithful pre-dispatch writer-stop seam in the surface lane',
-        t35: 'NOT_VERIFIED: session/prompt is a control-stream write; dropping its ACK needs a stream-frame seam not present in the installed transport',
-        t36: 'NOT_VERIFIED: private PiFile/TerminalProgress positive business read not driven in surface mode',
-      })
       trace('t40', {
         candidate: basename(tarball),
         sha256: candidateSha256,
         dshVersion: targetDshVersion,
         directHelp: 'pass',
         t01t26: 'pass',
-        surface: 'T27-T33/T37-T39 pass; T34-T36 NOT_VERIFIED',
+        surface: 'T27-T39 pass',
       })
     } finally {
       for (const client of surfaceClients) await client.dispose()
