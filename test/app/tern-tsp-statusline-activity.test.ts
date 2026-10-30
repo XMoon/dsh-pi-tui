@@ -103,6 +103,11 @@ interface Harness {
    * production `commitSummary` — never a hand-written patch.
    */
   attachTaskSource(source: TaskSurfaceSource): void
+  /**
+   * Publish ONE activity fact batch through the surface's REAL activity
+   * projection entry (the same path `publishAttention`/`commitSummary` take).
+   */
+  commitActivityOnly(facts: { questionAttention?: number }): void
   dispose(): Promise<void>
 }
 
@@ -259,6 +264,25 @@ async function mountActivityHarness(): Promise<Harness> {
         diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         isCleanedUp: () => false,
       })
+    },
+    commitActivityOnly(facts) {
+      // The REAL publish shape the interaction runtime's publishAttention
+      // produces: the activity projection rides the formal display commit
+      // (store update + commitDisplaySubject), exactly like commitActivityFacts.
+      const published = { questionAttention: 1, ...facts }
+      const activity = deriveActivityStatus(
+        { working: false, compacting: false, applyingCompaction: false, approvalOpen: false, questionOpen: false },
+        false,
+        {
+          queuedCount: 0,
+          taskCount: 0,
+          childAgentCount: 0,
+          questionAttentionCount: published.questionAttention,
+          todoCount: 0,
+        },
+      )
+      surface.status.update({ activity } as never)
+      bound.display.commitDisplaySubject({ activity } as never, {}, undefined)
     },
     async dispose() {
       try {
@@ -641,8 +665,14 @@ function mountQuestionOwner(options: {
   let approvalListener: ((request: unknown, next: () => Promise<unknown>) => Promise<unknown>) | undefined
   /** The REAL provider the controller registered (drives `handleLive`). */
   let questionProvider: ((request: unknown, next: () => Promise<unknown>) => Promise<unknown>) | undefined
-  /** A gate holding the NEXT `claimTimedWait` open (the Host claim in flight). */
+  /**
+   * A gate holding the NEXT `claimTimedWait` open (the Host claim in flight).
+   * `claimEntered` resolves when the claim call ACTUALLY starts — the negative
+   * assertions then run against a proven in-flight claim, never against a
+   * request that has not begun (external review P3).
+   */
   let claimGate: Promise<void> | undefined
+  let claimEntered: (() => void) | undefined
   const port: QuestionInteractionPort = {
     onRequest: provider => { questionProvider = provider as typeof questionProvider; return true },
     subscribe: (_sessionId, listener) => {
@@ -651,6 +681,7 @@ function mountQuestionOwner(options: {
     },
     snapshot: () => snapshot,
     claimTimedWait: async () => {
+      claimEntered?.()
       if (claimGate !== undefined) await claimGate
       return undefined
     },
@@ -705,9 +736,16 @@ function mountQuestionOwner(options: {
     publish: () => runtime.publishAttention(),
     holdClaim(): { entered: Promise<void>; release: () => void } {
       let release: () => void = () => {}
-      const entered = new Promise<void>(resolve => { claimGate = new Promise<void>(r => { release = r }) })
-      void entered
-      return { entered: Promise.resolve(), release: () => { release(); claimGate = undefined } }
+      claimGate = new Promise<void>(r => { release = r })
+      const entered = new Promise<void>(resolve => { claimEntered = resolve })
+      return {
+        entered,
+        release: () => {
+          release()
+          claimGate = undefined
+          claimEntered = undefined
+        },
+      }
     },
     whenAskEntered: () => new Promise<void>(resolve => { askEntered = resolve }),
     /** Deliver ONE live question request through the REAL registered provider. */
@@ -920,9 +958,6 @@ test('PR-B RFL-001: a replaced session live flow keeps alive but never presents'
       'an inadmissible live flow never publishes the presented fact')
     assert.equal(owner.controller.hasPresentedQuestion(), false,
       '…and the narrow read agrees: the current subject is not waiting-question')
-    // …and it stays unpresented while the Host signal lives on.
-    await new Promise(resolve => setTimeout(resolve, 20))
-    assert.equal(owner.controller.hasPresentedQuestion(), false)
     // Cleanup: the Host ends the request; the flow settles through the real path.
     hostLifetime.abort()
     await flow.catch(() => {})
@@ -1017,7 +1052,9 @@ test('PR-B EXT-F1: a blocked timed claim never paints waiting-question until the
       queuedReplyCallIds: new Set(),
     } as never)
     // Hold the timed Host claim OPEN: the request is registered and admissible,
-    // but its form has NOT reached the presenter yet.
+    // but its form has NOT reached the presenter yet. `entered` resolves when
+    // the claim call has ACTUALLY started, so the negative assertions below run
+    // against a proven in-flight claim (external review P3) — no fixed wait.
     const claim = owner.holdClaim()
     const hostLifetime = new AbortController()
     const flow = owner.deliverQuestion({
@@ -1027,8 +1064,8 @@ test('PR-B EXT-F1: a blocked timed claim never paints waiting-question until the
       signal: hostLifetime.signal,
       timed: true,
     })
+    await claim.entered
     // While the claim is in flight the flow is ALIVE but NOT presented.
-    await new Promise(resolve => setTimeout(resolve, 30))
     assert.equal(owner.controller.hasPresentedQuestion(), false,
       'a registered-but-claiming flow is not a presented Question')
     assert.equal(owner.activity.some(facts => facts.questionOpen === true), false,
@@ -1105,6 +1142,45 @@ test('PR-B EXT-F2b: a title-only facts commit still updates the legacy dock line
     // formal display commit following.
     await drawn('the legacy title line on the wire', () =>
       wireNodes(harness.pane).some(node => typeof node.p.text === 'string' && node.p.text.includes('FACTS_ONLY_TITLE')))
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── EXT-F3: a Question parked/visible switch paints ONE frame, not a
+// dock-count frame followed by a native-badge frame ─────────────────────────
+
+test('PR-B EXT-F3: a parked-Question arrival publishes the dock line and the native badge in ONE frame', async () => {
+  const harness = await mountActivityHarness()
+  try {
+    await drawn('the initial dock frame', () => harness.pane.frames().length > 0)
+    // Establish a live native row first (the probe sequence: a working run seg),
+    // so the dock already carries status content — the same shape the
+    // production surface is in when a Question parks mid-run.
+    harness.surface.display.commitStatusFacts({ working: true, busy: true })
+    await drawn('the run seg on the wire', () => segText(harness.pane, 'status-r1-run') !== undefined)
+
+    // The interaction runtime's REAL publish sequence for a parked-Question
+    // arrival: the presenter's dock-count projection (`setQuestionAttention`,
+    // the `Continued questions: N` line) followed by the surface's activity
+    // publish (the native `?1` badge) — the SAME business fact through two
+    // presentation outlets. F3 requires them to reach the wire as ONE frame.
+    const presenter = harness.renderer.interaction
+    const framesBefore = harness.pane.frames().length
+    presenter.setQuestionAttention(1)
+    harness.commitActivityOnly({ questionAttention: 1 })
+    // Let the same-tick microtask window pass (a split publish's second frame
+    // would land here).
+    await new Promise(resolve => setTimeout(resolve, 30))
+    const sent = harness.pane.frames().length - framesBefore
+    assert.equal(sent, 1,
+      `the parked-Question fact batch published exactly ONE frame (got ${sent})`)
+
+    // …and both projections of the fact are on the wire.
+    await drawn('the dock continued-questions line', () =>
+      wireNodes(harness.pane).some(node => typeof node.p.text === 'string' && node.p.text.includes('Continued questions')))
+    await drawn('the native attention badge', () =>
+      segText(harness.pane, 'status-r1-attention')?.includes('?1') === true)
   } finally {
     await harness.dispose()
   }

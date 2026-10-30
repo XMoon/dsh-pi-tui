@@ -2087,9 +2087,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         throw new Error('the TSP renderer has no status reader: the mount must bind one')
       }
       presentedStatus = statusReader.snapshot()
-      // TSP-7 PR-B (F2): this render carries the SAME tick's legacy facts too
-      // (the scheduled flush is absorbed here — one frame, both fact families).
+      // TSP-7 PR-B (F2/F3): this render carries the SAME tick's legacy facts and
+      // attention-line repaint too (the scheduled flushes are absorbed here —
+      // one frame, every fact family of the batch).
       statusFactsFlushScheduled = false
+      seat.absorbAttentionFlush()
       render()
     },
     commitStatusFacts(facts) {
