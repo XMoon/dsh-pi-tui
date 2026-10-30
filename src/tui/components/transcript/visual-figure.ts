@@ -21,6 +21,7 @@ import type { PublishedVisual } from '../../../domain/visual/publication.ts'
 import { svgDetailRows } from '../../../domain/visual/svg.ts'
 import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
 import { ChartBody } from './chart-body.ts'
+import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
 import { SvgThumbnail, type SvgThumbnailTheme } from '../media/svg-thumbnail.ts'
 import type { ImageGraphics } from '../../graphics/native-image.ts'
 import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
@@ -225,7 +226,7 @@ export class VisualFigureComponent implements Component {
     // action rows stay those of the LAST render (they never move with the
     // asynchronous raster).
     let thumbnailBody = this.painted.thumbnailBody
-    if (this.options.graphics?.mode === 'sixel' && this.thumbnail !== undefined) {
+    if (effectiveImageProtocol(this.options.graphics) === 'sixel' && this.thumbnail !== undefined) {
       thumbnailBody = undefined
       const live = this.thumbnail.paintedImageBody(width)
       const startRow = this.painted.thumbnailStartRow
@@ -274,7 +275,7 @@ export class VisualFigureComponent implements Component {
       // body, and the rows stay inert.
       thumbnailStartRow = bodyRows + 1
       thumbnailMaxRows = Math.max(0, thumbnailRows.length - 1)
-      if (this.options.graphics?.mode !== 'sixel') {
+      if (effectiveImageProtocol(this.options.graphics) !== 'sixel') {
         // Kitty's placement is synchronous with this render: the snapshot is
         // the same fact the user sees. SIXEL must not declare pixels here —
         // its committed footprint is read at hit time (see `paintedHitMap`).

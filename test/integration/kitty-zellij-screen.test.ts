@@ -254,7 +254,7 @@ test('the real TuiApp stays text-only until the live OK, then paints one Native 
   const vt = h.terminal
   try {
     assert.equal(getCapabilities().images, 'kitty', 'the fork really classified the detected Ghostty host')
-    assert.equal(h.graphics.mode, 'native')
+    assert.equal(h.graphics.mode, 'zellij-negotiated')
     assert.equal(h.graphics.canPaint(), false, 'probing starts text-only')
     assert.equal(effectiveImageProtocol(h.graphics), null)
     assert.equal((h.app as unknown as { terminal: unknown }).terminal, h.graphics.terminal,

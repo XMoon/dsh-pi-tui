@@ -66,7 +66,20 @@ export function candidateZellijKitty(environment: NodeJS.ProcessEnv = process.en
   return true
 }
 
+/**
+ * The shared Zellij topology gate for every Zellij graphics consumer.
+ *
+ * This is intentionally a thin alias of {@link candidateZellijKitty}: one set
+ * of topology facts, never a second gate that could drift.
+ */
+export function candidateZellijGraphics(environment: NodeJS.ProcessEnv = process.env): boolean {
+  return candidateZellijKitty(environment)
+}
+
 type ZellijAdmissionState = 'pending' | 'probing' | 'allowed' | 'denied'
+
+/** The one irreversible outcome of this handle's live-probe lifetime. */
+export type ZellijKittySettlement = 'allowed' | 'denied'
 
 /**
  * One TuiApp lifetime's Zellij probe state.
@@ -76,9 +89,15 @@ type ZellijAdmissionState = 'pending' | 'probing' | 'allowed' | 'denied'
  * the facade's `start()` supplies the write callback after the real input
  * listener is installed, so a probe can never be written from a constructor or
  * a render pass.
+ *
+ * `onSettled` is an OPTIONAL read-only notification for a composite consumer
+ * (the Image-8 / I8-5 negotiator): it runs after the state has been committed
+ * and receives this handle's one outcome. The original callback and factory API
+ * stay unchanged.
  */
 export class ZellijKittyAdmission {
   private readonly onAllowed: (() => void) | undefined
+  private readonly onSettled: ((outcome: ZellijKittySettlement) => void) | undefined
   private readonly probeIdValue: number
   private state: ZellijAdmissionState = 'pending'
   private timer: NodeJS.Timeout | undefined
@@ -86,8 +105,13 @@ export class ZellijKittyAdmission {
   /** Whether the facade currently has a real input listener installed. */
   private inputActive = false
 
-  constructor(onAllowed?: () => void, probeId: number = createZellijProbeId()) {
+  constructor(
+    onAllowed?: () => void,
+    probeId: number = createZellijProbeId(),
+    onSettled?: (outcome: ZellijKittySettlement) => void,
+  ) {
     this.onAllowed = onAllowed
+    this.onSettled = onSettled
     this.probeIdValue = probeId
   }
 
@@ -104,6 +128,13 @@ export class ZellijKittyAdmission {
   /** Whether this pane's live query was answered with `OK`. */
   get allowed(): boolean {
     return this.state === 'allowed'
+  }
+
+  /** The one committed outcome, or `undefined` while the probe is unresolved. */
+  get settledOutcome(): ZellijKittySettlement | undefined {
+    if (this.state === 'allowed') return 'allowed'
+    if (this.state === 'denied') return 'denied'
+    return undefined
   }
 
   /** Whether the screen currently has the facade's input listener mounted. */
@@ -132,14 +163,14 @@ export class ZellijKittyAdmission {
     this.state = 'probing'
     this.timer = setTimeout(() => {
       this.timer = undefined
-      if (this.state === 'probing') this.state = 'denied'
+      if (this.state === 'probing') this.settle('denied')
     }, ZELLIJ_PROBE_TIMEOUT_MS)
     this.timer.unref()
     try {
       sendQuery()
     } catch (error) {
       this.clearTimer()
-      this.state = 'denied'
+      this.settle('denied')
       throw error
     }
   }
@@ -160,13 +191,18 @@ export class ZellijKittyAdmission {
     if (this.state === 'probing' && !this.disposed) {
       this.clearTimer()
       if (command.payload === 'OK') {
-        this.state = 'allowed'
+        this.settle('allowed')
         this.onAllowed?.()
       } else {
-        this.state = 'denied'
+        this.settle('denied')
       }
     }
     return true
+  }
+
+  private settle(outcome: ZellijKittySettlement): void {
+    this.state = outcome
+    this.onSettled?.(outcome)
   }
 
   /** Cancel the pending timer; late replies are consumed but never promote. */

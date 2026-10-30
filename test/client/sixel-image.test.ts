@@ -31,6 +31,7 @@ import {
 import { SIXEL_MAX_QUEUED_JOBS } from '../../src/client/media/sixel/types.ts'
 import {
   createDirectSixelGraphics,
+  createSixelGraphicsWithAdmission,
   SIXEL_ENCODE_ATTEMPT_LIMIT,
   SIXEL_REGISTRY_MAX_VARIANTS,
   type DirectSixelGraphics,
@@ -1015,4 +1016,76 @@ test('dispose clears the candidate registry too (no retained source bytes)', asy
   assert.notEqual(harness.graphics.screen.candidate(token), undefined, 'a bound occurrence is a candidate')
   harness.graphics.dispose()
   assert.equal(harness.graphics.screen.candidate(token), undefined, 'dispose drops the candidate table')
+})
+
+// ── Image-8 / I8-5: the Zellij-only raster normalizer hook ─────────────────
+
+/** Build the SAME owner behind an admitted non-DA1 capability (Zellij). */
+async function readyAdmissionHarness(
+  t: test.TestContext,
+  normalizeRaster?: (raster: import('../../src/client/media/sixel/types.ts').SixelRaster) => import('../../src/client/media/sixel/types.ts').SixelRaster | undefined,
+): Promise<Harness & { normalized: () => number }> {
+  const home = testLifecycle(t).tempDir('sixel-zellij-owner-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  t.after(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const terminal = new ScriptedSixelTerminal(120, 24)
+  const screen = new ScriptedScreen()
+  screen.background = { r: 0x28, g: 0x2c, b: 0x34 }
+  let notifications = 0
+  let normalizations = 0
+  const capability = { verdict: 'admitted' as const, dispose: () => {} }
+  const graphics = createSixelGraphicsWithAdmission(terminal, capability, () => {
+    notifications += 1
+  }, (raster) => {
+    normalizations += 1
+    return normalizeRaster === undefined ? raster : normalizeRaster(raster)
+  })
+  assert.notEqual(graphics, undefined)
+  graphics!.observeScreen(screen, terminal.columns, terminal.rows)
+  screen.replyCell(10, 20)
+  await waitUntil(() => graphics!.canPaint(), 'the admitted owner facts')
+  return {
+    graphics: graphics!,
+    terminal,
+    screen,
+    notifications: () => notifications,
+    normalized: () => normalizations,
+  }
+}
+
+test('the Zellij normalizer runs for full and crop variants before registry admission', async (t) => {
+  const harness = await readyAdmissionHarness(t, (raster) => {
+    // Keep the production transform but prove the hook sees both variants.
+    return raster.sequence.includes('!') || raster.sequence.includes('-') ? raster : undefined
+  })
+  t.after(() => harness.graphics.dispose())
+  const png = await pngFromRgba(
+    fill(40, 40, (_x, y) => (y < 20 ? [0, 0, 0, 0] : [255, 0, 0, 255])),
+    40,
+    40,
+  )
+  const image = harness.graphics.image(
+    { pngBase64: png, widthPx: 40, heightPx: 40 },
+    { maxWidthCells: 8, maxHeightCells: 4, fallback: 'fallback' },
+  )
+  assert.equal(paint(harness, image, 40)[0], 'fallback')
+  await waitUntil(() => harness.notifications() > 1, 'the full encode settle')
+  const full = paint(harness, image, 40)[0]!
+  assert.ok(full.startsWith('\x1bP0;1;q'), 'the full variant is one trusted DCS')
+  assert.notEqual(harness.graphics.screen.footprint(full), undefined, 'the full variant is registered')
+  const fullDecoded = decodeSixel(full)
+  assert.ok(fullDecoded.width > 0)
+
+  const beforeCrop = harness.normalized()
+  const repaint = harness.notifications()
+  assert.equal(paint(harness, image, 40, { top: 1, rows: 2 })[0], 'fallback')
+  await waitUntil(() => harness.notifications() > repaint, 'the crop encode settle')
+  const crop = paint(harness, image, 40, { top: 1, rows: 2 })[0]!
+  assert.ok(crop.startsWith('\x1bP0;1;q'), 'the crop variant is one trusted DCS')
+  assert.notEqual(harness.graphics.screen.footprint(crop), undefined, 'the crop variant is registered')
+  assert.ok(harness.normalized() >= beforeCrop + 1, 'the hook ran for the full and crop encodes')
 })

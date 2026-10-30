@@ -42,6 +42,12 @@ export type EffectiveImageProtocol = 'kitty' | 'iterm2' | 'sixel' | null
  * owner's own readiness projection is.
  */
 export function effectiveImageProtocol(graphics: ImageGraphics | undefined): EffectiveImageProtocol {
+  if (graphics !== undefined && graphics.mode === 'zellij-negotiated') {
+    // ONE selection projection, never the inherited fork capability: a
+    // negotiated pane answers exactly the protocol the live negotiation
+    // committed, and only while that transport can really paint this frame.
+    return graphics.canPaint() ? graphics.selectedProtocol() : null
+  }
   if (graphics !== undefined && graphics.mode !== 'sixel') return graphics.canPaint() ? 'kitty' : null
   if (graphics !== undefined) return graphics.canPaint() ? 'sixel' : null
   if ((process.env.ZELLIJ ?? '') !== '') return null

@@ -261,20 +261,29 @@ export function createDirectSixelGraphics(
   return createSixelOwner(terminal, capability, onReadinessChanged)
 }
 
+/** One bounded, pure transform applied to an encoded raster before admission. */
+export type SixelRasterNormalizer = (raster: SixelRaster) => SixelRaster | undefined
+
 /**
  * Create the ONE SIXEL owner for a non-DA1 admission (native tmux SIXEL).
  *
  * The caller owns the transport facade and passes the immutable capability
  * verdict; this function only reuses the same encoder, registry, screen port
  * and occurrence lifecycle as every other SIXEL surface.
+ *
+ * `normalizeRaster` is an internal-only hook for the ONE Zellij transport
+ * (I8-5): it runs immediately before `admit()` for both full and crop
+ * variants, and `undefined` refuses the variant. Direct and tmux callers pass
+ * no hook and keep every encoded byte untouched.
  */
 export function createSixelGraphicsWithAdmission(
   terminal: Terminal,
   capability: SixelCapability,
   onReadinessChanged: () => void = () => {},
+  normalizeRaster?: SixelRasterNormalizer,
 ): DirectSixelGraphics | undefined {
   if (capability.verdict === 'denied') return undefined
-  return createSixelOwner(terminal, capability, onReadinessChanged)
+  return createSixelOwner(terminal, capability, onReadinessChanged, normalizeRaster)
 }
 
 /** The single constructor both SIXEL factories share. */
@@ -282,8 +291,9 @@ function createSixelOwner(
   terminal: Terminal,
   capability: SixelCapability,
   onReadinessChanged: () => void,
+  normalizeRaster?: SixelRasterNormalizer,
 ): DirectSixelGraphics {
-  return new DirectSixelGraphicsOwner(terminal, capability, onReadinessChanged)
+  return new DirectSixelGraphicsOwner(terminal, capability, onReadinessChanged, normalizeRaster)
 }
 
 /**
@@ -298,6 +308,7 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
   readonly terminal: Terminal
   readonly screen: DirectSixelScreenPort
   private readonly capability: SixelCapability
+  private readonly normalizeRasterHook: SixelRasterNormalizer | undefined
   private readonly encoder = new SixelEncoder()
   private readonly onReadinessChanged: () => void
   private readonly diag: Diag
@@ -335,10 +346,12 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     terminal: Terminal,
     capability: SixelCapability,
     onReadinessChanged: () => void,
+    normalizeRaster?: SixelRasterNormalizer,
   ) {
     this.terminal = terminal
     this.capability = capability
     this.onReadinessChanged = onReadinessChanged
+    this.normalizeRasterHook = normalizeRaster
     this.diag = diagFromEnv(process.env)
     this.screen = {
       footprint: (line: string) => {
@@ -626,6 +639,11 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     return this.verifiedGeometry()
   }
 
+  /** @internal — apply the ONE transport normalizer, if any. */
+  normalizeRaster(raster: SixelRaster): SixelRaster | undefined {
+    return this.normalizeRasterHook === undefined ? raster : this.normalizeRasterHook(raster)
+  }
+
   /** @internal — bind one candidate identity BEFORE any encode exists. */
   bindOccurrence(
     image: SixelImage,
@@ -778,14 +796,16 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     if (crop.record.owners.size === 0) this.unregister(crop.record)
   }
 
-  /** @internal — register a freshly encoded crop variant. */
+  /** @internal — normalize, then register a freshly encoded crop variant. */
   admitCrop(raster: SixelRaster): RasterRecord | undefined {
-    return this.admit(raster, 'crop')
+    const normalized = this.normalizeRaster(raster)
+    return normalized === undefined ? undefined : this.admit(normalized, 'crop')
   }
 
-  /** @internal — register a freshly encoded FULL raster; the caller marks its owner. */
+  /** @internal — normalize, then register a freshly encoded FULL raster. */
   admitFull(raster: SixelRaster): RasterRecord | undefined {
-    return this.admit(raster, 'full')
+    const normalized = this.normalizeRaster(raster)
+    return normalized === undefined ? undefined : this.admit(normalized, 'full')
   }
 
   /** @internal — the current trust-table revision (see `admissionRevision`). */
