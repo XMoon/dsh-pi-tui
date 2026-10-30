@@ -672,11 +672,11 @@ Where it runs:
   Session retirement cancel: that cancel remains the explicit Stop/navigation
   authority. A Host-owned pending Question/Approval forward must stay pending in
   the Host Gateway across the detach, and a later Client must answer the same
-  event/call identity at most once. The split Client composition orders its
+  event/call identity at most once. A split Client composition must install its
   interaction owner before the official Gateway event pump can consume the
-  pending event; a surface teardown must not settle that Host event, and a
-  permanent pending promise or private pending store is not a substitute for
-  the official Loader readiness ordering.
+  pending forwarded event; a surface teardown must not settle that Host event,
+  and a permanent pending promise or private pending store is not a substitute
+  for the official Loader readiness ordering.
 - **Same-process Client surface revision**: when the internal split Client
   replaces its surface, ONE serial revision task slot owns the transition:
   close the old revision's input/admission, await the old runner's physical
