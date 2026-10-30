@@ -3185,10 +3185,18 @@ async function main() {
       }
 
       // T57: Client-only HMR happy path on the SAME Client PID/Context/transport.
+      // The Session is open and its Turn has settled BEFORE the revision
+      // replacement, so the new revision must re-adopt a fresh exact
+      // `tuiMainView` wrapper rather than starting sessionless.
       {
-        const { host, ready } = await startC1Host('long-turn', 't57', { C1_HOLD_LONG_TURN: join(workDir, 't57-never-released') })
+        const releaseBarrier = join(workDir, 't57-long-turn.release')
+        const { host, ready, workRoot } = await startC1Host('long-turn', 't57', { C1_HOLD_LONG_TURN: releaseBarrier })
         const { client } = await startC1Client('T57 Client', { SPLIT_PROCESS_CLIENT_HMR_PROBE: '1' })
-        const before = await waitForSurfaceStatus(client, record => record.surfaceMounted === true, 'T57 initial surface')
+        const sessionId = await openC1Session(client, 't57 prompt', 'T57')
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T57 initial held Turn')
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T57 initial turn/end')
+        const before = await waitForSurfaceStatus(client, record => record.surfaceMounted === true && record.sessionOpen === true && record.openSessionId === sessionId, 'T57 initial surface')
         const hostBefore = await hostIdentityFacts(host)
         const beforePid = before.pid
         const beforeRootFiber = before.rootFiberUid
@@ -3196,6 +3204,7 @@ async function main() {
         const beforeRevision = before.surfaceRevision
         client.signalBusiness('SIGUSR2')
         await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T57 HMR start', 60_000)
+        await waitForSurfaceStatus(client, record => record.surfaceRevision === beforeRevision && record.surfaceMounted === false, 'T57 retired surface status', 60_000)
         await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T57 HMR retired', 120_000)
         const hmrReady = await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready', 'T57 HMR ready', 180_000)
         const after = await waitForSurfaceStatus(client, record => record.surfaceRevision === hmrReady.revision && record.surfaceMounted === true, 'T57 new surface status', 120_000)
@@ -3204,11 +3213,20 @@ async function main() {
         assert(after.generationId === beforeGeneration, 'T57 the HMR changed the transport generation')
         assert(after.surfaceRevision !== beforeRevision, 'T57 the surface revision did not change')
         assert(after.surfaceFiberUid !== before.surfaceFiberUid, 'T57 the runner fiber did not change')
-        await client.waitForScreen('type a message to start a session', 'T57 new TTY paint', 120_000)
+        assert(after.sessionOpen === true && after.openSessionId === sessionId, 'T57 the new revision did not re-adopt the exact Session wrapper')
+        assert(after.owners?.typert === 1 && after.owners?.connection === 1 && after.owners?.remote === 1
+          && after.owners?.fileUpload === 1 && after.owners?.sessions === 1 && after.owners?.jobs === 1,
+        `T57 duplicate/absent Domain owners after HMR: ${JSON.stringify(after.owners)}`)
+        assert(after.privateNamespaces === 2, 'T57 private namespaces were not remounted exactly once')
+        for (const operation of ['hmr-revision-start', 'hmr-revision-retired', 'hmr-revision-ready']) {
+          assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === operation).length === 1,
+            `T57 expected exactly one ${operation} record`)
+        }
+        await client.waitForScreen('long-turn answer', 'T57 new TTY paint', 120_000)
         await assertHostIdentityKept(host, hostBefore, 'T57 Host identity')
         await exitC1Client(client, 'T57 Client')
         await stopC1Host(host)
-        trace('t57', { hostPid: ready.pid, clientPid: beforePid, revisionBefore: beforeRevision, revisionAfter: after.surfaceRevision, sameContext: true, sameTransport: true, newTty: true })
+        trace('t57', { hostPid: ready.pid, clientPid: beforePid, sessionId, revisionBefore: beforeRevision, revisionAfter: after.surfaceRevision, sameContext: true, sameTransport: true, sessionWrapper: 're-adopted', newTty: true })
       }
 
       // T58: HMR while a real Host Job is running. The Host Job continues
@@ -3227,6 +3245,10 @@ async function main() {
         await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready', 'T58 HMR ready', 180_000)
         const after = await waitForSurfaceStatus(client, record => record.sessionOpen === true && record.openSessionId === sessionId, 'T58 new surface Session', 120_000)
         assert(after.pid === client.records.find(record => record.m4a0 === 'ready')?.pid, 'T58 the HMR changed the Client PID')
+        assert(after.owners?.sessions === 1 && after.owners?.jobs === 1 && after.privateNamespaces === 2,
+          'T58 duplicate/absent owners after HMR')
+        assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired').length === 1,
+          'T58 duplicate HMR retirement records')
         assert(alive(ready.pid), 'T58 the Host died during HMR')
         await assertHostIdentityKept(host, hostBefore, 'T58 Host after HMR')
         assert(readC1WorkEvents(workRoot).every(event => !(event.kind === 'job-event' && event.jobId === job.jobId && event.event === 'settled')),
@@ -3255,6 +3277,15 @@ async function main() {
         await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-failure', 'T59 HMR failure', 120_000)
         const failureExit = await client.waitForExit(60_000)
         assert(failureExit.code === 1, `T59 HMR failure exit was ${JSON.stringify(failureExit)}`)
+        for (const operation of ['hmr-revision-start', 'hmr-revision-retired', 'hmr-revision-failure']) {
+          assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === operation).length === 1,
+            `T59 expected exactly one ${operation} record on HMR failure`)
+        }
+        const closed = client.records.find(record => record.m4b2s === 'client-closed')
+        assert(closed !== undefined, 'T59 HMR failure did not emit the final Client owner inventory')
+        for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+          assert(closed.owners?.[owner] === 0, `T59 HMR failure left ${owner} owner alive`)
+        }
         assert(alive(ready.pid), 'T59 HMR failure killed the Host')
         await client.dispose()
         await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
@@ -3276,6 +3307,12 @@ async function main() {
         writeFileSync(barrier, 'release\n', { mode: 0o600 })
         const stopExit = await stopping.waitForExit(60_000)
         assert(stopExit.code === 0, `T59 stop-during-HMR exit was ${JSON.stringify(stopExit)}`)
+        assert(stopping.records.filter(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start').length === 1,
+          'T59 stop-during-HMR emitted a duplicate revision start')
+        assert(stopping.records.filter(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired').length === 1,
+          'T59 stop-during-HMR emitted a duplicate revision retirement')
+        assert(!stopping.records.some(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready'),
+          'T59 stop-during-HMR published a fake ready revision')
         assert(!stopping.records.some(record => record.m4a0 === 'cleanup-failure'), 'T59 stop-during-HMR reported a cleanup failure')
         assert(alive(stopReady.pid), 'T59 stop-during-HMR killed the Host')
         await stopping.dispose()

@@ -316,7 +316,7 @@ export class SurfaceRevisionTasks {
   }
 
   /** Resolve after every task queued SO FAR has settled. */
-  settle(): Promise<void> {
+  drain(): Promise<void> {
     return this.tail
   }
 }
@@ -739,7 +739,7 @@ async function startSurfaceLocalClient(
       // Stop is the ONE outer coordinator: it first aborts the in-flight
       // revision through `signal`, then waits for that revision task before
       // releasing the Context. Never release the root underneath a mount.
-      await revisionTasks.settle()
+      await revisionTasks.drain()
       const errors: unknown[] = []
       const revision = currentRevision
       currentRevision = undefined

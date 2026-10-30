@@ -483,7 +483,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
             })
             // Failure is observed OUTSIDE the serial task: `stop()` waits for
             // the same slot, so awaiting stop from inside it would deadlock.
-            run.catch(error => stop(1, error))
+            return run.catch(error => stop(1, error))
           }, { diag })
         })
       }
