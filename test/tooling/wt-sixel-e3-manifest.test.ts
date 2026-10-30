@@ -310,6 +310,24 @@ test('an unclean-tree run is refused when the caller requires a frozen tree', (t
   assert.ok(frozen.caseFailures.some((failure: string) => failure.includes('unclean tree')), frozen.caseFailures.join('; '))
 })
 
+test('a cleanup row is not mistaken for a frame of the case', (t) => {
+  const { root } = workspace(t)
+  const path = join(root, 'manifest.jsonl')
+  // A cleanup row has no screenshot by design. When frame detection used a denylist
+  // it absorbed this phase and reported a sound case as unverified.
+  writeFileSync(
+    path,
+    `${JSON.stringify(soundRow(root))}\n${JSON.stringify(traceRow(root))}\n${JSON.stringify({
+      run_id: 'I8-3-20261030T000000Z',
+      case_id: 'WT01',
+      phase: 'cleanup',
+      result: 'PASS',
+    })}\n`,
+  )
+  const verdict = validateWtE3Manifest(path, { root })
+  assert.deepEqual(verdict.verifiedCases, ['WT01'])
+})
+
 test('the manifest reader parses JSONL rows and reports the file it read', (t) => {
   const { root } = workspace(t)
   const path = join(root, 'manifest.jsonl')

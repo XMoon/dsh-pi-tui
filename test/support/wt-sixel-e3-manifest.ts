@@ -202,6 +202,13 @@ export function validateWtE3Row(row: WtE3Row, options: { readonly root: string }
     return { ok: failures.length === 0, countedAsPass: false, failures, facts }
   }
 
+  // A `cleanup` row records whether this case's window really went away. It has
+  // no screenshot and must not be judged as a frame.
+  if (row.phase === 'cleanup') {
+    if (row.result !== 'PASS' && row.result !== 'FAIL') failures.push('a cleanup row must be PASS or FAIL')
+    return { ok: failures.length === 0, countedAsPass: false, failures, facts }
+  }
+
   // An `.input` row records a delivered OS operation, not a frame.
   if (typeof row.phase === 'string' && row.phase.endsWith('.input')) {
     if (typeof row.action !== 'string' || row.action === '') failures.push('an input row must name the delivered action')
@@ -308,15 +315,22 @@ export function validateWtE3Manifest(
     rows,
     byCase,
     // "passes" counts CASES, not frames: the unit of an E3 claim is one case with
-    // its frame and trace closure, never an isolated screenshot.
+    // its frame and trace closure, never an isolated screenshot. Row failures and
+    // case-closure failures stay separate so neither double-counts the other.
     passes: verifiedCases.length,
     verifiedCases,
-    failures: rows.filter((entry) => entry.verdict.ok !== true).length + caseFailures.length,
+    failures: rows.filter((entry) => entry.verdict.ok !== true).length,
     caseFailures,
   }
 }
 
 /** A row that asserts a rendered frame (as opposed to an operation or the trace). */
 export function isFrameRow(row: WtE3Row): boolean {
-  return row.phase !== 'trace' && row.phase !== 'teardown' && typeof row.phase === 'string' && !row.phase.endsWith('.input')
+  // An explicit ALLOWLIST of the phases that assert a rendered frame. A denylist
+  // silently absorbed new bookkeeping phases (`cleanup`) and then reported a sound
+  // case as unverified, because a cleanup row legitimately has no screenshot.
+  return FRAME_PHASES.has(String(row.phase ?? ''))
 }
+
+/** Phases whose row asserts one captured frame. */
+const FRAME_PHASES = new Set(['before', 'after', 'scrolled', 'expanded', 'intermediate', 'restored', 'cropped'])
