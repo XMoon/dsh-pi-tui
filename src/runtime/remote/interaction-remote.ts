@@ -117,8 +117,6 @@ export interface RemoteInteractionRuntimeSource {
   readonly sessions: RemoteQuestionSessionsSource
   readonly remote: RemoteUserQuestionRemotes & RemoteInteractionEventsSource
   readonly connection: { readonly generation: RemoteConnectionGenerationSource }
-  /** True only for the split Client's Host-owned forwarded interaction carrier. */
-  readonly preservesHostPendingOnDetach?: boolean
 }
 
 const USER_QUESTIONS_PROJECTION_KEY = 'userQuestions'
@@ -184,7 +182,6 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
   private readonly sessions: RemoteQuestionSessionsSource
   private readonly remote: RemoteUserQuestionRemotes & RemoteInteractionEventsSource
   private readonly generation: RemoteConnectionGenerationSource
-  readonly preservesHostPendingOnDetach: boolean
   /** Every subscription this adapter owns, released exactly once. */
   private readonly owned: Array<() => void> = []
 
@@ -192,7 +189,6 @@ class RemoteQuestionInteractionPort implements QuestionInteractionPort {
     this.sessions = source.sessions
     this.remote = source.remote
     this.generation = source.connection.generation
-    this.preservesHostPendingOnDetach = source.preservesHostPendingOnDetach === true
   }
 
   onRequest(provider: UserQuestionProvider): boolean {
@@ -412,11 +408,9 @@ export class RemoteInteractionPort implements InteractionPort {
   /** Every subscription this port owns, released exactly once. */
   private readonly owned: Array<() => void> = []
   private readonly questionsPort: RemoteQuestionInteractionPort
-  readonly preservesHostPendingOnDetach: boolean
 
   constructor(source: RemoteInteractionRuntimeSource) {
     this.remote = source.remote
-    this.preservesHostPendingOnDetach = source.preservesHostPendingOnDetach === true
     this.questionsPort = new RemoteQuestionInteractionPort(source)
     this.questions = this.questionsPort
   }

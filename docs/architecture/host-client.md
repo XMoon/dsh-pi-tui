@@ -245,15 +245,16 @@ attached may answer a re-delivered event id / call id once; the Host pending
 map clears only on the Host's own settlement. A settled, cancelled or replaced
 request is never resurrected from an old Client's painted card.
 
-The current DSH Client event pump consumes a Host-pending forwarded event as
-soon as its Connection generation opens, before a fresh Client's official
-Domain/interaction owner can register an answerer; the Client API has no
-pre-start listener gate or replay buffer. A fresh Client therefore cannot
-recover a legacy Host-pending Question/Approval after the prior Client dies
-through the public Client API alone. That is an upstream capability gap, not a
-Host Gateway pending-map failure and not a reason to add a private PiTui
-pending store; an upstream pre-pump registration gate/buffer or an explicit
-Client restore API is required before this contract can be claimed end to end.
+The DSH Client event pump starts with the Connection generation. Official Web
+uses the existing Loader readiness gate (`loader.await().then(start)`) to mount
+its plugin graph before starting the Gateway. The PiTui split Client has not
+yet verified an equivalent assembly order for its interaction owner; in the
+current composition a fresh Client can consume a Host-pending forwarded event
+before that owner attaches. This is a PiTui split-assembly ordering gap, not
+established evidence that rc.4 lacks a public capability, and it is not a
+reason to add a private PiTui pending store. The correct re-entry is to verify
+the official Loader readiness contract in the PiTui split composition before
+claiming end-to-end pending-interaction recovery.
 
 The internal split mode also supports one Client-only surface revision
 replacement on the SAME Client PID, Client Context and B1 transport: the

@@ -165,9 +165,6 @@ export interface QuestionWaitClaim {
 /** The Question sub-domain of the interaction port: semantic operations,
  * never Typert objects. Both adapters implement the SAME contract. */
 export interface QuestionInteractionPort {
-  /** M4-C1: this backend carries Host-owned forwarded watermarks whose
-   *  surface teardown must leave the Host event pending for a later Client. */
-  readonly preservesHostPendingOnDetach?: boolean
   /** Observe live question requests (the forwarded waterfall). The request
    * DTO is detached; the adapter derives the owning Session identity inside
    * the adapter so the surface never sees an Agent object. `false` = the
@@ -256,9 +253,6 @@ export function questionAnswerError(error: unknown): QuestionAnswerError {
 
 /** The interaction domain port. */
 export interface InteractionPort {
-  /** M4-C1: this backend carries Host-owned forwarded watermarks whose
-   *  surface teardown must leave the Host event pending for a later Client. */
-  readonly preservesHostPendingOnDetach?: boolean
   /** The Question sub-domain (live requests, durable surface, timed claims,
    * late answers). */
   readonly questions: QuestionInteractionPort
