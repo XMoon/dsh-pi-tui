@@ -27,6 +27,9 @@ import {
   tmuxFeatureQueryWire,
 } from '../../src/tui/graphics/tmux-kitty-feature-probe.ts'
 import { createFakeTmuxCli, type FakeTmuxCli } from '../support/fake-tmux-cli.ts'
+import { createTmuxKittyGraphics } from '../../src/tui/graphics/tmux-image.ts'
+import { createTmuxSixelGraphics } from '../../src/tui/graphics/tmux-sixel.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 function admitted(cli: FakeTmuxCli): TmuxKittyIdentity {
   const identity = probeTmuxKittyIdentity(cli.env)
@@ -665,4 +668,26 @@ test('StdinBuffer rebuilds a split U1 feature reply into one consumed sequence',
   assert.deepEqual(consumed, [probeReply(probe)], 'ordinary input still reaches the screen')
   buffer.destroy()
   probe.dispose()
+})
+
+test('native tmux SIXEL never displaces a trustworthy tmux Kitty U1 positive', (t) => {
+  const cli = createFakeTmuxCli(t)
+  cli.setArgvReply(['display-message', '-p', '-t', '%7', '#{sixel_support}'], { text: '1\n' })
+  cli.setReply('show-messages', { text: '  1: Sxl: (flag) true\n' })
+  try {
+    const kitty = createTmuxKittyGraphics(new VirtualTerminal(), {}, cli.env)
+    assert.ok(kitty, 'the known Kitty client still gets the existing virtual transport')
+    assert.equal(kitty.mode, 'tmux-virtual')
+    assert.equal(createTmuxSixelGraphics(new VirtualTerminal(), cli.env), undefined,
+      'the factory ordering leaves the known-U1 positive untouched')
+    kitty.dispose()
+
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\txterm(1.0)\t0\n' })
+    const sixel = createTmuxSixelGraphics(new VirtualTerminal(), cli.env)
+    assert.ok(sixel, 'an unknown renderer with real Sxl selects native SIXEL')
+    assert.equal(sixel.mode, 'sixel')
+    sixel.dispose()
+  } finally {
+    cli.dispose()
+  }
 })

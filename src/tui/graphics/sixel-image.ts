@@ -1,12 +1,16 @@
 /**
- * Image-8 / I8-2A — the ONE Client-local Direct SIXEL graphics owner.
+ * Image-8 / I8-2A + I8-4 — the ONE Client-local SIXEL graphics owner.
  *
  * This module is the only place in the product that turns an authorized PNG
- * into pixels on a SIXEL terminal. It owns four things and nothing else:
+ * into pixels on a SIXEL terminal. Direct SIXEL feeds it a passive DA1
+ * observation; native tmux SIXEL feeds it a live server/client Sxl admission.
+ * Both reuse the SAME encoder, registry, crop path and Screen port. It owns
+ * four things and nothing else:
  *
  * 1. **Admission.** `canPaint()` answers "may THIS frame paint" from a
- *    per-app readiness projection over three real terminal facts: the passive
- *    DA1 SIXEL attribute (`ProcessTerminal.onSixelSupport`, X071), the real
+ *    per-app admission verdict plus the active Screen's real facts: the passive
+ *    DA1 SIXEL attribute (`ProcessTerminal.onSixelSupport`, X071) for Direct,
+ *    or the immutable tmux Sxl binding for native tmux, the real
  *    `CSI 6;h;w t` cell reply the active screen parsed, and the real OSC 11
  *    background. `pending` is not permission: a candidate that has not
  *    answered, a screen that has not reported, or a background observation
@@ -89,6 +93,16 @@ export interface DirectSixelGraphics {
   /** Bind one display occurrence. The returned component owns its raster. */
   image(source: KittyImageSource, options: NativeKittyImageOptions): PixelBody
   /** Release the encoder and every registered raster. Idempotent. */
+  dispose(): void
+}
+
+/** The narrow admission face both Direct DA1 and tmux Sxl owners consume. */
+export interface SixelCapability {
+  /** `pending` is not permission; only `admitted` may paint. */
+  readonly verdict: 'pending' | 'admitted' | 'denied'
+  /** Observe a later verdict transition (DA1 change or tmux one-way revoke). */
+  observe?(listener: () => void): () => void
+  /** Idempotent: stops observing and releases any probe resources. */
   dispose(): void
 }
 
@@ -244,8 +258,32 @@ export function createDirectSixelGraphics(
   const capability = createDirectSixelCapability(terminal, environment, getCapabilities().images)
   if (capability.verdict === 'denied') return undefined
 
-  const owner = new DirectSixelGraphicsOwner(terminal, capability, onReadinessChanged)
-  return owner
+  return createSixelOwner(terminal, capability, onReadinessChanged)
+}
+
+/**
+ * Create the ONE SIXEL owner for a non-DA1 admission (native tmux SIXEL).
+ *
+ * The caller owns the transport facade and passes the immutable capability
+ * verdict; this function only reuses the same encoder, registry, screen port
+ * and occurrence lifecycle as every other SIXEL surface.
+ */
+export function createSixelGraphicsWithAdmission(
+  terminal: Terminal,
+  capability: SixelCapability,
+  onReadinessChanged: () => void = () => {},
+): DirectSixelGraphics | undefined {
+  if (capability.verdict === 'denied') return undefined
+  return createSixelOwner(terminal, capability, onReadinessChanged)
+}
+
+/** The single constructor both SIXEL factories share. */
+function createSixelOwner(
+  terminal: Terminal,
+  capability: SixelCapability,
+  onReadinessChanged: () => void,
+): DirectSixelGraphics {
+  return new DirectSixelGraphicsOwner(terminal, capability, onReadinessChanged)
 }
 
 /**
@@ -259,7 +297,7 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
   readonly mode = 'sixel' as const
   readonly terminal: Terminal
   readonly screen: DirectSixelScreenPort
-  private readonly capability: ReturnType<typeof createDirectSixelCapability>
+  private readonly capability: SixelCapability
   private readonly encoder = new SixelEncoder()
   private readonly onReadinessChanged: () => void
   private readonly diag: Diag
@@ -289,13 +327,13 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
   private cell: { widthPx: number; heightPx: number } | undefined
   private backgroundRgb: number | undefined
   private readyGeometry: VerifiedGeometry | undefined
-  private unsubscribeDa1: (() => void) | undefined
+  private unsubscribeCapability: (() => void) | undefined
   private disposed = false
   private disposal: Promise<void> | undefined
 
   constructor(
     terminal: Terminal,
-    capability: ReturnType<typeof createDirectSixelCapability>,
+    capability: SixelCapability,
     onReadinessChanged: () => void,
   ) {
     this.terminal = terminal
@@ -326,7 +364,7 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
         this.materialize(line, cropTopRows, visibleRows),
       framePainted: (screen: object, retained: readonly ScreenFrameRaster[]) => this.framePainted(screen, retained),
     }
-    this.unsubscribeDa1 = terminal.onSixelSupport?.(() => this.capabilityChanged())
+    this.unsubscribeCapability = capability.observe?.(() => this.capabilityChanged())
     // A late subscriber receives the terminal's already-known DA1 value, so the
     // first admission can arrive here instead of in a render.
     this.capabilityChanged()
@@ -379,12 +417,12 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
 
   /** Whether a consumer may paint pixels on this frame. */
   canPaint(): boolean {
-    return !this.disposed && this.readyGeometry !== undefined
+    return !this.disposed && this.capability.verdict === 'admitted' && this.readyGeometry !== undefined
   }
 
   /** The verified facts a new occurrence must encode with, if they are ready. */
   private verifiedGeometry(): VerifiedGeometry | undefined {
-    return this.disposed ? undefined : this.readyGeometry
+    return this.canPaint() ? this.readyGeometry : undefined
   }
 
   private capabilityChanged(): void {
@@ -398,9 +436,20 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
       this.sampleGeometry()
       return
     }
-    // `pending` and `denied` are both "no pixels": a denied DA1 must also stop
-    // painting anything the previous admission produced.
+    // `pending` and `denied` are both "no pixels". A one-way tmux revoke also
+    // drops every already-painted fact synchronously: a click must not answer
+    // from a raster the refused frame never committed.
+    this.dropPaintFacts()
     this.invalidateGeometry()
+  }
+
+  /** Abort owned encode work and drop every paintable record/grant/painted fact. */
+  private dropPaintFacts(): void {
+    this.grantOrder = []
+    for (const occurrence of [...this.occurrences]) occurrence.image.releaseRecords()
+    this.records.clear()
+    this.retainedBytes = 0
+    this.admissionRevision += 1
   }
 
   /**
@@ -614,7 +663,7 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
    * `framePainted` releases first, then tasks the one lane in bottom-up order.
    */
   private reconcileVisible(screen: object, demands: readonly ScreenVisibleCandidate[]): boolean {
-    if (this.disposed || this.observer === undefined || screen !== this.observer) return false
+    if (!this.canPaint() || screen !== this.observer) return false
     const wanted = new Map<Occurrence, { cropTopRows: number; visibleRows: number }>()
     // Bottom-up priority is the OWNER's rule, not the caller's: the newest visible
     // content wins a contested slot on every screen.
@@ -646,6 +695,7 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
   /** Exact DCS for a granted window; never starts work and never accepts an
    *  unregistered request. */
   private materialize(line: string, cropTopRows: number, visibleRows: number): string | undefined {
+    if (!this.canPaint()) return undefined
     const occurrence = this.candidates.get(line)
     if (occurrence === undefined || occurrence.grant === undefined) return undefined
     if (occurrence.grant.cropTopRows !== cropTopRows || occurrence.grant.visibleRows !== visibleRows) return undefined
@@ -658,7 +708,7 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
    * granted-but-unready occurrences in the caller's bottom-up order.
    */
   private framePainted(screen: object, retained: readonly ScreenFrameRaster[]): void {
-    if (this.disposed || this.observer === undefined || screen !== this.observer) return
+    if (!this.canPaint() || screen !== this.observer) return
     const shown = new Map<string, ScreenFrameRaster>()
     for (const raster of retained) shown.set(raster.line, raster)
     // A release needs no extra repaint: the frame being committed already paints
@@ -778,8 +828,8 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
     if (this.disposal !== undefined) return
     // The synchronous half first: no new work, no new pixels, nothing retained.
     this.disposed = true
-    this.unsubscribeDa1?.()
-    this.unsubscribeDa1 = undefined
+    this.unsubscribeCapability?.()
+    this.unsubscribeCapability = undefined
     this.detachObserver?.()
     this.detachObserver = undefined
     this.observer = undefined

@@ -376,8 +376,9 @@ of `test/tui/kitty-graphics-owner.test.ts` and the geometry parity in
 SIXEL has no image-id residency model, so nothing here is shared with the Kitty
 Core. What the Client may rely on is one observed terminal fact and one gate:
 
-- **The primary DA1 is the only capability source.** A terminal that paints
-  SIXEL advertises attribute `4` in its primary device-attributes reply; the
+- **The primary DA1 is the only capability source for Direct SIXEL.** A terminal
+  that paints SIXEL advertises attribute `4` in its primary device-attributes
+  reply; the
   graphics-inquiry query is not a reliable substitute (some terminals never
   answer it). `ProcessTerminal` therefore observes a COMPLETE DA1 and exposes it
   through the optional `Terminal.onSixelSupport()` (divergence X071). The
@@ -457,6 +458,48 @@ Core. What the Client may rely on is one observed terminal fact and one gate:
   codec operating on authorized image bytes may produce a sequence, and only the
   owner's registry can make the Screen treat it as an image.
 
+### Native tmux SIXEL is a separate transport from passthrough
+
+A tmux pane that is compiled with native SIXEL support paints the pane's OWN
+SIXEL DCS; it does not need the Kitty passthrough envelope. The two transports
+therefore have different authorities and must never be collapsed:
+
+- **Admission is live server + client evidence, never a pane hint.**
+  `src/tui/graphics/tmux-sixel-admission.ts` admits only when the live tmux
+  server reports `#{sixel_support}=1`, exactly one ordinary display client
+  (Control Mode excluded) owns the pane's session with valid name/tty and is not
+  a nested multiplexer, and `show-messages -T -t <exact client>` reports exactly
+  one complete `Sxl: (flag) true`. A pane DA1 SIXEL attribute, `TERM_PROGRAM`,
+  `WT_SESSION`, `KITTY_WINDOW_ID` or a terminal brand is never proof. The
+  binding is immutable for the TUI lifetime; any later mismatch, lost server
+  support or lost Sxl revokes the handle one way, and only a restart may choose
+  a transport again.
+- **The factory order is fixed.** Native Kitty, Zellij Kitty, native tmux SIXEL,
+  tmux virtual Kitty, then Direct SIXEL. A live known-U1 Kitty/Ghostty tmux
+  client (or the explicit `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1` assertion) keeps
+  the virtual transport ahead of SIXEL; a merely pending unknown-renderer U1
+  probe does not outrank a proven Sxl client. `PI_TUI_TMUX_KITTY_IMAGES=0`
+  disables only the virtual Kitty transport and never this native SIXEL route;
+  `PI_IMAGE_PROTOCOL=none|0|kitty|iterm2` and every nested/other multiplexer
+  deny it before any tmux query.
+- **Writes are trusted complete DCS only.** `src/tui/graphics/tmux-sixel.ts`
+  wraps the real `Terminal` and scans the byte stream for the owner's exact
+  `ESC P0;1;q … ESC \` DCS. The fork's `BoundedTerminalWriter` can split a
+  frame at 1 MiB, so a partial command is held (bounded by the owner's 32 MiB
+  registry budget) and never reaches the sink; a complete string is accepted
+  only when the owner's exact registry reports its footprint, and then a forced
+  live admission probe runs BEFORE its first byte. A refused command writes zero
+  managed bytes, throws `TmuxGraphicsRevokedError`, drops the owner's paintable
+  facts, and the app boundary schedules one full text repaint. Ordinary text and
+  other ANSI sequences pass through in order; ordinary IO errors propagate
+  unchanged. No unwrapped or partially wrapped command ever escapes, and no
+  `DCS tmux;` envelope is added.
+- **The same SIXEL owner and Screen contract.** `src/tui/graphics/sixel-image.ts`
+  keeps ONE encoder, registry, crop path and Screen port for Direct and tmux
+  SIXEL; only the admission source and the write gate differ. `graphics.mode`
+  stays `'sixel'`, so every media consumer keeps asking
+  `effectiveImageProtocol()` and gets `'sixel'` only while the owner can paint.
+
 Proof: `packages/pi-tui/test/terminal.test.ts` (passive DA1 observation),
 `test/tui/sixel-capability.test.ts` (production DA1 stream to verdict),
 `test/client/sixel-image.test.ts` (three-fact gating, trust registry, crop
@@ -464,7 +507,10 @@ variants), `packages/pi-tui/test/tui-cell-size-input.test.ts` (the one cell-size
 parser), `packages/pi-tui/test/tui-sixel-main.test.ts` (X073 erase/paint order)
 and `packages/pi-tui/test/layout.test.ts` + `tui-alt-screen.test.ts` (X074 crop
 and paint order), plus the end-to-end chain in
-`test/integration/sixel-direct-screen.test.ts`.
+`test/integration/sixel-direct-screen.test.ts`. The native tmux SIXEL server/
+client evidence and the trusted-DCS write gate are guarded by
+`test/tui/tmux-sixel-admission.test.ts` and
+`test/integration/sixel-tmux-native-screen.test.ts`.
 
 ## Specialized contracts that stay as they are
 
