@@ -521,8 +521,16 @@ test('source to sink: the admitted component really emits the managed grid, and 
  * `canPaint()`), so a minimal object is a faithful input for THIS contract — a
  * fuller fake would only restate the Kitty face the sibling files already own.
  */
-function classifierHandle(mode: 'native' | 'tmux-virtual' | 'sixel', paints: boolean): ImageGraphics {
-  return { mode, canPaint: () => paints } as unknown as ImageGraphics
+function classifierHandle(
+  mode: 'native' | 'tmux-virtual' | 'sixel' | 'zellij-negotiated',
+  paints: boolean,
+  selected: 'kitty' | 'sixel' | null = 'kitty',
+): ImageGraphics {
+  return {
+    mode,
+    canPaint: () => paints,
+    ...(mode === 'zellij-negotiated' ? { selectedProtocol: () => selected } : {}),
+  } as unknown as ImageGraphics
 }
 
 test('Direct SIXEL is the last branch: it never overrides a managed handle and never invents pixels', () => {
@@ -555,5 +563,22 @@ test('a managed native-tmux SIXEL handle is the only authority for that pane', (
     'a revoked native-tmux SIXEL handle never falls back to the fork capability')
   assert.equal(effectiveImageProtocol(classifierHandle('tmux-virtual', true)), 'kitty',
     'the tmux virtual Kitty handle keeps its own transport')
+  resetCapabilitiesCache()
+})
+
+test('a negotiated Zellij handle projects only its own selection, never the inherited capability', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', false, null)), null,
+    'pending paints text')
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', true, 'kitty')), 'kitty')
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', true, 'sixel')), 'sixel')
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', false, 'kitty')), null,
+    'a lost Kitty transport paints text, never legacy pixels')
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', false, 'sixel')), null,
+    'an unready/revoked SIXEL owner paints text')
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', false, null)), null,
+    'a settled Zellij pane never falls back to the inherited iTerm2 answer')
   resetCapabilitiesCache()
 })

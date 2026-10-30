@@ -476,8 +476,9 @@ therefore have different authorities and must never be collapsed:
   binding is immutable for the TUI lifetime; any later mismatch, lost server
   support or lost Sxl revokes the handle one way, and only a restart may choose
   a transport again.
-- **The factory order is fixed.** Native Kitty, Zellij Kitty, native tmux SIXEL,
-  tmux virtual Kitty, then Direct SIXEL. A live known-U1 Kitty/Ghostty tmux
+- **The factory order is fixed.** Native Kitty, ONE Zellij negotiated handle
+  (Kitty > SIXEL > text), native tmux SIXEL, tmux virtual Kitty, then Direct
+  SIXEL. A live known-U1 Kitty/Ghostty tmux
   client (or the explicit `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1` assertion) keeps
   the virtual transport ahead of SIXEL; a merely pending unknown-renderer U1
   probe does not outrank a proven Sxl client. `PI_TUI_TMUX_KITTY_IMAGES=0`
@@ -515,6 +516,79 @@ and paint order), plus the end-to-end chain in
 client evidence and the trusted-DCS write gate are guarded by
 `test/tui/tmux-sixel-admission.test.ts` and
 `test/integration/sixel-tmux-native-screen.test.ts`.
+
+### Zellij native SIXEL is one negotiated pane handle
+
+A Zellij pane inherits the outer terminal's environment, so `TERM_PROGRAM`,
+`WT_SESSION`, `getCapabilities().images` and an inherited Kitty capability are
+not pane capability proof. The product creates ONE `zellij-negotiated` handle
+per app lifetime when `ZELLIJ` is a non-empty session marker with no nested
+`TMUX`/`STY` and no explicit `none`/`0`/`iterm2` override. That handle owns both
+the existing Native Kitty Core/Facade and a potential Direct SIXEL owner; only
+one of them can ever become paintable.
+
+- **Selection is driven by two live pane facts, exactly once.** The existing
+  bounded Kitty `a=q` query (500 ms) answers the pane's Kitty transport; the
+  terminal's passive primary DA1 observation (`onSixelSupport`, attribute `4`)
+  answers SIXEL. Kitty wins whenever its probe returns the matching `OK`, even
+  if DA1 also declares SIXEL. SIXEL is selected only when Kitty did not admit,
+  DA1 declares attribute `4`, and the LOCAL `zellij --version` is strictly
+  `>= 0.45.0` (older programs advertised SIXEL unconditionally). No answer, a
+  timeout, a missing/malformed version or an ineligible version settles to
+  text; DA1 has ONE 800 ms initial bound. Unknown is never treated as positive.
+- **No runtime protocol switching.** Once `kitty` or `sixel` is committed the
+  choice never changes. A late Kitty `OK` or DA1 reply is consumed but inert.
+  After SIXEL is selected, a later complete DA1 that omits attribute `4`
+  permanently revokes SIXEL: the owner drops every registered raster, grant and
+  clickable footprint and forces a full text repaint. It never falls back to
+  Kitty and never re-enters SIXEL.
+- **One write path, one SIXEL owner.** The negotiated handle keeps the existing
+  `ZellijKittyTerminal` as the ONLY `Terminal` writer; the potential SIXEL
+  branch is `createSixelGraphicsWithAdmission()` over the SAME encoder,
+  registry, crop path and `SixelScreenPort` as Direct/native-tmux SIXEL. Every
+  Main/Alt/workspace Screen receives that port at construction even while the
+  handle is pending; the port's owner refuses all pixels unless SIXEL is
+  selected and the three Direct-SIXEL facts (DA1, real cell size, real OSC 11
+  background) are complete. `effectiveImageProtocol()` derives
+  `'kitty' | 'sixel' | null` from the handle's live selection and `canPaint()`;
+  it never falls back to the inherited fork capability for a Zellij pane.
+- **Per-source rendering is one lazy delegate.** `ZellijNegotiatedImage`
+  renders the caller's fallback until selection, then creates exactly one
+  protocol delegate per source: `NativeKittyImage` for Kitty or the SIXEL
+  owner's `image()` for SIXEL. It never creates both pixel children and never
+  switches after selection.
+- **SIXEL re-verifies the pane on ownership changes.** After SIXEL is selected,
+  a real terminal resize, screen handoff or external-editor resume sends ONE
+  bounded `CSI c` re-query while the app owns the input listener. The reply is
+  consumed after `StdinBuffer` framing and before the editor; the capability
+  boolean remains the existing `onSixelSupport` observation. Until the
+  affirmative reply arrives the surface paints text; a negative reply or the
+  800 ms bound revokes SIXEL permanently. There is no per-frame query.
+- **Zellij's transparent first band needs a bounded width repair.** The ONE
+  SIXEL encoder can emit a first band with no painted pixels when the source's
+  top band is fully transparent; Zellij may then infer a zero-width image.
+  `src/tui/graphics/zellij-sixel-width.ts` accepts only the production
+  encoder's own grammar, verifies the declared raster width, and inserts a
+  transparent `!<widthPx>?$` run before the first `-`. It never rewrites an
+  arbitrary/external DCS, never duplicates an existing run, and refuses an
+  over-budget or unrecognised grammar (the occurrence then paints text). Full
+  and crop variants go through the same `admit()` entry, so the registry and
+  physical Screen always see the same repaired bytes.
+- **A screen constructed before selection keeps the Kitty cleanup protocol.**
+  `TuiAltScreen` captures its image protocol at construction. While the
+  negotiated handle is pending/denied it therefore uses the legacy Kitty
+  lifecycle (it paints no pixels because the consumer gate is `null`); a
+  confirmed SIXEL selection uses SIXEL screen semantics. SIXEL clearing itself
+  is driven by the independent Screen port, not by this construction-time
+  protocol value.
+
+Proof: `test/tui/zellij-image.test.ts`,
+`test/tui/zellij-sixel-width.test.ts`,
+`test/integration/kitty-zellij-screen.test.ts`,
+`test/integration/sixel-zellij-native-screen.test.ts`,
+`test/client/sixel-image.test.ts`, plus the existing Direct SIXEL and native
+tmux SIXEL suites. Real Zellij GUI/outer-terminal pixels are qualified by the
+release protocol smoke, never by a repository-doc claim.
 
 ## Specialized contracts that stay as they are
 

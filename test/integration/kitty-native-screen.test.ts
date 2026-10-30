@@ -43,6 +43,7 @@ import { KITTY_VIRTUAL_PLACEHOLDER } from '../../src/tui/graphics/tmux-virtual.t
 import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
 import { NativeKittyImage } from '../../src/tui/graphics/native-image.ts'
 import type { KittyGraphics } from '../../src/tui/graphics/native-image.ts'
+import type { ZellijNegotiatedGraphics } from '../../src/tui/graphics/zellij-sixel.ts'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 
@@ -712,9 +713,9 @@ test('a ZELLIJ session routes TuiApp to the Zellij query factory, never the Dire
     app.start()
     apps.started.add(app)
     try {
-      const graphics = (app as unknown as { graphics: KittyGraphics | undefined }).graphics
+      const graphics = (app as unknown as { graphics: ZellijNegotiatedGraphics | undefined }).graphics
       assert.ok(graphics, 'the Zellij factory created one pending handle')
-      assert.equal(graphics.mode, 'native')
+      assert.equal(graphics.mode, 'zellij-negotiated')
       assert.equal(graphics.canPaint(), false, 'the pending admission paints no pixels')
       assert.equal((vt.writes.join('').match(/a=q,i=\d+/g) ?? []).length, 1, 'one live query after the real input listener')
       const ref = ghosttyImageRef('att-zellij-route', 'routed.png')

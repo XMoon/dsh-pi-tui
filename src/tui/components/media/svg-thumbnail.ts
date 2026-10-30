@@ -130,7 +130,7 @@ export class SvgThumbnail implements Component {
    * @returns the painted body row count and its widest occupied column.
    */
   paintedImageBody(width: number): SvgThumbnailBody | undefined {
-    if (this.graphics?.mode === 'sixel') {
+    if (effectiveImageProtocol(this.graphics) === 'sixel') {
       const live = this.instance?.paintedBodyAt?.(width)
       if (live === undefined) return undefined
       return {
@@ -152,7 +152,7 @@ export class SvgThumbnail implements Component {
    * @returns the painted PNG's width/height in pixels.
    */
   paintedPixelSize(width: number): { readonly widthPx: number; readonly heightPx: number } | undefined {
-    if (this.graphics?.mode === 'sixel') {
+    if (effectiveImageProtocol(this.graphics) === 'sixel') {
       if (this.instance?.paintedBodyAt?.(width) === undefined) return undefined
       const live = this.paintedPixel
       if (live === undefined || live.width !== width) return undefined

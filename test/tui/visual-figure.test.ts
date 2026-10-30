@@ -349,3 +349,111 @@ test('a SIXEL figure reports its pixel hit only after the Screen commits, withou
     resetCapabilitiesCache()
   }
 })
+
+// ── Image-8 / I8-5: the negotiated Zellij projection at the consumer ───────
+
+/**
+ * A negotiated handle whose selection is controlled by the test. The two
+ * `mode`-based consumers must follow `effectiveImageProtocol()` instead of the
+ * fixed `zellij-negotiated` transport mode.
+ */
+function negotiatedFigureGraphics(state: {
+  protocol: 'kitty' | 'sixel' | null
+  committed: boolean
+  rows: number
+  columns: number
+  cropTopRows?: number
+  paintable?: boolean
+}): ImageGraphics {
+  return {
+    mode: 'zellij-negotiated',
+    selectedProtocol: () => state.protocol,
+    canPaint: () => state.protocol !== null && state.paintable !== false,
+    image: () => {
+      const body: PixelBody = {
+        render: () => [SIXEL_PLACEMENT, '', ''],
+        invalidate: () => {},
+        paintedBodyAt: (width: number) => state.committed
+          ? {
+              width,
+              columns: state.columns,
+              rows: state.rows,
+              ...(state.cropTopRows === undefined ? {} : { cropTopRows: state.cropTopRows }),
+            }
+          : undefined,
+        dispose: () => {},
+      }
+      return body
+    },
+    terminal: {} as never,
+    sixelScreen: {} as never,
+    observeScreen: () => {},
+    resample: () => {},
+    dispose: () => {},
+  } as unknown as ImageGraphics
+}
+
+test('a negotiated Zellij SIXEL figure follows async text → committed crop hit → revoke', async () => {
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  try {
+    const state = {
+      protocol: null as 'kitty' | 'sixel' | null,
+      committed: false,
+      rows: 3,
+      columns: 8,
+      cropTopRows: undefined as number | undefined,
+    }
+    const loader = new SvgRasterLoader(async (_source, options) => ({
+      png: new Uint8Array(),
+      base64: TINY_PNG_BASE64,
+      widthPx: options.targetWidth,
+      heightPx: Math.max(1, Math.round(options.targetWidth / 2)),
+    }))
+    const figure = figureOf(svgPublication(), {
+      svgLoader: loader,
+      svgTheme: { fallbackColor: text => text },
+      svgAdmissionWidth: 640,
+      graphics: negotiatedFigureGraphics(state),
+    })
+
+    // 1) Pending negotiation: description/actions only, never a pixel body.
+    figure.render(100)
+    await drainRaster()
+    const pending = figure.paintedHitMap(100)
+    assert.ok(pending !== undefined)
+    assert.equal(pending.thumbnailBody, undefined, 'pending is text')
+
+    // 2) The protocol settles to SIXEL; the same mounted component repaints
+    // (the first render starts the loader, the settle is a later paint).
+    state.protocol = 'sixel'
+    figure.render(100)
+    await drainRaster()
+    figure.render(100)
+    await drainRaster()
+    const beforeCommit = figure.paintedHitMap(100)
+    assert.ok(beforeCommit !== undefined)
+    assert.equal(beforeCommit.thumbnailBody, undefined, 'an uncommitted raster is not a hit')
+
+    // 3) The real Screen commits the footprint; a top crop shifts the hit.
+    state.committed = true
+    const uncropped = figure.paintedHitMap(100)
+    assert.ok(uncropped?.thumbnailBody !== undefined)
+    state.cropTopRows = 2
+    state.rows = 1
+    const cropped = figure.paintedHitMap(100)
+    assert.ok(cropped?.thumbnailBody !== undefined)
+    assert.equal(cropped.thumbnailBody.startRow, uncropped.thumbnailBody.startRow + 2)
+    assert.equal(cropped.thumbnailBody.endRow - cropped.thumbnailBody.startRow, state.rows)
+
+    // 4) A revoke clears the projection and the ghost hit.
+    state.protocol = null
+    state.committed = false
+    figure.render(100)
+    await drainRaster()
+    assert.equal(figure.paintedHitMap(100)?.thumbnailBody, undefined)
+    figure.dispose()
+    loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})

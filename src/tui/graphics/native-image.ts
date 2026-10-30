@@ -27,6 +27,7 @@ import { KittyGraphicsCore, type KittyGraphicsCoreOptions, type KittyImage, type
 import { calculateNativeCellSize, encodeKittyPlacement, type KittyPlacementGeometry } from './kitty-native.ts'
 import { KittyTerminalFacade } from './kitty-terminal.ts'
 import type { DirectSixelGraphics } from './sixel-image.ts'
+import type { ZellijNegotiatedGraphics } from './zellij-sixel.ts'
 
 /** The options one managed image occurrence declares. */
 export interface NativeKittyImageOptions {
@@ -203,7 +204,7 @@ export class NativeKittyImage implements Component {
  * Kitty keeps precedence everywhere it was admitted; SIXEL is only ever the
  * single owner of a Direct terminal that reported its own DA1 attribute.
  */
-export type ImageGraphics = KittyGraphics | DirectSixelGraphics
+export type ImageGraphics = KittyGraphics | DirectSixelGraphics | ZellijNegotiatedGraphics
 
 const MULTIPLEXER_ENV_KEYS = ['TMUX', 'ZELLIJ', 'STY'] as const
 

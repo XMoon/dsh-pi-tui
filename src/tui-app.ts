@@ -246,10 +246,11 @@ import {
   type ImageGraphics,
   type KittyGraphics,
 } from './tui/graphics/native-image.ts'
-import { createDirectSixelGraphics, type SixelScreenObservation } from './tui/graphics/sixel-image.ts'
+import { createDirectSixelGraphics, type DirectSixelScreenPort, type SixelScreenObservation } from './tui/graphics/sixel-image.ts'
 import { createTmuxSixelGraphics, isTmuxSixelTerminal } from './tui/graphics/tmux-sixel.ts'
 import { createTmuxKittyGraphics } from './tui/graphics/tmux-image.ts'
-import { createZellijKittyGraphics } from './tui/graphics/zellij-image.ts'
+import { createZellijNegotiatedGraphics } from './tui/graphics/zellij-sixel.ts'
+import { effectiveImageProtocol } from './tui/graphics/image-capability.ts'
 import { TmuxGraphicsRevokedError } from './tui/graphics/kitty-terminal.ts'
 import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
@@ -2866,11 +2867,20 @@ interface ScopeSettlement {
   readonly text: string
 }
 
+/** The ONE SIXEL-backed trust port projection: Direct SIXEL or Zellij. */
+function sixelScreenPortOf(graphics: ImageGraphics | undefined): DirectSixelScreenPort | undefined {
+  if (graphics === undefined) return undefined
+  if (graphics.mode === 'sixel') return graphics.screen
+  if (graphics.mode === 'zellij-negotiated') return graphics.sixelScreen
+  return undefined
+}
+
 export class TuiApp {
   private readonly terminal: Terminal
   /**
    * The ONE managed graphics owner of this physical terminal (Image-7A native /
-   * Image-7B-A tmux virtual / Image-8 Direct SIXEL). `undefined` on every
+   * Image-7B-A tmux virtual / Image-8 Direct SIXEL / Image-8 I8-5 Zellij
+   * negotiated). `undefined` on every
    * terminal that admitted no transport: those consumers keep the legacy fork
    * `Image`/text path.
    */
@@ -2880,13 +2890,22 @@ export class TuiApp {
    * route. A Zellij live `OK` can admit the Kitty transport while the fork's
    * static capability is still `null`/`iterm2`; the Alt screen's clear/redraw
    * and release strategy must follow the MANAGED transport, while whether
-   * pixels may be painted stays `graphics.canPaint()`. `undefined` keeps the
-   * fork's existing static capability (including legacy iTerm2 and the tmux
-   * virtual path).
+   * pixels may be painted stays `graphics.canPaint()`. A negotiated Zellij
+   * screen is constructed with `'kitty'` lifecycle semantics while pending
+   * (no pixels can paint yet), and switches to `'sixel'` only when SIXEL was
+   * already selected before construction. `undefined` keeps the fork's
+   * existing static capability (including legacy iTerm2 and tmux virtual).
    */
   private get altScreenImageProtocol(): ImageProtocol | 'sixel' | undefined {
     if (this.graphics === undefined) return undefined
     if (this.graphics.mode === 'sixel') return 'sixel'
+    if (this.graphics.mode === 'zellij-negotiated') {
+      // A screen constructed BEFORE the negotiation settles must keep the
+      // legacy Kitty cleanup protocol: no pixels can paint while pending, and
+      // a later Kitty selection would otherwise lose its placement cleanup.
+      // Once SIXEL is actually selected, new screens use SIXEL semantics.
+      return this.graphics.selectedProtocol() === 'sixel' ? 'sixel' : 'kitty'
+    }
     return this.graphics.mode === 'native' ? 'kitty' : undefined
   }
 
@@ -2901,7 +2920,7 @@ export class TuiApp {
    */
   private syncSixelObservation(): void {
     const graphics = this.graphics
-    if (graphics === undefined || graphics.mode !== 'sixel') return
+    if (graphics === undefined || (graphics.mode !== 'sixel' && graphics.mode !== 'zellij-negotiated')) return
     if (!this.terminalPresentationActive) {
       // The app does not own the physical terminal right now (suspended for
       // $EDITOR, a workspace transition, or stopped): a readiness query written
@@ -4315,7 +4334,15 @@ export class TuiApp {
     // closed, so a terminal that admits none keeps `getCapabilities()`
     // untouched and every consumer keeps its legacy `Image`/text path.
     const graphics: ImageGraphics | undefined = createNativeKittyGraphics(resizeAware)
-      ?? createZellijKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
+      // ONE Zellij candidate handle decides Kitty > SIXEL > text from the live
+      // pane answers. It must come before both tmux and every other SIXEL
+      // factory so two Zellij writers can never compete.
+      ?? createZellijNegotiatedGraphics(
+        resizeAware,
+        process.env,
+        () => this.requestRender(),
+        () => this.settleThumbnailRender(),
+      )
       // Native tmux SIXEL owns the pane's own DCS before the tmux virtual Kitty
       // factory gets a chance: a real Sxl client outranks a pending U1 probe,
       // while a live known-U1 Kitty/Ghostty facility keeps its fixed precedence
@@ -4597,7 +4624,7 @@ export class TuiApp {
       this.terminal,
       undefined,
       undefined,
-      this.graphics?.mode === 'sixel' ? this.graphics.screen : undefined,
+      sixelScreenPortOf(this.graphics),
     )
     // The host default editor is the TuiEditor subclass: kimi parity for
     // `@dir/` mention completion (Tab-accepting a directory reopens the
@@ -5266,7 +5293,7 @@ export class TuiApp {
     // invalidated the cell facts. The scheme fan-out is the same ownership seam
     // every other handoff uses. (RFL-015.)
     this.refreshSchemeRegistrations()
-    if (this.graphics?.mode === 'sixel') this.graphics.resample()
+    if (this.graphics?.mode === 'sixel' || this.graphics?.mode === 'zellij-negotiated') this.graphics.resample()
     // The suspend released the observation that screen owned; the resumed SAME screen
     // re-samples once when the latest intent still follows the terminal (the shared
     // hand-off completion point).
@@ -8084,7 +8111,7 @@ export class TuiApp {
       // expanded individually, exactly like a web disclosure row.
       const alt = new TuiAltScreen(this.terminal, undefined, undefined, {
         imageProtocolOverride: this.altScreenImageProtocol,
-        ...(this.graphics?.mode === 'sixel' ? { sixelScreen: this.graphics.screen } : {}),
+        ...(sixelScreenPortOf(this.graphics) === undefined ? {} : { sixelScreen: sixelScreenPortOf(this.graphics) }),
         // The fullscreen mouse-wheel step (Client preference): the fork
         // reads it at construction, so a change while fullscreen is
         // active applies on the next re-entry.
@@ -12973,7 +13000,7 @@ export class TuiApp {
       rows,
       viewerBack: this.paintedViewerBack(paintedHeight(this.header), paintedHeight(this.viewerSubjectBar)),
     }
-    if (this.graphics?.mode === 'sixel') this.refreshCommittedPixelHitRows()
+    if (effectiveImageProtocol(this.graphics) === 'sixel') this.refreshCommittedPixelHitRows()
     if (this.scrollProfiler.enabled && this.scrollFramePending) {
       const now = performance.now()
       this.scrollProfiler.emit({
@@ -24343,7 +24370,7 @@ export class TuiApp {
     })
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       imageProtocolOverride: this.altScreenImageProtocol,
-      ...(this.graphics?.mode === 'sixel' ? { sixelScreen: this.graphics.screen } : {}),
+      ...(sixelScreenPortOf(this.graphics) === undefined ? {} : { sixelScreen: sixelScreenPortOf(this.graphics) }),
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,
@@ -24648,7 +24675,7 @@ export class TuiApp {
     const token: object = {}
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       imageProtocolOverride: this.altScreenImageProtocol,
-      ...(this.graphics?.mode === 'sixel' ? { sixelScreen: this.graphics.screen } : {}),
+      ...(sixelScreenPortOf(this.graphics) === undefined ? {} : { sixelScreen: sixelScreenPortOf(this.graphics) }),
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,
@@ -25666,7 +25693,7 @@ export class TuiApp {
         // so the Direct SIXEL owner re-observes it before the next raster is
         // composited: a semi-transparent picture must never keep blending over the
         // previous background. (No SIXEL handle: nothing to do.)
-        this.graphics?.mode === 'sixel' && this.graphics.resample()
+        (this.graphics?.mode === 'sixel' || this.graphics?.mode === 'zellij-negotiated') && this.graphics.resample()
         for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
       }))
     }
