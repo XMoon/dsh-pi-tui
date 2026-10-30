@@ -154,7 +154,9 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     't22-t24-host-rpc-proof',
     't25-repeat-probe',
     't25-client-detach',
-    't26-runtime-missing',
+    't26-runtime-row-disabled',
+    't26-runtime-artifact-absent',
+    't26-runtime-artifact-restored',
     't26-official-row-disabled',
     't26-no-cookie',
     'mutation-tui-enabled',
@@ -183,4 +185,19 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(source, /mutationEnv/u)
   assert.match(source, /DSH_PI_TUI_ROLE: 'host'/u, 'the inherited-role negative control must remain')
+
+  // The artifact-absence control is the claim issue #474 left NOT_VERIFIED. It
+  // must rename the installed module and prove the rename is REALLY
+  // unresolvable from the profile anchor; a row toggle or an `existsSync`
+  // precheck would test a different claim.
+  assert.match(source, /renameSync\(hostRuntimeArtifact, hostRuntimeAbsentPath\)/u,
+    'the artifact-absence control must remove the installed module itself, not disable the row')
+  assert.match(source, /the renamed artifact must be genuinely unresolvable from the profile anchor/u,
+    'the artifact-absence control must prove resolution failure before booting the Host')
+  assert.match(source, /reachableAncestorCopies/u,
+    'the artifact-absence control must reject a layout with a second reachable package copy')
+  assert.match(source, /packageScopeBarrier/u,
+    'the artifact-absence control must block the package-scope self-reference escape')
+  assert.match(source, /profilesManifest/u,
+    'the artifact-absence control must reject an enclosing profiles manifest carrying the candidate package name')
 })
