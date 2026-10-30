@@ -107,14 +107,6 @@ export interface TspInteractionSeatOptions {
    * seat, and it is idempotent (a promoted slot may run it again).
    */
   readonly beforeModalSeat?: () => void
-  /**
-   * TSP-7 PR-B (F5): when the owning renderer DEFERS the seat-change repaint
-   * (so the modal and the waiting-phase activity land in one display commit),
-   * a later frame failure is routed back through here so the seat keeps its
-   * presentation-failure contract (retire the slot, settle its promise, fatal
-   * sink) — the same outcome a synchronous throw produced.
-   */
-  readonly reportPresentationFailure?: (error: unknown) => void
 }
 
 /** The seat's narrow surface for its owning renderer. */

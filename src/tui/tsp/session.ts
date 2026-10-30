@@ -554,7 +554,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * for the same-tick commit (or its own microtask when none follows).
    */
   let seatPresentationFlushScheduled = false
-  let seatFailure: ((error: unknown) => void) | undefined
+  /** The deferred-frame failure entry (assigned once the seat exists below). */
+  let seatFailure: (error: unknown) => void = () => {}
   const seatRender = (): void => {
     if (seatPresentationFlushScheduled) return
     seatPresentationFlushScheduled = true
@@ -568,7 +569,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         // The deferred frame failed: route it back through the seat's own
         // presentation-failure path (retire the slot, settle its promise,
         // reach the fatal sink) — the same contract a synchronous throw kept.
-        seatFailure?.(error)
+        seatFailure(error)
       }
     })
   }
@@ -576,7 +577,6 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const absorbSeatFlush = (): void => { seatPresentationFlushScheduled = false }
   const seat: TspInteractionSeat = createTspInteractionSeat({
     render: seatRender,
-    reportPresentationFailure: error => { seatFailure = undefined; seat.failPresentationForRenderer(error) },
     // A frame/focus failure while settling a prompt must reach the runner's
     // fatal lifecycle (the tty owner is broken), never become a silent modal
     // cancellation; a repeated failure keeps the FIRST fatal (exitRequested).
@@ -592,6 +592,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // form becomes visible/answerable; the close stays owned by this renderer.
     beforeModalSeat: () => { retireWorkDetails('modal') },
   })
+  // TSP-7 PR-B (F5): the deferred-frame failure entry — the seat's own
+  // retire/settle/fatal path for a frame that failed AFTER the deferral.
+  seatFailure = (error: unknown): void => { seat.failPresentationForRenderer(error) }
   modelPicker = new TspModelPicker({
     render: () => render(),
     canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
