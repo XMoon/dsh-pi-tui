@@ -2970,10 +2970,26 @@ async function main() {
         trace('t48', { hostPid: ready.pid, parentSessionId: sessionId, childId: started.childId, runId: started.runId, childDurable: true })
       }
 
-      if (process.env.SPLIT_PROCESS_SMOKE_SKIP_INTERACTIONS === '1') {
+      if (process.env.SPLIT_PROCESS_SMOKE_RUN_INTERACTIONS !== '1') {
+        // Owner-approved partial M4-C1 scope: the fresh-Client interaction
+        // handoff is blocked upstream. Record every affected test individually
+        // and keep the default lane green for the delivered subset rather than
+        // claiming a false PASS.
         trace('t49-t55', {
-          status: 'BLOCKED',
-          reason: 'the fresh Client event pump delivers a Host-pending forwarded interaction before the surface interaction port attaches; exact upstream capability is under Owner review',
+          status: 'BLOCKED_UPSTREAM',
+          dshVersion: targetDshVersion,
+          blockers: {
+            t49: 'BLOCKED_UPSTREAM: a fresh C2 cannot receive the original pending question after C1 death',
+            t50: 'BLOCKED_UPSTREAM: a fresh C2 cannot receive the original pending question after clean C1 exit',
+            t51: 'BLOCKED_UPSTREAM: stale legal event replay depends on the same pending-forwarded-event path',
+            t52: 'BLOCKED_UPSTREAM: timed/continued C2 answer depends on the same pending-forwarded-event path',
+            t53: 'BLOCKED_UPSTREAM: a fresh C2 cannot receive the original pending approval (allow)',
+            t54: 'BLOCKED_UPSTREAM: a fresh C2 cannot receive the original pending approval (reject)',
+            t55: 'BLOCKED_UPSTREAM: delayed old-peer/Host-abort races depend on the same pending-forwarded-event path',
+          },
+          rootCause: 'the rc.4 Client event pump consumes Host-pending forwarded waterfall events when the Connection generation opens, before the fresh Client interaction owner attaches; no public pre-pump registration, replay buffer or restore API exists',
+          requiredUpstreamApi: 'pre-pump answerer registration/replay buffer or an explicit Client pending-event restore API',
+          reentry: 'upgrade to a DSH release with that public capability and rerun T49-T55 against the exact candidate',
         })
       } else {
         // T49/T50: an official pending Question survives C1 SIGKILL and a clean
@@ -3330,9 +3346,11 @@ async function main() {
         candidate: basename(tarball),
         sha256: candidateSha256,
         dshVersion: targetDshVersion,
-        t44t48: process.env.SPLIT_PROCESS_SMOKE_SKIP_INTERACTIONS === '1' ? 'T44-T48 pass' : 'executed',
-        t49t55: process.env.SPLIT_PROCESS_SMOKE_SKIP_INTERACTIONS === '1' ? 'BLOCKED: upstream Client event-pump pre-answerer delivery gap' : 'executed',
-        t56t59: process.env.SPLIT_PROCESS_SMOKE_SKIP_INTERACTIONS === '1' ? 'T56-T59 pass' : 'executed',
+        m4c1: 'PARTIAL (Owner-approved scope split)',
+        t44t48: 'pass',
+        t49t55: 'BLOCKED_UPSTREAM: rc.4 Client event-pump pre-answerer delivery gap',
+        t56t59: 'pass',
+        t60Status: 'BLOCKED_UPSTREAM: complete T01-T60 qualification is not claimed',
         t26aArtifactMissing: 'NOT_VERIFIED (#474)',
         t12PtyHup: 'NOT_RUN',
         releaseGates: 'run by the stage-final lane, not by this smoke',
