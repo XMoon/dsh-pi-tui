@@ -49,7 +49,7 @@ import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { rasterizeSvg } from '../../src/client/media/svg/rasterize.ts'
 import { clearAssistantVisualPresentation, setAssistantVisualPresentation, type VisualPresentationKey } from '../../src/domain/visual/presentation.ts'
 import { SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
-import { svgDetailRows, svgFactFromArgs, svgHumanText } from '../../src/domain/visual/svg.ts'
+import { authorizeSvg, svgContentBlocks, svgDetailRows, svgFactFromArgs, svgHumanText, type SvgAuthorization } from '../../src/domain/visual/svg.ts'
 import type { PublishedVisual } from '../../src/domain/visual/publication.ts'
 import { MessageId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
@@ -246,6 +246,22 @@ async function startSixelApp(
   )
   app.start()
 
+  // The fixture's own admission fact: a Direct SIXEL topology mounts the ONE
+  // managed handle; a statically denied topology mounts none. This is checked
+  // BEFORE waiting for readiness bytes, so an ambient terminal identity (a
+  // developer's KITTY_WINDOW_ID / TERM_PROGRAM=tern / ZELLIJ / PI_IMAGE_PROTOCOL
+  // selecting another transport) fails with the reason instead of a 30 s
+  // missing-OSC-11 timeout. The product lane clears those variables.
+  const mountedGraphics = (app as unknown as { graphics?: { mode: string } }).graphics
+  if (options.skipSixelReadiness === true) {
+    assert.equal(mountedGraphics, undefined,
+      'a statically denied topology must mount no graphics handle')
+  } else {
+    assert.equal(mountedGraphics?.mode, 'sixel',
+      'this fixture requires the Direct SIXEL topology; an ambient terminal identity must not select another '
+      + 'transport (run through `pnpm test:product`, which clears KITTY_WINDOW_ID/ZELLIJ/TERM_PROGRAM/PI_IMAGE_PROTOCOL)')
+  }
+
   // The terminal's own DA1; the geometry and background replies come from the
   // terminal itself (see `write`), exactly like a real tty.
   if (options.skipSixelReadiness !== true) {
@@ -381,6 +397,85 @@ function rowOf(text: string, needle: string): number {
 async function nextRaster(terminal: SixelAppTerminal, before: number, label: string): Promise<string> {
   await until(() => paintedRasters(terminal).length > before, label)
   return paintedRasters(terminal).at(-1)!
+}
+
+/** A tool-card authorization the production gate admitted. */
+type AdmittedSvg = Extract<SvgAuthorization, { state: 'ready' }>
+
+/**
+ * The failure-only read of one tool card's EXACT loader variant plus the
+ * bounded frame facts that separate the first failing boundary:
+ * authorization / loader idle-loading-ready-error / graphics readiness /
+ * DCS materialization.
+ */
+function toolRasterProbe(
+  app: TuiApp,
+  terminal: SixelAppTerminal,
+  svgLoader: SvgRasterLoader,
+  authorization: AdmittedSvg,
+  rasterWidths: readonly number[],
+): {
+  state: () => ReturnType<SvgRasterLoader['get']>
+  diagnose: () => Promise<string>
+} {
+  const digest = authorization.fact.digest
+  const width = authorization.admission.width
+  return {
+    state: () => svgLoader.get(digest, width),
+    diagnose: async () => {
+      const state = svgLoader.get(digest, width)
+      const graphics = (app as unknown as {
+        graphics?: { mode: string; canPaint(): boolean }
+      }).graphics
+      const wire = terminal.writes.join('')
+      const viewport = await viewportOf(terminal)
+      return JSON.stringify({
+        // The exact key the card's loader was asked for; never a guessed width.
+        variant: { digest: digest.slice(0, 16), width },
+        loader: state.state === 'error'
+          ? { state: 'error', error: state.error.message }
+          : { state: state.state },
+        requestedWidths: rasterWidths.slice(-3),
+        graphics: graphics === undefined
+          ? undefined
+          : { mode: graphics.mode, canPaint: graphics.canPaint() },
+        dcsCount: paintedRasters(terminal).length,
+        queries: { csi16t: wire.includes('\x1b[16t'), osc11Background: wire.includes('\x1b]11;?') },
+        viewportTail: viewport.slice(-400),
+      })
+    },
+  }
+}
+
+/**
+ * Wait for one tool-card DCS, but let a loader that already FAILED settle the
+ * wait with its own reason. The generic `nextRaster` would wait the whole 30 s
+ * budget and then report only "no raster": a native raster child that exceeds
+ * its 3 s bound would burn the remaining 27 s first. `diagnose` runs on
+ * failure only and stays bounded (no SVG source, no full DCS).
+ */
+async function nextToolRaster(
+  terminal: SixelAppTerminal,
+  before: number,
+  label: string,
+  probe: {
+    state: () => ReturnType<SvgRasterLoader['get']>
+    diagnose: () => string | Promise<string>
+  },
+): Promise<string> {
+  const deadline = Date.now() + 30_000
+  for (;;) {
+    const rasters = paintedRasters(terminal)
+    if (rasters.length > before) return rasters.at(-1)!
+    const current = probe.state()
+    if (current.state === 'error') {
+      assert.fail(`${label}: the SVG raster loader failed before any pixel was painted: ${current.error.message}; ${await probe.diagnose()}`)
+    }
+    if (Date.now() > deadline) {
+      assert.fail(`timed out waiting for ${label} (loader: ${current.state}); ${await probe.diagnose()}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
 }
 
 /** Wait until the flushed viewport no longer paints the needle. */
@@ -983,23 +1078,32 @@ test('E2-05: a real SVG tool card paints admitted pixels, and malformed SVG pain
   const mountToolSvg = async (svg: string, title: string, description: string): Promise<string> => {
     const fact = svgFactFromArgs({ title, description, svg })
     const human = svgHumanText(fact)
+    const args = JSON.stringify({ title, description, svg })
+    const resultBlocks = svgContentBlocks(fact)
     const message = {
       kind: 'tool',
       turn: 1,
       name: SVG_TOOL_NAME,
-      args: JSON.stringify({ title, description, svg }),
+      args,
       result: human,
-      resultBlocks: [
-        { type: 'text', text: human },
-        { type: 'text', text: `visual-v1:${JSON.stringify(fact)}` },
-      ],
+      resultBlocks,
       status: 'ok',
     } as never
+    // The card's own authorization verdict supplies the loader variant the
+    // diagnostic must watch; the width is never guessed from the fixture.
+    const authorization = authorizeSvg(args, resultBlocks, 'ok')
+    if (authorization.state !== 'ready') {
+      assert.fail(`the ${title} fixture must be admitted: ${authorization.reason}`)
+    }
     const before = paintedRasters(terminal).length
     internals.setTranscript([message])
     internals.toggleMessageExpanded(internals.messages[0])
-    const dcs = await nextRaster(terminal, before, `the ${title} tool raster`)
-    return dcs
+    return await nextToolRaster(
+      terminal,
+      before,
+      `the ${title} tool raster`,
+      toolRasterProbe(app, terminal, svgLoader, authorization, rasterWidths),
+    )
   }
 
   // A normal admitted drawing: real pixels and the readable description.
@@ -1081,6 +1185,55 @@ test('E2-05: a real SVG tool card paints admitted pixels, and malformed SVG pain
   const badView = await waitViewport(terminal, 'Broken drawing', 'the malformed card description')
   assert.ok(badView.includes('Broken drawing'))
   assert.equal(paintedRasters(terminal).length, beforeBad, 'malformed SVG emits no trusted DCS')
+})
+
+test('E2-05 negative: a failed SVG raster reports its own reason before the DCS wait', async (t) => {
+  const rasterFailure = new Error('SVG rasterization exceeded 3000 ms')
+  const svgLoader = new SvgRasterLoader(async () => { throw rasterFailure })
+  const { terminal, app } = await startSixelApp(t, {
+    svgLoader,
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  const internals = app as unknown as {
+    setTranscript(messages: unknown[]): void
+    messages: readonly unknown[]
+    toggleMessageExpanded(message: unknown): void
+  }
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
+  const fact = svgFactFromArgs({ title: 'Failed topology', description: 'unavailable', svg })
+  const human = svgHumanText(fact)
+  const args = JSON.stringify({ title: 'Failed topology', description: 'unavailable', svg })
+  const resultBlocks = svgContentBlocks(fact)
+  const message = {
+    kind: 'tool',
+    turn: 1,
+    name: SVG_TOOL_NAME,
+    args,
+    result: human,
+    resultBlocks,
+    status: 'ok',
+  } as never
+  const authorization = authorizeSvg(args, resultBlocks, 'ok')
+  if (authorization.state !== 'ready') {
+    assert.fail(`the negative-control fixture must be admitted: ${authorization.reason}`)
+  }
+  const before = paintedRasters(terminal).length
+  internals.setTranscript([message])
+  internals.toggleMessageExpanded(internals.messages[0])
+  const started = Date.now()
+  await assert.rejects(
+    () => nextToolRaster(
+      terminal,
+      before,
+      'the failed tool raster',
+      toolRasterProbe(app, terminal, svgLoader, authorization, []),
+    ),
+    (error: Error) => error.message.includes('the SVG raster loader failed before any pixel was painted')
+      && error.message.includes(rasterFailure.message),
+    'the wait surfaces the loader error itself, not a generic DCS timeout',
+  )
+  assert.ok(Date.now() - started < 10_000,
+    'the loader error settles the wait immediately instead of consuming the 30 s raster budget')
 })
 
 test('E2-06: a published Assistant SIXEL figure exposes the committed hit and its exact boundaries', async (t) => {

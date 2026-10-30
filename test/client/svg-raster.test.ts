@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { createSvgRasterizer, rasterizeSvg, type SvgRasterize } from '../../src/client/media/svg/rasterize.ts'
@@ -83,6 +83,41 @@ test('an already-aborted raster request is refused before work starts', { skip: 
   const controller = new AbortController()
   controller.abort()
   await assert.rejects(rasterizeSvg(SVG_SOURCE, { targetWidth: 128, signal: controller.signal }), /cancelled/u)
+})
+
+test('a raster child that outlives the 3 s bound is classified as a timeout after its real close', { skip: nativeRasterSkip }, async () => {
+  // The ONE hard-timeout path, measured on a REAL child: a process that never
+  // answers, the SIGKILL at the shared `SVG_RASTER_TIMEOUT_MS` bound, and a
+  // promise that settles only after `close`. This is the event-order evidence
+  // for the `SVG rasterization exceeded 3000 ms` failure class; it does not
+  // change the production budget.
+  const events: string[] = []
+  let child: ChildProcessWithoutNullStreams | undefined
+  const spawnProcess = ((..._args: Parameters<typeof spawn>): ReturnType<typeof spawn> => {
+    const spawned = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60_000)'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    child = spawned
+    events.push('spawn')
+    spawned.on('exit', (code, signal) => events.push(`exit:${signal ?? code}`))
+    spawned.on('close', (code, signal) => events.push(`close:${signal ?? code}`))
+    return spawned
+  }) as typeof spawn
+  const rasterize = createSvgRasterizer(spawnProcess)
+  const started = Date.now()
+  await assert.rejects(
+    rasterize(SVG_SOURCE, { targetWidth: 128, signal: new AbortController().signal }),
+    /SVG rasterization exceeded 3000 ms/u,
+  )
+  events.push('settled')
+  const elapsed = Date.now() - started
+  assert.deepEqual(events, ['spawn', 'exit:SIGKILL', 'close:SIGKILL', 'settled'],
+    'the failure settles from the real child close, never from the timer alone')
+  assert.ok(elapsed >= 3000, `the shared hard timeout really elapsed: ${elapsed} ms`)
+  assert.ok(elapsed < 10_000, `the failure is bounded by the raster budget, not a 30 s wait: ${elapsed} ms`)
+  assert.equal(child?.signalCode, 'SIGKILL', 'the child process is really gone before the promise settles')
+  assert.equal(child?.exitCode, null)
 })
 
 
