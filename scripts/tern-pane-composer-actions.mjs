@@ -83,6 +83,21 @@ async function styleOf(h, node) {
 export default async function (h) {
   const subject = join(h.repo, 'scripts', 'tern-pane-composer-actions-subject.mts')
   const testCase = process.env.TERN_TSP7_PRC_CASE ?? 'idle'
+  // The SAME flow serves both lanes (the plan's §Batch 3). The GUI lane is
+  // detected by its pane-split member: a real window cannot shrink below its
+  // minimum width, so the narrow widths come from SPLITTING the window's pane
+  // (the GUI guide's splitPane) instead of resizing the viewport.
+  const gui = typeof h.splitPane === 'function'
+  // The subject pane's real width: the FOCUSED pane element (.tn-pane.on) in
+  // the client's own tree — the authority for what the subject's viewport
+  // actually is after a window resize re-lays the split.
+  const paneWidth = () => {
+    const snapNow = h.snapshot()
+    const pane = snapNow.nodes.find(node =>
+      String(node.class ?? '').split(' ').includes('tn-pane') &&
+      String(node.class ?? '').split(' ').includes('on'))
+    return Array.isArray(pane?.rect) ? pane.rect[2] : undefined
+  }
 
   const useCase = name => {
     writeFileSync(join(h.root, 'case'), `${name}\n`)
@@ -91,10 +106,16 @@ export default async function (h) {
   const runCase = useCase(testCase)
 
   // ── The wide viewport: the chrome and the two status rows ────────────────
+  // GUI: the split must precede the launch (an EMPTY pane splits; a live TSP
+  // subject does not — GUI guide trap 16), and the subject stays in the
+  // ORIGINAL pane, which keeps the focus. The pane's measured width (not the
+  // window's) is the subject's viewport in this lane.
+  if (gui) await h.splitPane('right')
   await h.resize(1280, 800)
   const booted = await h.launch(subject, { ready: `composer-actions ${runCase}` })
   h.check(`the PR-C ${runCase} subject boots inside a real Tern pane`, booted)
   if (!booted) return
+  if (gui) h.measure('gui-wide-pane-width', String(paneWidth()))
 
   let snap = h.snapshot()
   let buttons = composerButtons(h, snap)
@@ -194,20 +215,40 @@ export default async function (h) {
   h.capture(`prc-${runCase}-1280x800`, `PR-C ${runCase}: the composer action row at 1280x800`)
 
   // ── The 400×600 split: the normal narrow pane ────────────────────────────
-  await h.resize(400, 600)
+  if (gui) {
+    // A real window cannot be 400px wide (measured minimum ~720px), but the
+    // SPLIT pane can: shrinking the WINDOW re-lays the split out, and the
+    // subject's pane follows (its exact width is measured, never assumed).
+    await h.resize(800, 600)
+    h.measure('gui-narrow-pane-width', String(paneWidth()))
+    h.check('the GUI narrow pane is under 72 columns',
+      (paneWidth() ?? 9999) / (h.ctl('stats')?.cell?.w ?? 8) < 72,
+      `pane=${paneWidth()}px cell=${h.ctl('stats')?.cell?.w}`)
+  } else {
+    await h.resize(400, 600)
+  }
   snap = h.snapshot()
   buttons = composerButtons(h, snap)
-  h.check('the 400x600 pane still mounts every button',
+  h.check('the narrow pane still mounts every button',
     [...buttons.keys()].sort().join(',') === expected.sort().join(','),
     JSON.stringify([...buttons.keys()]))
-  h.check('every button is clickable (visible fragment on both axes) at 400x600',
+  h.check('every button is clickable (visible fragment on both axes) in the narrow pane',
     [...buttons.values()].every(node => visiblePoint(snap.chains, node) !== undefined),
     [...buttons.values()].map(node => JSON.stringify(visibleBox(snap.chains, node))).join(' '))
-  h.capture(`prc-${runCase}-400x600`, `PR-C ${runCase}: the row in a 400x600 split`)
+  h.capture(`prc-${runCase}-narrow`, `PR-C ${runCase}: the row in a narrow pane`)
 
   // ── The 260-wide narrow pane: the short-label rule ───────────────────────
   if (runCase === 'narrow') {
-    await h.resize(260, 600)
+    if (gui) {
+      // The window's measured minimum (~720px) bounds the split pane at ~360px
+      // — the narrowest this lane reaches. The PRODUCT rule under test is the
+      // cols<72 short-label switch, which this width still exercises; the
+      // exact 260px figure stays a headless scenario.
+      await h.resize(720, 600)
+      h.measure('gui-narrowest-pane-width', String(paneWidth()))
+    } else {
+      await h.resize(260, 600)
+    }
     snap = h.snapshot()
     buttons = composerButtons(h, snap)
     h.check('the 260-wide pane drops the value labels (cols < 72)',
@@ -303,12 +344,21 @@ export default async function (h) {
   }
 
   // ── Dark and light ────────────────────────────────────────────────────────
-  await h.resize(400, 600)
+  if (!gui) await h.resize(400, 600)
   await h.sleep(300)
-  h.send('appearance', 'dark')
+  if (gui) {
+    // The LIVE window switch (the GUI guide): `appearance` is a no-op here.
+    h.send('plugins', 'run', 'appearance:dark')
+  } else {
+    h.send('appearance', 'dark')
+  }
   h.check('the client resolved the dark appearance', h.ctl('state').theme === 'dark')
   h.capture(`prc-${runCase}-dark`, `PR-C ${runCase}: the row in the dark appearance`)
-  h.send('appearance', 'light')
+  if (gui) {
+    h.send('plugins', 'run', 'appearance:light')
+  } else {
+    h.send('appearance', 'light')
+  }
   h.check('the client resolved the light appearance', h.ctl('state').theme === 'light')
   h.capture(`prc-${runCase}-light`, `PR-C ${runCase}: the row in the light appearance`)
 
