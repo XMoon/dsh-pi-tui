@@ -92,7 +92,7 @@ function composerButtons(pane: TspPane): Map<string, WireNode> {
     // The keys carry the presentation-scope epoch (`composer-model-s<N>`);
     // the product name is the prefix up to the epoch suffix.
     if (!key.startsWith('composer-')) continue
-    const base = key.replace(/-s\d+$/, '')
+    const base = key.replace(/-s\d+(?:r\d+)?$/, '')
     out.set(base, node)
   }
   return out
@@ -381,6 +381,44 @@ test('composer actions: a Stop click from the PREVIOUS session cannot cancel the
   click(pane, freshStop!)
   await settle(200) // window: let the pane ack the frame before reading the wire
   assert.equal(calls.cancels, 1, 'the CURRENT session\'s Stop cancels exactly once')
+})
+
+test('composer actions: a Stop click from the PREVIOUS run cannot cancel the next run of the SAME session', async (t) => {
+  // The external review r3's sequence: turn A busy → idle → turn B busy again,
+  // all within ONE subject (the scope epoch does not move). The Stop key
+  // carries a busy-lifetime serial, so B's button paints under a NEW node id
+  // and A's late click resolves to nothing.
+  const m = await mountComposerActions({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'] })
+  t.after(() => { void m.dispose() })
+  const { pane, calls } = m
+  const MODEL = { displayName: 'same-session', id: 's' }
+  await m.commitStatus(snapshotFor({ busy: true, model: MODEL }))
+  const turnAStop = composerButtons(pane).get('composer-stop')
+  assert.ok(turnAStop, 'turn A painted its Stop')
+  // Turn A ends (busy → false): the Stop retires.
+  await m.commitStatus(snapshotFor({ busy: false, model: MODEL }))
+  assert.equal(composerButtons(pane).has('composer-stop'), false, 'idle paints no Stop')
+  // Turn B starts (false → true edge, SAME subject): a NEW busy lifetime.
+  await m.commitStatus(snapshotFor({ busy: true, model: MODEL }))
+  const turnBStop = composerButtons(pane).get('composer-stop')
+  assert.ok(turnBStop, 'turn B paints its Stop')
+  assert.notEqual(turnBStop!.id, turnAStop!.id,
+    'the busy-lifetime serial gives turn B its OWN node identity within one session')
+  // A's late click arrives after B's frame: address A's retired id directly.
+  click(pane, turnAStop!)
+  await settle(200) // window: let the pane ack the frame before reading the wire
+  assert.equal(calls.cancels, 0,
+    'a click minted under turn A never cancels turn B — the id is not in the current view')
+  // B's OWN Stop still works (non-vacuous control).
+  click(pane, turnBStop!)
+  await settle(200) // window: let the pane ack the frame before reading the wire
+  assert.equal(calls.cancels, 1, 'turn B\'s own Stop cancels exactly once')
+  // A continuous busy commit (no false edge) keeps the SAME identity — the
+  // serial tracks RUNS, not status revisions (§4.1's stable-key contract).
+  await m.commitStatus(snapshotFor({ busy: true, model: MODEL, }))
+  const continuous = composerButtons(pane).get('composer-stop')
+  assert.equal(continuous!.id, turnBStop!.id,
+    'a same-run status commit does not remount the Stop button')
 })
 
 /* --------------------------------------------------------------- Model/Effort */
