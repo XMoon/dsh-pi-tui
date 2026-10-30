@@ -834,12 +834,14 @@ modal-pre-emption, exactly-once close and final-dispose rules.
 - **Read authority and protocol scope.** The viewer reads through the ONE
   existing `ImageLoader` keyed by the occurrence's immutable presentation scope
   and `attachmentId`; one subscription, one idempotent unsubscribe, no second
-  cache or read service. PR2 renders real pixels on Kitty only: the AltScreen
-  deliberately disables the iTerm2 image capability and its cursor-up framing
-  is outside the fork's ANSI width layer, so the iTerm2 workspace shows the
-  real metadata plus `Preview unavailable`; native iTerm2 workspace pixels are
-  deferred to separate renderer/protocol work. Transcript thumbnails keep their
-  existing per-surface capability behavior.
+  cache or read service. The workspace Viewer paints real pixels on Kitty and
+  on Direct SIXEL once the terminal's own live DA1, cell-size and background
+  facts admit it. iTerm2 remains outside the Viewer/SVG pixel scope: the
+  AltScreen deliberately disables its image capability and its cursor-up
+  framing is outside the fork's ANSI width layer, so the iTerm2 workspace shows
+  the real metadata plus `Preview unavailable`; native iTerm2 workspace pixels
+  remain deferred to separate renderer/protocol work. Transcript thumbnails
+  keep their existing per-surface capability behavior.
 
 ## 11. Optional seat tenant: PARK / REFUSE
 A private Client-local caller may project ONE optional tenant into the editor
