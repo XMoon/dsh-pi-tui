@@ -113,6 +113,7 @@ test('the PiTui presenter forwards every member to the app receiver and withdraw
       assert.equal(this, app, 'the presenter must call the app as receiver')
       calls.push(`attention:${count}`)
     },
+    presentedModalKindForStatus: () => undefined,
   }
   const presenter = pituiSurfaceInteractionPresenter(app)
   const outcome = await presenter.showApprovalPrompt({ toolName: 'bash', reason: 'why' }, true)

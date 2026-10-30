@@ -641,6 +641,12 @@ function mountQuestionOwner(options: {
   readonly currentSessionId?: () => string | undefined
   /** The ADMISSION authority (defaults to "the session the surface shows"). */
   readonly isAdmissibleSession?: (sessionId: string) => boolean
+  /**
+   * Model the REAL TSP single-seat FIFO in the fake presenter: one active
+   * modal, later arrivals queue behind it, a settle promotes the queue before
+   * resolving (the same order the real seat keeps).
+   */
+  readonly fifoSeat?: boolean
 } = {}): {
   readonly activity: DisplayActivityFacts[]
   readonly presenterCount: () => number
@@ -699,16 +705,60 @@ function mountQuestionOwner(options: {
     onAttentionChanged: () => {},
     publishActivity: facts => { published.push(facts) },
   })
-  /** Resolves when the presenter actually received a Question form. */
-  let askEntered: (() => void) | undefined
+  /** Resolves when the presenter actually received a Question form (level-
+   *  triggered: an ask that already entered resolves immediately). */
+  let askEntered = false
+  let askWaiter: (() => void) | undefined
+  /** The presenter's ACTIVE-slot kind (PR-B F4: the presented authority). */
+  let presentedKind: 'approval' | 'question' | undefined
+  /** The FIFO seat's queued admissions (each runs when the seat frees). */
+  const seatQueue: Array<() => void> = []
   const presenter: SurfaceInteractionPresenter = {
-    showApprovalPrompt: () => Promise.resolve('cancelled' as never),
+    showApprovalPrompt: (request: never, _agentInputWait: boolean) => {
+      const signal = (request as { signal?: AbortSignal } | undefined)?.signal
+      const take = (resolve: (outcome: import('../../src/app/surface/interaction-presenter.ts').ApprovalOutcome) => void): void => {
+        presentedKind = 'approval'
+        // The promoted approval OWNS the seat until its own lifetime ends (the
+        // real seat presents it; nothing settles it implicitly). An already-
+        // ended lifetime settles immediately (an abort that fired while the
+        // request was still queued).
+        if (signal?.aborted === true) { resolve('cancelled'); return }
+        signal?.addEventListener('abort', () => { resolve('cancelled') }, { once: true })
+      }
+      if (options.fifoSeat === true && presentedKind !== undefined) {
+        // QUEUED behind the active modal (the real seat's fifo): not presented.
+        return new Promise<import('../../src/app/surface/interaction-presenter.ts').ApprovalOutcome>(resolve => {
+          seatQueue.push(() => take(resolve))
+        }).finally(() => { presentedKind = undefined })
+      }
+      return new Promise<import('../../src/app/surface/interaction-presenter.ts').ApprovalOutcome>(resolve => {
+        take(resolve)
+      }).finally(() => { presentedKind = undefined })
+    },
+    presentedModalKind: () => presentedKind,
     // A mounted Question form stays mounted until its lifetime aborts (a real
     // form waits for the user and rejects on abort — the RFL-002 coexistence
-    // case needs the held-open form, and the process needs every flow settleable).
+    // case needs the held-open form, and the process needs every flow
+    // settleable). A Question queued behind an active modal models the fifo.
     askQuestions: (_questions, signal) => new Promise((_resolve, reject) => {
-      askEntered?.()
-      signal?.addEventListener('abort', () => reject(new Error('question flow cancelled')), { once: true })
+      const take = (): void => {
+        presentedKind = 'question'
+        askEntered = true
+        askWaiter?.()
+        const end = (): void => {
+          // The settle PROMOTES the queue before the rejection propagates.
+          presentedKind = undefined
+          seatQueue.shift()?.()
+          reject(new Error('question flow cancelled'))
+        }
+        if (signal?.aborted === true) { end(); return }
+        signal?.addEventListener('abort', end, { once: true })
+      }
+      if (options.fifoSeat === true && presentedKind !== undefined) {
+        seatQueue.push(take)
+        return
+      }
+      take()
     }),
     setSettledQuestionAnswersLookup: () => {},
     notify: () => {},
@@ -747,7 +797,10 @@ function mountQuestionOwner(options: {
         },
       }
     },
-    whenAskEntered: () => new Promise<void>(resolve => { askEntered = resolve }),
+    whenAskEntered: () => {
+      if (askEntered) return Promise.resolve()
+      return new Promise<void>(resolve => { askWaiter = resolve })
+    },
     /** Deliver ONE live question request through the REAL registered provider. */
     deliverQuestion: (request: Record<string, unknown>) => {
       assert.ok(questionProvider !== undefined, 'the controller registered its live provider')
@@ -953,11 +1006,10 @@ test('PR-B RFL-001: a replaced session live flow keeps alive but never presents'
       timed: false,
     })
     await new Promise(resolve => setTimeout(resolve, 20))
-    // The flow is STILL ALIVE (it awaits its Host signal)…
+    // The flow is STILL ALIVE (it awaits its Host signal) but the presenter's
+    // ACTIVE slot never took it — the current subject is not waiting-question.
     assert.equal(owner.activity.some(facts => facts.questionOpen === true), false,
       'an inadmissible live flow never publishes the presented fact')
-    assert.equal(owner.controller.hasPresentedQuestion(), false,
-      '…and the narrow read agrees: the current subject is not waiting-question')
     // Cleanup: the Host ends the request; the flow settles through the real path.
     hostLifetime.abort()
     await flow.catch(() => {})
@@ -968,8 +1020,8 @@ test('PR-B RFL-001: a replaced session live flow keeps alive but never presents'
 
 // ── RFL-002: a Question that outlives an approval keeps its fact ────────────
 
-test('PR-B RFL-002: an approval beside a presented Question keeps BOTH facts and restores on settle', async () => {
-  const owner = mountQuestionOwner()
+test('PR-B RFL-002/F4: the seat is the phase authority — a queued approval keeps the Question phase, a promoted one takes it', async () => {
+  const owner = mountQuestionOwner({ fifoSeat: true })
   try {
     // 1. A continued Question is mounted VISIBLE (the real reopen path).
     owner.setSnapshot({
@@ -983,22 +1035,111 @@ test('PR-B RFL-002: an approval beside a presented Question keeps BOTH facts and
     owner.publish()
     assert.equal(owner.activity.at(-1)?.questionOpen, true, 'the Question is presented')
 
-    // 2. The approval path publishes BOTH facts: the approval takes the phase
-    //    (the shared precedence) but the Question fact is PRESERVED, not zeroed.
-    //    Drive the real port listener the runtime registered.
-    const approval = { toolName: 'bash', reason: 'probe', sessionId: SESSION_ID }
-    const settled = owner.deliverApproval(approval)
-    const during = owner.activity.find(facts => facts.approvalOpen === true)
-    assert.ok(during !== undefined, 'the approval registered its fact')
-    assert.equal(during.questionOpen, true,
-      'a still-presented Question keeps its fact beside the approval (RFL-002)')
+    // 2. An Approval arrives while the Question HOLDS the single seat. The
+    //    presenter queues it (FIFO); the phase must STAY with the Question — a
+    //    merely-queued approval never claims waiting-approval (F4).
+    const approvalLifetime = new AbortController()
+    const settled = owner.deliverApproval({
+      toolName: 'bash', reason: 'probe', sessionId: SESSION_ID, signal: approvalLifetime.signal,
+    })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const during = owner.activity.at(-1)
+    assert.equal(during?.questionOpen, true, 'the Question keeps the phase while the approval queues')
+    assert.equal(during?.approvalOpen, false, 'a FIFO-queued approval is NOT waiting-approval')
 
-    // 3. The approval settles: the Question fact is RESTORED in the same step.
+    // 3. The Question parks (the real Esc path): the seat frees and the QUEUED
+    //    approval is promoted — the phase moves to waiting-approval (the seat
+    //    truth, published through the controller's park notification).
+    owner.controller.attentionRows() // (no-op read; the park path below is real)
+    const parked = owner.controller.reopen(SESSION_ID, 'c1')
+    void parked
+    // Park the mounted continued form through the controller's own path.
+    owner.setSnapshot({
+      sessionId: SESSION_ID,
+      active: [],
+      settled: [{ callId: 'c1', answers: [] }],
+      queuedReplyCallIds: new Set(),
+    } as never)
+    owner.controller.reconcile()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(owner.activity.some(facts => facts.approvalOpen === true), true,
+      'the promoted approval owns the phase after the Question parks')
+
+    // 4. The approval settles (its own lifetime ends) and the phase returns.
+    approvalLifetime.abort()
     await settled
-    const after = owner.activity.at(-1)
-    assert.equal(after?.approvalOpen, false, 'the approval fact cleared')
-    assert.equal(after?.questionOpen, true,
-      'the Question that outlived the approval is restored immediately')
+    const after = owner.activity.at(-1)!
+    assert.equal(after.approvalOpen, false, 'the settled approval releases the phase')
+  } finally {
+    owner.dispose()
+  }
+})
+
+test('PR-B EXT-F4: a Question holding the seat keeps its phase while an Approval queues; a fresh seat admits the Approval directly', async () => {
+  // The fake seat models the REAL TSP single-seat FIFO (one active modal, a
+  // settle promotes the queue before resolving); everything else is the
+  // production controller -> interaction runtime -> presenter chain.
+  const owner = mountQuestionOwner({ fifoSeat: true })
+  try {
+    owner.setSnapshot({
+      sessionId: SESSION_ID,
+      active: [],
+      settled: [],
+      queuedReplyCallIds: new Set(),
+    } as never)
+    // 1. The Question TAKES the seat through the REAL live provider path.
+    const questionLifetime = new AbortController()
+    const question = owner.deliverQuestion({
+      sessionId: SESSION_ID,
+      callId: 'c1',
+      questions: [{ id: 'q1', question: 'q', options: [] }],
+      signal: questionLifetime.signal,
+      timed: false,
+    })
+    question.catch(() => {})
+    await owner.whenAskEntered()
+    await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(owner.activity.some(facts => facts.questionOpen === true), true,
+      'the seat-holder Question publishes waiting-question')
+
+    // 2. An Approval arrives while the Question holds the seat: it QUEUES and
+    //    must NOT claim waiting-approval. (The promotion itself is witnessed by
+    //    the RFL-002 park path: the settle promotes before the promise chain
+    //    resumes, so the republish reads the new seat.)
+    const approvalLifetime = new AbortController()
+    const settled = owner.deliverApproval({
+      toolName: 'bash', reason: 'probe', sessionId: SESSION_ID, signal: approvalLifetime.signal,
+    })
+    settled.catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    const during = owner.activity.at(-1)
+    assert.equal(during?.questionOpen, true, 'the Question keeps the phase while the approval queues')
+    assert.equal(during?.approvalOpen, false, 'a FIFO-queued approval is NOT waiting-approval')
+
+    // 3. Teardown through the real lifetimes (both flows settle).
+    approvalLifetime.abort()
+    questionLifetime.abort()
+    await Promise.allSettled([settled, question])
+  } finally {
+    owner.dispose()
+  }
+})
+
+test('PR-B EXT-F4b: with the seat free an Approval admits directly and publishes waiting-approval', async () => {
+  const owner = mountQuestionOwner({ fifoSeat: true })
+  try {
+    const approvalLifetime = new AbortController()
+    const settled = owner.deliverApproval({
+      toolName: 'bash', reason: 'probe', sessionId: SESSION_ID, signal: approvalLifetime.signal,
+    })
+    settled.catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 10))
+    assert.equal(owner.activity.some(facts => facts.approvalOpen === true), true,
+      'the directly-admitted approval publishes waiting-approval')
+    approvalLifetime.abort()
+    await settled
+    const after = owner.activity.at(-1)!
+    assert.equal(after.approvalOpen, false, 'the settled approval releases the phase')
   } finally {
     owner.dispose()
   }
@@ -1066,18 +1207,14 @@ test('PR-B EXT-F1: a blocked timed claim never paints waiting-question until the
     })
     await claim.entered
     // While the claim is in flight the flow is ALIVE but NOT presented.
-    assert.equal(owner.controller.hasPresentedQuestion(), false,
-      'a registered-but-claiming flow is not a presented Question')
     assert.equal(owner.activity.some(facts => facts.questionOpen === true), false,
-      '…and it never published the waiting-question fact')
+      'a registered-but-claiming flow never publishes the waiting-question fact')
 
     // Release the claim: the flow reaches the presenter and the phase arrives.
     claim.release()
     await owner.whenAskEntered()
-    assert.equal(owner.controller.hasPresentedQuestion(), true,
-      'the form reaching the presenter presents the Question')
     assert.equal(owner.activity.some(facts => facts.questionOpen === true), true,
-      '…and the waiting-question fact is published in the same step')
+      'the form reaching the presenter publishes waiting-question in the same step')
 
     hostLifetime.abort()
     await flow.catch(() => {})
