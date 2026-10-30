@@ -747,6 +747,17 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       deps.notify('model selection is unavailable in this session (the /model command is not registered)', 'error')
       return
     }
+    // The UI entry obeys the SAME capability admission the typed `/model`
+    // route already enforces (tsp-capability): a mounted renderer whose pane
+    // cannot present the native picker must not run the handler, because its
+    // PiTui fallback presenter has no `TuiApp` on the TSP branch. The mounted
+    // presenter getter is the existing availability fact — no new state. On
+    // the PiTui branch the typed presenter IS the fallback, so the entry
+    // simply runs (it has no composer consumer there anyway).
+    if (deps.app() === undefined && deps.modelPresentation?.() === undefined) {
+      deps.notify("This command's UI is not available in TSP yet", 'error')
+      return
+    }
     // The registered handler's own runOwned/diag/sessionId wiring owns this
     // promise (see createModelCommands); the surface adds no second owner. A
     // resolved ERROR result is surfaced through the existing notice path (the

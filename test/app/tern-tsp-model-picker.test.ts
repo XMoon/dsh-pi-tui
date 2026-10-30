@@ -1462,7 +1462,7 @@ test('official Direct Agent: native /model makes exactly one durable Session sel
  * here the CHAIN (same owner, same real directory, truthful absence, no
  * second write) is the assertion.
  */
-test('PR-C production chain: composer Model and Effort clicks reach the real command owner and writer', async (t) => {
+test('composer Model and Effort clicks reach the real command owner and writer', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     modelPicker: true,
@@ -2698,7 +2698,7 @@ test('official Host same-name /model keeps the original Host route even with nat
   }
 })
 
-test('PR-C: a Host-owned /model registration leaves the composer UI opener unavailable', async (t) => {
+test('a Host-owned /model registration leaves the composer UI opener unavailable', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     modelPicker: true,
@@ -2731,6 +2731,41 @@ test('PR-C: a Host-owned /model registration leaves the composer UI opener unava
     assert.ok(fixture.pane.output.text().length >= before.length, 'no catalog read replaced the dock')
     // The Host sink is untouched too: the UI entry never dispatched anything.
     assert.equal(fixture.modelCalls(), 0)
+  } finally {
+    await fixture.settle() // window: bounded teardown settle for the real Direct composition fixture
+  }
+})
+
+test('the composer UI entry obeys the native picker capability admission', async (t) => {
+  // The external review's gap: a pane that CAN draw the action row (`el` +
+  // `styles`) but CANNOT present the native picker (no `picker`/`row`/
+  // `overlay` kinds) used to run the handler anyway — whose PiTui fallback
+  // presenter has no `TuiApp` on the TSP branch. The UI entry must refuse
+  // through the SAME capability fact the typed `/model` route uses.
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    composerActions: true,
+    // NO modelPicker: the pane advertises el+styles but not the picker kinds.
+  })
+  try {
+    await waitFor('booted', () => fixture.pane.output.text().includes('dock.composer'))
+    // The row paints (el+styles negotiated)...
+    const nodes = (await import('../support/tsp-picker-wire.ts')).wireNodes(fixture.pane)
+    const modelButton = nodes.find(node => node.k === 'el' && /\.composer-model-s\d+$/.test(String(node.id)))
+    assert.ok(modelButton, 'the composer row paints on the el+styles pane')
+    // ...but the renderer's modelPresentation is undefined (picker kinds
+    // missing), so the click must be refused with the SAME notice the typed
+    // route shows — never the PiTui fallback, never a silent no-op.
+    fixture.pane.event({
+      ev: 'action',
+      sf: fixture.pane.frames().at(-1)!.sf,
+      id: modelButton!.id,
+      act: 'click',
+    })
+    await waitFor('the capability refusal', () =>
+      fixture.pane.output.text().includes("This command's UI is not available in TSP yet"))
+    assert.equal(picker(fixture.pane), undefined, 'no picker opened (none can be presented)')
+    assert.equal(fixture.modelCalls(), 0, 'and no model request was dispatched')
   } finally {
     await fixture.settle() // window: bounded teardown settle for the real Direct composition fixture
   }
