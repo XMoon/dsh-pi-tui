@@ -409,6 +409,11 @@ test('a bottom-clipped block is a NEW encode of its own source, never a sliced D
   assert.notEqual(second, undefined)
   const [, , secondBlue] = pixelAt(decodeSixel(second!), 4, 0)
   assert.ok(secondBlue > 200, 'cropping one cell row starts at the blue band')
+  // The owner records the committed top-crop offset on the occurrence so the
+  // consumer hit map can start at the real visible row.
+  paint(harness, image, 40, { top: 1, rows: 1 })
+  assert.equal(image.paintedBodyAt?.(40)?.cropTopRows, 1,
+    'framePainted stores the committed top-crop offset on the occurrence')
 
   // Out-of-contract bounds are refused instead of clamped silently.
   assert.equal(harness.graphics.screen.crop(full, 2, 1), undefined)
