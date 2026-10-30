@@ -110,6 +110,11 @@ function traceRow(root: string, overrides: Record<string, unknown> = {}): Record
   }
 }
 
+/** The per-case teardown row: without a PASS here the window teardown is unproven. */
+function cleanupRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return { run_id: 'I8-3-20261030T000000Z', case_id: 'WT01', phase: 'cleanup', result: 'PASS', ...overrides }
+}
+
 test('a consistent PASS row validates', (t) => {
   const { root } = workspace(t)
   const verdict = validateWtE3Row(soundRow(root), { root })
@@ -290,7 +295,10 @@ test('a case whose trace failed is not counted even when its frame is sound', (t
 test('a sound frame plus sound trace counts exactly one verified CASE', (t) => {
   const { root } = workspace(t)
   const path = join(root, 'manifest.jsonl')
-  writeFileSync(path, `${JSON.stringify(soundRow(root))}\n${JSON.stringify(traceRow(root))}\n`)
+  writeFileSync(
+    path,
+    `${JSON.stringify(soundRow(root))}\n${JSON.stringify(traceRow(root))}\n${JSON.stringify(cleanupRow())}\n`,
+  )
   const verdict = validateWtE3Manifest(path, { root })
   assert.equal(verdict.passes, 1)
   assert.deepEqual(verdict.verifiedCases, ['WT01'])
@@ -302,12 +310,50 @@ test('an unclean-tree run is refused when the caller requires a frozen tree', (t
   const path = join(root, 'manifest.jsonl')
   writeFileSync(
     path,
-    `${JSON.stringify(soundRow(root, { git_status_clean: false }))}\n${JSON.stringify(traceRow(root, { git_status_clean: false }))}\n`,
+    `${JSON.stringify(soundRow(root, { git_status_clean: false }))}\n${JSON.stringify(traceRow(root, { git_status_clean: false }))}\n${JSON.stringify(cleanupRow())}\n`,
   )
   assert.equal(validateWtE3Manifest(path, { root }).passes, 1, 'without the flag the case is still a sound record')
   const frozen = validateWtE3Manifest(path, { root, requireCleanTree: true })
   assert.equal(frozen.passes, 0)
   assert.ok(frozen.caseFailures.some((failure: string) => failure.includes('unclean tree')), frozen.caseFailures.join('; '))
+})
+
+test('a case whose cleanup FAILED is not counted as verified (RFL-009)', (t) => {
+  const { root } = workspace(t)
+  const path = join(root, 'manifest.jsonl')
+  writeFileSync(
+    path,
+    `${JSON.stringify(soundRow(root))}\n${JSON.stringify(traceRow(root))}\n${JSON.stringify(
+      cleanupRow({ result: 'FAIL', reason: 'the case window did not go away' }),
+    )}\n`,
+  )
+  const verdict = validateWtE3Manifest(path, { root })
+  assert.equal(verdict.passes, 0, 'a leaked window must block the case')
+  assert.deepEqual(verdict.verifiedCases, [])
+  assert.ok(verdict.caseFailures.some((failure: string) => failure.includes('cleanup failed')), verdict.caseFailures.join('; '))
+})
+
+test('a case with NO cleanup row is not counted as verified (RFL-009)', (t) => {
+  const { root } = workspace(t)
+  const path = join(root, 'manifest.jsonl')
+  writeFileSync(path, `${JSON.stringify(soundRow(root))}\n${JSON.stringify(traceRow(root))}\n`)
+  const verdict = validateWtE3Manifest(path, { root })
+  assert.equal(verdict.passes, 0)
+  assert.ok(verdict.caseFailures.some((failure: string) => failure.includes('no cleanup row')), verdict.caseFailures.join('; '))
+})
+
+test('a trace row recorded as GUI_BLOCKED cannot close a case (RFL-010)', (t) => {
+  const { root } = workspace(t)
+  const path = join(root, 'manifest.jsonl')
+  // The artifact is sound on purpose: the row's own status is the only signal that
+  // the run was blocked, and it must be honoured.
+  writeFileSync(
+    path,
+    `${JSON.stringify(soundRow(root))}\n${JSON.stringify(traceRow(root, { result: 'GUI_BLOCKED' }))}\n${JSON.stringify(cleanupRow())}\n`,
+  )
+  const verdict = validateWtE3Manifest(path, { root })
+  assert.equal(verdict.passes, 0)
+  assert.ok(verdict.caseFailures.some((failure: string) => failure.includes('trace row failed')), verdict.caseFailures.join('; '))
 })
 
 test('a cleanup row is not mistaken for a frame of the case', (t) => {

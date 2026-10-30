@@ -159,6 +159,9 @@ export function validateWtE3Row(row: WtE3Row, options: { readonly root: string }
   // The ONE per-case trace row: the only row that owns the trace digest, and the
   // only one that may assert DA1 / tty / mux / DCS facts.
   if (row.phase === 'trace') {
+    // The row's own status is a fact: a trace recorded as GUI_BLOCKED/FAIL cannot
+    // close a case just because its file is well formed.
+    if (row.result !== 'PASS') failures.push(`trace row is not PASS (${String(row.result)})`)
     const eventsName = row.events_relative_path
     if (typeof eventsName !== 'string' || eventsName === '') {
       failures.push('a trace row must name its events file')
@@ -300,6 +303,18 @@ export function validateWtE3Manifest(
     }
     if (trace.verdict.ok !== true) {
       caseFailures.push(`${caseId}: trace row failed: ${trace.verdict.failures.join('; ')}`)
+      continue
+    }
+    // RFL-009: a case whose window was never confirmed closed has leaked a
+    // 900-second subject; its evidence cannot be counted, and the leak must not
+    // be silently dropped from the gate.
+    const cleanup = entries.find((entry) => entry.row.phase === 'cleanup')
+    if (cleanup === undefined) {
+      caseFailures.push(`${caseId}: no cleanup row (the window teardown is unverified)`)
+      continue
+    }
+    if (cleanup.verdict.ok !== true || cleanup.row.result !== 'PASS') {
+      caseFailures.push(`${caseId}: cleanup failed: ${cleanup.verdict.failures.join('; ') || String(cleanup.row.reason ?? cleanup.row.result)}`)
       continue
     }
     // Dirty-tree evidence is not a frozen verification of this deliverable.
