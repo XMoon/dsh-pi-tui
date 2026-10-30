@@ -29,7 +29,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/graphics/kitty-terminal
  */
 
-import type { ProgramStatus, Terminal, TerminalProgressState } from '@xmoon76/pi-tui'
+import type { ProgramStatus, Terminal } from '@xmoon76/pi-tui'
 import type {
   KittyGlobalImageDeletePlan,
   KittyGraphicsCore,
@@ -338,8 +338,24 @@ export class KittyTerminalFacade implements Terminal {
     this.inner.setProgramStatus(status)
   }
 
-  setProgressState(state: TerminalProgressState): void {
-    this.inner.setProgressState?.(state)
+  /**
+   * Optional terminal capabilities are delegated by RUNTIME presence, not
+   * re-declared: a facade that always exposes `setProgressState` makes
+   * `TuiApp.writeTerminalProgress` take the stateful branch for a terminal
+   * that never implemented it, and the write silently disappears. Each access
+   * binds the live underlying method to the underlying terminal, so the
+   * implementation's own receiver is preserved. The current consumers probe
+   * existence and call immediately; no function identity is cached or relied
+   * on (a new binding per access is intended).
+   */
+  get setProgressState(): Terminal['setProgressState'] {
+    const method = this.inner.setProgressState
+    return method === undefined ? undefined : method.bind(this.inner)
+  }
+
+  get onSixelSupport(): Terminal['onSixelSupport'] {
+    const method = this.inner.onSixelSupport
+    return method === undefined ? undefined : method.bind(this.inner)
   }
 
   /** Release the facade after the physical terminal is gone. Idempotent. */

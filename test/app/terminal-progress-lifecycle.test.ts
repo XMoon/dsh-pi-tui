@@ -21,8 +21,9 @@ import { afterEach, test } from 'node:test'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { ProcessTerminal, type TerminalProgressState } from '@xmoon76/pi-tui'
+import { ProcessTerminal, resetCapabilitiesCache, setCapabilityOverrides, type TerminalProgressState } from '@xmoon76/pi-tui'
 import { TuiApp } from '../../src/tui-app.ts'
+import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
 import type { RunPhase } from '../../src/domain/status/types.ts'
 import type { TerminalProgressMode } from '../../src/domain/terminal-progress/settings.ts'
 import type { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
@@ -95,6 +96,53 @@ function mountApp(tern = false): {
   app.start()
   startedApps.add(app)
   return { vt, app, progress, states }
+}
+
+/** The ambient terminal-identity keys the fork's capability detection reads. */
+const KITTY_ENV_KEYS = [
+  'TERM',
+  'TERM_PROGRAM',
+  'KITTY_WINDOW_ID',
+  'GHOSTTY_RESOURCES_DIR',
+  'WEZTERM_PANE',
+  'WARP_SESSION_ID',
+  'WARP_TERMINAL_SESSION_UUID',
+  'TMUX',
+  'ZELLIJ',
+  'STY',
+  'PI_IMAGE_PROTOCOL',
+  'PI_TUI_TMUX_KITTY_IMAGES',
+] as const
+
+/**
+ * Apply EXACTLY one terminal-capability environment through the fork's real
+ * detection path and return its restorer. The terminal-identity keys are
+ * cleared first, so the developer's enclosing terminal (a Tern pane inside
+ * Kitty, a tmux session, ...) can never decide which graphics facade — if any —
+ * the production composition builds.
+ */
+function applyTerminalCapabilityEnvironment(environment: Record<string, string>): () => void {
+  const saved = new Map<string, string | undefined>()
+  for (const key of KITTY_ENV_KEYS) {
+    saved.set(key, process.env[key])
+    delete process.env[key]
+  }
+  for (const [key, value] of Object.entries(environment)) process.env[key] = value
+  setCapabilityOverrides({})
+  resetCapabilitiesCache()
+  return () => {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    setCapabilityOverrides({})
+    resetCapabilitiesCache()
+  }
+}
+
+/** Force the production composition through the native Kitty admission. */
+function applyKittyGraphicsAdmission(): () => void {
+  return applyTerminalCapabilityEnvironment({ PI_IMAGE_PROTOCOL: 'kitty' })
 }
 
 test('setTerminalProgress dedupes equal writes (no per-status churn)', () => {
@@ -1304,10 +1352,13 @@ test('a Tern terminal without the stateful projection fails soft to the working 
   // §9.3): the paused target must degrade to the boolean working/clear pair and
   // never to a raw escape write.
   Object.defineProperty(vt, 'setProgressState', { value: undefined, configurable: true })
+  const restore = applyTerminalCapabilityEnvironment({})
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { ternTerminal: true })
   app.start()
   startedApps.add(app)
   try {
+    assert.ok(!((app as unknown as { terminal: unknown }).terminal instanceof KittyTerminalFacade),
+      'without a Kitty admission the app keeps the plain terminal, so this is the no-facade path')
     assert.deepEqual(progress, [false], 'the mount asserts idle through the boolean contract')
     app.setTerminalProgress(true)
     assert.deepEqual(progress, [false, true])
@@ -1323,6 +1374,74 @@ test('a Tern terminal without the stateful projection fails soft to the working 
       'the settled wait is still working and the pane never left the active state')
   } finally {
     app.dispose()
+    restore()
+  }
+})
+
+test('a Kitty facade never invents the stateful projection its real terminal lacks', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const progress: boolean[] = []
+  vt.setProgress = (active: boolean) => { progress.push(active) }
+  // The REAL terminal has no richer projection. The production composition
+  // still wraps it in the Kitty graphics facade, and that facade must not turn
+  // the absent member into a callable one: `writeTerminalProgress` checks the
+  // member's existence, so an invented function would drop every write.
+  Object.defineProperty(vt, 'setProgressState', { value: undefined, configurable: true })
+  const restore = applyKittyGraphicsAdmission()
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { ternTerminal: true })
+  startedApps.add(app)
+  try {
+    assert.ok((app as unknown as { terminal: unknown }).terminal instanceof KittyTerminalFacade,
+      'the production composition really routes this Tern app through the Kitty facade')
+    app.start()
+    assert.deepEqual(progress, [false], 'the mount asserts idle through the boolean contract')
+    app.setTerminalProgress(true)
+    assert.deepEqual(progress, [false, true])
+
+    const controller = new AbortController()
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, true)
+    assert.deepEqual(progress, [false, true, true],
+      'a paused target re-asserts the working indicator, never a clear or a raw sequence')
+    controller.abort()
+    await decision
+    await drain()
+    assert.deepEqual(progress, [false, true, true, true],
+      'the settled wait is still working and the pane never left the active state')
+  } finally {
+    app.dispose()
+    restore()
+  }
+})
+
+test('a Kitty facade forwards a real stateful projection with the terminal receiver', async () => {
+  const vt = new VirtualTerminal(80, 24)
+  const states: TerminalProgressState[] = []
+  const receivers: unknown[] = []
+  vt.setProgressState = function (state: TerminalProgressState): void {
+    receivers.push(this)
+    states.push(state)
+  }
+  const restore = applyKittyGraphicsAdmission()
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { ternTerminal: true })
+  startedApps.add(app)
+  try {
+    assert.ok((app as unknown as { terminal: unknown }).terminal instanceof KittyTerminalFacade,
+      'the production composition really routes this Tern app through the Kitty facade')
+    app.start()
+    app.setTerminalProgress(true)
+    const controller = new AbortController()
+    const decision = app.showApprovalPrompt({ toolName: 'bash', reason: 'probe', signal: controller.signal }, true)
+    controller.abort()
+    await decision
+    await drain()
+    assert.deepEqual(states, ['clear', 'indeterminate', 'paused', 'indeterminate'],
+      'the real stateful projection reaches the terminal through the facade')
+    assert.equal(receivers.length, states.length)
+    assert.ok(receivers.every(receiver => receiver === vt),
+      'every physical write keeps the real terminal as its receiver, never the facade')
+  } finally {
+    app.dispose()
+    restore()
   }
 })
 
