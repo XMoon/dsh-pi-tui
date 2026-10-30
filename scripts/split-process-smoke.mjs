@@ -25,7 +25,7 @@
  *   T22/T23/T24 a real Client PID proves official session/list, private PiFile RPC
  *                and the private terminal-progress snapshot over the authenticated link
  *   T25 repeated probes register no duplicate descriptor; Client exit keeps the same Host
- *   T26 missing runtime artifact / required official row / Cookie fail closed, no Ready
+ *   T26 Host Runtime row/artifact absence / required official row / Cookie fail closed, no Ready
  *
  * Usage: node scripts/split-process-smoke.mjs [path-to-candidate.tgz]
  *        pnpm smoke:split-process -- [path-to-candidate.tgz]
@@ -992,37 +992,124 @@ async function main() {
     trace('mutation-connection-disabled', { exit: connectionMutationExit.code, readyEmitted: false, error: String(connectionMutationFailure.error).slice(0, 160) })
 
     // T26a: the built-in Host Runtime ROW disabled after the overlay must fail
-    // the strict readiness audit with no Ready and no Host identity. A file
-    // rename is not a stable negative on this pnpm hardlinked profile layout
-    // (the same installed artifact can still resolve from the store mirror), so
-    // the row-level absence is the faithful "missing built-in Host Runtime"
-    // control the readiness audit actually owns.
+    // the strict readiness audit with no Ready and no Host identity. This is the
+    // ROW-absence control: the module artifact itself is still installed and
+    // reachable, so it is NOT the artifact-absence claim (issue #474).
     const runRoot = join(dshHome, 'run', 'dsh-pi-tui')
     const hasPublishedIdentity = () => existsSync(runRoot)
       && readdirSync(runRoot, { recursive: true }).some(name => String(name).endsWith('instance.json'))
     const hostRuntimeMutationPatch = join(workDir, 't26-host-runtime-disabled.patch.yml')
     writeFileSync(hostRuntimeMutationPatch, '- id: split-host-pi-tui-runtime\n  disabled: true\n')
-    let runtimeMissingFailure
-    let runtimeMissingExit
+    let runtimeRowDisabledFailure
+    let runtimeRowDisabledExit
     try {
-      const missingRuntime = new EntryProcess('host', entries.host, {
+      const rowDisabled = new EntryProcess('host', entries.host, {
         ...base,
         env: { ...base.env, SPLIT_PROCESS_EXTRA_PATCH: hostRuntimeMutationPatch },
       })
-      runtimeMissingFailure = await missingRuntime.waitFor(record => record.m4a0 === 'failure', 'T26 missing Host Runtime row', 120_000)
-      runtimeMissingExit = await missingRuntime.waitForExit(60_000)
-      assert(runtimeMissingExit.code === 1, `T26 missing Runtime row exit was ${JSON.stringify(runtimeMissingExit)}`)
-      assert(!missingRuntime.records.some(record => record.m4a0 === 'ready'), 'T26 missing Runtime row emitted ready')
-      assert(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(String(runtimeMissingFailure.error)),
-        `T26 missing Runtime row: unexpected error ${String(runtimeMissingFailure.error)}`)
-      assert(!hasPublishedIdentity(), 'T26 missing Runtime row published a Host identity')
+      runtimeRowDisabledFailure = await rowDisabled.waitFor(record => record.m4a0 === 'failure', 'T26 Host Runtime row disabled', 120_000)
+      runtimeRowDisabledExit = await rowDisabled.waitForExit(60_000)
+      assert(runtimeRowDisabledExit.code === 1, `T26 Host Runtime row disabled exit was ${JSON.stringify(runtimeRowDisabledExit)}`)
+      assert(!rowDisabled.records.some(record => record.m4a0 === 'ready'), 'T26 Host Runtime row disabled emitted ready')
+      assert(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(String(runtimeRowDisabledFailure.error)),
+        `T26 Host Runtime row disabled: unexpected error ${String(runtimeRowDisabledFailure.error)}`)
+      assert(!hasPublishedIdentity(), 'T26 Host Runtime row disabled published a Host identity')
     } finally {
       rmSync(hostRuntimeMutationPatch, { force: true })
     }
-    trace('t26-runtime-missing', {
-      exit: runtimeMissingExit?.code,
+    trace('t26-runtime-row-disabled', {
+      exit: runtimeRowDisabledExit?.code,
       readyEmitted: false,
-      error: String(runtimeMissingFailure?.error ?? '').slice(0, 160),
+      error: String(runtimeRowDisabledFailure?.error ?? '').slice(0, 160),
+    })
+
+    // T26a-artifact-absent: the REAL module-absence negative (issue #474). The
+    // Loader row stays inserted and enabled; only the installed module file is
+    // gone. This is NOT the row-disabled control above.
+    //
+    // The historical "renamed artifact still Ready" observation (PR #473) was
+    // NOT a pnpm hardlink/store mirror and NOT a second installed copy. DSH's
+    // HMR invalidates the profile's package.json at startup; its package-scope
+    // hook then skips the profile directory (trailing-slash `dirname`), so
+    // Node's package SELF-REFERENCE climbed to an enclosing `package.json`
+    // (`name: @xmoon76/dsh-pi-tui`, `exports`) and resolved a second build of
+    // the artifact. DSH app-boot's startup-audit retry (`importFailure` ->
+    // `entry.parent.tree.import`) is what then made the row active. The Host
+    // code itself fails closed once the artifact is genuinely unreachable, so
+    // this control removes every remaining escape explicitly:
+    // - no ancestor may provide another INSTALLED package copy;
+    // - a non-matching `<DSH_HOME>/package.json` barrier shadows every enclosing
+    //   package scope above it for THIS negative only (removed in `finally`);
+    // - after the rename the profile-anchored resolver must really fail.
+    // The smoke work dir may live under the developer worktree (the Client peer
+    // set resolves from its `node_modules`, as the historical runs did); the
+    // barrier is what makes that layout equivalent for the Host artifact.
+    const hostRuntimeArtifact = join(profilePackage, 'dist', 'host-runtime.mjs')
+    const hostRuntimeAbsentPath = `${hostRuntimeArtifact}.artifact-absent`
+    const packageScopeBarrier = join(dshHome, 'package.json')
+    const barrierBody = '{"name":"dsh-split-process-t26-artifact-barrier","private":true}\n'
+    const profilesManifest = join(dirname(profileDir), 'package.json')
+    assert(!existsSync(profilesManifest)
+      || readJson(profilesManifest).name !== '@xmoon76/dsh-pi-tui',
+      `T26a artifact-absent: an enclosing profiles package manifest carries the candidate package name: ${profilesManifest}`)
+    const profileRequire = createRequire(join(profileDir, 'package.json'))
+    assert(profileRequire.resolve('@xmoon76/dsh-pi-tui/host-runtime') === realpathSync(hostRuntimeArtifact),
+      'T26a artifact-absent: the profile copy must be the normal resolvable Host Runtime artifact')
+    const reachableAncestorCopies = []
+    for (let directory = dirname(profileDir); ; directory = dirname(directory)) {
+      const candidate = join(directory, 'node_modules', '@xmoon76', 'dsh-pi-tui')
+      if (existsSync(candidate)) reachableAncestorCopies.push(candidate)
+      if (dirname(directory) === directory) break
+    }
+    const harnessCopy = join(harnessDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
+    if (existsSync(harnessCopy)) reachableAncestorCopies.push(harnessCopy)
+    assert(reachableAncestorCopies.length === 0,
+      `T26a artifact-absent: the isolated profile still has another installed package copy: ${reachableAncestorCopies.join(', ')}`)
+    let artifactAbsentFailure
+    let artifactAbsentExit
+    let artifactAbsentStderr = ''
+    const previousBarrier = existsSync(packageScopeBarrier) ? saveFile(packageScopeBarrier) : undefined
+    try {
+      writeFileSync(packageScopeBarrier, barrierBody)
+      renameSync(hostRuntimeArtifact, hostRuntimeAbsentPath)
+      // Auxiliary normal-resolution check (the profile-anchored CJS resolver).
+      // It cannot exercise the ESM package-scope retry by itself; the barrier
+      // plus the Host's own fail-closed verdict below are the real proof.
+      let resolutionError
+      try {
+        profileRequire.resolve('@xmoon76/dsh-pi-tui/host-runtime')
+      } catch (error) {
+        resolutionError = error
+      }
+      assert(resolutionError !== undefined
+        && /ERR_MODULE_NOT_FOUND|Cannot find module/u.test(`${resolutionError?.code ?? ''} ${resolutionError?.message ?? resolutionError}`),
+        'T26a artifact-absent: the renamed artifact must be genuinely unresolvable from the profile anchor')
+      const artifactAbsent = new EntryProcess('host', entries.host, base)
+      artifactAbsentFailure = await artifactAbsent.waitFor(record => record.m4a0 === 'failure', 'T26 Host Runtime artifact absent', 120_000)
+      artifactAbsentExit = await artifactAbsent.waitForExit(60_000)
+      artifactAbsentStderr = artifactAbsent.stderr
+      assert(artifactAbsentExit.code === 1, `T26 Host Runtime artifact absent exit was ${JSON.stringify(artifactAbsentExit)}`)
+      assert(!artifactAbsent.records.some(record => record.m4a0 === 'ready'), 'T26 Host Runtime artifact absent emitted ready')
+      assert(!artifactAbsent.records.some(record => record.services?.piTuiHostReady === true),
+        'T26 Host Runtime artifact absent published piTuiHostReady')
+      assert(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(String(artifactAbsentFailure.error)),
+        `T26 Host Runtime artifact absent: the strict owner audit did not reject the missing row: ${String(artifactAbsentFailure.error)}`)
+      assert(/split-host-pi-tui-runtime \(@xmoon76\/dsh-pi-tui\/host-runtime\): failed to import/u.test(artifactAbsentStderr)
+        && /ERR_MODULE_NOT_FOUND/u.test(artifactAbsentStderr),
+        `T26 Host Runtime artifact absent: the Loader did not report the real import failure; stderr=${artifactAbsentStderr.slice(-800)}`)
+      assert(!hasPublishedIdentity(), 'T26 Host Runtime artifact absent published a Host identity')
+    } finally {
+      if (existsSync(hostRuntimeAbsentPath)) renameSync(hostRuntimeAbsentPath, hostRuntimeArtifact)
+      if (previousBarrier === undefined) rmSync(packageScopeBarrier, { force: true })
+      else restoreFile(packageScopeBarrier, previousBarrier)
+    }
+    trace('t26-runtime-artifact-absent', {
+      exit: artifactAbsentExit?.code,
+      readyEmitted: false,
+      identityPublished: false,
+      error: String(artifactAbsentFailure?.error ?? '').slice(0, 160),
+      loaderImportFailed: true,
+      packageScopeBarrier: true,
     })
 
     // T26b: one required official Session-serving row disabled after the
@@ -1212,7 +1299,11 @@ async function main() {
     ]
     const clientOutcomes = await Promise.all(clients.map((client, index) => waitForOutcome(client, `T09 client ${String(index)}`)))
     const clientWinners = clients.filter(client => client.records.some(record => record.m4a0 === 'ready'))
-    assert(clientWinners.length === 1, `T09 expected one active Client, got ${String(clientWinners.length)}`)
+    assert(clientWinners.length === 1,
+      `T09 expected one active Client, got ${String(clientWinners.length)};`
+      + ` outcomes=${JSON.stringify(clientOutcomes)};`
+      + ` records=${JSON.stringify(clients.map(client => client.records.slice(-4)))};`
+      + ` stderr=${JSON.stringify(clients.map(client => client.stderr.slice(-1200)))}`)
     const c1 = clientWinners[0]
     const c1Ready = clientOutcomes[clients.indexOf(c1)]
     assert(c1Ready.m4a0 === 'ready', 'T09 winning Client did not become ready')
@@ -2540,7 +2631,7 @@ async function main() {
         sha256: candidateSha256,
         dshVersion: targetDshVersion,
         directHelp: 'pass',
-        t01t26: 'pass except T26a artifact-missing NOT_VERIFIED (row-absence control passes)',
+        t01t26: 'pass (T26a row-disabled + real artifact-absent; T26b official row; T26 no-cookie)',
         surface: 'T27-T39 + T41/T42/T43 pass',
       })
     } finally {
@@ -2550,6 +2641,35 @@ async function main() {
       }
     }
 
+    // C-04 (issue #474 recovery): the SAME candidate/profile must start a FRESH
+    // Host after the artifact-absent negative. A real Ready proves the failed
+    // process released the kernel seat (a leak would produce
+    // HOST_ALREADY_OWNED), and the ready status proves both private services and
+    // the ONE owner row are live. This runs at the END of the lane so a full
+    // ready Host never changes the preconditions of the T08-T43 flow, which
+    // starts its first ready Host at T08.
+    const restoredHost = new EntryProcess('host', entries.host, base)
+    const restoredReady = await restoredHost.waitFor(record => record.m4a0 === 'ready', 'T26 Host Runtime artifact restored', 120_000)
+    assert(!restoredHost.records.some(record => record.m4a0 === 'host-seat-conflict'),
+      'T26 Host Runtime artifact absent leaked the Host kernel seat')
+    assert(restoredReady.services?.piTuiHostReady === true
+      && restoredReady.services?.piTuiFileReferences === true
+      && restoredReady.services?.piTuiTerminalProgress === true,
+      `T26 Host Runtime restored: the private Host services are not live: ${JSON.stringify(restoredReady.services)}`)
+    assert(restoredReady.ownerEntries?.piTuiHostRuntime?.length === 1,
+      `T26 Host Runtime restored: expected exactly ONE active Host Runtime owner row, got ${JSON.stringify(restoredReady.ownerEntries?.piTuiHostRuntime)}`)
+    // The owner-governed stdin shutdown is the entry's documented qualification
+    // path (a ready Host keeps its control dispatcher).
+    const restoredExit = await restoredHost.shutdown()
+    assert(restoredExit.code === 0, `T26 Host Runtime restored shutdown exit was ${JSON.stringify(restoredExit)}`)
+    await seatFree(`\0dsh-pi-tui-h-${restoredReady.localHost.scopeId.slice(0, 40)}`, 10_000)
+    trace('t26-runtime-artifact-restored', {
+      exit: restoredExit.code,
+      readyEmitted: true,
+      identityAuthenticated: true,
+      privateBindings: true,
+      hostSeatFree: true,
+    })
 
     // T18: installed package shape is already checked above; Direct `--help`
     // and the role-only negative control ran before any Host existed.
