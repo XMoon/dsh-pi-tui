@@ -123,7 +123,11 @@ const MODEL = { displayName: 'luna-fast', id: 'luna-fast', reasoningEffort: 'hig
 const LONG = { displayName: 'an-extremely-long-model-display-name-for-the-clamp', id: 'long', reasoningEffort: 'high' }
 const modelFor = (): { displayName: string; id: string; reasoningEffort?: string } | undefined =>
   testCase === 'nomodel' ? undefined : testCase === 'long' ? LONG : MODEL
-let current: StatusSnapshot = snapshotFor({ busy: testCase === 'busy', model: modelFor() })
+// The plan's case table: `narrow` is the C-V3 shape — the NARROWEST pane with
+// a BUSY subject, so the scenario observes BOTH delivery controls (Send AND
+// Stop) reachable beside the short-label rule.
+const busyCase = testCase === 'busy' || testCase === 'narrow'
+let current: StatusSnapshot = snapshotFor({ busy: busyCase, model: modelFor() })
 
 const commit = (label: string): void => {
   renderer.bindStatusReader({ snapshot: () => current })

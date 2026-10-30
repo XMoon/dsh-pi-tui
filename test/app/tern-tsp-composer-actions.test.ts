@@ -89,14 +89,18 @@ function composerButtons(pane: TspPane): Map<string, WireNode> {
   for (const node of dockNodes(pane)) {
     if (node.k !== 'el') continue
     const key = String(node.p['key'] ?? '')
-    if (key.startsWith('composer-')) out.set(key, node)
+    // The keys carry the presentation-scope epoch (`composer-model-s<N>`);
+    // the product name is the prefix up to the epoch suffix.
+    if (!key.startsWith('composer-')) continue
+    const base = key.replace(/-s\d+$/, '')
+    out.set(base, node)
   }
   return out
 }
 
 /** The row node itself (the outer `row` keyed `composer-actions`). */
 function composerRow(pane: TspPane): WireNode | undefined {
-  return dockNodes(pane).find(node => node.id === 'dock.composer-actions')
+  return dockNodes(pane).find(node => /dock\.composer-actions-s\d+$/.test(node.id))
 }
 
 /** A busy/idle snapshot with a model configured as asked. */
@@ -207,7 +211,7 @@ test('composer actions: the row mounts between the editor and the statusline on 
   // flat dock list's indices ARE the column order.
   const ids = dockNodes(pane).map(node => node.id)
   const editorAt = ids.indexOf('dock.composer')
-  const actionsAt = ids.indexOf('dock.composer-actions')
+  const actionsAt = ids.findIndex(id => /dock\.composer-actions-s\d+$/.test(id))
   const statusAt = ids.findIndex(id => id.startsWith('dock.status-row'))
   assert.ok(editorAt >= 0 && actionsAt > editorAt, 'the action row follows the editor')
   if (statusAt >= 0) assert.ok(actionsAt < statusAt, 'the action row precedes the statusline')
@@ -344,6 +348,41 @@ test('composer actions: a one-frame-old Stop click cannot cancel a NEWLY idle su
   assert.equal(calls.cancels, 0, 'the busy re-check refused the stale click')
 })
 
+test('composer actions: a Stop click from the PREVIOUS session cannot cancel the next busy session', async (t) => {
+  // The external review's busy→busy crossing: session A paints Stop, the
+  // subject switches to an equally busy B, and A's click arrives AFTER B's
+  // first frame committed. The row's node keys carry the presentation-scope
+  // epoch, so A's node id simply does not exist in B's view — the SDK's own
+  // dispatch drops it and no cancel is issued against the wrong subject.
+  const m = await mountComposerActions({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'] })
+  t.after(() => { void m.dispose() })
+  const { pane, calls, renderer } = m
+  await m.commitStatus(snapshotFor({ busy: true, model: { displayName: 'session-a', id: 'a' } }))
+  const stale = composerButtons(pane).get('composer-stop')
+  assert.ok(stale, 'session A painted its Stop')
+  // The subject switch: the hydration window retires the row, and the new
+  // subject's first frame re-commits an EQUALLY busy status under a NEW scope.
+  renderer.display.beginSessionHydration()
+  await settle(120) // window: let the Loading frame commit
+  renderer.display.setTranscript([], undefined, undefined, undefined, undefined, { next: true })
+  await settle(120) // window: the new source commits and the fence lifts
+  await m.commitStatus(snapshotFor({ busy: true, model: { displayName: 'session-b', id: 'b' } }))
+  // B is busy and paints ITS Stop — under a different node id than A's.
+  const freshStop = composerButtons(pane).get('composer-stop')
+  assert.ok(freshStop, 'session B paints its own Stop')
+  assert.notEqual(freshStop!.id, stale!.id,
+    'the epoch-scoped keys give the successor session its OWN node identity')
+  // A's click arrives now (after B's frame): address A's retired id directly.
+  click(pane, stale!)
+  await settle(200) // window: let the pane ack the frame before reading the wire
+  assert.equal(calls.cancels, 0,
+    'a click minted under session A never cancels session B — the id is not in B\'s view')
+  // B's OWN Stop still works: the refusal above was A's id, not a dead control.
+  click(pane, freshStop!)
+  await settle(200) // window: let the pane ack the frame before reading the wire
+  assert.equal(calls.cancels, 1, 'the CURRENT session\'s Stop cancels exactly once')
+})
+
 /* --------------------------------------------------------------- Model/Effort */
 
 test('composer actions: Model and Effort forward to the one late-bound entry with the right hint', async (t) => {
@@ -470,11 +509,15 @@ test('composer actions: a click behind a modal seat, an open picker, hydration o
   await settle(120) // window: let the pane ack the frame before reading the wire
   const hydratingButtons = composerButtons(pane)
   const send = hydratingButtons.get('composer-send')
+  const modelDuringSwitch = hydratingButtons.get('composer-model')
   pane.key('typed during the window')
   await settle(80)
   click(pane, send!)
+  click(pane, modelDuringSwitch!)
   await settle(200) // window: let the pane ack the frame before reading the wire
   assert.equal(calls.submits.length, 0, 'no submit during the hydration window')
+  assert.equal(calls.modelEntries.length, 1,
+    'and no picker entry either — the whole row is inert while the subject is being replaced')
   assert.equal(m.renderer.composer.getDraft(), draftBefore,
     'the hydration fence drops the keys and preserves the draft as it was')
 })
