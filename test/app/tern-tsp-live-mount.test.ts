@@ -227,6 +227,8 @@ interface Harness {
   /** Replace the main fold under the same session id (re-hydration shape). */
   replaceMain(): void
   exitRequested(): boolean
+  /** PR-C (TSP-7): the handlers the input bind delivered (undefined pre-bind). */
+  boundHandlers(): { openModelPicker(entry: 'models' | 'effort'): void } | undefined
   dispose(): Promise<void>
 }
 
@@ -234,6 +236,9 @@ async function mountTspHarness(options: {
   requestExit?: () => void
   onFatal?: (error: unknown) => void
   sessionBrowserCapabilities?: boolean
+  /** PR-C (TSP-7): the composition's late-bound `/model` UI entry, injected
+   *  exactly as `src/app/bootstrap.ts` injects it into `createSurfaceRuntime`. */
+  openModelPicker?: (entry: 'models' | 'effort') => void
 } = {}): Promise<Harness & { session: Session }> {
   const hello = options.sessionBrowserCapabilities
     ? {
@@ -304,10 +309,16 @@ async function mountTspHarness(options: {
     mainProgressAuthority: 'local-events',
     terminalProgress: undefined,
     createPluginManagerPanel: createPluginManagerWorkspacePanel,
+    // PR-C (TSP-7): the composition's late-bound `/model` UI entry, when the
+    // case supplies one (the production bootstrap always does).
+    ...(options.openModelPicker === undefined ? {} : { openModelPicker: options.openModelPicker }),
   })
   surface.attachEventRouting(source)
 
   let mountedRenderer: TspRenderer | undefined
+  // PR-C (TSP-7): the handlers `bindRendererInput` delivered, so a case can
+  // drive the renderer's own input contract (the button click path's handler).
+  let boundHandlers: Parameters<TspRenderer['bindInput']>[0] | undefined
   const renderer: SurfaceRendererMount = {
     mount: (binding, statusReader) => {
       mountedRenderer = mountTspRenderer(session, { copyVisual: async () => false,
@@ -324,6 +335,18 @@ async function mountTspHarness(options: {
       // PR-C: the mount hands the renderer the ONE image binding of this
       // surface — the fake mount installs it, it never fakes success.
       mountedRenderer.bindImages(binding)
+      const innerBind = mountedRenderer.bindInput.bind(mountedRenderer)
+      mountedRenderer = new Proxy(mountedRenderer, {
+        get(target, prop, receiver) {
+          if (prop === 'bindInput') {
+            return (handlers: Parameters<TspRenderer['bindInput']>[0]) => {
+              boundHandlers = handlers
+              innerBind(handlers)
+            }
+          }
+          return Reflect.get(target, prop, receiver)
+        },
+      })
       return mountedRenderer
     },
     releaseUnmounted: async () => { await mountedRenderer?.dispose() },
@@ -362,6 +385,8 @@ async function mountTspHarness(options: {
       controller.setTurns(folder.groupedTurns())
     },
     exitRequested: () => exitCount > 0,
+    /** PR-C (TSP-7): the handlers the input bind delivered (test-only read). */
+    boundHandlers: () => boundHandlers,
     async dispose() {
       // The ONE renderer-release promise owns the disposal outcome: a failed
       // release must surface to THIS caller (never as an unowned rejection), and
@@ -628,6 +653,51 @@ test('A-04b: exit routes Ctrl+C and empty-draft Ctrl+D; a typed q is editor text
 
 // ── untrusted terminal output: the TSP dock never forwards raw controls ─────
 
+// ── PR-C (TSP-7): the late-bound `/model` UI entry reaches the bound renderer ─
+//
+// The composition's seam is narrow by construction: bootstrap assigns a
+// callback AFTER registration, `createSurfaceRuntime` forwards it verbatim
+// into the renderer input binding, and the renderer's handlers are the ONLY
+// consumers. These cases pin that wiring (the full business chain — command
+// owner → catalog → picker → writer — is qualified end-to-end by the
+// composer-actions suite and the model-picker suites).
+
+test('the late-bound /model entry reaches the bound renderer input exactly once', async () => {
+  const calls: Array<'models' | 'effort'> = []
+  const harness = await mountTspHarness({
+    openModelPicker: entry => { calls.push(entry) },
+  })
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound, 'the renderer input is bound')
+    bound.openModelPicker('models')
+    bound.openModelPicker('effort')
+    await settle() // window: let the seam callbacks run before reading the recorded calls
+    assert.deepEqual(calls, ['models', 'effort'],
+      'both entry hints traverse the surface seam verbatim, exactly once each')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('an unwired composition refuses the /model UI entry loudly, never silently', async () => {
+  const harness = await mountTspHarness()
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound)
+    // The runtime's placeholder throws: a dead composer control must be
+    // VISIBLE (the renderer reports it), not a silent no-op.
+    assert.throws(() => bound!.openModelPicker('models'),
+      /model picker command entry is not wired/)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 test('a hostile notice never reaches the TSP wire raw', async () => {
   const harness = await mountTspHarness()
   try {
@@ -822,6 +892,7 @@ test('non-key SDK events reach no business action while no modal seat is up', as
       noteUserInput: () => { calls.noteUserInput += 1 },
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
+      openModelPicker() {},
     })
     await settle()
     // INJECTED protocol events, not events this UI emits: the current TSP view
@@ -902,6 +973,7 @@ async function mountDiagnosed(tern: ScriptedTern) {
     noteUserInput: () => { business.noteUserInput += 1 },
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
+    openModelPicker() {},
   })
   return { renderer, diagnostics, notifications, business, fatals }
 }

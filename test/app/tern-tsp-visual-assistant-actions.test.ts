@@ -402,6 +402,7 @@ async function mountHarness(options: {
     noteUserInput: () => {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
+    openModelPicker() {},
   }
   if (options.bind !== false) renderer.bindInput(handlers)
   return {

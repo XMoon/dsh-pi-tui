@@ -623,6 +623,16 @@ export function applyRunnerWithRuntime(
     // has resolved the surface capabilities. The mounted TuiApp is created and
     // released by this owner alone. Declared BEFORE the resume commit: the A2
     // commit seams reset the completion owner during startup, before the mount.
+    /**
+     * PR-C (TSP-7): the ONE late-bound `/model` UI entry. It is declared in
+     * the same lexical scope as `surface` and `command`, assigned only after
+     * the command registration succeeded and BEFORE `bindRendererInput()` can
+     * deliver the first bound key/click — so a composer Model/Effort control
+     * can never reach a half-registered command surface. The assigned function
+     * only calls the registered entry through the SAME `runOwned`/diag wiring
+     * the command itself uses; there is no second async owner here.
+     */
+    let openRegisteredModelPicker: ((entry: 'models' | 'effort') => void) | undefined
     const surface = createSurfaceRuntime<SessionEvent>({
       tuiVersion: bundleVersion(),
       notificationPresentation,
@@ -646,6 +656,14 @@ export function applyRunnerWithRuntime(
       // The PR2 read-only visual snapshot supply: Direct main attachment or the
       // mounted viewed child's exact Session, undefined on Remote.
       visualEventSnapshotFor,
+      // PR-C (TSP-7): the late-bound `/model` UI entry (see the
+      // `openRegisteredModelPicker` declaration above). A click before the
+      // assignment reaches the runtime's loud placeholder, never a fabricated
+      // picker.
+      openModelPicker: entry => {
+        if (openRegisteredModelPicker === undefined) throw new Error('model picker command not registered')
+        openRegisteredModelPicker(entry)
+      },
     })
 
     // The live Agent is declared before the TUI-facing facade so every read
@@ -3633,6 +3651,17 @@ export function applyRunnerWithRuntime(
     // The pre-mount snapshot installs SYNCHRONOUSLY inside registration —
     // the first terminal input cannot arrive before this call stack unwinds.
     command.register({ snapshot: initialSnapshot, skills: initialSkills })
+    // PR-C (TSP-7): the `/model` UI entry is armed the moment its registration
+    // settled and BEFORE `bindRendererInput()` (the end of this startup) can
+    // deliver the first bound input. The entry runs the SAME registered
+    // handler body under the project's owned-task model (never a bare void
+    // promise); its own outcome paths already own every notice.
+    openRegisteredModelPicker = entry => {
+      runOwned('model picker UI entry', () => command.openModelPicker(entry), {
+        diag,
+        sessionId: () => ownership.currentSessionId(),
+      })
+    }
     // PR4 §2.2: the DIRECT branch's Host command catalog arrives through the
     // pre-mount prefetch above; the REMOTE branch has no Direct agent to
     // prefetch, so a RESUMED session installs its authoritative Host catalog

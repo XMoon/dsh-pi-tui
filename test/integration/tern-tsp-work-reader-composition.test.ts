@@ -150,6 +150,7 @@ async function compose(
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
+    openModelPicker() {},
   })
   composition.renderer = renderer
 

@@ -106,6 +106,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
+    openModelPicker() {},
   })
   const browserPresentation = renderer.sessionBrowserPresentation
   assert.ok(browserPresentation, 'the pane advertises picker, row, overlay, text and scroll')
@@ -740,6 +741,7 @@ test('Model, Browser, and Preset retire one another through the shared TSP layer
   const retiredBrowserPickerId = picker(pane)!.id
   const model = renderer.modelPresentation!.open({
     subject: { sessionless: false },
+    entry: 'models',
     apply: async () => 'rejected' as const,
     retry() {},
     isCurrent: () => true,

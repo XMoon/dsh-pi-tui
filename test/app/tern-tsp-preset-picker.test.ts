@@ -165,6 +165,7 @@ async function mounted(
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
+    openModelPicker() {},
   })
   const applies: string[] = []
   const defaults: string[] = []
@@ -912,6 +913,7 @@ test('native Preset: opening Model and Preset alternates one layer, never two', 
   assert.equal(pickerNode(pane, M), undefined)
   const model = renderer.modelPresentation.open({
     subject: { sessionless: true },
+    entry: 'models',
     isCurrent: () => true,
     retry() {},
     apply: () => 'superseded' as ModelApplyOutcome,
