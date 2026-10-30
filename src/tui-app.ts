@@ -12184,7 +12184,7 @@ export class TuiApp {
         // PIXELS: a protocol-unsupported raster format paints the fork's text
         // fallback, which stays informational and clickable nowhere.
         const body = component.paintedImageBody(width)
-        const bodyStart = rowOffset + 1
+        const bodyStart = rowOffset + 1 + (body?.cropTopRows ?? 0)
         hits.push({
           occurrence,
           infoRow: rowOffset,
@@ -12855,16 +12855,40 @@ export class TuiApp {
    * and scroll state are re-read fresh on EVERY commit. Contract:
    * docs/architecture/transcript.md ("Fullscreen geometry-epoch snapshot reuse"). The snapshot
    * keeps STABLE values only. */
-  /** Re-commit the fullscreen row snapshot when a live visual pixel body is
-   *  painted but the last snapshot still resolves its rows as inert. */
-  private reconcilePaintedRowSnapshot(): void {
-    const liveBody = this.messageRows.some(entry =>
-      entry.visuals?.some(hit => hit.thumbnailBody !== undefined) === true)
-    const snapshotBody = this.fullscreenPaintSnapshot?.rows.some(row =>
-      row.visualHits?.some(hit => hit.kind === 'body') === true) ?? false
-    if (!this.fullscreenRowsDirty && (!liveBody || snapshotBody)) return
-    this.fullscreenRowsDirty = true
-    this.commitFullscreenPaintSnapshot()
+  /** Re-project image/visual hit descriptors after a committed SIXEL frame.
+   *  Only messages that actually own image or published-visual occurrences are
+   *  re-read (their components are cached); transcript heights/layout and every
+   *  non-image block stay untouched. */
+  private refreshCommittedPixelHitRows(): void {
+    const width = this.transcriptRenderWidth()
+    let changed = false
+    const entries = this.messageRows.map(entry => {
+      if (entry.message === undefined) return entry
+      if (entry.attachments.length === 0 && entry.visuals.length === 0) return entry
+      const block = this.mountedTranscriptBlocks.find(candidate =>
+        candidate.block.kind === 'message' && candidate.block.message === entry.message)
+      if (block === undefined) return entry
+      const attachments = this.attachmentHitsOf(block.component, width, entry.message)
+      const visuals = this.visualHitsOf(entry.message, width)
+      changed = true
+      return { ...entry, attachments, visuals }
+    })
+    if (!changed) return
+    this.messageRows = entries
+    const snapshot = this.fullscreenPaintSnapshot
+    if (snapshot === undefined || snapshot.rows.length !== entries.length) return
+    this.fullscreenPaintSnapshot = {
+      ...snapshot,
+      rows: snapshot.rows.map((row, index) => {
+        const entry = entries[index]!
+        if (entry.height !== row.height) return row
+        return {
+          ...row,
+          ...(entry.attachments.length === 0 ? {} : { imageHits: this.fullscreenImageRowHits(entry) }),
+          ...(entry.visuals.length === 0 ? {} : { visualHits: this.fullscreenVisualRowHits(entry) }),
+        }
+      }),
+    }
   }
 
   private commitFullscreenPaintSnapshot(): void {
@@ -12940,6 +12964,7 @@ export class TuiApp {
       rows,
       viewerBack: this.paintedViewerBack(paintedHeight(this.header), paintedHeight(this.viewerSubjectBar)),
     }
+    if (this.graphics?.mode === 'sixel') this.refreshCommittedPixelHitRows()
     if (this.scrollProfiler.enabled && this.scrollFramePending) {
       const now = performance.now()
       this.scrollProfiler.emit({
@@ -13882,7 +13907,6 @@ export class TuiApp {
     // row-hit map without any chrome change. Re-commit the row geometry before
     // resolving this press, so the press-time identity is the one the user
     // actually clicked instead of a stale inert row.
-    this.reconcilePaintedRowSnapshot()
     // Image UX PR1: the composer preview band is pinned chrome above the
     // editor. A modal owner or a capturing overlay consumes it as inert
     // (never a hidden draft edit); only the last-painted `×` cell starts a
