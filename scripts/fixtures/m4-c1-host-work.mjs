@@ -364,11 +364,55 @@ export function apply(ctx) {
     })
   })
 
-  // The fixture deliberately does NOT register a Question/Approval waterfall
-  // listener: the real C2 PiTui answerer must be the only interactive consumer
-  // and a test observer must never influence the Host waterfall. Durable
-  // `tool/call` / `tool/result` / `approval/asked` / `approval/decided` events
-  // are the smoke's authority.
+  // Observe the official Question/Approval waterfalls without claiming them:
+  // each listener records the exact Host request/answer identity and then
+  // delegates with `next()`, so the real C2 PiTui answerer remains the only
+  // consumer. Durable `tool/call` / `tool/result` / `approval/asked` /
+  // `approval/decided` events remain the final authority.
+  ctx.on('user-questions/request', async (request, next) => {
+    const callId = request?.wait?.callId
+    const sessionId = request?.agent?.id === undefined ? undefined : String(request.agent.id)
+    record('question-request', {
+      callId: callId === undefined ? undefined : String(callId),
+      sessionId,
+      timed: request?.wait?.timed === true,
+      questions: request?.questions,
+    })
+    try {
+      const answer = await next()
+      record('question-settled', {
+        callId: callId === undefined ? undefined : String(callId),
+        sessionId,
+        answers: answer?.answers,
+      })
+      return answer
+    } catch (error) {
+      record('question-failed', {
+        callId: callId === undefined ? undefined : String(callId),
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw error
+    }
+  }, { prepend: true })
+
+  ctx.on('approval/request', async (request, next) => {
+    const callId = request?.callId === undefined ? undefined : String(request.callId)
+    record('approval-request', {
+      toolName: request?.toolName,
+      callId,
+      sessionId: request?.agent?.id === undefined ? undefined : String(request.agent.id),
+      reason: request?.reason,
+    })
+    try {
+      const outcome = await next()
+      record('approval-settled', { toolName: request?.toolName, callId, outcome })
+      return outcome
+    } catch (error) {
+      record('approval-failed', { toolName: request?.toolName, callId, error: error instanceof Error ? error.message : String(error) })
+      throw error
+    }
+  }, { prepend: true })
 
   if (scenario === 'foreground-tool') {
     ctx.effect(() => ctx.tools.register(defineTool({

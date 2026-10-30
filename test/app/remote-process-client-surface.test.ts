@@ -202,7 +202,7 @@ test('surface revision tasks run strictly serially and a stop waits for the acti
   releaseFirst?.()
   await Promise.all([first, second])
   assert.deepEqual(order, ['first:start', 'first:end', 'second:start', 'second:end'])
-  const settled = slot.settle()
+  const settled = slot.drain()
   assert.equal(await Promise.resolve(settled).then(() => true), true, 'settle did not resolve after the tail')
 })
 
@@ -214,5 +214,5 @@ test('a failed surface revision task does not poison the serial slot', async () 
   let ran = false
   await slot.run(async () => { ran = true })
   assert.equal(ran, true, 'a later revision task did not run after the failed one settled')
-  await slot.settle()
+  await slot.drain()
 })

@@ -240,20 +240,20 @@ The Host Gateway's pending forwarded events are the ONE recovery channel for a
 Question or Approval that was waiting when the Client left. A Client surface
 teardown must not settle a Host-owned forwarded request: it drops its local
 presentation without sending an answer, cancellation or `next` that would
-permanently settle the Host event. A later Client receiving the same event id /
-call id may answer it once through the official answerer; the Host pending map
-clears only on the Host's own settlement. A settled, cancelled or replaced
+permanently settle the Host event. A Client whose official answerer is already
+attached may answer a re-delivered event id / call id once; the Host pending
+map clears only on the Host's own settlement. A settled, cancelled or replaced
 request is never resurrected from an old Client's painted card.
 
-The installed rc.4 Client event pump consumes a Host-pending forwarded event
-as soon as its Connection generation opens, before a fresh Client's official
-Domain/interaction owner can register an answerer; the pump has no pre-start
-listener gate or replay buffer. A fresh Client therefore cannot recover a
-legacy Host-pending Question/Approval after the prior Client dies with only the
-public rc.4 Client API. That is an upstream capability gap, not a Host Gateway
-pending-map failure and not a reason to add a private PiTui pending store; an
-upstream pre-pump registration gate/buffer or an explicit Client restore API is
-required before this contract can be claimed end to end.
+The current DSH Client event pump consumes a Host-pending forwarded event as
+soon as its Connection generation opens, before a fresh Client's official
+Domain/interaction owner can register an answerer; the Client API has no
+pre-start listener gate or replay buffer. A fresh Client therefore cannot
+recover a legacy Host-pending Question/Approval after the prior Client dies
+through the public Client API alone. That is an upstream capability gap, not a
+Host Gateway pending-map failure and not a reason to add a private PiTui
+pending store; an upstream pre-pump registration gate/buffer or an explicit
+Client restore API is required before this contract can be claimed end to end.
 
 The internal split mode also supports one Client-only surface revision
 replacement on the SAME Client PID, Client Context and B1 transport: the
