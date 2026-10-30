@@ -785,6 +785,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   let presentedStatus: StatusSnapshot | undefined
   /**
+   * PR-C (external review r3): the busy-LIFETIME identity of the current
+   * display subject — a renderer-local presentation serial advanced at every
+   * FALSE→TRUE busy edge of the formally-committed snapshot (and reset with
+   * the subject at hydration). It is the same class of ephemeral identity as
+   * `readerEpoch`/`noticeSeq`, NOT a business mirror: nothing reads it except
+   * the Stop button's node key, so a click minted against turn A's Stop can
+   * never resolve onto turn B's re-painted button — the old node id is simply
+   * absent from the current view and the SDK's own dispatch drops it.
+   */
+  let busyEpoch = 0
+  /**
    * PR-C: the immutable image scope of the CURRENT display subject, captured
    * ONCE per projection source. An ordinary repaint or delta REUSES it: the
    * scope is never re-resolved when an async read settles, so a retired
@@ -2081,7 +2092,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (statusReader === undefined) {
         throw new Error('the TSP renderer has no status reader: the mount must bind one')
       }
+      const previous = presentedStatus
       presentedStatus = statusReader.snapshot()
+      // PR-C (external review r3): every FALSE→TRUE busy edge of the committed
+      // snapshot starts a NEW busy lifetime — the next Stop button paints under
+      // a fresh node identity, so a stale click from the PREVIOUS run of the
+      // same session can never cancel the new one. A TRUE→TRUE commit keeps
+      // the identity (one continuous run), and the subject reset below owns
+      // the cross-session case.
+      if (previous !== undefined
+        && previous.activity.busy !== true
+        && presentedStatus.activity.busy === true) {
+        busyEpoch += 1
+      }
       render()
     },
     commitStatusFacts(facts) {
@@ -2124,6 +2147,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // transcript — the Loading frame shows NO native status row, so an old
       // permission/cwd/usage fact can never sit beside the incoming subject.
       presentedStatus = undefined
+      // PR-C (external review r3): the outgoing subject's busy lifetime dies
+      // with it — the incoming subject's first busy edge mints a fresh Stop
+      // identity even though the serial is renderer-local.
+      busyEpoch = 0
       // PR-C: the retired subject's image subscriptions go with it - a late
       // settle of the outgoing subject must not repaint the incoming one.
       releaseImageSubscriptions()
@@ -2476,7 +2503,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           onClick: () => { composerSendClicked() },
         }, 'Send'),
         ...(busy ? [html.button({
-          key: `composer-stop-${actionScope}`,
+          // PR-C (external review r3): the Stop node's identity carries the
+          // busy LIFETIME serial beside the subject scope, so each run of the
+          // same session paints under its OWN id — a stale click from the
+          // previous run cannot resolve onto this one. Model/Effort/Send keep
+          // their stable subject-scoped keys (no cross-run identity exists for
+          // them to confuse).
+          key: `composer-stop-${actionScope}r${busyEpoch}`,
           role: COMPOSER_STOP_ROLE,
           title: `Stop — ${TSP_COMPOSER_STOP_LABEL}`,
           aria: 'Stop the running turn',
