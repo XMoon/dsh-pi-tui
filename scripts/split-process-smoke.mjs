@@ -2644,20 +2644,39 @@ async function main() {
     // C-04 (issue #474 recovery): the SAME candidate/profile must start a FRESH
     // Host after the artifact-absent negative. A real Ready proves the failed
     // process released the kernel seat (a leak would produce
-    // HOST_ALREADY_OWNED), and the ready status proves both private services and
-    // the ONE owner row are live. This runs at the END of the lane so a full
-    // ready Host never changes the preconditions of the T08-T43 flow, which
-    // starts its first ready Host at T08.
+    // HOST_ALREADY_OWNED), and the authenticated /connect + identity read proves
+    // the restored Host's identity is really usable, not only declared. This runs
+    // at the END of the lane so a full ready Host never changes the
+    // preconditions of the T08-T43 flow, which starts its first ready Host at T08.
     const restoredHost = new EntryProcess('host', entries.host, base)
     const restoredReady = await restoredHost.waitFor(record => record.m4a0 === 'ready', 'T26 Host Runtime artifact restored', 120_000)
     assert(!restoredHost.records.some(record => record.m4a0 === 'host-seat-conflict'),
       'T26 Host Runtime artifact absent leaked the Host kernel seat')
-    assert(restoredReady.services?.piTuiHostReady === true
+    const restoredPrivateBindings = restoredReady.services?.piTuiHostReady === true
       && restoredReady.services?.piTuiFileReferences === true
-      && restoredReady.services?.piTuiTerminalProgress === true,
+      && restoredReady.services?.piTuiTerminalProgress === true
+    assert(restoredPrivateBindings,
       `T26 Host Runtime restored: the private Host services are not live: ${JSON.stringify(restoredReady.services)}`)
     assert(restoredReady.ownerEntries?.piTuiHostRuntime?.length === 1,
       `T26 Host Runtime restored: expected exactly ONE active Host Runtime owner row, got ${JSON.stringify(restoredReady.ownerEntries?.piTuiHostRuntime)}`)
+    // Authenticated identity proof against THIS Host's own published material:
+    // the /connect Cookie exchange, a 200 identity read and the registry match
+    // are the same chain T02 audits for the main Host.
+    const restoredScopeDir = join(dshHome, 'run', 'dsh-pi-tui', restoredReady.localHost.scopeId)
+    const restoredRegistry = readJson(join(restoredScopeDir, 'instance.json'))
+    const restoredLaunch = readJson(join(restoredScopeDir, 'launch.json'))
+    assertIdentityFields(restoredReady.localHost, restoredRegistry, 'T26 Host Runtime restored ready/registry')
+    const restoredCookie = await connectCookie(restoredReady.localHost.origin, restoredLaunch)
+    const restoredIdentityResponse = await fetchStatus(`${restoredReady.localHost.origin}/api/pi-tui.local-host`, {
+      headers: { cookie: restoredCookie },
+    })
+    const restoredIdentityAuthenticated = restoredIdentityResponse.status === 200
+    assert(restoredIdentityAuthenticated,
+      `T26 Host Runtime restored authenticated identity returned HTTP ${String(restoredIdentityResponse.status)}`)
+    assert(/application\/json\b/iu.test(String(restoredIdentityResponse.headers.get('content-type'))),
+      'T26 Host Runtime restored identity response is not JSON')
+    assertIdentityFields(JSON.parse(restoredIdentityResponse.body), restoredRegistry,
+      'T26 Host Runtime restored authenticated identity')
     // The owner-governed stdin shutdown is the entry's documented qualification
     // path (a ready Host keeps its control dispatcher).
     const restoredExit = await restoredHost.shutdown()
@@ -2666,8 +2685,9 @@ async function main() {
     trace('t26-runtime-artifact-restored', {
       exit: restoredExit.code,
       readyEmitted: true,
-      identityAuthenticated: true,
-      privateBindings: true,
+      identityAuthenticated: restoredIdentityAuthenticated,
+      privateBindings: restoredPrivateBindings,
+      registryMatched: true,
       hostSeatFree: true,
     })
 
