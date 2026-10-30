@@ -188,6 +188,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   // frozen JSONL control channel on stdin/stdout.
   const recordSink = options.mode === 'surface' ? createSurfaceRecordSink() : undefined
   const emit: EntryRecordSink = recordSink?.emit ?? writeEntryRecord
+  // Publish the business PID before any seat/assembly work: a signal-stop test
+  // must be able to address THIS process while it is still assembling and no
+  // ready record exists yet. No secret/path is carried.
+  emit({ m4a0: 'client-started', processRole: 'client', pid: process.pid, phase: 'startup' })
   // The single-TUI seat precedes discovery: a second Client never spawns a
   // Host or touches the existing connection.
   const seat: ProcessSeat = await bindProcessSeat(scope.clientSeatSocketName, 'CLIENT_ALREADY_ACTIVE')
@@ -214,6 +218,13 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     setImmediate(() => { process.exit(1) })
   }
   let stopping: Promise<void> | undefined
+  /** The ONE startup cancellation owner: a stop aborts every in-flight mount
+   *  and readiness wait before any teardown starts. */
+  const startupAbort = new AbortController()
+  /** The in-flight ONE startup chain; `stop` awaits it before disposing. */
+  let startupPromise: Promise<LocalClientHandle> | undefined
+  /** Whether the transport/root release already happened (single-root latch). */
+  let rootReleased = false
   let resolveStopped: (() => void) | undefined
   const stopped = new Promise<void>(resolve => { resolveStopped = resolve })
   let terminalError: unknown
@@ -221,6 +232,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
 
   const stop = (code: number, failure?: unknown): Promise<void> => {
     if (stopping !== undefined) return stopping
+    // A signal/exit request while the assembly is still running aborts the
+    // Domain readiness, assembly holds and runner readiness FIRST; the startup
+    // chain then unwinds exactly the graph it created, and this coordinator
+    // performs the ONE transport/root release after it settles.
+    startupAbort.abort(failure ?? new Error('local client entry: stop requested during startup'))
     stopping = (async () => {
       if (failure !== undefined) {
         const primary = failure instanceof Error ? failure : new Error(String(failure))
@@ -236,14 +252,25 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       }
       const errors: unknown[] = []
       const timedOut = await disposeWithinDeadline(async () => {
+        if (rootReleased) return
+        // Wait for the in-flight assembly to settle: a success publishes the
+        // ONE handle, a failure has already unwound the graph it created.
+        if (startupPromise !== undefined && handle === undefined) {
+          try {
+            handle = await startupPromise
+          } catch {
+            // The startup's failure unwind owns the graph. The borrowed
+            // transport/root still belong to this coordinator.
+          }
+        }
         if (handle !== undefined) {
-          // UI subtree -> official transport -> Client root, all owned by the
-          // handle's single reverse-disposal path.
           try { await handle.dispose() } catch (error) { errors.push(error) }
+          rootReleased = true
           return
         }
         try { await transport?.dispose() } catch (error) { errors.push(error) }
         try { await context?.fiber.dispose() } catch (error) { errors.push(error) }
+        rootReleased = true
       }, errors)
       if (options.mode === 'surface' && handle !== undefined) {
         // The final owner inventory the qualification reads after the process
@@ -432,6 +459,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     const composition: LocalClientComposition = options.mode === 'surface'
       ? {
           mode: 'surface',
+          signal: startupAbort.signal,
           transport,
           host: host.identity,
           dshAnchor: options.dshAnchor,
@@ -447,7 +475,14 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         }
       : { mode: 'qualification', transport, host: host.identity }
     const { startLocalClient } = await import('./client-bootstrap.ts')
-    handle = await startLocalClient(clientContext, surfaceFacts, processStartIdentity, composition)
+    startupPromise = startLocalClient(clientContext, surfaceFacts, processStartIdentity, composition)
+    handle = await startupPromise
+    if (stopping !== undefined) {
+      // The signal/exit coordinator already owns the teardown; never publish a
+      // ready surface after a stop was requested.
+      await stopping
+      return
+    }
     if (terminalError !== undefined) {
       // A terminal transport failure may have arrived while the UI subtree was
       // mounting; never emit a ready state after stop was requested.
@@ -511,16 +546,26 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     })
     await stopped
   } catch (error) {
+    // A signal/exit coordinator may already own the teardown (the startup was
+    // aborted by `stop`). Wait for that ONE coordinator and do not report a
+    // second cleanup or a duplicate failure for the expected cancellation.
+    if (stopping !== undefined) {
+      await stopping
+      return
+    }
     const failure = terminalError ?? error
     let primary = failure instanceof Error ? failure : new Error(String(failure))
     const cleanupErrors: unknown[] = []
     const timedOut = await disposeWithinDeadline(async () => {
+      if (rootReleased) return
       if (handle !== undefined) {
         try { await handle.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
+        rootReleased = true
         return
       }
       try { await transport?.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
       try { await context?.fiber.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
+      rootReleased = true
     }, cleanupErrors)
     for (const cleanupError of cleanupErrors) primary = mergeCause(primary, cleanupError)
     const transportCleanupFailed = (error instanceof Error && (error as { cleanupFailed?: boolean }).cleanupFailed === true)

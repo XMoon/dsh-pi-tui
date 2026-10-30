@@ -468,6 +468,7 @@ export class SurfaceEntryProcess {
   /** Signal the business Client process (never the `script` wrapper). */
   signalBusiness(signal) {
     const pid = this.records.find(record => record.m4a0 === 'ready')?.pid
+      ?? this.records.find(record => record.m4a0 === 'client-started')?.pid
     if (!Number.isInteger(pid)) throw new Error(`${this.role}: no business PID is known yet`)
     process.kill(pid, signal)
   }
@@ -2237,6 +2238,60 @@ async function main() {
       })
       await c1.dispose()
 
+      // T41/T42: a SIGTERM during the assembly must be owned by ONE coordinator:
+      // no ready, no duplicate cleanup, the Client seat immediately reusable,
+      // and the Host untouched. Two deterministic stages are held: after the
+      // Domain readiness and after the runner fiber mount/before surface ready.
+      for (const [stage, traceName] of [['domain', 't41'], ['surface', 't42']]) {
+        const barrier = join(workDir, `${traceName}-assembly-barrier`)
+        rmSync(barrier, { force: true })
+        const stopping = new SurfaceEntryProcess(entries.client, {
+          ...base,
+          workDir,
+          env: {
+            ...base.env,
+            SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY: `${stage}@${barrier}`,
+          },
+        })
+        surfaceClients.push(stopping)
+        const held = await stopping.waitFor(
+          record => record.m4b2s === 'qualification' && record.op === 'assembly-hold' && record.stage === stage,
+          `${traceName} ${stage} assembly hold`,
+          180_000,
+        )
+        stopping.signalBusiness('SIGTERM')
+        writeFileSync(barrier, 'release\n', { mode: 0o600 })
+        const stopped = await stopping.waitForExit(60_000)
+        assert(stopped.code === 0, `${traceName} ${stage} stop exit was ${JSON.stringify(stopped)}`)
+        assert(!stopping.records.some(record => record.m4a0 === 'ready'),
+          `${traceName} ${stage} stop still published a ready surface`)
+        assert(!stopping.records.some(record => record.m4a0 === 'cleanup-failure'),
+          `${traceName} ${stage} stop reported a duplicate/failed cleanup`)
+        await stopping.dispose()
+        // The kernel Client seat is free immediately: a NEW Client acquires it
+        // and reaches a real surface over the SAME Host.
+        const reusable = new SurfaceEntryProcess(entries.client, { ...base, workDir })
+        surfaceClients.push(reusable)
+        const reusableReady = await reusable.waitFor(record => record.m4a0 === 'ready', `${traceName} reusable Client ready`, 180_000)
+        assert(reusableReady.surfaceMounted === true, `${traceName} the reusable Client did not mount`)
+        assert(alive(surfaceHostPid), `${traceName} the Host died on the startup stop`)
+        const reusableInstance = readJson(join(scopeDir, 'instance.json'))
+        assert(reusableInstance.instanceId === surfaceHostFacts.instanceId,
+          `${traceName} the Host instance changed on the startup stop`)
+        reusable.send('/exit\r')
+        const reusableExit = await reusable.waitForExit(60_000)
+        assert(reusableExit.code === 0, `${traceName} reusable Client exit was ${JSON.stringify(reusableExit)}`)
+        await reusable.dispose()
+        trace(traceName, {
+          stage,
+          heldAt: held.stage,
+          readyEmitted: false,
+          cleanupFailures: 0,
+          seatReusable: true,
+          hostAlive: true,
+        })
+      }
+
       // T34: close the writer's pre-dispatch admission while a REAL
       // serialization barrier holds the write. The writer must return
       // not-dispatched, the draft must return to the composer, and the Host must
@@ -2437,7 +2492,7 @@ async function main() {
         dshVersion: targetDshVersion,
         directHelp: 'pass',
         t01t26: 'pass except T26a artifact-missing NOT_VERIFIED (row-absence control passes)',
-        surface: 'T27-T39 pass',
+        surface: 'T27-T39 + T41/T42 pass',
       })
     } finally {
       for (const client of surfaceClients) await client.dispose()
