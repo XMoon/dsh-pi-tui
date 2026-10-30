@@ -83,10 +83,12 @@ export interface SurfaceInteractionPresenter {
    * REGISTERED or FIFO-QUEUED behind another modal is NOT presented and must
    * never claim the phase.
    *
-   * Implementations: the PiTui adapter mirrors `TuiApp.activityStatus()`'s own
-   * facts (`approvals.isActive()` / `activeQuestions` — the ACTIVE slot, never
-   * the queue); the TSP seat reads its active slot the same way. Optional so a
-   * narrow test double can omit it; `undefined` means "no modal presented".
+   * Implementations: the TSP seat answers from its active slot (the ACTIVE
+   * modal, never the queue). The PiTui adapter deliberately does NOT implement
+   * it — that branch's activity comes from `TuiApp.activityStatus()` itself
+   * and the surface's TSP activity projection is a no-op while a TuiApp is
+   * mounted, so the read has no reachable sink there. Optional so a narrow
+   * test double can omit it; `undefined` means "no modal presented".
    */
   presentedModalKind?(): 'approval' | 'question' | undefined
   /**
@@ -126,10 +128,7 @@ export interface SurfaceInteractionPresenter {
 export type PiTuiInteractionApp = Pick<
   TuiApp,
   'showApprovalPrompt' | 'askQuestions' | 'setSettledQuestionAnswersLookup' | 'notify' | 'setQuestionAttention'
-> & {
-/** The ACTIVE-slot modal read `TuiApp.activityStatus()` derives phases from. */
-  readonly presentedModalKindForStatus: () => 'approval' | 'question' | undefined
-}
+>
 
 /**
  * The PiTui presenter: a narrow delegating adapter over the ONE mounted
@@ -149,9 +148,10 @@ export function pituiSurfaceInteractionPresenter(app: PiTuiInteractionApp): Surf
     setSettledQuestionAnswersLookup: lookup => { app.setSettledQuestionAnswersLookup(lookup) },
     notify: (text, kind) => { app.notify(text, kind) },
     setQuestionAttention: parkedCount => { app.setQuestionAttention(parkedCount) },
-    // The same ACTIVE-slot facts `TuiApp.activityStatus()` derives its phases
-    // from (PR-B F4): the presented modal, never the queued requests.
-    presentedModalKind: () => app.presentedModalKindForStatus(),
+    // PR-B F4 note: `presentedModalKind` stays UNIMPLEMENTED here — the PiTui
+    // branch's activity comes from `TuiApp.activityStatus()` itself, and the
+    // surface's TSP activity projection is a no-op while a TuiApp is mounted,
+    // so the read has no reachable sink on this branch.
     withdrawPending: () => {},
     withdrawPresentations: () => {},
     closeTransientList: () => {},

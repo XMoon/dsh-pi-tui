@@ -136,23 +136,6 @@ export interface TspInteractionSeat {
   /** The parked-Question count projected into the dock (`0` hides the line). */
   attentionCount(): number
   /**
-   * TSP-7 PR-B (F5): the renderer's deferred-frame failure entry — the same
-   * retire/settle/fatal path a synchronous presentation failure took.
-   */
-  failPresentationForRenderer(error: unknown): void
-  /**
-   * TSP-7 PR-B (F4): the ACTIVE slot's kind — the ONE authority for the
-   * waiting phases. A FIFO-queued request behind another modal is alive but
-   * NOT presented.
-   */
-  presentedModalKind(): 'approval' | 'question' | undefined
-  /**
-   * TSP-7 PR-B (F3): the renderer's display commit absorbs the pending
-   * attention-line repaint (the same-tick activity publish carries BOTH the
-   * dock count and the native badge in ONE frame).
-   */
-  absorbAttentionFlush(): void
-  /**
    * Close the transient Alt+Q list if it is open. Called when a newly committed
    * Session takes the presentation (P3): the list belongs to the subject that
    * opened it, so it must not survive a replacement and keep consuming keys (its
@@ -345,8 +328,6 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   /** Scopes the modal node ids and rejects late presentation of an old seat. */
   let modalEpoch = 0
   let attention = 0
-  /** TSP-7 PR-B (F3): the deferred attention-line repaint (see setQuestionAttention). */
-  let attentionFlushScheduled = false
   let disposed = false
 
   // ── Seat ownership ──
@@ -1281,29 +1262,14 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     setQuestionAttention(parkedCount) {
       if (disposed || parkedCount === attention) return
       attention = parkedCount
-      // TSP-7 PR-B (external review F3): the dock's `Continued questions: N`
-      // line and the native attention badge describe the SAME business fact,
-      // and the surface publishes the activity projection right AFTER this
-      // call (`publishAttention` → `publishActivity` → the display commit). A
-      // synchronous render here would first paint the new dock count beside the
-      // OLD native `?N` — the same split F2 fixed for the status facts. The
-      // repaint is therefore deferred into the same tick's display commit; an
-      // attention change with NO following commit still repaints via the
-      // microtask (the presenter contract is unchanged for every caller).
-      if (attentionFlushScheduled) return
-      attentionFlushScheduled = true
-      queueMicrotask(() => {
-        if (!attentionFlushScheduled || disposed) { attentionFlushScheduled = false; return }
-        attentionFlushScheduled = false
-        try {
-          options.render()
-        } catch (error) {
-          // The park-count projection rides the same frame path as every other
-          // presentation: a broken terminal reaches the renderer's fatal sink
-          // instead of throwing into whoever asked for the repaint.
-          options.onFatal(error)
-        }
-      })
+      try {
+        options.render()
+      } catch (error) {
+        // The park-count projection rides the same frame path as every other
+        // presentation: a broken terminal reaches the renderer's fatal sink
+        // instead of throwing into whoever asked for the repaint.
+        options.onFatal(error)
+      }
     },
     withdrawPending() {
       retireAll()
@@ -1342,18 +1308,6 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     renderEmptyLayer,
     desiredFocusId,
     attentionCount: () => attention,
-    presentedModalKind: () => active?.kind,
-    /**
-     * TSP-7 PR-B (F3): the renderer's display commit absorbs the pending
-     * attention-line repaint (the same-tick activity publish carries BOTH the
-     * dock count and the native badge in ONE frame).
-     */
-    absorbAttentionFlush(): void { attentionFlushScheduled = false },
-    failPresentationForRenderer(error: unknown): void {
-      const slot = active
-      if (slot !== undefined) failPresentation(slot, error)
-      else options.onFatal(error)
-    },
     closeTransientList,
     withdrawPresentations,
     withdrawPresentation,

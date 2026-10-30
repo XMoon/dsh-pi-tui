@@ -541,42 +541,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * `supportsModals` capability only flips once `bindInput` has installed the
    * application callbacks the seat routes Alt+Q through (never before).
    */
-  /**
-   * TSP-7 PR-B (external review F5): the seat-change repaint coalesces into
-   * the same tick's display commit. The surface publishes the waiting-phase
-   * activity right after the presenter call returns (`publishActivity` → the
-   * display commit), so a synchronous render here would paint the new modal
-   * beside the OLD native phase — the same split F2/F3 closed for the status
-   * facts and the attention line. The deferral is OUTSIDE the seat: the seat's
-   * own fail-fast presentation contract (a throwing render retires the slot
-   * synchronously) is untouched — a THROWING render still propagates
-   * synchronously to the seat's fatal path; only the successful repaint waits
-   * for the same-tick commit (or its own microtask when none follows).
-   */
-  let seatPresentationFlushScheduled = false
-  /** The deferred-frame failure entry (assigned once the seat exists below). */
-  let seatFailure: (error: unknown) => void = () => {}
-  const seatRender = (): void => {
-    if (seatPresentationFlushScheduled) return
-    seatPresentationFlushScheduled = true
-    queueMicrotask(() => {
-      if (!seatPresentationFlushScheduled) { return }
-      seatPresentationFlushScheduled = false
-      if (disposed) return
-      try {
-        render()
-      } catch (error) {
-        // The deferred frame failed: route it back through the seat's own
-        // presentation-failure path (retire the slot, settle its promise,
-        // reach the fatal sink) — the same contract a synchronous throw kept.
-        seatFailure(error)
-      }
-    })
-  }
-  /** The display commit absorbs the pending seat-change repaint (F3/F5). */
-  const absorbSeatFlush = (): void => { seatPresentationFlushScheduled = false }
   const seat: TspInteractionSeat = createTspInteractionSeat({
-    render: seatRender,
+    render: () => render(),
     // A frame/focus failure while settling a prompt must reach the runner's
     // fatal lifecycle (the tty owner is broken), never become a silent modal
     // cancellation; a repeated failure keeps the FIRST fatal (exitRequested).
@@ -592,9 +558,6 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // form becomes visible/answerable; the close stays owned by this renderer.
     beforeModalSeat: () => { retireWorkDetails('modal') },
   })
-  // TSP-7 PR-B (F5): the deferred-frame failure entry — the seat's own
-  // retire/settle/fatal path for a frame that failed AFTER the deferral.
-  seatFailure = (error: unknown): void => { seat.failPresentationForRenderer(error) }
   modelPicker = new TspModelPicker({
     render: () => render(),
     canInteract: () => !disposed && !hydrating && inputBound && !seat.hasModalSeat(),
@@ -2051,17 +2014,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     render()
   }
 
-  /** Mutable renderer-local mirror of the last committed status facts. */
-  const statusFacts: { busy?: boolean; working?: boolean; planMode?: boolean; sessionTitle?: string; todos?: readonly TodoItem[]; compactionPhase?: DisplayStatusFacts['compactionPhase'] } = {}
+  /** Mutable renderer-local mirror of the last committed status facts (the
+   * facts the legacy dock lines still read; the machine facts the activity
+   * projection consumes live in the surface's store, not here). */
+  const statusFacts: { sessionTitle?: string; todos?: readonly TodoItem[]; compactionPhase?: DisplayStatusFacts['compactionPhase'] } = {}
   /**
    * TSP-7 PR-A: the legacy dock text lines that survive as SHORT standalone
    * rows. They are the facts no PR-A native item carries (the session title and
    * the todo completion count) plus the compaction phase, an immediate state
    * channel that must not depend on a status commit. The banner's `plan` word
-   * migrated to the native plan-state row; the run-phase display (`busy` /
-   * `working`) is PR-B scope exactly as the accepted plan assigns it, and those
-   * presence facts stay mirrored here for that handover — nothing else reads
-   * them in PR-A.
+   * migrated to the native plan-state row; the run-phase display lives in the
+   * surface's activity projection (the native run seg), not this mirror.
    */
   const legacyDockLines = (): { key: string; text: string }[] => {
     const lines: { key: string; text: string }[] = []
@@ -2081,27 +2044,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const flushStatus = (): void => {
     // TSP-7 PR-A: the legacy banner text is gone, so this is the presentation
     // repaint only — the facts above are read by `dockView` on the next frame.
-    statusFactsFlushScheduled = false
     render()
-  }
-  /**
-   * TSP-7 PR-B (external review F2): the deferred legacy-facts repaint. The
-   * surface's activity projection publishes the SAME business fact batch as a
-   * formal display commit a moment later (`commitDisplaySubject` renders once,
-   * sampling the store that already carries the new activity); a synchronous
-   * render HERE would first paint the new legacy word beside the OLD native run
-   * state — a non-atomic intermediate frame. The flush therefore coalesces into
-   * the same tick's display commit when one follows, and only schedules its own
-   * repaint when none does (a title/todo-only commit still updates its line).
-   */
-  let statusFactsFlushScheduled = false
-  const scheduleStatusFlush = (): void => {
-    if (statusFactsFlushScheduled) return
-    statusFactsFlushScheduled = true
-    queueMicrotask(() => {
-      if (!statusFactsFlushScheduled || disposed) { statusFactsFlushScheduled = false; return }
-      flushStatus()
-    })
   }
 
   const display: SurfaceDisplaySeam = {
@@ -2124,27 +2067,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         throw new Error('the TSP renderer has no status reader: the mount must bind one')
       }
       presentedStatus = statusReader.snapshot()
-      // TSP-7 PR-B (F2/F3): this render carries the SAME tick's legacy facts and
-      // attention-line repaint too (the scheduled flushes are absorbed here —
-      // one frame, every fact family of the batch).
-      statusFactsFlushScheduled = false
-      seat.absorbAttentionFlush()
-      absorbSeatFlush()
       render()
     },
     commitStatusFacts(facts) {
       // PRESENCE is the write authority: an explicitly-present
       // `sessionTitle: undefined` CLEARS (Remote current-facts rely on it).
-      if (facts.busy !== undefined) statusFacts.busy = facts.busy
-      if (facts.working !== undefined) statusFacts.working = facts.working
-      if (facts.planMode !== undefined) statusFacts.planMode = facts.planMode
       if ('sessionTitle' in facts) statusFacts.sessionTitle = facts.sessionTitle
       if (facts.todos !== undefined) statusFacts.todos = facts.todos
       if (facts.compactionPhase !== undefined) statusFacts.compactionPhase = facts.compactionPhase
-      // TSP-7 PR-B (F2): defer the legacy repaint to the SAME tick's display
-      // commit (the surface's activity projection publishes right after this
-      // call); only a facts-only commit takes the scheduled repaint itself.
-      scheduleStatusFlush()
+      flushStatus()
     },
     resetSessionFacts() {
       // The HYDRATE-TAIL clear only: stale notices and the exit latch. The
