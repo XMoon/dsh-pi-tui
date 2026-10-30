@@ -606,6 +606,11 @@ async function main() {
         ? { SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch }
         : {}
     const base = { cwd: profileDir, env: { ...env, ...mutationEnv }, anchor, profile: 'pi-tui', scratch }
+    const hostFoundationBarrier = join(workDir, 'host-foundation-watch-barrier')
+    const probeClientBase = {
+      ...base,
+      env: { ...base.env, SPLIT_PROCESS_HOST_FOUNDATION_BARRIER: hostFoundationBarrier },
+    }
     const requireFromProfile = createRequire(join(profilePackage, 'package.json'))
     const WebSocket = requireFromProfile('ws')
 
@@ -867,7 +872,10 @@ async function main() {
 
     // T09: two Clients race for the one kernel TUI seat. Only the winner may
     // create a Client Context or reach the Host.
-    const clients = [new EntryProcess('client', entries.client, base), new EntryProcess('client', entries.client, base)]
+    const clients = [
+      new EntryProcess('client', entries.client, probeClientBase),
+      new EntryProcess('client', entries.client, probeClientBase),
+    ]
     const clientOutcomes = await Promise.all(clients.map((client, index) => waitForOutcome(client, `T09 client ${String(index)}`)))
     const clientWinners = clients.filter(client => client.records.some(record => record.m4a0 === 'ready'))
     assert(clientWinners.length === 1, `T09 expected one active Client, got ${String(clientWinners.length)}`)
@@ -945,43 +953,58 @@ async function main() {
     // Client Context. The probe mounts its two contributions temporarily and
     // unmounts them; no second Client/Connection/Gateway/Context is created.
     // Running it twice is also the T25 duplicate-registration check.
+    /** Wait for the Host to report exactly `expected` live progress watchers. */
+    const waitForHostWatchCount = async (expected, label, timeoutMs = 5_000) => {
+      const deadline = Date.now() + timeoutMs
+      let status = await hostStatus(mainHost)
+      while (status.terminalProgressWatches !== expected && Date.now() < deadline) {
+        await sleep(25)
+        status = await hostStatus(mainHost)
+      }
+      assert(
+        status.terminalProgressWatches === expected,
+        `${label}: expected ${String(expected)} Host terminal-progress watcher(s), got ${JSON.stringify(status.terminalProgressWatches)}`,
+      )
+      return status
+    }
     const runHostFoundationProbe = async (client, label) => {
       const requestId = `m4b2hf-${label}-${++statusSequence}`
+      rmSync(hostFoundationBarrier, { force: true })
       client.send({ op: 'qualification-host-foundation', requestId })
-      return await client.waitFor(
+      // The probe holds the real Host watch open after its opening snapshot and
+      // waits for the private barrier file, so the harness can observe the live
+      // Host subscription (1) before releasing it and then observe 0.
+      await client.waitFor(
+        record => record.m4b2hf === 'host-rpc-watch-open' && record.requestId === requestId,
+        `${label} watch open`,
+        180_000,
+      )
+      const during = await waitForHostWatchCount(1, `${label} live watch`)
+      writeFileSync(hostFoundationBarrier, 'release\n', { mode: 0o600 })
+      const proof = await client.waitFor(
         record => record.m4b2hf === 'host-rpc-proof' && record.requestId === requestId,
         label,
         180_000,
       )
+      const after = await waitForHostWatchCount(0, `${label} watch release`)
+      return { proof, during, after }
     }
-    const hostRpcProof = await runHostFoundationProbe(c1, 't22-24')
+    const firstProbe = await runHostFoundationProbe(c1, 't22-24')
+    const hostRpcProof = firstProbe.proof
     assert(hostRpcProof.hostPid === hostReady.pid, 'T22 probe Host PID mismatch')
     assert(hostRpcProof.hostInstanceId === hostReady.localHost.instanceId, 'T22 probe Host instance mismatch')
     assert(hostRpcProof.clientPid === c1Ready.pid, 'T22 probe Client PID mismatch')
     for (const field of ['officialSessionList', 'privateFileRpc', 'terminalSnapshot', 'cleaned']) {
       assert(hostRpcProof[field] === true, `T22/T23/T24/T25 ${field} is not proven`)
     }
-    const repeatedProof = await runHostFoundationProbe(c1, 't25-repeat')
+    const repeatedProbe = await runHostFoundationProbe(c1, 't25-repeat')
+    const repeatedProof = repeatedProbe.proof
     assert(repeatedProof.hostPid === hostReady.pid, 'T25 repeat probe Host PID mismatch')
     assert(repeatedProof.hostInstanceId === hostReady.localHost.instanceId, 'T25 repeat probe Host instance mismatch')
     assert(repeatedProof.clientPid === c1Ready.pid, 'T25 repeat probe Client PID mismatch')
     for (const field of ['officialSessionList', 'privateFileRpc', 'terminalSnapshot', 'cleaned']) {
       assert(repeatedProof[field] === true, `T25 repeat ${field} is not proven`)
     }
-    // T24 Host-side release evidence: the opening snapshot is produced by the
-    // Host watch() after registering its subscriber, so a Host status read
-    // after the proof must show that subscriber gone. A local Client iterator
-    // ending alone cannot satisfy this assertion.
-    let hostWatchStatus = await hostStatus(mainHost)
-    const watchReleaseDeadline = Date.now() + 5_000
-    while (hostWatchStatus.terminalProgressWatches !== 0 && Date.now() < watchReleaseDeadline) {
-      await sleep(25)
-      hostWatchStatus = await hostStatus(mainHost)
-    }
-    assert(
-      hostWatchStatus.terminalProgressWatches === 0,
-      `T24 the Host terminal-progress watcher leaked: ${JSON.stringify(hostWatchStatus.terminalProgressWatches)}`,
-    )
     trace('t22-t24-host-rpc-proof', {
       hostPid: hostRpcProof.hostPid,
       hostInstanceId: hostRpcProof.hostInstanceId,
@@ -991,13 +1014,16 @@ async function main() {
       terminalSnapshot: 'snapshot:false:idle',
       cleaned: true,
       hostTerminalProgressWatchesBefore: hostReady.terminalProgressWatches,
-      hostTerminalProgressWatchesAfter: hostWatchStatus.terminalProgressWatches,
+      hostTerminalProgressWatchesDuring: firstProbe.during.terminalProgressWatches,
+      hostTerminalProgressWatchesAfter: firstProbe.after.terminalProgressWatches,
     })
     trace('t25-repeat-probe', {
       hostPid: repeatedProof.hostPid,
       hostInstanceId: repeatedProof.hostInstanceId,
       clientPid: repeatedProof.clientPid,
       duplicateRegistration: false,
+      hostTerminalProgressWatchesDuring: repeatedProbe.during.terminalProgressWatches,
+      hostTerminalProgressWatchesAfter: repeatedProbe.after.terminalProgressWatches,
     })
 
     // T05: one mux socket per authenticated peer; release invalidates the Peer.
