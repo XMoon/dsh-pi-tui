@@ -687,7 +687,9 @@ class DirectSixelGraphicsOwner implements DirectSixelGraphics {
             width: occurrence.width,
             columns: record.columns,
             rows: record.rows,
-            cropTopRows: record === crop?.record ? crop.cropTopRows : 0,
+            ...(record === crop?.record && crop.cropTopRows !== undefined
+              ? { cropTopRows: crop.cropTopRows }
+              : {}),
           }
     }
     // Bottom-up order is the caller's contract: the newest content wins a

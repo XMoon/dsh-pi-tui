@@ -135,12 +135,14 @@ function tick(ms = 25): Promise<void> {
 
 /**
  * Wait out the fork's DOUBLE_CLICK_INTERVAL_MS window before the next pointer
- * gesture at the same cell. This is the surface's own contract (a second
- * same-cell press within 500 ms is a word-selection double click and withholds
- * the release callback), not a blind UI sleep.
+ * gesture at the same cell.
+ * reason: the fork's DOUBLE_CLICK_INTERVAL_MS=500 is the surface contract; a
+ * second same-cell press inside the window is a word-selection double click
+ * and withholds the release callback, so the pointer sequence needs the real
+ * window rather than an arbitrary wait.
  */
 function settlePointerWindow(): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, 600))
+  return new Promise(resolve => setTimeout(resolve, 600)) // reason: the fork DOUBLE_CLICK_INTERVAL_MS=500 contract
 }
 
 function fill(width: number, height: number, color: (x: number, y: number) => [number, number, number, number]): Uint8Array {
