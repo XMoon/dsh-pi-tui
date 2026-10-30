@@ -97,7 +97,12 @@ export function probeTmuxSixelIdentity(env: NodeJS.ProcessEnv = process.env): Tm
   const displayClients = parseTmuxDisplayClients(report)
   if (displayClients === undefined || displayClients.length !== 1) return undefined
   const client = displayClients[0]!
-  if (!nonEmpty(client.name) || !nonEmpty(client.tty)) return undefined
+  if (
+    !nonEmpty(client.name)
+    || !nonEmpty(client.tty)
+    || !nonEmpty(client.termname)
+    || !nonEmpty(client.termtype)
+  ) return undefined
   if (client.session !== sessionName) return undefined
   const identity: TmuxSixelIdentity = {
     paneId,
