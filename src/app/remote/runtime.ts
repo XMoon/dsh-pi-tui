@@ -30,6 +30,7 @@ import { RemoteHostUserShellPort } from '../../runtime/remote/host-user-shell-re
 import { createRemoteHostRuntime, type RemoteHostRuntime } from './host-runtime.ts'
 import { mergeCause } from './dispose-cause.ts'
 import { createRemoteM3ASemantics, remoteM3ARuntimeSourceOf, type RemoteM3ARuntimeSource, type RemoteM3ASemantics } from './m3a-semantics.ts'
+import type { SplitClientInteractionDelivery } from '../../runtime/remote/interaction-remote.ts'
 
 /**
  * Run one disposal step with per-step error isolation: the step's failures
@@ -137,6 +138,10 @@ export type RemoteBackendFetch = (input: string | URL, init?: RequestInit) => Pr
 
 /** Inputs for the complete experimental Remote `Backend` assembly. */
 export interface RemoteBackendRuntimeOptions {
+  /** Split-Client only: the Client-root interaction delivery owner. */
+  readonly delivery?: SplitClientInteractionDelivery
+  /** Split-Client only: the surface revision identity attached to `delivery`. */
+  readonly surfaceRevision?: number
   /** The ONE shared Client runtime source every adapter consumes: the M3-1
    *  Client runtime or the real split Client's mounted official Domains —
    *  never a second graph. */
@@ -209,6 +214,8 @@ export async function createRemoteBackendRuntime(
       promptSerializer: options.promptSerializer
         ?? RemotePromptSerializerProduction.overSessions(options.runtime.sessions),
       ...(options.isDispatchAllowed === undefined ? {} : { isDispatchAllowed: options.isDispatchAllowed }),
+      ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
+      ...(options.surfaceRevision === undefined ? {} : { surfaceRevision: options.surfaceRevision }),
     })
     unwind.push(() => semantics.dispose())
     const config = new RemoteConfigPort(remoteConfigRuntimeSourceOf(options.runtime))

@@ -264,4 +264,11 @@ export interface InteractionPort {
    * never a silent fallback). The Direct adapter resolves the live Agent
    * internally. */
   setApprovalPolicy(sessionId: string, policy: ApprovalPolicy): boolean
+  /**
+   * Split-Client only: revoke the CURRENT surface revision's presentation
+   * token BEFORE the surface withdraws its modal promises. The root delivery
+   * then discards that revision's local teardown result instead of forwarding
+   * it as a Host decision. Adapters without a root delivery omit it.
+   */
+  detachSurface?(): void
 }

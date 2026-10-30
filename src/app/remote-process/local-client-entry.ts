@@ -40,14 +40,21 @@ import type {
   LocalClientComposition,
   LocalClientHandle,
   MountedLocalClientRunner,
+  MountedRemoteClientDomains,
+  MountedRemoteClientDomainPrerequisites,
 } from './client-bootstrap.ts'
-import type { LocalClientTransport } from './local-transport.ts'
+import type { InstalledLocalClientTransport, LocalClientTransport } from './local-transport.ts'
+import {
+  createSplitClientInteractionDelivery,
+  type SplitClientInteractionDeliveryOwner,
+} from './client-interaction-delivery.ts'
 import { createLocalClientSurfaceBridge } from './local-client-surface.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 
 interface OfficialClientHostModules {
   readonly Context: new () => import('@deepseek-ai/cordis').Context
   readonly PluginPackages: abstract new (...args: never[]) => unknown
+  readonly Loader: new (ctx: import('@deepseek-ai/cordis').Context) => import('@deepseek-ai/cordis-plugin-loader').Loader
   readonly loadProfile: (binName: string, name: string, installAnchor: string) => unknown
   readonly createRuntimeResolution: (options: {
     installAnchor: string
@@ -64,10 +71,12 @@ async function loadOfficialClientHost(anchor: string): Promise<OfficialClientHos
     import(pathToFileURL(requireFromDsh.resolve(specifier)).href)
   const appBoot = await importResolved('@deepseek-ai/dsh-app-boot')
   const cordis = await importResolved('@deepseek-ai/cordis')
+  const loaderModule = await importResolved('@deepseek-ai/cordis-plugin-loader')
   const homePaths = await importResolved('@deepseek-ai/dsh-home-paths')
   return {
     Context: cordis.Context as OfficialClientHostModules['Context'],
     PluginPackages: appBoot.PluginPackages as OfficialClientHostModules['PluginPackages'],
+    Loader: loaderModule.default as OfficialClientHostModules['Loader'],
     loadProfile: appBoot.loadProfile as OfficialClientHostModules['loadProfile'],
     createRuntimeResolution: appBoot.createRuntimeResolution as OfficialClientHostModules['createRuntimeResolution'],
     resolveDshHome: homePaths.resolveDshHome as OfficialClientHostModules['resolveDshHome'],
@@ -75,8 +84,9 @@ async function loadOfficialClientHost(anchor: string): Promise<OfficialClientHos
   }
 }
 
-/** The internal Client process mode: frozen B1 qualification or the real surface. */
-export type LocalClientEntryMode = 'qualification' | 'surface'
+/** The internal Client process mode: frozen B1 qualification, the real
+ *  surface, or the qualification-only non-TUI answering Peer. */
+export type LocalClientEntryMode = 'qualification' | 'surface' | 'peer'
 
 /** The launcher-supplied facts one Client-only process needs. */
 export interface LocalClientEntryOptions {
@@ -167,6 +177,135 @@ function surfaceStartupFacts(options: LocalClientEntryOptions): { sessionId?: st
   }
 }
 
+/** The single internal Loader builtin name of the interaction startup gate. */
+export const INTERACTION_STARTUP_GATE = 'pi-tui-interaction-startup-gate'
+
+/**
+ * The ONE interaction startup gate entry: its async Loader plugin holds the
+ * official Gateway's `loader.await()` until the official Session resolver and
+ * the root interaction listeners exist. Settles once; a stop/failure rejects
+ * the pending gate so the Gateway never starts after cancellation.
+ */
+interface InteractionStartupGate {
+  readonly plugin: () => Promise<void>
+  readonly pending: boolean
+  release(): void
+  cancel(reason: unknown): void
+}
+
+export function createInteractionStartupGate(): InteractionStartupGate {
+  let resolveBarrier: (() => void) | undefined
+  let rejectBarrier: ((reason: unknown) => void) | undefined
+  let state: 'pending' | 'released' | 'cancelled' = 'pending'
+  const barrier = new Promise<void>((resolve, reject) => {
+    resolveBarrier = resolve
+    rejectBarrier = reject
+  })
+  return {
+    plugin: async () => { await barrier },
+    get pending(): boolean { return state === 'pending' },
+    release(): void {
+      if (state !== 'pending') return
+      state = 'released'
+      resolveBarrier?.()
+    },
+    cancel(reason: unknown): void {
+      if (state !== 'pending') return
+      state = 'cancelled'
+      rejectBarrier?.(reason)
+    },
+  }
+}
+
+/** One pending forwarded interaction held by the non-TUI answering Peer. */
+interface PeerInteractionSeat {
+  answer(kind: 'question' | 'approval', callId: string, value: unknown): boolean
+  dispose(): void
+}
+
+const PEER_ABORTED = Symbol('peer-request-aborted')
+
+/**
+ * The qualification-only non-TUI answering Peer: it registers the two official
+ * `$on` listeners and holds each forwarded request until the smoke sends the
+ * exact `peer-answer` control record. It never renders, never takes the TUI
+ * seat and never invents a Host decision.
+ */
+function createPeerInteractionSeat(
+  remote: import('./client-interaction-delivery.ts').SplitClientInteractionEventsSource,
+  sessions: { scopeOf(owner: unknown): string | undefined },
+  emit: EntryRecordSink,
+): PeerInteractionSeat {
+  const pending = new Map<string, (value: unknown) => void>()
+  const owned: Array<() => void> = []
+  let sequence = 0
+  const KEY = (kind: 'question' | 'approval', key: string): string => `${kind}:${key}`
+  const waitForAnswer = async (
+    kind: 'question' | 'approval',
+    callId: string,
+    signal: AbortSignal | undefined,
+  ): Promise<unknown> => {
+    return await new Promise<unknown>(resolve => {
+      let settled = false
+      const settle = (value: unknown): void => {
+        if (settled) return
+        settled = true
+        signal?.removeEventListener('abort', onAbort)
+        pending.delete(KEY(kind, callId))
+        resolve(value)
+      }
+      const onAbort = (): void => { settle(PEER_ABORTED) }
+      pending.set(KEY(kind, callId), settle)
+      if (signal?.aborted === true) onAbort()
+      else signal?.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+  owned.push(remote.$on('user-questions/request', async function (this: unknown, request, next) {
+    const sessionId = sessions.scopeOf(this)
+    if (sessionId === undefined) return next()
+    const callId = request.wait?.callId
+    const peerKey = typeof callId === 'string' ? callId : `question-${++sequence}`
+    emit({
+      m4a0: 'peer-interaction',
+      kind: 'question',
+      peerKey,
+      callId: typeof callId === 'string' ? callId : undefined,
+      sessionId,
+    })
+    const value = await waitForAnswer('question', peerKey, request.signal)
+    if (value === PEER_ABORTED) throw new Error('local client entry: peer question request aborted')
+    return value as never
+  }))
+  owned.push(remote.$on('approval/request', async function (this: unknown, request, next) {
+    const sessionId = sessions.scopeOf(this)
+    if (sessionId === undefined) return (next as () => unknown)()
+    const callId = request.callId
+    const peerKey = typeof callId === 'string' ? callId : `approval-${++sequence}`
+    emit({
+      m4a0: 'peer-interaction',
+      kind: 'approval',
+      peerKey,
+      callId: typeof callId === 'string' ? callId : undefined,
+      sessionId,
+    })
+    const value = await waitForAnswer('approval', peerKey, request.signal)
+    if (value === PEER_ABORTED) throw new Error('local client entry: peer approval request aborted')
+    return value
+  }))
+  return {
+    answer(kind, callId, value): boolean {
+      const settle = pending.get(KEY(kind, callId))
+      if (settle === undefined) return false
+      settle(value)
+      return true
+    },
+    dispose(): void {
+      for (const off of owned.splice(0)) off()
+      for (const settle of [...pending.values()]) settle(PEER_ABORTED)
+    },
+  }
+}
+
 /**
  * Run one Client-only process until its launcher requests shutdown. Exported
  * for the qualification harness; `import.meta.main` is the only production
@@ -194,9 +333,21 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   emit({ m4a0: 'client-started', processRole: 'client', pid: process.pid, phase: 'startup' })
   // The single-TUI seat precedes discovery: a second Client never spawns a
   // Host or touches the existing connection.
-  const seat: ProcessSeat = await bindProcessSeat(scope.clientSeatSocketName, 'CLIENT_ALREADY_ACTIVE')
+  // The qualification-only answering Peer is NOT a TUI and must not take the
+  // single-TUI seat: it is the protocol counterpart used by the stale-result
+  // negative controls while the real TUI Client owns the seat.
+  const seat: ProcessSeat = options.mode === 'peer'
+    ? { close: async () => {} }
+    : await bindProcessSeat(scope.clientSeatSocketName, 'CLIENT_ALREADY_ACTIVE')
   let context: import('@deepseek-ai/cordis').Context | undefined
+  let loaderFiber: Fiber | undefined
+  let startupGate: InteractionStartupGate | undefined
+  let installedTransport: InstalledLocalClientTransport | undefined
   let transport: LocalClientTransport | undefined
+  let domainPrerequisites: MountedRemoteClientDomainPrerequisites | undefined
+  let mountedDomains: MountedRemoteClientDomains | undefined
+  let interactionDelivery: SplitClientInteractionDeliveryOwner | undefined
+  let peerSeat: PeerInteractionSeat | undefined
   let handle: LocalClientHandle | undefined
   /** The CURRENT revision's surface bridge behind the ONE root `appExit`. */
   let activeBridge: import('./local-client-surface.ts').LocalClientSurfaceBridge | undefined
@@ -290,7 +441,18 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           rootReleased = true
           return
         }
+        try { interactionDelivery?.dispose() } catch (error) { errors.push(error) }
+        try { peerSeat?.dispose() } catch (error) { errors.push(error) }
+        // Stop the official Gateway/Connection before the Session Client goes
+        // away; its generation signal is what releases every pending delivery.
         try { await transport?.dispose() } catch (error) { errors.push(error) }
+        try { await domainPrerequisites?.dispose() } catch (error) { errors.push(error) }
+        try { await mountedDomains?.dispose() } catch (error) { errors.push(error) }
+        // Only after the official Gateway/Connection is disposed may the gate
+        // settle: the upstream Loader await cannot call a live connection.start
+        // after cancellation.
+        startupGate?.cancel(failure ?? new Error('local client entry: stop requested during startup'))
+        try { await loaderFiber?.dispose() } catch (error) { errors.push(error) }
         try { await context?.fiber.dispose() } catch (error) { errors.push(error) }
         rootReleased = true
       }, errors)
@@ -375,36 +537,155 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     await packageFiber
     emit({ m4a0: 'context-ready', processRole: 'client', pid: process.pid, phase: 'context-ready' })
 
-    // The official resolution interception is live before this dynamic import;
-    // the transport chunk's bare @deepseek-ai imports therefore resolve exactly
+    // The official resolution interception is live before these dynamic
+    // imports; the chunks' bare @deepseek-ai imports therefore resolve exactly
     // like a Loader-mounted plugin's would.
-    const { startLocalTransport } = await import('./local-transport.ts')
-    transport = await startLocalTransport(context, {
-      dshAnchor: options.dshAnchor,
-      host,
-      scope,
-      diag,
-      onFatal: error => {
-        terminalError ??= error
-        // Before the composition is ready, the sequential startup path owns the
-        // single stop; a concurrent stop while the UI subtree is mounting could
-        // tear down the context twice and race the readiness publication.
-        if (compositionDone) {
-          runDetached('local client: terminal transport identity failure', () => stop(1, terminalError), { diag })
-        }
-      },
-    })
-    if (terminalError !== undefined) {
-      await stop(1, terminalError)
-      return
+    const transportModule = await import('./local-transport.ts')
+    const { mountSurfaceClientDomainPrerequisites, startLocalClient } = await import('./client-bootstrap.ts')
+    const onTransportFatal = (error: unknown): void => {
+      terminalError ??= error
+      // Before the composition is ready, the sequential startup path owns the
+      // single stop; a concurrent stop while the UI subtree is mounting could
+      // tear down the context twice and race the readiness publication.
+      if (compositionDone) {
+        runDetached('local client: terminal transport identity failure', () => stop(1, terminalError), { diag })
+      }
     }
-    emit({
-      m4a0: 'transport-ready',
-      processRole: 'client',
-      pid: process.pid,
-      phase: 'transport-ready',
-      ...traceTransportStatus(),
-    })
+    if (options.mode === 'surface' || options.mode === 'peer') {
+      const clientContext = context
+      if (clientContext === undefined) throw new Error('local client entry: the Client root Context is missing')
+      // 1. The REAL Cordis Loader is installed first and owns the official
+      // Gateway's startup gate. Its one internal builtin entry stays pending
+      // until the Session resolver and the root interaction listeners exist;
+      // the upstream `ClientRemoteService` sees that pending entry in
+      // `loader.await()` and therefore does not start `connection.start()`.
+      loaderFiber = clientContext.plugin(hostModules.Loader as never, {} as never)
+      await loaderFiber
+      const loader = clientContext.get('loader') as import('@deepseek-ai/cordis-plugin-loader').Loader | undefined
+      if (loader === undefined) throw new Error('local client entry: the official Cordis Loader did not install')
+      startupGate = createInteractionStartupGate()
+      loader.builtins[INTERACTION_STARTUP_GATE] = startupGate.plugin as never
+      await loader.create({ name: `cordis:${INTERACTION_STARTUP_GATE}` })
+      startupAbort.signal.throwIfAborted()
+      if (!startupGate.pending) throw new Error('local client entry: the interaction startup gate failed before the transport install')
+      // 2. Install typert/connection/gateway. Gateway applies its service but
+      // its event pump waits for the Loader gate above.
+      installedTransport = await transportModule.installLocalTransport(clientContext, {
+        dshAnchor: options.dshAnchor,
+        host,
+        scope,
+        diag,
+        signal: startupAbort.signal,
+        onFatal: onTransportFatal,
+      })
+      transport = installedTransport
+      startupAbort.signal.throwIfAborted()
+      // 3. Mount the official Session Client (Agent resolver) and the other
+      // Domain prerequisites while the event pump is still gated.
+      domainPrerequisites = await mountSurfaceClientDomainPrerequisites(clientContext, { dshAnchor: options.dshAnchor })
+      const remote = clientContext.get('remote') as unknown as import('./client-interaction-delivery.ts').SplitClientInteractionEventsSource | undefined
+      if (remote === undefined) throw new Error('local client entry: the official Client Remote service did not install')
+      // 4. Register the TWO official listeners EXACTLY ONCE for this Client
+      // root, then release the gate. Only now may the Gateway start. The
+      // surface mode borrows the root delivery owner; the qualification-only
+      // answering Peer registers its own held-answer listeners.
+      if (options.mode === 'surface') {
+        interactionDelivery = createSplitClientInteractionDelivery({ remote, sessions: domainPrerequisites.sessions })
+      } else {
+        peerSeat = createPeerInteractionSeat(remote, domainPrerequisites.sessions, emit)
+      }
+      const typert = clientContext.get('typert') as unknown as {
+        contexts: { getClient(name: string): unknown }
+      } | undefined
+      emit({
+        m4b2s: 'qualification',
+        op: 'interaction-startup-gate',
+        phase: 'listeners-ready',
+        agentResolver: typert?.contexts.getClient('agent') !== undefined,
+        questionListeners: 1,
+        approvalListeners: 1,
+        loaderTasks: loader.getTasks().length,
+      })
+      startupGate.release()
+      // 5. First real generation + authenticated identity audit. `transport`
+      // is the same installed handle once ready.
+      transport = await transportModule.awaitLocalTransportReady(installedTransport, { signal: startupAbort.signal })
+      if (terminalError !== undefined) {
+        await stop(1, terminalError)
+        return
+      }
+      emit({
+        m4a0: 'transport-ready',
+        processRole: 'client',
+        pid: process.pid,
+        phase: 'transport-ready',
+        ...traceTransportStatus(),
+      })
+      // 6. Complete the root Domain graph: Jobs Client + official initial
+      // readiness. Every surface revision below borrows this ONE graph.
+      mountedDomains = await domainPrerequisites.complete({ signal: startupAbort.signal })
+      domainPrerequisites = undefined
+      startupAbort.signal.throwIfAborted()
+      emit({ m4b2s: 'qualification', op: 'startup-stage', stage: 'domains-ready', pid: process.pid })
+      if (options.mode === 'peer') {
+        emit({
+          m4a0: 'ready',
+          processRole: 'client',
+          pid: process.pid,
+          phase: 'peer-ready',
+          mode: 'peer',
+          hostPid: host.identity.hostPid,
+          hostInstanceId: host.identity.instanceId,
+          ...traceTransportStatus(),
+        })
+        compositionDone = true
+        attachEntryControl(async request => {
+          if (request.op === 'status') {
+            emit({ m4a0: 'status', pid: process.pid, ...traceTransportStatus() })
+            return false
+          }
+          if (request.op === 'peer-answer') {
+            const kind = request.kind
+            const callId = request.callId
+            const value = request.value
+            if ((kind !== 'question' && kind !== 'approval') || typeof callId !== 'string') {
+              emit({ m4a0: 'control-error', error: 'peer-answer requires kind/callId/value' })
+              return false
+            }
+            const delivered = peerSeat?.answer(kind, callId, value) === true
+            emit({ m4a0: 'peer-answer-sent', kind, callId, delivered })
+            return false
+          }
+          if (request.op === 'shutdown') {
+            await stop(0)
+            return true
+          }
+          emit({ m4a0: 'control-error', error: `local client entry: unknown op ${JSON.stringify(request.op)}` })
+          return false
+        })
+        await stopped
+        return
+      }
+    } else {
+      transport = await transportModule.startLocalTransport(context, {
+        dshAnchor: options.dshAnchor,
+        host,
+        scope,
+        diag,
+        onFatal: onTransportFatal,
+      })
+      if (terminalError !== undefined) {
+        await stop(1, terminalError)
+        return
+      }
+      emit({
+        m4a0: 'transport-ready',
+        processRole: 'client',
+        pid: process.pid,
+        phase: 'transport-ready',
+        ...traceTransportStatus(),
+      })
+    }
 
     // Qualification-only startup-failure control. The internal entry is not a
     // public surface; this flag lets the process lane exercise the after-
@@ -513,6 +794,8 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           host: host.identity,
           dshAnchor: options.dshAnchor,
           authenticatedFetch: transport.authenticatedFetch,
+          domains: mountedDomains,
+          interactionDelivery,
           mountRunner,
           diag,
           onStatus: status => {
@@ -524,7 +807,6 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         }
       : { mode: 'qualification', transport, host: host.identity }
     try {
-      const { startLocalClient } = await import('./client-bootstrap.ts')
       // Qualification-only hold in the pre-assignment window (the dynamic
       // import and the composition are already resolved, but `startupPromise`
       // is not assigned yet): a SIGTERM here must wait for this ONE gate.
@@ -625,7 +907,13 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         rootReleased = true
         return
       }
+      try { interactionDelivery?.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
+      try { peerSeat?.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
       try { await transport?.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
+      try { await domainPrerequisites?.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
+      try { await mountedDomains?.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
+      startupGate?.cancel(primary)
+      try { await loaderFiber?.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
       try { await context?.fiber.dispose() } catch (cleanupError) { cleanupErrors.push(cleanupError) }
       rootReleased = true
     }, cleanupErrors)
@@ -730,8 +1018,8 @@ async function waitForStartupHold(path: string, signal: AbortSignal): Promise<vo
 function clientModeFromEnvironment(): LocalClientEntryMode {
   const raw = process.env.SPLIT_PROCESS_CLIENT_MODE
   if (raw === undefined || raw === '') return 'qualification'
-  if (raw === 'qualification' || raw === 'surface') return raw
-  throw new Error(`local client entry: invalid SPLIT_PROCESS_CLIENT_MODE ${JSON.stringify(raw)}; expected "qualification" or "surface"`)
+  if (raw === 'qualification' || raw === 'surface' || raw === 'peer') return raw
+  throw new Error(`local client entry: invalid SPLIT_PROCESS_CLIENT_MODE ${JSON.stringify(raw)}; expected "qualification", "surface" or "peer"`)
 }
 
 /** Read the launcher environment; a missing anchor is a hard startup failure. */

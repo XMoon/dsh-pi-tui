@@ -41,7 +41,10 @@ import type { RemotePiTuiFileReferenceRemotes } from '../../runtime/remote/host-
 import type { RemoteCommandsSource } from '../../runtime/remote/host-command-remote.ts'
 import type { RemoteConfigRuntimeSource } from '../../runtime/remote/config-remote.ts'
 import type { RemotePresentationSessionsSource } from '../../runtime/remote/presentation-read-remote.ts'
-import type { RemoteInteractionRuntimeSource } from '../../runtime/remote/interaction-remote.ts'
+import type {
+  RemoteInteractionRuntimeSource,
+  SplitClientInteractionDelivery,
+} from '../../runtime/remote/interaction-remote.ts'
 import { RemoteInteractionPort } from '../../runtime/remote/interaction-remote.ts'
 import type { RemotePluginManagerSource } from '../../runtime/remote/plugin-manager-remote.ts'
 import { RemotePluginManagerPort } from '../../runtime/remote/plugin-manager-remote.ts'
@@ -100,6 +103,10 @@ export interface RemoteM3ASemantics {
 export interface RemoteM3ASemanticsOptions {
   readonly promptSerializer: RemotePromptSerializer
   readonly isDispatchAllowed?: () => boolean
+  /** Split-Client only: borrow the root delivery instead of per-revision `$on`. */
+  readonly delivery?: SplitClientInteractionDelivery
+  /** Split-Client only: the surface revision token attached to `delivery`. */
+  readonly surfaceRevision?: number
 }
 
 /** The ONE shared Client sessions service: the intersection of every
@@ -193,6 +200,8 @@ export function createRemoteM3ASemantics(
     sessions,
     remote: { userQuestions: remote.userQuestions, $on: forwardedEvents },
     connection: { generation },
+    ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
+    ...(options.surfaceRevision === undefined ? {} : { surfaceRevision: options.surfaceRevision }),
   })
   const presetCatalog = new RemotePresetCatalog(remote.agentPresets, generation)
   let disposed = false

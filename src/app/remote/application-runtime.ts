@@ -58,6 +58,7 @@ import {
 } from './presentation-source.ts'
 import { createRemoteClientUiRuntime, type RemoteClientUiRuntime } from './client-ui-runtime.ts'
 import type { MountedRemoteClientDomains } from './client-runtime.ts'
+import type { SplitClientInteractionDelivery } from '../../runtime/remote/interaction-remote.ts'
 
 /** Start input for the M3 Remote application runtime aggregate. */
 export interface RemoteApplicationRuntimeOptions {
@@ -138,6 +139,12 @@ export interface SplitRemoteApplicationRuntimeOptions {
    *  write between serialization and dispatch admission (T34). Absent in
    *  production, where the production serializer is the default. */
   readonly promptSerializer?: RemotePromptSerializer
+  /** Split-Client only: the Client-root interaction delivery owner. When
+   *  present, the Remote interaction adapter borrows THIS surface revision's
+   *  two providers instead of registering per-revision `$on` listeners. */
+  readonly delivery?: SplitClientInteractionDelivery
+  /** Split-Client only: the surface revision identity attached to `delivery`. */
+  readonly surfaceRevision?: number
 }
 
 /** The ONE shared composition stage: Backend + owner registry + presentation. */
@@ -189,6 +196,8 @@ async function composeRemoteApplicationStage(input: {
   readonly client: RemotePresentationClientSource
   readonly fetch: RemoteBackendFetch
   readonly promptSerializer?: RemotePromptSerializer
+  readonly delivery?: SplitClientInteractionDelivery
+  readonly surfaceRevision?: number
 }): Promise<ComposedRemoteApplicationStage> {
   let backendRuntime: RemoteBackendRuntime | undefined
   let ownerServices: ReturnType<typeof createRemoteSessionOwnerServices> | undefined
@@ -208,6 +217,8 @@ async function composeRemoteApplicationStage(input: {
       isDispatchAllowed: () => dispatchAdmissionOpen,
       // Absent = the production serializer (see createRemoteBackendRuntime).
       ...(input.promptSerializer === undefined ? {} : { promptSerializer: input.promptSerializer }),
+      ...(input.delivery === undefined ? {} : { delivery: input.delivery }),
+      ...(input.surfaceRevision === undefined ? {} : { surfaceRevision: input.surfaceRevision }),
     })
     // ONE owner registry shared by owners + retirement (never constructed
     // independently — that would create a second owner truth). The SAME
@@ -360,11 +371,11 @@ export async function createRemoteApplicationRuntime(
  * this function owns exactly the Backend, owner registry, presentation bundle
  * and the selected core.
  *
- * `selected.disposeTransport()` memoizes ONE release of presentation/backend/
- * domains, so the runner (which may call it during its own teardown) and the
- * Client bootstrap (final fallback) can both ask for it without a second
- * unmount. It never releases the Client UI subtree or the B1 transport — those
- * stay with the Client bootstrap.
+ * `selected.disposeTransport()` memoizes ONE release of the presentation and
+ * backend adapters, so the runner (which may call it during its own teardown)
+ * and the Client bootstrap (final fallback) can both ask for it without a
+ * second unmount. It never releases the Client UI subtree, the root Domain
+ * graph or the B1 transport — those stay with the Client bootstrap.
  */
 export async function createRemoteApplicationRuntimeFromClient(
   options: SplitRemoteApplicationRuntimeOptions,
@@ -373,6 +384,8 @@ export async function createRemoteApplicationRuntimeFromClient(
     client: options.domains,
     fetch: options.fetch,
     ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
+    ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
+    ...(options.surfaceRevision === undefined ? {} : { surfaceRevision: options.surfaceRevision }),
   })
   let transportDisposed = false
   return {
@@ -386,11 +399,11 @@ export async function createRemoteApplicationRuntimeFromClient(
         if (transportDisposed) return
         transportDisposed = true
         // Presentation task first (official ClientSessions / JobClient still
-        // mounted), then the backend adapters, then the borrowed Client
-        // Domain graph. The Client UI subtree and B1 transport are NOT ours.
+        // mounted), then the backend adapters. The root Domain graph, the
+        // Client UI subtree and the B1 transport are NOT owned here: the
+        // split Client root disposes them after every surface revision.
         const errors = [
           ...await collectDisposeErrors(() => stage.disposeAdapters()),
-          ...await collectDisposeErrors(() => options.domains.dispose()),
         ]
         if (errors.length > 0) throwAggregated(errors, 'split remote application transport disposal')
       },
