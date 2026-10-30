@@ -2436,7 +2436,7 @@ async function main() {
         sha256: candidateSha256,
         dshVersion: targetDshVersion,
         directHelp: 'pass',
-        t01t26: 'pass',
+        t01t26: 'pass except T26a artifact-missing NOT_VERIFIED (row-absence control passes)',
         surface: 'T27-T39 pass',
       })
     } finally {

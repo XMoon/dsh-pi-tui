@@ -384,7 +384,9 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
      * mounts the runner as its own Cordis fiber on the SAME Client Context.
      */
     const mountRunner: NonNullable<LocalClientComposition['mountRunner']> = async input => {
-      const bridge = createLocalClientSurfaceBridge(code => { void stop(code) })
+      const bridge = createLocalClientSurfaceBridge(code => {
+        runDetached('local client: surface exit', () => stop(code), { diag })
+      })
       // The Client process launcher provides `appExit`; a sibling runner fiber
       // resolves it through the root service store, so it must exist before the
       // runner's first synchronous read.
