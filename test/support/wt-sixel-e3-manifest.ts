@@ -294,9 +294,22 @@ export function validateWtE3Manifest(
   const caseFailures: string[] = []
   const verifiedCases: string[] = []
   for (const [caseId, entries] of byCase) {
-    const trace = entries.find((entry) => entry.row.phase === 'trace')
+    const traceRows = entries.filter((entry) => entry.row.phase === 'trace')
     const frames = entries.filter((entry) => isFrameRow(entry.row))
-    if (frames.length === 0) caseFailures.push(`${caseId}: no frame row`)
+    // RFL-012: an EMPTY frame list makes `frames.every(...)` true, so a case with
+    // only bookkeeping rows could be counted as verified. A case must prove at
+    // least one picture; stop before the every() check.
+    if (frames.length === 0) {
+      caseFailures.push(`${caseId}: no frame row`)
+      continue
+    }
+    // Exactly one trace, for the same reason: duplicates would let a PASS shadow a
+    // FAIL (RFL-011 applies the same rule to cleanup below).
+    if (traceRows.length !== 1) {
+      caseFailures.push(`${caseId}: expected exactly one trace row, found ${traceRows.length}`)
+      continue
+    }
+    const trace = traceRows[0]!
     if (trace === undefined) {
       caseFailures.push(`${caseId}: no trace row (frames cannot be verified without the terminal facts)`)
       continue
@@ -305,14 +318,15 @@ export function validateWtE3Manifest(
       caseFailures.push(`${caseId}: trace row failed: ${trace.verdict.failures.join('; ')}`)
       continue
     }
-    // RFL-009: a case whose window was never confirmed closed has leaked a
-    // 900-second subject; its evidence cannot be counted, and the leak must not
-    // be silently dropped from the gate.
-    const cleanup = entries.find((entry) => entry.row.phase === 'cleanup')
-    if (cleanup === undefined) {
-      caseFailures.push(`${caseId}: no cleanup row (the window teardown is unverified)`)
+    // RFL-009 + RFL-011: a case whose window was never confirmed closed has leaked
+    // a 900-second subject; its evidence cannot be counted. Exactly ONE cleanup row
+    // is required — `find()` would let a PASS shadow a later FAIL.
+    const cleanupRows = entries.filter((entry) => entry.row.phase === 'cleanup')
+    if (cleanupRows.length !== 1) {
+      caseFailures.push(`${caseId}: expected exactly one cleanup row, found ${cleanupRows.length} (the window teardown is unverified)`)
       continue
     }
+    const cleanup = cleanupRows[0]!
     if (cleanup.verdict.ok !== true || cleanup.row.result !== 'PASS') {
       caseFailures.push(`${caseId}: cleanup failed: ${cleanup.verdict.failures.join('; ') || String(cleanup.row.reason ?? cleanup.row.result)}`)
       continue

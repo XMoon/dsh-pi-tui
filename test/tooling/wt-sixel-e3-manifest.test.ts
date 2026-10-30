@@ -265,7 +265,7 @@ test('a frame with no trace row does not count as a verified case (RFL-001)', (t
   writeFileSync(path, `${JSON.stringify(soundRow(root))}\n`)
   const verdict = validateWtE3Manifest(path, { root })
   assert.equal(verdict.passes, 0, 'a frame without its trace proves no terminal facts')
-  assert.ok(verdict.caseFailures.some((failure: string) => failure.includes('no trace row')), verdict.caseFailures.join('; '))
+  assert.ok(verdict.caseFailures.some((failure: string) => failure.includes('exactly one trace row')), verdict.caseFailures.join('; '))
 })
 
 test('a case whose trace failed is not counted even when its frame is sound', (t) => {
@@ -339,7 +339,7 @@ test('a case with NO cleanup row is not counted as verified (RFL-009)', (t) => {
   writeFileSync(path, `${JSON.stringify(soundRow(root))}\n${JSON.stringify(traceRow(root))}\n`)
   const verdict = validateWtE3Manifest(path, { root })
   assert.equal(verdict.passes, 0)
-  assert.ok(verdict.caseFailures.some((failure: string) => failure.includes('no cleanup row')), verdict.caseFailures.join('; '))
+  assert.ok(verdict.caseFailures.some((failure: string) => failure.includes('exactly one cleanup row')), verdict.caseFailures.join('; '))
 })
 
 test('a trace row recorded as GUI_BLOCKED cannot close a case (RFL-010)', (t) => {
@@ -354,6 +354,47 @@ test('a trace row recorded as GUI_BLOCKED cannot close a case (RFL-010)', (t) =>
   const verdict = validateWtE3Manifest(path, { root })
   assert.equal(verdict.passes, 0)
   assert.ok(verdict.caseFailures.some((failure: string) => failure.includes('trace row failed')), verdict.caseFailures.join('; '))
+})
+
+test('a duplicate cleanup row cannot hide a FAILED teardown (RFL-011)', (t) => {
+  const { root } = workspace(t)
+  const path = join(root, 'manifest.jsonl')
+  writeFileSync(
+    path,
+    `${JSON.stringify(soundRow(root))}\n${JSON.stringify(traceRow(root))}\n${JSON.stringify(cleanupRow())}\n${JSON.stringify(
+      cleanupRow({ result: 'FAIL', reason: 'the case window did not go away' }),
+    )}\n`,
+  )
+  const verdict = validateWtE3Manifest(path, { root })
+  assert.equal(verdict.passes, 0, 'a PASS cannot shadow a later FAILED cleanup')
+  assert.ok(
+    verdict.caseFailures.some((failure: string) => failure.includes('exactly one cleanup row')),
+    verdict.caseFailures.join('; '),
+  )
+})
+
+test('a case with no frame row is never counted as verified (RFL-012)', (t) => {
+  const { root } = workspace(t)
+  const path = join(root, 'manifest.jsonl')
+  // Sound trace + cleanup but NO picture: an empty `every()` used to return true.
+  writeFileSync(path, `${JSON.stringify(traceRow(root))}\n${JSON.stringify(cleanupRow())}\n`)
+  const verdict = validateWtE3Manifest(path, { root })
+  assert.equal(verdict.passes, 0)
+  assert.ok(verdict.caseFailures.some((failure: string) => failure.includes('no frame row')), verdict.caseFailures.join('; '))
+})
+
+test('a duplicate trace row cannot shadow a FAILED trace (RFL-011)', (t) => {
+  const { root } = workspace(t)
+  const path = join(root, 'manifest.jsonl')
+  writeFileSync(
+    path,
+    `${JSON.stringify(soundRow(root))}\n${JSON.stringify(traceRow(root))}\n${JSON.stringify(
+      traceRow(root, { result: 'GUI_BLOCKED' }),
+    )}\n${JSON.stringify(cleanupRow())}\n`,
+  )
+  const verdict = validateWtE3Manifest(path, { root })
+  assert.equal(verdict.passes, 0)
+  assert.ok(verdict.caseFailures.some((failure: string) => failure.includes('exactly one trace row')), verdict.caseFailures.join('; '))
 })
 
 test('a cleanup row is not mistaken for a frame of the case', (t) => {
