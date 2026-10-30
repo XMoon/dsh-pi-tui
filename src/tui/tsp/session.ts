@@ -2044,7 +2044,27 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const flushStatus = (): void => {
     // TSP-7 PR-A: the legacy banner text is gone, so this is the presentation
     // repaint only — the facts above are read by `dockView` on the next frame.
+    statusFactsFlushScheduled = false
     render()
+  }
+  /**
+   * TSP-7 PR-B (external review F2): the deferred legacy-facts repaint. The
+   * surface's activity projection publishes the SAME business fact batch as a
+   * formal display commit a moment later (`commitDisplaySubject` renders once,
+   * sampling the store that already carries the new activity); a synchronous
+   * render HERE would first paint the new legacy word beside the OLD native run
+   * state — a non-atomic intermediate frame. The flush therefore coalesces into
+   * the same tick's display commit when one follows, and only schedules its own
+   * repaint when none does (a title/todo-only commit still updates its line).
+   */
+  let statusFactsFlushScheduled = false
+  const scheduleStatusFlush = (): void => {
+    if (statusFactsFlushScheduled) return
+    statusFactsFlushScheduled = true
+    queueMicrotask(() => {
+      if (!statusFactsFlushScheduled || disposed) { statusFactsFlushScheduled = false; return }
+      flushStatus()
+    })
   }
 
   const display: SurfaceDisplaySeam = {
@@ -2067,6 +2087,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         throw new Error('the TSP renderer has no status reader: the mount must bind one')
       }
       presentedStatus = statusReader.snapshot()
+      // TSP-7 PR-B (F2): this render carries the SAME tick's legacy facts too
+      // (the scheduled flush is absorbed here — one frame, both fact families).
+      statusFactsFlushScheduled = false
       render()
     },
     commitStatusFacts(facts) {
@@ -2078,7 +2101,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if ('sessionTitle' in facts) statusFacts.sessionTitle = facts.sessionTitle
       if (facts.todos !== undefined) statusFacts.todos = facts.todos
       if (facts.compactionPhase !== undefined) statusFacts.compactionPhase = facts.compactionPhase
-      flushStatus()
+      // TSP-7 PR-B (F2): defer the legacy repaint to the SAME tick's display
+      // commit (the surface's activity projection publishes right after this
+      // call); only a facts-only commit takes the scheduled repaint itself.
+      scheduleStatusFlush()
     },
     resetSessionFacts() {
       // The HYDRATE-TAIL clear only: stale notices and the exit latch. The

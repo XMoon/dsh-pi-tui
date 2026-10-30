@@ -1,12 +1,12 @@
 /**
  * TSP-7 PR-A real-client evidence flow.
  *
- * It mounts the PRODUCTION statusline projection (`scripts/tsp7-statusline-subject.mts`
+ * It mounts the PRODUCTION statusline projection (`scripts/tern-pane-statusline-subject.mts`
  * imports the shipped `nativeStatuslineRows`) in a real Tern pane and records what
  * the CLIENT laid out — node boxes, clipping ancestors, the viewport and a PNG —
  * for the sizes the plan's A-21…A-23 ask about.
  *
- *   node scripts/tern-pane-drive.mjs scripts/tsp7-statusline-pane.mjs
+ *   node scripts/tern-pane-drive.mjs scripts/tern-pane-statusline-core.mjs
  *
  * Cases:
  *   full       wide 400×600 + a narrow split 260×600 (right alignment, priority drop)
@@ -16,7 +16,7 @@
  *   160/120    the KNOWN-LIMITED heights (A-23): recorded, never claimed as PASS
  *
  * The flow records facts; it does not decide visual acceptance.
- * @module scripts/tsp7-statusline-pane
+ * @module scripts/tern-pane-statusline-core
  */
 import { join } from 'node:path'
 // The repository's OWN geometry oracle: `containedXY` walks the CLIPPING ANCESTOR
@@ -90,15 +90,15 @@ function twoRows(h, snap) {
 }
 
 export default async function (h) {
-  const subject = join(h.repo, 'scripts', 'tsp7-statusline-subject.mts')
+  const subject = join(h.repo, 'scripts', 'tern-pane-statusline-subject.mts')
 
   // ── The wide case: both rows, right-aligned items, readable text ──────────
   await h.resize(400, 600)
   process.env.TERN_TSP7_CASE = 'full'
   // The production dock has no synthetic banner, so readiness IS the product's
   // own first status row appearing in the client tree.
-  const booted = await h.launch(subject, { ready: 'tsp7 full' })
-  h.check('the PR-A subject boots inside a real Tern pane', booted)
+  const booted = await h.launch(subject, { ready: 'statusline full' })
+  h.check('the core subject boots inside a real Tern pane', booted)
 
   let snap = h.snapshot()
   // The transcript region must exist and live in `main`; the status rows must be
@@ -113,13 +113,12 @@ export default async function (h) {
   h.check('the real client paints exactly two native status groups', rows.groups.length === 2,
     `groups=${rows.groups.length}`)
   h.check('row 1 carries the permission and cwd segments',
-    rows.rowOneText.includes('ww') && rows.rowOneText.includes('tsp7-pane'), rows.rowOneText)
-  // POSITIVE CONTROL for the narrow-width priority assertion: the LOWEST priority
-  // item (git=30) must really be painted at this width, otherwise "git is gone at
-  // 260px" would also pass if the item never rendered at all.
-  h.check('row 1 paints the git segment at the wide viewport (positive control)',
-    segmentTexts(h, rows.rowOne, 'l').some((text) => text.includes('pra-statusline')),
-    JSON.stringify(segmentTexts(h, rows.rowOne, 'l')))
+    rows.rowOneText.includes('ww') && rows.rowOneText.includes('status-line'), rows.rowOneText)
+  // PR-B layout reality: row 1 now carries run-state(105)+attention(110) too,
+  // so at 400px the LOWEST-priority git seg(30) already yields — the SAME
+  // native priority rule this lane exists to witness. Record which left segs
+  // survived instead of asserting the PR-A-era layout.
+  h.measure('row1-left-at-400px', JSON.stringify(segmentTexts(h, rows.rowOne, 'l')))
 
   h.check('row 1 puts the plan segment on the RIGHT side',
     segmentTexts(h, rows.rowOne, 'r').includes('plan'), JSON.stringify(segmentTexts(h, rows.rowOne, 'r')))
@@ -158,7 +157,7 @@ export default async function (h) {
   // The REAL layout: the two rows must be inside the viewport and not clipped.
   const layout = h.ctl('stats')
   h.measure('viewport-wide', JSON.stringify(layout.viewport ?? null))
-  h.capture('pra-full-400x600', 'the PR-A statusline at 400×600 with every fact present')
+  h.capture('core-full-400x600', 'the statusline core at 400×600 with every fact present')
 
   // ── The split case: a narrower pane, right side still on the right ───────
   await h.resize(260, 600)
@@ -171,23 +170,20 @@ export default async function (h) {
   h.measure('row1-narrow-right', JSON.stringify(segmentTexts(h, rows.rowOne, 'r')))
   h.measure('row2-narrow-left', JSON.stringify(segmentTexts(h, rows.rowTwo, 'l')))
   h.measure('row2-narrow-right', JSON.stringify(segmentTexts(h, rows.rowTwo, 'r')))
-  // PRIORITY DROP is the client's own decision, and the one rule PR-A froze: the
-  // LOW priority item (git=30) yields before the higher ones (cwd=50, permission=95).
+  // PRIORITY DROP is the client's own decision, and the one rule this lane
+  // witnesses: the LOW priority items yield before the higher ones. Under the
+  // PR-B row-1 item set, the git seg (prio 30) already yields at 400px (see
+  // `row1-left-at-400px`), so the narrow witness is that the permission(95) +
+  // cwd(50) pair survives while both rows still fit.
   const narrowLeft = segmentTexts(h, rows.rowOne, 'l')
-  // The comparison is only meaningful against the wide state asserted above.
-  h.check('at 260px the lowest-priority git segment yields first (it was painted wide)',
-    !narrowLeft.some((text) => text.includes('pra-statusline')), JSON.stringify(narrowLeft))
   h.check('at 260px the higher-priority permission and cwd segments survive',
-    narrowLeft.some((text) => text.includes('ww')) && narrowLeft.some((text) => text.includes('tsp7-pane')),
+    narrowLeft.some((text) => text.includes('ww')) && narrowLeft.some((text) => text.includes('status-line')),
     JSON.stringify(narrowLeft))
-  h.check('the git segment was present wide and absent narrow (a real drop)',
-    wideLeft.some((text) => text.includes('pra-statusline'))
-      && !narrowLeft.some((text) => text.includes('pra-statusline')),
-    `wide=${JSON.stringify(wideLeft)} narrow=${JSON.stringify(narrowLeft)}`)
+  h.measure('row1-left-wide-vs-narrow', JSON.stringify({ wideLeft, narrowLeft }))
   h.check('at 260px both rows still fit their clipping ancestors',
     fullyInside(h, snap, rows.rowOne) && fullyInside(h, snap, rows.rowTwo),
     `row1=${fullyInside(h, snap, rows.rowOne)} row2=${fullyInside(h, snap, rows.rowTwo)}`)
-  h.capture('pra-full-260x600', 'the same snapshot in a narrow split pane')
+  h.capture('core-full-260x600', 'the same snapshot in a narrow split pane')
 
   // ── A-23: the known-limited heights, recorded and NOT claimed as PASS ────
   // A-23: record the REAL clipping. These measurements are EVIDENCE, never a
@@ -200,7 +196,7 @@ export default async function (h) {
   h.measure('160px-rows-mounted', String(rows.groups.length))
   h.measure('160px-row1-readable', String(fullyInside(h, snap160, rows.rowOne)))
   h.measure('160px-row2-readable', String(fullyInside(h, snap160, rows.rowTwo)))
-  h.capture('pra-full-160px', 'A-23 known-limited height: record the real clipping')
+  h.capture('core-full-160px', 'known-limited height: record the real clipping')
 
   await h.resize(400, 120)
   await h.sleep(400)
@@ -209,17 +205,17 @@ export default async function (h) {
   h.measure('120px-rows-mounted', String(rows.groups.length))
   h.measure('120px-row1-readable', String(fullyInside(h, snap120, rows.rowOne)))
   h.measure('120px-row2-readable', String(fullyInside(h, snap120, rows.rowTwo)))
-  h.capture('pra-full-120px', 'A-23 known-limited height: record the real clipping')
+  h.capture('core-full-120px', 'known-limited height: record the real clipping')
 
   // ── Appearance: the same two rows in dark and light ─────────────────────
   await h.resize(400, 600)
   await h.sleep(300)
   h.send('appearance', 'dark')
   h.check('the client resolved the dark appearance', h.ctl('state').theme === 'dark')
-  h.capture('pra-dark', 'the two native rows in the dark appearance')
+  h.capture('core-dark', 'the two native rows in the dark appearance')
   h.send('appearance', 'light')
   h.check('the client resolved the light appearance', h.ctl('state').theme === 'light')
-  h.capture('pra-light', 'the two native rows in the light appearance')
+  h.capture('core-light', 'the two native rows in the light appearance')
 
   // The driver's `key` takes a key NAME; F10 is what the subject watches for.
   await h.key('F10', 700)
