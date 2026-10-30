@@ -92,6 +92,13 @@ export interface LocalClientStatus {
    * merged into one `ready`.
    */
   readonly surfaceMounted: boolean
+  /**
+   * The current surface revision identity (qualification observation only).
+   * A replacement creates a NEW number; it never grants Host authority.
+   */
+  readonly surfaceRevision?: number
+  /** The mounted runner fiber's UID for the current revision. */
+  readonly surfaceFiberUid?: number
   readonly fiberOwner: 'client-root'
   readonly rootFiberUid?: number
   readonly extensionService: { readonly present: true }
@@ -123,6 +130,8 @@ export interface MountedLocalClientRunner {
   readonly stopped: Promise<number>
   /** Dispose the runner fiber (surface + session retirement + adapters). */
   dispose(): Promise<void>
+  /** The runner fiber's Cordis UID (qualification observation only). */
+  readonly fiberUid?: number
 }
 
 /** The inputs the process composition root's lazy runner mount receives. */
@@ -186,6 +195,14 @@ export interface LocalClientHandle {
   /** Fresh snapshot from the official Connection on every read. */
   readonly status: LocalClientStatus
   /**
+   * Qualification-only same-process surface replacement: retire the current
+   * revision (runner -> UI -> memoized application/Domains) and mount a fresh
+   * one on the SAME Client Context/transport. Never touches the Host. The
+   * caller (local-client-entry's qualification signal path) owns the process
+   * exit on failure; this method is not a public root export.
+   */
+  replaceSurfaceForQualification(): Promise<void>
+  /**
    * Dispose the Client composition, then the official Client transport, then
    * the Client root. The caller still owns the process seat.
    */
@@ -225,8 +242,9 @@ async function waitForAssemblyHold(
   stage: 'domain' | 'surface',
   signal: AbortSignal | undefined,
   onHold: ((record: Record<string, unknown>) => void) | undefined,
+  envName = 'SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY',
 ): Promise<void> {
-  const spec = process.env.SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY
+  const spec = process.env[envName]
   if (spec === undefined || spec === '') return
   const [name, path] = spec.split('@')
   if (name !== stage || path === undefined || path === '') return
@@ -283,10 +301,60 @@ function throwDisposalErrors(errors: readonly unknown[], label: string): void {
 }
 
 /**
+ * The ONE serial surface-revision task slot. Revision mounts and the final
+ * Client disposal chain through it, so an HMR replacement can never overlap
+ * another replacement, a stop, or the root release. A failed task settles the
+ * slot and the next task still runs (the caller owns the failure decision).
+ */
+export class SurfaceRevisionTasks {
+  private tail: Promise<void> = Promise.resolve()
+
+  run<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.tail.then(task, task)
+    this.tail = run.then(() => {}, () => {})
+    return run
+  }
+
+  /** Resolve after every task queued SO FAR has settled. */
+  settle(): Promise<void> {
+    return this.tail
+  }
+}
+
+/** One mounted surface revision: the complete graph one runner owns. */
+interface SurfaceRevision {
+  readonly id: number
+  domains?: MountedRemoteClientDomains
+  ui?: RemoteClientUiRuntime
+  application?: SplitRemoteApplicationRuntime
+  runner?: MountedLocalClientRunner
+  surfaceMounted: boolean
+  statusCleanup?: () => void
+}
+
+/** The official `tuiMainView` reference one mounted Domain graph holds. */
+function openSessionIdFor(domains: MountedRemoteClientDomains): string | undefined {
+  const snapshot = domains.sessions.list.getSnapshot()
+  for (const id of snapshot.ids) {
+    const info = domains.sessions.retainInfo(id).getSnapshot()
+    if ((info.retainedBy.tuiMainView ?? 0) > 0) return String(id)
+  }
+  return undefined
+}
+
+/**
  * The ONE split-Client surface composition: Domain graph -> Client UI
  * subtree -> Remote application runtime -> real runner. Every stage is
  * recorded the instant it exists, so a failure at any later stage unwinds the
  * whole partial composition in reverse and the original error stays primary.
+ *
+ * The composition is a sequence of SURFACE REVISIONS over the SAME Client
+ * Context and B1 transport. A normal Client process mounts exactly one
+ * revision; the qualification-only replacement path retires the current
+ * revision (runner -> Client UI -> the memoized application/Domain release)
+ * and mounts a fresh one on the same Context. The host is never involved:
+ * its `runProfile`, Agent, Job and service fibers stay owned by the Host
+ * process.
  */
 async function startSurfaceLocalClient(
   context: Context,
@@ -309,52 +377,11 @@ async function startSurfaceLocalClient(
     throw new Error('local client entry: surface mode requires the process composition runner mount')
   }
 
-  let domains: MountedRemoteClientDomains | undefined
-  let ui: RemoteClientUiRuntime | undefined
-  let application: SplitRemoteApplicationRuntime | undefined
-  let runner: MountedLocalClientRunner | undefined
+  let currentRevision: SurfaceRevision | undefined
+  let revisionSequence = 0
   let disposed = false
-  let surfaceMounted = false
-  let domainsOpen = false
-  let surfaceStatusCleanup: (() => void) | undefined
-
-  /** The official `tuiMainView` reference the visible SessionRuntime holds. */
-  const openSessionId = (): string | undefined => {
-    if (!domainsOpen || domains === undefined) return undefined
-    const snapshot = domains.sessions.list.getSnapshot()
-    for (const id of snapshot.ids) {
-      const info = domains.sessions.retainInfo(id).getSnapshot()
-      if ((info.retainedBy.tuiMainView ?? 0) > 0) return String(id)
-    }
-    return undefined
-  }
-
-  const unwind = async (): Promise<void> => {
-    surfaceMounted = false
-    domainsOpen = false
-    surfaceStatusCleanup?.()
-    surfaceStatusCleanup = undefined
-    const errors: unknown[] = []
-    if (runner !== undefined) {
-      try { await runner.dispose() } catch (error) { errors.push(error) }
-    }
-    if (ui !== undefined) {
-      try { await ui.dispose() } catch (error) { errors.push(error) }
-    }
-    // The runner may already have released the selected adapters; this is the
-    // SAME memoized release (idempotent). When the runner never mounted, this
-    // is the first release and still runs BEFORE the borrowed transport.
-    if (application !== undefined) {
-      try { await application.selected.disposeTransport() } catch (error) { errors.push(error) }
-    } else if (domains !== undefined) {
-      try { await domains.dispose() } catch (error) { errors.push(error) }
-    }
-    // The borrowed transport and the Client root are the ENTRY coordinator's
-    // ownership: this function unwinds only the graph it created, so a stop
-    // during startup and the final handle disposal never race two root owners.
-    throwDisposalErrors(errors, 'local client surface graph')
-  }
-
+  const revisionTasks = new SurfaceRevisionTasks()
+  const enqueueRevision = <T>(task: () => Promise<T>): Promise<T> => revisionTasks.run(task)
   const base = {
     processRole: 'client' as const,
     pid: process.pid,
@@ -368,7 +395,10 @@ async function startSurfaceLocalClient(
   }
   const status = (): LocalClientStatus => {
     const observed = transport.status()
-    const current = openSessionId()
+    const revision = currentRevision
+    const domains = revision?.domains
+    const domainsOpen = revision !== undefined && domains !== undefined
+    const current = domainsOpen ? openSessionIdFor(domains) : undefined
     const privateRemote = domains?.remote as unknown as {
       readonly piTuiFileReferences?: unknown
       readonly piTuiTerminalProgress?: unknown
@@ -378,7 +408,9 @@ async function startSurfaceLocalClient(
       transport: observed.transport,
       sessionOpen: current !== undefined,
       ...(current === undefined ? {} : { openSessionId: current }),
-      surfaceMounted,
+      surfaceMounted: revision?.surfaceMounted === true,
+      ...(revision === undefined ? {} : { surfaceRevision: revision.id }),
+      ...(revision?.runner?.fiberUid === undefined ? {} : { surfaceFiberUid: revision.runner.fiberUid }),
       ...(observed.generationId === undefined ? {} : { generationId: observed.generationId }),
       ...(observed.hostHome === undefined ? {} : { hostHome: observed.hostHome }),
       activeWrappers: observed.activeWrappers,
@@ -402,149 +434,30 @@ async function startSurfaceLocalClient(
     }
   }
 
-  try {
-    signal?.throwIfAborted()
-    domains = await mountRemoteClientDomains({
-      context,
-      dshAnchor,
-      ...(signal === undefined ? {} : { signal }),
-    })
-    domainsOpen = true
-    await waitForAssemblyHold('domain', signal, composition.onQualification)
-    signal?.throwIfAborted()
-    ui = await createRemoteClientUiRuntime({ context, startup: startupFactsOf(startup) })
-    signal?.throwIfAborted()
-    // T34 qualification input: hold ONE write between its real serialization
-    // and the writer's dispatch-admission check. Production never sets this
-    // variable; the production serializer stays the default.
-    const holdPath = process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE
-    let promptSerializer: RemotePromptSerializer | undefined
-    if (holdPath !== undefined && holdPath !== '') {
-      const production = RemotePromptSerializerProduction.overSessions(domains.sessions)
-      promptSerializer = {
-        preflight: message => production.preflight(message),
-        async serialize(message) {
-          const serialized = await production.serialize(message)
-          await waitForQualificationBarrier(holdPath)
-          return serialized
-        },
-      }
-    }
-    application = await createRemoteApplicationRuntimeFromClient({
-      domains,
-      fetch: authenticatedFetch,
-      clientUi: ui,
-      ...(signal === undefined ? {} : { signal }),
-      ...(promptSerializer === undefined ? {} : { promptSerializer }),
-    })
-    signal?.throwIfAborted()
-    // T36 qualification input: probe the private Host RPCs through the ALREADY
-    // mounted Domain namespaces (no second private contribution).
-    if (process.env.SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF === '1') {
-      if (composition.diag === undefined) {
-        throw new Error('local client entry: the private RPC qualification requires the Client diagnostics sink')
-      }
-      const diag = composition.diag
-      process.on('SIGUSR2', () => {
-        const target = openSessionId() ?? domains?.sessions.list.getSnapshot().ids[0]
-        if (target === undefined || domains === undefined) {
-          composition.onQualification?.({ op: 'private-rpc-proof', error: 'no retained Session' })
-          return
-        }
-        const currentDomains = domains
-        runDetached('surface private RPC proof', async () => {
-          const remote = currentDomains.remote as unknown as {
-            readonly piTuiFileReferences: {
-              list(sessionId: string, query: string): Promise<{ readonly ok: boolean; readonly value?: { readonly kind?: unknown } }>
-            }
-            readonly piTuiTerminalProgress: {
-              watch(sessionId: string): {
-                dispose(): void
-                [Symbol.asyncIterator](): AsyncIterator<{ readonly kind?: unknown }>
-              }
-            }
-          }
-          const sessionId = String(target)
-          const file = await remote.piTuiFileReferences.list(sessionId, 'notes')
-          const watch = remote.piTuiTerminalProgress.watch(sessionId)
-          const iterator = watch[Symbol.asyncIterator]()
-          let terminalKind: unknown
-          try {
-            const first = await iterator.next()
-            terminalKind = first.done === true ? 'ended' : first.value?.kind
-          } finally {
-            watch.dispose()
-          }
-          composition.onQualification?.({
-            op: 'private-rpc-proof',
-            sessionId,
-            fileOk: file.ok === true,
-            fileKind: file.ok ? file.value?.kind : undefined,
-            terminalKind,
-            owners: status().owners,
-            privateNamespaces: status().privateNamespaces,
-          })
-        }, { diag })
-      })
-    }
-    // T34 qualification input: close the writer's pre-dispatch admission while
-    // the serializer barrier holds the write; the surface stays mounted so the
-    // restored draft is observable.
-    if (holdPath !== undefined && holdPath !== '') {
-      // SIGUSR2 is the T34 admission-stop trigger; the private-RPC proof above
-      // uses the same signal in its own process (the two env flags never
-      // coexist), keeping the qualification surface to standard POSIX signals.
-      process.on('SIGUSR2', () => {
-        application?.selected.stopSurfaceAdmission?.()
-        composition.onQualification?.({ op: 'stop-surface-admission' })
-      })
-    }
-    const override: RemoteApplicationOverride = {
-      selected: application.selected,
-      presentation: application.presentation,
-      extensionService: application.extensionService,
-    }
-    // Schema defaults + the explicit Client-local startup facts. No fabricated
-    // profile document: a preference's absence resolves to its schema default.
-    const config = TuiConfigSchema({
-      ...(startup.sessionId === undefined ? {} : { sessionId: startup.sessionId }),
-    } as never)
-    signal?.throwIfAborted()
-    runner = await mountRunner({ context, config, override })
-    await waitForAssemblyHold('surface', signal, composition.onQualification)
-    signal?.throwIfAborted()
-    // Wait for the physical surface, not merely the mounted runner fiber. An
-    // exit request raised during startup is CANCELLATION, never a silent hang.
-    const abortReady = abortable(signal)
-    try {
-      await Promise.race([
-        runner.ready,
-        runner.stopped.then(code => {
-          throw new Error(`local client entry: the surface startup was cancelled by exit request ${String(code)}`)
-        }),
-        abortReady.promise,
-      ])
-    } finally {
-      abortReady.cancel()
-    }
-    surfaceMounted = true
-    // The qualification-visible projection of the REAL `tuiMainView`
-    // ownership: the official Session list names the candidate ids and each
-    // id's official `retainInfo` source is the authoritative reference count.
-    // A same-id re-retain or an owner switch therefore emits a new record, and
-    // a sessionless surface keeps reporting `sessionOpen: false`.
-    let lastStatusKey = ''
-    const emitStatus = (): void => {
-      if (composition.onStatus === undefined) return
-      const current = status()
-      const key = JSON.stringify([current.transport, current.generationId, current.sessionOpen, current.openSessionId])
-      if (key === lastStatusKey) return
-      lastStatusKey = key
-      composition.onStatus(current)
-    }
+  let lastStatusKey = ''
+  const emitStatus = (): void => {
+    if (composition.onStatus === undefined) return
+    const current = status()
+    const key = JSON.stringify([
+      current.transport,
+      current.generationId,
+      current.sessionOpen,
+      current.openSessionId,
+      current.surfaceMounted,
+      current.surfaceRevision,
+      current.surfaceFiberUid,
+    ])
+    if (key === lastStatusKey) return
+    lastStatusKey = key
+    composition.onStatus(current)
+  }
+
+  /** Attach the revision-local official status subscriptions. */
+  const subscribeRevisionStatus = (revision: SurfaceRevision): void => {
+    const domains = revision.domains
+    if (domains === undefined) return
     const watched = new Map<string, () => void>()
     const watchListedSessions = (): void => {
-      if (domains === undefined) return
       for (const id of domains.sessions.list.getSnapshot().ids) {
         const key = String(id)
         if (watched.has(key)) continue
@@ -557,23 +470,210 @@ async function startSurfaceLocalClient(
     })
     // The transport identity is part of the observable tuple: a physical mux
     // drop/reconnect changes the official Connection generation and must emit
-    // a new record (the retained `tuiMainView` reference is re-adopted by the
-    // official service; this record proves the Client observed the rollover).
+    // a new record. The retained `tuiMainView` reference is re-adopted by the
+    // official service; this record proves the Client observed the rollover.
     const unsubscribeGeneration = transport.connection.generation.subscribe(emitStatus)
-    surfaceStatusCleanup = (): void => {
+    revision.statusCleanup = (): void => {
       unsubscribeList()
       unsubscribeGeneration()
       for (const unsubscribe of watched.values()) unsubscribe()
       watched.clear()
     }
     watchListedSessions()
-    emitStatus()
-  } catch (error) {
-    const cleanupErrors: unknown[] = []
+  }
+
+  /** Mount one fresh revision on the SAME Client Context/transport. */
+  const mountRevision = async (kind: 'initial' | 'hmr', sessionIdOverride?: string): Promise<SurfaceRevision> => {
+    signal?.throwIfAborted()
+    const revision: SurfaceRevision = { id: ++revisionSequence, surfaceMounted: false }
+    currentRevision = revision
+    revision.domains = await mountRemoteClientDomains({
+      context,
+      dshAnchor,
+      ...(signal === undefined ? {} : { signal }),
+    })
+    await waitForAssemblyHold('domain', signal, composition.onQualification)
+    signal?.throwIfAborted()
+    const revisionStartup = {
+      ...startupFactsOf(startup),
+      ...(sessionIdOverride === undefined ? {} : { sessionId: sessionIdOverride }),
+    }
+    revision.ui = await createRemoteClientUiRuntime({ context, startup: revisionStartup })
+    signal?.throwIfAborted()
+    // T34 qualification input: hold ONE write between its real serialization
+    // and the writer's dispatch-admission check. Production never sets this
+    // variable; the production serializer stays the default.
+    const holdPath = process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE
+    let promptSerializer: RemotePromptSerializer | undefined
+    if (holdPath !== undefined && holdPath !== '') {
+      const production = RemotePromptSerializerProduction.overSessions(revision.domains.sessions)
+      promptSerializer = {
+        preflight: message => production.preflight(message),
+        async serialize(message) {
+          const serialized = await production.serialize(message)
+          await waitForQualificationBarrier(holdPath)
+          return serialized
+        },
+      }
+    }
+    revision.application = await createRemoteApplicationRuntimeFromClient({
+      domains: revision.domains,
+      fetch: authenticatedFetch,
+      clientUi: revision.ui,
+      ...(signal === undefined ? {} : { signal }),
+      ...(promptSerializer === undefined ? {} : { promptSerializer }),
+    })
+    signal?.throwIfAborted()
+    // T59 qualification input: force the NEW revision's UI mount to fail after
+    // the old revision was already retired. Production never sets this.
+    if (kind === 'hmr' && process.env.SPLIT_PROCESS_CLIENT_HMR_FAIL === '1') {
+      throw new Error('local client entry: qualification forced HMR surface mount failure')
+    }
+    const override: RemoteApplicationOverride = {
+      selected: revision.application.selected,
+      presentation: revision.application.presentation,
+      extensionService: revision.application.extensionService,
+    }
+    // Schema defaults + the explicit Client-local startup facts. No fabricated
+    // profile document: a preference's absence resolves to its schema default.
+    const activeSessionId = sessionIdOverride ?? startup.sessionId
+    const config = TuiConfigSchema({
+      ...(activeSessionId === undefined ? {} : { sessionId: activeSessionId }),
+    } as never)
+    signal?.throwIfAborted()
+    revision.runner = await mountRunner({ context, config, override })
+    // T59 mid-HMR hold: a replacement-only barrier between the new runner
+    // fiber mount and its physical surface readiness. Production never sets it.
+    await waitForAssemblyHold(
+      'surface',
+      signal,
+      composition.onQualification,
+      kind === 'hmr' ? 'SPLIT_PROCESS_CLIENT_HMR_HOLD' : 'SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY',
+    )
+    signal?.throwIfAborted()
+    // Wait for the physical surface, not merely the mounted runner fiber. An
+    // exit request raised during startup is CANCELLATION, never a silent hang.
+    const abortReady = abortable(signal)
     try {
-      await unwind()
-    } catch (cleanupError) {
-      cleanupErrors.push(cleanupError)
+      await Promise.race([
+        revision.runner.ready,
+        revision.runner.stopped.then(code => {
+          throw new Error(`local client entry: the surface startup was cancelled by exit request ${String(code)}`)
+        }),
+        abortReady.promise,
+      ])
+    } finally {
+      abortReady.cancel()
+    }
+    revision.surfaceMounted = true
+    subscribeRevisionStatus(revision)
+    emitStatus()
+    return revision
+  }
+
+  /** Reverse-dispose exactly one revision: runner -> UI -> application/Domains. */
+  const disposeRevision = async (revision: SurfaceRevision): Promise<void> => {
+    revision.surfaceMounted = false
+    emitStatus()
+    revision.statusCleanup?.()
+    revision.statusCleanup = undefined
+    const errors: unknown[] = []
+    if (revision.runner !== undefined) {
+      try { await revision.runner.dispose() } catch (error) { errors.push(error) }
+    }
+    if (revision.ui !== undefined) {
+      try { await revision.ui.dispose() } catch (error) { errors.push(error) }
+    }
+    // The runner may already have released the selected adapters; this is the
+    // SAME memoized release. When the runner never mounted, this is the first
+    // release.
+    if (revision.application !== undefined) {
+      try { await revision.application.selected.disposeTransport() } catch (error) { errors.push(error) }
+    } else if (revision.domains !== undefined) {
+      try { await revision.domains.dispose() } catch (error) { errors.push(error) }
+    }
+    revision.runner = undefined
+    revision.ui = undefined
+    revision.application = undefined
+    revision.domains = undefined
+    throwDisposalErrors(errors, 'local client surface revision')
+  }
+
+  // T36 qualification input: probe the private Host RPCs through the ALREADY
+  // mounted Domain namespaces (no second private contribution). Registered
+  // ONCE on the process: a revision replacement must not duplicate listeners.
+  if (process.env.SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF === '1') {
+    if (composition.diag === undefined) {
+      throw new Error('local client entry: the private RPC qualification requires the Client diagnostics sink')
+    }
+    const diag = composition.diag
+    process.on('SIGUSR2', () => {
+      const revision = currentRevision
+      const domains = revision?.domains
+      if (domains === undefined) {
+        composition.onQualification?.({ op: 'private-rpc-proof', error: 'no retained Session' })
+        return
+      }
+      const target = openSessionIdFor(domains) ?? domains.sessions.list.getSnapshot().ids[0]
+      if (target === undefined) {
+        composition.onQualification?.({ op: 'private-rpc-proof', error: 'no retained Session' })
+        return
+      }
+      const currentDomains = domains
+      runDetached('surface private RPC proof', async () => {
+        const remote = currentDomains.remote as unknown as {
+          readonly piTuiFileReferences: {
+            list(sessionId: string, query: string): Promise<{ readonly ok: boolean; readonly value?: { readonly kind?: unknown } }>
+          }
+          readonly piTuiTerminalProgress: {
+            watch(sessionId: string): {
+              dispose(): void
+              [Symbol.asyncIterator](): AsyncIterator<{ readonly kind?: unknown }>
+            }
+          }
+        }
+        const sessionId = String(target)
+        const file = await remote.piTuiFileReferences.list(sessionId, 'notes')
+        const watch = remote.piTuiTerminalProgress.watch(sessionId)
+        const iterator = watch[Symbol.asyncIterator]()
+        let terminalKind: unknown
+        try {
+          const first = await iterator.next()
+          terminalKind = first.done === true ? 'ended' : first.value?.kind
+        } finally {
+          watch.dispose()
+        }
+        composition.onQualification?.({
+          op: 'private-rpc-proof',
+          sessionId,
+          fileOk: file.ok === true,
+          fileKind: file.ok ? file.value?.kind : undefined,
+          terminalKind,
+          owners: status().owners,
+          privateNamespaces: status().privateNamespaces,
+        })
+      }, { diag })
+    })
+  }
+  // T34 qualification input: close the writer's pre-dispatch admission while
+  // the serializer barrier holds the write; the surface stays mounted so the
+  // restored draft is observable. Registered ONCE for the process.
+  if (process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE !== undefined
+    && process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE !== '') {
+    process.on('SIGUSR2', () => {
+      currentRevision?.application?.selected.stopSurfaceAdmission?.()
+      composition.onQualification?.({ op: 'stop-surface-admission' })
+    })
+  }
+
+  try {
+    await enqueueRevision(async () => { await mountRevision('initial') })
+  } catch (error) {
+    const partial = currentRevision
+    currentRevision = undefined
+    const cleanupErrors: unknown[] = []
+    if (partial !== undefined) {
+      try { await disposeRevision(partial) } catch (cleanupError) { cleanupErrors.push(cleanupError) }
     }
     let primary = error instanceof Error ? error : new Error(String(error))
     for (const cleanupError of cleanupErrors) primary = mergeCause(primary, cleanupError)
@@ -584,11 +684,68 @@ async function startSurfaceLocalClient(
     get status(): LocalClientStatus {
       return status()
     },
+    async replaceSurfaceForQualification(): Promise<void> {
+      await enqueueRevision(async () => {
+        if (disposed) throw new Error('local client entry: the surface revision owner is already disposed')
+        const previous = currentRevision
+        if (previous === undefined) throw new Error('local client entry: no mounted surface revision to replace')
+        const previousSessionId = previous.domains === undefined ? undefined : openSessionIdFor(previous.domains)
+        composition.onQualification?.({ op: 'hmr-revision-start', revision: revisionSequence + 1 })
+        previous.surfaceMounted = false
+        emitStatus()
+        try {
+          await disposeRevision(previous)
+        } catch (error) {
+          composition.onQualification?.({
+            op: 'hmr-revision-failure',
+            phase: 'retire',
+            revision: previous.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          throw error
+        }
+        composition.onQualification?.({ op: 'hmr-revision-retired', revision: previous.id })
+        try {
+          const next = await mountRevision('hmr', previousSessionId)
+          composition.onQualification?.({
+            op: 'hmr-revision-ready',
+            revision: next.id,
+            pid: process.pid,
+            ...(next.runner?.fiberUid === undefined ? {} : { fiberUid: next.runner.fiberUid }),
+            ...(status().generationId === undefined ? {} : { generationId: status().generationId }),
+          })
+        } catch (error) {
+          const partial = currentRevision
+          currentRevision = undefined
+          const cleanupErrors: unknown[] = []
+          if (partial !== undefined) {
+            try { await disposeRevision(partial) } catch (cleanupError) { cleanupErrors.push(cleanupError) }
+          }
+          composition.onQualification?.({
+            op: 'hmr-revision-failure',
+            phase: 'mount',
+            revision: revisionSequence,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          let primary = error instanceof Error ? error : new Error(String(error))
+          for (const cleanupError of cleanupErrors) primary = mergeCause(primary, cleanupError)
+          throw primary
+        }
+      })
+    },
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true
+      // Stop is the ONE outer coordinator: it first aborts the in-flight
+      // revision through `signal`, then waits for that revision task before
+      // releasing the Context. Never release the root underneath a mount.
+      await revisionTasks.settle()
       const errors: unknown[] = []
-      try { await unwind() } catch (error) { errors.push(error) }
+      const revision = currentRevision
+      currentRevision = undefined
+      if (revision !== undefined) {
+        try { await disposeRevision(revision) } catch (error) { errors.push(error) }
+      }
       try { await transport.dispose() } catch (error) { errors.push(error) }
       try { await context.fiber.dispose() } catch (error) { errors.push(error) }
       throwDisposalErrors(errors, 'local client surface')
@@ -660,6 +817,9 @@ export async function startLocalClient(
         activeWrappers: observed.activeWrappers,
         liveSockets: observed.liveSockets,
       }
+    },
+    async replaceSurfaceForQualification(): Promise<void> {
+      throw new Error('local client entry: surface replacement requires the internal surface mode')
     },
     async dispose(): Promise<void> {
       if (disposed) return

@@ -198,6 +198,15 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   let context: import('@deepseek-ai/cordis').Context | undefined
   let transport: LocalClientTransport | undefined
   let handle: LocalClientHandle | undefined
+  /** The CURRENT revision's surface bridge behind the ONE root `appExit`. */
+  let activeBridge: import('./local-client-surface.ts').LocalClientSurfaceBridge | undefined
+  /** The ONE serial revision task slot shared by HMR and stop. */
+  let revisionTask: Promise<void> = Promise.resolve()
+  const enqueueRevisionTask = (task: () => Promise<void>): Promise<void> => {
+    const run = revisionTask.then(task, task)
+    revisionTask = run.then(() => {}, () => {})
+    return run
+  }
   const diag = createEntryDiag('client', recordSink?.emit)
   const CLIENT_DISPOSE_DEADLINE_MS = 10_000
   const disposeWithinDeadline = async (dispose: () => Promise<void>, errors: unknown[]): Promise<boolean> => {
@@ -273,6 +282,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           }
         }
         if (handle !== undefined) {
+          // A same-process surface revision in flight owns the Context until it
+          // settles. Stop aborted its signal first; now wait for the ONE serial
+          // revision slot before releasing the root.
+          await revisionTask
           try { await handle.dispose() } catch (error) { errors.push(error) }
           rootReleased = true
           return
@@ -423,10 +436,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       const bridge = createLocalClientSurfaceBridge(code => {
         runDetached('local client: surface exit', () => stop(code), { diag })
       })
-      // The Client process launcher provides `appExit`; a sibling runner fiber
-      // resolves it through the root service store, so it must exist before the
-      // runner's first synchronous read.
-      clientContext.provide('appExit', (code: number) => { bridge.requestStop(code) })
+      // The root `appExit` bridge (provided ONCE below) reads the CURRENT
+      // revision's bridge. It must never point at a disposed revision's
+      // callback after a same-process surface replacement.
+      activeBridge = bridge
       const { applyRunnerWithRuntime } = await import('../bootstrap.ts')
       let runnerFiber: Fiber | undefined
       try {
@@ -446,9 +459,34 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         ready: bridge.ready,
         stopped: bridge.stopped,
         dispose: async (): Promise<void> => { await fiber.dispose() },
+        ...(fiber.uid == null ? {} : { fiberUid: fiber.uid }),
       }
     }
     if (options.mode === 'surface') {
+      // The ONE root `appExit` service. It delegates to the CURRENT revision's
+      // bridge; a replacement swaps `activeBridge` before the new runner mounts.
+      clientContext.provide('appExit', (code: number) => { activeBridge?.requestStop(code) })
+      // Qualification-only same-process surface HMR (M4-C1): SIGUSR2 retires
+      // and remounts the Client surface on the SAME PID/Context/transport. It
+      // is mutually exclusive with the T34/T36 SIGUSR2 qualification modes.
+      if (process.env.SPLIT_PROCESS_CLIENT_HMR_PROBE === '1') {
+        if (process.env.SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF === '1'
+          || (process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE !== undefined
+            && process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE !== '')) {
+          throw new Error('local client entry: the HMR qualification signal is mutually exclusive with the T34/T36 SIGUSR2 modes')
+        }
+        process.on('SIGUSR2', () => {
+          if (handle === undefined) return
+          runDetached('local client: surface HMR', () => {
+            const run = enqueueRevisionTask(async () => {
+              await handle!.replaceSurfaceForQualification()
+            })
+            // Failure is observed OUTSIDE the serial task: `stop()` waits for
+            // the same slot, so awaiting stop from inside it would deadlock.
+            run.catch(error => stop(1, error))
+          }, { diag })
+        })
+      }
       // A closed terminal (PTY HUP) is a normal Client exit: the physical
       // surface can no longer render or accept input. It joins the SAME
       // idempotent stop path as Esc / `/exit` / SIGINT / SIGTERM.

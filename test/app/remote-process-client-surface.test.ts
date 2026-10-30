@@ -28,7 +28,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import { Config as TuiConfigSchema } from '../../src/app/config/schema.ts'
-import { startLocalClient } from '../../src/app/remote-process/client-bootstrap.ts'
+import { startLocalClient, SurfaceRevisionTasks } from '../../src/app/remote-process/client-bootstrap.ts'
 import { createLocalClientSurfaceBridge } from '../../src/app/remote-process/local-client-surface.ts'
 import type { LocalClientTransport } from '../../src/app/remote-process/local-transport.ts'
 import type { LocalInstanceRecord } from '../../src/app/remote-process/local-discovery.ts'
@@ -182,4 +182,37 @@ test('the process composition entry owns exactly one lazy bootstrap import after
   assert.doesNotMatch(source.replace(/await import\('\.\.\/bootstrap\.ts'\)/u, ''),
     /import\s*\{[^}]*\}\s*from\s*'\.\.\/bootstrap\.ts'/u,
     'the bootstrap facade must never become a static import of the process entry')
+})
+
+test('surface revision tasks run strictly serially and a stop waits for the active task', async () => {
+  const slot = new SurfaceRevisionTasks()
+  const order: string[] = []
+  let releaseFirst: (() => void) | undefined
+  const first = slot.run(async () => {
+    order.push('first:start')
+    await new Promise<void>(resolve => { releaseFirst = resolve })
+    order.push('first:end')
+  })
+  const second = slot.run(async () => {
+    order.push('second:start')
+    order.push('second:end')
+  })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.deepEqual(order, ['first:start'], 'a second revision task overlapped the active one')
+  releaseFirst?.()
+  await Promise.all([first, second])
+  assert.deepEqual(order, ['first:start', 'first:end', 'second:start', 'second:end'])
+  const settled = slot.settle()
+  assert.equal(await Promise.resolve(settled).then(() => true), true, 'settle did not resolve after the tail')
+})
+
+test('a failed surface revision task does not poison the serial slot', async () => {
+  const slot = new SurfaceRevisionTasks()
+  const failure = new Error('revision mount failed')
+  const failed = slot.run(async () => { throw failure })
+  await assert.rejects(failed, error => error === failure)
+  let ran = false
+  await slot.run(async () => { ran = true })
+  assert.equal(ran, true, 'a later revision task did not run after the failed one settled')
+  await slot.settle()
 })

@@ -104,7 +104,7 @@ test('a completed waitForExit does not leave its deadline holding the process', 
 
 test('the upgraded smoke carries every B1/B2-HF gate and the critical negative controls', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40', 'T41', 'T42', 'T43']) {
+  for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40', 'T41', 'T42', 'T43', 'T44', 'T45', 'T46', 'T47', 'T48', 'T49', 'T50', 'T51', 'T52', 'T53', 'T54', 'T55', 'T56', 'T57', 'T58', 'T59', 'T60']) {
     assert.match(source, new RegExp(`\\b${gate}\\b`, 'u'), `missing ${gate}`)
   }
   for (const marker of [
@@ -138,6 +138,34 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     't35',
     't36',
     'SPLIT_PROCESS_CLIENT_FORCE_FAILURE',
+    'SPLIT_PROCESS_CLIENT_HMR_PROBE',
+    'SPLIT_PROCESS_CLIENT_HMR_FAIL',
+    'SPLIT_PROCESS_CLIENT_HMR_HOLD',
+    'C1_SCENARIO',
+    'C1_WORK_ROOT',
+    'writeC1WorkFixture',
+    'm4-c1-host-work',
+    'hmr-revision-start',
+    'hmr-revision-retired',
+    'hmr-revision-ready',
+    'hmr-revision-failure',
+    't44',
+    't45',
+    't46',
+    't47',
+    't48',
+    't49',
+    't50',
+    't51',
+    't52',
+    't53',
+    't54',
+    't55',
+    't56',
+    't57',
+    't58',
+    't59',
+    't60',
     'SPLIT_PROCESS_CLIENT_OMIT_COOKIE',
     'SPLIT_PROCESS_CLIENT_FORCE_STARTUP_FATAL',
     'SPLIT_PROCESS_CLIENT_FORCE_REFRESH_UNRESPONSIVE_ONCE',
@@ -172,7 +200,7 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     assert.ok(source.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 7,
+  assert.equal(extraPatchUses.length, 9,
     'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row mutations, the whole-smoke mutation mode and the isolated surface LLM overlay')
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
