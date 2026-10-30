@@ -3736,12 +3736,12 @@ export function applyRunnerWithRuntime(
     })
   }
 
-  void startRunner().catch(error => {
-    // The split Client composition must learn about a startup root failure
-    // BEFORE the fatal lifecycle tears the tree down: it owns the reverse
-    // unwind of its Domain/UI/transport graph, and the ORIGINAL error is what
-    // its bridge reports.
+  /** Report a startup-root failure before the fatal lifecycle owns it: the
+   *  split Client composition owns the reverse unwind of its Domain/UI/
+   *  transport graph and needs the ORIGINAL error for its bridge. */
+  const failStartup = (error: unknown): Promise<void> => {
     startupSettlement?.surfaceFailed(error)
     return fatalLifecycle.handleStartupFailure(error)
-  }) // allowlist: startup lifecycle root — see AGENTS.md
+  }
+  void startRunner().catch(failStartup) // allowlist: startup lifecycle root — see AGENTS.md
 }
