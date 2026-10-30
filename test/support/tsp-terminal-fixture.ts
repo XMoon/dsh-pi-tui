@@ -145,6 +145,10 @@ export interface TspPane {
  * override the advertised set verbatim (the fail-closed negative). */
 export function installTspPane(options: {
   readonly modelPicker?: boolean
+  /** Advertise the composer action row's negotiated kinds (the `el` kind —
+   *  `styles` is already in the base feature set): a pane without it can never
+   *  carry the native composer buttons. */
+  readonly composerActions?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
   /**
@@ -190,6 +194,7 @@ export function installTspPane(options: {
   // A case can override the advertised sets verbatim (fail-closed).
   const native = Array.from(new Set([
     ...(options.modelPicker === true ? ['picker', 'row', 'overlay', 'text'] : []),
+    ...(options.composerActions === true ? ['el'] : []),
     ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md'] : []),
     ...(options.sessionBrowser === true ? ['picker', 'row', 'overlay', 'text'] : []),
     ...(options.workDetails === true ? ['row', 'text'] : []),
