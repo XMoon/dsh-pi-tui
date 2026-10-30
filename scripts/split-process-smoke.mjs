@@ -3213,6 +3213,7 @@ async function main() {
         await stopping.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T59 stop HMR start')
         await stopping.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T59 stop HMR retired', 120_000)
         stopping.signalBusiness('SIGTERM')
+        await stopping.waitFor(record => record.m4a0 === 'signal' && record.signal === 'SIGTERM', 'T59 stop signal admitted', 30_000)
         writeFileSync(barrier, 'release\n', { mode: 0o600 })
         const stopExit = await stopping.waitForExit(60_000)
         assert(stopExit.code === 0, `T59 stop-during-HMR exit was ${JSON.stringify(stopExit)}`)
