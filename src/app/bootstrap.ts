@@ -101,7 +101,11 @@ import { createExitController } from './bootstrap/exit.ts'
 import { type SessionRetirementReport } from '../app/session/owner-access.ts'
 import { mergeDraft, refuseByTransitionFence, type SteerSubjectLike } from './submission/steer.ts'
 import { createDirectApplicationRuntime, type DirectApplicationRuntime } from '../app/direct/runtime.ts'
-import type { RemoteApplicationOverride, RemoteTransportLifetime } from '../app/application-runtime.ts'
+import type {
+  RemoteApplicationOverride,
+  RemoteTransportLifetime,
+  RunnerStartupSettlement,
+} from '../app/application-runtime.ts'
 import type { ModelSelectionDto } from '../runtime/catalog-port.ts'
 import { selectApplicationRuntime } from './bootstrap/runtime-selection.ts'
 import { createPresentationBridge } from './bootstrap/presentation-bridge.ts'
@@ -192,28 +196,6 @@ function detachedModelSelection(selection: ModelSelectionDto | undefined): Model
     model: selection.model,
     ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
   } as ModelSelection
-}
-
-/**
- * The internal startup-settlement seam for the split Client's ONE real
- * Surface composition (M4-B2-S §7.1). `applyRunnerWithRuntime` is synchronous
- * and starts an asynchronous runner root, so the caller cannot learn from its
- * return value whether a physical surface was actually mounted:
- *
- * - `surfaceReady()` fires exactly once, after `surface.start(...)` returned
- *   successfully and the renderer/terminal ownership transfer settled — i.e.
- *   the real tty is owned by the mounted TUI;
- * - `surfaceFailed(error)` fires instead when the runner's startup root (or
- *   the surface acquisition) fails before `surfaceReady`, with the ORIGINAL
- *   error so the caller can unwind its whole Client graph in reverse order.
- *
- * Omitted by the Direct package entry (`applyRunner`) and every test that does
- * not observe real mount readiness; internal split-Client composition is the
- * only caller.
- */
-export interface RunnerStartupSettlement {
-  surfaceReady(): void
-  surfaceFailed(error: unknown): void
 }
 
 export function applyRunner(ctx: Context, config: Config): void {
@@ -432,8 +414,8 @@ export function applyRunnerWithRuntime(
       // The split Client's ONE authority is the pre-mounted official Client
       // data plane plus the adopted Remote selected core. Never resolve (or
       // fabricate) Host agents/sessions/default-model services here.
-      const selected = override.selected
-      if (selected.kind !== 'remote' || selected.backend.kind !== 'remote') {
+      const remoteSelection = override.selected
+      if (remoteSelection.kind !== 'remote' || remoteSelection.backend.kind !== 'remote') {
         throw new Error('tui-runner: the split Client runner requires the selected Remote application runtime')
       }
     }
