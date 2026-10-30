@@ -247,14 +247,12 @@ request is never resurrected from an old Client's painted card.
 
 The DSH Client event pump starts with the Connection generation. Official Web
 uses the existing Loader readiness gate (`loader.await().then(start)`) to mount
-its plugin graph before starting the Gateway. The PiTui split Client has not
-yet verified an equivalent assembly order for its interaction owner; in the
-current composition a fresh Client can consume a Host-pending forwarded event
-before that owner attaches. This is a PiTui split-assembly ordering gap, not
-established evidence that rc.4 lacks a public capability, and it is not a
-reason to add a private PiTui pending store. The correct re-entry is to verify
-the official Loader readiness contract in the PiTui split composition before
-claiming end-to-end pending-interaction recovery.
+its plugin graph before starting the Gateway. A split Client composition must
+order its interaction owner before the event pump can consume Host-pending
+forwarded events; a fresh Client must not delegate a pending forwarded event
+before that owner is attached. Use the official Loader readiness contract for
+that ordering. A private PiTui pending store, permanent pending promise or
+Gateway monkey-patch is not a substitute for this composition contract.
 
 The internal split mode also supports one Client-only surface revision
 replacement on the SAME Client PID, Client Context and B1 transport: the
