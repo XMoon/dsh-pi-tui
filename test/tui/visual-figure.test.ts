@@ -325,17 +325,24 @@ test('a SIXEL figure reports its pixel hit only after the Screen commits, withou
 
     state.rows = 99
     assert.equal(figure.paintedHitMap(100)?.thumbnailBody, undefined, 'an over-budget footprint is never a hit')
+    state.rows = 1
+    state.columns = 8
+    state.cropTopRows = 2
+    const cropped = figure.paintedHitMap(100)?.thumbnailBody
+    assert.ok(cropped !== undefined)
+    assert.equal(cropped.startRow, body.startRow + 2, 'the committed top-crop offset moves the hit start')
+    assert.equal(cropped.endRow, cropped.startRow + 1)
+    state.cropTopRows = undefined
     state.rows = 3
     state.columns = 101
     assert.equal(figure.paintedHitMap(100)?.thumbnailBody, undefined, 'a footprint wider than the grant is never a hit')
     // A top-cropped window starts where the Screen really starts showing it.
+    // A top-cropped committed footprint (smaller than the candidate layout)
+    // stays fail-closed rather than being assigned a guessed row offset.
     state.columns = 8
     state.rows = 1
-    state.cropTopRows = 2
-    const cropped = figure.paintedHitMap(100)?.thumbnailBody
-    assert.ok(cropped !== undefined)
-    assert.equal(cropped.startRow, body.startRow + 2, 'the crop offset moves the hit start')
-    assert.equal(cropped.endRow, cropped.startRow + 1)
+    state.committed = false
+    assert.equal(figure.paintedHitMap(100)?.thumbnailBody, undefined, 'a cropped occurrence cannot be hit-tested')
     figure.dispose()
     loader.dispose()
   } finally {

@@ -234,8 +234,6 @@ export class VisualFigureComponent implements Component {
       if (live !== undefined && startRow !== undefined && maxRows !== undefined
         && live.rows > 0 && cropTopRows >= 0 && cropTopRows + live.rows <= maxRows
         && live.endCol > 0 && live.endCol <= width) {
-        // A top-cropped Screen window starts at the source row it really
-        // shows; the figure-relative start must move by that many rows.
         thumbnailBody = {
           startRow: startRow + cropTopRows,
           endRow: startRow + cropTopRows + live.rows,

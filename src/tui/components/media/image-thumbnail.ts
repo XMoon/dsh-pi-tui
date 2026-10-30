@@ -292,7 +292,7 @@ export class ImageThumbnail implements Component {
    * `imageFallback` TEXT row, and that row is information, not an image body;
    * treating it as pixels would open a Viewer from a line of plain text.
    */
-  paintedImageBody(width: number): { rows: number; endCol: number } | undefined {
+  paintedImageBody(width: number): { rows: number; endCol: number; cropTopRows?: number } | undefined {
     // A SIXEL occurrence's hit body is the LAST COMMITTED frame's footprint, which
     // the owner keeps until the next `framePainted`: the component renders before
     // the Screen materializes, so a component-local snapshot would always lag one
@@ -303,7 +303,12 @@ export class ImageThumbnail implements Component {
     // JPEG/WebP and must behave exactly like the direct PNG path here.
     if (this.instanceKind === 'raw-sixel' || this.instanceKind === 'preview-sixel') {
       const live = this.instance?.paintedBodyAt?.(width)
-      return live === undefined ? undefined : { rows: live.rows, endCol: live.columns }
+      if (live === undefined) return undefined
+      return {
+        rows: live.rows,
+        endCol: live.columns,
+        ...(live.cropTopRows === undefined ? {} : { cropTopRows: live.cropTopRows }),
+      }
     }
     const painted = this.paintedBody
     if (painted === undefined || painted.width !== width) return undefined

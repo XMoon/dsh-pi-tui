@@ -1005,7 +1005,7 @@ const SIXEL_TERMINAL = {
  * derives the footprint from it, so a pending/transparent/fallback render can
  * never register a clickable body.
  */
-function sixelGraphics(paint: () => string[] | undefined, calls: string[] = []): ImageGraphics {
+function sixelGraphics(paint: () => string[] | undefined, calls: string[] = [], cropTopRows = 0): ImageGraphics {
   return {
     mode: 'sixel',
     canPaint: () => true,
@@ -1017,7 +1017,7 @@ function sixelGraphics(paint: () => string[] | undefined, calls: string[] = []):
         paintedBodyAt: (width: number) => {
           const lines = paint()
           if (lines === undefined || !lines[0]!.startsWith('\x1bP')) return undefined
-          return { width, columns: 4, rows: lines.length }
+          return { width, columns: 4, rows: lines.length, ...(cropTopRows === 0 ? {} : { cropTopRows }) }
         },
         dispose: () => {},
       }
@@ -1052,6 +1052,20 @@ test('a PNG paints through Direct SIXEL even when the fork capability is null', 
   assert.equal(lines[1], SIXEL_DCS, 'the raster anchor is the encoder\'s exact string')
   assert.ok(lines.slice(2).every((line) => line === ''), 'the body rows are blank layout rows')
   assert.deepEqual(component.paintedImageBody(80), { rows: 3, endCol: 4 }, 'the REAL encoder footprint is the click body')
+})
+
+test('a committed top-cropped SIXEL image exposes its crop offset to the image hit map', async () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  const loader = loaderOf(new Uint8Array([1, 2, 3]))
+  loader.load(REF)
+  await until(() => loader.get(REF).state === 'ready', 'the attachment read')
+  const graphics = sixelGraphics(() => [SIXEL_DCS, '', ''], [], 3)
+  const component = new ImageThumbnail(REF, loader, THEME, () => {}, undefined, undefined, undefined, graphics)
+  component.render(80)
+  assert.deepEqual(component.paintedImageBody(80), { rows: 3, endCol: 4, cropTopRows: 3 },
+    'the committed crop offset is part of the image hit answer')
+  component.dispose()
 })
 
 test('a pending or fallback SIXEL render registers no clickable body', async () => {
