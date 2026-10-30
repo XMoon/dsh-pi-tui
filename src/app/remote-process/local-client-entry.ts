@@ -218,6 +218,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     setImmediate(() => { process.exit(1) })
   }
   let stopping: Promise<void> | undefined
+  /** Resolves when the ONE startup chain has been entered/finished. A stop
+   *  that lands before `startupPromise` exists waits here instead of disposing
+   *  the root underneath a late `startLocalClient` call. */
+  let startupReadyResolve: (() => void) | undefined
+  const startupReady = new Promise<void>(resolve => { startupReadyResolve = resolve })
   /** The ONE startup cancellation owner: a stop aborts every in-flight mount
    *  and readiness wait before any teardown starts. */
   const startupAbort = new AbortController()
@@ -253,6 +258,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       const errors: unknown[] = []
       const timedOut = await disposeWithinDeadline(async () => {
         if (rootReleased) return
+        // A stop can land during the dynamic client-bootstrap import or before
+        // `startupPromise` is assigned. Wait for the startup gate so the root
+        // is never disposed underneath a late `startLocalClient` call.
+        if (startupPromise === undefined && !compositionDone) await startupReady
         // Wait for the in-flight assembly to settle: a success publishes the
         // ONE handle, a failure has already unwound the graph it created.
         if (startupPromise !== undefined && handle === undefined) {
@@ -474,9 +483,22 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           },
         }
       : { mode: 'qualification', transport, host: host.identity }
-    const { startLocalClient } = await import('./client-bootstrap.ts')
-    startupPromise = startLocalClient(clientContext, surfaceFacts, processStartIdentity, composition)
-    handle = await startupPromise
+    try {
+      const { startLocalClient } = await import('./client-bootstrap.ts')
+      // Qualification-only hold in the pre-assignment window (the dynamic
+      // import and the composition are already resolved, but `startupPromise`
+      // is not assigned yet): a SIGTERM here must wait for this ONE gate.
+      const holdBeforeStart = process.env.SPLIT_PROCESS_CLIENT_HOLD_BEFORE_START
+      if (holdBeforeStart !== undefined && holdBeforeStart !== '') {
+        emit({ m4a0: 'qualification', op: 'before-start-hold', processRole: 'client', pid: process.pid })
+        await waitForStartupHold(holdBeforeStart, startupAbort.signal)
+      }
+      startupPromise = startLocalClient(clientContext, surfaceFacts, processStartIdentity, composition)
+      handle = await startupPromise
+    } finally {
+      startupReadyResolve?.()
+      startupReadyResolve = undefined
+    }
     if (stopping !== undefined) {
       // The signal/exit coordinator already owns the teardown; never publish a
       // ready surface after a stop was requested.
@@ -645,6 +667,19 @@ export async function stopLocalClient(
     })
     return requestedCode === 0 ? 1 : requestedCode
   }
+}
+
+/** Qualification-only hold in the pre-startup assignment window. */
+async function waitForStartupHold(path: string, signal: AbortSignal): Promise<void> {
+  const deadline = Date.now() + 60_000
+  while (!existsSync(path)) {
+    signal.throwIfAborted()
+    if (Date.now() > deadline) {
+      throw new Error(`local client entry: the pre-startup barrier was not released: ${path}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  signal.throwIfAborted()
 }
 
 /**

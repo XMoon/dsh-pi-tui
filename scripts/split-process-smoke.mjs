@@ -2292,6 +2292,55 @@ async function main() {
         })
       }
 
+      // T43: a signal in the PRE-STARTUP assignment window (after the lazy
+      // client-bootstrap import, before `startupPromise` exists) must wait for
+      // the ONE startup gate and never dispose the root underneath a late
+      // `startLocalClient` call.
+      const preStartBarrier = join(workDir, 't43-pre-start-barrier')
+      rmSync(preStartBarrier, { force: true })
+      const preStart = new SurfaceEntryProcess(entries.client, {
+        ...base,
+        workDir,
+        env: {
+          ...base.env,
+          SPLIT_PROCESS_CLIENT_HOLD_BEFORE_START: preStartBarrier,
+        },
+      })
+      surfaceClients.push(preStart)
+      await preStart.waitFor(
+        record => record.m4a0 === 'qualification' && record.op === 'before-start-hold',
+        'T43 pre-startup assignment hold',
+        180_000,
+      )
+      preStart.signalBusiness('SIGTERM')
+      writeFileSync(preStartBarrier, 'release\n', { mode: 0o600 })
+      const preStartExit = await preStart.waitForExit(60_000)
+      assert(preStartExit.code === 0, `T43 pre-startup stop exit was ${JSON.stringify(preStartExit)}`)
+      assert(!preStart.records.some(record => record.m4a0 === 'ready'),
+        'T43 pre-startup stop still published a ready surface')
+      assert(!preStart.records.some(record => record.m4a0 === 'cleanup-failure'),
+        'T43 pre-startup stop reported a duplicate/failed cleanup')
+      await preStart.dispose()
+      const afterPreStart = new SurfaceEntryProcess(entries.client, { ...base, workDir })
+      surfaceClients.push(afterPreStart)
+      const afterPreStartReady = await afterPreStart.waitFor(record => record.m4a0 === 'ready', 'T43 reusable Client ready', 180_000)
+      assert(afterPreStartReady.surfaceMounted === true, 'T43 the reusable Client did not mount')
+      assert(alive(surfaceHostPid), 'T43 the Host died on the pre-startup stop')
+      const afterPreStartInstance = readJson(join(scopeDir, 'instance.json'))
+      assert(afterPreStartInstance.instanceId === surfaceHostFacts.instanceId,
+        'T43 the Host instance changed on the pre-startup stop')
+      afterPreStart.send('/exit\r')
+      const afterPreStartExit = await afterPreStart.waitForExit(60_000)
+      assert(afterPreStartExit.code === 0, `T43 reusable Client exit was ${JSON.stringify(afterPreStartExit)}`)
+      await afterPreStart.dispose()
+      trace('t43', {
+        stage: 'pre-startup-assignment',
+        readyEmitted: false,
+        cleanupFailures: 0,
+        seatReusable: true,
+        hostAlive: true,
+      })
+
       // T34: close the writer's pre-dispatch admission while a REAL
       // serialization barrier holds the write. The writer must return
       // not-dispatched, the draft must return to the composer, and the Host must
@@ -2492,7 +2541,7 @@ async function main() {
         dshVersion: targetDshVersion,
         directHelp: 'pass',
         t01t26: 'pass except T26a artifact-missing NOT_VERIFIED (row-absence control passes)',
-        surface: 'T27-T39 + T41/T42 pass',
+        surface: 'T27-T39 + T41/T42/T43 pass',
       })
     } finally {
       for (const client of surfaceClients) await client.dispose()
