@@ -475,6 +475,36 @@ export class QuestionSurfaceController {
     return rows
   }
 
+  /**
+   * TSP-7 PR-B: whether a Question form is PRESENTED right now, i.e. the
+   * controller's own logical seat ownership (`entry.state === 'visible'`) or a
+   * live foreground flow it started.
+   *
+   * This is a NARROW read of state THIS controller already owns — never a modal
+   * tree scan and never a new state machine. It is deliberately NOT proof that
+   * the form is the OS-level top layer: a more preferred modal may still cover
+   * it, which is exactly why the surface only uses it to answer "a question is
+   * currently presented" (§8.2).
+   */
+  hasPresentedQuestion(): boolean {
+    if (this.disposed) return false
+    // CURRENTNESS: a live flow keyed to a session the surface no longer shows
+    // (or is no longer admissible) is NOT a presented question — it is a late
+    // request this controller merely keeps alive until its Host lifetime ends
+    // (TSP-7 PR-B RFL-001). Only what may still take THIS surface's seat counts.
+    for (const live of this.livePresentations.values()) {
+      if (this.deps.isAdmissibleSession(live.sessionId)) return true
+    }
+    const sessionId = this.deps.currentSessionId()
+    if (sessionId !== undefined) {
+      for (const entry of this.entries.values()) {
+        if (entry.sessionId !== sessionId) continue
+        if (entry.state === 'visible') return true
+      }
+    }
+    return false
+  }
+
   /** Observe Question attention changes (presentation-only invalidation). */
   subscribeAttention(listener: () => void): () => void {
     this.attentionListeners.add(listener)
@@ -673,6 +703,10 @@ export class QuestionSurfaceController {
     // ADMISSION currentness (B3 finding F10): a request whose Session the surface
     // no longer shows never presents — and never takes a Host claim either.
     const admissible = this.deps.isAdmissibleSession(request.sessionId)
+    // TSP-7 PR-B: only an ADMISSIBLE flow publishes the presented-Question fact.
+    // A late request of a replaced session (RFL-001) is kept alive until its
+    // Host lifetime ends, but it must never paint THIS subject as waiting.
+    if (admissible) this.notifyAttention()
     if (admissible && timed && callId !== undefined) {
       status.text = 'Claiming this question’s foreground wait…'
       this.deps.repaint()
@@ -754,6 +788,10 @@ export class QuestionSurfaceController {
     } finally {
       settled = true
       this.livePresentations.delete(signal)
+      // TSP-7 PR-B: the wait ENDED (answered, cancelled, timed out, Host-ended or
+      // withdrawn), so the presented-Question fact must fall in the SAME step —
+      // never on the next model token.
+      this.notifyAttention()
       this.activeCleanups.delete(teardown)
       stopTimer()
       claim?.release()

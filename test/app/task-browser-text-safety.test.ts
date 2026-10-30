@@ -171,6 +171,7 @@ function startHarness(options: HarnessOptions = {}): Harness {
     presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
   return { vt, app, tasks, observation, interrupts, notices, stream: () => written.join('') }

@@ -29,6 +29,7 @@ import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { SurfaceInteractionPresenter } from './interaction-presenter.ts'
 import type { QuestionAttentionRow } from './question-controller.ts'
+import type { DisplayActivityFacts } from './display-seam.ts'
 import { QuestionSurfaceController } from './question-controller.ts'
 
 /** The approval/question presentation inputs (A4-7, plan §13.3/§16). */
@@ -90,6 +91,13 @@ export interface InteractionRuntimeOptions {
   readonly isCleanedUp: () => boolean
   /** The Task Center's PRESENTATION-only refresh after an attention change. */
   readonly onAttentionChanged: () => void
+  /**
+   * TSP-7 PR-B: the read-only projection of this owner's modal/parked facts onto
+   * the surface's ONE activity status. The surface (never this owner) is the
+   * `StatusStore` writer, and this never reads the Host, the catalog or a modal
+   * tree — it forwards facts this owner already derived.
+   */
+  readonly publishActivity: (facts: DisplayActivityFacts) => void
 }
 
 /** The approval/question owner `createSurfaceRuntime()` consumes. */
@@ -187,7 +195,20 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
   const publishAttention = (): void => {
     if (options.isCleanedUp()) return
     const rows = questionController?.attentionRows() ?? []
-    options.presenter().setQuestionAttention(rows.filter(row => row.presentation === 'parked').length)
+    const parked = rows.filter(row => row.presentation === 'parked').length
+    options.presenter().setQuestionAttention(parked)
+    // TSP-7 PR-B: the SAME commit publishes the parked COUNT and the presented
+    // fact together, so the two can never disagree on screen.
+    //
+    // `parked` is "still answerable but not on screen" — it is NEVER a
+    // `waiting-question` phase. `questionOpen` needs the Controller's own
+    // presented-form/live-flow fact (§8.2): a mounted modal is the only proof
+    // the user is actually being waited on.
+    options.publishActivity({
+      questionAttention: parked,
+      questionOpen: questionController?.hasPresentedQuestion() === true,
+      approvalOpen: liveApprovals.size > 0,
+    })
   }
 
   /** Whether a request for this Session may still be presented (F10/F12/F13). */
@@ -401,6 +422,17 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
             : waitForLifetime(lifetime, release)
         }
         if (sessionId !== undefined) liveApprovals.set(lifetime, { sessionId, retire })
+        // TSP-7 PR-B: the request now has a PRESENTED prompt. An `ask` policy or
+        // a `read-only` preset is NOT an open approval — only a prompt this owner
+        // actually handed to the seat is. The Question fact is RE-READ from the
+        // controller (RFL-002): a Question that is still presented keeps its own
+        // fact — the shared derive decides which phase wins, never this publish.
+        if (sessionId !== undefined) {
+          options.publishActivity({
+            approvalOpen: true,
+            questionOpen: questionController?.hasPresentedQuestion() === true,
+          })
+        }
         return options.presenter().showApprovalPrompt({
           toolName: req.toolName,
           reason: req.reason,
@@ -409,6 +441,17 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
           ...args !== undefined && req.toolName === 'bash' && deps.dangerCommand(args) ? { danger: true } : {},
         }, true).finally(() => {
           liveApprovals.delete(lifetime)
+          // The settle/abort/withdraw ends the wait: the phase must fall back
+          // immediately instead of waiting for the next model token (§3.3). The
+          // Question fact is re-read here too, so a Question that OUTLIVED the
+          // approval is restored in the SAME step (RFL-002) — never left as a
+          // stale `false` until some later event.
+          if (sessionId !== undefined) {
+            options.publishActivity({
+              approvalOpen: liveApprovals.size > 0,
+              questionOpen: questionController?.hasPresentedQuestion() === true,
+            })
+          }
           release()
         })
       })

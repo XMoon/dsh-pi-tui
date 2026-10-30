@@ -36,40 +36,70 @@ const registry = createBuiltinFooterRegistry()
  */
 const NO_SURFACE_HINTS: FooterRenderContext = { taskBrowserAvailable: false, extensionFooterText: '' }
 
-/** The PR-A priority numbers (Tern drops the smallest first, per row). */
+/** The PR-A + PR-B priority numbers (Tern drops the smallest first, PER ROW). */
 const PRIORITY = {
+  /** PR-B: the attention badge — the highest row-1 claim (a failure or a
+   * blocked human wait outranks every environment fact). */
+  attention: 110,
   permission: 95,
   cwd: 50,
   git: 30,
   plan: 100,
+  /** PR-B: the machine run phase — above the environment items, below attention. */
+  run: 105,
   tokens: 60,
   context: 100,
+  /** PR-B: the cache share. */
+  cache: 35,
+  /** PR-B: the recent (R5) / whole-session (All) output rate. */
+  speed: 45,
+  /** PR-B: the time-to-first-token — the first statistic Tern may drop. */
+  ttfb: 25,
 } as const
 
-/** One PR-A status item: its builtin id, its format, and its native shape. */
+/** One status item: its builtin id, its format, its density and its native shape. */
 interface StatuslineItem {
   readonly id: string
   readonly format: string
   readonly key: string
-  readonly icon?: 'shield' | 'folder' | 'git-branch' | 'plan' | 'tokens' | 'context'
+  readonly icon?: 'shield' | 'folder' | 'git-branch' | 'plan' | 'tokens' | 'context' | 'run' | 'tasks' | 'cache' | 'gauge' | 'timer'
   readonly side?: 'right'
   readonly priority: number
+  /**
+   * PR-B: the density the item renders at. `run-state` and `tasks` are fixed to
+   * `compact` so the attention badge and the phase word survive a narrower pane;
+   * every other item keeps the builtin's `preferred` form.
+   */
+  readonly density?: 'compact'
 }
 
 /**
- * Row 1 (the working environment): permission, cwd, git branch on the LEFT,
- * the plan state on the RIGHT.
+ * Row 1 (the working environment + the run state / attention): permission, cwd,
+ * git branch, run state on the LEFT, the plan state and the attention badge on
+ * the RIGHT.
  */
 const ROW_ONE: readonly StatuslineItem[] = [
   { id: 'permission-preset', format: 'compact', key: 'status-r1-permission', icon: 'shield', priority: PRIORITY.permission },
   { id: 'cwd', format: 'basename', key: 'status-r1-cwd', icon: 'folder', priority: PRIORITY.cwd },
   { id: 'git-branch', format: 'plain', key: 'status-r1-git', icon: 'git-branch', priority: PRIORITY.git },
+  // PR-B: the run phase. An idle subject renders nothing (the builtin omits it),
+  // so a quiet session never shows a useless `idle` word.
+  { id: 'run-state', format: 'plain', key: 'status-r1-run', icon: 'run', density: 'compact', priority: PRIORITY.run },
   { id: 'plan-state', format: 'plain', key: 'status-r1-plan', icon: 'plan', side: 'right', priority: PRIORITY.plan },
+  // PR-B: the ONE attention badge — the GLOBAL job/agent totals, the failure
+  // marker and the parked-Question count in the builtin's own compact form. It
+  // omits itself when no fact exists, so no empty `[]` badge is ever painted.
+  { id: 'tasks', format: 'badge', key: 'status-r1-attention', icon: 'tasks', side: 'right', density: 'compact', priority: PRIORITY.attention },
 ]
 
-/** Row 2 (the statistics): token usage on the LEFT, context pressure RIGHT. */
+/** Row 2 (the statistics): tokens, cache, TTFB and the rate on the LEFT, the
+ *  context pressure on the RIGHT. Every item omits itself when its fact is
+ *  absent, so a missing sample never paints a fabricated zero. */
 const ROW_TWO: readonly StatuslineItem[] = [
   { id: 'token-usage', format: 'pi', key: 'status-r2-tokens', icon: 'tokens', priority: PRIORITY.tokens },
+  { id: 'cache-hit', format: 'pi', key: 'status-r2-cache', icon: 'cache', priority: PRIORITY.cache },
+  { id: 'performance', format: 'latency', key: 'status-r2-ttfb', icon: 'timer', priority: PRIORITY.ttfb },
+  { id: 'performance', format: 'speed-both', key: 'status-r2-speed', icon: 'gauge', priority: PRIORITY.speed },
   { id: 'context', format: 'percent', key: 'status-r2-context', icon: 'context', side: 'right', priority: PRIORITY.context },
 ]
 
@@ -114,7 +144,10 @@ function itemText(snapshot: StatusSnapshot, item: StatuslineItem): { text: strin
   const segment = definition(item.id).render(
     snapshot,
     { id: item.id, format: item.format },
-    'preferred',
+    // PR-B: `run-state`/`tasks` render COMPACT so the phase word and the
+    // attention badge survive a narrower pane (the plan's explicit choice — it
+    // is a density hint, never a second layout engine).
+    item.density ?? 'preferred',
     NO_SURFACE_HINTS,
   )
   if (segment === null) return undefined

@@ -170,6 +170,7 @@ function startApp(columns = 120, rows = 40, jobIds: readonly string[] = ['job-a'
     presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
   return { vt, app, tasks, observation, copied }

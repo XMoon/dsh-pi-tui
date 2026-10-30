@@ -263,7 +263,11 @@ test('the status commit and the pending-input presentation are surface-owned', (
   // app (M3-5 PR1 §9.7).
   assert.match(surface, /commitStatus\(\n?\s*patch: StatusPatch,/u,
     'the surface must own the status commit')
-  assert.match(surface, /displaySeam\(\)\.commitDisplaySubject\(patch, legacyFacts, presentation\)/u,
+  // TSP-7 PR-B: the ONE atomic commit is a named closure so the surface's own
+  // activity projection publishes through the identical path; the seam commit
+  // therefore addresses `effective` (a commit that replaces the display subject
+  // re-derives the activity section in the SAME transaction).
+  assert.match(surface, /displaySeam\(\)\.commitDisplaySubject\(effective, legacyFacts, presentation\)/u,
     'the surface must commit the display-subject payload through the display seam')
   assert.match(statusSource, /deps\.surface\.commitStatus\(patch,/u,
     'the status owner must delegate the status commit to the surface')

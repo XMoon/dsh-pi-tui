@@ -1336,6 +1336,7 @@ test('A-08b: the interaction owner registers fail-closed answerers on a modal-le
     diag: () => ({ debug() {}, info() {}, warn() {}, error() {}, dispose() {} }),
     isCleanedUp: () => false,
     onAttentionChanged: () => {},
+    publishActivity: () => {},
   })
   interaction.attach(port as never, { lookupCallArgs: () => undefined, dangerCommand: () => false })
   try {

@@ -14,18 +14,30 @@
  *   notokens  — a Remote-style snapshot: `usage.tokens` absent, context present
  *   nocwd     — `cwdUnavailable`: the stated `Unavailable` word, no path
  *   empty     — no fact at all: NEITHER row may be mounted
+ *   prb       — PR-B: the working run phase + the rich attention badge + the
+ *               full statistics row (cache/TTFB/R5·All) — the rich case
+ *   prb-attn  — PR-B: attention + context only (the statistics facts absent)
+ *   prb-idle  — PR-B: environment + context only (no run phase, no badge)
  *
  * Usage: node --import tsx/esm scripts/tsp7-statusline-subject.mts
  * @module scripts/tsp7-statusline-subject
  */
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { connect } from '@stencil-hq/tern'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../src/domain/status/types.ts'
+import { deriveActivityStatus } from '../src/domain/status/derive-activity.ts'
 import { mountTspRenderer } from '../src/tui/tsp/session.ts'
 
 const dir = process.env.TERN_PANE_DIR ?? '.'
 const note = (value: unknown): void => appendFileSync(`${dir}/events.jsonl`, `${JSON.stringify(value)}\n`)
-const testCase = process.env.TERN_TSP7_CASE ?? 'full'
+/**
+ * The fixture case. The pane driver's `launch.sh` does NOT forward the driver
+ * process's environment, so a flow that needs more than one case writes it into
+ * the run directory's `case` file (the env var stays the single-subject path).
+ */
+const caseFile = `${dir}/case`
+const testCase = (existsSync(caseFile) ? readFileSync(caseFile, 'utf8').trim() : '')
+  || process.env.TERN_TSP7_CASE || 'full'
 
 /** The fixture snapshots — the ONLY inputs this subject invents. */
 function snapshotFor(name: string): StatusSnapshot {
@@ -47,6 +59,50 @@ function snapshotFor(name: string): StatusSnapshot {
       workspace: { cwd: '', cwdUnavailable: true },
       access: { permissionPreset: { id: 'read-only' } },
       usage: { ...base.usage, tokens: { input: 114_000_000, output: 54_000, cacheRead: 0, cacheWrite: 0 } },
+    } as unknown as StatusSnapshot
+  }
+  // ── PR-B: the rich activity projection ──
+  // The activity section is built by the SHARED derive (the same one the surface
+  // uses), never by a hand-written literal: the phase precedence and the field
+  // set stay the product's.
+  if (name === 'prb' || name === 'prb-attn' || name === 'prb-idle') {
+    const rich = name === 'prb'
+    return {
+      ...base,
+      workspace: { cwd: '/workspaces/tsp7-pane', branch: 'pra-statusline' },
+      access: { permissionPreset: { id: 'workspace-write' } },
+      collaboration: { plan: { effective: true } },
+      activity: deriveActivityStatus(
+        name === 'prb-idle'
+          ? { working: false, compacting: false, applyingCompaction: false, approvalOpen: false, questionOpen: false }
+          : { working: true, compacting: false, applyingCompaction: false, approvalOpen: false, questionOpen: false },
+        // `busy` is the machine-behavior fact, published alongside the phase.
+        name !== 'prb-idle',
+        // prb-idle is the REAL no-work state (RFL-004): every attention count is
+        // zero, so the badge item must omit itself — a fixture that kept the
+        // rich counts would make the "no badge" assertion undiscriminating.
+        name === 'prb-idle'
+          ? { queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 }
+          : {
+              queuedCount: 0,
+              taskCount: 2,
+              childAgentCount: 1,
+              taskTotalCount: 4,
+              childAgentTotalCount: 3,
+              failedTaskCount: 1,
+              questionAttentionCount: 1,
+              todoCount: 0,
+            },
+      ),
+      usage: {
+        ...base.usage,
+        ...rich ? { tokens: { input: 114_000_000, output: 54_000, cacheRead: 0, cacheWrite: 0 } } : { tokens: undefined },
+        ...rich ? { cacheHitPct: 91.9 } : {},
+        ...rich
+          ? { performance: { llmMs: 0, firstTokenMs: 2_600, tokensPerSec: 116, sessionTokensPerSec: 44 } }
+          : {},
+        context: { usedTokens: 250_000, windowTokens: 1_000_000, percent: 25 },
+      },
     } as unknown as StatusSnapshot
   }
   return {
