@@ -145,6 +145,7 @@ export class TspModelPicker {
    *  draft whose value is still advertised, and never keep a highlight the new
    *  catalogue cannot reach. */
   private hydrate(panel: ModelPickerPanel, directory: ModelPickerDirectory): void {
+    const firstHydration = panel.directory === undefined
     const projection = projectModelDirectory(
       directory.directory,
       directory.current,
@@ -162,6 +163,23 @@ export class TspModelPicker {
     }
     panel.phase = 'ready'
     panel.notice = undefined
+    // PR-C (TSP-7): an `effort` opener lands the FIRST hydrated catalogue on
+    // its Reasoning Effort strip — the same editor the `models` entry reaches
+    // through Tab, never a second page or a second writer. It happens only on
+    // the FIRST successful read (a Retry/re-read never repeats it), and only
+    // when the configured/current row really advertises candidates: a model
+    // without effort metadata keeps the catalogue and states the reason in a
+    // notice instead of guessing a value. The panel's `normalize` (below)
+    // re-checks `stripOffered`, so a first read whose highlight carries no
+    // candidates simply stays on the list.
+    if (firstHydration && panel.request.entry === 'effort') {
+      const row = highlightedModel(panel)
+      if (row !== undefined && modelChoices(row).length > 0 && stripOffered(panel)) {
+        panel.zone = 'strip'
+      } else {
+        panel.notice = { text: 'Reasoning effort is unavailable for this model', tone: 'muted' }
+      }
+    }
     this.align(panel)
     this.change(panel)
   }

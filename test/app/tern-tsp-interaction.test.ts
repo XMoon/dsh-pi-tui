@@ -159,6 +159,7 @@ async function mountHarness(): Promise<Harness> {
       harness.onReopen?.()
       return true
     },
+    openModelPicker() {},
   })
   harness.renderer = renderer
   return harness

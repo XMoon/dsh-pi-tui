@@ -945,6 +945,14 @@ export function registerTuiCommands(
   /** Bind one submission's resolved delivery mode for the synchronous window
    * that launches a command execution (see the TUI skill handlers). */
   withDelivery<T>(delivery: SubmitDelivery, run: () => T): T
+  /**
+   * PR-C (TSP-7): the command-only UI entry into the SAME registered `/model`
+   * handler the typed command runs — the composer's high-frequency Model and
+   * Effort controls call this, never a fabricated submission. `entry` changes
+   * only the panel's initial presentation focus; the read/scope/writer owners
+   * stay the registered command's own.
+   */
+  openModelPicker(entry: 'models' | 'effort'): Promise<CommandResult>
 } {
   const { ctx, app } = runner
   // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal
@@ -2345,6 +2353,11 @@ export function registerTuiCommands(
     /** The revalidating transition (the coordinator's target-change hook). */
     enterTransition: (): void => enterCatalogTransition(),
     withDelivery,
+    // PR-C (TSP-7): the narrow UI entry over the SAME registered `/model`
+    // handler. The registrars object is captured ONCE here — the closure owns
+    // the command identity — and the caller receives only this method, never
+    // the whole registrar surface.
+    openModelPicker: (entry: 'models' | 'effort'): Promise<CommandResult> => modelCommands.openModel(entry),
     takeCommandDraftDisposition: (commandId?: string): CommandDraftDisposition | undefined => {
       if (commandId !== undefined) {
         const disposition = commandDraftDispositions.get(commandId)

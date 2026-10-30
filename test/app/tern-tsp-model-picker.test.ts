@@ -58,7 +58,7 @@ test('production /model: a pane with the picker but without the Reader kinds sti
   assert.ok(session)
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
-  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
+  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {} })
   assert.equal(renderer.modelPresentation, undefined, 'the native model UI fails closed')
   assert.equal(picker(pane), undefined)
 })
@@ -391,6 +391,7 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
+    openModelPicker() {},
   })
   assert.ok(renderer.modelPresentation)
   const writes: unknown[] = []
@@ -399,6 +400,7 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
   let retries = 0
   const handle = renderer.modelPresentation.open({
     subject,
+    entry: 'models',
     isCurrent: () => true,
     retry: () => {
       retries += 1
@@ -1016,7 +1018,7 @@ test('native Model: proven refusal stays usable, uncertain settlement closes, su
   assert.ok(session)
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
-  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
+  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {} })
   assert.ok(renderer.modelPresentation)
   // The panel opens INSIDE the loop below, so the resize is delivered before any
   // handle exists. The catalogue owns the ONE write at every width.
@@ -1026,6 +1028,7 @@ test('native Model: proven refusal stays usable, uncertain settlement closes, su
     let resolve!: (outcome: ModelApplyOutcome) => void
     const handle = renderer.modelPresentation.open({
       subject: { sessionless: false },
+      entry: 'models',
       isCurrent: () => true,
       retry: () => assert.fail('no read failure in this scenario'),
       apply: () => new Promise<ModelApplyOutcome>((r) => {
@@ -2301,6 +2304,183 @@ test('native Model: a model without efforts paints no strip and invents no candi
   await enterDetails(pane)
   assert.equal(readerValue(pane, 'reader-model'), 'Twin', 'the Reader still describes that model')
   assert.equal(m.writes.length, 0, 'and nothing wrote')
+})
+
+/* ------------------------------------------------- PR-C: the effort entry hint */
+
+/**
+ * The PR-C composer control's `entry: 'effort'` is a PRESENTATION-only first
+ * focus: the FIRST hydrated catalogue lands on the configured row's strip
+ * (never a second page, never a write), a Retry/re-read never repeats the
+ * relocation, and a model without effort metadata keeps the catalogue with an
+ * explicit notice instead of guessing a value.
+ */
+async function mountedEffortEntry(
+  t: { after(fn: () => unknown): void },
+  subject = { sessionless: false },
+) {
+  const pane = installTspPane({ modelPicker: true })
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session)
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
+    requestExit() {},
+    onFatal: (e) => assert.fail(String(e)),
+  })
+  t.after(() => renderer.dispose())
+  renderer.bindInput({
+    exit() {},
+    cancel() {},
+    submit() {},
+    steer() {},
+    pasteMedia: () => {},
+    noteUserInput() {},
+    listContinuedQuestions: () => [],
+    reopenContinuedQuestion: () => false,
+    openModelPicker() {},
+  })
+  const writes: unknown[] = []
+  let retries = 0
+  const handle = renderer.modelPresentation!.open({
+    subject,
+    entry: 'effort',
+    isCurrent: () => true,
+    retry: () => { retries += 1 },
+    apply: (selection: unknown) => {
+      writes.push(selection)
+      return 'committed'
+    },
+    runOwned: (label, task, options) =>
+      runOwned(label, task, { ...options, diag: { debug() {}, warn() {}, error() {} } as never }),
+  })
+  sendResize(pane, 100)
+  await settle(20)
+  return {
+    pane,
+    renderer,
+    handle,
+    writes,
+    retries: () => retries,
+    ready: async (d: ModelPickerDirectory = directory) => {
+      handle.setLoading()
+      handle.setDirectory(d)
+      await waitUntil('native picker ready', () => props(pane).state === 'ready')
+    },
+  }
+}
+
+test('native Model effort entry: the first hydrated catalogue lands on the current row\'s strip', async (t) => {
+  const m = await mountedEffortEntry(t)
+  await m.ready()
+  const { pane } = m
+  // The relocation happens only AFTER the first authoritative read settles:
+  // the loading panel keeps the plain list focus and nothing is guessed.
+  assert.equal(props(pane).focus, 'strip', 'the strip owns the keyboard from the first ready frame')
+  assert.equal(props(pane).selected, SAME_A, 'the configured/current row is the highlighted one')
+  assert.equal(stripOn(pane), 'high', 'the strip paints the directory-advertised draft, never a guessed value')
+  assert.equal(m.writes.length, 0, 'an entry focus never writes')
+  assert.equal(props(pane).message ?? undefined, undefined, 'a successful relocation carries no notice')
+  // The keyboard is live in the strip zone: a strip arrow edits the LOCAL
+  // draft of the same model (high → low with the base fixture's ring),
+  // exactly like a Tab into the strip would.
+  pane.key('\u001b[D')
+  await waitUntil('the strip arrow moved the draft', () => stripOn(pane) === 'low')
+  assert.equal(m.writes.length, 0)
+  // The ONE write stays the explicit footer action.
+  pane.key('\t')
+  await waitUntil('primary focused', () => String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
+  pane.key('\r')
+  await waitUntil('one admitted write', () => m.writes.length === 1)
+  assert.deepEqual(m.writes, [{ provider: 'a', model: 'same', reasoningEffort: 'low' }])
+})
+
+test('native Model effort entry: no effort metadata keeps the catalogue and states the reason', async (t) => {
+  const m = await mountedEffortEntry(t)
+  // The CURRENT model advertises no candidates (provider B's plain model), so
+  // the strip cannot be offered: the panel stays a normal catalogue and the
+  // notice says why — no invented `medium`, no second page.
+  const plainCurrent: ModelPickerDirectory = {
+    current: { provider: 'b', model: 'same' },
+    directory: {
+      default: { provider: 'a', model: 'same', reasoningEffort: 'high' },
+      routableProviders: ['a', 'b'],
+      groups: [
+        {
+          id: 'a',
+          name: 'A',
+          models: [{ id: 'same', name: 'Twin', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } }],
+        },
+        { id: 'b', name: 'B', models: [{ id: 'same', name: 'Twin' }] },
+      ],
+      failures: [],
+    },
+  }
+  await m.ready(plainCurrent)
+  const { pane } = m
+  assert.equal(props(pane).focus, 'list', 'the plain catalogue keeps the keyboard on the list')
+  assert.equal(props(pane).message, 'Reasoning effort is unavailable for this model',
+    'the absence is stated in words, never guessed')
+  assert.equal(props(pane).selected, SAME_B, 'the current row is highlighted as usual')
+  assert.equal(m.writes.length, 0)
+  // The user can still reach the effort of ANOTHER model the normal way: the
+  // notice changed nothing about the page's own ring.
+  browse(pane, SAME_A)
+  await waitUntil('the effort-bearing model is highlighted', () => props(pane).selected === SAME_A)
+  pane.key('\t')
+  await waitUntil('the strip is reachable', () => props(pane).focus === 'strip')
+  assert.notEqual(stripOn(pane), undefined, 'the strip is painted for the effort-bearing model')
+})
+
+test('native Model effort entry: a Retry/re-read never repeats the relocation', async (t) => {
+  const m = await mountedEffortEntry(t)
+  await m.ready()
+  const { pane } = m
+  assert.equal(props(pane).focus, 'strip', 'the first hydration relocated to the strip')
+  // The user moves the keyboard to the LIST (their own edit of the zone), then
+  // a failed read + Retry re-hydrates the SAME panel: the relocation is a
+  // FIRST-hydration fact only, so the user's zone survives.
+  pane.key('\t')
+  await waitUntil('the ring moved to the action bar', () => focusCue(pane, 'apply'))
+  pane.key('\t')
+  await waitUntil('the ring returned to the list', () => props(pane).focus === 'list')
+  m.handle.setLoadError('read failed')
+  await waitUntil('the failed read state', () => props(pane).state === 'error')
+  // The failed read's bar is the ONE operable region; its Retry action re-reads
+  // through the command's own read owner (the retry spy), and the re-hydrated
+  // panel keeps the LIST zone the user chose. The retry entry carries the
+  // current frame's revision token, exactly as the rendered bar does.
+  const retryId = String(actionOf(pane, 'retry')?.id ?? 'retry')
+  action(pane, retryId)
+  await waitUntil('the retry reached the read owner', () => m.retries() === 1)
+  await m.ready()
+  assert.equal(props(pane).focus, 'list',
+    'the re-read keeps the zone the user left the panel in (no repeated relocation)')
+  assert.equal(m.writes.length, 0)
+})
+
+test('native Model effort entry: a superseded panel never relocates a newer one', async (t) => {
+  // A NEW open (the newer `/model` surface token) replaces the panel ON THE
+  // SAME renderer — exactly the production shape (`presentation.open` retires
+  // the previous panel). The retired handle's late `setDirectory` is inert
+  // (isDisposed), so no cross-panel zone write can reach the newer panel.
+  const m = await mountedEffortEntry(t)
+  const retired = m.handle
+  const second = m.renderer.modelPresentation!.open({
+    subject: { sessionless: false },
+    entry: 'effort',
+    isCurrent: () => true,
+    retry() {},
+    apply: () => 'committed',
+    runOwned: (label, task, options) =>
+      runOwned(label, task, { ...options, diag: { debug() {}, warn() {}, error() {} } as never }),
+  })
+  retired.setDirectory(directory)
+  second.setLoading()
+  second.setDirectory(directory)
+  await waitUntil('the newer panel hydrated', () => props(m.pane).state === 'ready')
+  assert.equal(props(m.pane).focus, 'strip', 'the second panel relocated on its own first hydration')
+  assert.equal(m.writes.length, 0)
+  assert.equal(retired.isDisposed(), true)
 })
 
 test('native Model: a provider called `all` and a scope-shaped effort id stay unambiguous', async (t) => {

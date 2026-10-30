@@ -38,7 +38,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/tsp/session
  */
 
-import { connect as sdkConnect, ui, View } from '@stencil-hq/tern'
+import { connect as sdkConnect, html, ui, View } from '@stencil-hq/tern'
 import type { Key, Node, ScrollTo, Session, SessionInput, Surface, Tree, TspEvent } from '@stencil-hq/tern'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { StatusSnapshot, StatusSnapshotReader } from '../../domain/status/types.ts'
@@ -55,8 +55,9 @@ import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '
 import type { SurfaceDraftImageOccurrence, SurfaceImageBinding } from '../../app/surface/runtime.ts'
 import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
+import { TSP_COMPOSER_SEND_LABEL, TSP_COMPOSER_STOP_LABEL, TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
+import { clampMiddle } from './picker-text.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { createTspInteractionSeat, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
@@ -216,6 +217,14 @@ export interface TspInputHandlers {
    * controller, whose own recheck decides. The renderer mounts no form itself.
    */
   reopenContinuedQuestion(sessionId: string, callId: string): boolean
+  /**
+   * PR-C (TSP-7): open the registered `/model` picker from the composer's
+   * high-frequency Model/Effort buttons — the SAME command owner the typed
+   * `/model` runs, never a fabricated submission or a renderer-built request.
+   * The composition's late-bound entry owns the read/write; the renderer only
+   * re-checks its own seat admission before forwarding.
+   */
+  openModelPicker(entry: 'models' | 'effort'): void
 }
 
 /** The B1 binding: editor-local + lifecycle only (submissions are B2). */
@@ -1951,6 +1960,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       placeholder: 'Message',
       prompt: '> ',
     }))
+    // TSP-7 PR-C: the composer action row (Model / Effort / Send / Stop)
+    // follows the editor and precedes the native statusline. It is undefined
+    // on a pane without `el`+`styles` — the honest omission, never a fake
+    // text-link control (§4.1/§4.2).
+    const actionsRow = composerActionsRow()
+    if (actionsRow !== undefined) lines.push(actionsRow)
     // TSP-7 PR-A: the two read-only native status rows follow the editor. They
     // are projected from the LAST FORMALLY COMMITTED snapshot, and they are
     // suppressed for the whole hydration window so an outgoing subject's status
@@ -2250,6 +2265,199 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return true
   }
 
+  // ── TSP-7 PR-C: the composer action row (Model / Effort / Send / Stop) ──
+  //
+  // The dock's ONE native control row between the editor and the statusline.
+  // It exists ONLY where the pane negotiated BOTH `el` and `styles` (§4.2 of
+  // the PR-C plan): without them a `html.button` paints as bare text — the
+  // documented measured trap — so the row is omitted entirely (the keyboard
+  // routes `/model`, Enter and Ctrl+C keep working; nothing fake is drawn).
+  const COMPOSER_ACTIONS_SHEET = 'dsh-composer-actions'
+  const COMPOSER_MODEL_ROLE = 'dsh-composer-model'
+  const COMPOSER_EFFORT_ROLE = 'dsh-composer-effort'
+  const COMPOSER_SEND_ROLE = 'dsh-composer-send'
+  const COMPOSER_STOP_ROLE = 'dsh-composer-stop'
+  /** The width (terminal columns) at or above which the value labels appear. */
+  const COMPOSER_VALUE_COLS = 72
+  /** The display-width budget a value label may occupy (ellipsis-bounded). */
+  const COMPOSER_VALUE_WIDTH = 14
+  const composerActionsSupported = (): boolean =>
+    session.caps.features.includes('styles') && session.caps.kinds.includes('el')
+  if (composerActionsSupported()) {
+    surface.stylesheet(COMPOSER_ACTIONS_SHEET, `
+      [data-role="${COMPOSER_MODEL_ROLE}"],
+      [data-role="${COMPOSER_EFFORT_ROLE}"],
+      [data-role="${COMPOSER_SEND_ROLE}"],
+      [data-role="${COMPOSER_STOP_ROLE}"] {
+        border: 1px solid var(--accent);
+        background: var(--card);
+        color: var(--t1);
+        padding: 1px 8px;
+        border-radius: 4px;
+        font-family: var(--sans);
+      }
+      [data-role="${COMPOSER_SEND_ROLE}"] {
+        background: var(--raise);
+        font-weight: bold;
+      }
+      [data-role="${COMPOSER_MODEL_ROLE}"]:hover,
+      [data-role="${COMPOSER_EFFORT_ROLE}"]:hover,
+      [data-role="${COMPOSER_SEND_ROLE}"]:hover,
+      [data-role="${COMPOSER_STOP_ROLE}"]:hover {
+        background: var(--raise);
+      }
+      [data-role="${COMPOSER_MODEL_ROLE}"]:focus-visible,
+      [data-role="${COMPOSER_EFFORT_ROLE}"]:focus-visible,
+      [data-role="${COMPOSER_SEND_ROLE}"]:focus-visible,
+      [data-role="${COMPOSER_STOP_ROLE}"]:focus-visible {
+        outline: 1px solid var(--accent);
+        outline-offset: 1px;
+      }
+    `)
+  }
+
+  /**
+   * PR-C (TSP-7 §3.3): the ONE shared submit helper — the Editor's Enter
+   * branch and the Send button both run EXACTLY this sequence (the frozen
+   * PR3-B §3.4 before-callback ordering). No business-level filtering lives
+   * here: the submission controller owns admission, rollback and the queue.
+   */
+  const submitComposerDraft = (handlers: TspInputHandlers, gesture: 'enter' | 'accelerated'): void => {
+    handlers.noteUserInput()
+    const serializedDraft = composer.getDraft()
+    composer.setDraft('')
+    handlers.submit(serializedDraft, gesture)
+  }
+
+  /**
+   * PR-C (TSP-7 §3.3): the ONE pointer admission predicate of the composer
+   * controls. A click arrives on the SDK node-handler channel (not through
+   * `dispatchKey`), so it re-checks the CURRENT seat here: disposal, the
+   * hydration window, the pre-bind renderer, a modal seat, the temporary
+   * Reader and any open native presenter each own the input before the dock
+   * does. It is a shared local predicate — no `enabled` mirror is persisted
+   * and no second state machine exists.
+   */
+  const composerActionsAdmitted = (): boolean => visualActionsAdmitted()
+
+  /**
+   * PR-C (TSP-7): the Send click — the same one-shot submit path as Enter. A
+   * wire-form-empty draft (no text AND no image placeholder) is refused here:
+   * the client does not enforce `disabled` on an `el` button (measured), so
+   * the program is the one that must not submit an empty prompt.
+   */
+  const composerSendClicked = (): void => {
+    if (!composerActionsAdmitted()) return
+    const handlers = boundHandlers
+    if (handlers === undefined) return
+    if (!composerDraftSubmittable()) return
+    submitComposerDraft(handlers, 'enter')
+  }
+
+  /**
+   * PR-C (TSP-7): the Stop click — the EXISTING cancel intent, exactly like
+   * Ctrl+C. It re-checks the busy fact at click time (a one-frame-old painted
+   * button must never cancel a NEW session's run) and never reads or writes
+   * the draft.
+   */
+  const composerStopClicked = (): void => {
+    if (!composerActionsAdmitted()) return
+    const handlers = boundHandlers
+    if (handlers === undefined) return
+    if (presentedStatus?.activity.busy !== true) return
+    handlers.cancel()
+  }
+
+  /** PR-C (TSP-7): whether the live wire-form draft carries a submittable
+   *  payload — non-empty text or at least one staged image placeholder. */
+  const composerDraftSubmittable = (): boolean => {
+    if (composer.getDraft() !== '') return true
+    return (imageBinding?.draftImages.occurrences().length ?? 0) > 0
+  }
+
+  /**
+   * PR-C (TSP-7): the Model/Effort click — the ONE registered `/model`
+   * command's own UI entry (§3.1's late-bound seam), admitted only on the
+   * current seat. The draft and caret are untouched: the picker is a modal
+   * layer over the same composer.
+   */
+  const composerModelClicked = (entry: 'models' | 'effort'): void => {
+    if (!composerActionsAdmitted()) return
+    const handlers = boundHandlers
+    if (handlers === undefined) return
+    try {
+      handlers.openModelPicker(entry)
+    } catch (error) {
+      // The loud placeholder of an unwired composition is a USER-facing fact,
+      // not a renderer crash: the dock states it and the keyboard route stays.
+      display.notify('model selection is unavailable in this session (the /model command is not registered)', 'error')
+      options.logError?.('tsp renderer: composer model entry refused', { error: errorText(error) })
+    }
+  }
+
+  /** The bounded, sanitized value label of one composer control (§2.1/§2.2). */
+  const composerValueLabel = (value: string | undefined): string | undefined => {
+    if (value === undefined || value === '') return undefined
+    if (session.caps.cols < COMPOSER_VALUE_COLS) return undefined
+    const clean = sanitizedPhysicalLine(value).trim()
+    if (clean === '') return undefined
+    return clampMiddle(clean, COMPOSER_VALUE_WIDTH)
+  }
+
+  /** The composer action row: PR-C's ONE native control row (§4.1). */
+  const composerActionsRow = (): Node | undefined => {
+    if (!composerActionsSupported()) return undefined
+    const model = presentedStatus?.composition.model
+    const modelValue = composerValueLabel(model?.displayName)
+    const effortValue = composerValueLabel(model?.reasoningEffort)
+    // Stop exists ONLY while the CURRENT formally-committed snapshot says the
+    // main subject is busy; a non-busy subject never paints a dead control.
+    const busy = presentedStatus?.activity.busy === true && !hydrating
+    const modelTitle = model === undefined
+      ? 'Model — type /model to switch'
+      : `Model ${model.displayName}${model.reasoningEffort === undefined ? '' : ` · effort ${model.reasoningEffort}`} — type /model to switch`
+    const submittable = composerDraftSubmittable()
+    return ui.row(
+      { key: 'composer-actions', wrap: true, justify: 'between', gap: 'xs', role: 'dsh-composer-actions' },
+      ui.row(
+        { key: 'composer-selectors', wrap: true, gap: 'xs' },
+        html.button({
+          key: 'composer-model',
+          role: COMPOSER_MODEL_ROLE,
+          title: modelTitle,
+          aria: 'Switch model',
+          onClick: () => { composerModelClicked('models') },
+        }, `Model${modelValue === undefined ? '' : ` · ${modelValue}`} ▾`),
+        html.button({
+          key: 'composer-effort',
+          role: COMPOSER_EFFORT_ROLE,
+          title: model === undefined
+            ? 'Reasoning effort — type /model to change'
+            : `Reasoning effort ${model.reasoningEffort ?? 'unset'} — type /model to change`,
+          aria: 'Change reasoning effort',
+          onClick: () => { composerModelClicked('effort') },
+        }, `Effort${effortValue === undefined ? '' : ` · ${effortValue}`} ▾`),
+      ),
+      ui.row(
+        { key: 'composer-delivery', gap: 'xs' },
+        html.button({
+          key: 'composer-send',
+          role: COMPOSER_SEND_ROLE,
+          title: submittable ? `Send — ${TSP_COMPOSER_SEND_LABEL}` : 'Type a message to send',
+          aria: 'Send message',
+          onClick: () => { composerSendClicked() },
+        }, 'Send'),
+        ...(busy ? [html.button({
+          key: 'composer-stop',
+          role: COMPOSER_STOP_ROLE,
+          title: `Stop — ${TSP_COMPOSER_STOP_LABEL}`,
+          aria: 'Stop the running turn',
+          onClick: () => { composerStopClicked() },
+        }, 'Stop')] : []),
+      ),
+    )
+  }
+
   /** The EXACT payload of one admitted publication: the final ChartFact as
    *  pretty JSON, or the admitted SVG source verbatim (never trimmed). */
   const visualCopyPayload = (publication: PublishedVisual): string | undefined => {
@@ -2421,16 +2629,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    Enter gestures, paste, edits). A typed `q` is TEXT now.
     const edit = composer.applyKey(key)
     if (edit.kind === 'submit') {
-      handlers.noteUserInput()
-      // PR3-B §3.4 submission gesture ordering: snapshot the serialized
-      // draft, CLEAR the composer BEFORE invoking onSubmit (a synchronous
-      // rejection/restore merges into the empty draft instead of being
-      // erased by a post-callback clear), and never re-apply a stale
-      // pre-callback editor snapshot afterwards. The submission controller
-      // owns the business outcome (admission, rollback, queue).
-      const serializedDraft = composer.getDraft()
-      composer.setDraft('')
-      handlers.submit(serializedDraft, edit.gesture)
+      submitComposerDraft(handlers, edit.gesture)
     }
     if (edit.kind === 'edited') handlers.noteUserInput()
     if (edit.kind === 'exit-empty') return true

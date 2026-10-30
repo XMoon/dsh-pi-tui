@@ -252,6 +252,15 @@ export interface SurfaceInputBinding {
    * never writes to a Host/port answer path.
    */
   reopenContinuedQuestion(sessionId: string, callId: string): boolean
+  /**
+   * PR-C (TSP-7): open the SAME registered `/model` picker the typed command
+   * runs, from the composer's high-frequency Model/Effort controls. The
+   * composition root late-binds this to the command surface's registered
+   * entry BEFORE the renderer input is bound, so a click before the binding
+   * (or on a mount whose registration failed) reaches a refused entry — never
+   * a fabricated picker request. PiTui supplies no consumer.
+   */
+  openModelPicker(entry: 'models' | 'effort'): void
 }
 
 /**
@@ -575,6 +584,17 @@ export interface SurfaceRuntimeOptions {
     readonly subjectKind: 'main' | 'viewed-child'
     readonly subjectId: string | undefined
   }) => VisualEventSnapshot | undefined
+  /**
+   * PR-C (TSP-7): the LATE-BOUND `/model` UI entry the composer's high-
+   * frequency controls call. The composition root assigns the real callback
+   * (the command surface's registered handler) AFTER `createSurfaceRuntime`
+   * returns and BEFORE the renderer input is bound; a click that outruns the
+   * assignment reaches the throwing placeholder, which the renderer reports
+   * through its own notice path. The promise the callback returns is owned by
+   * the command's own `runOwned` wiring — this seam never creates a second
+   * async owner.
+   */
+  readonly openModelPicker?: (entry: 'models' | 'effort') => void
 }
 
 /**
@@ -2644,6 +2664,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           listContinuedQuestions: () => interaction.attentionRows(),
           reopenContinuedQuestion: (sessionId, callId) =>
             interaction.controller()?.reopen(sessionId, callId) ?? false,
+          // PR-C (TSP-7): the late-bound `/model` UI entry, forwarded verbatim
+          // to the renderer. A composition that supplied no entry leaves a
+          // loud placeholder: the renderer's composer buttons are the only
+          // consumers, and a silent no-op would paint a dead control.
+          openModelPicker: entry => {
+            const open = options.openModelPicker
+            if (open === undefined) throw new Error('the model picker command entry is not wired in this composition')
+            open(entry)
+          },
         }
         inputBindTarget = mounted
         return

@@ -397,6 +397,15 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
   refreshCompletions(): void
   /** Bind one submission's resolved delivery for its launch window. */
   withCommandDelivery<T>(delivery: SubmitDelivery, run: () => T): T
+  /**
+   * PR-C (TSP-7): open the SAME registered `/model` picker the typed command
+   * runs, from a high-frequency composer control. It is admitted only while
+   * the `/model` registration actually succeeded (`commandsRegistered` with a
+   * live `modelPickerOpener`); an unregistered surface notifies the existing
+   * error and returns without reading any catalog. `entry` changes only the
+   * panel's initial presentation focus.
+   */
+  openModelPicker(entry: 'models' | 'effort'): void
   /** Request one catalog refresh through the coordinator. */
   requestCatalogRefresh(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
   /** Whether the catalog coordinator is registered yet. */
@@ -516,6 +525,15 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * the unwired default simply runs the launch. */
   
   let withCommandDelivery = <T>(_delivery: SubmitDelivery, run: () => T): T => run()
+
+  /**
+   * PR-C (TSP-7): the installed `/model` UI entry — the `openModelPicker`
+   * member `registerTuiCommands` returns, captured only when the `/model`
+   * registration itself succeeded. `undefined` means "not registered (yet)":
+   * the public entry then refuses with the existing notice path instead of
+   * constructing a request of its own.
+   */
+  let modelPickerOpener: ((entry: 'models' | 'effort') => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
 
   /** Consume TUI-local command draft dispositions after DSH normalizes the
    * public CommandResult. A missing id is used only for a thrown command
@@ -720,6 +738,26 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     })
   }
 
+  /** PR-C (TSP-7): the ONE `/model` UI entry — the registered handler's own
+   *  body, admitted only while its registration is live. A refusal states
+   *  itself through the existing notice path; it never constructs a
+   *  `ModelPickerRequest` of its own. */
+  const openModelPicker = (entry: 'models' | 'effort'): void => {
+    if (!commandsRegistered || modelPickerOpener === undefined) {
+      deps.notify('model selection is unavailable in this session (the /model command is not registered)', 'error')
+      return
+    }
+    // The registered handler's own runOwned/diag/sessionId wiring owns this
+    // promise (see createModelCommands); the surface adds no second owner. A
+    // rejection is already reported by the handler's own paths — this entry
+    // observes it for diagnostics only, never a bare floating promise.
+    // (allowlist: the diagnostics-only observer over the command-owned promise)
+    const opened = modelPickerOpener(entry)
+    void opened.catch((error: unknown) => { // allowlist: diagnostics observer, the command owns the task
+      deps.logError(`tui-runner: model picker UI entry failed: ${safeErrorMessage(error)}`)
+    })
+  }
+
   const registerCommands = (initial?: InitialCommandCatalog): void => {
     if (commandsRegistered) return
     commandsRegistered = true
@@ -770,6 +808,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       isSkillWrapperName = installed.isSkillWrapper
       refreshCommandCompletions = installed.refreshCommandCompletions
       withCommandDelivery = installed.withDelivery
+      // PR-C (TSP-7): the `/model` UI entry exists only where the registration
+      // really installed one. `registerTuiCommands` registers `/model` at its
+      // frozen position before returning, so a missing member here can only
+      // mean the registration degraded (a Host-claimed name): the surface then
+      // refuses the composer control truthfully instead of guessing a route.
+      modelPickerOpener = installed.openModelPicker
       takeCommandDraftDisposition = installed.takeCommandDraftDisposition
       // The coordinator's surface hooks point INTO the command surface;
       // the command runtime's refresh facades (and the switch/first-session
@@ -1256,6 +1300,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     // The delivery binding is a LATE-REBOUND slot: read it on every call, or the
     // owner would hand out the pre-registration default forever.
     withCommandDelivery: (delivery, run) => withCommandDelivery(delivery, run),
+    openModelPicker,
     requestCatalogRefresh,
     catalogRefreshAvailable,
     isSkillInvocation,

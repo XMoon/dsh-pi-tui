@@ -21,6 +21,19 @@ import type { KeyId } from '@xmoon76/pi-tui'
 export const TSP_CONTINUED_INSPECTION_LABEL = 'Alt+Q'
 
 /**
+ * The TSP composer action row's FIXED keyboard-equivalent labels (TSP-7 PR-C).
+ *
+ * The row's Send and Stop buttons reuse the composer's EXISTING fixed keys —
+ * Enter and Ctrl+C, dispatched from the raw SDK key stream — so their tooltip
+ * labels can never come from `keyHint`/`keysFor`, and cannot go stale under a
+ * remap because no remap exists for them. They live HERE, with the key-label
+ * vocabulary, for the same gate reason as {@link TSP_CONTINUED_INSPECTION_LABEL}:
+ * a renderer module must not hard-code the chord itself.
+ */
+export const TSP_COMPOSER_SEND_LABEL = 'Enter'
+export const TSP_COMPOSER_STOP_LABEL = 'Ctrl+C'
+
+/**
  * The History editor-seat tenant's FIXED labels (Phase 3B / B3-A).
  *
  * The seat is a per-surface COMPONENT contract, not a Host command: it owns no
