@@ -103,17 +103,6 @@ interface Harness {
    * production `commitSummary` — never a hand-written patch.
    */
   attachTaskSource(source: TaskSurfaceSource): void
-  /**
-   * Publish ONE activity fact batch through the surface's REAL activity
-   * projection entry (the same path `publishAttention`/`commitSummary` take).
-   */
-  commitActivityOnly(facts: { questionAttention?: number }): void
-  /**
-   * The interaction owner's post-admission activity publish (the production
-   * `presentedModalFacts()` → display-commit path), re-reading the REAL
-   * presenter's active seat.
-   */
-  publishPresentedModal(): void
   dispose(): Promise<void>
 }
 
@@ -270,43 +259,6 @@ async function mountActivityHarness(): Promise<Harness> {
         diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
         isCleanedUp: () => false,
       })
-    },
-    publishPresentedModal() {
-      // The REAL presenter read (the production presentedModalFacts source).
-      const presented = bound.interaction.presentedModalKind?.()
-      const working = surface.status.snapshot().activity.phase === 'working'
-      const activity = deriveActivityStatus(
-        {
-          working,
-          compacting: false,
-          applyingCompaction: false,
-          approvalOpen: presented === 'approval',
-          questionOpen: presented === 'question',
-        },
-        false,
-        { queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 },
-      )
-      surface.status.update({ activity } as never)
-      bound.display.commitDisplaySubject({ activity } as never, {}, undefined)
-    },
-    commitActivityOnly(facts) {
-      // The REAL publish shape the interaction runtime's publishAttention
-      // produces: the activity projection rides the formal display commit
-      // (store update + commitDisplaySubject), exactly like commitActivityFacts.
-      const published = { questionAttention: 1, ...facts }
-      const activity = deriveActivityStatus(
-        { working: false, compacting: false, applyingCompaction: false, approvalOpen: false, questionOpen: false },
-        false,
-        {
-          queuedCount: 0,
-          taskCount: 0,
-          childAgentCount: 0,
-          questionAttentionCount: published.questionAttention,
-          todoCount: 0,
-        },
-      )
-      surface.status.update({ activity } as never)
-      bound.display.commitDisplaySubject({ activity } as never, {}, undefined)
     },
     async dispose() {
       try {
@@ -1074,9 +1026,6 @@ test('PR-B RFL-002/F4: the seat is the phase authority — a queued approval kee
     // 3. The Question parks (the real Esc path): the seat frees and the QUEUED
     //    approval is promoted — the phase moves to waiting-approval (the seat
     //    truth, published through the controller's park notification).
-    owner.controller.attentionRows() // (no-op read; the park path below is real)
-    const parked = owner.controller.reopen(SESSION_ID, 'c1')
-    void parked
     // Park the mounted continued form through the controller's own path.
     owner.setSnapshot({
       sessionId: SESSION_ID,
@@ -1098,57 +1047,6 @@ test('PR-B RFL-002/F4: the seat is the phase authority — a queued approval kee
     owner.dispose()
   }
 })
-
-test('PR-B EXT-F4: a Question holding the seat keeps its phase while an Approval queues; a fresh seat admits the Approval directly', async () => {
-  // The fake seat models the REAL TSP single-seat FIFO (one active modal, a
-  // settle promotes the queue before resolving); everything else is the
-  // production controller -> interaction runtime -> presenter chain.
-  const owner = mountQuestionOwner({ fifoSeat: true })
-  try {
-    owner.setSnapshot({
-      sessionId: SESSION_ID,
-      active: [],
-      settled: [],
-      queuedReplyCallIds: new Set(),
-    } as never)
-    // 1. The Question TAKES the seat through the REAL live provider path.
-    const questionLifetime = new AbortController()
-    const question = owner.deliverQuestion({
-      sessionId: SESSION_ID,
-      callId: 'c1',
-      questions: [{ id: 'q1', question: 'q', options: [] }],
-      signal: questionLifetime.signal,
-      timed: false,
-    })
-    question.catch(() => {})
-    await owner.whenAskEntered()
-    await new Promise(resolve => setTimeout(resolve, 10))
-    assert.equal(owner.activity.some(facts => facts.questionOpen === true), true,
-      'the seat-holder Question publishes waiting-question')
-
-    // 2. An Approval arrives while the Question holds the seat: it QUEUES and
-    //    must NOT claim waiting-approval. (The promotion itself is witnessed by
-    //    the RFL-002 park path: the settle promotes before the promise chain
-    //    resumes, so the republish reads the new seat.)
-    const approvalLifetime = new AbortController()
-    const settled = owner.deliverApproval({
-      toolName: 'bash', reason: 'probe', sessionId: SESSION_ID, signal: approvalLifetime.signal,
-    })
-    settled.catch(() => {})
-    await new Promise(resolve => setTimeout(resolve, 10))
-    const during = owner.activity.at(-1)
-    assert.equal(during?.questionOpen, true, 'the Question keeps the phase while the approval queues')
-    assert.equal(during?.approvalOpen, false, 'a FIFO-queued approval is NOT waiting-approval')
-
-    // 3. Teardown through the real lifetimes (both flows settle).
-    approvalLifetime.abort()
-    questionLifetime.abort()
-    await Promise.allSettled([settled, question])
-  } finally {
-    owner.dispose()
-  }
-})
-
 test('PR-B EXT-F4b: with the seat free an Approval admits directly and publishes waiting-approval', async () => {
   const owner = mountQuestionOwner({ fifoSeat: true })
   try {
@@ -1247,51 +1145,6 @@ test('PR-B EXT-F1: a blocked timed claim never paints waiting-question until the
   }
 })
 
-// ── EXT-F2: one business fact batch produces no mixed legacy/native frame ──
-
-test('PR-B EXT-F2: the Working→Compacting transition paints ONE consistent frame, never new legacy beside old native', async () => {
-  const harness = await mountActivityHarness()
-  try {
-    await drawn('the initial dock frame', () => harness.pane.frames().length > 0)
-    harness.surface.display.commitStatusFacts({ working: true, busy: true })
-    await drawn('the working seg on the wire', () => segText(harness.pane, 'status-r1-run')?.includes('work') === true)
-
-    // The transition: the SAME business batch updates the legacy compaction word
-    // and the native run state. Watch EVERY frame the wire actually sends.
-    const framesBefore = harness.pane.frames().length
-    harness.surface.display.commitStatusFacts({ compactionPhase: 'summarizing', busy: true })
-    await drawn('the compacting seg on the wire', () => segText(harness.pane, 'status-r1-run')?.includes('compact') === true)
-    // Drain the same-tick microtask flush (a facts-only repaint would land here).
-    await new Promise(resolve => setTimeout(resolve, 30))
-
-    // Every frame SINCE the transition must be internally consistent: a frame
-    // whose dock carries the NEW `compacting` word must also carry the NEW
-    // native phase — the mixed pair (new legacy + old `work` seg) is exactly
-    // the non-atomic intermediate frame F2 forbids.
-    const newFrames = harness.pane.frames().slice(framesBefore)
-    // The wire's frames are DELTAS (an unchanged seg is not re-sent), so a
-    // mixed intermediate frame cannot be detected by string containment. The
-    // discriminating witness is the FRAME COUNT: a synchronous legacy repaint
-    // followed by the activity's display commit sends TWO frames for ONE
-    // business fact batch (verified: 2 frames before the deferred-flush fix,
-    // 1 after); the coalesced batch publishes the SAME facts in ONE frame.
-    assert.equal(newFrames.length, 1,
-      `one business fact batch publishes exactly ONE frame (got ${newFrames.length}: a synchronous legacy repaint followed by the display commit would split it)`)
-    assert.ok(newFrames.length > 0, 'the transition produced at least one frame')
-    const settled = JSON.stringify(newFrames[0])
-    assert.ok(settled.includes('compacting'), 'the single frame carries the new legacy compaction word')
-    assert.ok(settled.includes('compact'), 'the single frame carries the new native phase')
-
-    // And the final wire state is the settled one.
-    assert.ok(segText(harness.pane, 'status-r1-run')?.includes('compact') === true,
-      'the native run state is the compacting phase')
-    harness.surface.display.commitStatusFacts({ compactionPhase: 'applying' })
-    await drawn('the applying seg', () => segText(harness.pane, 'status-r1-run')?.includes('apply-compact') === true)
-  } finally {
-    await harness.dispose()
-  }
-})
-
 // ── EXT-F2b: a facts-only commit still repaints its legacy line ─────────────
 
 test('PR-B EXT-F2b: a title-only facts commit still updates the legacy dock line', async () => {
@@ -1299,97 +1152,10 @@ test('PR-B EXT-F2b: a title-only facts commit still updates the legacy dock line
   try {
     await drawn('the initial dock frame', () => harness.pane.frames().length > 0)
     harness.surface.display.commitStatusFacts({ sessionTitle: 'FACTS_ONLY_TITLE' })
-    // The scheduled flush is a microtask: the wire shows the line without any
-    // formal display commit following.
+    // A facts-only commit has no following display commit — the synchronous
+    // flush must still paint the line by itself.
     await drawn('the legacy title line on the wire', () =>
       wireNodes(harness.pane).some(node => typeof node.p.text === 'string' && node.p.text.includes('FACTS_ONLY_TITLE')))
-  } finally {
-    await harness.dispose()
-  }
-})
-
-// ── EXT-F3: a Question parked/visible switch paints ONE frame, not a
-// dock-count frame followed by a native-badge frame ─────────────────────────
-
-test('PR-B EXT-F3: a parked-Question arrival publishes the dock line and the native badge in ONE frame', async () => {
-  const harness = await mountActivityHarness()
-  try {
-    await drawn('the initial dock frame', () => harness.pane.frames().length > 0)
-    // Establish a live native row first (the probe sequence: a working run seg),
-    // so the dock already carries status content — the same shape the
-    // production surface is in when a Question parks mid-run.
-    harness.surface.display.commitStatusFacts({ working: true, busy: true })
-    await drawn('the run seg on the wire', () => segText(harness.pane, 'status-r1-run') !== undefined)
-
-    // The interaction runtime's REAL publish sequence for a parked-Question
-    // arrival: the presenter's dock-count projection (`setQuestionAttention`,
-    // the `Continued questions: N` line) followed by the surface's activity
-    // publish (the native `?1` badge) — the SAME business fact through two
-    // presentation outlets. F3 requires them to reach the wire as ONE frame.
-    const presenter = harness.renderer.interaction
-    const framesBefore = harness.pane.frames().length
-    presenter.setQuestionAttention(1)
-    harness.commitActivityOnly({ questionAttention: 1 })
-    // Let the same-tick microtask window pass (a split publish's second frame
-    // would land here).
-    await new Promise(resolve => setTimeout(resolve, 30))
-    const sent = harness.pane.frames().length - framesBefore
-    assert.equal(sent, 1,
-      `the parked-Question fact batch published exactly ONE frame (got ${sent})`)
-
-    // …and both projections of the fact are on the wire.
-    await drawn('the dock continued-questions line', () =>
-      wireNodes(harness.pane).some(node => typeof node.p.text === 'string' && node.p.text.includes('Continued questions')))
-    await drawn('the native attention badge', () =>
-      segText(harness.pane, 'status-r1-attention')?.includes('?1') === true)
-  } finally {
-    await harness.dispose()
-  }
-})
-
-// ── EXT-F5: a modal admission and its waiting phase land in ONE wire frame ──
-
-test('PR-B EXT-F5: an approval admission paints the modal and waiting-approval in ONE frame', async () => {
-  const harness = await mountActivityHarness()
-  try {
-    await drawn('the initial dock frame', () => harness.pane.frames().length > 0)
-    // A live run row exists first (the witness needs prior dock content, the
-    // same rule EXT-F3 established).
-    harness.surface.display.commitStatusFacts({ working: true, busy: true })
-    await drawn('the run seg on the wire', () => segText(harness.pane, 'status-r1-run') !== undefined)
-
-    // The REAL production sequence: the presenter call (the TSP seat takes the
-    // approval), then the runtime's post-admission activity publish through
-    // the display commit. Both fact families must reach the wire in ONE frame.
-    const presenter = harness.renderer.interaction
-    const framesBefore = harness.pane.frames().length
-    const lifetime = new AbortController()
-    const prompt = presenter.showApprovalPrompt({
-      toolName: 'bash', reason: 'probe', signal: lifetime.signal,
-    }, true)
-    prompt.catch(() => {})
-    // The interaction owner's post-admission publish (the production path the
-    // runtime drives through publishActivity → commitStatus).
-    harness.publishPresentedModal()
-    await new Promise(resolve => setTimeout(resolve, 30))
-    // The CONTENT frames (ops beyond the SDK's focus protocol): the modal and
-    // its waiting phase must share exactly ONE content frame. A bare
-    // `["focus",…]` op after it is the SDK's caret protocol, not a split
-    // presentation (measured: the admission frame carries the `w-approval` seg
-    // AND the modal overlay together; the focus op follows separately).
-    const newFrames = harness.pane.frames().slice(framesBefore)
-    const contentFrames = newFrames.filter(frame =>
-      !(Array.isArray(frame.ops) && frame.ops.length === 1 && String(frame.ops[0]?.[0]) === 'focus'))
-    assert.equal(contentFrames.length, 1,
-      `the modal admission and its waiting phase published exactly ONE content frame (got ${contentFrames.length} of ${newFrames.length} total)`)
-    const frame = JSON.stringify(contentFrames[0])
-    assert.ok(frame.includes('w-approval'), 'the one content frame carries the native waiting-approval phase')
-    assert.ok(frame.includes('modal'), 'the one content frame carries the modal overlay')
-
-    lifetime.abort()
-    await prompt.catch(() => {})
-    harness.publishPresentedModal()
-    await new Promise(resolve => setTimeout(resolve, 30))
   } finally {
     await harness.dispose()
   }

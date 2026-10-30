@@ -20970,21 +20970,6 @@ export class TuiApp {
    * precedence lives in the pure derive — the app never re-derives it in the
    * footer). Its `todoCount` is the DISPLAY SUBJECT's list length, so the
    * display-subject commit carries it in the SAME store patch (M3-5 PR1). */
-  /**
-   * TSP-7 PR-B (F4): the ACTIVE-slot modal facts `activityStatus()` derives
-   * the waiting phases from, as ONE narrow read for the presenter adapter. The
-   * ACTIVE slot only (never the queued requests): a FIFO-queued prompt is not
-   * presented and must not claim the phase.
-   */
-  presentedModalKindForStatus(): 'approval' | 'question' | undefined {
-    if (this.approvals.isActive()) return 'approval'
-    if (this.activeQuestions !== undefined) return 'question'
-    return undefined
-  }
-  /** PR-B F4 adapter halves (prefer {@link presentedModalKindForStatus}). */
-  approvalActiveForStatus(): boolean { return this.approvals.isActive() }
-  questionActiveForStatus(): boolean { return this.activeQuestions !== undefined }
-
   private activityStatus(): ActivityStatus {
     return deriveActivityStatus(
       {
