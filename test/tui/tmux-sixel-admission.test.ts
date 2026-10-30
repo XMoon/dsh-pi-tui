@@ -171,7 +171,6 @@ test('N06: the whole list-clients report must be strict six-column records', (t)
       'main\t/dev/pts/12\twork\txterm-kitty\tkitty\t0\n\n',
       '\t/dev/pts/12\twork\txterm-kitty\tkitty\t0\n',
       'main\t\twork\txterm-kitty\tkitty\t0\n',
-      'main\t/dev/pts/12\twork\t\tkitty\t0\n',
     ]
     for (const report of rejected) {
       cli.setReply('list-clients', { text: report })
@@ -182,15 +181,15 @@ test('N06: the whole list-clients report must be strict six-column records', (t)
     // A real Windows Terminal client may have no XTVERSION termtype; Sxl is the
     // effective client evidence and the empty identity field stays part of the
     // immutable binding.
-    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\t\t0\n' })
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\t\t\t0\n' })
     assert.deepEqual(probeTmuxSixelIdentity(cli.env), {
       paneId: '%7',
       sessionName: 'work',
       clientName: 'main',
       clientTty: '/dev/pts/12',
-      clientTermname: 'xterm-256color',
+      clientTermname: '',
       clientTermtype: '',
-    }, 'an empty termtype is a valid client identity when Sxl is proven')
+    }, 'empty optional terminal-description fields are valid when Sxl is proven')
   } finally {
     cli.dispose()
   }

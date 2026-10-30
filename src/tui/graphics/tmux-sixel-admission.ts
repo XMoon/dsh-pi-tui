@@ -100,7 +100,6 @@ export function probeTmuxSixelIdentity(env: NodeJS.ProcessEnv = process.env): Tm
   if (
     !nonEmpty(client.name)
     || !nonEmpty(client.tty)
-    || !nonEmpty(client.termname)
   ) return undefined
   if (client.session !== sessionName) return undefined
   const identity: TmuxSixelIdentity = {

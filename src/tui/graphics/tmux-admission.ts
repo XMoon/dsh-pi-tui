@@ -235,7 +235,6 @@ export function probeTmuxDisplayIdentity(env: NodeJS.ProcessEnv = process.env): 
   if (
     !nonEmpty(client.name)
     || !nonEmpty(client.tty)
-    || !nonEmpty(client.termname)
   ) return undefined
   if (client.session !== sessionName) return undefined
   const identity: TmuxDisplayIdentity = {
