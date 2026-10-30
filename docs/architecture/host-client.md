@@ -150,11 +150,13 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   A replaced Host's files are never deleted by another instance.
 - **Session boundary.** The Client derives `connecting | connected | disconnected`
   from the official Connection state and generation on every read and never
-  copies it into a long-lived flag. The split-process Client keeps
-  `sessionOpen=false`: SessionReference/Session Writer/real TUI operation are a
-  later migration step, and no business mutation is replayed across a transport
-  reconnect. The protocol guarantees only a reconnect to the same Host; a Host
-  crash is not a graceful migration.
+  copies it into a long-lived flag. `sessionOpen` is a LIVE projection of the
+  official `tuiMainView` reference count on the current Session — never the
+  launch `--session` intent, the Domain mount or a cached boolean. No business
+  mutation is replayed across a transport reconnect; a write whose ACK was lost
+  is `indeterminate` and the next Client reconciles it from the Host's durable
+  log instead of retrying. The protocol guarantees only a reconnect to the same
+  Host; a Host crash is not a graceful migration.
 
 ### Host composition and the built-in PiTui runtime
 
@@ -182,6 +184,45 @@ the built-in row to be ACTIVE, checks the official and private Typert
 `piTuiPerformanceReady` before it publishes the authenticated B1 identity. A
 missing row, artifact, binding or readiness gate fails Host startup before any
 identity is published.
+
+### Client composition, Session references and the real surface
+
+The split Client keeps ONE Cordis root and ONE official
+Typert/Connection/Gateway graph. Its Domain plane is mounted by one
+`mountRemoteClientDomains()` call: the generated `/remote` contributions, the
+package's ONE private contribution, then the official fileUpload -> Sessions ->
+Jobs Client plugins. This function never creates or disposes the Context,
+Connection or Gateway. The official Client bundles and generated `/remote`
+descriptors are resolved from the installed DSH anchor; the browser-form
+`/client` bundles' platform statics (`@deepseek-ai/cordis`,
+`@deepseek-ai/dsh-client-store`) come from the same installed Harness family
+through the profile's runtime resolution. No source-tree descriptor may mix
+with that installation.
+
+Above the Domains, the Client mounts exactly one Client UI subtree (extension
+host + first-party builtins), one split application runtime (Backend + the ONE
+shared owner registry + presentation bundle) and one real runner fiber. The
+runner adopts the pre-built Remote selection by identity; the Client bootstrap
+never constructs a second Backend, owner registry or presentation graph. A
+mounted Session is committed to the visible surface only through the official
+`retain()` reference, `ready` AND `openState === 'open'`; `ready` alone is not
+an open history.
+
+Disposal is one reverse chain, owned by `LocalClientHandle.dispose()`: runner
+surface (TUI state + the owned `tuiMainView` reference + session retirement +
+the selected presentation/backend adapters) -> Client UI subtree -> the SAME
+memoized presentation/backend/Domain release -> the borrowed B1 transport ->
+the Client root. The runner may trigger the memoized adapter release during its
+own teardown; the bootstrap's later call never unmounts a second time. A Client
+exit, SIGTERM/SIGKILL, terminal EOF or surface teardown never calls the Host's
+shutdown, cancels a Host Agent, or releases a Host Session on the UI's behalf.
+
+The internal surface mode gives the tty to PiTui and routes structured
+telemetry to a private 0600 JSONL file; the frozen B1 stdin/stdout JSON control
+channel remains the qualification mode only, and JSON records never share the
+real terminal. A surface-mode Client is the shell for the official web-form
+Client bundles, so it supplies exactly the platform statics those bundles
+require; it does not add a second transport, session RPC or Host service.
 
 ## Direct/Remote semantic equivalence
 

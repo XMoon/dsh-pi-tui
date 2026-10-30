@@ -97,7 +97,7 @@ function attachmentHarness(options: AttachmentHarnessOptions = {}): AttachmentHa
     },
   } as unknown as RemoteBackendRuntime
 
-  const source = createRemotePresentationSource(wire, backendRuntime)
+  const source = createRemotePresentationSource(wire.client, backendRuntime)
   return {
     attachments: source.attachments,
     lifetime: () => source.sessionFacts.captureTransportToken('session-1') as RemoteTransportLifetime,

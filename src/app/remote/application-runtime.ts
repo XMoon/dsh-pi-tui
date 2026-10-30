@@ -14,13 +14,22 @@
  * M3-4 submission PR) supply a real one; the aggregate itself never invents
  * or weakens one.
  *
- * The transport disposer owns exactly `clientUi.dispose()` (the M3-6 PR1
- * Client UI subtree: builtins -> extension host -> startup facts) then
- * `presentation.task.dispose()` then `backendRuntime.dispose()` then
- * `wire.dispose()` (adapters before Client, Client before Host additive
- * fibers) and is idempotent + error-preserving. It never retires the
- * currently selected Session — that stays `app/session` ownership, and the
- * caller order is `session retirement -> disposeTransport()`.
+ * M4-B2-S adds {@link createRemoteApplicationRuntimeFromClient}: the SAME
+ * Backend/Owner/Presentation stage over an ALREADY-MOUNTED official Client
+ * Domain graph (the real split Client's one Context + B1 transport). It owns
+ * no Context, Connection, Gateway or Client UI subtree: those belong to the
+ * Client process composition root. The two public functions share the ONE
+ * private {@link composeRemoteApplicationStage}, so the Remote semantics can
+ * never fork between the M3 in-process path and the split Client path.
+ *
+ * The transport disposer owns exactly the adapters it was given: for M3 that
+ * is `clientUi.dispose()` then the presentation task then the backend runtime
+ * then `wire.dispose()`; for the split Client it is the presentation task then
+ * the backend runtime then the mounted Client Domains (the Client UI subtree
+ * and B1 transport stay owned by the Client bootstrap). It is idempotent and
+ * error-preserving, and never retires the currently selected Session — that
+ * stays `app/session` ownership, and the caller order is `session retirement
+ * -> disposeTransport()`.
  *
  * The only sanctioned reachability is the internal application
  * runtime-selection seam through `runtime/backend-loader.ts`; tests about
@@ -32,18 +41,25 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { ClientUiStartupFacts, SelectedApplicationRuntime } from '../application-runtime.ts'
 import type { RemotePromptSerializer } from '../../runtime/remote/session-writer-remote.ts'
+import type { PiTuiExtensionService } from '../../extensions.ts'
 import { mergeCause } from './dispose-cause.ts'
 import {
   createExperimentalRemoteRuntime,
   createRemoteBackendRuntime,
   type ExperimentalRemoteRuntime,
+  type RemoteBackendFetch,
   type RemoteBackendRuntime,
 } from './runtime.ts'
-import { createRemoteSessionOwnerServices, type RemoteSessionOwnerServices } from './session-owners.ts'
-import { createRemotePresentationSource, type RemoteApplicationSource } from './presentation-source.ts'
+import { createRemoteSessionOwnerServices } from './session-owners.ts'
+import {
+  createRemotePresentationSource,
+  type RemoteApplicationSource,
+  type RemotePresentationClientSource,
+} from './presentation-source.ts'
 import { createRemoteClientUiRuntime, type RemoteClientUiRuntime } from './client-ui-runtime.ts'
+import type { MountedRemoteClientDomains } from './client-runtime.ts'
 
-/** Start input for the Remote application runtime aggregate. */
+/** Start input for the M3 Remote application runtime aggregate. */
 export interface RemoteApplicationRuntimeOptions {
   /** The already-running ordinary Host Context (never disposed here). */
   readonly hostContext: Context
@@ -69,7 +85,7 @@ export interface RemoteApplicationRuntimeOptions {
   readonly clientUiStartup: ClientUiStartupFacts
 }
 
-/** The Remote application runtime: the selected core plus its parts. */
+/** The M3 Remote application runtime: the selected core plus its parts. */
 export interface RemoteApplicationRuntime {
   readonly selected: SelectedApplicationRuntime
   readonly wire: ExperimentalRemoteRuntime
@@ -93,6 +109,46 @@ export interface RemoteApplicationRuntime {
   readonly clientUi: RemoteClientUiRuntime
 }
 
+/**
+ * The split-Client application runtime (M4-B2-S): the selected core plus the
+ * presentation bundle and the Client-local extension service, all built over
+ * the ONE mounted official Client Domain graph. It deliberately has NO `wire`
+ * member: the split Client has no M3 Host carrier or in-process wire, and this
+ * narrow result must not be mistaken for {@link RemoteApplicationRuntime}.
+ */
+export interface SplitRemoteApplicationRuntime {
+  readonly selected: SelectedApplicationRuntime
+  readonly presentation: RemoteApplicationSource
+  /** Identity: `clientUi.extensionService` (the Client Context's service). */
+  readonly extensionService: PiTuiExtensionService
+}
+
+/** Start input for the split-Client application runtime. */
+export interface SplitRemoteApplicationRuntimeOptions {
+  /** The mounted official Client Domain graph (ONE Context/Connection). */
+  readonly domains: MountedRemoteClientDomains
+  /** The SAME B1 authenticated Cookie fetch the archive adapter addresses. */
+  readonly fetch: RemoteBackendFetch
+  /** The already-mounted Client UI subtree (identity source of the extension
+   * service). */
+  readonly clientUi: RemoteClientUiRuntime
+  /** Lifecycle signal observed by the Backend composition. */
+  readonly signal?: AbortSignal
+}
+
+/** The ONE shared composition stage: Backend + owner registry + presentation. */
+interface ComposedRemoteApplicationStage {
+  readonly backendRuntime: RemoteBackendRuntime
+  readonly owners: SelectedApplicationRuntime['owners']
+  readonly retirement: SelectedApplicationRuntime['retirement']
+  readonly presentation: RemoteApplicationSource
+  /** Synchronously close the pre-dispatch write admission (idempotent). */
+  stopSurfaceAdmission(): void
+  /** Dispose the presentation task then the backend runtime (idempotent,
+   *  error-preserving). Never touches the Client graph the caller owns. */
+  disposeAdapters(): Promise<void>
+}
+
 /** Run one disposal step with per-step error isolation: the step's failures
  *  are collected (never thrown here) so the remaining steps always run. */
 async function collectDisposeErrors(dispose: () => Promise<void> | void): Promise<unknown[]> {
@@ -114,7 +170,91 @@ function throwAggregated(errors: readonly unknown[], label: string): void {
 }
 
 /**
- * Compose the Remote application runtime as ONE graph. Failure semantics: a
+ * The ONE Remote semantic composition stage shared by both public
+ * application-runtime constructors. It composes the Backend, the ONE owner
+ * registry and the presentation bundle over the supplied Client runtime
+ * source. It owns no Context/Connection/Gateway/UI: the caller owns those and
+ * disposes them around this stage.
+ *
+ * Failure semantics: a backend construction failure unwinds inside
+ * `createRemoteBackendRuntime`; a LATER owner/presentation failure disposes the
+ * constructed presentation task/backend before rethrowing, with the original
+ * error primary.
+ */
+async function composeRemoteApplicationStage(input: {
+  readonly client: RemotePresentationClientSource
+  readonly fetch: RemoteBackendFetch
+  readonly promptSerializer?: RemotePromptSerializer
+}): Promise<ComposedRemoteApplicationStage> {
+  let backendRuntime: RemoteBackendRuntime | undefined
+  let ownerServices: ReturnType<typeof createRemoteSessionOwnerServices> | undefined
+  let presentation: RemoteApplicationSource | undefined
+  /**
+   * The composition-owned pre-dispatch write admission: OPEN for the whole live
+   * surface, closed ONCE and synchronously by the application's surface-stop
+   * boundary (`SelectedApplicationRuntime.stopSurfaceAdmission`). A write still
+   * parked before dispatch when the surface stops is then refused before any
+   * Host dispatch instead of being admitted silently.
+   */
+  let dispatchAdmissionOpen = true
+  try {
+    backendRuntime = await createRemoteBackendRuntime({
+      runtime: input.client,
+      fetch: input.fetch,
+      isDispatchAllowed: () => dispatchAdmissionOpen,
+      // Absent = the production serializer (see createRemoteBackendRuntime).
+      ...(input.promptSerializer === undefined ? {} : { promptSerializer: input.promptSerializer }),
+    })
+    // ONE owner registry shared by owners + retirement (never constructed
+    // independently — that would create a second owner truth). The SAME
+    // official Connection generation source fences the owner mutation replies.
+    ownerServices = createRemoteSessionOwnerServices(
+      input.client.sessions,
+      input.client.connection.generation,
+    )
+    // The presentation bundle built from the SAME source. Its Task read owns a
+    // retained root Job-roster watch that must be released through this stage
+    // before the official Client services are unmounted.
+    presentation = createRemotePresentationSource(input.client, backendRuntime)
+  } catch (error) {
+    const disposeErrors = [
+      ...presentation === undefined ? [] : await collectDisposeErrors(() => presentation!.task.dispose()),
+      ...backendRuntime === undefined ? [] : await collectDisposeErrors(() => backendRuntime!.dispose()),
+    ]
+    if (disposeErrors.length > 0) {
+      const secondary = disposeErrors.length === 1
+        ? disposeErrors[0]
+        : new AggregateError(disposeErrors, 'remote application runtime: disposal failures during stage construction')
+      throw mergeCause(error instanceof Error ? error : new Error(String(error)), secondary)
+    }
+    throw error
+  }
+  const composed = { backendRuntime, ownerServices, presentation }
+  let adaptersDisposed = false
+  return {
+    backendRuntime: composed.backendRuntime,
+    owners: composed.ownerServices.owners,
+    retirement: composed.ownerServices.retirement,
+    presentation: composed.presentation,
+    stopSurfaceAdmission: (): void => { dispatchAdmissionOpen = false },
+    async disposeAdapters(): Promise<void> {
+      if (adaptersDisposed) return
+      adaptersDisposed = true
+      // The presentation task drops its retained roster watch and invalidates
+      // every in-flight Task read; the backend runtime then drops its adapter
+      // caches/subscriptions. Both run even when the first throws; the first
+      // error surfaces with the rest on its cause chain.
+      const errors = [
+        ...await collectDisposeErrors(() => composed.presentation.task.dispose()),
+        ...await collectDisposeErrors(() => composed.backendRuntime.dispose()),
+      ]
+      if (errors.length > 0) throwAggregated(errors, 'remote application runtime adapter disposal')
+    },
+  }
+}
+
+/**
+ * Compose the M3 Remote application runtime as ONE graph. Failure semantics: a
  * Host/Client construction failure unwinds inside
  * `createExperimentalRemoteRuntime` (no leaked fibers); a backend/owner
  * failure after the wire exists disposes the wire (both steps run; the
@@ -130,61 +270,32 @@ export async function createRemoteApplicationRuntime(
     signal: options.signal,
   })
 
-  let backendRuntime: RemoteBackendRuntime | undefined
-  let ownerServices: RemoteSessionOwnerServices
-  /**
-   * The composition-owned pre-dispatch write admission: OPEN for the whole live
-   * surface, closed ONCE and synchronously by the application's surface-stop
-   * boundary (`SelectedApplicationRuntime.stopSurfaceAdmission`). A write still
-   * parked before dispatch when the surface stops is then refused before any
-   * Host dispatch instead of being admitted silently.
-   */
-  let dispatchAdmissionOpen = true
+  let stage: ComposedRemoteApplicationStage
   try {
-    backendRuntime = await createRemoteBackendRuntime({
-      runtime: wire.client,
+    stage = await composeRemoteApplicationStage({
+      client: wire.client,
       fetch: wire.host.carrier.fetch,
-      isDispatchAllowed: () => dispatchAdmissionOpen,
-      // Absent = the production serializer (see createRemoteBackendRuntime).
       ...(options.promptSerializer === undefined ? {} : { promptSerializer: options.promptSerializer }),
     })
-    // ONE owner registry shared by owners + retirement (never constructed
-    // independently — that would create a second owner truth). The SAME
-    // official Connection generation source fences the owner mutation replies.
-    ownerServices = createRemoteSessionOwnerServices(
-      wire.client.sessions,
-      wire.client.connection.generation,
-    )
   } catch (error) {
-    // Unwind the partial graph: the wire (Client first, then Host additive
-    // fibers) must not survive a backend/owner construction failure after the
-    // Client exists — and a backend that WAS constructed is disposed first, so
-    // its partial adapter state does not survive either. A disposal failure
-    // rides the original error's cause chain; the original rethrows.
-    const constructed = backendRuntime
-    const disposeErrors = [
-      ...constructed !== undefined ? await collectDisposeErrors(() => constructed.dispose()) : [],
-      ...await collectDisposeErrors(() => wire.dispose()),
-    ]
+    // The wire (Client first, then Host additive fibers) must not survive a
+    // stage construction failure after the Client exists. The original error
+    // rethrows; a disposal failure rides its cause chain.
+    const disposeErrors = await collectDisposeErrors(() => wire.dispose())
     if (disposeErrors.length > 0) {
       const secondary = disposeErrors.length === 1
         ? disposeErrors[0]
-        : new AggregateError(disposeErrors, 'remote application runtime: disposal failures during construction-failure unwind')
+        : new AggregateError(disposeErrors, 'remote application runtime: disposal failures during stage-failure unwind')
       throw mergeCause(error instanceof Error ? error : new Error(String(error)), secondary)
     }
     throw error
   }
 
-  let transportDisposed = false
-  // The M3-5 PR2 presentation/task source bundle. Its Task read owns a retained
-  // root Job-roster watch that must be released through THIS owner before the
-  // Client Context is disposed (adapter -> Client -> Host order).
-  const presentation = createRemotePresentationSource(wire, backendRuntime)
   // The M3-6 PR1 Client UI subtree on the EXACT official Client Context —
   // never a second Context. A construction failure after the
   // backend/presentation exist unwinds the partially-created subtree (its
-  // own constructor owns its partial fibers), then the presentation task,
-  // backend and wire, with the original error primary.
+  // own constructor owns its partial fibers), then the stage adapters and the
+  // wire, with the original error primary.
   let clientUi: RemoteClientUiRuntime
   try {
     clientUi = await createRemoteClientUiRuntime({
@@ -193,8 +304,7 @@ export async function createRemoteApplicationRuntime(
     })
   } catch (error) {
     const disposeErrors = [
-      ...await collectDisposeErrors(() => presentation.task.dispose()),
-      ...await collectDisposeErrors(() => backendRuntime.dispose()),
+      ...await collectDisposeErrors(() => stage.disposeAdapters()),
       ...await collectDisposeErrors(() => wire.dispose()),
     ]
     if (disposeErrors.length > 0) {
@@ -205,37 +315,83 @@ export async function createRemoteApplicationRuntime(
     }
     throw error
   }
+
+  let transportDisposed = false
   return {
     selected: {
       kind: 'remote',
-      backend: backendRuntime.backend,
-      owners: ownerServices.owners,
-      retirement: ownerServices.retirement,
-      stopSurfaceAdmission: (): void => { dispatchAdmissionOpen = false },
+      backend: stage.backendRuntime.backend,
+      owners: stage.owners,
+      retirement: stage.retirement,
+      stopSurfaceAdmission: stage.stopSurfaceAdmission,
       disposeTransport: async (): Promise<void> => {
         if (transportDisposed) return
         transportDisposed = true
         // clientUi.dispose() drops the Client UI plugin fibers (builtins ->
         // extension host -> startup facts) while every official Client
-        // service they may consume still exists; presentation.task.dispose()
-        // drops the retained roster watch and invalidates every in-flight
-        // Task read; backendRuntime.dispose() then drops the adapter
-        // caches/subscriptions BEFORE the Client Context disposal;
-        // wire.dispose() disposes Client first, Host additive fibers last.
-        // Every step runs even when an earlier one throws; the first error
-        // surfaces with the rest on its cause chain.
+        // service they may consume still exists; the stage then drops the
+        // presentation/task + backend adapters; wire.dispose() disposes Client
+        // first, Host additive fibers last. Every step runs even when an
+        // earlier one throws; the first error surfaces with the rest on its
+        // cause chain.
         const errors = [
           ...await collectDisposeErrors(() => clientUi.dispose()),
-          ...await collectDisposeErrors(() => presentation.task.dispose()),
-          ...await collectDisposeErrors(() => backendRuntime.dispose()),
+          ...await collectDisposeErrors(() => stage.disposeAdapters()),
           ...await collectDisposeErrors(() => wire.dispose()),
         ]
         if (errors.length > 0) throwAggregated(errors, 'remote application runtime transport disposal')
       },
     },
     wire,
-    backendRuntime,
-    presentation,
+    backendRuntime: stage.backendRuntime,
+    presentation: stage.presentation,
     clientUi,
+  }
+}
+
+/**
+ * Compose the split-Client application runtime over the ONE already-mounted
+ * official Client Domain graph. The caller (the Client process composition
+ * root) owns the Context, B1 transport, Domain mount and Client UI subtree;
+ * this function owns exactly the Backend, owner registry, presentation bundle
+ * and the selected core.
+ *
+ * `selected.disposeTransport()` memoizes ONE release of presentation/backend/
+ * domains, so the runner (which may call it during its own teardown) and the
+ * Client bootstrap (final fallback) can both ask for it without a second
+ * unmount. It never releases the Client UI subtree or the B1 transport — those
+ * stay with the Client bootstrap.
+ */
+export async function createRemoteApplicationRuntimeFromClient(
+  options: SplitRemoteApplicationRuntimeOptions,
+): Promise<SplitRemoteApplicationRuntime> {
+  const stage = await composeRemoteApplicationStage({
+    client: options.domains,
+    fetch: options.fetch,
+    ...(options.signal === undefined ? {} : {}),
+  })
+  let transportDisposed = false
+  return {
+    selected: {
+      kind: 'remote',
+      backend: stage.backendRuntime.backend,
+      owners: stage.owners,
+      retirement: stage.retirement,
+      stopSurfaceAdmission: stage.stopSurfaceAdmission,
+      disposeTransport: async (): Promise<void> => {
+        if (transportDisposed) return
+        transportDisposed = true
+        // Presentation task first (official ClientSessions / JobClient still
+        // mounted), then the backend adapters, then the borrowed Client
+        // Domain graph. The Client UI subtree and B1 transport are NOT ours.
+        const errors = [
+          ...await collectDisposeErrors(() => stage.disposeAdapters()),
+          ...await collectDisposeErrors(() => options.domains.dispose()),
+        ]
+        if (errors.length > 0) throwAggregated(errors, 'split remote application transport disposal')
+      },
+    },
+    presentation: stage.presentation,
+    extensionService: options.clientUi.extensionService,
   }
 }

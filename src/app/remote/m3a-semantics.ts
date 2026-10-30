@@ -28,17 +28,18 @@ import type { SessionLifecycle } from '../../runtime/session-lifecycle-port.ts'
 import type { SessionReader } from '../../runtime/session-reader-port.ts'
 import type { SessionWriter } from '../../runtime/session-writer-port.ts'
 import type { SubagentPort } from '../../runtime/subagent-port.ts'
-import type { RemoteClientRuntime } from './client-runtime.ts'
 import type { RemoteConnectionGenerationSource, RemoteSessionsReadSource } from '../../runtime/remote/session-reader-remote.ts'
 import type { RemoteLlmRemotes, RemoteModelRemotes, RemoteModelSessionsSource } from '../../runtime/remote/model-remote.ts'
 import type { RemotePendingSessionsSource } from '../../runtime/remote/pending-input-reader-remote.ts'
 import type { RemoteWriteSessionsSource } from '../../runtime/remote/session-writer-remote.ts'
+import type { RemoteSerializerSessionsSource } from '../../runtime/remote/prompt-serializer-remote.ts'
 import type { RemoteLifecycleSessions } from '../../runtime/remote/session-lifecycle-remote.ts'
 import type { RemoteSubagentSource } from '../../runtime/remote/subagent-remote.ts'
 import type { RemotePresetRemotes } from '../../runtime/remote/preset-remote.ts'
 import type { RemoteSkillRemotes } from '../../runtime/remote/skill-remote.ts'
 import type { RemotePiTuiFileReferenceRemotes } from '../../runtime/remote/host-file-remote.ts'
 import type { RemoteCommandsSource } from '../../runtime/remote/host-command-remote.ts'
+import type { RemoteConfigRuntimeSource } from '../../runtime/remote/config-remote.ts'
 import type { RemotePresentationSessionsSource } from '../../runtime/remote/presentation-read-remote.ts'
 import type { RemoteInteractionRuntimeSource } from '../../runtime/remote/interaction-remote.ts'
 import { RemoteInteractionPort } from '../../runtime/remote/interaction-remote.ts'
@@ -111,17 +112,21 @@ export type RemoteM3ASessionsSource = RemoteSessionsReadSource
   & RemoteModelSessionsSource
   & RemotePresentationSessionsSource
   & RemoteInteractionRuntimeSource['sessions']
+  // The production prompt serializer reads recalled attachment bytes through
+  // the exact retained binding on this SAME sessions service.
+  & RemoteSerializerSessionsSource
 
 /** The NARROW one-source runtime face the assembly consumes — exactly what
- * `RemoteClientRuntime` provides (the official-contract gate proves that
- * assignability; tests construct small structural stand-ins). */
+ * the official Client runtime provides (the official-contract gate proves
+ * that assignability; tests construct small structural stand-ins). */
 export interface RemoteM3ARuntimeSource {
   /** The ONE shared Client sessions service. */
   readonly sessions: RemoteM3ASessionsSource
   /** The ONE shared generated Remote namespaces the M3-3A adapters map. */
   readonly remote: {
     readonly session: RemoteModelRemotes
-    readonly llm: RemoteLlmRemotes
+    /** The official generated `llm` namespaces (discovery + the configurable-provider directory the ConfigPort reads from this SAME service). */
+    readonly llm: RemoteLlmRemotes & RemoteConfigRuntimeSource['remote']['llm']
     readonly agentPresets: RemotePresetRemotes
     readonly skills: RemoteSkillRemotes
     /** The PRIVATE pi-tui Host augmentation namespace (TS8-HF1): the Session
@@ -138,10 +143,19 @@ export interface RemoteM3ARuntimeSource {
     /** The official generated `workspaceFiles` namespace (Delivered files
      *  PR2): bounded Host file reads for the preview. */
     readonly workspaceFiles: RemoteWorkspaceFilesNamespace | undefined
+    /** The official generated config-plane namespaces (the SAME Client
+     *  Remote service): settings, credentials and permission presets. The
+     *  M3-3A adapters ignore them; the Remote Backend's ConfigPort reads them
+     *  from this SAME source (no second Client Remote object). */
+    readonly settings: RemoteConfigRuntimeSource['remote']['settings']
+    readonly credentials: RemoteConfigRuntimeSource['remote']['credentials']
+    readonly permissionPresets: RemoteConfigRuntimeSource['remote']['permissionPresets']
     /** The forwarded-event seat shared by every adapter: the intersection of
      *  the event declarations each one subscribes to (the real generated
      *  `$on` is one generic method and satisfies the whole intersection). */
-    readonly $on: RemoteInteractionRuntimeSource['remote']['$on'] & RemotePluginManagerSource['$on']
+    readonly $on: RemoteInteractionRuntimeSource['remote']['$on']
+      & RemotePluginManagerSource['$on']
+      & RemoteConfigRuntimeSource['remote']['$on']
   }
   /** The ONE shared Client jobs service (the Job observation adapter). */
   readonly jobs: RemoteJobObservationSource
@@ -157,7 +171,7 @@ export interface RemoteM3ARuntimeSource {
  */
 /** Compile-time proof that the real M3-1 runtime satisfies the narrow
  *  one-source face (never called; referenced by the official-contract gate). */
-export function remoteM3ARuntimeSourceOf(runtime: RemoteClientRuntime): RemoteM3ARuntimeSource {
+export function remoteM3ARuntimeSourceOf(runtime: RemoteM3ARuntimeSource): RemoteM3ARuntimeSource {
   return runtime
 }
 

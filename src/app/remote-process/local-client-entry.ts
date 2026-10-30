@@ -19,12 +19,13 @@
  * @module app/remote-process/local-client-entry
  */
 
-import { realpathSync } from 'node:fs'
+import { constants, closeSync, existsSync, fchmodSync, fstatSync, lstatSync, openSync, realpathSync, statSync, writeSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { mergeCause } from '../remote/dispose-cause.ts'
-import { attachEntryControl, createEntryDiag, writeEntryRecord } from './entry-control.ts'
+import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryRecordSink } from './entry-control.ts'
 import {
   bindProcessSeat,
   installedPackageRootFromEntry,
@@ -35,8 +36,13 @@ import {
   type ProcessSeat,
 } from './local-scope.ts'
 import { ensureLocalHost, type VerifiedLocalHost } from './local-discovery.ts'
-import type { LocalClientHandle } from './client-bootstrap.ts'
+import type {
+  LocalClientComposition,
+  LocalClientHandle,
+  MountedLocalClientRunner,
+} from './client-bootstrap.ts'
 import type { LocalClientTransport } from './local-transport.ts'
+import { createLocalClientSurfaceBridge } from './local-client-surface.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
 
 interface OfficialClientHostModules {
@@ -69,12 +75,21 @@ async function loadOfficialClientHost(anchor: string): Promise<OfficialClientHos
   }
 }
 
+/** The internal Client process mode: frozen B1 qualification or the real surface. */
+export type LocalClientEntryMode = 'qualification' | 'surface'
+
 /** The launcher-supplied facts one Client-only process needs. */
 export interface LocalClientEntryOptions {
   /** Absolute path of the installed `@deepseek-ai/dsh/package.json`. */
   readonly dshAnchor: string
   /** Profile whose installed package table supplies the peer-resolution layer. */
   readonly profile: string
+  /** Internal mode; the production default is the frozen qualification channel. */
+  readonly mode: LocalClientEntryMode
+  /** Surface-mode internal `--session` intent (qualified resume); absent = sessionless. */
+  readonly sessionId?: string
+  /** Surface-mode internal `--preset` intent (fresh-session create). */
+  readonly presetId?: string
 }
 
 /** Project the authenticated record without the profile path or cookie. */
@@ -94,6 +109,65 @@ function hostRecordForTrace(host: VerifiedLocalHost): Record<string, unknown> {
 }
 
 /**
+ * The surface-mode telemetry sink: an owner-managed `0600` absolute JSONL file
+ * under the isolated qualification work root. Terminal bytes never carry JSON
+ * in surface mode, and the file never records a Cookie, token or private Host
+ * profile path. The parent directory's REAL path and ownership are validated
+ * before the file is opened; a symlinked target is refused.
+ */
+function createSurfaceRecordSink(): { emit: EntryRecordSink; close(): void } {
+  const target = process.env.SPLIT_PROCESS_CLIENT_RECORD_FILE
+  if (target === undefined || target === '') {
+    throw new Error('local client entry: surface mode requires SPLIT_PROCESS_CLIENT_RECORD_FILE')
+  }
+  if (!isAbsolute(target)) {
+    throw new Error('local client entry: the surface record file path must be absolute')
+  }
+  const directory = realpathSync(dirname(target))
+  const directoryStats = statSync(directory)
+  if (!directoryStats.isDirectory()) {
+    throw new Error('local client entry: the surface record directory is not a directory')
+  }
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (uid !== undefined && directoryStats.uid !== uid) {
+    throw new Error('local client entry: the surface record directory is not owned by this process user')
+  }
+  if (existsSync(target) && lstatSync(target).isSymbolicLink()) {
+    throw new Error('local client entry: the surface record file must not be a symlink')
+  }
+  const fd = openSync(target, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW, 0o600)
+  // `openSync` honors the supplied creation mode only for a NEW file; an
+  // existing broader mode is narrowed explicitly so the sink is always 0600.
+  if ((fstatSync(fd).mode & 0o777) !== 0o600) fchmodSync(fd, 0o600)
+  if ((fstatSync(fd).mode & 0o777) !== 0o600) {
+    closeSync(fd)
+    throw new Error('local client entry: the surface record file must have mode 0600')
+  }
+  return {
+    emit: record => { writeSync(fd, `${JSON.stringify(record)}\n`) },
+    close: () => { closeSync(fd) },
+  }
+}
+
+/** The surface-mode startup intent: an explicit internal input, never a
+ *  control-channel override of published behavior. */
+function surfaceStartupFacts(options: LocalClientEntryOptions): { sessionId?: string; presetId?: string } {
+  const sessionId = process.env.SPLIT_PROCESS_CLIENT_SESSION
+  const presetId = process.env.SPLIT_PROCESS_CLIENT_PRESET
+  if (options.mode !== 'surface') return {}
+  if (sessionId !== undefined && sessionId.trim() === '') {
+    throw new Error('local client entry: SPLIT_PROCESS_CLIENT_SESSION must be non-empty when set')
+  }
+  if (presetId !== undefined && presetId.trim() === '') {
+    throw new Error('local client entry: SPLIT_PROCESS_CLIENT_PRESET must be non-empty when set')
+  }
+  return {
+    ...(sessionId === undefined || sessionId === '' ? {} : { sessionId }),
+    ...(presetId === undefined || presetId === '' ? {} : { presetId }),
+  }
+}
+
+/**
  * Run one Client-only process until its launcher requests shutdown. Exported
  * for the qualification harness; `import.meta.main` is the only production
  * caller.
@@ -109,13 +183,18 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     dshVersion: readInstalledDshVersion(options.dshAnchor),
   })
   const processStartIdentity = readLinuxStarttime()
+  // Surface mode separates the terminal (owned by PiTui) from the structured
+  // telemetry channel (a private 0600 JSONL file). Qualification keeps the
+  // frozen JSONL control channel on stdin/stdout.
+  const recordSink = options.mode === 'surface' ? createSurfaceRecordSink() : undefined
+  const emit: EntryRecordSink = recordSink?.emit ?? writeEntryRecord
   // The single-TUI seat precedes discovery: a second Client never spawns a
   // Host or touches the existing connection.
   const seat: ProcessSeat = await bindProcessSeat(scope.clientSeatSocketName, 'CLIENT_ALREADY_ACTIVE')
   let context: import('@deepseek-ai/cordis').Context | undefined
   let transport: LocalClientTransport | undefined
   let handle: LocalClientHandle | undefined
-  const diag = createEntryDiag('client')
+  const diag = createEntryDiag('client', recordSink?.emit)
   const CLIENT_DISPOSE_DEADLINE_MS = 10_000
   const disposeWithinDeadline = async (dispose: () => Promise<void>, errors: unknown[]): Promise<boolean> => {
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -145,7 +224,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     stopping = (async () => {
       if (failure !== undefined) {
         const primary = failure instanceof Error ? failure : new Error(String(failure))
-        writeEntryRecord({
+        emit({
           m4a0: 'failure',
           processRole: 'client',
           phase: context === undefined ? 'startup' : 'after-context',
@@ -166,10 +245,17 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         try { await transport?.dispose() } catch (error) { errors.push(error) }
         try { await context?.fiber.dispose() } catch (error) { errors.push(error) }
       }, errors)
+      if (options.mode === 'surface' && handle !== undefined) {
+        // The final owner inventory the qualification reads after the process
+        // left: every Client-owned service row and `tuiMainView` reference is
+        // released (0), while the Host is untouched. Emitted BEFORE the record
+        // sink closes and before the process exits.
+        emit({ m4b2s: 'client-closed', ...traceStatus(handle.status) })
+      }
       const transportCleanupFailed = errors.some(error => error instanceof Error && (error as { cleanupFailed?: boolean }).cleanupFailed === true)
       if (errors.length > 0 || timedOut) {
         const primary = errors[0] instanceof Error ? errors[0] : new Error(String(errors[0] ?? 'client disposal failed'))
-        writeEntryRecord({
+        emit({
           m4a0: 'cleanup-failure',
           processRole: 'client',
           phase: 'shutdown',
@@ -178,7 +264,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         })
         process.exitCode = 1
       } else if (failure !== undefined) {
-        writeEntryRecord({ m4a0: 'cleanup', processRole: 'client', phase: 'after-context', pid: process.pid, status: 'completed' })
+        emit({ m4a0: 'cleanup', processRole: 'client', phase: 'after-context', pid: process.pid, status: 'completed' })
         process.exitCode = 1
       } else {
         process.exitCode = code
@@ -193,6 +279,28 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     return stopping
   }
 
+  /**
+   * The structured status of the transport for a record. Surface mode strips
+   * the private Host home path; the qualification channel keeps its frozen
+   * shape. Cookie/token values never enter a record on either path.
+   */
+  const traceTransportStatus = (): Record<string, unknown> => {
+    if (transport === undefined) return {}
+    const observed = transport.status()
+    if (options.mode !== 'surface') return observed as unknown as Record<string, unknown>
+    const { hostHome: _hostHome, ...safe } = observed
+    return safe
+  }
+  /**
+   * The same projection for the handle status (surface mode strips the Host
+   * home path; the qualification status shape is unchanged).
+   */
+  const traceStatus = (status: LocalClientHandle['status']): Record<string, unknown> => {
+    if (options.mode !== 'surface') return status as unknown as Record<string, unknown>
+    const { hostHome: _hostHome, ...safe } = status
+    return safe
+  }
+
   try {
     const host = await ensureLocalHost({
       scope,
@@ -200,7 +308,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       dshAnchor: options.dshAnchor,
       profile: options.profile,
     })
-    writeEntryRecord({
+    emit({
       m4a0: 'host-authenticated',
       processRole: 'client',
       pid: process.pid,
@@ -216,7 +324,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     context = new hostModules.Context()
     const packageFiber = context.plugin(hostModules.PluginPackages as never, { resolution } as never)
     await packageFiber
-    writeEntryRecord({ m4a0: 'context-ready', processRole: 'client', pid: process.pid, phase: 'context-ready' })
+    emit({ m4a0: 'context-ready', processRole: 'client', pid: process.pid, phase: 'context-ready' })
 
     // The official resolution interception is live before this dynamic import;
     // the transport chunk's bare @deepseek-ai imports therefore resolve exactly
@@ -241,12 +349,12 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       await stop(1, terminalError)
       return
     }
-    writeEntryRecord({
+    emit({
       m4a0: 'transport-ready',
       processRole: 'client',
       pid: process.pid,
       phase: 'transport-ready',
-      ...transport.status(),
+      ...traceTransportStatus(),
     })
 
     // Qualification-only startup-failure control. The internal entry is not a
@@ -255,14 +363,6 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     // fingerprint that a renamed chunk would change.
     if (process.env.SPLIT_PROCESS_CLIENT_FORCE_FAILURE === 'client-bootstrap') {
       throw new Error('local client entry: qualification forced client bootstrap failure')
-    }
-    const { startLocalClient } = await import('./client-bootstrap.ts')
-    handle = await startLocalClient(context, {}, processStartIdentity, { transport, host: host.identity })
-    if (terminalError !== undefined) {
-      // A terminal transport failure may have arrived while the UI subtree was
-      // mounting; never emit a ready state after stop was requested.
-      await stop(1, terminalError)
-      return
     }
     // Install the process-lifetime shutdown handlers BEFORE the ready record:
     // the qualification harness sends SIGTERM as soon as it observes ready, and
@@ -273,12 +373,93 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     process.on('SIGINT', () => {
       runDetached('local client: SIGINT shutdown', () => stop(130), { diag })
     })
-    writeEntryRecord({ m4a0: 'ready', ...handle.status })
+    const clientContext = context
+    if (clientContext === undefined) throw new Error('local client entry: the Client root Context is missing')
+    const surfaceFacts = surfaceStartupFacts(options)
+    /**
+     * The ONE allowed process-composition edge into `app/bootstrap.ts`
+     * (architecture gate: exact lazy dynamic import, this entry only). It runs
+     * only AFTER `PluginPackages` installed the official runtime resolution and
+     * the Client bootstrap mounted the official Domain/UI/application graph; it
+     * mounts the runner as its own Cordis fiber on the SAME Client Context.
+     */
+    const mountRunner: NonNullable<LocalClientComposition['mountRunner']> = async input => {
+      const bridge = createLocalClientSurfaceBridge(code => { void stop(code) })
+      // The Client process launcher provides `appExit`; a sibling runner fiber
+      // resolves it through the root service store, so it must exist before the
+      // runner's first synchronous read.
+      clientContext.provide('appExit', (code: number) => { bridge.requestStop(code) })
+      const { applyRunnerWithRuntime } = await import('../bootstrap.ts')
+      let runnerFiber: Fiber | undefined
+      try {
+        runnerFiber = clientContext.plugin(pluginContext => {
+          applyRunnerWithRuntime(pluginContext, input.config, input.override, {
+            surfaceReady: () => bridge.markMounted(),
+            surfaceFailed: error => bridge.fail(error),
+          })
+        })
+        await runnerFiber
+      } catch (error) {
+        bridge.fail(error)
+        throw error
+      }
+      const fiber = runnerFiber
+      return {
+        ready: bridge.ready,
+        stopped: bridge.stopped,
+        dispose: async (): Promise<void> => { await fiber.dispose() },
+      }
+    }
+    if (options.mode === 'surface') {
+      // A closed terminal (PTY HUP) is a normal Client exit: the physical
+      // surface can no longer render or accept input. It joins the SAME
+      // idempotent stop path as Esc / `/exit` / SIGINT / SIGTERM.
+      const onTerminalEnd = (): void => {
+        runDetached('local client: terminal EOF shutdown', () => stop(0), { diag })
+      }
+      process.stdin.on('end', onTerminalEnd)
+      process.stdin.on('close', onTerminalEnd)
+      // Qualification-only transport-rollover trigger (the B1 control channel
+      // has no tty in surface mode): SIGUSR1 drops the physical mux socket
+      // exactly like `qualification-drop-websocket`, never a production path.
+      process.on('SIGUSR1', () => {
+        transport?.dropWebSocketsForQualification()
+        emit({ m4b2s: 'qualification', op: 'drop-websocket', processRole: 'client', pid: process.pid })
+      })
+    }
+    const composition: LocalClientComposition = options.mode === 'surface'
+      ? {
+          mode: 'surface',
+          transport,
+          host: host.identity,
+          dshAnchor: options.dshAnchor,
+          authenticatedFetch: transport.authenticatedFetch,
+          mountRunner,
+          onStatus: status => {
+            emit({ m4b2s: 'surface-status', ...traceStatus(status) })
+          },
+        }
+      : { mode: 'qualification', transport, host: host.identity }
+    const { startLocalClient } = await import('./client-bootstrap.ts')
+    handle = await startLocalClient(clientContext, surfaceFacts, processStartIdentity, composition)
+    if (terminalError !== undefined) {
+      // A terminal transport failure may have arrived while the UI subtree was
+      // mounting; never emit a ready state after stop was requested.
+      await stop(1, terminalError)
+      return
+    }
+    emit({ m4a0: 'ready', ...traceStatus(handle.status) })
     compositionDone = true
 
+    if (options.mode === 'surface') {
+      // Surface mode owns the tty: the B1 JSONL control channel must never
+      // touch stdin/stdout. The process is driven by the real terminal.
+      await stopped
+      return
+    }
     attachEntryControl(async request => {
       if (request.op === 'status') {
-        writeEntryRecord({
+        emit({
           m4a0: 'status',
           ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
           ...handle!.status,
@@ -291,7 +472,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       }
       if (request.op === 'qualification-drop-websocket') {
         transport?.dropWebSocketsForQualification()
-        writeEntryRecord({
+        emit({
           m4a0: 'qualification',
           op: 'drop-websocket',
           processRole: 'client',
@@ -312,14 +493,14 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           host,
           ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
         })
-        writeEntryRecord({
+        emit({
           ...proof,
           processRole: 'client',
           ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
         })
         return false
       }
-      writeEntryRecord({ m4a0: 'control-error', error: `local client entry: unknown op ${JSON.stringify(request.op)}` })
+      emit({ m4a0: 'control-error', error: `local client entry: unknown op ${JSON.stringify(request.op)}` })
       return false
     })
     await stopped
@@ -338,12 +519,12 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     for (const cleanupError of cleanupErrors) primary = mergeCause(primary, cleanupError)
     const transportCleanupFailed = (error instanceof Error && (error as { cleanupFailed?: boolean }).cleanupFailed === true)
       || cleanupErrors.some(cleanupError => cleanupError instanceof Error && (cleanupError as { cleanupFailed?: boolean }).cleanupFailed === true)
-    writeEntryRecord({
+    emit({
       m4a0: 'failure',
       processRole: 'client',
       phase: context === undefined ? 'startup' : 'after-context',
       pid: process.pid,
-      ...(transport?.status() ?? {}),
+      ...traceTransportStatus(),
       ...(failure instanceof LocalScopeError ? { code: failure.code } : {}),
       error: primary.message,
       ...(primary.stack === undefined ? {} : { stack: primary.stack }),
@@ -351,10 +532,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     })
     process.stdin.pause()
     if (cleanupErrors.length === 0 && !timedOut && !transportCleanupFailed) {
-      writeEntryRecord({ m4a0: 'cleanup', processRole: 'client', phase: 'after-context', pid: process.pid, status: 'completed' })
+      emit({ m4a0: 'cleanup', processRole: 'client', phase: 'after-context', pid: process.pid, status: 'completed' })
     } else {
       const cleanup = cleanupErrors[0] instanceof Error ? cleanupErrors[0] : new Error(String(cleanupErrors[0]))
-      writeEntryRecord({
+      emit({
         m4a0: 'cleanup-failure',
         processRole: 'client',
         phase: 'after-context',
@@ -367,9 +548,15 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   } finally {
     process.stdin.pause()
     try {
+      recordSink?.close()
+    } catch (error) {
+      process.exitCode = 1
+      process.stderr.write(`local client entry: closing the surface record sink failed: ${error instanceof Error ? error.message : String(error)}\n`)
+    }
+    try {
       await seat.close()
     } catch (error) {
-      writeEntryRecord({
+      emit({
         m4a0: 'cleanup-failure',
         processRole: 'client',
         phase: 'shutdown',
@@ -409,20 +596,36 @@ export async function stopLocalClient(
   }
 }
 
+/**
+ * Read the internal Client mode. Absent/empty keeps the frozen B1
+ * `qualification` contract; `surface` is the internal real-terminal mode. Any
+ * other value fails closed (never a silent default).
+ */
+function clientModeFromEnvironment(): LocalClientEntryMode {
+  const raw = process.env.SPLIT_PROCESS_CLIENT_MODE
+  if (raw === undefined || raw === '') return 'qualification'
+  if (raw === 'qualification' || raw === 'surface') return raw
+  throw new Error(`local client entry: invalid SPLIT_PROCESS_CLIENT_MODE ${JSON.stringify(raw)}; expected "qualification" or "surface"`)
+}
+
 /** Read the launcher environment; a missing anchor is a hard startup failure. */
 function optionsFromEnvironment(): LocalClientEntryOptions {
   const dshAnchor = process.env.SPLIT_PROCESS_DSH_ANCHOR
   if (dshAnchor === undefined || dshAnchor === '') {
     throw new Error('local client entry: SPLIT_PROCESS_DSH_ANCHOR must name the installed @deepseek-ai/dsh/package.json')
   }
-  return { dshAnchor, profile: process.env.SPLIT_PROCESS_PROFILE ?? 'pi-tui' }
+  return {
+    dshAnchor,
+    profile: process.env.SPLIT_PROCESS_PROFILE ?? 'pi-tui',
+    mode: clientModeFromEnvironment(),
+  }
 }
 
 if (import.meta.main) {
   try {
     await runLocalClientEntry(optionsFromEnvironment())
   } catch (error) {
-    writeEntryRecord({
+    const record = {
       m4a0: 'failure',
       processRole: 'client',
       phase: 'startup',
@@ -430,7 +633,14 @@ if (import.meta.main) {
       ...(error instanceof LocalScopeError ? { code: error.code } : {}),
       error: error instanceof Error ? error.message : String(error),
       ...(error instanceof Error && error.stack !== undefined ? { stack: error.stack } : {}),
-    })
+    }
+    if (process.env.SPLIT_PROCESS_CLIENT_MODE === 'surface') {
+      // Surface mode owns the tty: a launcher/startup failure is a human line
+      // on stderr, never a JSON record on the terminal.
+      process.stderr.write(`split client surface: ${record.error}\n`)
+    } else {
+      writeEntryRecord(record)
+    }
     process.exit(1)
   }
 }

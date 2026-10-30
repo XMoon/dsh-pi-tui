@@ -36,7 +36,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   chmodSync,
   closeSync,
@@ -59,7 +59,8 @@ import { createRequire } from 'node:module'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import xterm from '@xterm/headless'
 
 import {
   candidateArgument,
@@ -99,6 +100,11 @@ function trace(event, fields = {}) {
 
 function assert(condition, message) {
   if (!condition) throw new Error(`ASSERTION_FAILED: ${message}`)
+}
+
+/** Quote one argument for the `sh -c` command string system `script(1)` runs. */
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`
 }
 
 function sleep(ms) {
@@ -275,6 +281,216 @@ export class EntryProcess {
       try { this.child.kill(signal) } catch { /* already gone */ }
     }
   }
+}
+
+/**
+ * One REAL PiTui surface Client driven through the system `script(1)` pseudo-TTY.
+ *
+ * Structured telemetry reads the private `0600` JSONL file the entry owns (never
+ * the terminal); the terminal bytes stay on the pty and are parsed with the
+ * repository's headless xterm parser, so "the frame shows …" is an escape-aware
+ * fact rather than a substring of raw ANSI. The process tree is `script ->
+ * node dist/local-client.mjs`; the business PID is the one in the `ready`
+ * record, and signals for the surface Client are sent to THAT pid.
+ */
+export class SurfaceEntryProcess {
+  constructor(entry, options) {
+    this.role = 'surface-client'
+    this.records = []
+    this.raw = ''
+    this.stderr = ''
+    this.exited = false
+    this.exitResult = undefined
+    this.recordError = undefined
+    this.recordPath = join(options.workDir, `surface-client-${String(++sequence)}.jsonl`)
+    this.term = new xterm.Terminal({
+      cols: options.columns ?? 100,
+      rows: options.rows ?? 30,
+      disableStdin: true,
+      allowProposedApi: true,
+    })
+    this.child = spawn('script', [
+      '-qefc',
+      `${shellQuote(process.execPath)} ${shellQuote(entry)}`,
+      '/dev/null',
+    ], {
+      cwd: options.cwd,
+      env: {
+        ...options.env,
+        SPLIT_PROCESS_DSH_ANCHOR: options.anchor,
+        SPLIT_PROCESS_PROFILE: options.profile,
+        SPLIT_PROCESS_SCRATCH: options.effectiveScratch ?? join(options.scratch, `surface-${String(sequence)}`),
+        SPLIT_PROCESS_CLIENT_MODE: 'surface',
+        SPLIT_PROCESS_CLIENT_RECORD_FILE: this.recordPath,
+        COLUMNS: String(options.columns ?? 100),
+        LINES: String(options.rows ?? 30),
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true,
+    })
+    activeProcesses.add(this)
+    this.child.stdout.setEncoding('utf8')
+    this.child.stderr.setEncoding('utf8')
+    this.child.stdout.on('data', chunk => {
+      this.raw += chunk
+      this.term.write(chunk)
+    })
+    this.child.stderr.on('data', chunk => { this.stderr += chunk })
+    this.exit = new Promise(resolveExit => {
+      this.child.on('close', (code, signal) => {
+        this.exited = true
+        this.exitResult = { code, signal }
+        activeProcesses.delete(this)
+        clearInterval(this.recordTimer)
+        resolveExit(this.exitResult)
+      })
+    })
+    this.recordTimer = setInterval(() => {
+      try {
+        this.readRecords()
+      } catch (error) {
+        this.recordError = error
+      }
+    }, 25)
+  }
+
+  /** Parse only COMPLETE lines: the entry appends while this polls. */
+  readRecords() {
+    if (!existsSync(this.recordPath)) return
+    const text = readFileSync(this.recordPath, 'utf8')
+    const end = text.lastIndexOf('\n')
+    if (end < 0) return
+    const lines = text.slice(0, end).split('\n').filter(line => line !== '')
+    this.records = lines.map((line, index) => {
+      try {
+        return JSON.parse(line)
+      } catch (error) {
+        throw new Error(`${this.role}: malformed record line ${String(index)}: ${line.slice(0, 200)} (${String(error)})`)
+      }
+    })
+  }
+
+  waitFor(predicate, label, timeoutMs = 120_000) {
+    const existing = this.records.find(predicate)
+    if (existing !== undefined) return Promise.resolve(existing)
+    return new Promise((resolveWait, reject) => {
+      const started = Date.now()
+      const poll = () => {
+        if (this.recordError !== undefined) {
+          cleanup()
+          reject(this.recordError)
+          return
+        }
+        const record = this.records.find(predicate)
+        if (record !== undefined) {
+          cleanup()
+          resolveWait(record)
+          return
+        }
+        if (this.exited) {
+          cleanup()
+          reject(new Error(`${this.role}: exited before ${label}; records=${JSON.stringify(this.records.slice(-4))}; stderr=${this.stderr.slice(-1500)}; raw=${JSON.stringify(this.raw.slice(-1200))}`))
+        }
+      }
+      const interval = setInterval(poll, 20)
+      const timer = setTimeout(() => {
+        cleanup()
+        reject(new Error(`${this.role}: timed out after ${String(Date.now() - started)}ms waiting for ${label}; records=${JSON.stringify(this.records.slice(-3))}; raw=${JSON.stringify(this.raw.slice(-2000))}`))
+      }, timeoutMs)
+      const cleanup = () => {
+        clearInterval(interval)
+        clearTimeout(timer)
+      }
+      poll()
+    })
+  }
+
+  /** Flush the headless terminal and return its visible viewport. */
+  async viewport() {
+    await new Promise(resolveFlush => this.term.write('', resolveFlush))
+    const lines = []
+    const buffer = this.term.buffer.active
+    for (let index = 0; index < this.term.rows; index += 1) {
+      const line = buffer.getLine(buffer.viewportY + index)
+      lines.push(line === undefined ? '' : line.translateToString(true))
+    }
+    return lines
+  }
+
+  /** Wait until the PAINTED frame contains the text (escape-aware). */
+  async waitForScreen(needle, label, timeoutMs = 60_000) {
+    const started = Date.now()
+    while (Date.now() - started < timeoutMs) {
+      const viewport = await this.viewport()
+      if (viewport.join('\n').includes(needle)) return
+      if (this.exited) {
+        throw new Error(`${this.role}: exited while waiting for the ${label} frame; raw=${JSON.stringify(this.raw.slice(-2000))}`)
+      }
+      await sleep(50)
+    }
+    const viewport = await this.viewport()
+    throw new Error(`${this.role}: timed out waiting for the ${label} frame; viewport=${JSON.stringify(viewport)}`)
+  }
+
+  /** Send terminal input to the Client through the pty master. */
+  send(data) {
+    this.child.stdin.write(data)
+  }
+
+  /** Signal the business Client process (never the `script` wrapper). */
+  signalBusiness(signal) {
+    const pid = this.records.find(record => record.m4a0 === 'ready')?.pid
+    if (!Number.isInteger(pid)) throw new Error(`${this.role}: no business PID is known yet`)
+    process.kill(pid, signal)
+  }
+
+  waitForExit(timeoutMs = 120_000) {
+    let timer
+    const deadline = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`${this.role}: process did not exit within ${String(timeoutMs)}ms`))
+      }, timeoutMs)
+    })
+    return Promise.race([this.exit, deadline]).finally(() => clearTimeout(timer))
+  }
+
+  async dispose() {
+    clearInterval(this.recordTimer)
+    try { process.kill(-this.child.pid, 'SIGKILL') } catch { /* already gone */ }
+    try { await this.waitForExit(15_000) } catch { /* best effort */ }
+  }
+}
+
+/** The test-only offline Host LLM route (official Loader row + patch override). */
+export function writeSurfaceLlmFixture(profileDir, workDir) {
+  const stubPath = join(profileDir, 'm4b2s-stub-llm.mjs')
+  writeFileSync(stubPath, `import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+export const name = 'm4b2s-stub-llm'
+export const inject = ['llm']
+class StubLlmAdapter extends LlmAdapter {
+  resolveModel(provider, model) { return Promise.resolve({ provider: 'stub', id: model, name: model }) }
+  listModels() { return Promise.resolve([{ provider: 'stub', id: 'stub', name: 'stub' }]) }
+  async *stream() {
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: 'stub answer' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'stub answer' } }
+  }
+}
+export function apply(ctx) { ctx.llm.registerAdapter(['stub'], new StubLlmAdapter()) }
+`, { mode: 0o600 })
+  const patchPath = join(workDir, 'm4b2s-llm.patch.yml')
+  writeFileSync(patchPath, [
+    '- insert:',
+    '    - id: m4b2s-stub-llm',
+    `      name: '${pathToFileURL(stubPath).href}'`,
+    '      inject: [llm]',
+    '- id: agent-default-model',
+    '  config:',
+    '    provider: stub',
+    '    model: stub',
+    '',
+  ].join('\n'), { mode: 0o600 })
+  return { stubPath, patchPath }
 }
 
 /** Wait for the first ready record among concurrent entries. */
@@ -562,6 +778,8 @@ function clientStatus(client) {
 async function main() {
   const tarball = resolveTarball(candidateArgument(process.argv.slice(2)))
   validateCandidateTarball(tarball)
+  /** The exact candidate artifact this run qualifies; re-read at the end. */
+  const candidateSha256 = createHash('sha256').update(readFileSync(tarball)).digest('hex')
   const targetDshVersion = npmDshVersion()
   const distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
   const workDir = mkdtempSync(join(tmpdir(), 'dsh-split-process-'))
@@ -605,7 +823,18 @@ async function main() {
       : mutationMode === 'connection-disabled'
         ? { SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch }
         : {}
-    const base = { cwd: profileDir, env: { ...env, ...mutationEnv }, anchor, profile: 'pi-tui', scratch }
+    // The test-only offline Host LLM row is part of the isolated profile for
+    // this whole run: the B1 lanes never prompt, and the surface lanes need a
+    // real Host-side model route to prove a committed prompt round trip. The
+    // running-mutation env wins when present (those cases replace the overlay).
+    const surfaceLlm = writeSurfaceLlmFixture(profileDir, workDir)
+    const base = {
+      cwd: profileDir,
+      env: { ...env, SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm.patchPath, ...mutationEnv },
+      anchor,
+      profile: 'pi-tui',
+      scratch,
+    }
     const hostFoundationBarrier = join(workDir, 'host-foundation-watch-barrier')
     const probeClientBase = {
       ...base,
@@ -665,25 +894,33 @@ async function main() {
     assert(!connectionMutation.records.some(record => record.m4a0 === 'ready'), 'T01 mutation: Connection row disabled emitted ready')
     trace('mutation-connection-disabled', { exit: connectionMutationExit.code, readyEmitted: false, error: String(connectionMutationFailure.error).slice(0, 160) })
 
-    // T26a: the installed package must carry the built-in Host Runtime artifact.
-    // Missing it must fail the Host startup with no Ready and no Host identity.
+    // T26a: the built-in Host Runtime ROW disabled after the overlay must fail
+    // the strict readiness audit with no Ready and no Host identity. A file
+    // rename is not a stable negative on this pnpm hardlinked profile layout
+    // (the same installed artifact can still resolve from the store mirror), so
+    // the row-level absence is the faithful "missing built-in Host Runtime"
+    // control the readiness audit actually owns.
     const runRoot = join(dshHome, 'run', 'dsh-pi-tui')
     const hasPublishedIdentity = () => existsSync(runRoot)
       && readdirSync(runRoot, { recursive: true }).some(name => String(name).endsWith('instance.json'))
-    const hostRuntimeModule = join(profilePackage, 'dist', 'host-runtime.mjs')
-    assert(existsSync(hostRuntimeModule), 'T26 the installed candidate has no built-in Host Runtime artifact')
-    renameSync(hostRuntimeModule, `${hostRuntimeModule}.missing`)
+    const hostRuntimeMutationPatch = join(workDir, 't26-host-runtime-disabled.patch.yml')
+    writeFileSync(hostRuntimeMutationPatch, '- id: split-host-pi-tui-runtime\n  disabled: true\n')
     let runtimeMissingFailure
     let runtimeMissingExit
     try {
-      const missingRuntime = new EntryProcess('host', entries.host, base)
-      runtimeMissingFailure = await missingRuntime.waitFor(record => record.m4a0 === 'failure', 'T26 missing Host Runtime artifact', 120_000)
+      const missingRuntime = new EntryProcess('host', entries.host, {
+        ...base,
+        env: { ...base.env, SPLIT_PROCESS_EXTRA_PATCH: hostRuntimeMutationPatch },
+      })
+      runtimeMissingFailure = await missingRuntime.waitFor(record => record.m4a0 === 'failure', 'T26 missing Host Runtime row', 120_000)
       runtimeMissingExit = await missingRuntime.waitForExit(60_000)
-      assert(runtimeMissingExit.code === 1, `T26 missing Runtime artifact exit was ${JSON.stringify(runtimeMissingExit)}`)
-      assert(!missingRuntime.records.some(record => record.m4a0 === 'ready'), 'T26 missing Runtime artifact emitted ready')
-      assert(!hasPublishedIdentity(), 'T26 missing Runtime artifact published a Host identity')
+      assert(runtimeMissingExit.code === 1, `T26 missing Runtime row exit was ${JSON.stringify(runtimeMissingExit)}`)
+      assert(!missingRuntime.records.some(record => record.m4a0 === 'ready'), 'T26 missing Runtime row emitted ready')
+      assert(/expected exactly one active piTuiHostRuntime owner row, found 0/u.test(String(runtimeMissingFailure.error)),
+        `T26 missing Runtime row: unexpected error ${String(runtimeMissingFailure.error)}`)
+      assert(!hasPublishedIdentity(), 'T26 missing Runtime row published a Host identity')
     } finally {
-      renameSync(`${hostRuntimeModule}.missing`, hostRuntimeModule)
+      rmSync(hostRuntimeMutationPatch, { force: true })
     }
     trace('t26-runtime-missing', {
       exit: runtimeMissingExit?.code,
@@ -1727,6 +1964,241 @@ async function main() {
     await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 10_000)
     trace('seats-free', { hostSeat: 'free', clientSeat: 'free' })
 
+    // ── M4-B2-S real surface qualification (T27–T39) ──────────────────────
+    // Everything above proves the B1 authenticated control/data link. This
+    // block starts a DEDICATED Host with the test-only offline LLM row and
+    // drives the ONE real tty surface Client over the SAME authenticated Host:
+    // create/open/switch Sessions and prove a real Host commit reaches the
+    // painted transcript, then exit/kill/reconnect without touching the Host.
+    // T34 (writer pre-dispatch stop), T35 (post-write ACK drop) and T36 (private
+    // PiFile/TerminalProgress business read) have no faithful qualification seam
+    // in this surface lane yet; they are recorded as NOT_VERIFIED, never as pass.
+    const surfaceHost = new EntryProcess('host', entries.host, base)
+    const surfaceHostReady = await surfaceHost.waitFor(record => record.m4a0 === 'ready', 'T27 surface Host ready', 180_000)
+    const surfaceHostPid = surfaceHostReady.pid
+    const surfaceHostFacts = surfaceHostReady.localHost
+    assert(surfaceHostReady.entries?.some(entry => entry.id === 'm4b2s-stub-llm' && entry.state === 'active') === true,
+      'T30 the test-only offline Host LLM row is not active')
+    assert(surfaceHostReady.localHost?.hostPid === surfaceHostPid, 'T27 Host ready PID mismatch')
+    const surfaceClients = []
+    let surfaceHostClosed = false
+    let sessionA
+    let sessionB
+    try {
+      // T27/T28: ONE real surface over the SAME B1 connection; sessionless
+      // Welcome painted on the real pty, no JSON on the terminal.
+      const c1 = new SurfaceEntryProcess(entries.client, { ...base, workDir })
+      surfaceClients.push(c1)
+      const c1Ready = await c1.waitFor(record => record.m4a0 === 'ready', 'T27 surface Client ready', 180_000)
+      assert(c1Ready.processRole === 'client', 'T27 surface Client role mismatch')
+      assert(c1Ready.pid !== surfaceHostPid, 'T27 the surface Client and the Host must be distinct OS PIDs')
+      assert(c1Ready.surfaceMounted === true, 'T27 the physical surface did not mount')
+      assert(c1Ready.sessionOpen === false, 'T28 a sessionless surface must not claim an open Session')
+      assert(c1Ready.transport === 'connected' && c1Ready.sessionsListPhase === 'ready',
+        'T27 the official Client Session list is not ready')
+      for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+        assert(c1Ready.owners?.[owner] === 1, `T27 expected exactly one ${owner} owner`)
+      }
+      assert(c1Ready.privateNamespaces === 2, 'T27 expected exactly the two private pi-tui namespaces')
+      assertClientHostFacts(c1Ready.host, surfaceHostFacts, 'T27 surface Client')
+      await c1.waitForScreen('type a message to start a session', 'T28 sessionless Welcome')
+      trace('t27-t28', {
+        hostPid: c1Ready.host.hostPid,
+        clientPid: c1Ready.pid,
+        sessionOpen: false,
+        owners: c1Ready.owners,
+        privateNamespaces: c1Ready.privateNamespaces,
+        welcome: 'painted',
+      })
+
+      // T29/T30: real input -> official beginSubmission -> Host commit ->
+      // durable readback -> retained presentation (the stub answer is produced
+      // by the Host's official LLM adapter, never by a Client fake).
+      c1.send('session a\r')
+      const openedA = await c1.waitFor(
+        record => record.m4b2s === 'surface-status' && record.sessionOpen === true,
+        'T29 Session open',
+        120_000,
+      )
+      assert(typeof openedA.openSessionId === 'string' && openedA.openSessionId.startsWith('session-'),
+        'T29 no official Session id was opened')
+      sessionA = openedA.openSessionId
+      await c1.waitForScreen('session a', 'T29 user message')
+      await c1.waitForScreen('stub answer', 'T30 assistant answer')
+      trace('t29-t30', { sessionId: sessionA, userMessage: 'painted', assistant: 'painted' })
+
+      // T31: Session switch A -> B -> A, each with retained-window hydration.
+      c1.send('/new\r')
+      const openedB = await c1.waitFor(
+        record => record.m4b2s === 'surface-status' && record.sessionOpen === true && record.openSessionId !== sessionA,
+        'T31 new Session',
+        120_000,
+      )
+      sessionB = openedB.openSessionId
+      assert(sessionB !== sessionA, 'T31 /new did not open a different Session')
+      c1.send('session b\r')
+      await c1.waitForScreen('session b', 'T31 Session B user message')
+      await c1.waitForScreen('stub answer', 'T31 Session B assistant answer')
+      c1.send(`/resume ${sessionA}\r`)
+      await c1.waitFor(
+        record => record.m4b2s === 'surface-status' && record.openSessionId === sessionA,
+        'T31 switch back to A',
+        120_000,
+      )
+      await c1.waitForScreen('session a', 'T31 Session A re-hydration')
+      c1.send(`/resume ${sessionB}\r`)
+      await c1.waitFor(
+        record => record.m4b2s === 'surface-status' && record.openSessionId === sessionB,
+        'T31 switch to B',
+        120_000,
+      )
+      await c1.waitForScreen('session b', 'T31 Session B re-hydration')
+      c1.send(`/resume ${sessionA}\r`)
+      await c1.waitFor(
+        record => record.m4b2s === 'surface-status' && record.openSessionId === sessionA,
+        'T31 switch A -> B -> A',
+        120_000,
+      )
+      await c1.waitForScreen('session a', 'T31 final Session A hydration')
+      trace('t31', { first: sessionA, second: sessionB, switches: 'A->B->A' })
+
+      // T32/T38: normal surface exit releases every Client-owned resource and
+      // leaves the Host PID/instance/build untouched.
+      c1.send('/exit\r')
+      const c1Exit = await c1.waitForExit(60_000)
+      assert(c1Exit.code === 0, `T32 surface Client exit was ${JSON.stringify(c1Exit)}`)
+      await c1.waitFor(record => record.m4b2s === 'client-closed', 'T38 client-closed record', 30_000)
+      const closed = c1.records.find(record => record.m4b2s === 'client-closed')
+      for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+        assert(closed.owners?.[owner] === 0, `T38 ${owner} survived the Client exit`)
+      }
+      assert(closed.sessionOpen === false && closed.surfaceMounted === false,
+        'T38 the Client still claims an open surface/Session after exit')
+      assert(closed.activeWrappers === 0 && closed.liveSockets === 0,
+        'T38 the Client still owns transport wrappers/sockets after exit')
+      assert(alive(surfaceHostPid), 'T32 the Host died on the normal surface exit')
+      const registryAfterExit = readJson(join(scopeDir, 'instance.json'))
+      assert(registryAfterExit.instanceId === surfaceHostFacts.instanceId, 'T32 the Host instance changed on the Client exit')
+      assert(registryAfterExit.buildId === surfaceHostFacts.buildId, 'T32 the Host build changed on the Client exit')
+      trace('t32-t38', {
+        clientExit: c1Exit.code,
+        hostPid: surfaceHostPid,
+        hostInstanceId: surfaceHostFacts.instanceId,
+        owners: closed.owners,
+        wrappers: closed.activeWrappers,
+        sockets: closed.liveSockets,
+      })
+      await c1.dispose()
+
+      // T29 resume + T33 SIGKILL survival: a NEW Client reads the committed
+      // Session; killing it leaves the same Host instance alive; a THIRD Client
+      // reads the SAME committed data again.
+      const c2 = new SurfaceEntryProcess(entries.client, {
+        ...base,
+        workDir,
+        env: { ...base.env, SPLIT_PROCESS_CLIENT_SESSION: sessionA },
+      })
+      surfaceClients.push(c2)
+      const c2Ready = await c2.waitFor(record => record.m4a0 === 'ready', 'T29 resume Client ready', 180_000)
+      assert(c2Ready.sessionOpen === true && c2Ready.openSessionId === sessionA,
+        'T29 the explicit --session resume did not open the exact retained Session')
+      await c2.waitForScreen('session a', 'T29 retained user message')
+      await c2.waitForScreen('stub answer', 'T30 retained assistant answer')
+      assertClientHostFacts(c2Ready.host, surfaceHostFacts, 'T29 C2')
+      const c2Pid = c2Ready.pid
+      c2.signalBusiness('SIGKILL')
+      for (let attempt = 0; attempt < 200 && alive(c2Pid); attempt += 1) await sleep(25)
+      assert(!alive(c2Pid), 'T33 the surface Client survived SIGKILL')
+      assert(alive(surfaceHostPid), 'T33 the Host died on Client SIGKILL')
+      await c2.dispose()
+
+      const c3 = new SurfaceEntryProcess(entries.client, {
+        ...base,
+        workDir,
+        env: { ...base.env, SPLIT_PROCESS_CLIENT_SESSION: sessionA },
+      })
+      surfaceClients.push(c3)
+      const c3Ready = await c3.waitFor(record => record.m4a0 === 'ready', 'T33 post-kill Client ready', 180_000)
+      assert(c3Ready.sessionOpen === true && c3Ready.openSessionId === sessionA,
+        'T33 the post-SIGKILL Client did not re-open the committed Session')
+      await c3.waitForScreen('session a', 'T33 committed readback after SIGKILL')
+      assertClientHostFacts(c3Ready.host, surfaceHostFacts, 'T33 C3')
+      trace('t33', { killedClient: c2Pid, resumedClient: c3Ready.pid, hostAlive: true, sessionId: sessionA })
+
+      // T37: one physical mux drop -> official generation rollover -> the
+      // retained main view is re-adopted and the transcript re-hydrates.
+      const generationBefore = c3Ready.generationId
+      c3.signalBusiness('SIGUSR1')
+      const rolled = await c3.waitFor(
+        record => record.m4b2s === 'surface-status'
+          && typeof record.generationId === 'number'
+          && record.generationId !== generationBefore
+          && record.sessionOpen === true,
+        'T37 connection generation rollover',
+        120_000,
+      )
+      assert(rolled.openSessionId === sessionA, 'T37 the rollover lost the retained Session')
+      await c3.waitForScreen('session a', 'T37 retained transcript after reconnect')
+      assert(alive(surfaceHostPid), 'T37 the Host died on the mux rollover')
+      assertClientHostFacts(c3Ready.host, surfaceHostFacts, 'T37 C3')
+      trace('t37', { generationBefore, generationAfter: rolled.generationId, sessionOpen: true, hostAlive: true })
+
+      c3.send('/exit\r')
+      const c3Exit = await c3.waitForExit(60_000)
+      assert(c3Exit.code === 0, `T37 surface Client exit was ${JSON.stringify(c3Exit)}`)
+      assert(alive(surfaceHostPid), 'T37 the Host died on the Client exit')
+      await c3.dispose()
+
+      // T39: a missing official Client Domain module means NO surface ready;
+      // the failure is loud and the Host stays alive. (The Host-side missing
+      // Session row is T26b and still runs above.)
+      const sessionControllerClient = createRequire(anchor).resolve('@deepseek-ai/dsh-api-session-controller/client')
+      renameSync(sessionControllerClient, `${sessionControllerClient}.missing`)
+      let missingDomain
+      try {
+        missingDomain = new SurfaceEntryProcess(entries.client, { ...base, workDir })
+        surfaceClients.push(missingDomain)
+        const failure = await missingDomain.waitFor(record => record.m4a0 === 'failure', 'T39 missing Client Domain module', 120_000)
+        assert(!missingDomain.records.some(record => record.m4a0 === 'ready'),
+          'T39 a missing official Client Domain module still emitted ready')
+        assert(missingDomain.records.find(record => record.m4a0 === 'ready') === undefined,
+          'T39 a missing official Client Domain module published a surface')
+        assert(/Cannot find module|ERR_MODULE_NOT_FOUND|ENOENT|not found/iu.test(JSON.stringify(failure)),
+          `T39 unexpected missing-module error: ${JSON.stringify(failure.error ?? failure)}`)
+        assert(alive(surfaceHostPid), 'T39 the missing Client Domain module killed the Host')
+        trace('t39', { readyEmitted: false, failure: 'module-missing', hostAlive: true })
+      } finally {
+        renameSync(`${sessionControllerClient}.missing`, sessionControllerClient)
+        await missingDomain?.dispose()
+      }
+
+      await surfaceHost.shutdown()
+      surfaceHostClosed = true
+      assert(!alive(surfaceHostPid), 'T40 the surface Host survived its owner-governed shutdown')
+      assert(!existsSync(join(scopeDir, 'instance.json')), 'T40 the Host registry survived its owner-governed shutdown')
+      assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
+        'T40 the candidate artifact changed during qualification')
+      trace('t34-t36', {
+        t34: 'NOT_VERIFIED: no faithful pre-dispatch writer-stop seam in the surface lane',
+        t35: 'NOT_VERIFIED: session/prompt is a control-stream write; dropping its ACK needs a stream-frame seam not present in the installed transport',
+        t36: 'NOT_VERIFIED: private PiFile/TerminalProgress positive business read not driven in surface mode',
+      })
+      trace('t40', {
+        candidate: basename(tarball),
+        sha256: candidateSha256,
+        dshVersion: targetDshVersion,
+        directHelp: 'pass',
+        t01t26: 'pass',
+        surface: 'T27-T33/T37-T39 pass; T34-T36 NOT_VERIFIED',
+      })
+    } finally {
+      for (const client of surfaceClients) await client.dispose()
+      if (!surfaceHostClosed) {
+        try { await surfaceHost.shutdown() } catch { /* already gone */ }
+      }
+    }
+
+
     // T18: installed package shape is already checked above; Direct `--help`
     // and the role-only negative control ran before any Host existed.
     assert(manifest.dependencies?.ws === '8.21.3', 'T18 ws runtime dependency missing')
@@ -1734,7 +2206,7 @@ async function main() {
     assert(!Object.keys(manifest.exports ?? {}).includes('./local-client'), 'T18 public Client entry appeared')
     trace('t18', { packageShape: 'internal entries only', directHelp: 'pass', roleOnlyNegative: 'pass' })
 
-    console.log(`split-process B1 authenticated-link smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}`)
+    console.log(`split-process B1/B2-S authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}`)
   } finally {
     // A failed assertion must not leave a live Host/Client probe behind; each
     // entry is its own process group leader (`detached: true`).
