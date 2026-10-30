@@ -18,7 +18,8 @@ import {
   tmuxSixelFlagReportAllows,
   type TmuxSixelIdentity,
 } from '../../src/tui/graphics/tmux-sixel-admission.ts'
-import { createTmuxSixelGraphics } from '../../src/tui/graphics/tmux-sixel.ts'
+import { createTmuxSixelGraphics, TmuxSixelTerminal } from '../../src/tui/graphics/tmux-sixel.ts'
+import { TmuxGraphicsRevokedError } from '../../src/tui/graphics/kitty-terminal.ts'
 
 const LIST_CLIENTS_ARGV = [
   'list-clients',
@@ -345,6 +346,56 @@ test('N13: PI_TUI_TMUX_KITTY_IMAGES=0 disables only the virtual Kitty transport'
     assert.equal(cli.calls().some((line) => line.startsWith('show-options')), false,
       'the disabled Kitty probe never runs; only the server SIXEL facts were queried')
     graphics.dispose()
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('N14: an unregistered managed-looking DCS writes zero bytes and never bypasses the write gate', (t) => {
+  const cli = createSixelFakeTmuxCli(t)
+  try {
+    const identity = admitted(cli)
+    const admittedFacade = new TmuxSixelTerminal(new VirtualTerminal(), new TmuxSixelAdmission(identity, cli.env), () => false)
+    assert.throws(
+      () => admittedFacade.write('\x1bP0;1;q#0;2;100;0;0#0~~\x1b\\'),
+      (error) => error instanceof TmuxGraphicsRevokedError,
+      'an unregistered complete DCS is a refusal, not ordinary text',
+    )
+    assert.deepEqual((admittedFacade as unknown as { inner: VirtualTerminal }).inner.writes, [],
+      'the refused complete DCS wrote zero bytes')
+
+    const splitFacade = new TmuxSixelTerminal(new VirtualTerminal(), new TmuxSixelAdmission(identity, cli.env), () => false)
+    splitFacade.write('\x1bP0;1;q#0;')
+    assert.throws(
+      () => splitFacade.write('2;100;0;0#0~~\x1b\\'),
+      (error) => error instanceof TmuxGraphicsRevokedError,
+      'a DCS split across chunks is still refused at completion',
+    )
+    assert.deepEqual((splitFacade as unknown as { inner: VirtualTerminal }).inner.writes, [],
+      'the split untrusted DCS wrote no prefix and no completion')
+
+    let trusted = true
+    const sink = new VirtualTerminal()
+    const registryFacade = new TmuxSixelTerminal(sink, new TmuxSixelAdmission(identity, cli.env), () => trusted)
+    registryFacade.write('\x1bP0;1;q#0;2;100;0;0#0~~\x1b\\')
+    assert.equal(sink.writes.length, 1, 'a registered DCS reaches the sink')
+    trusted = false
+    assert.throws(
+      () => registryFacade.write('\x1bP0;1;q#0;2;100;0;0#0~~\x1b\\'),
+      (error) => error instanceof TmuxGraphicsRevokedError,
+      'a registry-invalidated DCS is refused',
+    )
+    assert.equal(sink.writes.length, 1, 'the second DCS wrote zero bytes')
+
+    const revokedAdmission = new TmuxSixelAdmission(identity, cli.env)
+    const revokedFacade = new TmuxSixelTerminal(new VirtualTerminal(), revokedAdmission, () => true)
+    cli.setReply('show-messages', { text: '  1: Sxl: (flag) false\n' })
+    assert.equal(revokedAdmission.isAllowed(true), false)
+    assert.throws(
+      () => revokedFacade.write('\x1bP0;1;q#0;2;100;0;0#0~~\x1b\\'),
+      (error) => error instanceof TmuxGraphicsRevokedError,
+      'a revoked admission refuses a registered DCS',
+    )
   } finally {
     cli.dispose()
   }

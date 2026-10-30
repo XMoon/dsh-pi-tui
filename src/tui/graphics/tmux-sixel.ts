@@ -183,16 +183,14 @@ export class TmuxSixelTerminal implements Terminal {
         return
       }
       const dcs = input.slice(start, end + SIXEL_DCS_TERMINATOR.length)
-      if (this.trustedDcs(dcs)) {
-        // The forced probe happens BEFORE the first byte of this DCS: a client
-        // change is detected cleanly and the refused command writes zero bytes.
-        if (!this.admission.isAllowed(true)) throw new TmuxGraphicsRevokedError()
-        this.inner.write(dcs)
-      } else {
-        // An unregistered lookalike has no privilege. It remains ordinary text
-        // the caller produced; the admission gate never treats it as managed.
-        this.inner.write(dcs)
-      }
+      // A completed DCS on the managed introducer path is never an ordinary
+      // text byte. An unregistered lookalike is a refusal, not a pass-through:
+      // it must write zero bytes and cannot bypass the forced live probe.
+      if (!this.trustedDcs(dcs)) throw new TmuxGraphicsRevokedError()
+      // The forced probe happens BEFORE the first byte of this DCS: a client
+      // change is detected cleanly and the refused command writes zero bytes.
+      if (!this.admission.isAllowed(true)) throw new TmuxGraphicsRevokedError()
+      this.inner.write(dcs)
       cursor = end + SIXEL_DCS_TERMINATOR.length
     }
   }
