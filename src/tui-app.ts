@@ -247,6 +247,7 @@ import {
   type KittyGraphics,
 } from './tui/graphics/native-image.ts'
 import { createDirectSixelGraphics, type SixelScreenObservation } from './tui/graphics/sixel-image.ts'
+import { createTmuxSixelGraphics, isTmuxSixelTerminal } from './tui/graphics/tmux-sixel.ts'
 import { createTmuxKittyGraphics } from './tui/graphics/tmux-image.ts'
 import { createZellijKittyGraphics } from './tui/graphics/zellij-image.ts'
 import { TmuxGraphicsRevokedError } from './tui/graphics/kitty-terminal.ts'
@@ -4308,12 +4309,18 @@ export class TuiApp {
     // the real terminal the screens will write through, and both screens plus
     // every first-party graphics consumer share the SAME facade/Core. The
     // native transport is preferred; a Ghostty-host Zellij pane gets its own
-    // live-query admission; only then does the strict tmux virtual factory get
-    // its own chance. Every factory fails closed, so a terminal that admits
-    // none keeps `getCapabilities()` untouched and every consumer keeps its
-    // legacy `Image`/text path.
+    // live-query admission; native tmux SIXEL then takes a proven Sxl pane
+    // before the tmux virtual Kitty factory, whose known-U1 positives keep
+    // their fixed precedence inside the SIXEL factory. Every factory fails
+    // closed, so a terminal that admits none keeps `getCapabilities()`
+    // untouched and every consumer keeps its legacy `Image`/text path.
     const graphics: ImageGraphics | undefined = createNativeKittyGraphics(resizeAware)
       ?? createZellijKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
+      // Native tmux SIXEL owns the pane's own DCS before the tmux virtual Kitty
+      // factory gets a chance: a real Sxl client outranks a pending U1 probe,
+      // while a live known-U1 Kitty/Ghostty facility keeps its fixed precedence
+      // inside the factory (which then returns undefined).
+      ?? createTmuxSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
       ?? createTmuxKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
       // Direct SIXEL is the LAST candidate and never a fallback: a managed Kitty
       // handle keeps precedence even while its own admission is pending/denied,
@@ -4328,12 +4335,14 @@ export class TuiApp {
     // A revoked tmux admission refuses a whole managed physical batch from
     // inside `Terminal.write()` (the fork screens call it from a render timer,
     // where a throw would become an uncaughtException and kill the process).
-    // This boundary converts exactly that refusal into one safe text frame:
-    // the admission is already latched revoked, so every consumer's next render
-    // sees `effectiveImageProtocol() === null` and repaints text instead of
+    // This boundary covers the virtual Kitty facade and the native tmux SIXEL
+    // write gate; both throw the same precise `TmuxGraphicsRevokedError`, which
+    // it converts into one safe text frame: the admission is already latched
+    // revoked, so every consumer's next render sees
+    // `effectiveImageProtocol() === null` and repaints text instead of
     // placeholders. The refused batch itself wrote nothing managed, and any
     // OTHER write error keeps propagating unchanged.
-    if (graphics?.mode === 'tmux-virtual') {
+    if (graphics?.mode === 'tmux-virtual' || (graphics?.mode === 'sixel' && isTmuxSixelTerminal(graphics.terminal))) {
       const virtual = graphics.terminal as Terminal & { write: (data: string) => void }
       const facadeWrite = virtual.write.bind(virtual)
       virtual.write = (data: string): void => {

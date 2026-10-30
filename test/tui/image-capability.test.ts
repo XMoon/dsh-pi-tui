@@ -545,3 +545,15 @@ test('Direct SIXEL is the last branch: it never overrides a managed handle and n
   assert.equal(effectiveImageProtocol(undefined), 'iterm2', 'no handle keeps the fork answer')
   resetCapabilitiesCache()
 })
+
+test('a managed native-tmux SIXEL handle is the only authority for that pane', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', true)), 'sixel',
+    'the tmux SIXEL handle answers sixel even when the fork would answer kitty')
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', false)), null,
+    'a revoked native-tmux SIXEL handle never falls back to the fork capability')
+  assert.equal(effectiveImageProtocol(classifierHandle('tmux-virtual', true)), 'kitty',
+    'the tmux virtual Kitty handle keeps its own transport')
+  resetCapabilitiesCache()
+})

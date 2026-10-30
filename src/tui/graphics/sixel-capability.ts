@@ -31,6 +31,11 @@ export interface SixelDirectCapability {
   readonly verdict: SixelDirectVerdict
   /** The terminal's own DA1 SIXEL answer; `undefined` while still unknown. */
   readonly observed: boolean | undefined
+  /**
+   * Observe every later DA1 answer on the same terminal. The owner uses this
+   * to re-evaluate readiness; the capability itself remains the only fact.
+   */
+  observe(listener: () => void): () => void
   /** Idempotent: unsubscribes and freezes the verdict. */
   dispose(): void
 }
@@ -105,6 +110,10 @@ export function createDirectSixelCapability(
     },
     get observed(): boolean | undefined {
       return observed
+    },
+    observe(listener: () => void): () => void {
+      if (disposed || denial !== undefined) return () => {}
+      return terminal.onSixelSupport?.(() => listener()) ?? (() => {})
     },
     dispose(): void {
       if (disposed) return
