@@ -321,6 +321,28 @@ export interface RemoteApplicationOverride {
   readonly extensionService: PiTuiExtensionService
 }
 
+/**
+ * The internal startup-settlement seam for the split Client's ONE real
+ * Surface composition (M4-B2-S §7.1). `applyRunnerWithRuntime` is synchronous
+ * and starts an asynchronous runner root, so the caller cannot learn from its
+ * return value whether a physical surface was actually mounted:
+ *
+ * - `surfaceReady()` fires exactly once, after `surface.start(...)` returned
+ *   successfully and the renderer/terminal ownership transfer settled — i.e.
+ *   the real tty is owned by the mounted TUI;
+ * - `surfaceFailed(error)` fires instead when the runner's startup root (or
+ *   the surface acquisition) fails before `surfaceReady`, with the ORIGINAL
+ *   error so the caller can unwind its whole Client graph in reverse order.
+ *
+ * Omitted by the Direct package entry (`applyRunner`) and every test that does
+ * not observe real mount readiness; internal split-Client composition is the
+ * only caller.
+ */
+export interface RunnerStartupSettlement {
+  surfaceReady(): void
+  surfaceFailed(error: unknown): void
+}
+
 /** The neutral Session-scoped facts face. */
 export interface RemoteSessionFactsSource {
   sessionStatus: SessionReader['sessionStatus']
