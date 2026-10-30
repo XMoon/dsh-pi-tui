@@ -666,6 +666,23 @@ Where it runs:
   promise shared by every teardown path, never four copies. That entry has no
   exit-controller hook, so `retireOwnedSession` performs the same synchronous
   pre-cancel itself before creating the memoized promise.
+- **Client detach vs explicit Stop**: a Client surface teardown, Client
+  process exit or connection loss releases only the Client-owned surface,
+  official transport and Client root. It does not invoke the Direct/runtime
+  Session retirement cancel: that cancel remains the explicit Stop/navigation
+  authority. A Host-owned pending Question/Approval forward stays pending in
+  the Host Gateway across the detach; the retiring Client removes its
+  presentation listener without settling the Host event, and a later Client
+  answers the same event/call identity at most once.
+- **Same-process Client surface revision**: when the internal split Client
+  replaces its surface, ONE serial revision task slot owns the transition:
+  close the old revision's input/admission, await the old runner's physical
+  tty release and Session-reference retirement, dispose its UI and memoized
+  application/Domain graph in reverse, mount the new revision on the same
+  Client Context/transport, and await its real `surfaceReady`. A stop request
+  aborts the in-flight revision and waits for that slot before releasing the
+  Client root; a failed revision disposes its partial graph and exits the
+  Client. The Host identity and Host business objects never change.
 - **Successful ordinary session transition** (`/new`, `/sessions` switch,
   or open): a USER NAVIGATION first sends its one exact-owner stop at the
   transition admission (before the drain), then the pre-commit quiesce

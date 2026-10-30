@@ -225,6 +225,45 @@ real terminal. A surface-mode Client is the shell for the official web-form
 Client bundles, so it supplies exactly the platform statics those bundles
 require; it does not add a second transport, session RPC or Host service.
 
+### Client detach, pending interactions and Client-only surface revisions
+
+Detaching a Client (clean exit, SIGKILL, transport loss or surface teardown)
+never terminates Host work that the Host already accepted. The Host's exact
+Agent, Turn, Tool, Job and Child objects keep their own Host lifetimes; a new
+Client attaches through the official authenticated Session reference and reads
+the durable Session log plus the live event stream. Only an explicit human
+Stop/navigation action sends the Host Agent cancel; a Client detach is a
+release of the Client's `tuiMainView` reference and transport, never a Host
+cancel in disguise.
+
+The Host Gateway's pending forwarded events are the ONE recovery channel for a
+Question or Approval that was waiting when the Client left. A Client surface
+teardown must not settle a Host-owned forwarded request: it drops its local
+presentation without sending an answer, cancellation or `next` that would
+permanently settle the Host event. A later Client receiving the same event id /
+call id may answer it once through the official answerer; the Host pending map
+clears only on the Host's own settlement. A settled, cancelled or replaced
+request is never resurrected from an old Client's painted card.
+
+The installed rc.4 Client event pump consumes a Host-pending forwarded event
+as soon as its Connection generation opens, before a fresh Client's official
+Domain/interaction owner can register an answerer; the pump has no pre-start
+listener gate or replay buffer. A fresh Client therefore cannot recover a
+legacy Host-pending Question/Approval after the prior Client dies with only the
+public rc.4 Client API. That is an upstream capability gap, not a Host Gateway
+pending-map failure and not a reason to add a private PiTui pending store; an
+upstream pre-pump registration gate/buffer or an explicit Client restore API is
+required before this contract can be claimed end to end.
+
+The internal split mode also supports one Client-only surface revision
+replacement on the SAME Client PID, Client Context and B1 transport: the
+current runner, Client UI subtree and memoized application/Domain graph are
+retired in reverse order, then a fresh revision is mounted and must reach a
+real TTY-ready state before it is reported mounted. Host `runProfile`, Agent,
+Job and service fibers are untouched. Revision identity and status are
+qualification observations only; they grant no Host authority, and no second
+runner may ever hold the tty at the same time.
+
 ## Direct/Remote semantic equivalence
 
 Direct and Remote implement the SAME port and share the SAME pure

@@ -590,6 +590,99 @@ export function apply(ctx) { ctx.llm.registerAdapter(['stub'], new StubLlmAdapte
   return { stubPath, patchPath }
 }
 
+/**
+ * The M4-C1 isolated Host workload overlay. The fixture file is copied into
+ * the installed profile so its official `@deepseek-ai/*` imports resolve from
+ * that profile (never from the repository checkout), exactly like the stub
+ * LLM row above. One row registers the scripted adapter; `agent-default-model`
+ * routes the Agent to it.
+ */
+export function writeC1WorkFixture(profileDir, workDir) {
+  const source = join(SCRIPT_DIR, 'fixtures', 'm4-c1-host-work.mjs')
+  const fixturePath = join(profileDir, 'm4-c1-host-work.mjs')
+  writeFileSync(fixturePath, readFileSync(source), { mode: 0o600 })
+  chmodSync(fixturePath, 0o600)
+  const rows = [
+    '- insert:',
+    '    - id: m4-c1-host-work',
+    `      name: '${pathToFileURL(fixturePath).href}'`,
+    '      inject: [llm, tools, jobs, subagents, agents]',
+    '- id: agent-default-model',
+    '  config:',
+    '    provider: c1-qualification',
+    '    model: c1',
+    '',
+  ]
+  const patchPath = join(workDir, 'm4-c1-work.patch.yml')
+  writeFileSync(patchPath, rows.join('\n'), { mode: 0o600 })
+  chmodSync(patchPath, 0o600)
+  // T52: the official TIMED ask_user_question form. This is an isolated
+  // qualification profile only; the production preset keeps its legacy form.
+  const timedPatchPath = join(workDir, 'm4-c1-work-timed.patch.yml')
+  writeFileSync(timedPatchPath, [
+    ...rows.slice(0, -1),
+    '- id: tool-ask-user',
+    '  config:',
+    '    mode: timed',
+    '    timeout: 1',
+    '',
+  ].join('\n'), { mode: 0o600 })
+  chmodSync(timedPatchPath, 0o600)
+  return { fixturePath, patchPath, timedPatchPath }
+}
+
+/** Read every M4-C1 fixture proof line (an absent file is simply empty). */
+function readC1WorkEvents(workRoot) {
+  const path = join(workRoot, 'events.jsonl')
+  if (!existsSync(path)) return []
+  return readFileSync(path, 'utf8').split('\n').filter(Boolean).flatMap(line => {
+    try {
+      return [JSON.parse(line)]
+    } catch {
+      return []
+    }
+  })
+}
+
+/** Wait for one fixture proof matching the predicate. */
+async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const event = readC1WorkEvents(workRoot).find(predicate)
+    if (event !== undefined) return event
+    await sleep(25)
+  }
+  throw new Error(`${label}: no M4-C1 work proof matched within ${String(timeoutMs)}ms; events=${JSON.stringify(readC1WorkEvents(workRoot).slice(-8))}`)
+}
+
+/** Wait for one durable Host Session event matching the predicate. */
+async function waitForHostSessionEvent(dshHome, sessionId, predicate, label, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const events = hostSessionEvents(dshHome, sessionId)
+    const event = events?.find(predicate)
+    if (event !== undefined) return event
+    await sleep(50)
+  }
+  throw new Error(`${label}: no durable Host Session event matched within ${String(timeoutMs)}ms; events=${JSON.stringify(hostSessionEvents(dshHome, sessionId)?.slice(-8))}`)
+}
+
+/** The last `surface-status` record of a surface Client (no stdin channel). */
+function lastSurfaceStatus(client) {
+  return client.records.filter(record => record.m4b2s === 'surface-status').at(-1)
+}
+
+/** Wait for a surface status matching the predicate. */
+async function waitForSurfaceStatus(client, predicate, label, timeoutMs = 120_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const status = lastSurfaceStatus(client)
+    if (status !== undefined && predicate(status)) return status
+    await sleep(25)
+  }
+  throw new Error(`${label}: no surface status matched; records=${JSON.stringify(client.records.slice(-6))}`)
+}
+
 /** Wait for the first ready record among concurrent entries. */
 async function waitForAnyReady(processes, label, timeoutMs) {
   const deadline = Date.now() + timeoutMs
@@ -2634,6 +2727,583 @@ async function main() {
         t01t26: 'pass (T26a row-disabled + real artifact-absent; T26b official row; T26 no-cookie)',
         surface: 'T27-T39 + T41/T42/T43 pass',
       })
+    // ── M4-C1 continuity / interactions / Client-only HMR (T44–T60) ────────
+    // Each scenario starts its OWN Host (one `C1_SCENARIO` per Host process)
+    // and records its facts through the isolated fixture. The Client processes
+    // are real PTY surfaces over the official authenticated B1 transport.
+    const c1Work = writeC1WorkFixture(profileDir, workDir)
+    const c1Hosts = []
+    const c1Clients = []
+    const c1WorkRoot = label => {
+      const root = join(workDir, `c1-${label}`)
+      mkdirSync(root, { recursive: true, mode: 0o700 })
+      chmodSync(root, 0o700)
+      return root
+    }
+    const startC1Host = async (scenario, label, extraEnv = {}) => {
+      await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 15_000)
+      const workRoot = c1WorkRoot(label)
+      const host = new EntryProcess('host', entries.host, {
+        ...base,
+        env: {
+          ...base.env,
+          SPLIT_PROCESS_EXTRA_PATCH: c1Work.patchPath,
+          C1_SCENARIO: scenario,
+          C1_WORK_ROOT: workRoot,
+          ...extraEnv,
+        },
+      })
+      c1Hosts.push(host)
+      const ready = await host.waitFor(record => record.m4a0 === 'ready', `${label} Host ready`, 180_000)
+      return { host, ready, workRoot }
+    }
+    const stopC1Host = async host => {
+      if (host.exited) return
+      try { await host.shutdown() } catch { /* the global backstop kills leftovers */ }
+    }
+    const startC1Client = async (label, extraEnv = {}) => {
+      await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+      const client = new SurfaceEntryProcess(entries.client, {
+        ...base,
+        workDir,
+        env: { ...base.env, ...extraEnv },
+      })
+      c1Clients.push(client)
+      const ready = await client.waitFor(record => record.m4a0 === 'ready', `${label} Client ready`, 180_000)
+      return { client, ready }
+    }
+    const exitC1Client = async (client, label) => {
+      client.send('/exit\r')
+      const exit = await client.waitForExit(60_000)
+      assert(exit.code === 0 && exit.signal === null, `${label} exit was ${JSON.stringify(exit)}`)
+      await client.dispose()
+      return exit
+    }
+    const openC1Session = async (client, prompt, label) => {
+      client.send(`${prompt}\r`)
+      await client.waitForScreen(prompt, `${label} prompt painted`, 120_000)
+      const status = await waitForSurfaceStatus(client, record => record.sessionOpen === true && typeof record.openSessionId === 'string', `${label} session open`)
+      return status.openSessionId
+    }
+    const hostIdentityFacts = async host => (await hostStatus(host)).localHost
+    const assertHostIdentityKept = async (host, before, label) => {
+      assertIdentityFields(await hostIdentityFacts(host), before, label)
+    }
+
+    try {
+      // T44: a real accepted Turn survives a Client SIGKILL. The LLM stream is
+      // held by the Host fixture; the Client disappears while the Host Agent is
+      // running, then the SAME Host writes the final assistant message.
+      {
+        const releaseBarrier = join(workDir, 't44-long-turn.release')
+        const { host, ready, workRoot } = await startC1Host('long-turn', 't44', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const { client: c1 } = await startC1Client('T44 C1')
+        const sessionId = await openC1Session(c1, 't44 prompt', 'T44')
+        const held = await waitForC1WorkEvent(workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T44 long-turn held')
+        assert(held.agentStatus === 'running', `T44 the Host Agent was ${JSON.stringify(held.agentStatus)} while the Turn was held`)
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/start', 'T44 turn/start')
+        const hostBefore = await hostIdentityFacts(host)
+        const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
+        c1.signalBusiness('SIGKILL')
+        await waitGone(c1Pid, 15_000)
+        assert(!alive(c1Pid), 'T44 the surface Client survived SIGKILL')
+        await c1.dispose()
+        assert(alive(ready.pid), 'T44 the Host died on the Client SIGKILL')
+        await assertHostIdentityKept(host, hostBefore, 'T44 Host after Client SIGKILL')
+        const beforeRelease = hostSessionEvents(dshHome, sessionId) ?? []
+        assert(!beforeRelease.some(event => event.type === 'turn/end'),
+          'T44 the Turn had already ended before the barrier was released — the case is not a running-Turn proof')
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T44 turn/end without a Client')
+        const events = hostSessionEvents(dshHome, sessionId) ?? []
+        assert(hostUserTexts(events).filter(text => text === 't44 prompt').length === 1,
+          'T44 the prompt was replayed or lost')
+        assert(hostAssistantHasText(events, 'long-turn answer'), 'T44 the Host did not write the final assistant message without a Client')
+        const { client: c2 } = await startC1Client('T44 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        await c2.waitForScreen('long-turn answer', 'T44 C2 readback')
+        await waitForSurfaceStatus(c2, record => record.openSessionId === sessionId, 'T44 C2 exact Session')
+        await exitC1Client(c2, 'T44 C2')
+        await stopC1Host(host)
+        trace('t44', {
+          hostPid: ready.pid,
+          c1Pid,
+          sessionId,
+          hostAliveDuringDetach: true,
+          turnEndedWithZeroClients: true,
+          promptReplays: 1,
+          c2Readback: true,
+        })
+      }
+
+      // T45: the same running Turn survives a CLEAN Client exit (`/exit`).
+      {
+        const releaseBarrier = join(workDir, 't45-long-turn.release')
+        const { host, ready, workRoot } = await startC1Host('long-turn', 't45', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const { client: c1 } = await startC1Client('T45 C1')
+        const sessionId = await openC1Session(c1, 't45 prompt', 'T45')
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T45 long-turn held')
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/start', 'T45 turn/start')
+        const hostBefore = await hostIdentityFacts(host)
+        await exitC1Client(c1, 'T45 C1 clean exit')
+        assert(alive(ready.pid), 'T45 the Host died on the Client clean exit')
+        await assertHostIdentityKept(host, hostBefore, 'T45 Host after clean Client exit')
+        const beforeRelease = hostSessionEvents(dshHome, sessionId) ?? []
+        assert(!beforeRelease.some(event => event.type === 'turn/end'),
+          'T45 the Client clean exit cancelled or settled the Host Turn')
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T45 turn/end without a Client')
+        const events = hostSessionEvents(dshHome, sessionId) ?? []
+        assert(hostUserTexts(events).filter(text => text === 't45 prompt').length === 1, 'T45 the prompt was replayed')
+        const { client: c2 } = await startC1Client('T45 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        await c2.waitForScreen('long-turn answer', 'T45 C2 readback')
+        await exitC1Client(c2, 'T45 C2')
+        await stopC1Host(host)
+        trace('t45', { hostPid: ready.pid, sessionId, cleanExitDidNotCancel: true, c2Readback: true })
+      }
+
+      // T46: a real foreground Host Tool call survives the Client exit and its
+      // result is written exactly once by the Host Tool authority.
+      {
+        const releaseBarrier = join(workDir, 't46-tool.release')
+        const { host, ready, workRoot } = await startC1Host('foreground-tool', 't46', {
+          C1_HOLD_TOOL: releaseBarrier,
+        })
+        const { client: c1 } = await startC1Client('T46 C1')
+        const sessionId = await openC1Session(c1, 't46 prompt', 'T46')
+        const toolStarted = await waitForC1WorkEvent(workRoot, event => event.kind === 'tool-started' && event.token?.includes(sessionId), 'T46 real Host tool call')
+        const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'c1_foreground_tool', 'T46 tool/call')
+        assert(String(call.data.callId) === toolStarted.callId, 'T46 fixture proof and durable tool/call disagree on the call id')
+        const hostBefore = await hostIdentityFacts(host)
+        const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
+        c1.signalBusiness('SIGKILL')
+        await waitGone(c1Pid, 15_000)
+        await c1.dispose()
+        assert(alive(ready.pid), 'T46 the Host died on the Client SIGKILL')
+        await assertHostIdentityKept(host, hostBefore, 'T46 Host after Client detach')
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const result = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === toolStarted.callId, 'T46 Host tool/result')
+        assert(result.data?.message?.isError !== true, 'T46 the held Host Tool failed')
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T46 turn/end')
+        const results = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === toolStarted.callId)
+        assert(results.length === 1, `T46 the Host Tool executed ${String(results.length)} times`)
+        const { client: c2 } = await startC1Client('T46 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        await c2.waitForScreen('foreground answer', 'T46 C2 readback')
+        await exitC1Client(c2, 'T46 C2')
+        await stopC1Host(host)
+        trace('t46', { hostPid: ready.pid, sessionId, callId: toolStarted.callId, toolResults: 1, hostAlive: true })
+      }
+
+      // T47: a real background Job (official ctx.jobs registry + OS process)
+      // keeps running after the Client exits and settles without one.
+      {
+        const releaseBarrier = join(workDir, 't47-job.release')
+        const { host, ready, workRoot } = await startC1Host('job', 't47')
+        const jobRelease = join(workRoot, 'job.release')
+        rmSync(jobRelease, { force: true })
+        const { client: c1 } = await startC1Client('T47 C1')
+        const sessionId = await openC1Session(c1, 't47 prompt', 'T47')
+        const registered = await waitForC1WorkEvent(workRoot, event => event.kind === 'job-event' && event.event === 'registered', 'T47 job registered')
+        assert(typeof registered.jobId === 'string' && registered.status === 'running', 'T47 no real running Host Job')
+        assert(registered.owner === sessionId, 'T47 the Job owner is not the exact Session')
+        const hostBefore = await hostIdentityFacts(host)
+        const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
+        c1.signalBusiness('SIGKILL')
+        await waitGone(c1Pid, 15_000)
+        await c1.dispose()
+        assert(alive(ready.pid), 'T47 the Host died on the Client SIGKILL')
+        await assertHostIdentityKept(host, hostBefore, 'T47 Host after Client detach')
+        await sleep(500)
+        const eventsWhileDetached = readC1WorkEvents(workRoot).filter(event => event.kind === 'job-event' && event.jobId === registered.jobId)
+        assert(eventsWhileDetached.every(event => event.event !== 'settled'), 'T47 the Job settled while no Client existed and the barrier was held')
+        writeFileSync(jobRelease, 'release\n', { mode: 0o600 })
+        const settled = await waitForC1WorkEvent(workRoot, event => event.kind === 'job-event' && event.jobId === registered.jobId && event.event === 'settled', 'T47 job settled without a Client', 120_000)
+        assert(settled.status === 'completed', `T47 the Job settled as ${JSON.stringify(settled.status)}`)
+        assert(typeof settled.output === 'string' && settled.output.includes('c1-job-done'),
+          `T47 the Job output ring did not carry the real process output: ${JSON.stringify(settled.output)}`)
+        const { client: c2 } = await startC1Client('T47 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        await c2.waitForScreen('job accepted', 'T47 C2 job result')
+        await exitC1Client(c2, 'T47 C2')
+        await stopC1Host(host)
+        trace('t47', { hostPid: ready.pid, sessionId, jobId: registered.jobId, jobStatus: settled.status, hostAlive: true, processOutput: true })
+      }
+
+      // T48: a real continuable Child survives the Client exit; the Child
+      // Session's own durable log carries its final assistant message.
+      {
+        const releaseBarrier = join(workDir, 't48-child.release')
+        const { host, ready, workRoot } = await startC1Host('child', 't48', {
+          C1_HOLD_CHILD: releaseBarrier,
+        })
+        const { client: c1 } = await startC1Client('T48 C1')
+        const sessionId = await openC1Session(c1, 't48 prompt', 'T48')
+        const started = await waitForC1WorkEvent(workRoot, event => event.kind === 'subagent-start', 'T48 real subagent/start', 120_000)
+        assert(typeof started.childId === 'string' && started.childId !== sessionId, 'T48 no distinct Child Agent identity')
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'child-stream-held' && event.sessionId === started.childId, 'T48 Child LLM stream held')
+        const hostBefore = await hostIdentityFacts(host)
+        const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
+        c1.signalBusiness('SIGKILL')
+        await waitGone(c1Pid, 15_000)
+        await c1.dispose()
+        assert(alive(ready.pid), 'T48 the Host died on the Client SIGKILL')
+        await assertHostIdentityKept(host, hostBefore, 'T48 Host after Client detach')
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const ended = await waitForC1WorkEvent(workRoot, event => event.kind === 'subagent-end' && event.childId === started.childId, 'T48 real subagent/end', 120_000)
+        assert(ended.runId === started.runId, 'T48 the subagent end does not pair the start run id')
+        const childEvents = await (async () => {
+          const deadline = Date.now() + 60_000
+          while (Date.now() < deadline) {
+            const events = hostSessionEvents(dshHome, started.childId)
+            if (events !== undefined && hostAssistantHasText(events, 'child answer')) return events
+            await sleep(50)
+          }
+          return undefined
+        })()
+        assert(childEvents !== undefined, 'T48 the Child Session durable log has no final assistant message')
+        const { client: c2 } = await startC1Client('T48 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        await c2.waitForScreen('child delegated', 'T48 C2 parent readback')
+        await exitC1Client(c2, 'T48 C2')
+        await stopC1Host(host)
+        trace('t48', { hostPid: ready.pid, parentSessionId: sessionId, childId: started.childId, runId: started.runId, childDurable: true })
+      }
+
+      if (process.env.SPLIT_PROCESS_SMOKE_SKIP_INTERACTIONS === '1') {
+        trace('t49-t55', {
+          status: 'BLOCKED',
+          reason: 'the fresh Client event pump delivers a Host-pending forwarded interaction before the surface interaction port attaches; exact upstream capability is under Owner review',
+        })
+      } else {
+        // T49/T50: an official pending Question survives C1 SIGKILL and a clean
+        // Client exit. C2 receives the ORIGINAL callId through the Host Gateway
+        // and its answer settles the same Host flow exactly once.
+        for (const [mode, label] of [['kill', 't49'], ['exit', 't50']]) {
+          const { host, ready, workRoot } = await startC1Host('question', label)
+          const { client: c1 } = await startC1Client(`${label.toUpperCase()} C1`)
+          const sessionId = await openC1Session(c1, `${label} prompt`, label.toUpperCase())
+          const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', `${label} ask_user_question tool/call`)
+          const callId = String(call.data.callId)
+          const request = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-request' && event.sessionId === sessionId, `${label} Host question request`)
+          assert(request.questions?.[0]?.question === 'Continue the C1 test?', `${label} the Host question payload is wrong`)
+          // The Host ask is pending AND the real C1 modal is painted before the
+          // detach: otherwise the kill would race the first forwarded delivery
+          // and could legitimately observe "no answerer" instead of a held question.
+          await c1.waitForScreen('[1] Proceed', `${label} C1 question modal`, 120_000)
+          const hostBefore = await hostIdentityFacts(host)
+          const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
+          if (mode === 'kill') {
+            c1.signalBusiness('SIGKILL')
+            await waitGone(c1Pid, 15_000)
+            await c1.dispose()
+          } else {
+            // SIGTERM is the clean detach path while a modal owns the editor
+            // seat; typing /exit into a modal would be modal input, not exit.
+            c1.signalBusiness('SIGTERM')
+            const cleanExit = await c1.waitForExit(60_000)
+            assert(cleanExit.code === 0 && cleanExit.signal === null, `${label} C1 clean exit was ${JSON.stringify(cleanExit)}`)
+            await c1.dispose()
+          }
+          assert(alive(ready.pid), `${label} the Host died on the Client exit`)
+          await assertHostIdentityKept(host, hostBefore, `${label} Host after Client exit`)
+          // A clean Client teardown must not settle the Host question as
+          // cancelled: no question-failed proof may appear before C2 answers.
+          await sleep(300)
+          assert(readC1WorkEvents(workRoot).every(event => !(event.kind === 'question-failed' && event.callId === callId)),
+            `${label} the Client teardown sent a cancellation that settled the Host pending question`)
+          const { client: c2 } = await startC1Client(`${label.toUpperCase()} C2`, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+          await c2.waitForScreen('Continue the C1 test?', `${label} C2 redelivered question`, 120_000)
+          c2.send('1')
+          await c2.waitForScreen('Submit', `${label} C2 review page`, 30_000)
+          c2.send('\r')
+          const settled = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-settled' && event.sessionId === sessionId, `${label} Host question settled`, 120_000)
+          assert(settled.answers?.[0]?.selected?.[0] === 'Proceed', `${label} the Host received the wrong answer: ${JSON.stringify(settled.answers)}`)
+          const result = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId, `${label} question tool result`)
+          assert(result.data?.message?.isError !== true, `${label} the question tool failed after a legal answer`)
+          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', `${label} turn/end after answer`)
+          const requests = readC1WorkEvents(workRoot).filter(event => event.kind === 'question-request' && event.sessionId === sessionId)
+          const settlements = readC1WorkEvents(workRoot).filter(event => event.kind === 'question-settled' && event.sessionId === sessionId)
+          assert(requests.length === 1 && settlements.length === 1, `${label} duplicate question request/settlement (${String(requests.length)}/${String(settlements.length)})`)
+          await exitC1Client(c2, `${label} C2`)
+          await stopC1Host(host)
+          trace(label, { hostPid: ready.pid, sessionId, callId, mode, c2Answer: 'Proceed', hostSettlements: settlements.length })
+        }
+
+        // T51: after the answer, a reattached Client does not resurrect the old
+        // card and the Host never records a second answer. (The stale legal frame
+        // replay needs a second simultaneous peer; that exact wire replay is
+        // recorded as NOT_VERIFIED below, never as a pass.)
+        {
+          const { host, ready, workRoot } = await startC1Host('question', 't51')
+          const { client: c1 } = await startC1Client('T51 C1')
+          const sessionId = await openC1Session(c1, 't51 prompt', 'T51')
+          const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', 'T51 question tool/call')
+          const callId = String(call.data.callId)
+          await waitForC1WorkEvent(workRoot, event => event.kind === 'question-request' && event.sessionId === sessionId, 'T51 question pending')
+          const { client: c2 } = await startC1Client('T51 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+          await c2.waitForScreen('Continue the C1 test?', 'T51 C2 question')
+          c2.send('1')
+          await c2.waitForScreen('Submit', 'T51 C2 review')
+          c2.send('\r')
+          await waitForC1WorkEvent(workRoot, event => event.kind === 'question-settled' && event.sessionId === sessionId, 'T51 answered')
+          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T51 turn/end')
+          await exitC1Client(c2, 'T51 C2')
+          const { client: c3 } = await startC1Client('T51 C3', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+          await c3.waitForScreen('question answered', 'T51 C3 settled transcript')
+          await sleep(500)
+          const viewport = (await c3.viewport()).join('\n')
+          assert(!viewport.includes('Submit'), 'T51 a settled question card was resurrected as an answerable flow')
+          const settlements = readC1WorkEvents(workRoot).filter(event => event.kind === 'question-settled' && event.sessionId === sessionId)
+          const toolResults = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId)
+          assert(settlements.length === 1 && toolResults.length === 1, 'T51 the settled question produced a second answer/result')
+          await exitC1Client(c3, 'T51 C3')
+          await stopC1Host(host)
+          trace('t51', { hostPid: ready.pid, sessionId, callId, noResurrection: true, staleLegalFrameReplay: 'NOT_VERIFIED' })
+        }
+
+        // T52: the official TIMED question path. The tool returns the pending
+        // payload after its foreground window; the Host projection keeps the call
+        // answerable as `continued`. The exact C2 continued-answer UI path is
+        // recorded as NOT_VERIFIED (no fabricated pass).
+        {
+          const { host, ready, workRoot } = await startC1Host('question', 't52', { C1_TIMED_QUESTION: '1', SPLIT_PROCESS_EXTRA_PATCH: c1Work.timedPatchPath })
+          const { client: c1 } = await startC1Client('T52 C1')
+          const sessionId = await openC1Session(c1, 't52 prompt', 'T52')
+          const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', 'T52 timed question tool/call')
+          const callId = String(call.data.callId)
+          const request = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-request' && event.sessionId === sessionId, 'T52 timed question request')
+          assert(request.timed === true, 'T52 the Host question was not the official timed form')
+          await waitForC1WorkEvent(workRoot, event => event.kind === 'question-failed' && event.sessionId === sessionId, 'T52 timed foreground ended', 120_000)
+          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId, 'T52 pending tool result', 120_000)
+          await exitC1Client(c1, 'T52 C1')
+          await stopC1Host(host)
+          trace('t52', { hostPid: ready.pid, sessionId, callId, timedForegroundEnded: true, continuedC2Answer: 'NOT_VERIFIED' })
+        }
+
+        // T53/T54: an official Approval request survives the Client exit and a
+        // fresh Client settles the SAME Host request exactly once. `allowed-once`
+        // executes the harmless command; `rejected` never executes it.
+        for (const [scenario, decision, expected, markerName] of [
+          ['approval-allow', 'y', 'allowed-once', 'approval-allow.marker'],
+          ['approval-reject', 'n', 'rejected', 'approval-reject.marker'],
+        ]) {
+          const label = scenario === 'approval-allow' ? 't53' : 't54'
+          const { host, ready, workRoot } = await startC1Host(scenario, label)
+          const { client: c1 } = await startC1Client(`${label.toUpperCase()} C1`)
+          const sessionId = await openC1Session(c1, `${label} prompt`, label.toUpperCase())
+          const asked = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/asked', `${label} approval/asked`, 120_000)
+          const requestId = String(asked.data.id)
+          const request = await waitForC1WorkEvent(workRoot, event => event.kind === 'approval-request', `${label} Host approval request`)
+          assert(request.toolName === 'bash', `${label} the approval is not for the official bash tool`)
+          await c1.waitForScreen('[y] Allow once', `${label} C1 approval sheet`, 120_000)
+          const hostBefore = await hostIdentityFacts(host)
+          const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
+          c1.signalBusiness('SIGKILL')
+          await waitGone(c1Pid, 15_000)
+          await c1.dispose()
+          assert(alive(ready.pid), `${label} the Host died on the Client SIGKILL`)
+          await assertHostIdentityKept(host, hostBefore, `${label} Host after Client detach`)
+          await sleep(300)
+          assert(readC1WorkEvents(workRoot).every(event => !(event.kind === 'approval-settled')), `${label} the Client teardown settled the Host approval`)
+          const { client: c2 } = await startC1Client(`${label.toUpperCase()} C2`, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+          await c2.waitForScreen(scenario === 'approval-allow' ? 'Allow once' : 'Reject', `${label} C2 approval sheet`, 120_000)
+          c2.send(decision)
+          const decided = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/decided' && String(event.data?.id) === requestId, `${label} approval/decided`, 120_000)
+          assert(decided.data.outcome === expected, `${label} approval outcome ${JSON.stringify(decided.data.outcome)} != ${expected}`)
+          const decisions = (hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'approval/decided' && String(event.data?.id) === requestId)
+          assert(decisions.length === 1, `${label} duplicated approval/decided`)
+          const marker = join(workRoot, markerName)
+          if (scenario === 'approval-allow') {
+            await waitForC1WorkEvent(workRoot, event => event.kind === 'approval-settled' && event.outcome === 'allowed-once', `${label} allowed-once`)
+            await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === String(request.callId), `${label} bash tool result`, 120_000)
+            assert(existsSync(marker), `${label} the allowed harmless command did not execute`)
+          } else {
+            await waitForC1WorkEvent(workRoot, event => event.kind === 'approval-settled' && event.outcome === 'rejected', `${label} rejected`)
+            assert(!existsSync(marker), `${label} the rejected harmless command executed`)
+          }
+          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', `${label} turn/end`)
+          await exitC1Client(c2, `${label} C2`)
+          await stopC1Host(host)
+          trace(label, { hostPid: ready.pid, sessionId, requestId, decision: expected, decisions: 1, marker: existsSync(marker) })
+        }
+
+        // T55: a Client exit during a pending Approval is NOT an implicit
+        // decision; a later legal Client rejects it. The delayed-old-Peer and
+        // Host-Agent-abort races are recorded as NOT_VERIFIED (the single-seat
+        // lane cannot hold two real Peers at once).
+        {
+          const { host, ready, workRoot } = await startC1Host('approval-reject', 't55')
+          const { client: c1 } = await startC1Client('T55 C1')
+          const sessionId = await openC1Session(c1, 't55 prompt', 'T55')
+          const asked = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/asked', 'T55 approval/asked', 120_000)
+          const requestId = String(asked.data.id)
+          await c1.waitForScreen('[y] Allow once', 'T55 C1 approval sheet', 120_000)
+          c1.signalBusiness('SIGTERM')
+          const cleanExit = await c1.waitForExit(60_000)
+          assert(cleanExit.code === 0 && cleanExit.signal === null, `T55 C1 clean exit was ${JSON.stringify(cleanExit)}`)
+          await c1.dispose()
+          await sleep(300)
+          const afterExit = hostSessionEvents(dshHome, sessionId) ?? []
+          assert(!afterExit.some(event => event.type === 'approval/decided'), 'T55 the Client clean exit decided the Host approval')
+          const { client: c2 } = await startC1Client('T55 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+          await c2.waitForScreen('Reject', 'T55 C2 approval sheet', 120_000)
+          c2.send('n')
+          const decided = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/decided' && String(event.data?.id) === requestId, 'T55 approval/decided')
+          assert(decided.data.outcome === 'rejected', 'T55 the later legal Client did not reject the approval')
+          await exitC1Client(c2, 'T55 C2')
+          await stopC1Host(host)
+          trace('t55', { hostPid: ready.pid, sessionId, requestId, exitDidNotDecide: true, stalePeerRace: 'NOT_VERIFIED', hostAbortRace: 'NOT_VERIFIED' })
+        }
+      }
+
+      // T56: a new Client is a fresh Peer/binding; it reads the exact history
+      // once and a new prompt appends live without duplication.
+      {
+        const releaseBarrier = join(workDir, 't56-long-turn.release')
+        const rebuilt = await startC1Host('long-turn', 't56', { C1_HOLD_LONG_TURN: releaseBarrier })
+        const { client: c1 } = await startC1Client('T56 C1b')
+        const sessionId = await openC1Session(c1, 't56 first', 'T56')
+        await waitForC1WorkEvent(rebuilt.workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T56 first held')
+        const c1Pid = c1.records.find(record => record.m4a0 === 'ready')?.pid
+        c1.signalBusiness('SIGKILL')
+        await waitGone(c1Pid, 15_000)
+        await c1.dispose()
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T56 first turn end')
+        const { client: c2 } = await startC1Client('T56 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        await c2.waitForScreen('t56 first', 'T56 C2 history')
+        c2.send('t56 second\r')
+        await c2.waitForScreen('long-turn answer 2', 'T56 C2 live append', 120_000)
+        const users = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
+        assert(users.filter(text => text.startsWith('t56 first')).length === 1
+          && users.filter(text => text.includes('t56 second')).length === 1,
+        `T56 history duplication: ${JSON.stringify(users.map(text => text.slice(0, 80)))}`)
+        await exitC1Client(c2, 'T56 C2')
+        await stopC1Host(rebuilt.host)
+        trace('t56', { hostPid: rebuilt.ready.pid, sessionId, historyOnce: true, liveAppend: true })
+      }
+
+      // T57: Client-only HMR happy path on the SAME Client PID/Context/transport.
+      {
+        const { host, ready } = await startC1Host('long-turn', 't57', { C1_HOLD_LONG_TURN: join(workDir, 't57-never-released') })
+        const { client } = await startC1Client('T57 Client', { SPLIT_PROCESS_CLIENT_HMR_PROBE: '1' })
+        const before = await waitForSurfaceStatus(client, record => record.surfaceMounted === true, 'T57 initial surface')
+        const hostBefore = await hostIdentityFacts(host)
+        const beforePid = before.pid
+        const beforeRootFiber = before.rootFiberUid
+        const beforeGeneration = before.generationId
+        const beforeRevision = before.surfaceRevision
+        client.signalBusiness('SIGUSR2')
+        await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T57 HMR start', 60_000)
+        await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T57 HMR retired', 120_000)
+        const hmrReady = await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready', 'T57 HMR ready', 180_000)
+        const after = await waitForSurfaceStatus(client, record => record.surfaceRevision === hmrReady.revision && record.surfaceMounted === true, 'T57 new surface status', 120_000)
+        assert(after.pid === beforePid, 'T57 the HMR changed the OS PID')
+        assert(after.rootFiberUid === beforeRootFiber, 'T57 the HMR changed the Client root Context fiber')
+        assert(after.generationId === beforeGeneration, 'T57 the HMR changed the transport generation')
+        assert(after.surfaceRevision !== beforeRevision, 'T57 the surface revision did not change')
+        assert(after.surfaceFiberUid !== before.surfaceFiberUid, 'T57 the runner fiber did not change')
+        await client.waitForScreen('type a message to start a session', 'T57 new TTY paint', 120_000)
+        await assertHostIdentityKept(host, hostBefore, 'T57 Host identity')
+        await exitC1Client(client, 'T57 Client')
+        await stopC1Host(host)
+        trace('t57', { hostPid: ready.pid, clientPid: beforePid, revisionBefore: beforeRevision, revisionAfter: after.surfaceRevision, sameContext: true, sameTransport: true, newTty: true })
+      }
+
+      // T58: HMR while a real Host Job is running. The Host Job continues
+      // across the surface revision; the new surface re-attaches to the same
+      // Session and reads the surviving work.
+      {
+        const { host, ready, workRoot } = await startC1Host('job', 't58')
+        const { client } = await startC1Client('T58 Client', { SPLIT_PROCESS_CLIENT_HMR_PROBE: '1' })
+        const sessionId = await openC1Session(client, 't58 prompt', 'T58')
+        const job = await waitForC1WorkEvent(workRoot, event => event.kind === 'job-event' && event.event === 'registered', 'T58 running Job')
+        assert(typeof job.jobId === 'string' && job.status === 'running', 'T58 no real running Host Job')
+        const hostBefore = await hostIdentityFacts(host)
+        client.signalBusiness('SIGUSR2')
+        await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T58 HMR start')
+        await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T58 HMR retired', 120_000)
+        await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-ready', 'T58 HMR ready', 180_000)
+        const after = await waitForSurfaceStatus(client, record => record.sessionOpen === true && record.openSessionId === sessionId, 'T58 new surface Session', 120_000)
+        assert(after.pid === client.records.find(record => record.m4a0 === 'ready')?.pid, 'T58 the HMR changed the Client PID')
+        assert(alive(ready.pid), 'T58 the Host died during HMR')
+        await assertHostIdentityKept(host, hostBefore, 'T58 Host after HMR')
+        assert(readC1WorkEvents(workRoot).every(event => !(event.kind === 'job-event' && event.jobId === job.jobId && event.event === 'settled')),
+          'T58 the HMR settled the running Host Job')
+        writeFileSync(join(workRoot, 'job.release'), 'release\n', { mode: 0o600 })
+        const settled = await waitForC1WorkEvent(workRoot, event => event.kind === 'job-event' && event.jobId === job.jobId && event.event === 'settled', 'T58 Job settled after HMR', 120_000)
+        assert(settled.status === 'completed', `T58 Job settled as ${JSON.stringify(settled.status)}`)
+        await client.waitForScreen('job accepted', 'T58 new surface Job readback', 120_000)
+        await exitC1Client(client, 'T58 Client')
+        await stopC1Host(host)
+        trace('t58', { hostPid: ready.pid, sessionId, jobId: job.jobId, hmrDuringJob: true, jobContinued: true, newSurfaceReadback: true })
+      }
+
+      // T59: HMR failure and stop-during-HMR both fail closed with exactly one
+      // reverse disposal and no second TTY owner.
+      {
+        const { host, ready } = await startC1Host('job', 't59')
+        const { client } = await startC1Client('T59 failure Client', {
+          SPLIT_PROCESS_CLIENT_HMR_PROBE: '1',
+          SPLIT_PROCESS_CLIENT_HMR_FAIL: '1',
+        })
+        const c1Pid = client.records.find(record => record.m4a0 === 'ready')?.pid
+        client.signalBusiness('SIGUSR2')
+        await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T59 failure HMR start')
+        await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T59 failure HMR retired', 120_000)
+        await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-failure', 'T59 HMR failure', 120_000)
+        const failureExit = await client.waitForExit(60_000)
+        assert(failureExit.code === 1, `T59 HMR failure exit was ${JSON.stringify(failureExit)}`)
+        assert(alive(ready.pid), 'T59 HMR failure killed the Host')
+        await client.dispose()
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        const reuse = await startC1Client('T59 reuse Client')
+        await exitC1Client(reuse.client, 'T59 reuse Client')
+        await stopC1Host(host)
+        trace('t59-failure', { hostPid: ready.pid, clientPid: c1Pid, exit: failureExit.code, seatReusable: true, hostAlive: true })
+
+        const barrier = join(workDir, 't59-hmr-hold')
+        const { host: stopHost, ready: stopReady } = await startC1Host('job', 't59-stop')
+        const { client: stopping } = await startC1Client('T59 stop Client', {
+          SPLIT_PROCESS_CLIENT_HMR_PROBE: '1',
+          SPLIT_PROCESS_CLIENT_HMR_HOLD: `surface@${barrier}`,
+        })
+        stopping.signalBusiness('SIGUSR2')
+        await stopping.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T59 stop HMR start')
+        await stopping.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T59 stop HMR retired', 120_000)
+        stopping.signalBusiness('SIGTERM')
+        writeFileSync(barrier, 'release\n', { mode: 0o600 })
+        const stopExit = await stopping.waitForExit(60_000)
+        assert(stopExit.code === 0, `T59 stop-during-HMR exit was ${JSON.stringify(stopExit)}`)
+        assert(!stopping.records.some(record => record.m4a0 === 'cleanup-failure'), 'T59 stop-during-HMR reported a cleanup failure')
+        assert(alive(stopReady.pid), 'T59 stop-during-HMR killed the Host')
+        await stopping.dispose()
+        await stopC1Host(stopHost)
+        trace('t59-stop', { hostPid: stopReady.pid, exit: stopExit.code, cleanupFailures: 0, hostAlive: true })
+      }
+
+      // T60: final qualification inventory. The real stage-final lane runs the
+      // release gates; this record proves the exact candidate stayed unchanged
+      // across the whole REAL_SPLIT_PROCESS run and names the known gaps.
+      assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
+        'T60 the candidate artifact changed during the M4-C1 qualification')
+      trace('t60', {
+        candidate: basename(tarball),
+        sha256: candidateSha256,
+        dshVersion: targetDshVersion,
+        t44t48: process.env.SPLIT_PROCESS_SMOKE_SKIP_INTERACTIONS === '1' ? 'T44-T48 pass' : 'executed',
+        t49t55: process.env.SPLIT_PROCESS_SMOKE_SKIP_INTERACTIONS === '1' ? 'BLOCKED: upstream Client event-pump pre-answerer delivery gap' : 'executed',
+        t56t59: process.env.SPLIT_PROCESS_SMOKE_SKIP_INTERACTIONS === '1' ? 'T56-T59 pass' : 'executed',
+        t26aArtifactMissing: 'NOT_VERIFIED (#474)',
+        t12PtyHup: 'NOT_RUN',
+        releaseGates: 'run by the stage-final lane, not by this smoke',
+      })
+    } finally {
+      for (const client of c1Clients) await client.dispose()
+      for (const host of c1Hosts) await stopC1Host(host)
+    }
+
     } finally {
       for (const client of surfaceClients) await client.dispose()
       if (!surfaceHostClosed) {
