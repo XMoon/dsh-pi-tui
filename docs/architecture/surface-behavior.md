@@ -39,6 +39,15 @@ retirement and requests `appExit` (see
 - Local transcript-lane input forces the virtual window to the latest row;
   background steering/context never steals the viewport.
 - Local-only rows carry no bulk hint; the hint is scoped to accepted rows.
+- A preserved Host queue is explained ONLY by the live projection: an idle
+  subject (`running === false`) holding at least one authoritative `queued`
+  occurrence shows the next-prompt wake hint ("waiting for the next prompt —
+  send a message to continue"). A BUSY subject's queued rows are ordinary
+  queueing and show no such hint, and a client-local `sending…` echo alone never
+  earns it. Both renderers derive the same condition from the one presentation
+  (PiTui queue pane, TSP Dock); there is no `parked` flag, no second state
+  source and no automatic wake — the park ends when the user sends a real
+  prompt.
 - `Alt+Up` is recall-all and `Ctrl+S` is a FIFO steer-all. They are bulk
   affordances, not per-occurrence actions. Per-occurrence row
   edit/remove/steer remains a known product gap (GitHub issue), not a promise.
