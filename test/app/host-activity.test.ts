@@ -6,7 +6,7 @@
  * structural fakes for the official Host services. The real two-PID
  * source→status evidence lives in `scripts/split-process-smoke.mjs`.
  *
- * @module @xmoon76/dsh-pi-tui/local-host-liveness.test
+ * @module @xmoon76/dsh-pi-tui/host-activity.test
  */
 
 import assert from 'node:assert/strict'
@@ -15,7 +15,7 @@ import { Context } from '@deepseek-ai/cordis'
 import {
   HostActivityObserver,
   type HostActivitySnapshot,
-} from '../../src/app/remote-process/host-liveness.ts'
+} from '../../src/app/remote-process/host-activity.ts'
 import { createControlDispatcher } from '../../src/app/remote-process/entry-control.ts'
 
 interface FakeAgent {

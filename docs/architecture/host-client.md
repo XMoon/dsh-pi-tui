@@ -188,7 +188,7 @@ identity is published.
 ### Host liveness observation
 
 The Host-only entry installs exactly one internal, read-only
-`HostActivityObserver` (`src/app/remote-process/host-liveness.ts`) after the
+`HostActivityObserver` (`src/app/remote-process/host-activity.ts`) after the
 readiness audit and before it publishes Ready. The observer owns no DSH
 business object and never drives, stops or replaces Host work. Every internal
 status response carries a fresh `HostActivitySnapshot` with a three-state

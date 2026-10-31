@@ -32,7 +32,7 @@
  * process-wide write flushes. The snapshot reports the resulting coverage gaps
  * as reasons/states; it never turns them into idle.
  *
- * @module app/remote-process/host-liveness
+ * @module app/remote-process/host-activity
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -260,7 +260,7 @@ const BLOCKING_REASONS: ReadonlySet<ActivityReason> = new Set([
 ])
 
 /** The dedicated timeout marker: a hung read is UNKNOWN, never an empty source. */
-const OBSERVATION_TIMEOUT = Symbol('host-liveness-observation-timeout')
+const OBSERVATION_TIMEOUT = Symbol('host-activity-observation-timeout')
 
 /** Reject a source read after the caller's bound. */
 async function withDeadline<T>(operation: Promise<T>, deadlineMs: number): Promise<T> {

@@ -34,7 +34,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { attachEntryControl, createEntryDiag, writeEntryRecord } from './entry-control.ts'
-import { HostActivityObserver } from './host-liveness.ts'
+import { HostActivityObserver } from './host-activity.ts'
 import {
   bindProcessSeat,
   installedPackageRootFromEntry,
