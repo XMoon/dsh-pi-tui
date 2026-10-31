@@ -299,3 +299,37 @@ test('a one-row custom layout mounts exactly one status node', () => {
   assert.equal(rows.length, 1)
   assert.deepEqual(children(rows[0]!).map(seg => props(seg).side), [undefined, 'right'])
 })
+
+// ── Mount-local registry ownership (the plan §3.3 single-registry rule) ─────
+
+test('two mounts with different USER text definitions never share definitions', () => {
+  const mountPres = (text: string): NativeFooterPresentation => compileNativeFooterPresentation({
+    mode: 'custom',
+    layout: { schemaVersion: 1, rows: [{ left: [{ id: 'user:environment' }], right: [] }] },
+    userTextItems: [{ schemaVersion: 1, id: 'user:environment', kind: 'text', text }],
+    userCommandIds: new Set<string>(),
+    notices: [],
+  })
+  const first = mountPres('mount-one-value')
+  const second = mountPres('mount-two-value')
+  const rowsOf = (pres: NativeFooterPresentation): string[] =>
+    nativeStatuslineRows(fullSnapshot(), pres).flatMap(row => children(row).map(seg => String(props(seg).text)))
+  assert.ok(rowsOf(first).includes('mount-one-value'), JSON.stringify(rowsOf(first)))
+  assert.ok(rowsOf(second).includes('mount-two-value'), JSON.stringify(rowsOf(second)))
+  // The first mount's compiled projection is IMMUTABLE: re-rendering it after
+  // the second mount compiled still paints its OWN value.
+  assert.ok(rowsOf(first).includes('mount-one-value'))
+  assert.notEqual(first.registry, second.registry, 'each mount owns its own registry instance')
+})
+
+test('repeat status repaints reuse the SAME compiled presentation (no per-frame rebuild)', () => {
+  const pres = presentation({
+    doc: { footer: 'custom', footerLayout: { schemaVersion: 1, rows: [{ left: [{ id: 'user:environment' }], right: [] }] } },
+    userItems: { items: [{ schemaVersion: 1, id: 'user:environment', kind: 'text', text: 'stable' }], invalidCount: 0 },
+  })
+  const registry = pres.registry
+  for (let repeat = 0; repeat < 5; repeat += 1) {
+    nativeStatuslineRows(fullSnapshot(), pres)
+    assert.equal(pres.registry, registry, `the registry instance survives repaint #${repeat}`)
+  }
+})

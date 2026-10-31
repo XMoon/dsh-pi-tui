@@ -108,6 +108,15 @@ import type { ToolImageState } from './transcript-view.ts'
 interface DockState {
   notices: readonly DisplayDockNotice[]
   welcome: readonly DisplayWelcomeFacts[]
+  /**
+   * TSP-7 PR-D: the mount-scoped footer compatibility notices. They are a
+   * SEPARATE segment from the transient `notices`: the transient list evicts
+   * its oldest entries at NOTICE_LIMIT, but a footer notice states a config
+   * fact of THIS mount that must stay observable for the whole session (a
+   * later transient notice must never evict it). Rendered before the
+   * transient list, in their fixed bind order.
+   */
+  footerNotices: readonly DisplayDockNotice[]
 }
 
 /** One eligible final Assistant row: the ONLY row kind that owns visuals. */
@@ -537,7 +546,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * premature no-op (and the resources are still released exactly once).
    */
   let disposeTask: Promise<void> | undefined
-  const dock: DockState = { notices: [], welcome: [] }
+  const dock: DockState = { notices: [], welcome: [], footerNotices: [] }
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
   /** The application's pending-submit fact, surfaced as a dock line. */
   let pendingSubmit: SubmitPendingDetail | undefined
@@ -1970,6 +1979,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         text: `${TSP_VISUAL_SELECT_LABEL} select visual · ${TSP_VISUAL_COPY_LABEL} copy`,
       }))
     }
+    // The MOUNT-scoped footer notices render first, in their fixed bind
+    // order — they are config facts of this mount, never evicted and never
+    // re-issued (a later hydration/subject does not touch them).
+    for (const notice of dock.footerNotices) {
+      lines.push(ui.text({ key: `notice-${notice.id}`, text: notice.kind === 'error' ? `! ${sanitizeDisplayText(notice.text)}` : sanitizeDisplayText(notice.text) }))
+    }
     for (const notice of dock.notices) {
       const noticeText = sanitizeDisplayText(notice.text)
       lines.push(ui.text({ key: `notice-${notice.id}`, text: notice.kind === 'error' ? `! ${noticeText}` : noticeText }))
@@ -2990,12 +3005,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       statusReader = reader
     },
     // TSP-7 PR-D: the one-shot footer config. The presentation compiles and
-    // the bounded notices enqueue BEFORE any render is triggered, so no frame
-    // can paint a half-configured footer (the reentrancy rule: commit the
-    // decided state, then notify). The notices ride the dock's ordinary
-    // notice lifecycle — they survive the first frame and the first
-    // setTranscript, and `beginSessionHydration` deliberately does NOT
-    // re-issue them (the config belongs to the MOUNT, not a subject).
+    // the FULL notice set commits BEFORE the single render, so no frame ever
+    // paints a partially-notified dock (the reentrancy rule: commit the
+    // decided state, then render once). The footer notices are
+    // MOUNT-scoped facts: they are enqueued in their fixed order at bind
+    // time, never re-issued by a later subject/hydration, and the ordinary
+    // NOTICE_LIMIT eviction never applies to them (a legal config can
+    // produce up to four distinct notices; dropping one would hide a real
+    // compatibility fact the plan requires visible).
     bindNativeFooterConfig: (config) => {
       if (disposed) throw new Error('cannot bind the footer config after TSP renderer disposal')
       if (footerPresentation !== undefined) throw new Error('the TSP renderer footer config is already bound')
@@ -3004,7 +3021,20 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // compile also decides the renderer-owned unavailable-items notice
       // (a registry fact, never a domain builtin-list copy).
       footerPresentation = compileNativeFooterPresentation(config)
-      for (const text of footerPresentation.notices) display.notify(text)
+      // The whole set commits synchronously in ONE dock update, into the
+      // MOUNT-scoped footer segment — the transient `notify()` list (with its
+      // eviction limit and per-call render) is deliberately bypassed. Every
+      // footer notice is an error-severity compatibility fact (the dock
+      // prefixes it with `!`).
+      const footerNotices: DisplayDockNotice[] = footerPresentation.notices.map((text, index) => ({
+        id: `fn${index + 1}`,
+        text,
+        kind: 'error',
+      }))
+      if (footerNotices.length > 0) {
+        dock.footerNotices = footerNotices
+        render()
+      }
     },
     bindInput: (handlers) => {
       if (disposed) throw new Error('the TSP renderer is disposed')

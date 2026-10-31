@@ -34,6 +34,7 @@ import { createBuiltinFooterRegistry } from '../footer/builtin-items.ts'
 import { FooterCustomItemCatalog } from '../footer/custom-item-catalog.ts'
 import type { FooterItemDefinition, FooterRenderContext } from '../footer/presentation-types.ts'
 import type { FooterItemRef, FooterLayoutV1, FooterTone } from '../footer/presentation-types.ts'
+import type { FooterItemRegistry } from '../footer/item-registry.ts'
 import { customItemName, CUSTOM_FOOTER_ITEM_PREFIX } from '../../domain/footer/custom-items.ts'
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
@@ -41,12 +42,14 @@ import { clampMiddle } from './picker-text.ts'
 import { TSP_FOOTER_NOTICES } from '../../domain/footer/tsp-native-config.ts'
 
 /**
- * The immutable builtin-only registry. It is created ONCE at module load: a
- * fresh registry per render would re-register every definition on every
- * frame, and no external/custom source is ever attached (PR-A renders six
- * fixed builtin items; the persisted footer configuration is PR-D).
+ * The immutable builtin-only lookup for the FROZEN default/compact presets
+ * (PR-A/PR-B). It is created ONCE at module load: those two presets render a
+ * fixed builtin item set with no custom source ever attached, so a shared
+ * immutable registry is their single source. The CONFIGURED `custom`
+ * projection deliberately does NOT use it — every mount compiles its own
+ * registry with the USER catalog attached (see compileNativeFooterPresentation).
  */
-const registry = createBuiltinFooterRegistry()
+const BUILTIN_PRESET_REGISTRY = createBuiltinFooterRegistry()
 
 /**
  * The fixed render context of the six PR-A items: none of them reads the task
@@ -141,7 +144,7 @@ const COMPACT_ROW: readonly StatuslineItem[] = [
 
 /** Resolve one builtin definition; an unknown id is an internal contract break. */
 function definition(id: string): FooterItemDefinition {
-  const def = registry.get(id)
+  const def = BUILTIN_PRESET_REGISTRY.get(id)
   if (def === undefined) throw new Error(`missing builtin status item: ${id}`)
   return def
 }
@@ -220,14 +223,16 @@ function rowSegments(snapshot: StatusSnapshot, items: readonly StatuslineItem[])
 /**
  * The compiled per-mount presentation of one `TspNativeFooterConfig`: the
  * mode, the validated layout (custom only) and the ONE registry carrying the
- * builtin definitions plus the USER text definitions. It is built once per
- * TSP mount and never rebuilt per frame.
+ * builtin definitions plus the USER text definitions (a mount-local
+ * `createBuiltinFooterRegistry()` with the USER catalog attached as its
+ * custom source — the plan §3.3 single-registry ownership). It is built once
+ * per TSP mount and never rebuilt per frame.
  */
 export interface NativeFooterPresentation {
   readonly mode: 'default' | 'compact' | 'custom'
   readonly layout: FooterLayoutV1 | undefined
-  /** The mount-local registry (builtins + the USER text catalog). */
-  readonly registry: FooterCustomItemCatalog
+  /** The ONE mount-local registry: builtins with the USER catalog attached. */
+  readonly registry: FooterItemRegistry
   /** The USER-layer command definition ids (rendered unavailable). */
   readonly userCommandIds: ReadonlySet<string>
   /**
@@ -240,8 +245,10 @@ export interface NativeFooterPresentation {
 /**
  * Compile one boot-time footer config into the renderer's immutable
  * presentation. The layout and the item classification were already decided
- * by the domain resolver; this step only attaches the USER text definitions
- * to a MOUNT-LOCAL registry (never the module-level builtin-only one).
+ * by the domain resolver; this step builds the ONE mount-local registry —
+ * a fresh `createBuiltinFooterRegistry()` with the USER text catalog attached
+ * through `setCustomSource` (never the module-level builtin-only lookup, and
+ * never a second per-frame rebuild).
  *
  * The returned notices are the renderer-owned ones the resolver could not
  * decide (the domain must not carry a second builtin id list): whether a
@@ -251,26 +258,26 @@ export interface NativeFooterPresentation {
  */
 export function compileNativeFooterPresentation(config: TspNativeFooterConfig): NativeFooterPresentation {
   const notices = [...config.notices]
+  const registry = createBuiltinFooterRegistry()
+  const catalog = new FooterCustomItemCatalog(config.userTextItems)
+  registry.setCustomSource(catalog)
   if (config.mode === 'custom' && config.layout !== undefined) {
-    const catalog = new FooterCustomItemCatalog(config.userTextItems)
     let unsupported = false
     for (const row of config.layout.rows) {
       for (const ref of [...row.left, ...row.right]) {
         if (ref.id === 'view-scope') continue // the retired inert builtin
         if (isExtensionId(ref.id)) { unsupported = true; continue }
-        const def = catalog.definition(ref.id) ?? (ref.id === 'ext:*' ? undefined : registry.get(ref.id))
-        if (def === undefined) unsupported = true
+        if (registry.get(ref.id) === undefined) unsupported = true
       }
     }
     if (unsupported && !notices.includes(TSP_FOOTER_NOTICES.unavailableItems)) {
       notices.push(TSP_FOOTER_NOTICES.unavailableItems)
     }
-    return { mode: config.mode, layout: config.layout, registry: catalog, userCommandIds: config.userCommandIds, notices }
   }
   return {
     mode: config.mode,
     layout: config.layout,
-    registry: new FooterCustomItemCatalog(config.userTextItems),
+    registry,
     userCommandIds: config.userCommandIds,
     notices,
   }
@@ -317,21 +324,22 @@ function customRefSegments(
   // The retired viewer identity block stays INERT (registered, renders
   // nothing) — not an unsupported marker and never an error.
   if (ref.id === 'view-scope') return undefined
-  const def = presentation.registry.definition(ref.id) ?? (ref.id === 'ext:*' ? undefined : registry.get(ref.id))
   // Extension items (the legacy `ext:*` bridge and owned `ext:<owner>/<id>`
   // items) are EXPLICIT_UNAVAILABLE in TSP: no extension state exists on this
   // renderer, and the synthetic builtin must not fabricate an empty bridge.
   if (isExtensionId(ref.id)) {
     return { ...unavailableSeg('extension'), importance: ref.importance ?? 70 }
   }
-  if (ref.id.startsWith(CUSTOM_FOOTER_ITEM_PREFIX)) {
-    if (def === undefined) {
+  // The ONE mount-local registry answers every lookup (builtins + the USER
+  // catalog attached through setCustomSource — the single source of truth).
+  const def = presentation.registry.get(ref.id)
+  if (def === undefined) {
+    if (ref.id.startsWith(CUSTOM_FOOTER_ITEM_PREFIX)) {
       // A USER command definition (classified by the resolver) or an unknown
       // `user:*` ref: the name is user-facing text, never the command string.
       const kind = presentation.userCommandIds.has(ref.id) ? 'command' : 'item'
       return { ...unavailableSeg(kind, customItemName(ref.id)), importance: ref.importance ?? 70 }
     }
-  } else if (def === undefined) {
     return { ...unavailableSeg('item'), importance: ref.importance ?? 70 }
   }
   const segment = def.render(snapshot, ref, 'preferred', NO_SURFACE_HINTS)

