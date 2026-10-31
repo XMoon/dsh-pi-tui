@@ -63,6 +63,17 @@ test('scanTree does not treat module names in string data as imports', (t) => {
       'include=cordis:include agent=@deepseek-ai/dsh-agent',
       'session=@deepseek-ai/dsh-session',
       '`',
+    ].join('\n'),
+  )
+  assert.deepEqual(scanTree(dir), {})
+})
+
+test('scanTree recognises static import and export declarations', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('client-boundary-static-')
+  writeFileSync(
+    join(dir, 'sample.ts'),
+    [
       "import type { Agent } from '@deepseek-ai/dsh-agent'",
       "export type { Session } from '@deepseek-ai/dsh-session'",
     ].join('\n'),
@@ -70,6 +81,36 @@ test('scanTree does not treat module names in string data as imports', (t) => {
   assert.deepEqual(scanTree(dir), {
     'sample.ts': ['import:dsh-agent', 'import:dsh-session'],
   })
+})
+
+test('scanTree recognises import() type queries', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('client-boundary-import-type-')
+  writeFileSync(
+    join(dir, 'sample.ts'),
+    "type AgentType = import('@deepseek-ai/dsh-agent').Agent\n",
+  )
+  assert.deepEqual(scanTree(dir), { 'sample.ts': ['import:dsh-agent'] })
+})
+
+test('scanTree recognises import = require() declarations', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('client-boundary-import-require-')
+  writeFileSync(
+    join(dir, 'sample.ts'),
+    "import AgentModule = require('@deepseek-ai/dsh-agent')\n",
+  )
+  assert.deepEqual(scanTree(dir), { 'sample.ts': ['import:dsh-agent'] })
+})
+
+test('scanTree recognises template-literal dynamic imports', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('client-boundary-dynamic-template-')
+  writeFileSync(
+    join(dir, 'sample.ts'),
+    'const module = await import(`@deepseek-ai/dsh-session`)\n',
+  )
+  assert.deepEqual(scanTree(dir), { 'sample.ts': ['import:dsh-session'] })
 })
 
 test('scanTree sees OPTIONAL-CHAINED Host access (ctx?.get / ctx?.<service>)', (t) => {

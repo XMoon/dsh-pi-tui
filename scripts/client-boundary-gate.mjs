@@ -28,7 +28,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import ts from 'typescript'
+import { parseImportSpecifiers, parseValueDynamicImports } from './application-architecture-gate.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BASELINE_PATH = join(ROOT, 'scripts', 'client-boundary-baseline.json')
@@ -95,29 +95,6 @@ const IMPORT_SPECIFIERS = [
   { key: 'import:dsh-session', packageName: '@deepseek-ai/dsh-session' },
 ]
 
-/** Extract module specifiers from real import/export syntax in one source file. */
-function importSpecifiers(text, fileName) {
-  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true)
-  const found = new Set()
-  const add = specifier => {
-    if (specifier !== undefined) found.add(specifier)
-  }
-  const visit = node => {
-    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
-      if (node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) add(node.moduleSpecifier.text)
-    }
-    if (ts.isCallExpression(node)
-      && node.expression.kind === ts.SyntaxKind.ImportKeyword
-      && node.arguments.length > 0
-      && ts.isStringLiteral(node.arguments[0])) {
-      add(node.arguments[0].text)
-    }
-    ts.forEachChild(node, visit)
-  }
-  visit(source)
-  return found
-}
-
 /** True when the line is (heuristically) inside a comment. */
 function isCommentLine(line) {
   const t = line.trim()
@@ -152,7 +129,10 @@ export function scanTree(dir, base = dir) {
             if (m) hits.add(key(m))
           }
         }
-        const imports = importSpecifiers(text, p)
+        const imports = new Set([
+          ...parseImportSpecifiers(text, rel).map(entry => entry.specifier),
+          ...parseValueDynamicImports(text, rel).map(entry => entry.specifier),
+        ])
         for (const { key, packageName } of IMPORT_SPECIFIERS) {
           for (const specifier of imports) {
             if (specifier === packageName || specifier.startsWith(`${packageName}/`)) {
