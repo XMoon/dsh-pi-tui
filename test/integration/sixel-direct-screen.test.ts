@@ -2116,7 +2116,18 @@ test('E2-10b: a real top-cropped Assistant SVG maps the visible pixel rows and k
   const targetScrollTop = tokenRow + 5
 
   terminal.writes.length = 0
-  const scrollView = (app as unknown as { fullscreenScroll: { scrollTo(top: number, options?: { disableFollow?: boolean }): void } }).fullscreenScroll
+  const scrollView = (app as unknown as {
+    fullscreenScroll: {
+      scrollTo(top: number, options?: { disableFollow?: boolean }): void
+      setScrollbarActive(active: boolean): void
+    }
+  }).fullscreenScroll
+  // Keep the auto scrollbar active across the asynchronous SVG crop: the
+  // default transient window (~1000 ms) can expire while the encoder is still
+  // settling, which is a test-timing race rather than the product path under
+  // test. The explicit activity flag exercises the same coexisting path.
+  scrollView.setScrollbarActive(true)
+  t.after(() => scrollView.setScrollbarActive(false))
   scrollView.scrollTo(Math.min(targetScrollTop, app.fullscreenScrollForTest()!.maxScrollTop), { disableFollow: true })
   await terminal.waitForRender()
   const hidden = app.fullscreenScrollForTest()!.scrollTop - tokenRow
@@ -2146,6 +2157,8 @@ test('E2-10b: a real top-cropped Assistant SVG maps the visible pixel rows and k
   assert.ok(painted.visual.thumbnailBody !== undefined, 'the visible-scrollbar frame lets the SVG crop DCS commit')
   assert.equal((app as unknown as { fullscreenScroll: { isScrollbarVisible: boolean } }).fullscreenScroll.isScrollbarVisible, true,
     'the SVG crop DCS commits while the auto scrollbar is still visible')
+  scrollView.setScrollbarActive(false)
+  await terminal.waitForRender()
   assert.ok(painted.crop >= 3, `the SVG top crop hides at least three rows (got ${painted.crop})`)
   const visibleRows = painted.visual.thumbnailBody!.endRow - painted.visual.thumbnailBody!.startRow
   assert.ok(visibleRows > 0, 'the SVG hit covers real visible rows')

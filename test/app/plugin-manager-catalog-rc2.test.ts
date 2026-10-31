@@ -243,7 +243,11 @@ test('the REAL Host listBundles discovers 14/14 official optional/on-demand bund
     } else {
       assert.equal(card.availability, 'installation')
       assert.equal(card.canInstall, false)
-      assert.equal(card.canToggle, true, 'a shipped Optional bundle is switchable by the Host')
+      assert.equal(
+        card.canToggle,
+        true,
+        `${card.name}: ${card.toggleBlockedReason ?? 'no blocked reason'}; Host error: ${JSON.stringify(card.error ?? null)}`,
+      )
       assert.equal(card.canRemove, false, 'a shipped bundle is never removable')
       assert.equal(upgrade!.value, 'Upgrade: Shipped with DSH. Upgrade the DSH installation to change this bundle version; Plugin Manager cannot update it in place.')
       assert.ok(!detail.actions.some(action => action.value === 'action:remove'), 'F10 never adds a Remove action to a shipped bundle')
