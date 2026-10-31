@@ -1053,6 +1053,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       ...(primary.stack === undefined ? {} : { stack: primary.stack }),
       ...(primary.cause === undefined ? {} : { cause: primary.cause instanceof Error ? primary.cause.message : String(primary.cause) }),
     })
+    // Surface mode owns the tty and reports this pre-Context refusal as one
+    // human line. Every other startup failure keeps its existing record path.
+    if (options.mode === 'surface' && failure instanceof LocalScopeError && failure.code === 'HOST_BUILD_INCOMPATIBLE') {
+      process.stderr.write(`${surfaceStartupFailureLine(failure)}\n`)
+    }
     process.stdin.pause()
     if (cleanupErrors.length === 0 && !timedOut && !transportCleanupFailed) {
       emit({ m4a0: 'cleanup', processRole: 'client', phase: 'after-context', pid: process.pid, status: 'completed' })
@@ -1133,6 +1138,21 @@ async function waitForStartupHold(path: string, signal: AbortSignal): Promise<vo
 }
 
 /**
+ * The human-facing surface line for one startup failure. The strict live-Host
+ * build refusal gets a dedicated, actionable line that names the code, keeps
+ * the old Host untouched, requires an explicit owner-verified OS stop and
+ * says that automatic in-memory migration is unsupported. It never includes
+ * the registry PID, the launch URL/token or a private profile path. Every
+ * other startup failure keeps the existing diagnostic.
+ */
+export function surfaceStartupFailureLine(error: unknown): string {
+  if (error instanceof LocalScopeError && error.code === 'HOST_BUILD_INCOMPATIBLE') {
+    return 'HOST_BUILD_INCOMPATIBLE: Another live local Host for this profile uses a different build or protocol. The Host has not been stopped or replaced. Finish or save your work in that Host, then explicitly stop that Host through its normal operating-system shutdown signal and retry. Automatic upgrade and migration of in-memory work are not supported.'
+  }
+  return `split client surface: ${error instanceof Error ? error.message : String(error)}`
+}
+
+/**
  * Read the internal Client mode. Absent/empty keeps the frozen B1
  * `qualification` contract; `surface` is the internal real-terminal mode. Any
  * other value fails closed (never a silent default).
@@ -1173,7 +1193,7 @@ if (import.meta.main) {
     if (process.env.SPLIT_PROCESS_CLIENT_MODE === 'surface') {
       // Surface mode owns the tty: a launcher/startup failure is a human line
       // on stderr, never a JSON record on the terminal.
-      process.stderr.write(`split client surface: ${record.error}\n`)
+      process.stderr.write(`${surfaceStartupFailureLine(error)}\n`)
     } else {
       writeEntryRecord(record)
     }

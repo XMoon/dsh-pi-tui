@@ -533,7 +533,7 @@ function findHostSessionLog(dshHome, sessionId) {
 }
 
 /** The durable Host Session events of one Session (undefined before any log). */
-function hostSessionEvents(dshHome, sessionId) {
+export function hostSessionEvents(dshHome, sessionId) {
   const path = findHostSessionLog(dshHome, sessionId)
   if (path === undefined) return undefined
   return decodeZstdFrames(readFileSync(path)).split('\n').filter(Boolean)
@@ -664,7 +664,7 @@ async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs = 60_000
 }
 
 /** Wait for one durable Host Session event matching the predicate. */
-async function waitForHostSessionEvent(dshHome, sessionId, predicate, label, timeoutMs = 60_000) {
+export async function waitForHostSessionEvent(dshHome, sessionId, predicate, label, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const events = hostSessionEvents(dshHome, sessionId)
