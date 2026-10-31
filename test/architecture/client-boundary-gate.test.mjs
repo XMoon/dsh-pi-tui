@@ -53,6 +53,25 @@ test('scanTree ignores comment lines and non-Host services', (t) => {
   })
 })
 
+test('scanTree does not treat module names in string data as imports', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('client-boundary-strings-')
+  writeFileSync(
+    join(dir, 'sample.ts'),
+    [
+      'const rows = `',
+      'include=cordis:include agent=@deepseek-ai/dsh-agent',
+      'session=@deepseek-ai/dsh-session',
+      '`',
+      "import type { Agent } from '@deepseek-ai/dsh-agent'",
+      "export type { Session } from '@deepseek-ai/dsh-session'",
+    ].join('\n'),
+  )
+  assert.deepEqual(scanTree(dir), {
+    'sample.ts': ['import:dsh-agent', 'import:dsh-session'],
+  })
+})
+
 test('scanTree sees OPTIONAL-CHAINED Host access (ctx?.get / ctx?.<service>)', (t) => {
   // A lazily-resolved service is the same Host coupling as a direct read: the
   // Direct Host-file adapter reads its `fileReferences` authority through

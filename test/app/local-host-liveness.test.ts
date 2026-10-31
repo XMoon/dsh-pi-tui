@@ -569,6 +569,28 @@ test('an allowed row id bound to a different official plugin is unqualified', as
   }
 })
 
+test('a qualified plugin in LOADING or UNLOADING is UNKNOWN', async () => {
+  for (const state of [1, 5]) {
+    const context = new Context()
+    provideAgents(context, [])
+    provideJobs(context, {})
+    provideGoals(context, {})
+    provideLoader(context, [
+      { options: { id: 'agent', name: '@deepseek-ai/dsh-agent' }, fiber: { state } },
+    ])
+    const observer = new HostActivityObserver(context)
+    try {
+      const snapshot = await observer.snapshot()
+      assert.equal(snapshot.verdict, 'UNKNOWN', `fiber state ${String(state)} must not be idle`)
+      assert.ok(snapshot.reasons.includes('source-unavailable'))
+      assert.equal(snapshot.sourceStates.other, 'UNKNOWN')
+    } finally {
+      observer.close()
+      await disposeContext(context)
+    }
+  }
+})
+
 test('an unqualified plugin in UNLOADING still reports UNKNOWN', async () => {
   const context = new Context()
   provideAgents(context, [])

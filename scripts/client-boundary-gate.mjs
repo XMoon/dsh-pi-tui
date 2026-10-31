@@ -28,6 +28,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const BASELINE_PATH = join(ROOT, 'scripts', 'client-boundary-baseline.json')
@@ -81,11 +82,41 @@ const PATTERNS = [
   // ctx.<service> / ctx?.<service> property access (would throw without
   // inject; still debt).
   { key: (m) => m[1], re: new RegExp(`ctx\\??\\.(${SERVICE_ALT})\\b`) },
-  // Concrete Host object types. The negative lookahead (?![\w-]) ensures
-  // exact package matching: `dsh-agent` does not match `dsh-agent-preset-registry`.
-  { key: () => 'import:dsh-agent', re: /@deepseek-ai\/dsh-agent(?![\w-])/ },
-  { key: () => 'import:dsh-session', re: /@deepseek-ai\/dsh-session(?![\w-])/ },
 ]
+
+/**
+ * Concrete Host object types. These are parsed as real TypeScript import /
+ * export declarations (and dynamic `import()` calls), never as substrings in
+ * ordinary string or template data: a roster of package names is data, not
+ * Host coupling.
+ */
+const IMPORT_SPECIFIERS = [
+  { key: 'import:dsh-agent', packageName: '@deepseek-ai/dsh-agent' },
+  { key: 'import:dsh-session', packageName: '@deepseek-ai/dsh-session' },
+]
+
+/** Extract module specifiers from real import/export syntax in one source file. */
+function importSpecifiers(text, fileName) {
+  const source = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true)
+  const found = new Set()
+  const add = specifier => {
+    if (specifier !== undefined) found.add(specifier)
+  }
+  const visit = node => {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
+      if (node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) add(node.moduleSpecifier.text)
+    }
+    if (ts.isCallExpression(node)
+      && node.expression.kind === ts.SyntaxKind.ImportKeyword
+      && node.arguments.length > 0
+      && ts.isStringLiteral(node.arguments[0])) {
+      add(node.arguments[0].text)
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return found
+}
 
 /** True when the line is (heuristically) inside a comment. */
 function isCommentLine(line) {
@@ -112,12 +143,22 @@ export function scanTree(dir, base = dir) {
       } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.mts')) {
         const rel = relative(base, p).split('\\').join('/')
         const hits = new Set()
-        const lines = readFileSync(p, 'utf8').split('\n')
+        const text = readFileSync(p, 'utf8')
+        const lines = text.split('\n')
         for (const line of lines) {
           if (isCommentLine(line)) continue
           for (const { key, re } of PATTERNS) {
             const m = line.match(re)
             if (m) hits.add(key(m))
+          }
+        }
+        const imports = importSpecifiers(text, p)
+        for (const { key, packageName } of IMPORT_SPECIFIERS) {
+          for (const specifier of imports) {
+            if (specifier === packageName || specifier.startsWith(`${packageName}/`)) {
+              hits.add(key)
+              break
+            }
           }
         }
         if (hits.size > 0) out[rel] = [...hits].sort()
