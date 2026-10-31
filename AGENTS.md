@@ -404,8 +404,7 @@ state incorrect (`workspace DSH incorrect` / `local state missing`); the
 bootstrap task performs the dependency install itself, then `source:doctor`
 must report `READY`. A plain `pnpm install` after bootstrap re-resolves
 `@deepseek-ai/*` to registry versions and breaks the source-mode workspace
-again; use `pnpm dev:shell` (or `source ./.dsh-dev-env`) for commands that need
-the source environment, and re-run `source:bootstrap` after any real install.
+again; use `DSH_MODE=source mise exec -- pnpm dev:shell` (or `source ./.dsh-dev-env` with `DSH_MODE=source` set) for commands that need the source environment, and re-run `source:bootstrap` after any real install.
 Keep each worktree's `node_modules` and `dist` independent; never symlink them,
 and build in that worktree before using a profile.
 

@@ -114,13 +114,15 @@ export function readModeConfig(path) {
 export function readMaterializedDevState(root) {
   const directory = resolve(root)
   const path = join(directory, DEV_STATE_FILE)
-  if (!existsSync(path)) return undefined
   let info
   try {
-    info = lstatSync(path)
+    // `existsSync()` follows symlinks and returns false for a dangling link;
+    // lstat with `throwIfNoEntry: false` preserves the real filesystem fact.
+    info = lstatSync(path, { throwIfNoEntry: false })
   } catch (error) {
     fail(`${DEV_STATE_FILE} could not be inspected: ${error instanceof Error ? error.message : String(error)}`)
   }
+  if (info === undefined) return undefined
   if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
     fail(`${DEV_STATE_FILE} must be a regular file owned by this worktree: ${path}`)
   }

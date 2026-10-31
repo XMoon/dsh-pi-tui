@@ -176,8 +176,9 @@ The generated `.dsh-dev-env` does not export `DSH_MODE=source` (the tracked
 mode remains the policy). A shell that needs source mode must set
 `DSH_MODE=source` explicitly for that shell after `source ./.dsh-dev-env`; do
 not add a global `DSH_MODE` setting. If a command reports that the source
-environment is not loaded, use `pnpm dev:shell` or the explicit export before
-commands that need the source-distribution environment.
+environment is not loaded, use `DSH_MODE=source mise exec -- pnpm dev:shell`,
+or `source ./.dsh-dev-env` with `DSH_MODE=source` set, before commands that
+need the source-distribution environment.
 
 The second doctor reports `READY` when the source pack and materialization are
 correct. `source:profile`/`source:dsh` fail closed until that is true.

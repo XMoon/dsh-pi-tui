@@ -309,6 +309,11 @@ test('mise run setup rejects stale, malformed and foreign materialization state'
     ['stale hash', root => writeMaterializedState(root, { packageJsonHash: '0'.repeat(64) })],
     ['foreign root', root => writeMaterializedState(root, { stateRoot: join(root, 'other-worktree') })],
     ['malformed json', root => writeFileSync(join(root, '.dsh-dev-state.json'), '{not-json\n')],
+    ['dangling symlink', root => {
+      writeMaterializedState(root, { mode: 'npm' })
+      unlinkSync(join(root, '.dsh-dev-state.json'))
+      symlinkSync(join(root, 'missing-state-target.json'), join(root, '.dsh-dev-state.json'))
+    }],
     ['symlink state', root => {
       writeMaterializedState(root, { mode: 'npm' })
       const target = join(root, 'real-state.json')
@@ -343,6 +348,22 @@ test('mise run setup rejects an npm state with malformed writer hashes', (t) => 
     /packageJsonHash/u,
   )
   assert.equal(existsSync(record), false, 'a malformed npm state must not spawn pnpm')
+})
+
+test('mise run setup rejects a dangling state symlink before spawning pnpm', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-mise-setup-dangling-')
+  writeNpmFixture(root)
+  writeMaterializedState(root, { mode: 'npm' })
+  unlinkSync(join(root, '.dsh-dev-state.json'))
+  symlinkSync(join(root, 'missing-state-target.json'), join(root, '.dsh-dev-state.json'))
+  const record = join(root, 'pnpm-record.json')
+  const fakePnpm = fakeCommand(root, 'pnpm-fixture', record)
+  assert.throws(
+    () => runMiseSetup({ root, environment: { PATH: `${join(root, 'bin')}:${process.env.PATH}`, PNPM_EXECUTABLE: fakePnpm } }),
+    /regular file/u,
+  )
+  assert.equal(existsSync(record), false, 'a dangling state symlink must not spawn pnpm')
 })
 
 test('npm profile and dev:dsh reject a Source-materialized worktree before spawning dsh', (t) => {
