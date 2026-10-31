@@ -144,10 +144,19 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   symlinks fail closed.
 - **Lifecycle.** A Client exit, crash or HUP disposes only the Client subtree,
   official transport, Client root and Client seat. It never calls a Host
-  shutdown. The Host's official `runProfile` shutdown owner is the only Host
-  stop; its cleanup first withdraws the identity route, then shuts down, then
-  removes only files matching its own `instanceId`, then closes the kernel seat.
-  A replaced Host's files are never deleted by another instance.
+  shutdown. A Host starts on demand for one profile scope and then remains
+  resident independent of Client attachment or idle time: only an explicit
+  official stop (the Host entry admits `SIGTERM`/`SIGINT` into its one
+  `runProfile` shutdown owner) or a real process/system failure ends it. There
+  is no automatic idle expiry or orphan-interaction timeout, and a pending
+  Question/Approval remains with the official Host authority until a legal
+  answer, business settlement, explicit stop or process failure. The Host's
+  official `runProfile` shutdown owner is the only Host stop; its cleanup first
+  withdraws the identity route, then shuts down, then removes only files
+  matching its own `instanceId`, then closes the kernel seat. A replaced Host's
+  files are never deleted by another instance. A Client from a different
+  installed build is refused before authentication and leaves the live Host,
+  its work and its registry/launch files untouched.
 - **Session boundary.** The Client derives `connecting | connected | disconnected`
   from the official Connection state and generation on every read and never
   copies it into a long-lived flag. `sessionOpen` is a LIVE projection of the
