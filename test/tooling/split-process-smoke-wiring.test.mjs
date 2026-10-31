@@ -164,7 +164,7 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     'C1_WORK_ROOT',
     'C1_UNOWNED_JOB_ARM',
     'writeC1WorkFixture',
-    'm4-c1-host-work',
+    'split-process-host-work',
     'hmr-revision-start',
     'hmr-revision-retired',
     'hmr-revision-ready',

@@ -599,13 +599,13 @@ export function apply(ctx) { ctx.llm.registerAdapter(['stub'], new StubLlmAdapte
  * routes the Agent to it.
  */
 export function writeC1WorkFixture(profileDir, workDir) {
-  const source = join(SCRIPT_DIR, 'fixtures', 'm4-c1-host-work.mjs')
-  const fixturePath = join(profileDir, 'm4-c1-host-work.mjs')
+  const source = join(SCRIPT_DIR, 'fixtures', 'split-process-host-work.mjs')
+  const fixturePath = join(profileDir, 'split-process-host-work.mjs')
   writeFileSync(fixturePath, readFileSync(source), { mode: 0o600 })
   chmodSync(fixturePath, 0o600)
   const rows = [
     '- insert:',
-    '    - id: m4-c1-host-work',
+    '    - id: split-process-host-work',
     `      name: '${pathToFileURL(fixturePath).href}'`,
     '      inject: [llm, tools, jobs, subagents, agents]',
     '- id: agent-default-model',
