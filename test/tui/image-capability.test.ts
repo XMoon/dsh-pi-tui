@@ -100,6 +100,31 @@ test('no handle keeps the fork capability untouched, including its null', () => 
   assert.equal(effectiveImageProtocol(undefined), 'iterm2', 'iTerm2 keeps its own capability')
 })
 
+test('explicit protocols never accept the other static legacy capability', () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined, 'iterm2'), null,
+    'iterm2 must not render a Kitty APC just because the fork says kitty')
+  assert.equal(effectiveImageProtocol(undefined, 'kitty'), 'kitty')
+
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined, 'kitty'), null,
+    'kitty must not render an iTerm2 OSC 1337 sequence')
+  assert.equal(effectiveImageProtocol(undefined, 'iterm2'), 'iterm2')
+})
+
+test('the classifier consumes the startup preference it was given, not a later env mutation', () => {
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  process.env.PI_IMAGE_PROTOCOL = 'kitty'
+  assert.equal(effectiveImageProtocol(undefined, 'iterm2'), 'iterm2',
+    'the captured startup iterm2 preference still allows only Direct iTerm2')
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined, 'iterm2'), null,
+    'the captured preference never reinterprets a changed static capability')
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined, 'kitty'), null,
+    'the captured kitty preference never accepts iTerm2')
+})
+
 test('an admitted tmux handle paints kitty where the fork detects none, and revocation is live', async (t) => {
   const cli = createFakeTmuxCli(t)
   try {

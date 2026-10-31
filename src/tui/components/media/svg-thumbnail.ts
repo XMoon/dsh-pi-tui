@@ -27,6 +27,7 @@
 import { Image, imageFallback, type Component } from '@xmoon76/pi-tui'
 import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol, type EffectiveImageProtocol } from '../../graphics/image-capability.ts'
+import type { ImageProtocolPreference } from '../../graphics/image-protocol-preference.ts'
 import type { ImageThumbnailTheme } from './image-thumbnail.ts'
 import { MAX_IMAGE_ROWS, MAX_IMAGE_WIDTH, NARROW_WIDTH_THRESHOLD } from './image-thumbnail.ts'
 import type { SvgRasterLoader } from '../../../client/media/svg/raster-loader.ts'
@@ -75,6 +76,8 @@ export class SvgThumbnail implements Component {
   private instanceManaged = false
   /** The ONE managed graphics owner of this physical terminal, when admitted. */
   private readonly graphics: ImageGraphics | undefined
+  /** The app's ONE startup image-protocol preference. */
+  private readonly imageProtocolPreference: ImageProtocolPreference | undefined
   private cachedLines: string[] | undefined
   private cachedKey: string | undefined
   /** The real pixel rows and placement width the LAST render at `width`
@@ -92,6 +95,7 @@ export class SvgThumbnail implements Component {
     requestRender: () => void,
     fixedRows?: number,
     graphics?: ImageGraphics,
+    imageProtocolPreference?: ImageProtocolPreference,
   ) {
     this.digest = digest
     this.source = source
@@ -101,6 +105,7 @@ export class SvgThumbnail implements Component {
     this.requestRender = requestRender
     this.fixedRows = fixedRows
     this.graphics = graphics
+    this.imageProtocolPreference = imageProtocolPreference
     this.unsubscribe = loader.subscribe(digest, targetWidth, () => {
       this.invalidate()
       this.requestRender()
@@ -130,7 +135,7 @@ export class SvgThumbnail implements Component {
    * @returns the painted body row count and its widest occupied column.
    */
   paintedImageBody(width: number): SvgThumbnailBody | undefined {
-    if (effectiveImageProtocol(this.graphics) === 'sixel') {
+    if (effectiveImageProtocol(this.graphics, this.imageProtocolPreference) === 'sixel') {
       const live = this.instance?.paintedBodyAt?.(width)
       if (live === undefined) return undefined
       return {
@@ -152,7 +157,7 @@ export class SvgThumbnail implements Component {
    * @returns the painted PNG's width/height in pixels.
    */
   paintedPixelSize(width: number): { readonly widthPx: number; readonly heightPx: number } | undefined {
-    if (effectiveImageProtocol(this.graphics) === 'sixel') {
+    if (effectiveImageProtocol(this.graphics, this.imageProtocolPreference) === 'sixel') {
       if (this.instance?.paintedBodyAt?.(width) === undefined) return undefined
       const live = this.paintedPixel
       if (live === undefined || live.width !== width) return undefined
@@ -177,7 +182,7 @@ export class SvgThumbnail implements Component {
     // The EFFECTIVE protocol (not the fork's process-wide detection) rides the
     // cache key: a live tmux admission may paint pixels where the fork reports
     // none, and its revocation must not reuse a cached PUA frame.
-    const protocol = effectiveImageProtocol(this.graphics)
+    const protocol = effectiveImageProtocol(this.graphics, this.imageProtocolPreference)
     const key = `${width}:${protocol ?? 'none'}`
     // Direct SIXEL readiness and the owner's bound occurrence are live facts:
     // caching the lines would leave a token row pointing at an occurrence the

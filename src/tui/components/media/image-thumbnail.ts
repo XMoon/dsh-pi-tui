@@ -41,6 +41,7 @@ import { Image, imageFallback, truncateToWidth, visibleWidth } from '@xmoon76/pi
 import type { Component } from '@xmoon76/pi-tui'
 import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
+import type { ImageProtocolPreference } from '../../graphics/image-protocol-preference.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
@@ -134,6 +135,8 @@ export class ImageThumbnail implements Component {
    *  When present, Kitty pixels are painted through the managed Core instead of
    *  the legacy fork `Image`; iTerm2 and every other terminal keep that path. */
   private readonly graphics: ImageGraphics | undefined
+  /** The app's ONE startup image-protocol preference (never re-read per frame). */
+  private readonly imageProtocolPreference: ImageProtocolPreference | undefined
   /** True when `instance` is a managed component (it owns a Core handle). */
   private instanceManaged = false
   private instance: PixelBody | undefined
@@ -170,6 +173,7 @@ export class ImageThumbnail implements Component {
     scope?: unknown,
     fullscreenCollapseControl?: () => boolean,
     graphics?: ImageGraphics,
+    imageProtocolPreference?: ImageProtocolPreference,
   ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.ref = ref
@@ -180,6 +184,7 @@ export class ImageThumbnail implements Component {
     this.scope = scope
     this.fullscreenCollapseControl = fullscreenCollapseControl
     this.graphics = graphics
+    this.imageProtocolPreference = imageProtocolPreference
     // Subscribe to THIS (scope, attachment)'s settles only: N thumbnails loading
     // in parallel never invalidate each other, and another presentation's settle
     // for the same content id never wakes this component (review finding 8 — no
@@ -343,7 +348,7 @@ export class ImageThumbnail implements Component {
     // The EFFECTIVE protocol (not the fork's process-wide detection) drives the
     // cache: an admitted tmux virtual handle paints pixels where the fork still
     // reports none, and its revocation must miss every cached APC/PUA frame.
-    const protocol = effectiveImageProtocol(this.graphics)
+    const protocol = effectiveImageProtocol(this.graphics, this.imageProtocolPreference)
     // A SIXEL raster settles OUTSIDE this frame cache: its readiness epoch and
     // the verified background change the painted bytes asynchronously, and none
     // of that is visible in a width/capability key. Caching it would freeze the
@@ -388,7 +393,7 @@ export class ImageThumbnail implements Component {
     // unsupported terminal, a revoked tmux admission and every other fallback
     // keep the text row AND never trigger a pointless read of the full bytes
     // (§17.3, round-2 finding 4).
-    const protocol = effectiveImageProtocol(this.graphics)
+    const protocol = effectiveImageProtocol(this.graphics, this.imageProtocolPreference)
     if (protocol === null) {
       return this.infoOnly(width, this.infoLine())
     }
@@ -532,7 +537,7 @@ export class ImageThumbnail implements Component {
       return this.infoOnly(width, `${this.infoLine()} · ${reason}`)
     }
     const managed = this.graphics !== undefined
-    const previewKind = effectiveImageProtocol(this.graphics) === 'sixel' ? 'preview-sixel' : 'preview-kitty'
+    const previewKind = effectiveImageProtocol(this.graphics, this.imageProtocolPreference) === 'sixel' ? 'preview-sixel' : 'preview-kitty'
     if (this.instance === undefined || this.instanceKind !== previewKind || this.instanceManaged !== managed) {
       this.releaseInstance()
       this.instance = managed

@@ -42,7 +42,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
-import { resetCapabilitiesCache } from '@xmoon76/pi-tui'
+import { resetCapabilitiesCache, setCapabilities } from '@xmoon76/pi-tui'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import type { TuiAppEvents } from '../../src/tui-app.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
@@ -1740,6 +1740,48 @@ test('E2 negative override: PI_IMAGE_PROTOCOL=sixel without DA1 stays text and n
   const wire = terminal.writes.join('')
   assert.equal(wire.includes('\x1bP0;1;q'), false, 'no SIXEL DCS without DA1')
   assert.equal(wire.includes('\x1b_G'), false, 'no Kitty fallback without DA1')
+})
+
+test('E2 cross-protocol: explicit legacy modes never emit the other static protocol bytes', async (t) => {
+  const previous = process.env.PI_IMAGE_PROTOCOL
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_IMAGE_PROTOCOL
+    else process.env.PI_IMAGE_PROTOCOL = previous
+    resetCapabilitiesCache()
+  })
+
+  for (const [preference, images] of [['iterm2', 'kitty'], ['kitty', 'iterm2']] as const) {
+    process.env.PI_IMAGE_PROTOCOL = preference
+    resetCapabilitiesCache()
+    setCapabilities({ images, trueColor: true, hyperlinks: false })
+    let reads = 0
+    const png = await pngFromRgba(fill(20, 20, () => [255, 0, 0, 255]), 20, 20)
+    const { terminal, app } = await startSixelApp(t, {
+      skipSixelReadiness: true,
+      imageLoader: new ImageLoader(async () => {
+        reads += 1
+        return { ref: {}, data: png }
+      }),
+      imageTheme: { fallbackColor: (text: string) => text },
+    })
+    const ref = {
+      attachmentId: `att-cross-${preference}`,
+      mediaType: 'image/png',
+      bytes: png.byteLength,
+      width: 20,
+      height: 20,
+      name: `cross-${preference}.png`,
+    } as const
+    terminal.writes.length = 0
+    app.setTranscript(transcriptWith(ref).messages())
+    app.requestRender()
+    await waitViewport(terminal, `cross-${preference}.png`, 'the text identity row')
+    assert.equal(reads, 0, `${preference}: no cross-protocol image read`)
+    const wire = terminal.writes.join('')
+    assert.equal(wire.includes('\x1b_G'), false, `${preference}: no Kitty APC`)
+    assert.equal(wire.includes('\x1b]1337;File='), false, `${preference}: no iTerm2 OSC 1337`)
+    app.dispose()
+  }
 })
 
 test('E2 negative: PI_IMAGE_PROTOCOL=none fails closed with no raster, read or encode', async (t) => {

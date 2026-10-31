@@ -251,7 +251,7 @@ import { createTmuxSixelGraphics, isTmuxSixelTerminal } from './tui/graphics/tmu
 import { createTmuxKittyGraphics } from './tui/graphics/tmux-image.ts'
 import { createZellijNegotiatedGraphics } from './tui/graphics/zellij-sixel.ts'
 import { effectiveImageProtocol } from './tui/graphics/image-capability.ts'
-import { imageProtocolPreference } from './tui/graphics/image-protocol-preference.ts'
+import { imageProtocolPreference, type ImageProtocolPreference } from './tui/graphics/image-protocol-preference.ts'
 import { TmuxGraphicsRevokedError } from './tui/graphics/kitty-terminal.ts'
 import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
@@ -2886,6 +2886,8 @@ export class TuiApp {
    * `Image`/text path.
    */
   private readonly graphics: ImageGraphics | undefined
+  /** The ONE startup protocol preference every media consumer reuses. */
+  private readonly imageProtocolPreference: ImageProtocolPreference
   /**
    * The image protocol every Alt Screen must use for this app's managed Native
    * route. A Zellij live `OK` can admit the Kitty transport while the fork's
@@ -4340,9 +4342,9 @@ export class TuiApp {
     //          Zellij handle sends no Kitty probe.
     // iterm2:  no managed handle; a Direct terminal keeps the legacy path.
     // none:    no managed handle and every consumer paints text.
-    const imagePreference = imageProtocolPreference(process.env)
+    this.imageProtocolPreference = imageProtocolPreference(process.env)
     let graphics: ImageGraphics | undefined
-    switch (imagePreference) {
+    switch (this.imageProtocolPreference) {
       case 'none':
       case 'iterm2':
         break
@@ -5073,6 +5075,7 @@ export class TuiApp {
       // Image-6B: a settled JPEG/WebP derivation must repaint the mounted
       // surface; the component owns no screen and never paints by itself.
       requestRender: () => this.requestRender(),
+      imageProtocolPreference: this.imageProtocolPreference,
       ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
     }, this.imageTheme ?? { fallbackColor: text => color.textDim(text) })
     // The working row sits between the todo panel and the editor seat so it
@@ -12420,6 +12423,7 @@ export class TuiApp {
       // The `[-]`/`[+]` control is a FULLSCREEN info-row affordance only.
       () => this.fullscreen !== undefined,
       this.graphics,
+      this.imageProtocolPreference,
     )
     const source = thumbnail.viewerSource
     const occurrence: TranscriptImageOccurrence = {
@@ -13037,7 +13041,7 @@ export class TuiApp {
       rows,
       viewerBack: this.paintedViewerBack(paintedHeight(this.header), paintedHeight(this.viewerSubjectBar)),
     }
-    if (effectiveImageProtocol(this.graphics) === 'sixel') this.refreshCommittedPixelHitRows()
+    if (effectiveImageProtocol(this.graphics, this.imageProtocolPreference) === 'sixel') this.refreshCommittedPixelHitRows()
     if (this.scrollProfiler.enabled && this.scrollFramePending) {
       const now = performance.now()
       this.scrollProfiler.emit({
@@ -18594,6 +18598,7 @@ export class TuiApp {
       selected: () => this.isVisualSelected(message, piece.ref),
       paint: text => color.textDim(text),
       requestRender: () => this.settleThumbnailRender(),
+      imageProtocolPreference: this.imageProtocolPreference,
       onCopy: () => this.copyVisualPayload(handle),
       ...(isSvg ? { onView: () => this.openSvgViewer(handle) } : {}),
       ...(isSvg && this.svgRasterLoader !== undefined && this.imageTheme !== undefined
@@ -19865,6 +19870,7 @@ export class TuiApp {
         () => this.settleThumbnailRender(),
         undefined,
         this.graphics,
+        this.imageProtocolPreference,
       ))
     }
     if (explicitlyExpanded) {
@@ -19927,6 +19933,7 @@ export class TuiApp {
             () => this.settleThumbnailRender(),
             MAX_IMAGE_ROWS + 1,
             this.graphics,
+            this.imageProtocolPreference,
           )
           thumbnailRows = thumbnail.render(width).length
         }
@@ -25025,6 +25032,7 @@ export class TuiApp {
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
       ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
+      imageProtocolPreference: this.imageProtocolPreference,
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates,
       // Currentness at SELECTION time: a candidate that left the mounted
@@ -25068,6 +25076,7 @@ export class TuiApp {
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
       ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
+      imageProtocolPreference: this.imageProtocolPreference,
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates: [],
       resolve: () => undefined,
@@ -25272,6 +25281,7 @@ export class TuiApp {
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
       ...(this.svgRasterLoader === undefined ? {} : { svgLoader: this.svgRasterLoader }),
       ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
+      imageProtocolPreference: this.imageProtocolPreference,
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates: [],
       resolve: () => undefined,

@@ -36,6 +36,7 @@ import { Image, imageFallback, matchesKey, truncateToWidth, visibleWidth } from 
 import type { Component } from '@xmoon76/pi-tui'
 import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
+import type { ImageProtocolPreference } from '../../graphics/image-protocol-preference.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import { MAX_KITTY_THUMBNAIL_SOURCE_BYTES } from '../../../client/media/image/kitty-thumbnail.ts'
@@ -77,6 +78,8 @@ export interface ImageViewerInput {
    * admitted; iTerm2 and every other surface keep the legacy `Image` path.
    */
   readonly graphics?: ImageGraphics
+  /** The app's ONE startup image-protocol preference. */
+  readonly imageProtocolPreference?: ImageProtocolPreference
 }
 
 /** One read-only rendered attachment, sized to the frame's content grant. */
@@ -99,6 +102,8 @@ export class ImageViewerPanel implements Component {
   /** Whether `instance` is a managed component (it owns a Core handle). */
   private instanceManaged = false
   private readonly graphics: ImageGraphics | undefined
+  /** The app's ONE startup image-protocol preference. */
+  private readonly imageProtocolPreference: ImageProtocolPreference | undefined
   /** The exact inputs the local instance was built for. */
   private instanceAttachmentId: string | undefined
   private instanceProtocol: 'kitty' | 'sixel' | undefined
@@ -119,6 +124,7 @@ export class ImageViewerPanel implements Component {
     this.onClose = input.onClose
     this.closeHint = input.closeHint === 'back' ? 'Esc back' : 'Esc close'
     this.graphics = input.graphics
+    this.imageProtocolPreference = input.imageProtocolPreference
     // Subscribe ONCE to THIS (scope, attachment)'s settles only: another
     // presentation's settle for the same content id must not wake this panel.
     // The callback only invalidates the local paint and schedules one frame.
@@ -222,7 +228,7 @@ export class ImageViewerPanel implements Component {
   private bodyLines(width: number, bodyRows: number): string[] {
     if (bodyRows <= 0) return []
     if (this.loader === undefined) return [this.failedStatus(width, 'Preview unavailable')]
-    const protocol = effectiveImageProtocol(this.graphics)
+    const protocol = effectiveImageProtocol(this.graphics, this.imageProtocolPreference)
     if (protocol === null) {
       // No paintable protocol on THIS frame (unsupported terminal or a revoked
       // managed admission): never start a pointless full-bytes read.

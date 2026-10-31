@@ -37,6 +37,7 @@ import { Image, imageFallback, truncateToWidth, visibleWidth } from '@xmoon76/pi
 import type { Component } from '@xmoon76/pi-tui'
 import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
+import type { ImageProtocolPreference } from '../../graphics/image-protocol-preference.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { color } from '../../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
@@ -112,6 +113,8 @@ export interface DraftImagePreviewOptions {
    * other terminal keeps the legacy fork `Image` path.
    */
   graphics?: ImageGraphics
+  /** The app's ONE startup image-protocol preference (never re-read per frame). */
+  imageProtocolPreference?: ImageProtocolPreference
 }
 
 /** The identity row's admission/derivation state for the current card. */
@@ -154,6 +157,8 @@ export class DraftImagePreview implements Component {
    *  Present does NOT mean paintable: `effectiveImageProtocol` re-reads the live
    *  admission, so a revoked tmux handle falls back to text for this frame. */
   private readonly graphics: ImageGraphics | undefined
+  /** The app's ONE startup image-protocol preference. */
+  private readonly imageProtocolPreference: ImageProtocolPreference | undefined
   /** Encoded bytes are immutable per draft; keyed by id + byte length. */
   private readonly base64Cache = new Map<string, string>()
   private occurrenceCache: { text: string; occurrences: readonly DraftImageOccurrence[] } | undefined
@@ -189,6 +194,7 @@ export class DraftImagePreview implements Component {
     this.requestRender = options.requestRender
     this.convertThumbnail = convertThumbnail
     this.graphics = options.graphics
+    this.imageProtocolPreference = options.imageProtocolPreference
   }
 
   /** The last-painted geometry, or undefined before the first render. */
@@ -375,7 +381,7 @@ export class DraftImagePreview implements Component {
     usedIds: Set<number>,
   ): string[] {
     const image = occurrence.image
-    const protocol = effectiveImageProtocol(this.graphics) ?? 'none'
+    const protocol = effectiveImageProtocol(this.graphics, this.imageProtocolPreference) ?? 'none'
     const native = this.graphics
     const key = `${image.id}:${occurrence.ordinal}:${image.mediaType}:${cardWidth}:${maxRows}:${protocol}:${image.byteLength}:direct:${native === undefined ? 'legacy' : 'managed'}`
     usedKeys.add(key)
@@ -427,7 +433,7 @@ export class DraftImagePreview implements Component {
   ): string[] {
     const image = occurrence.image
     const native = this.graphics
-    const protocol = effectiveImageProtocol(this.graphics) ?? 'none'
+    const protocol = effectiveImageProtocol(this.graphics, this.imageProtocolPreference) ?? 'none'
     const key = `${image.id}:${occurrence.ordinal}:derived:${this.draftGeneration}:${cardWidth}:${maxRows}:${protocol}:${png.width}:${png.height}:${png.byteLength}:${native === undefined ? 'legacy' : 'managed'}`
     usedKeys.add(key)
     usedIds.add(image.id)
@@ -482,7 +488,7 @@ export class DraftImagePreview implements Component {
    * metadata-only. iTerm2 keeps carrying the original format through OSC 1337.
    */
   private pixelMode(image: DraftImage): DraftPreviewPixelMode {
-    const protocol = effectiveImageProtocol(this.graphics)
+    const protocol = effectiveImageProtocol(this.graphics, this.imageProtocolPreference)
     if (protocol === null) return 'unavailable'
     if (image.source.type === 'recalled') return 'unavailable'
     if (image.bytes.byteLength === 0 || image.bytes.byteLength > DRAFT_PREVIEW_MAX_PIXEL_BYTES) return 'unavailable'
