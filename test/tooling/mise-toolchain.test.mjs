@@ -1,0 +1,163 @@
+/**
+ * The mise toolchain contract: the project tools, their lock/sidecar, the
+ * task mapping, and the two task entry scripts' safety boundaries.
+ *
+ * This is a CONFIGURATION guard, not proof that a DSH CLI installs natively on
+ * a given machine; the CI mise-toolchain job performs the real install and
+ * version check.
+ *
+ * @module @xmoon76/dsh-pi-tui/test/tooling/mise-toolchain.test
+ */
+
+import assert from 'node:assert/strict'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import test from 'node:test'
+
+import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { DSH_REPOSITORY } from '../../scripts/dsh-dev-context.mjs'
+import { _test as setupTest, runMiseSetup } from '../../scripts/mise-setup.mjs'
+import { _test as profileTest } from '../../scripts/mise-dev-profile.mjs'
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const MISE_TOML = readFileSync(join(ROOT, 'mise.toml'), 'utf8')
+const MISE_LOCK = readFileSync(join(ROOT, 'mise.lock'), 'utf8')
+const packageJson = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+const matrix = JSON.parse(readFileSync(join(ROOT, 'src', 'dsh-compat-matrix.json'), 'utf8'))
+
+function taskRun(task) {
+  const header = task.includes(':') ? `[tasks."${task}"]` : `[tasks.${task}]`
+  const start = MISE_TOML.indexOf(`${header}\n`)
+  assert.notEqual(start, -1, `mise.toml must declare ${header}`)
+  const next = MISE_TOML.indexOf('\n[', start + header.length)
+  const body = MISE_TOML.slice(start, next === -1 ? undefined : next)
+  const match = /^run = "(.*)"$/mu.exec(body)
+  assert.notEqual(match, null, `${header} must declare a run command`)
+  return match[1]
+}
+
+function allowBuildsFromMatrix() {
+  const match = /--allow-scripts=(?<list>[^ ]+)/u.exec(matrix.current.upgradeCommand)
+  assert.notEqual(match, null, 'the matrix upgrade command must carry the native-script allow list')
+  return match.groups.list.split(',')
+}
+
+test('the mise tool pins take their versions from the single package.json authority', () => {
+  assert.match(MISE_TOML, /^pnpm = "\{\{ read_json\(path='package\.json'\)\['packageManager'\] \| split\(pat='@'\) \| last \}\}"$/mu,
+    'pnpm must be templated from packageManager, not a second hand-maintained pin')
+  assert.match(MISE_TOML,
+    /^"npm:@deepseek-ai\/dsh" = \{ version = "\{\{ read_json\(path='package\.json'\)\['devDependencies'\]\['@deepseek-ai\/dsh-agent'\] \}\}", allow_builds = \[[^\]]*\] \}$/mu,
+    'the DSH CLI version must be templated from the exact dsh-agent devDependency')
+  assert.equal(packageJson.devDependencies['@deepseek-ai/dsh-agent'], '0.2.1-rc.4')
+
+  const line = MISE_TOML.split('\n').find(candidate => candidate.startsWith('"npm:@deepseek-ai/dsh"'))
+  const allowMatch = /allow_builds = \[(.*)\]/u.exec(line)
+  assert.notEqual(allowMatch, null, 'the DSH tool must declare allow_builds')
+  const allowBuilds = JSON.parse(`[${allowMatch[1]}]`)
+  assert.deepEqual(allowBuilds, allowBuildsFromMatrix(),
+    'mise allow_builds must stay the same native-script allow list the published upgrade command names')
+})
+
+test('mise.lock records the resolved tools and the npm sidecar exists', () => {
+  const dshSection = /\[\[tools\."npm:@deepseek-ai\/dsh"\]\]\nversion = "(?<version>[^"]+)"/u.exec(MISE_LOCK)
+  assert.notEqual(dshSection, null, 'mise.lock must record the npm DSH tool')
+  assert.equal(dshSection.groups.version, packageJson.devDependencies['@deepseek-ai/dsh-agent'])
+  assert.match(MISE_LOCK, /\[\[tools\.node\]\]\nversion = "24\./u)
+  assert.match(MISE_LOCK, /\[\[tools\.pnpm\]\]\nversion = "12\.11\.2"/u)
+
+  const sidecar = /aube = \{ path = "(?<path>[^"]+)", digest = "sha256:[0-9a-f]{64}" \}/u.exec(MISE_LOCK)
+  assert.notEqual(sidecar, null, 'mise.lock must reference the aube sidecar with a digest')
+  const sidecarRoot = join(ROOT, sidecar.groups.path)
+  assert.equal(existsSync(join(sidecarRoot, 'aube-lock.yaml')), true, 'the referenced aube lock must be committed')
+  assert.equal(existsSync(join(sidecarRoot, 'package.json')), true, 'the sidecar package manifest must be committed')
+  const sidecarPackage = JSON.parse(readFileSync(join(sidecarRoot, 'package.json'), 'utf8'))
+  assert.equal(sidecarPackage.dependencies['@deepseek-ai/dsh'], packageJson.devDependencies['@deepseek-ai/dsh-agent'])
+})
+
+test('the mise task map mirrors the existing pnpm entry points without adding gates', () => {
+  assert.equal(taskRun('setup'), 'node scripts/mise-setup.mjs')
+  assert.equal(taskRun('build'), 'pnpm build')
+  assert.equal(taskRun('typecheck'), 'pnpm typecheck')
+  assert.equal(taskRun('test:fork'), 'pnpm test:fork')
+  assert.equal(taskRun('test:product'), 'pnpm test:product')
+  assert.equal(taskRun('test:tooling'), 'pnpm test:tooling')
+  assert.equal(taskRun('test:tmux'), 'pnpm test:tmux')
+  assert.equal(taskRun('test'), 'pnpm test')
+  assert.equal(taskRun('verify:release'), 'pnpm verify:release')
+  assert.equal(taskRun('dev:profile'), 'node scripts/mise-dev-profile.mjs')
+  assert.equal(taskRun('dev:dsh'), 'dsh --profile pi-tui-dev')
+  assert.doesNotMatch(MISE_TOML, /^\[tasks\."(smoke|gate):/mu, 'mise must not mirror smoke/gate lanes')
+  assert.doesNotMatch(MISE_TOML, /^\[env\]/mu, 'mise must not set a global development environment')
+})
+
+test('mise run setup runs the frozen npm install in this checkout', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-mise-setup-')
+  const record = join(root, 'pnpm-record.json')
+  writeFileSync(join(root, 'package.json'), `${JSON.stringify({
+    name: 'mise-setup-fixture',
+    private: true,
+    packageManager: 'pnpm@12.11.2',
+  }, null, 2)}\n`)
+  writeFileSync(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+  mkdirSync(join(root, 'test', 'compat'), { recursive: true })
+  writeFileSync(join(root, 'test', 'compat', 'dsh-mode.json'), `${JSON.stringify({ schemaVersion: 1, mode: 'npm' })}\n`)
+  const fakePnpm = join(root, 'pnpm-fixture')
+  writeFileSync(fakePnpm, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs'
+writeFileSync(${JSON.stringify(record)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }))
+`)
+  chmodSync(fakePnpm, 0o755)
+  runMiseSetup({ root, environment: { PATH: process.env.PATH, XDG_CACHE_HOME: join(root, 'cache'), PNPM_EXECUTABLE: fakePnpm } })
+  assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), {
+    args: ['install', '--frozen-lockfile'],
+    cwd: root,
+  })
+})
+
+test('mise run setup refuses a source-mode worktree before spawning pnpm', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-mise-setup-source-')
+  const record = join(root, 'pnpm-record.json')
+  writeFileSync(join(root, 'package.json'), `${JSON.stringify({
+    name: 'mise-setup-fixture',
+    private: true,
+    packageManager: 'pnpm@12.11.2',
+  }, null, 2)}\n`)
+  writeFileSync(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+  mkdirSync(join(root, 'test', 'compat'), { recursive: true })
+  writeFileSync(join(root, 'test', 'compat', 'dsh-mode.json'), `${JSON.stringify({ schemaVersion: 1, mode: 'source' })}\n`)
+  writeFileSync(join(root, 'test', 'compat', 'dsh-source.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    repository: DSH_REPOSITORY,
+    ref: 'a'.repeat(40),
+    expectedVersion: '0.2.1-rc.4',
+  })}\n`)
+  const fakePnpm = join(root, 'pnpm-fixture')
+  writeFileSync(fakePnpm, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs'
+writeFileSync(${JSON.stringify(record)}, 'spawned')
+`)
+  chmodSync(fakePnpm, 0o755)
+  assert.throws(
+    () => runMiseSetup({ root, environment: { PATH: process.env.PATH, XDG_CACHE_HOME: join(root, 'cache'), PNPM_EXECUTABLE: fakePnpm } }),
+    /refuses mode=source/u,
+  )
+  assert.equal(existsSync(record), false, 'the source-mode guard must fail before pnpm install starts')
+})
+
+test('the development profile refuses the real DSH home and an unbuilt checkout', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-mise-profile-')
+  assert.throws(() => profileTest.assertIsolatedHome({}), /DSH_HOME is not set/u)
+  assert.throws(() => profileTest.assertIsolatedHome({ DSH_HOME: join(homedir(), '.dsh') }), /refusing to install/u)
+  assert.throws(() => profileTest.assertIsolatedHome({ DSH_HOME: join(homedir(), '.dsh', 'profiles') }), /refusing to install/u)
+  profileTest.assertIsolatedHome({ DSH_HOME: join(root, 'home') })
+  assert.throws(() => profileTest.assertBuildOutput(root), /run `mise run build` first/u)
+  mkdirSync(join(root, 'dist'), { recursive: true })
+  writeFileSync(join(root, 'dist', 'index.mjs'), 'export {}\n')
+  profileTest.assertBuildOutput(root)
+  assert.equal(setupTest.INSTALL_ARGUMENTS.join(' '), 'install --frozen-lockfile')
+})

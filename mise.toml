@@ -1,8 +1,61 @@
-# node matches CI; pnpm is read from package.json's packageManager field.
-# The ambient pin is what dev-doctor/dev-bootstrap compare, because they disable
-# pnpm's own version switching.
+# dsh-pi-tui main / npm-backed developer toolchain.
+#
+# Version authority:
+# - Node matches CI (Node 24).
+# - pnpm comes from package.json's packageManager field.
+# - The project DSH CLI is a separate mise tool whose exact version comes from
+#   the package.json @deepseek-ai/dsh-agent devDependency. The CLI is not part
+#   of the workspace pnpm dependency graph and does not share its node_modules.
 [tools]
 node = "24"
+pnpm = "{{ read_json(path='package.json')['packageManager'] | split(pat='@') | last }}"
+"npm:@deepseek-ai/dsh" = { version = "{{ read_json(path='package.json')['devDependencies']['@deepseek-ai/dsh-agent'] }}", allow_builds = ["@deepseek-ai/dsh-subprocess-local", "koffi", "node-pty"] }
 
 [settings]
-idiomatic_version_file_enable_tools = ["pnpm"]
+lockfile = true
+
+[tasks.setup]
+description = "Materialize this checkout's npm-mode workspace dependencies"
+run = "node scripts/mise-setup.mjs"
+
+[tasks.build]
+description = "Build the vendored fork and the root bundle"
+run = "pnpm build"
+
+[tasks.typecheck]
+description = "Typecheck the fork, the bundle and the benchmarks"
+run = "pnpm typecheck"
+
+[tasks."test:fork"]
+description = "Run the vendored fork test lane"
+run = "pnpm test:fork"
+
+[tasks."test:product"]
+description = "Run the product test lane"
+run = "pnpm test:product"
+
+[tasks."test:tooling"]
+description = "Run the tooling test lane"
+run = "pnpm test:tooling"
+
+[tasks."test:tmux"]
+description = "Run the tmux terminal-tooling test lane"
+run = "pnpm test:tmux"
+
+[tasks.test]
+description = "Run every test lane (build timing stays with the caller)"
+run = "pnpm test"
+
+[tasks."verify:release"]
+description = "Run the main release verification pipeline"
+run = "pnpm verify:release"
+
+[tasks."dev:profile"]
+description = "Install this checkout's TUI into an isolated development profile"
+env = { DSH_HOME = "{{ config_root }}/temp/mise-dsh-home" }
+run = "node scripts/mise-dev-profile.mjs"
+
+[tasks."dev:dsh"]
+description = "Run the isolated development profile for this checkout"
+env = { DSH_HOME = "{{ config_root }}/temp/mise-dsh-home" }
+run = "dsh --profile pi-tui-dev"
