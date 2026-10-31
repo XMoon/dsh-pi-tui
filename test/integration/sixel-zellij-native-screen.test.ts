@@ -472,6 +472,41 @@ test('ZE03: Main transcript and Fullscreen Alt paint through the same Zellij SIX
   assert.equal((h.app as unknown as { graphics: unknown }).graphics, h.graphics, 'one owner across Main/Alt')
 })
 
+
+// ── ZE06b: a tall image is bounded by the real Screen crop ────────────────
+
+test('ZE06b: a tall transcript image is cropped inside the real fullscreen viewport', async (t) => {
+  const tall = await pngFromRgba(fill(80, 400, (x, y) => {
+    const n = (x * 11 + y * 7) % 256
+    return [n, (n * 3) & 255, (n * 5) & 255, 255]
+  }), 80, 400)
+  const loader = new ImageLoader(async () => ({ ref: {}, data: tall }))
+  const h = await startZellijSixelApp(t, { imageLoader: loader })
+  const ref: ImageAttachmentRefLike = {
+    attachmentId: 'att-ze06b-tall',
+    mediaType: 'image/png',
+    bytes: tall.byteLength,
+    width: 80,
+    height: 400,
+    name: 'tall.png',
+  }
+  h.app.setTranscript(transcriptOf(ref).messages())
+  h.app.setFullscreen(true)
+  await until(() => paintedRasters(h.terminal).length > 0, 'the tall fullscreen raster')
+  const dcs = paintedRasters(h.terminal).at(-1)!
+  const footprint = h.graphics.sixelScreen.footprint(dcs)
+  assert.notEqual(footprint, undefined)
+  const decoded = decodeSixel(dcs)
+  assert.ok(decoded.width > 0)
+  assert.ok(decoded.height <= footprint!.rows * h.terminal.rows, 'the raster is bounded by its cell footprint')
+  assert.ok(footprint!.rows <= h.terminal.rows, 'the crop does not reserve rows outside the physical screen')
+  // A terminal resize must re-encode/re-fit through the same owner, never
+  // replay the old DCS bytes.
+  h.terminal.resize(80, 16)
+  await settle(h.app, h.terminal)
+  assert.equal(h.graphics.selectedProtocol(), 'sixel')
+})
+
 // ── ZE07: transparent first band width/color ──────────────────────────────
 
 test('ZE07: a fully transparent first band keeps its declared width and the second band color', async (t) => {
@@ -638,6 +673,57 @@ test('ZE06: a resize and Main↔Alt round-trip re-sample the same Zellij SIXEL o
   assert.ok(!h.terminal.writes.join('').includes('SIXC'), 'no internal marker leaks after the screen swap')
 })
 
+
+/** A long transcript with one image in the middle; enough rows to show the auto scrollbar. */
+function longTranscriptWithImage(ref: ImageAttachmentRefLike): TranscriptFolder {
+  const folder = new TranscriptFolder()
+  const events: unknown[] = []
+  for (let index = 0; index < 32; index += 1) {
+    events.push({
+      type: 'user/message',
+      seq: index + 1,
+      time: index + 1,
+      data: {
+        content: index === 31
+          ? [{ type: 'image', attachment: ref }]
+          : [{ type: 'text', text: `ZE08 scroll row ${String(index + 1).padStart(2, '0')} — product transcript content.` }],
+        source: { kind: 'user' },
+      },
+    })
+  }
+  folder.apply(events as never)
+  return folder
+}
+
+
+// ── ZE08: a real auto scrollbar keeps a non-overlapping SIXEL image ───────
+
+test('ZE08: an auto scrollbar keeps a non-overlapping Zellij SIXEL image visible', async (t) => {
+  const h = await startZellijSixelApp(t)
+  const ref = imageRef('att-ze08-scrollbar', 'scrollbar.png', 'image/png')
+  h.app.setTranscript(longTranscriptWithImage(ref).messages())
+  await until(() => h.reads.get(ref.attachmentId) === 1, 'the long transcript image read')
+  h.terminal.writes.length = 0
+  h.app.setFullscreen(true)
+  await until(() => paintedRasters(h.terminal).length > 0, 'the fullscreen image raster')
+  const before = paintedRasters(h.terminal).at(-1)!
+
+  // Hover/scroll at the right edge is the real X074 mouse path; the auto
+  // scrollbar becomes visible without touching the image's anchor column.
+  h.terminal.sendInput(`\x1b[<35;${h.terminal.columns};1M`)
+  h.terminal.sendInput(`\x1b[<64;${h.terminal.columns};1M`)
+  await settle(h.app, h.terminal)
+  const view = h.terminal.getViewport()
+  assert.ok(view.some(line => line.trimEnd().endsWith('│') || line.trimEnd().endsWith('┃')), 'the auto scrollbar is visible')
+  const after = paintedRasters(h.terminal).at(-1)
+  assert.ok(after !== undefined, 'the image remains painted while the auto scrollbar is visible')
+  const decoded = decodeSixel(after!)
+  assert.ok(decoded.width > 0 && decoded.width < h.terminal.columns * 10, 'the image stays inside the non-overlapping column budget')
+  assert.notEqual(h.graphics.sixelScreen.footprint(after!), undefined, 'the visible image is still a trusted raster')
+  assert.equal(h.graphics.selectedProtocol(), 'sixel')
+  assert.ok(before.length > 0)
+})
+
 // ── ZE11: hard-off and non-Zellij topologies never fall into SIXEL ────────
 
 test('ZE11: PI_IMAGE_PROTOCOL=none and nested multiplexers create no negotiated SIXEL', async (t) => {
@@ -669,6 +755,36 @@ test('ZE11: PI_IMAGE_PROTOCOL=none and nested multiplexers create no negotiated 
       }
     })
   }
+})
+
+
+// ── ZE09b: a real revoke clears the product click body ─────────────────────
+
+test('ZE09b: a real DA1 revoke clears the Zellij image body and click footprint', async (t) => {
+  const h = await startZellijSixelApp(t)
+  const ref = imageRef('att-ze09b-ghost', 'ghost.png', 'image/png')
+  h.app.setTranscript(transcriptOf(ref).messages())
+  await until(() => h.reads.get(ref.attachmentId) === 1, 'the image read')
+  h.app.setFullscreen(true)
+  await until(() => paintedRasters(h.terminal).length > 0, 'the fullscreen raster')
+  const internals = h.app as unknown as {
+    mountedImageOccurrences(): { thumbnail: { paintedImageBody(width: number): { rows: number; endCol: number } | undefined } }[]
+    transcriptRenderWidth(): number
+  }
+  const width = internals.transcriptRenderWidth()
+  assert.ok(internals.mountedImageOccurrences()[0]?.thumbnail.paintedImageBody(width) !== undefined,
+    'the committed image has a real click body before revoke')
+  const oldDcs = paintedRasters(h.terminal).at(-1)!
+  assert.notEqual(h.graphics.sixelScreen.footprint(oldDcs), undefined, 'the old raster is trusted before revoke')
+  h.terminal.writes.length = 0
+  h.terminal.declareDa1(false)
+  await until(() => h.graphics.selectedProtocol() === null, 'the one-way revoke')
+  await tick(300)
+  assert.equal(internals.mountedImageOccurrences()[0]?.thumbnail.paintedImageBody(width), undefined,
+    'the revoked image has no ghost click body')
+  assert.equal(effectiveImageProtocol(h.graphics), null)
+  assert.equal(h.graphics.sixelScreen.footprint(oldDcs), undefined, 'the old footprint is erased')
+  assert.equal(paintedRasters(h.terminal).length, 0, 'the text repaint emits no old DCS')
 })
 
 // ── ZE10: a revoke during an in-flight encode leaves no raster ─────────────
