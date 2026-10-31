@@ -1294,11 +1294,6 @@ async function main() {
     assert(startupLiveness.verdict !== 'OBSERVED_QUIESCENT', 'T01 the stock Host cannot prove quiescence with rc.4 pending/write gaps')
     assert(startupLiveness.reasons.includes('pending-interaction-unobservable'), 'T01 the pending-interaction gap is not reported')
     assert(startupLiveness.reasons.includes('inflight-write-unproven'), 'T01 the in-flight-write gap is not reported')
-    // The isolated profile always mounts one test-only file-URL row. Reading
-    // the REAL `context.loader` must surface it as an active unqualified Host
-    // source; a reflect-store probe would silently miss it and report IDLE.
-    assert(startupLiveness.sourceStates.other === 'UNKNOWN', 'T01 the unqualified test-only Host row was not observed through the real Loader')
-    assert(startupLiveness.reasons.includes('unqualified-host-source'), 'T01 the unqualified Host source reason is missing')
     const startupStatus = await hostStatus(mainHost)
     assert(startupStatus.liveness !== undefined, 'T01 a Host status request carries no liveness snapshot')
     assert(startupStatus.liveness.epoch >= startupLiveness.epoch, 'T01 the liveness epoch moved backwards')
@@ -3042,6 +3037,12 @@ async function main() {
         assert(goalLiveness?.verdict === 'BLOCKED', `C2A the armed Goal did not block: ${JSON.stringify(goalLiveness)}`)
         assert(goalLiveness.reasons?.includes('goal-armed'), 'C2A the armed Goal did not contribute goal-armed')
         assert(goalLiveness.sourceStates?.goal === 'ACTIVE', 'C2A the goal source is not ACTIVE')
+        // The C1 Host mounts one active test-only file-URL Loader row through
+        // `c1Work.patchPath`. Reading the REAL `context.loader` must surface it
+        // as an unqualified Host source; the reflect-store probe this replaced
+        // silently missed every active Loader row on the real Host path.
+        assert(goalLiveness.sourceStates?.other === 'UNKNOWN', 'C2A the active test-only Loader row was not observed through the real Loader')
+        assert(goalLiveness.reasons?.includes('unqualified-host-source'), 'C2A the unqualified Host source reason is missing')
         await exitC1Client(client, 'C2A goal C1')
         await stopC1Host(host)
         trace('c2a-goal', { hostPid: ready.pid, sessionId, goalId: created.goalId, round: round.round, agentStatus: round.agentStatus, verdict: goalLiveness.verdict })
