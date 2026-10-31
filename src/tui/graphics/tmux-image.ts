@@ -24,6 +24,7 @@ import {
 import { calculateNativeCellSize } from './kitty-native.ts'
 import type { KittyGraphics, NativeKittyImageBody, NativeKittyImageOptions } from './native-image.ts'
 import { KittyTerminalFacade } from './kitty-terminal.ts'
+import { imageProtocolPreference, type ImageProtocolPreference } from './image-protocol-preference.ts'
 import {
   TMUX_KITTY_PLACEHOLDERS_ENV,
   TmuxKittyAdmission,
@@ -233,7 +234,8 @@ export function createTmuxKittyGraphics(
   environment: NodeJS.ProcessEnv = process.env,
   onAllowed?: () => void,
 ): KittyGraphics | undefined {
-  const identity = probeTmuxKittyIdentity(environment)
+  const preference = imageProtocolPreference(environment)
+  const identity = probeTmuxKittyIdentity(environment, preference)
   if (identity === undefined) return undefined
 
   const hasKnownPlaceholderSupport = tmuxKittyHasKnownUnicodePlaceholders(identity)
@@ -255,6 +257,7 @@ export function createTmuxKittyGraphics(
     environment,
     probe === undefined ? undefined : () => probe.allowed,
     probe === undefined ? undefined : () => probe.denied,
+    preference,
   )
   const core = new KittyGraphicsCore({ ...options, placementMode: 'tmux-virtual' })
   const featureBinding: TmuxFeatureProbeBinding | undefined = probe === undefined

@@ -30,6 +30,7 @@ import {
   type DirectSixelGraphics,
   type SixelScreenObservation,
 } from './sixel-image.ts'
+import { imageProtocolPreference, type ImageProtocolPreference } from './image-protocol-preference.ts'
 import { TmuxSixelAdmission, probeTmuxSixelIdentity } from './tmux-sixel-admission.ts'
 
 /** The exact introducer every owner-produced SIXEL DCS starts with. */
@@ -54,8 +55,11 @@ function introducerHoldLength(text: string): number {
  * outranks a transport that has never proven it can draw. Only known
  * Kitty/Ghostty U1 evidence or the explicit placeholder assertion counts.
  */
-function tmuxKittyTransportHasPriority(env: NodeJS.ProcessEnv): boolean {
-  const identity = probeTmuxKittyIdentity(env)
+function tmuxKittyTransportHasPriority(
+  env: NodeJS.ProcessEnv,
+  preference: ImageProtocolPreference,
+): boolean {
+  const identity = probeTmuxKittyIdentity(env, preference)
   if (identity === undefined) return false
   return tmuxKittyHasKnownUnicodePlaceholders(identity) || env[TMUX_KITTY_PLACEHOLDERS_ENV] === '1'
 }
@@ -221,11 +225,12 @@ export function createTmuxSixelGraphics(
   environment: NodeJS.ProcessEnv = process.env,
   onReadinessChanged: () => void = () => {},
 ): DirectSixelGraphics | undefined {
-  if (tmuxKittyTransportHasPriority(environment)) return undefined
-  const identity = probeTmuxSixelIdentity(environment)
+  const preference = imageProtocolPreference(environment)
+  if (tmuxKittyTransportHasPriority(environment, preference)) return undefined
+  const identity = probeTmuxSixelIdentity(environment, preference)
   if (identity === undefined) return undefined
 
-  const admission = new TmuxSixelAdmission(identity, environment)
+  const admission = new TmuxSixelAdmission(identity, environment, preference)
   let graphics: DirectSixelGraphics | undefined
   const facade = new TmuxSixelTerminal(terminal, admission, (dcs) => graphics?.screen.footprint(dcs) !== undefined)
   graphics = createSixelGraphicsWithAdmission(facade, admission, onReadinessChanged)

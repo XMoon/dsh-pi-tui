@@ -33,7 +33,7 @@ import {
   tmuxPaneEnvironmentAdmits,
   type TmuxDisplayIdentity,
 } from './tmux-admission.ts'
-import { imageProtocolPreference } from './image-protocol-preference.ts'
+import { imageProtocolPreference, type ImageProtocolPreference } from './image-protocol-preference.ts'
 
 /** The immutable live binding a native tmux SIXEL handle may use. */
 export interface TmuxSixelIdentity extends TmuxDisplayIdentity {}
@@ -42,8 +42,7 @@ export interface TmuxSixelIdentity extends TmuxDisplayIdentity {}
 const PROBE_CACHE_TTL_MS = 250
 
 /** The explicit preferences that must never be satisfied by tmux SIXEL. */
-function protocolDeniesSixel(env: NodeJS.ProcessEnv): boolean {
-  const preference = imageProtocolPreference(env)
+function protocolDeniesSixel(preference: ImageProtocolPreference): boolean {
   return preference !== 'auto' && preference !== 'sixel'
 }
 
@@ -77,8 +76,11 @@ export function tmuxSixelFlagReportAllows(report: string | undefined): boolean {
  * consulted. Any query failure (missing binary, non-zero exit, timeout,
  * overflow) is "no answer" and denies.
  */
-export function probeTmuxSixelIdentity(env: NodeJS.ProcessEnv = process.env): TmuxSixelIdentity | undefined {
-  if (protocolDeniesSixel(env)) return undefined
+export function probeTmuxSixelIdentity(
+  env: NodeJS.ProcessEnv = process.env,
+  preference: ImageProtocolPreference = imageProtocolPreference(env),
+): TmuxSixelIdentity | undefined {
+  if (protocolDeniesSixel(preference)) return undefined
   if (!tmuxPaneEnvironmentAdmits(env)) return undefined
   const paneId = env.TMUX_PANE
   if (paneId === undefined) return undefined
@@ -130,15 +132,21 @@ export function probeTmuxSixelIdentity(env: NodeJS.ProcessEnv = process.env): Tm
 export class TmuxSixelAdmission {
   private readonly initial: TmuxSixelIdentity
   private readonly env: NodeJS.ProcessEnv
+  private readonly preference: ImageProtocolPreference
   private readonly revokedListeners = new Set<() => void>()
   private revoked = false
   private hasProbed = false
   private lastProbeAt = 0
   private lastProbeAllowed = false
 
-  constructor(initial: TmuxSixelIdentity, env: NodeJS.ProcessEnv = process.env) {
+  constructor(
+    initial: TmuxSixelIdentity,
+    env: NodeJS.ProcessEnv = process.env,
+    preference: ImageProtocolPreference = imageProtocolPreference(env),
+  ) {
     this.initial = initial
     this.env = env
+    this.preference = preference
   }
 
   /** The two-state admission projection the SIXEL owner consumes. */
@@ -152,7 +160,7 @@ export class TmuxSixelAdmission {
     if (!force && this.hasProbed && now - this.lastProbeAt < PROBE_CACHE_TTL_MS) {
       return this.lastProbeAllowed
     }
-    const probed = probeTmuxSixelIdentity(this.env)
+    const probed = probeTmuxSixelIdentity(this.env, this.preference)
     const allowed = probed !== undefined && sameTmuxDisplayIdentity(probed, this.initial)
     this.hasProbed = true
     this.lastProbeAt = now
