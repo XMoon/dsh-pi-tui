@@ -27,13 +27,29 @@ const FORBIDDEN_MODULES = [
   'composer',
 ] as const
 
-/** Any import statement naming one of the forbidden footer modules. */
+/** Any import statement naming one of the forbidden footer modules.
+ *
+ * The matcher covers every import FORM that can bind a module in this
+ * codebase: static single/double-quoted, dynamic `import()`, `require()`,
+ * `export … from`, and the two relative depths a `src/tui/tsp` module can
+ * reach `src/tui/footer` with. It deliberately matches on the resolved
+ * specifier text, so quoting style and whitespace cannot hide a binding.
+ */
+const FORBIDDEN_SPECIFIER_SHAPES = [
+  /from\s+["']([^"']+)["']/g,
+  /import\s*\(\s*["']([^"']+)["']\s*\)/g,
+  /require\s*\(\s*["']([^"']+)["']\s*\)/g,
+] as const
+
 const forbiddenImport = (source: string): string | undefined => {
-  for (const match of source.matchAll(/from\s+'([^']+)'/g)) {
-    const specifier = match[1] ?? ''
-    for (const module of FORBIDDEN_MODULES) {
-      if (specifier === `../footer/${module}.ts` || specifier === `../../tui/footer/${module}.ts`) {
-        return specifier
+  for (const shape of FORBIDDEN_SPECIFIER_SHAPES) {
+    shape.lastIndex = 0
+    for (const match of source.matchAll(shape)) {
+      const specifier = match[1] ?? ''
+      for (const module of FORBIDDEN_MODULES) {
+        if (specifier === `../footer/${module}.ts` || specifier === `../../tui/footer/${module}.ts`) {
+          return specifier
+        }
       }
     }
   }
@@ -53,10 +69,22 @@ test('no TSP renderer module imports the PiTui footer executors', () => {
 
 test('the forbidden-import detector actually detects (self-check)', () => {
   // A no-op detector would make the gate above false assurance: prove the
-  // matcher fires on each forbidden specifier shape.
+  // matcher fires on each forbidden specifier in EVERY import form.
+  const forms = (specifier: string): readonly string[] => [
+    `import { x } from '${specifier}'`,
+    `import { x } from "${specifier}"`,
+    `const m = await import('${specifier}')`,
+    `const m = await import("${specifier}")`,
+    `const m = require('${specifier}')`,
+    `export { x } from '${specifier}'`,
+  ]
   for (const module of FORBIDDEN_MODULES) {
-    assert.equal(forbiddenImport(`import { x } from '../footer/${module}.ts'`), `../footer/${module}.ts`)
-    assert.equal(forbiddenImport(`import { x } from '../../tui/footer/${module}.ts'`), `../../tui/footer/${module}.ts`)
+    for (const depth of ['../footer', '../../tui/footer'] as const) {
+      const specifier = `${depth}/${module}.ts`
+      for (const form of forms(specifier)) {
+        assert.equal(forbiddenImport(form), specifier, `detector must fire on: ${form}`)
+      }
+    }
   }
   assert.equal(forbiddenImport("import { x } from '../footer/builtin-items.ts'"), undefined,
     'the read-only builtin definitions stay importable')
