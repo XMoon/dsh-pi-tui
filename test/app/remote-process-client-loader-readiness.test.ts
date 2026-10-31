@@ -148,12 +148,24 @@ test('a cancelled startup disposes the Gateway before the Loader barrier settles
   await hostRuntime.dispose()
 })
 
-test('a missing Session resolver fails the production gate before the Gateway starts', async t => {
+test('a missing Session resolver fails the production gate before the real Gateway starts', async t => {
   const life = testLifecycle(t)
+  const host = await createRemoteApplicationHostFixture(life, 'preset')
+  const hostRuntime = await createRemoteHostRuntime(host.ctx)
   const ctx = new Context()
   life.defer(() => ctx.fiber.dispose())
   let openStreams = 0
   const gate = await installGate(ctx)
+  const { gatewayFiber } = await installClientTransport(ctx, hostRuntime.carrier, endpoint => {
+    if (endpoint === '$events') openStreams += 1
+  })
+  const connection = ctx.get('connection') as unknown as {
+    generation: { getSnapshot(): unknown }
+  }
+  assert.equal(connection.generation.getSnapshot(), undefined,
+    'the Gateway must not establish a generation before the interaction gate is released')
+  assert.equal(openStreams, 0, 'the Gateway must not open $events while the interaction gate is pending')
+
   let thrown: unknown
   try {
     assertInteractionStartupReady(gate, undefined)
@@ -162,7 +174,18 @@ test('a missing Session resolver fails the production gate before the Gateway st
   }
   assert.match(String(thrown), /official Session Agent resolver did not install/u,
     'the production gate did not reject a missing Session resolver')
-  assert.equal(openStreams, 0, 'a rejected preflight must not install or start the Gateway')
+  assert.equal(connection.generation.getSnapshot(), undefined,
+    'a rejected resolver preflight must not establish a Connection generation')
+  assert.equal(openStreams, 0, 'a rejected resolver preflight must not open the real $events stream')
+
+  // Production stop order: dispose the real Gateway/Connection before the
+  // rejected gate settles; no delayed `connection.start()` may follow.
+  await gatewayFiber.dispose()
   gate.cancel(new Error('test finished before gate release'))
   await (ctx.get('loader') as Loader).await()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.equal(openStreams, 0, 'a delayed connection.start() ran after the gate rejection was cleaned up')
+  assert.equal(connection.generation.getSnapshot(), undefined,
+    'a delayed connection.start() established a generation after cleanup')
+  await hostRuntime.dispose()
 })
