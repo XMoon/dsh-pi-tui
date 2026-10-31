@@ -32,7 +32,7 @@ import {
 } from '../../domain/footer/custom-items.ts'
 import { DEFAULT_COMMAND_TIMEOUT_MS } from '../../domain/footer/command-config.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
-import { MAX_ITEMS_PER_ROW, stripControlChars } from '../../domain/footer/layout.ts'
+import { MAX_ITEMS_PER_ROW, defaultHideInTsp, stripControlChars } from '../../domain/footer/layout.ts'
 import { COMPACT_FOOTER_LAYOUT, DEFAULT_FOOTER_LAYOUT } from '../../domain/footer/presets.ts'
 import type { FooterItemRef, FooterLayoutV1, FooterRowLayout, FooterSeparator, FooterTone } from './presentation-types.ts'
 
@@ -190,6 +190,7 @@ interface MutableRef {
   prefix?: string
   suffix?: string
   importance?: number
+  hideInTsp?: boolean
 }
 interface MutableRow {
   left: MutableRef[]
@@ -209,6 +210,7 @@ function cloneRef(ref: FooterItemRef): MutableRef {
     ...ref.prefix === undefined ? {} : { prefix: ref.prefix },
     ...ref.suffix === undefined ? {} : { suffix: ref.suffix },
     ...ref.importance === undefined ? {} : { importance: ref.importance },
+    ...ref.hideInTsp === undefined ? {} : { hideInTsp: ref.hideInTsp },
   }
 }
 
@@ -238,6 +240,7 @@ function sameFooterRef(a: FooterItemRef, b: FooterItemRef): boolean {
     && (a.prefix ?? undefined) === (b.prefix ?? undefined)
     && (a.suffix ?? undefined) === (b.suffix ?? undefined)
     && (a.importance ?? undefined) === (b.importance ?? undefined)
+    && (a.hideInTsp ?? undefined) === (b.hideInTsp ?? undefined)
 }
 
 function sameFooterRow(a: FooterRowLayout, b: FooterRowLayout): boolean {
@@ -319,6 +322,31 @@ function canonicalRef(ref: FooterItemRef, defaultFormatOf: FooterDefaultFormatOf
     ...(ref.prefix === undefined || ref.prefix === '' ? {} : { prefix: ref.prefix }),
     ...(ref.suffix === undefined || ref.suffix === '' ? {} : { suffix: ref.suffix }),
     ...(ref.importance === undefined ? {} : { importance: ref.importance }),
+    // The id default is the canonical absent form: an explicit default
+    // boolean (a redundant value in a hand-edited file) must not read as
+    // dirty. A non-default boolean IS the real override and is retained —
+    // the three default-On items keep their semantic `false`.
+    ...(ref.hideInTsp === undefined || ref.hideInTsp === defaultHideInTsp(ref.id)
+      ? {}
+      : { hideInTsp: ref.hideInTsp }),
+  }
+}
+
+/** The persisted projection of one mutable draft ref: ONLY the
+ * `hideInTsp` field is canonicalized (default-equal values are omitted on
+ * save; every other field keeps the configurator's existing persistence
+ * behavior). The live draft itself is never rewritten by a load or a
+ * dirty check. */
+function canonicalHideInTsp(ref: MutableRef): FooterItemRef {
+  const hide = ref.hideInTsp
+  return {
+    id: ref.id,
+    ...(ref.format === undefined ? {} : { format: ref.format }),
+    ...(ref.tone === undefined ? {} : { tone: ref.tone as FooterTone }),
+    ...(ref.prefix === undefined ? {} : { prefix: ref.prefix }),
+    ...(ref.suffix === undefined ? {} : { suffix: ref.suffix }),
+    ...(ref.importance === undefined ? {} : { importance: ref.importance }),
+    ...(hide === undefined || hide === defaultHideInTsp(ref.id) ? {} : { hideInTsp: hide }),
   }
 }
 
@@ -368,6 +396,7 @@ export function flatLengthOf(row: FooterRowLayout): number {
 export type ItemMenuEntry =
   | { readonly kind: 'style' }
   | { readonly kind: 'tone' }
+  | { readonly kind: 'hide-tsp' }
   | { readonly kind: 'advanced' }
   | { readonly kind: 'custom-text' }
   | { readonly kind: 'custom-command' }
@@ -421,6 +450,10 @@ export function itemMenuFor(
     entries.push({ kind: 'custom-tone' })
   }
   entries.push({ kind: 'tone' })
+  // Universal placement visibility: every id (builtin, USER text/command,
+  // extension, unknown) gets the same toggle; duplicate placements stay
+  // independent because the field lives on the ref.
+  entries.push({ kind: 'hide-tsp' })
   entries.push({ kind: 'advanced' })
   if (custom !== undefined) {
     entries.push({ kind: 'custom-name' })
@@ -906,6 +939,18 @@ export class FooterConfiguratorModel {
     else ref.tone = tone
   }
 
+  /** Toggle the placement's TSP visibility. The id default is stored as an
+   * ABSENT field (canonical form); only a non-default choice becomes an
+   * explicit boolean — so a default-On item's explicit `false` survives,
+   * and a redundant explicit default never does. */
+  private toggleHideInTsp(): void {
+    const ref = this.refAt(this.cursor)?.ref
+    if (ref === undefined) return
+    const next = !(ref.hideInTsp ?? defaultHideInTsp(ref.id))
+    if (next === defaultHideInTsp(ref.id)) delete ref.hideInTsp
+    else ref.hideInTsp = next
+  }
+
   /** Persist a custom definition's tone in the draft catalog. */
   private applyCustomTone(tone: FooterTone | 'auto'): void {
     const id = this.editedRefId()
@@ -1003,6 +1048,8 @@ export class FooterConfiguratorModel {
         } else if (entry.kind === 'custom-delete') {
           this.mode = 'custom-delete'
           this.customError = ''
+        } else if (entry.kind === 'hide-tsp') {
+          this.toggleHideInTsp()
         } else {
           this.mode = 'advanced'
           this.advancedField = 'prefix'
@@ -1639,11 +1686,22 @@ export class FooterConfiguratorModel {
     delete ref.prefix
     delete ref.suffix
     delete ref.importance
+    delete ref.hideInTsp
   }
 
-  /** The draft layout (the live preview source). */
+  /** The draft layout (the live preview source). `hideInTsp` is canonicalized
+   * for persistence: a value equal to the id's default is omitted, while the
+   * semantic override (the three default-On items' explicit `false`) is
+   * retained. Every other field passes through unchanged. */
   preview(): FooterLayoutV1 {
-    return this.draft as unknown as FooterLayoutV1
+    return {
+      schemaVersion: 1,
+      rows: this.draft.rows.map(row => ({
+        left: row.left.map(canonicalHideInTsp),
+        right: row.right.map(canonicalHideInTsp),
+        ...(row.separator === undefined ? {} : { separator: { ...row.separator } }),
+      })),
+    }
   }
 
   /** Re-anchor the editor onto the Row Selector after a whole-layout

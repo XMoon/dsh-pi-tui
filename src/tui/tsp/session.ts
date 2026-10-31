@@ -67,6 +67,7 @@ import { TspPresetPicker } from './preset-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
 import { nativeStatuslineRows, compileNativeFooterPresentation, type NativeFooterPresentation } from './statusline-view.ts'
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
+import type { TspFooterAffordances } from '../../domain/footer/layout.ts'
 import { TspWorkHub } from './work-hub.ts'
 import {
   WORK_DETAILS_REGION,
@@ -2035,7 +2036,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // window so an outgoing subject's status can never appear beside the
     // incoming subject's transcript.
     if (presentedStatus !== undefined && !hydrating) {
-      lines.push(...nativeStatuslineRows(presentedStatus, footerPresentation))
+      lines.push(...nativeStatuslineRows(presentedStatus, footerPresentation, nativeFooterAffordances()))
     }
     return ui.col({ key: 'dock' }, ...lines)
   }
@@ -2363,6 +2364,20 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const COMPOSER_VALUE_WIDTH = 14
   const composerActionsSupported = (): boolean =>
     session.caps.features.includes('styles') && session.caps.kinds.includes('el')
+
+  /**
+   * PR-F: the LIVE composer capability facts the universal footer visibility
+   * uses for its default-On fallback. Each flag means "the TSP dock really
+   * presents and can operate this control now" — never "a status value
+   * exists". PR-F has no Permission control (the Quiet Composer lands in
+   * PR-E), so `permission` stays false and the permission item's default-On
+   * hide falls back to visible.
+   */
+  const nativeFooterAffordances = (): TspFooterAffordances => ({
+    permission: false,
+    model: composerActionsSupported(),
+    reasoning: composerActionsSupported(),
+  })
   if (composerActionsSupported()) {
     surface.stylesheet(COMPOSER_ACTIONS_SHEET, `
       [data-role="${COMPOSER_MODEL_ROLE}"],

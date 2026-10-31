@@ -584,6 +584,27 @@ test('unavailable recent metrics omit the performance segments (never a zero sta
   assert.equal(render('stats-line', zero), '↑0 ↓0 | TTFB 0s · 0 tok/s')
 })
 
+test('hideInTsp is a TSP-only field: PiTui item rendering ignores it', () => {
+  const snapshot = snapshotWith(snap => {
+    snap.access.permissionPreset = { id: 'workspace-write', label: 'Workspace Write', matched: true }
+    snap.workspace.cwd = '/home/x/proj'
+  })
+  const permission = render('permission-preset', snapshot, { id: 'permission-preset' })
+  assert.notEqual(permission, '')
+  assert.equal(
+    render('permission-preset', snapshot, { id: 'permission-preset', hideInTsp: true }),
+    permission,
+    'the PiTui permission item must render exactly the same with hideInTsp',
+  )
+  const cwd = render('cwd', snapshot, { id: 'cwd', format: 'basename' })
+  assert.notEqual(cwd, '')
+  assert.equal(
+    render('cwd', snapshot, { id: 'cwd', format: 'basename', hideInTsp: true }),
+    cwd,
+    'every PiTui item ignores the TSP-only field',
+  )
+})
+
 test('a partially available fact renders only the formats that own it', () => {
   const latencyOnly = snapshotWith(snap => {
     snap.usage.performance = { llmMs: 8100, firstTokenMs: 2_600 }
