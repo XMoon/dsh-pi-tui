@@ -42,6 +42,7 @@ import {
 } from '../../src/app/surface/runtime.ts'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
+import { resolveTspNativeFooterConfig } from '../../src/domain/footer/tsp-native-config.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { isQuitKey, mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import { foldWireNodes, wireNodes } from '../support/tsp-picker-wire.ts'
@@ -1241,6 +1242,7 @@ test('A-12b: the PRODUCTION connector handshake releases a mount a REAL surface.
   const mount = await selectRendererMount({
     log: () => {},
     env: { DSH_PI_TUI_RENDERER: 'tsp' },
+    resolveFooterConfig: () => resolveTspNativeFooterConfig({ doc: { footer: 'default' }, readiness: 'ready', userItems: { items: [], invalidCount: 0 } }),
     connectTsp: productionTspConnector({ copyVisual: async () => false,
       cwd: '/tmp', requestExit, onFatal: () => {}, log: () => {}, logError: () => {},
       connect: async () => session,

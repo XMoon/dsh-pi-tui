@@ -88,6 +88,7 @@ reading is an additional rendering container, never a second renderer.
 | The temporary reading surface, its reading identity and its close | `src/tui/tsp/session.ts` (the reader slot) | A presenter-owned surface, a business owner, a second Session, or a persisted reading state |
 | Terminal rendering, pixel clipping and scroll view state | Tern client | Node-tree text, TypeScript props, guessed pixels |
 | Status facts (permission, workspace, usage, plan) | The ONE `StatusStore` the `SurfaceRuntime` creates and updates | A renderer-owned store, a second writer, or a value derived from the dock, the transcript or `process.cwd()` |
+| Footer settings (mode/layout/custom items) | The ConfigPort + settings document; the TSP renderer consumes ONE boot-time read-only projection bound at mount (`bindNativeFooterConfig`) | A renderer-owned settings store, a config watcher, a second write path, or any command/extension execution from the projection |
 
 State-representation rule: authority, disposable projection, SDK transport
 state and component-local draft may contain similar values without being
@@ -152,6 +153,19 @@ reduction; a search hit or "two variables" is not proof of entropy.
    commit on the renderer, which samples the snapshot at exactly that point —
    never per render and never through a store subscription. A renderer with no
    bound reader fails the display commit fast instead of projecting a substitute.
+10. The native footer presentation is a BOOT-TIME READ-ONLY CONFIG PROJECTION,
+   the same one-shot install shape as the status reader: the composition root
+   resolves it from the ConfigPort (readiness-gated; the USER-layer custom-item
+   read is skipped entirely while the backend is not `ready`) and the mount
+   binds it exactly once (`bindNativeFooterConfig`) before the first status
+   commit. It is a snapshot of that boot, not a live settings view: no
+   watcher, no re-read, no write-back, and a settings change takes effect on
+   the NEXT TSP process, not through a repaint. A direct mount that binds no
+   config renders the frozen default rows. Unsupported capabilities in the
+   projection (whole-footer command, custom command items, extension items,
+   foreign separators) are explicit unavailability facts — a native fallback
+   plus bounded one-time notices — never a fabricated value and never silent
+   execution. See the footer guide for the user-facing compatibility table.
 
 ### Bounded reader surface lifecycle
 

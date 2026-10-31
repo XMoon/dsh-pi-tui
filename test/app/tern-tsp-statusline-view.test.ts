@@ -28,6 +28,7 @@ import type { SessionStatusProjection } from '../../src/runtime/session-reader-p
 import { emptyStatusSnapshot, type StatusSnapshot } from '../../src/domain/status/types.ts'
 import { mountTspRenderer } from '../../src/tui/tsp/session.ts'
 import { nativeStatuslineRows } from '../../src/tui/tsp/statusline-view.ts'
+import { resolveTspNativeFooterConfig } from '../../src/domain/footer/tsp-native-config.ts'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import type { SurfaceEventRoutingSource } from '../../src/app/surface/event-routing.ts'
@@ -725,6 +726,9 @@ test('PR-A A-24: a REAL binder throw propagates and the production release close
     const mount = await selectRendererMount({
       log: () => {},
       env: { DSH_PI_TUI_RENDERER: 'tsp' },
+      // PR-D: the footer resolver slot; the default projection keeps this
+      // PR-A binder-throw witness on its original subject.
+      resolveFooterConfig: () => resolveTspNativeFooterConfig({ doc: { footer: 'default' }, readiness: 'ready', userItems: { items: [], invalidCount: 0 } }),
       connectTsp: async () => tsp,
     })
     assert.ok(mount !== undefined, 'the wrapper produced a mount')
