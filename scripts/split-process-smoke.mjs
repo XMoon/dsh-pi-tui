@@ -607,7 +607,7 @@ export function writeC1WorkFixture(profileDir, workDir) {
     '- insert:',
     '    - id: split-process-host-work',
     `      name: '${pathToFileURL(fixturePath).href}'`,
-    '      inject: [llm, tools, jobs, subagents, agents]',
+    '      inject: [llm, tools, jobs, subagents, agents, typertGateway, connection]',
     '- id: agent-default-model',
     '  config:',
     '    provider: c1-qualification',
@@ -3205,6 +3205,22 @@ async function main() {
         assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === 'interaction-startup-gate').length === 1,
           `${label} registered the interaction startup gate more than once`)
       }
+      // rc.4 exposes no pending inventory: after a Client detaches, the Host
+      // status must keep the pending source fail-closed as UNKNOWN with the
+      // stable gap reason. This asserts only the absence of an inventory; it
+      // never names a request id or claims an expiry outcome.
+      const assertPendingUnobservable = async (host, before, label) => {
+        const status = await hostStatus(host)
+        assertIdentityFields(status.localHost, before, `${label} Host status identity`)
+        const liveness = status.liveness
+        assert(liveness?.sourceStates?.pending === 'UNKNOWN',
+          `${label} the pending source is not UNKNOWN: ${JSON.stringify(liveness?.sourceStates)}`)
+        assert(liveness.reasons?.includes('pending-interaction-unobservable'),
+          `${label} the pending-interaction gap is not reported: ${JSON.stringify(liveness?.reasons)}`)
+        assert(liveness.verdict !== 'OBSERVED_QUIESCENT',
+          `${label} the Host claimed quiescence around an unobservable pending interaction`)
+        return liveness
+      }
       const startPeer = async (label, extraEnv = {}) => {
         const peer = new EntryProcess('peer', entries.client, {
           ...base,
@@ -3240,8 +3256,36 @@ async function main() {
       // Client exit. C2 receives the ORIGINAL callId through the Host Gateway
       // and its answer settles the same Host flow exactly once.
       for (const [mode, label] of [['kill', 't49'], ['exit', 't50']]) {
-        const { host, ready, workRoot } = await startC1Host('question', label)
+        // B-03 eligibility control: the kill case drives the full real Gateway
+        // owner-event-stream lifecycle (none -> C1 -> none -> C2 -> none) and
+        // one non-answering Peer negative control. The clean-exit case keeps
+        // the same question recovery without duplicating the eligibility trace.
+        const eligibilityProbe = mode === 'kill'
+        const nonAnsweringBarrier = join(workDir, 't49-non-answering-peer.probe')
+        rmSync(nonAnsweringBarrier, { force: true })
+        const { host, ready, workRoot } = await startC1Host('question', label, eligibilityProbe
+          ? { C1_HAS_LIVE_CLIENT_PROBE: '1', C1_NON_ANSWERING_PEER_PROBE: nonAnsweringBarrier }
+          : {})
+        const waitLiveClient = (value, afterSequence, probeLabel) => waitForC1WorkEvent(
+          workRoot,
+          event => event.kind === 'has-live-client' && event.value === value && event.sequence > afterSequence,
+          probeLabel,
+        )
+        let liveSequence = 0
+        if (eligibilityProbe) {
+          const initial = await waitLiveClient(false, liveSequence, 'T49 initial Gateway eligibility')
+          liveSequence = initial.sequence
+          writeFileSync(nonAnsweringBarrier, 'probe\n', { mode: 0o600 })
+          const negative = await waitForC1WorkEvent(workRoot, event => event.kind === 'non-answering-peer', 'T49 non-answering Peer negative control')
+          assert(negative.opened === false, 'T49 a non-answering Peer opened the forwarded-event stream')
+          assert(negative.code === 'gateway/interactions-forbidden', `T49 unexpected non-answering Peer refusal: ${JSON.stringify(negative)}`)
+          assert(negative.liveClient === false, 'T49 the non-answering Peer made hasLiveClient() true')
+        }
         const { client: c1 } = await startC1Client(`${label.toUpperCase()} C1`)
+        if (eligibilityProbe) {
+          const attached = await waitLiveClient(true, liveSequence, 'T49 C1 Gateway eligibility')
+          liveSequence = attached.sequence
+        }
         const sessionId = await openC1Session(c1, `${label} prompt`, label.toUpperCase())
         const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', `${label} ask_user_question tool/call`)
         const callId = String(call.data.callId)
@@ -3267,6 +3311,11 @@ async function main() {
         }
         assert(alive(ready.pid), `${label} the Host died on the Client exit`)
         await assertHostIdentityKept(host, hostBefore, `${label} Host after Client exit`)
+        if (eligibilityProbe) {
+          const detached = await waitLiveClient(false, liveSequence, 'T49 detached Gateway eligibility')
+          liveSequence = detached.sequence
+        }
+        await assertPendingUnobservable(host, hostBefore, `${label} detached pending`)
         // A clean Client teardown must not settle the Host question as
         // cancelled: no question-failed proof may appear before C2 answers.
         await sleep(300)
@@ -3274,6 +3323,10 @@ async function main() {
           `${label} the Client teardown sent a cancellation that settled the Host pending question`)
         const { client: c2 } = await startC1Client(`${label.toUpperCase()} C2`, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
         assertInteractionGate(c2, `${label} C2`)
+        if (eligibilityProbe) {
+          const recovered = await waitLiveClient(true, liveSequence, 'T49 C2 Gateway eligibility')
+          liveSequence = recovered.sequence
+        }
         await c2.waitForScreen('Continue the C1 test?', `${label} C2 redelivered question`, 120_000)
         c2.send('1')
         await c2.waitForScreen('Submit', `${label} C2 review page`, 30_000)
@@ -3287,8 +3340,20 @@ async function main() {
         const settlements = readC1WorkEvents(workRoot).filter(event => event.kind === 'question-settled' && event.sessionId === sessionId)
         assert(requests.length === 1 && settlements.length === 1, `${label} duplicate question request/settlement (${String(requests.length)}/${String(settlements.length)})`)
         await exitC1Client(c2, `${label} C2`)
+        if (eligibilityProbe) {
+          const final = await waitLiveClient(false, liveSequence, 'T49 final Gateway eligibility')
+          liveSequence = final.sequence
+        }
         await stopC1Host(host)
-        trace(label, { hostPid: ready.pid, sessionId, callId, mode, c2Answer: 'Proceed', hostSettlements: settlements.length })
+        trace(label, {
+          hostPid: ready.pid,
+          sessionId,
+          callId,
+          mode,
+          c2Answer: 'Proceed',
+          hostSettlements: settlements.length,
+          ...(eligibilityProbe ? { gatewayEligibility: 'none>c1>none>c2>none', nonAnsweringPeer: 'refused' } : {}),
+        })
       }
 
       // T51: after the original Client is gone, a legal new TUI answers the
@@ -3366,7 +3431,9 @@ async function main() {
 
       // T52: the official TIMED question becomes a durable `continued` entry.
       // C2 reopens it from the Task Quick projection, submits a late answer,
-      // and the Host queues exactly one `user-question-reply` message.
+      // and the Host queues exactly one `user-question-reply` message. This is
+      // the official askTimed()/continued lifetime, NOT a 30-minute orphan
+      // expiry test.
       {
         const afterTimedBarrier = join(workDir, 't52-after-timed.release')
         const duplicateProbeBarrier = join(workDir, 't52-duplicate-probe.release')
@@ -3475,6 +3542,7 @@ async function main() {
         await c1.dispose()
         assert(alive(ready.pid), `${label} the Host died on the Client SIGKILL`)
         await assertHostIdentityKept(host, hostBefore, `${label} Host after Client detach`)
+        await assertPendingUnobservable(host, hostBefore, `${label} detached pending`)
         await sleep(300)
         assert(readC1WorkEvents(workRoot).every(event => !(event.kind === 'approval-settled')), `${label} the Client teardown settled the Host approval`)
         const { client: c2 } = await startC1Client(`${label.toUpperCase()} C2`, { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
@@ -3872,7 +3940,7 @@ async function main() {
       dshVersion: targetDshVersion,
       m4c1: 'PASS_REAL_SPLIT_PROCESS',
       t44t48: 'pass',
-      t49t55: 'pass (T49-T55, including the old-peer protocol negatives and same-PID HMR pending question/approval)',
+      t49t55: 'pass (T49-T55, including detached pending UNKNOWN, real Gateway owner-stream eligibility, the old-peer protocol negatives and same-PID HMR pending question/approval)',
       t56t59: 'pass',
       t60Status: 'PASS_REAL_SPLIT_PROCESS: T01-T60 split-process inventory and T26a restored identity completed; release gates pending the stage-final lane verdict',
       t26aArtifactMissing: 'pass (current main real artifact-absent + restored authenticated identity)',

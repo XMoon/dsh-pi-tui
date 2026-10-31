@@ -18,6 +18,8 @@
  *                 unowned-job
  *   C1_WORK_ROOT = private 0700 directory under the isolated work dir
  *   C1_HOLD_<NAME> = absolute barrier file path the smoke releases
+ *   C1_HAS_LIVE_CLIENT_PROBE = set to sample Gateway.hasLiveClient() transitions
+ *   C1_NON_ANSWERING_PEER_PROBE = absolute barrier path for the negative control
  */
 
 import { appendFileSync, chmodSync, existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
@@ -26,7 +28,7 @@ import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 export const name = 'm4-c1-host-work'
-export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents']
+export const inject = ['llm', 'tools', 'jobs', 'subagents', 'agents', 'typertGateway', 'connection']
 
 const SCENARIOS = new Set([
   'long-turn',
@@ -646,6 +648,61 @@ export function apply(ctx) {
         })
       })
     }
+  }
+
+  // M4-C2-B B1: observe the one official Gateway eligibility fact rc.4 exposes.
+  // `hasLiveClient()` reports whether ANY owner event stream is open; it never
+  // identifies a request, so the proof below only records a boolean transition
+  // and never infers a pending inventory or an expiry.
+  const liveClientProbe = process.env.C1_HAS_LIVE_CLIENT_PROBE
+  if (liveClientProbe !== undefined && liveClientProbe !== '') {
+    const gateway = ctx.get('typertGateway')
+    if (gateway === undefined) throw new Error('m4-c1-host-work: typertGateway is missing for the live-client probe')
+    let last
+    let sequence = 0
+    const sample = () => {
+      const value = gateway.hasLiveClient()
+      if (value === last) return
+      last = value
+      sequence += 1
+      record('has-live-client', { value, sequence })
+    }
+    sample()
+    const timer = setInterval(sample, 20)
+    timer.unref?.()
+    ctx.effect(() => () => clearInterval(timer))
+  }
+
+  // Negative control: a real in-process Peer that is not eligible to answer
+  // forwarded events must not open `$events`, and must not make
+  // `hasLiveClient()` true. Both services are official Host APIs; the fixture
+  // only observes the refusal and records its stable code.
+  const nonAnsweringProbe = process.env.C1_NON_ANSWERING_PEER_PROBE
+  if (nonAnsweringProbe !== undefined && nonAnsweringProbe !== '') {
+    const timer = setInterval(() => {
+      if (!existsSync(nonAnsweringProbe)) return
+      clearInterval(timer)
+      const gateway = ctx.get('typertGateway')
+      const connection = ctx.get('connection')
+      if (gateway === undefined || connection === undefined) {
+        record('non-answering-peer', { opened: false, code: 'service-unavailable' })
+        return
+      }
+      const peer = connection.createPeer({ principal: { kind: 'owner' }, interactions: 'none' })
+      gateway.wireStream.open('$events', { args: {} }, (async function* emptyUplink() {})(), peer, peer.signal).then(
+        stream => {
+          record('non-answering-peer', { opened: true, code: 'opened', liveClient: gateway.hasLiveClient() })
+          stream[Symbol.asyncIterator]().return?.()
+        },
+        error => {
+          record('non-answering-peer', { opened: false, code: error?.code ?? 'unknown', liveClient: gateway.hasLiveClient() })
+        },
+      ).finally(() => peer.dispose()).catch(error => {
+        record('non-answering-peer-failed', { error: error instanceof Error ? error.message : String(error) })
+      })
+    }, 20)
+    timer.unref?.()
+    ctx.effect(() => () => clearInterval(timer))
   }
 
   // Host-liveness unowned-Job qualification: start one real DSH Job with no

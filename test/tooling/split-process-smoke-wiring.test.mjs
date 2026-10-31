@@ -163,6 +163,12 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     'C1_SCENARIO',
     'C1_WORK_ROOT',
     'C1_UNOWNED_JOB_ARM',
+    'C1_HAS_LIVE_CLIENT_PROBE',
+    'C1_NON_ANSWERING_PEER_PROBE',
+    'has-live-client',
+    'non-answering-peer',
+    'gateway/interactions-forbidden',
+    'assertPendingUnobservable',
     'writeC1WorkFixture',
     'split-process-host-work',
     'hmr-revision-start',
@@ -250,4 +256,14 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     'the artifact-absence control must block the package-scope self-reference escape')
   assert.match(source, /profilesManifest/u,
     'the artifact-absence control must reject an enclosing profiles manifest carrying the candidate package name')
+})
+
+test('every real Client-detach recovery case observes the pending source as UNKNOWN', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const pendingChecks = source.match(/await assertPendingUnobservable\(host, hostBefore,/gu) ?? []
+  assert.equal(pendingChecks.length, 2,
+    'the detached pending UNKNOWN assertion must cover the Question detach loop (kill + clean exit) and the Approval outcome loop (allow + reject)')
+  assert.match(source, /event\.kind === 'has-live-client' && event\.value === value && event\.sequence > afterSequence/u)
+  assert.match(source, /C1_HAS_LIVE_CLIENT_PROBE: '1'/u)
+  assert.match(source, /C1_NON_ANSWERING_PEER_PROBE: nonAnsweringBarrier/u)
 })
