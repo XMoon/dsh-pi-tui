@@ -107,6 +107,11 @@ Mode selection is policy-driven, not branch-name-driven:
   materialized into `.dsh-dev-env`). It is only a legacy fallback when no tracked
   mode policy exists and never overrides `dsh-mode.json`.
 
+CI's `mise-toolchain` job follows the same split: npm mode validates the npm CLI
+and runs `mise run setup`; Source mode validates Node/pnpm and the tracked source
+config/task surface without running npm setup. The existing `prepare-dsh-source`
+and source jobs remain the authority for the exact-SHA distribution.
+
 ### npm mode
 
 The main worktree uses the tracked lockfile and the registry DSH package family.

@@ -316,8 +316,8 @@ of them only when the resolved DSH mode is `source`), `test:tmux`,
 in separate jobs, then a lifecycle-free `pack:artifact` candidate qualified by
 the eight packed-artifact smokes through `smoke:release`; the qualification job
 also runs `smoke:startup-strictness`. The `mise-toolchain` job installs the
-locked project toolchain, proves the DSH CLI version and the committed lock
-sidecar, and runs `mise run setup`. The remaining jobs
+locked project toolchain, proves the DSH CLI version and setup in npm mode, and
+proves the Source toolchain contract without running npm setup in source mode. The remaining jobs
 run `smoke:boundary`, `smoke:official-presets`, `compat:dsh:client-family`, the
 tarball smokes and `pnpm audit`. `split-process` runs only for an npm release
 tag: PR, main and next runs legitimately report it as `skipped`, and
