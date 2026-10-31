@@ -20,7 +20,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { startLocalClient } from '../../src/app/remote-process/client-bootstrap.ts'
 import { createControlDispatcher } from '../../src/app/remote-process/entry-control.ts'
-import { stopLocalClient } from '../../src/app/remote-process/local-client-entry.ts'
+import { stopLocalClient, surfaceStartupFailureLine } from '../../src/app/remote-process/local-client-entry.ts'
+import { LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
 import { collectHostEntryStatus } from '../../src/app/remote-process/host-bootstrap.ts'
 import { finishHostFailureCleanup, HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 import {
@@ -336,4 +337,22 @@ test('the B1 Client transport mounts exactly the three Node client halves and no
   assert.doesNotMatch(source, /openStream\s*:/u)
   assert.match(source, /interactions: 'answer'/u)
   assert.match(source, /streamBaseUrl: origin/u)
+})
+
+test('a surface startup build refusal states the code, preserved Host and explicit manual stop', () => {
+  const line = surfaceStartupFailureLine(
+    new LocalScopeError('HOST_BUILD_INCOMPATIBLE', 'local discovery: the live Host was built from a different payload'),
+  )
+  assert.match(line, /^HOST_BUILD_INCOMPATIBLE: /u)
+  assert.match(line, /has not been stopped or replaced/u)
+  assert.match(line, /explicitly stop that Host through its normal operating-system shutdown signal/u)
+  assert.match(line, /Automatic upgrade and migration of in-memory work are not supported/u)
+  // The refusal must not turn an unauthenticated registry candidate into a
+  // displayed PID/kill target or leak the private launch material.
+  assert.doesNotMatch(line, /\bpid\b|connectUrl|token|cookie|\/home\/|\/users\//iu)
+  // Other startup failures keep the existing surface diagnostic.
+  assert.equal(
+    surfaceStartupFailureLine(new LocalScopeError('HOST_UNRESPONSIVE', 'local discovery: identity route answered HTTP 503')),
+    'split client surface: local discovery: identity route answered HTTP 503',
+  )
 })
