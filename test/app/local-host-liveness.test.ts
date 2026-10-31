@@ -106,6 +106,15 @@ function provideSchedule(
 }
 
 /** Provide the two unobservable-in-rc.4 source owners. */
+/** Provide the Loader as the real Host Context exposes it (a direct property, not the reflect store). */
+function provideLoader(context: Context, entries: readonly Record<string, unknown>[]): void {
+  Object.defineProperty(context, 'loader', {
+    configurable: true,
+    value: { entries: () => entries },
+  })
+}
+
+/** Provide the two unobservable-in-rc.4 source owners. */
 function provideUnobservableOwners(context: Context): void {
   context.provide('typertGateway', {} as never)
   context.provide('sessionPersistence', {} as never)
@@ -127,6 +136,7 @@ test('an empty, fully covered Host observes quiescence', async () => {
   provideAgents(context, [])
   provideJobs(context, {})
   provideGoals(context, {})
+  provideLoader(context, [])
   const observer = new HostActivityObserver(context)
   try {
     const snapshot = await observer.snapshot()
@@ -304,6 +314,7 @@ test('an unmounted Schedule is ABSENT rather than UNKNOWN', async () => {
   provideAgents(context, [])
   provideJobs(context, {})
   provideGoals(context, {})
+  provideLoader(context, [])
   const observer = new HostActivityObserver(context)
   try {
     const snapshot = await observer.snapshot()
@@ -504,12 +515,10 @@ test('an active third-party Loader row is an unqualified Host source', async () 
   provideAgents(context, [])
   provideJobs(context, {})
   provideGoals(context, {})
-  context.provide('loader', {
-    entries: () => [
-      { options: { id: 'official', name: '@deepseek-ai/dsh-agent' }, fiber: { state: 2 } },
-      { options: { id: 'third-party', name: 'file:///tmp/third-party-plugin.mjs' }, fiber: { state: 2 } },
-    ],
-  } as never)
+  provideLoader(context, [
+    { options: { id: 'official', name: '@deepseek-ai/dsh-agent' }, fiber: { state: 2 } },
+    { options: { id: 'third-party', name: 'file:///tmp/third-party-plugin.mjs' }, fiber: { state: 2 } },
+  ])
   const observer = new HostActivityObserver(context)
   try {
     const snapshot = await observer.snapshot()
@@ -573,6 +582,23 @@ test('a failing Goal read is UNKNOWN rather than an empty goal source', async ()
   try {
     const snapshot = await observer.snapshot()
     assert.equal(snapshot.sourceStates.goal, 'UNKNOWN')
+    assert.ok(snapshot.reasons.includes('source-unavailable'))
+  } finally {
+    observer.close()
+    await disposeContext(context)
+  }
+})
+
+test('a missing Loader service is UNKNOWN rather than an implicitly empty Host', async () => {
+  const context = new Context()
+  provideAgents(context, [])
+  provideJobs(context, {})
+  provideGoals(context, {})
+  const observer = new HostActivityObserver(context)
+  try {
+    const snapshot = await observer.snapshot()
+    assert.equal(snapshot.sourceStates.other, 'UNKNOWN')
+    assert.equal(snapshot.verdict, 'UNKNOWN')
     assert.ok(snapshot.reasons.includes('source-unavailable'))
   } finally {
     observer.close()

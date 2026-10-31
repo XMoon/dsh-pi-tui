@@ -342,8 +342,17 @@ export class HostActivityObserver implements HostLivenessObserver {
     let state: HostActivitySourceState = 'IDLE'
     let maintenanceGap = false
     for (const agent of agents) {
-      const running = agent.status === 'running'
-      const pending = agent.inbox.nextTurn.length + agent.inbox.nextStep.length
+      let running: boolean
+      let pending: number
+      try {
+        running = agent.status === 'running'
+        pending = agent.inbox.nextTurn.length + agent.inbox.nextStep.length
+      } catch {
+        // A live registry entry that cannot be read is a coverage gap, never
+        // an idle Agent.
+        reasons.add('source-unavailable')
+        return { state: 'UNKNOWN', agents, readable: false }
+      }
       if (running) {
         reasons.add('agent-running')
         state = 'ACTIVE'
@@ -484,8 +493,13 @@ export class HostActivityObserver implements HostLivenessObserver {
 
   /** Active Loader rows outside the official/xmoon namespaces are unqualified. */
   private readOther(reasons: Set<ActivityReason>): HostActivitySourceState {
-    const loader = this.context.reflect.get('loader') as LoaderLike | undefined
-    if (loader === undefined) return 'IDLE'
+    // The Loader is a direct Context service, not a reflect-store entry: read
+    // the same owner property the Host readiness audit uses.
+    const loader = (this.context as unknown as { readonly loader?: LoaderLike }).loader
+    if (loader === undefined) {
+      reasons.add('source-unavailable')
+      return 'UNKNOWN'
+    }
     let entries: LoaderEntryLike[]
     try {
       entries = [...loader.entries()]

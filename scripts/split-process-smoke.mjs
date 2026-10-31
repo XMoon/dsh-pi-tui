@@ -1294,6 +1294,11 @@ async function main() {
     assert(startupLiveness.verdict !== 'OBSERVED_QUIESCENT', 'T01 the stock Host cannot prove quiescence with rc.4 pending/write gaps')
     assert(startupLiveness.reasons.includes('pending-interaction-unobservable'), 'T01 the pending-interaction gap is not reported')
     assert(startupLiveness.reasons.includes('inflight-write-unproven'), 'T01 the in-flight-write gap is not reported')
+    // The isolated profile always mounts one test-only file-URL row. Reading
+    // the REAL `context.loader` must surface it as an active unqualified Host
+    // source; a reflect-store probe would silently miss it and report IDLE.
+    assert(startupLiveness.sourceStates.other === 'UNKNOWN', 'T01 the unqualified test-only Host row was not observed through the real Loader')
+    assert(startupLiveness.reasons.includes('unqualified-host-source'), 'T01 the unqualified Host source reason is missing')
     const startupStatus = await hostStatus(mainHost)
     assert(startupStatus.liveness !== undefined, 'T01 a Host status request carries no liveness snapshot')
     assert(startupStatus.liveness.epoch >= startupLiveness.epoch, 'T01 the liveness epoch moved backwards')
