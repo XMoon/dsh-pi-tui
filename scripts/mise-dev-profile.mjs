@@ -25,15 +25,15 @@ function fail(message) {
   throw error
 }
 
-export function assertIsolatedHome(environment = process.env) {
+export function assertIsolatedHome(environment = process.env, command = 'mise run dev:profile') {
   const configured = environment.DSH_HOME
   if (typeof configured !== 'string' || configured.trim() === '') {
-    fail('DSH_HOME is not set; run this through `mise run dev:profile`')
+    fail(`DSH_HOME is not set; run this through \`${command}\``)
   }
   const realHome = resolve(homedir(), '.dsh')
   const selected = resolve(configured)
   if (selected === realHome || selected.startsWith(`${realHome}${sep}`)) {
-    fail('refusing to install the development profile into the real ~/.dsh; use the isolated DSH_HOME provided by `mise run dev:profile`')
+    fail(`refusing to install the development profile into the real ~/.dsh; use the isolated DSH_HOME provided by \`${command}\``)
   }
 }
 
