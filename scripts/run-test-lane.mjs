@@ -69,10 +69,18 @@ const AMBIENT_TERMINAL_ENV = Object.freeze([
   'PI_IMAGE_PROTOCOL', 'PI_TUI_TMUX_KITTY_IMAGES', 'PI_TUI_TMUX_KITTY_PLACEHOLDERS',
 ])
 
-/** The lane child environment without the developer's terminal identity. */
+/**
+ * An ambient global module path (for example a mise-managed DSH rc.5 store)
+ * must not make fixture `createRequire`/`require.resolve` calls select a
+ * different DSH family than this checkout's locked rc.4 graph. Tests that need
+ * a module set it explicitly; the lane child never inherits a global path.
+ */
+const AMBIENT_MODULE_ENV = Object.freeze(['NODE_PATH'])
+
+/** The lane child environment without the developer's terminal identity or global module paths. */
 export function sanitizeTestEnvironment(env = process.env) {
   const sanitized = { ...env }
-  for (const name of AMBIENT_TERMINAL_ENV) delete sanitized[name]
+  for (const name of [...AMBIENT_TERMINAL_ENV, ...AMBIENT_MODULE_ENV]) delete sanitized[name]
   return sanitized
 }
 
