@@ -15,8 +15,10 @@ import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+import { parse as parseYaml } from 'yaml'
 
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { REQUIRED_PHASES } from '../../scripts/ci-verdict.mjs'
 import { DSH_REPOSITORY } from '../../scripts/dsh-dev-context.mjs'
 import { _test as setupTest, runMiseSetup } from '../../scripts/mise-setup.mjs'
 import { _test as profileTest } from '../../scripts/mise-dev-profile.mjs'
@@ -143,9 +145,29 @@ writeFileSync(${JSON.stringify(record)}, 'spawned')
   chmodSync(fakePnpm, 0o755)
   assert.throws(
     () => runMiseSetup({ root, environment: { PATH: process.env.PATH, XDG_CACHE_HOME: join(root, 'cache'), PNPM_EXECUTABLE: fakePnpm } }),
-    /refuses mode=source/u,
+    /refuses the tracked source mode/u,
+  )
+  assert.throws(
+    () => runMiseSetup({ root, environment: { PATH: process.env.PATH, XDG_CACHE_HOME: join(root, 'cache'), PNPM_EXECUTABLE: fakePnpm, DSH_MODE: 'npm' } }),
+    /refuses the tracked source mode/u,
+    'a DSH_MODE override must not turn a tracked source worktree into a plain npm install',
   )
   assert.equal(existsSync(record), false, 'the source-mode guard must fail before pnpm install starts')
+})
+
+test('the CI mise-toolchain job is a required, SHA-pinned contract lane', () => {
+  const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'))
+  const job = workflow.jobs['mise-toolchain']
+  assert.notEqual(job, undefined, 'ci.yml must define the mise-toolchain job')
+  assert.equal(job.env.MISE_ENABLE_TOOLS, 'node,pnpm,npm:@deepseek-ai/dsh')
+  const setup = (job.steps ?? []).find(step => typeof step.uses === 'string' && step.uses.startsWith('jdx/mise-action@'))
+  assert.notEqual(setup, undefined, 'the job must use the official mise action')
+  assert.match(setup.uses, /@[0-9a-f]{40}$/u, 'the third-party action must be pinned to a full commit SHA')
+  assert.equal(setup.with.install, true)
+  const runText = (job.steps ?? []).map(step => step.run).filter(Boolean).join('\n')
+  assert.match(runText, /mise exec -- dsh --version/u)
+  assert.match(runText, /mise run setup/u)
+  assert.ok(REQUIRED_PHASES.includes('mise-toolchain'), 'the contract lane must block qualification')
 })
 
 test('the development profile refuses the real DSH home and an unbuilt checkout', (t) => {
