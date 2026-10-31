@@ -219,12 +219,24 @@ export function createInteractionStartupGate(): InteractionStartupGate {
 
 /** The official Remote service subset the qualification Peer observes. */
 interface PeerRemoteService {
-  readonly events?: {
-    answer?: (frame: { readonly event: string; readonly eventId: string }, clientId: string, signal?: AbortSignal) => Promise<unknown>
-  }
   readonly userQuestions?: {
     answer(sessionId: string, callId: string, answer: unknown): Promise<{ readonly ok: boolean; readonly value?: boolean; readonly error?: { readonly code?: string } }>
   }
+}
+
+/** Production fail-closed preflight for the interaction startup gate.
+ *
+ * The Gateway's event pump must not start merely because the Session plugin
+ * mounted: the official `typert.contexts` Agent resolver is the exact target
+ * every forwarded request needs. A missing resolver is a startup failure, not
+ * a later `next()` fallback that would irreversibly settle a Host request.
+ */
+export function assertInteractionStartupReady(
+  gate: { readonly pending: boolean },
+  agentResolver: unknown,
+): void {
+  if (!gate.pending) throw new Error('local client entry: the interaction startup gate failed before the transport install')
+  if (agentResolver === undefined) throw new Error('local client entry: the official Session Agent resolver did not install')
 }
 
 /** One pending forwarded interaction held by the non-TUI answering Peer. */
@@ -314,6 +326,40 @@ function createPeerInteractionSeat(
       for (const settle of [...pending.values()]) settle(PEER_ABORTED)
     },
   }
+}
+
+/** Qualification-only read-only observer of the official transport frames.
+ *  It records the Gateway `$events` clientId/eventId without changing any
+ *  Gateway method or frame. */
+function observeQualificationSocket(
+  socket: import('./local-transport.ts').ConnectionWebSocketLike,
+  emit: EntryRecordSink,
+): void {
+  let clientId: string | undefined
+  socket.addEventListener('message', event => {
+    const data: unknown = event.data
+    const text = typeof data === 'string'
+      ? data
+      : Buffer.isBuffer(data)
+        ? data.toString('utf8')
+        : data instanceof ArrayBuffer
+          ? Buffer.from(data).toString('utf8')
+          : ArrayBuffer.isView(data)
+            ? Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString('utf8')
+            : ''
+    if (text === '') return
+    const client = /"clientId":"([^"]+)"/u.exec(text)
+    if (client !== null) clientId = client[1]
+    const eventId = /"eventId":"([^"]+)"/u.exec(text)
+    if (eventId === null) return
+    const eventName = /"event":"([^"]+)"/u.exec(text)
+    emit({
+      m4a0: 'peer-frame',
+      event: eventName?.[1] ?? 'unknown',
+      eventId: eventId[1],
+      ...(clientId === undefined ? {} : { clientId }),
+    })
+  })
 }
 
 /**
@@ -610,6 +656,9 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         diag,
         signal: startupAbort.signal,
         onFatal: onTransportFatal,
+        ...(options.mode === 'peer'
+          ? { qualificationWebSocketObserver: (_url, socket) => observeQualificationSocket(socket, emit) }
+          : {}),
       })
       transport = installedTransport
       startupAbort.signal.throwIfAborted()
@@ -619,26 +668,6 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       const remote = clientContext.get('remote') as unknown as import('./client-interaction-delivery.ts').SplitClientInteractionEventsSource | undefined
       if (remote === undefined) throw new Error('local client entry: the official Client Remote service did not install')
       const remoteService = clientContext.get('remote') as unknown as PeerRemoteService | undefined
-      const peerFrames = new Map<string, { readonly clientId: string; readonly event: string }>()
-      if (options.mode === 'peer' && remoteService?.events?.answer !== undefined) {
-        // Test-only protocol observer: capture the official forwarded-event
-        // identity (clientId/eventId) and the frame before the real answerer
-        // runs. It never replaces the official dispatcher: the original method
-        // is called unbound on its own owner.
-        const events = remoteService.events
-        const originalAnswer = events.answer
-        if (originalAnswer === undefined) throw new Error('local client entry: the official Remote event dispatcher is unavailable')
-        events.answer = async function (frame, clientId, signal) {
-          peerFrames.set(String(frame.eventId), { clientId, event: frame.event })
-          emit({
-            m4a0: 'peer-frame',
-            event: frame.event,
-            eventId: String(frame.eventId),
-            clientId,
-          })
-          return await originalAnswer.call(events, frame, clientId, signal)
-        }
-      }
       // 4. Register the TWO official listeners EXACTLY ONCE for this Client
       // root, then release the gate. Only now may the Gateway start. The
       // surface mode borrows the root delivery owner; the qualification-only
@@ -651,11 +680,13 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       const typert = clientContext.get('typert') as unknown as {
         contexts: { getClient(name: string): unknown }
       } | undefined
+      const agentResolver = typert?.contexts.getClient('agent')
+      assertInteractionStartupReady(startupGate, agentResolver)
       emit({
         m4b2s: 'qualification',
         op: 'interaction-startup-gate',
         phase: 'listeners-ready',
-        agentResolver: typert?.contexts.getClient('agent') !== undefined,
+        agentResolver: agentResolver !== undefined,
         questionListeners: 1,
         approvalListeners: 1,
         loaderTasks: loader.getTasks().length,

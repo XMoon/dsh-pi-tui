@@ -113,6 +113,11 @@ export interface StartLocalTransportOptions {
   readonly scope: LocalScope
   /** Client entry diagnostics sink for the owned socket-opening task. */
   readonly diag: Diag
+  /** Qualification-only read-only observer of the official WebSocket carrier.
+   *  It never changes the socket or its frames; the Peer test uses it to
+   *  capture the official `$events` clientId/eventId without patching Gateway
+   *  internals. */
+  readonly qualificationWebSocketObserver?: (url: string, socket: ConnectionWebSocketLike) => void
   /**
    * Terminal transport failure. The Client entry must stop and report this
    * error; the official Connection loop must not silently retry a replaced
@@ -133,7 +138,7 @@ interface RawSocket {
 }
 
 /** Structural WebSocket surface accepted by the official Connection client. */
-interface ConnectionWebSocketLike {
+export interface ConnectionWebSocketLike {
   readonly readyState: number
   send(data: string): void
   close(code?: number, reason?: string): void
@@ -599,12 +604,17 @@ export async function installLocalTransport(
     await typertFiber
     options.signal?.throwIfAborted()
 
+    const createWebSocket = cookieWebSocketFactory(origin, () => cookie, refreshCookie, sockets, wrappers, diag, includeCookie)
     connectionFiber = context.plugin(connectionContext => {
       modules.connection.installConnection(connectionContext, {
         interactions: 'answer',
         transport: {
           fetch: cookieFetch(origin, () => cookie, includeCookie),
-          createWebSocket: cookieWebSocketFactory(origin, () => cookie, refreshCookie, sockets, wrappers, diag, includeCookie),
+          createWebSocket: url => {
+            const socket = createWebSocket(url)
+            options.qualificationWebSocketObserver?.(url, socket)
+            return socket
+          },
           streamBaseUrl: origin,
         },
       })
