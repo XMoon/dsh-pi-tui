@@ -198,8 +198,10 @@ obligation; `UNKNOWN` is the fail-closed answer for an unreadable, unloading or
 unexcluded source; `OBSERVED_QUIESCENT` describes only the covered sources in
 that transient window and is never a shutdown authorization, admission fence or
 reusable lifecycle decision. Sources the installed DSH runtime cannot enumerate
-remain `UNKNOWN`; the epoch invalidates overlapping reads but is not an atomic
-barrier.
+remain `UNKNOWN`; only explicitly qualified passive Loader rows are treated as
+idle, while any other active row (an official autonomous service, a
+third-party plugin or a future row) fails closed as an unqualified Host source.
+The epoch invalidates overlapping reads but is not an atomic barrier.
 
 ### Client composition, Session references and the real surface
 

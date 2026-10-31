@@ -510,6 +510,45 @@ test('a running child Agent contributes child-active', async () => {
   }
 })
 
+test('an official autonomous terminal-controller row is an unqualified Host source', async () => {
+  const context = new Context()
+  provideAgents(context, [])
+  provideJobs(context, {})
+  provideGoals(context, {})
+  provideLoader(context, [
+    { options: { id: 'terminal-controller', name: '@deepseek-ai/dsh-api-terminal-controller' }, fiber: { state: 2 } },
+  ])
+  const observer = new HostActivityObserver(context)
+  try {
+    const snapshot = await observer.snapshot()
+    assert.equal(snapshot.verdict, 'UNKNOWN')
+    assert.ok(snapshot.reasons.includes('unqualified-host-source'))
+    assert.equal(snapshot.sourceStates.other, 'UNKNOWN')
+  } finally {
+    observer.close()
+    await disposeContext(context)
+  }
+})
+
+test('a qualified stock Loader row is not treated as an unqualified source', async () => {
+  const context = new Context()
+  provideAgents(context, [])
+  provideJobs(context, {})
+  provideGoals(context, {})
+  provideLoader(context, [
+    { options: { id: 'agent', name: '@deepseek-ai/dsh-agent' }, fiber: { state: 2 } },
+  ])
+  const observer = new HostActivityObserver(context)
+  try {
+    const snapshot = await observer.snapshot()
+    assert.equal(snapshot.reasons.includes('unqualified-host-source'), false)
+    assert.equal(snapshot.sourceStates.other, 'IDLE')
+  } finally {
+    observer.close()
+    await disposeContext(context)
+  }
+})
+
 test('an active third-party Loader row is an unqualified Host source', async () => {
   const context = new Context()
   provideAgents(context, [])
