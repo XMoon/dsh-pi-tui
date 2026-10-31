@@ -64,7 +64,8 @@ import { createTspInteractionSeat, type TspContinuedRow, type TspInteractionSeat
 import { TspModelPicker } from './model-picker.ts'
 import { TspPresetPicker } from './preset-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
-import { nativeStatuslineRows } from './statusline-view.ts'
+import { nativeStatuslineRows, compileNativeFooterPresentation, type NativeFooterPresentation } from './statusline-view.ts'
+import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import { TspWorkHub } from './work-hub.ts'
 import {
   WORK_DETAILS_REGION,
@@ -335,6 +336,18 @@ export interface TspRenderer extends TspInputBinding {
    * installer, and it runs before the first business commit).
    */
   readonly bindStatusReader: (reader: StatusSnapshotReader) => void
+  /**
+   * TSP-7 PR-D: install the ONE-SHOT read-only footer config. Exactly like
+   * the reader: called once by the mount before the first status commit, a
+   * second binding or a post-disposal binding fails fast. An UNBOUND mount
+   * (a direct test mount) keeps the frozen PR-A/B default presentation —
+   * only the production composition root reads user settings.
+   *
+   * The config is a boot-time SNAPSHOT: hydration, session switches and
+   * status repaints never re-read it, and its notices are enqueued exactly
+   * once at bind time.
+   */
+  readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
   /**
    * Stop the input loop, close the surface + session ONCE. The promise
    * settles only after the SDK restored the tty (input drain included), so
@@ -777,6 +790,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let statusReader: StatusSnapshotReader | undefined
   /** TSP-7 PR-A: the one-time binding latch (a lifecycle fact, not a cache). */
   let statusReaderInstalled = false
+  /**
+   * TSP-7 PR-D: the compiled footer presentation of THIS mount (undefined =
+   * the frozen PR-A/B default — a direct test mount that never bound a
+   * config). Immutable for the renderer's whole life: the boot snapshot is
+   * compiled once at bind time and never re-read (a settings change needs a
+   * new TSP process, not a repaint).
+   */
+  let footerPresentation: NativeFooterPresentation | undefined
   /**
    * TSP-7 PR-A: the last FORMALLY COMMITTED, displayable snapshot reference.
    * It is a read-only presentation pointer — never patched, derived or
@@ -1977,12 +1998,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // text-link control (§4.1/§4.2).
     const actionsRow = composerActionsRow()
     if (actionsRow !== undefined) lines.push(actionsRow)
-    // TSP-7 PR-A: the two read-only native status rows follow the editor. They
-    // are projected from the LAST FORMALLY COMMITTED snapshot, and they are
-    // suppressed for the whole hydration window so an outgoing subject's status
-    // can never appear beside the incoming subject's transcript.
+    // TSP-7 PR-A/PR-D: the native status rows follow the editor. They are
+    // projected from the LAST FORMALLY COMMITTED snapshot through THIS
+    // mount's compiled footer presentation (the frozen PR-A/B default when
+    // no config was bound), and they are suppressed for the whole hydration
+    // window so an outgoing subject's status can never appear beside the
+    // incoming subject's transcript.
     if (presentedStatus !== undefined && !hydrating) {
-      lines.push(...nativeStatuslineRows(presentedStatus))
+      lines.push(...nativeStatuslineRows(presentedStatus, footerPresentation))
     }
     return ui.col({ key: 'dock' }, ...lines)
   }
@@ -2965,6 +2988,23 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (statusReaderInstalled) throw new Error('the TSP renderer status reader is already bound')
       statusReaderInstalled = true
       statusReader = reader
+    },
+    // TSP-7 PR-D: the one-shot footer config. The presentation compiles and
+    // the bounded notices enqueue BEFORE any render is triggered, so no frame
+    // can paint a half-configured footer (the reentrancy rule: commit the
+    // decided state, then notify). The notices ride the dock's ordinary
+    // notice lifecycle — they survive the first frame and the first
+    // setTranscript, and `beginSessionHydration` deliberately does NOT
+    // re-issue them (the config belongs to the MOUNT, not a subject).
+    bindNativeFooterConfig: (config) => {
+      if (disposed) throw new Error('cannot bind the footer config after TSP renderer disposal')
+      if (footerPresentation !== undefined) throw new Error('the TSP renderer footer config is already bound')
+      // Compile first: a throwing compile (a hostile layout) leaves the
+      // renderer in the clean unbound state instead of half-installed. The
+      // compile also decides the renderer-owned unavailable-items notice
+      // (a registry fact, never a domain builtin-list copy).
+      footerPresentation = compileNativeFooterPresentation(config)
+      for (const text of footerPresentation.notices) display.notify(text)
     },
     bindInput: (handlers) => {
       if (disposed) throw new Error('the TSP renderer is disposed')

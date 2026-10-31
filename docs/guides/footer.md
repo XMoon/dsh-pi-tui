@@ -637,6 +637,45 @@ A layout currently contains one or two logical rows. Physical wrapping is
 bounded by the Footer's surface budget so Footer chrome cannot grow without
 limit and crowd the transcript/editor off screen.
 
+## Experimental TSP renderer compatibility
+
+The experimental TSP renderer (`DSH_PI_TUI_RENDERER=tsp`) reads the SAME
+persisted footer settings as the default PiTui renderer — there is no second
+`/footer`, no TSP-specific settings key, and nothing to configure twice.
+
+Compatibility is read-only and applied once per TSP start:
+
+| Setting | TSP behavior |
+| --- | --- |
+| `footer: default` / `full` | The two native status rows, unchanged. |
+| `footer: compact` | ONE native status row (the TSP compact preset: permission, cwd, git, run on the left; plan, tasks, context on the right). |
+| `footer: custom` (valid layout) | The persisted 1–2 row layout: builtin items and Custom Text render at their saved placement, Style, Tone, Prefix/Suffix and Importance. A duplicated item id keeps one segment per placement. |
+| `footer: custom` (invalid layout) | The default two rows plus a dock notice; the saved layout is preserved untouched. |
+| `footer: command` | Never executed in TSP. The persisted `footerFallbackMode` native layout is shown instead (default/compact/custom), with a one-time dock notice. |
+| Custom Command items (`kind: command`) | Not executed. Their placement shows `Unavailable: <name>` with a one-time notice. |
+| Extension Footer items (`ext:*`, `ext:<owner>/<id>`) | Not available in TSP. Their placement shows `Unavailable: extension` with a one-time notice. |
+| Custom row `separator` | Not supported by the native status rows. Standard spacing is used and a one-time notice states it; the setting is preserved. |
+| `view-scope` | Retired inert item: renders nothing, never an error. |
+
+Rules that follow from the read-only projection:
+
+- **Boot-time snapshot.** The footer config is read once when the TSP process
+  mounts. Changing footer settings from outside (or editing the settings file)
+  requires restarting the TSP session to take effect; PiTui's `/footer` and
+  `/reload` behavior is unchanged.
+- **Settings are never rewritten.** An unsupported mode or item degrades to a
+  native fallback plus a dock notice — the persisted document is preserved
+  byte-for-byte.
+- **Trust boundary unchanged.** Custom Command items and the whole-footer
+  command keep their USER-layer trust rules; TSP executes none of them, so a
+  project-layer config can never trigger execution through the TSP renderer.
+- **Unknown `user:*` references and unknown ids** show `Unavailable: item` at
+  their placement instead of being silently dropped or guessed.
+- `/footer` and `/statusline` remain PiTui-only configurators; they are not
+  reachable inside a TSP session.
+- Very short panes (roughly under six rows) remain a known limitation for the
+  whole dock; this is not a footer-config loss.
+
 ## Raw settings reference
 
 Most users should prefer `/footer`. The raw settings form is useful for

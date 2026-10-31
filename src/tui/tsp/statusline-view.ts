@@ -1,5 +1,5 @@
 /**
- * TSP-7 PR-A: the native statusline projection — the TSP renderer's two
+ * TSP-7 PR-A/PR-B/PR-D: the native statusline projection — the TSP renderer's
  * read-only `ui.status` rows built from the ONE committed `StatusSnapshot`.
  *
  * This module is a PURE projection: no IO, no timers, no filesystem, no
@@ -9,10 +9,21 @@
  * re-implements a token/context/permission formatter and never parses the
  * ANSI output of `FooterComposer.render()`.
  *
- * The item set, formats, keys, sides and priorities are the frozen PR-A
- * minimum (see the PR-A plan §1.2). Every item omits itself when its fact is
- * absent, and a row with no segment produces no `status` node at all — the
- * dock never shows a blank native status line.
+ * Modes (PR-D):
+ * - `default` — the frozen PR-A/PR-B two-row shape (byte-for-byte the same
+ *   item set/keys/priorities; PR-D must not change it).
+ * - `compact` — the plan's OWN fixed single native row (NOT the PiTui
+ *   `COMPACT_FOOTER_LAYOUT`): permission, cwd, git, run on the left; plan,
+ *   the attention badge and the context pressure on the right, with the
+ *   right-side facts above the environment ones so a narrow pane keeps them.
+ * - `custom` — the validated `FooterLayoutV1` placements, each rendered by
+ *   its OWN registry definition at `preferred` density; unsupported refs
+ *   (USER command items, extension items, unknown ids) keep their placement
+ *   with a visible `Unavailable` marker — they are never silently dropped.
+ *
+ * Every item omits itself when its fact is absent, and a row with no segment
+ * produces no `status` node at all — the dock never shows a blank native
+ * status line.
  * @module @xmoon76/dsh-pi-tui/tui/tsp/statusline-view
  */
 
@@ -20,7 +31,14 @@ import { ui } from '@stencil-hq/tern'
 import type { Node, Tone } from '@stencil-hq/tern'
 import type { StatusSnapshot } from '../../domain/status/types.ts'
 import { createBuiltinFooterRegistry } from '../footer/builtin-items.ts'
-import type { FooterItemDefinition, FooterRenderContext, FooterTone } from '../footer/presentation-types.ts'
+import { FooterCustomItemCatalog } from '../footer/custom-item-catalog.ts'
+import type { FooterItemDefinition, FooterRenderContext } from '../footer/presentation-types.ts'
+import type { FooterItemRef, FooterLayoutV1, FooterTone } from '../footer/presentation-types.ts'
+import { customItemName, CUSTOM_FOOTER_ITEM_PREFIX } from '../../domain/footer/custom-items.ts'
+import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
+import { sanitizedPhysicalLine } from '../presentation/lines.ts'
+import { clampMiddle } from './picker-text.ts'
+import { TSP_FOOTER_NOTICES } from '../../domain/footer/tsp-native-config.ts'
 
 /**
  * The immutable builtin-only registry. It is created ONCE at module load: a
@@ -103,6 +121,24 @@ const ROW_TWO: readonly StatuslineItem[] = [
   { id: 'context', format: 'percent', key: 'status-r2-context', icon: 'context', side: 'right', priority: PRIORITY.context },
 ]
 
+/**
+ * PR-D: the TSP compact preset — ONE native row, in the plan's fixed segment
+ * order (§2.2). It is deliberately NOT the PiTui `COMPACT_FOOTER_LAYOUT`: no
+ * Model (the Composer owns it), no stats row, and the right-side attention
+ * and context facts sit ABOVE the left environment ones so a narrow pane that
+ * drops by priority keeps them (`tasks` 110 > run 105 > context 109 > plan
+ * 100 > permission 95 > cwd 50 > git 30).
+ */
+const COMPACT_ROW: readonly StatuslineItem[] = [
+  { id: 'permission-preset', format: 'compact', key: 'status-r1-permission', icon: 'shield', priority: 95 },
+  { id: 'cwd', format: 'basename', key: 'status-r1-cwd', icon: 'folder', priority: 50 },
+  { id: 'git-branch', format: 'plain', key: 'status-r1-git', icon: 'git-branch', priority: 30 },
+  { id: 'run-state', format: 'plain', key: 'status-r1-run', icon: 'run', density: 'compact', priority: 105 },
+  { id: 'plan-state', format: 'plain', key: 'status-r1-plan', icon: 'plan', side: 'right', priority: 100 },
+  { id: 'tasks', format: 'badge', key: 'status-r1-attention', icon: 'tasks', side: 'right', density: 'compact', priority: 110 },
+  { id: 'context', format: 'percent', key: 'status-r1-context', icon: 'context', side: 'right', priority: 109 },
+]
+
 /** Resolve one builtin definition; an unknown id is an internal contract break. */
 function definition(id: string): FooterItemDefinition {
   const def = registry.get(id)
@@ -179,16 +215,202 @@ function rowSegments(snapshot: StatusSnapshot, items: readonly StatuslineItem[])
   return segments
 }
 
+// ── PR-D: the configured native presentation ───────────────────────────────
+
+/**
+ * The compiled per-mount presentation of one `TspNativeFooterConfig`: the
+ * mode, the validated layout (custom only) and the ONE registry carrying the
+ * builtin definitions plus the USER text definitions. It is built once per
+ * TSP mount and never rebuilt per frame.
+ */
+export interface NativeFooterPresentation {
+  readonly mode: 'default' | 'compact' | 'custom'
+  readonly layout: FooterLayoutV1 | undefined
+  /** The mount-local registry (builtins + the USER text catalog). */
+  readonly registry: FooterCustomItemCatalog
+  /** The USER-layer command definition ids (rendered unavailable). */
+  readonly userCommandIds: ReadonlySet<string>
+  /**
+   * The notices this mount enqueues at bind time: the resolver's own plus the
+   * renderer-decided unavailable-items notice (a registry fact).
+   */
+  readonly notices: readonly string[]
+}
+
+/**
+ * Compile one boot-time footer config into the renderer's immutable
+ * presentation. The layout and the item classification were already decided
+ * by the domain resolver; this step only attaches the USER text definitions
+ * to a MOUNT-LOCAL registry (never the module-level builtin-only one).
+ *
+ * The returned notices are the renderer-owned ones the resolver could not
+ * decide (the domain must not carry a second builtin id list): whether a
+ * custom layout actually references an item with no renderable definition —
+ * a USER command item, an extension item or an unknown id — is a REGISTRY
+ * fact, decided here against the real definitions.
+ */
+export function compileNativeFooterPresentation(config: TspNativeFooterConfig): NativeFooterPresentation {
+  const notices = [...config.notices]
+  if (config.mode === 'custom' && config.layout !== undefined) {
+    const catalog = new FooterCustomItemCatalog(config.userTextItems)
+    let unsupported = false
+    for (const row of config.layout.rows) {
+      for (const ref of [...row.left, ...row.right]) {
+        if (ref.id === 'view-scope') continue // the retired inert builtin
+        if (isExtensionId(ref.id)) { unsupported = true; continue }
+        const def = catalog.definition(ref.id) ?? (ref.id === 'ext:*' ? undefined : registry.get(ref.id))
+        if (def === undefined) unsupported = true
+      }
+    }
+    if (unsupported && !notices.includes(TSP_FOOTER_NOTICES.unavailableItems)) {
+      notices.push(TSP_FOOTER_NOTICES.unavailableItems)
+    }
+    return { mode: config.mode, layout: config.layout, registry: catalog, userCommandIds: config.userCommandIds, notices }
+  }
+  return {
+    mode: config.mode,
+    layout: config.layout,
+    registry: new FooterCustomItemCatalog(config.userTextItems),
+    userCommandIds: config.userCommandIds,
+    notices,
+  }
+}
+/** The visibility bound of an unavailable item's clamped name (cells). */
+const UNAVAILABLE_NAME_CELLS = 18
+
+/**
+ * The visible marker for one unsupported placement. The label never carries
+ * the underlying command string or plugin path — only the user-facing name
+ * (for a USER command item) or the fixed kind word.
+ */
+function unavailableText(kind: 'item' | 'extension' | 'command', name?: string): string {
+  if (kind === 'command' && name !== undefined && name !== '') {
+    return `Unavailable: ${clampMiddle(sanitizedPhysicalLine(name), UNAVAILABLE_NAME_CELLS)}`
+  }
+  return `Unavailable: ${kind}`
+}
+
+/** One unsupported placement's native shape: the warning marker. */
+function unavailableSeg(kind: 'item' | 'extension' | 'command', name?: string): { text: string; tone: Tone } {
+  return { text: unavailableText(kind, name), tone: 'warning' as const }
+}
+
+/** Whether an id belongs to the extension namespace (`ext:…`). */
+function isExtensionId(id: string): boolean {
+  return id.startsWith('ext:')
+}
+
+/**
+ * Render one custom placement through its registry definition at `preferred`
+ * density, or return the placement's unavailable marker. Returns `undefined`
+ * only for a legitimately absent fact (the item renders nothing) and for the
+ * retired inert `view-scope` item. The returned importance is the user's
+ * override when present, otherwise the resolved definition's default (the
+ * unavailable markers use the fixed plan priority 70).
+ */
+function customRefSegments(
+  snapshot: StatusSnapshot,
+  presentation: NativeFooterPresentation,
+  ref: FooterItemRef,
+  side: 'left' | 'right',
+): { text: string; tone: Tone | undefined; importance: number } | undefined {
+  // The retired viewer identity block stays INERT (registered, renders
+  // nothing) — not an unsupported marker and never an error.
+  if (ref.id === 'view-scope') return undefined
+  const def = presentation.registry.definition(ref.id) ?? (ref.id === 'ext:*' ? undefined : registry.get(ref.id))
+  // Extension items (the legacy `ext:*` bridge and owned `ext:<owner>/<id>`
+  // items) are EXPLICIT_UNAVAILABLE in TSP: no extension state exists on this
+  // renderer, and the synthetic builtin must not fabricate an empty bridge.
+  if (isExtensionId(ref.id)) {
+    return { ...unavailableSeg('extension'), importance: ref.importance ?? 70 }
+  }
+  if (ref.id.startsWith(CUSTOM_FOOTER_ITEM_PREFIX)) {
+    if (def === undefined) {
+      // A USER command definition (classified by the resolver) or an unknown
+      // `user:*` ref: the name is user-facing text, never the command string.
+      const kind = presentation.userCommandIds.has(ref.id) ? 'command' : 'item'
+      return { ...unavailableSeg(kind, customItemName(ref.id)), importance: ref.importance ?? 70 }
+    }
+  } else if (def === undefined) {
+    return { ...unavailableSeg('item'), importance: ref.importance ?? 70 }
+  }
+  const segment = def.render(snapshot, ref, 'preferred', NO_SURFACE_HINTS)
+  if (segment === null) return undefined
+  if (segment.spans.length === 0) return undefined
+  // The LAST output boundary: every span text and the user prefix/suffix pass
+  // the one-physical-line sanitization before entering `ui.seg` (the builtins
+  // already sanitize their own facts; a USER text item or a hostile snapshot
+  // fact must not smuggle C0/C1 or OSC/CSI through the dock).
+  let text = sanitizedPhysicalLine(segment.spans.map(span => span.text).join(''))
+  if (text === '') return undefined
+  // The user's prefix/suffix are display decoration for a REAL rendering
+  // only — an unavailable placeholder never carries them.
+  if (ref.prefix !== undefined) text = `${sanitizedPhysicalLine(ref.prefix)}${text}`
+  if (ref.suffix !== undefined) text = `${text}${sanitizedPhysicalLine(ref.suffix)}`
+  const refTone = ref.tone !== undefined && ref.tone !== 'auto' ? nativeTone(ref.tone) : undefined
+  const tone = refTone !== undefined
+    ? refTone
+    : nativeTone(segment.spans.find(span => span.tone !== undefined)?.tone)
+  return { text, tone, importance: ref.importance ?? def.defaultImportance }
+}
+
+/**
+ * The custom rows: one `ui.status` per layout row (1..2), each with the
+ * left-zone and right-zone segments in their persisted placement order.
+ * Keys are derived from the STABLE PLACEMENT PATH (row/zone/index) — never
+ * from the bare user id — so a duplicate id keeps two independent segments.
+ */
+function customRows(snapshot: StatusSnapshot, presentation: NativeFooterPresentation): readonly Node[] {
+  const layout = presentation.layout
+  if (layout === undefined) return []
+  const rows: Node[] = []
+  for (const [rowIndex, row] of layout.rows.entries()) {
+    const rowNumber = rowIndex + 1
+    const segments: Node[] = []
+    for (const [zone, refs] of [['left', row.left], ['right', row.right]] as const) {
+      for (const [index, ref] of refs.entries()) {
+        const rendered = customRefSegments(snapshot, presentation, ref, zone)
+        if (rendered === undefined) continue
+        segments.push(ui.seg({
+          key: `footer-r${rowNumber}-${zone[0]}${index}`,
+          text: rendered.text,
+          ...(rendered.tone === undefined ? {} : { tone: rendered.tone }),
+          ...(zone === 'left' ? {} : { side: 'right' as const }),
+          priority: rendered.importance,
+        }))
+      }
+    }
+    if (segments.length > 0) rows.push(ui.status({ key: `status-row-${rowNumber}` }, ...segments))
+  }
+  return rows
+}
+
 /**
  * The two PR-A native status rows for one committed snapshot, in the frozen
  * order (row 1 then row 2). A row without a single present item contributes
  * no node, so the dock never paints an empty status line.
  */
-export function nativeStatuslineRows(snapshot: StatusSnapshot): readonly Node[] {
-  const rows: Node[] = []
-  const rowOne = rowSegments(snapshot, ROW_ONE)
-  if (rowOne.length > 0) rows.push(ui.status({ key: 'status-row-1' }, ...rowOne))
-  const rowTwo = rowSegments(snapshot, ROW_TWO)
-  if (rowTwo.length > 0) rows.push(ui.status({ key: 'status-row-2' }, ...rowTwo))
-  return rows
+export function nativeStatuslineRows(snapshot: StatusSnapshot): readonly Node[]
+/**
+ * PR-D: the configured projection. With a presentation the mode decides the
+ * shape (`default` keeps the frozen PR-A/B rows; `compact` is the fixed TSP
+ * single row; `custom` walks the validated layout); without one the frozen
+ * default stays byte-for-byte (an unconfigured mount keeps PR-A/B).
+ */
+export function nativeStatuslineRows(snapshot: StatusSnapshot, presentation: NativeFooterPresentation | undefined): readonly Node[]
+export function nativeStatuslineRows(snapshot: StatusSnapshot, presentation?: NativeFooterPresentation): readonly Node[] {
+  if (presentation === undefined || presentation.mode === 'default') {
+    const rows: Node[] = []
+    const rowOne = rowSegments(snapshot, ROW_ONE)
+    if (rowOne.length > 0) rows.push(ui.status({ key: 'status-row-1' }, ...rowOne))
+    const rowTwo = rowSegments(snapshot, ROW_TWO)
+    if (rowTwo.length > 0) rows.push(ui.status({ key: 'status-row-2' }, ...rowTwo))
+    return rows
+  }
+  if (presentation.mode === 'compact') {
+    const row = rowSegments(snapshot, COMPACT_ROW)
+    if (row.length > 0) return [ui.status({ key: 'status-row-1' }, ...row)]
+    return []
+  }
+  return customRows(snapshot, presentation)
 }

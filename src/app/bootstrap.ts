@@ -2848,6 +2848,11 @@ export function applyRunnerWithRuntime(
     try {
       rendererMount = await selectRendererMount({
         log: (message, fields) => diag.info(message, fields),
+        // TSP-7 PR-D: the boot-time footer projection source. The resolver is
+        // evaluated ONLY inside the TSP mount (never on the PiTui path or a
+        // declined connect) — the settings owner performs the read-only
+        // readiness-gated ConfigPort read.
+        resolveFooterConfig: () => settings.resolveTspFooterConfig(),
         connectTsp: productionTspConnector({
           cwd,
           requestExit: () => requestExit(),

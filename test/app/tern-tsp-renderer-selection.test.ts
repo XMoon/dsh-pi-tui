@@ -41,6 +41,7 @@ import {
 } from '../../src/app/surface/runtime.ts'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
+import { resolveTspNativeFooterConfig } from '../../src/domain/footer/tsp-native-config.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
@@ -205,6 +206,10 @@ async function selectRenderer(options: {
   })
   return selectRendererMount({
     log: (): void => {},
+    // PR-D: the production footer resolver slot. These selection tests do
+    // not exercise the footer projection; the fixed default projection keeps
+    // the mount honest without faking a USER config authority.
+    resolveFooterConfig: () => resolveTspNativeFooterConfig({ doc: { footer: 'default' }, readiness: 'ready', userItems: { items: [], invalidCount: 0 } }),
     connectTsp: async () => {
       options.onConnect?.()
       return await production()
