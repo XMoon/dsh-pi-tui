@@ -14,7 +14,7 @@
  *
  * Scenario protocol (frozen):
  *   C1_SCENARIO = long-turn | foreground-tool | job | child | question |
- *                 approval-allow | approval-reject
+ *                 approval-allow | approval-reject | goal | maintenance | schedule
  *   C1_WORK_ROOT = private 0700 directory under the isolated work dir
  *   C1_HOLD_<NAME> = absolute barrier file path the smoke releases
  */
@@ -35,6 +35,11 @@ const SCENARIOS = new Set([
   'question',
   'approval-allow',
   'approval-reject',
+  // Host-liveness qualification scenarios. They only reach official Host
+  // services (`goals`, `schedule`, `Agent.runMaintenance`) and record facts.
+  'goal',
+  'maintenance',
+  'schedule',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -260,6 +265,14 @@ class C1Model extends LlmAdapter {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: `question answered ${token}` }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `question answered ${token}` } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+
+    if (this.scenario === 'goal' || this.scenario === 'maintenance' || this.scenario === 'schedule') {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: `${this.scenario} answer ${token}` }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: `${this.scenario} answer ${token}` } }
       yield { type: 'finish', reason: { kind: 'stop' } }
       return
     }
@@ -518,6 +531,119 @@ export function apply(ctx) {
       }
     }, 20)
     ctx.effect(() => () => clearInterval(timer))
+  }
+
+  // M4-C2-A liveness scenarios: produce one official source fact only after
+  // the first real turn, so the Agent is idle at the moment the fact exists.
+  // Every step uses the official Host owner; the fixture only records.
+  if (scenario === 'goal' || scenario === 'maintenance' || scenario === 'schedule') {
+    let sawRunning = false
+    let armed = false
+    const afterFirstTurn = (callback) => {
+      ctx.on('agent/status', ({ agent, status }) => {
+        if (status === 'running') {
+          sawRunning = true
+          return
+        }
+        if (status !== 'idle' || !sawRunning || armed) return
+        if (!ctx.agents.roots().includes(agent)) return
+        armed = true
+        setTimeout(() => { callback(agent) }, 0)
+      })
+    }
+    if (scenario === 'goal') {
+      // The REAL goal-round-driver owns the automatic reservation; this
+      // fixture only creates the governing Goal record through the service.
+      ctx.on('agent/inbox/inserted', ({ agent, message }) => {
+        const source = message?.source
+        if (source?.kind !== 'goal') return
+        record('goal-round-observed', {
+          agentId: String(agent.id),
+          agentStatus: agent.status,
+          goalId: String(source.goalId),
+          revision: source.revision,
+          round: source.round,
+          inboxNextTurn: agent.inbox.nextTurn.length,
+          inboxNextStep: agent.inbox.nextStep.length,
+        })
+      })
+      afterFirstTurn(agent => {
+        const goals = ctx.get('goals')
+        if (goals === undefined) {
+          record('goal', { phase: 'unavailable' })
+          return
+        }
+        try {
+          const view = goals.create(agent, { objective: 'M4-C2-A qualification goal', maxGoalRounds: 1 })
+          record('goal-created', {
+            agentId: String(agent.id),
+            goalId: String(view.id),
+            revision: view.revision,
+            goalPhase: view.phase,
+            activation: view.activation,
+          })
+        } catch (error) {
+          record('goal-create-failed', {
+            agentId: String(agent.id),
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      })
+    }
+    if (scenario === 'maintenance') {
+      afterFirstTurn(agent => {
+        const release = join(root, 'maintenance.release')
+        record('maintenance', { phase: 'before', agentId: String(agent.id), agentStatus: agent.status })
+        agent.runMaintenance(async (signal) => {
+          record('maintenance', { phase: 'running', agentId: String(agent.id), agentStatus: agent.status })
+          while (!existsSync(release)) {
+            if (signal?.aborted === true) throw signal.reason ?? new Error('m4-c1-host-work: maintenance aborted')
+            await new Promise(resolveWait => setTimeout(resolveWait, 20))
+          }
+          record('maintenance', { phase: 'released', agentId: String(agent.id) })
+          return 'released'
+        }).then(
+          () => { record('maintenance', { phase: 'settled', agentId: String(agent.id), agentStatus: agent.status }) },
+          error => { record('maintenance', { phase: 'failed', agentId: String(agent.id), error: error instanceof Error ? error.message : String(error) }) },
+        )
+      })
+    }
+    if (scenario === 'schedule') {
+      afterFirstTurn(agent => {
+        const schedule = ctx.get('schedule')
+        if (schedule === undefined) {
+          record('schedule', { phase: 'unavailable' })
+          return
+        }
+        schedule.create(agent.id, {
+          prompt: 'M4-C2-A qualification schedule task',
+          title: 'M4-C2-A qualification schedule task',
+          after_seconds: 600,
+        }).then(view => {
+          record('schedule-created', {
+            agentId: String(agent.id),
+            scheduleId: String(view.id),
+            status: 'active',
+          })
+          const deleteBarrier = join(root, 'schedule.delete')
+          const timer = setInterval(() => {
+            if (!existsSync(deleteBarrier)) return
+            clearInterval(timer)
+            schedule.delete({ sessionId: agent.id, id: view.id }).then(
+              result => { record('schedule-deleted', { scheduleId: String(view.id), deleted: result.deleted, code: result.code }) },
+              error => { record('schedule-delete-failed', { scheduleId: String(view.id), error: error instanceof Error ? error.message : String(error) }) },
+            )
+          }, 20)
+          timer.unref?.()
+          ctx.effect(() => () => clearInterval(timer))
+        }, error => {
+          record('schedule-create-failed', {
+            agentId: String(agent.id),
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
+      })
+    }
   }
 
   if (scenario === 'foreground-tool') {

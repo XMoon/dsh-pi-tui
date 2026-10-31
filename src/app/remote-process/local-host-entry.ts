@@ -34,6 +34,7 @@ import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { attachEntryControl, createEntryDiag, writeEntryRecord } from './entry-control.ts'
+import { HostActivityObserver } from './host-liveness.ts'
 import {
   bindProcessSeat,
   installedPackageRootFromEntry,
@@ -377,6 +378,7 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
 
   let handle: Awaited<ReturnType<OfficialDshModules['runProfile']>> | undefined
   let registration: PublishedLocalHost | undefined
+  let liveness: HostActivityObserver | undefined
   try {
     const scratchDir = mkdtempSync(join(scope.dir, 'host-scratch-'))
     scratchOwner.scratchDir = scratchDir
@@ -421,6 +423,10 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
       const { settleHostEntries, collectHostEntryStatus } = await import('./host-bootstrap.ts')
       await settleHostEntries(handle.ctx)
       const status = collectHostEntryStatus(handle.ctx, { profile: options.profile, processStartIdentity })
+      // Installed after the Host readiness audit and before Ready. The
+      // observer is Host-process-local: it subscribes to the official live
+      // signals and never owns or stops any DSH business work.
+      liveness = new HostActivityObserver(handle.ctx)
       // R1: signal admission is process-lifetime and precedes the discoverable
       // registry. A signal inside the publication gap becomes ONE pending stop
       // intent; it cannot default-terminate the process and cannot create a
@@ -435,6 +441,11 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         shuttingDown = true
         stopping = (async () => {
           const errors: Array<{ step: string; error: unknown }> = []
+          try {
+            liveness?.close()
+          } catch (error) {
+            errors.push({ step: 'liveness-close', error })
+          }
           // runProfile already consumed the Host-only overlay. Remove only this
           // process's own scratch under the real scope; a removal failure is one
           // collected cleanup step and must never truncate the official shutdown.
@@ -560,13 +571,16 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         releaseSignalAdmission()
         return
       }
-      writeEntryRecord({ m4a0: 'ready', ...status, localHost: publishedHost.identity })
+      const initialLiveness = await liveness.snapshot()
+      writeEntryRecord({ m4a0: 'ready', ...status, liveness: initialLiveness, localHost: publishedHost.identity })
       attachEntryControl(async request => {
         if (request.op === 'status') {
+          const snapshot = await liveness!.snapshot()
           writeEntryRecord({
             m4a0: 'status',
             ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
             ...collectHostEntryStatus(handle!.ctx, { profile: options.profile, processStartIdentity }),
+            liveness: snapshot,
             localHost: publishedHost.identity,
           })
           return false
@@ -614,6 +628,19 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
           pid: process.pid,
           step: 'settle-before-shutdown',
           error: priorCleanupFailure,
+        })
+      }
+      try {
+        liveness?.close()
+      } catch (cleanupError) {
+        priorCleanupFailure ??= cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        writeEntryRecord({
+          m4a0: 'cleanup-failure',
+          processRole: 'host',
+          phase: 'after-boot',
+          pid: process.pid,
+          step: 'liveness-close',
+          error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
         })
       }
       try {

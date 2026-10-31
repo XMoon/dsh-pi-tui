@@ -1280,6 +1280,23 @@ async function main() {
       assert(hostReady.entries?.find(entry => entry.id === id)?.state === 'absent', `T01 ${id} is not absent`)
     }
     assert(Object.values(hostReady.services ?? {}).every(Boolean), 'T01 not all Host prerequisites reported present')
+    // Host liveness: the ready record and every later status carry one fresh
+    // read-only snapshot. The stock Host must report the unmounted Schedule as
+    // ABSENT and must not claim quiescence while rc.4's pending-interaction
+    // and in-flight-write gaps remain unobservable.
+    const startupLiveness = hostReady.liveness
+    assert(startupLiveness !== undefined, 'T01 the Host ready record carries no liveness snapshot')
+    assert(['BLOCKED', 'UNKNOWN', 'OBSERVED_QUIESCENT'].includes(startupLiveness.verdict), `T01 invalid liveness verdict ${JSON.stringify(startupLiveness.verdict)}`)
+    for (const source of ['agent', 'jobs', 'goal', 'schedule', 'pending', 'write', 'other']) {
+      assert(['ACTIVE', 'IDLE', 'ABSENT', 'UNKNOWN'].includes(startupLiveness.sourceStates?.[source]), `T01 liveness source ${source} missing or invalid: ${JSON.stringify(startupLiveness.sourceStates)}`)
+    }
+    assert(startupLiveness.sourceStates.schedule === 'ABSENT', 'T01 the stock Host must report Schedule ABSENT')
+    assert(startupLiveness.verdict !== 'OBSERVED_QUIESCENT', 'T01 the stock Host cannot prove quiescence with rc.4 pending/write gaps')
+    assert(startupLiveness.reasons.includes('pending-interaction-unobservable'), 'T01 the pending-interaction gap is not reported')
+    assert(startupLiveness.reasons.includes('inflight-write-unproven'), 'T01 the in-flight-write gap is not reported')
+    const startupStatus = await hostStatus(mainHost)
+    assert(startupStatus.liveness !== undefined, 'T01 a Host status request carries no liveness snapshot')
+    assert(startupStatus.liveness.epoch >= startupLiveness.epoch, 'T01 the liveness epoch moved backwards')
     for (const service of [
       'sessionController',
       'fileUploads',
@@ -1816,7 +1833,7 @@ async function main() {
     }
     assert(driftExit.code === 1, `T17 payload drift exit was ${JSON.stringify(driftExit)}`)
     assert(driftRecords.some(record => record.m4a0 === 'failure' && record.code === 'HOST_BUILD_INCOMPATIBLE'), 'T17 payload drift did not fail closed on the build identity')
-    assert(driftRecords.some(record => record.m4a0 === 'cleanup' && record.status === 'completed'), 'T17 payload drift did not emit completed cleanup')
+    assert(driftRecords.some(record => record.m4a0 === 'cleanup' && record.status === 'completed'), `T17 payload drift did not emit completed cleanup; records=${JSON.stringify(driftRecords.slice(-5))}`)
     assert(alive(hostReady.pid), 'T17 payload drift killed the Host')
     trace('t17-payload-drift', { code: 'HOST_BUILD_INCOMPATIBLE', hostAlive: true })
 
@@ -2984,16 +3001,91 @@ async function main() {
         await sleep(500)
         const eventsWhileDetached = readC1WorkEvents(workRoot).filter(event => event.kind === 'job-event' && event.jobId === registered.jobId)
         assert(eventsWhileDetached.every(event => event.event !== 'settled'), 'T47 the Job settled while no Client existed and the barrier was held')
+        const jobLiveness = (await hostStatus(host)).liveness
+        assert(jobLiveness?.verdict === 'BLOCKED', `T47 the Host status did not report BLOCKED while an owned Job ran: ${JSON.stringify(jobLiveness)}`)
+        assert(jobLiveness.reasons?.includes('job-running'), 'T47 the owned Job did not contribute job-running')
+        assert(jobLiveness.sourceStates?.jobs === 'ACTIVE', 'T47 the jobs source is not ACTIVE')
         writeFileSync(jobRelease, 'release\n', { mode: 0o600 })
         const settled = await waitForC1WorkEvent(workRoot, event => event.kind === 'job-event' && event.jobId === registered.jobId && event.event === 'settled', 'T47 job settled without a Client', 120_000)
         assert(settled.status === 'completed', `T47 the Job settled as ${JSON.stringify(settled.status)}`)
         assert(typeof settled.output === 'string' && settled.output.includes('c1-job-done'),
           `T47 the Job output ring did not carry the real process output: ${JSON.stringify(settled.output)}`)
+        const settledLiveness = (await hostStatus(host)).liveness
+        assert(!settledLiveness.reasons?.includes('job-running') && !settledLiveness.reasons?.includes('job-stopping'),
+          `T47 a settled Job left a ghost Job reason: ${JSON.stringify(settledLiveness)}`)
         const { client: c2 } = await startC1Client('T47 C2', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
         await c2.waitForScreen('job accepted', 'T47 C2 job result')
         await exitC1Client(c2, 'T47 C2')
         await stopC1Host(host)
         trace('t47', { hostPid: ready.pid, sessionId, jobId: registered.jobId, jobStatus: settled.status, hostAlive: true, processOutput: true })
+      }
+
+      // Host liveness: an armed Goal plus the REAL goal-round-driver's
+      // automatic reservation. The fixture creates only the official governing
+      // Goal; the driver owns the inbox round. The Host status must stay
+      // BLOCKED even while the Agent itself is idle.
+      {
+        const { host, ready, workRoot } = await startC1Host('goal', 'c2a-goal')
+        const { client } = await startC1Client('C2A goal C1')
+        const sessionId = await openC1Session(client, 'c2a goal prompt', 'C2A goal')
+        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-created', 'C2A goal created', 120_000)
+        assert(created.goalPhase === 'active' && created.activation === 'armed', `C2A goal was not armed: ${JSON.stringify(created)}`)
+        const round = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-round-observed', 'C2A goal round reserved', 120_000)
+        assert(round.goalId === created.goalId, 'C2A the reserved goal round names a different Goal')
+        assert(round.agentStatus === 'idle', `C2A the goal round was reserved while the Agent was ${JSON.stringify(round.agentStatus)}`)
+        const goalLiveness = (await hostStatus(host)).liveness
+        assert(goalLiveness?.verdict === 'BLOCKED', `C2A the armed Goal did not block: ${JSON.stringify(goalLiveness)}`)
+        assert(goalLiveness.reasons?.includes('goal-armed'), 'C2A the armed Goal did not contribute goal-armed')
+        assert(goalLiveness.sourceStates?.goal === 'ACTIVE', 'C2A the goal source is not ACTIVE')
+        await exitC1Client(client, 'C2A goal C1')
+        await stopC1Host(host)
+        trace('c2a-goal', { hostPid: ready.pid, sessionId, goalId: created.goalId, round: round.round, agentStatus: round.agentStatus, verdict: goalLiveness.verdict })
+      }
+
+      // Host liveness: Agent.runMaintenance() is really executing while the
+      // public Agent status stays idle. The observer must not claim quiescence;
+      // rc.4 has no synchronous maintenance getter, so UNKNOWN is correct.
+      {
+        const { host, ready, workRoot } = await startC1Host('maintenance', 'c2a-maintenance')
+        const { client } = await startC1Client('C2A maintenance C1')
+        const sessionId = await openC1Session(client, 'c2a maintenance prompt', 'C2A maintenance')
+        const maintenance = await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'running', 'C2A maintenance running', 120_000)
+        assert(maintenance.agentStatus === 'idle', `C2A maintenance ran while the Agent was ${JSON.stringify(maintenance.agentStatus)}`)
+        const maintenanceLiveness = (await hostStatus(host)).liveness
+        assert(maintenanceLiveness?.verdict === 'UNKNOWN', `C2A maintenance did not leave the Host UNKNOWN: ${JSON.stringify(maintenanceLiveness)}`)
+        assert(maintenanceLiveness.verdict !== 'OBSERVED_QUIESCENT', 'C2A maintenance was reported as quiescent')
+        assert(maintenanceLiveness.reasons?.includes('agent-maintenance-unproven'), 'C2A the maintenance gap is not reported')
+        writeFileSync(join(workRoot, 'maintenance.release'), 'release\n', { mode: 0o600 })
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'settled', 'C2A maintenance settled', 120_000)
+        await exitC1Client(client, 'C2A maintenance C1')
+        await stopC1Host(host)
+        trace('c2a-maintenance', { hostPid: ready.pid, sessionId, agentStatus: maintenance.agentStatus, verdict: maintenanceLiveness.verdict })
+      }
+
+      // Host liveness: the optional official Schedule row is mounted in an
+      // isolated test-only overlay. An active task must block with zero
+      // Clients; deleting it must clear the schedule-active contribution.
+      {
+        const schedulePatch = join(workDir, 'c2a-schedule.patch.yml')
+        const operations = parseYaml(readFileSync(c1Work.patchPath, 'utf8'))
+        operations.push({ insert: [{ id: 'c2a-schedule', name: '@deepseek-ai/dsh-schedule' }] })
+        writeFileSync(schedulePatch, JSON.stringify(operations, null, 2), { mode: 0o600 })
+        const { host, ready, workRoot } = await startC1Host('schedule', 'c2a-schedule', { SPLIT_PROCESS_EXTRA_PATCH: schedulePatch })
+        const { client } = await startC1Client('C2A schedule C1')
+        const sessionId = await openC1Session(client, 'c2a schedule prompt', 'C2A schedule')
+        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'schedule-created' && event.status === 'active', 'C2A schedule created', 120_000)
+        await exitC1Client(client, 'C2A schedule C1')
+        const activeLiveness = (await hostStatus(host)).liveness
+        assert(activeLiveness?.verdict === 'BLOCKED', `C2A the active Schedule task did not block: ${JSON.stringify(activeLiveness)}`)
+        assert(activeLiveness.reasons?.includes('schedule-active'), 'C2A the active Schedule task did not contribute schedule-active')
+        assert(activeLiveness.sourceStates?.schedule === 'ACTIVE', 'C2A the schedule source is not ACTIVE')
+        writeFileSync(join(workRoot, 'schedule.delete'), 'delete\n', { mode: 0o600 })
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'schedule-deleted' && event.deleted === true, 'C2A schedule deleted', 120_000)
+        const deletedLiveness = (await hostStatus(host)).liveness
+        assert(!deletedLiveness.reasons?.includes('schedule-active'), `C2A a deleted Schedule task left an active reason: ${JSON.stringify(deletedLiveness)}`)
+        assert(deletedLiveness.sourceStates?.schedule === 'IDLE', `C2A the schedule source did not return to IDLE: ${JSON.stringify(deletedLiveness.sourceStates)}`)
+        await stopC1Host(host)
+        trace('c2a-schedule', { hostPid: ready.pid, sessionId, scheduleId: created.scheduleId, activeVerdict: activeLiveness.verdict, deletedScheduleState: deletedLiveness.sourceStates.schedule })
       }
 
       // T48: a real continuable Child survives the Client exit; the Child

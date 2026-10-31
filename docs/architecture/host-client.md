@@ -185,6 +185,22 @@ the built-in row to be ACTIVE, checks the official and private Typert
 missing row, artifact, binding or readiness gate fails Host startup before any
 identity is published.
 
+### Host liveness observation
+
+The Host-only entry installs exactly one internal, read-only
+`HostActivityObserver` (`src/app/remote-process/host-liveness.ts`) after the
+readiness audit and before it publishes Ready. The observer owns no DSH
+business object and never drives, stops or replaces Host work. Every internal
+status response carries a fresh `HostActivitySnapshot` with a three-state
+verdict, per-source states, diagnostic reasons and a volatile observation
+epoch. `BLOCKED` reports positively observed current work or a future keepalive
+obligation; `UNKNOWN` is the fail-closed answer for an unreadable, unloading or
+unexcluded source; `OBSERVED_QUIESCENT` describes only the covered sources in
+that transient window and is never a shutdown authorization, admission fence or
+reusable lifecycle decision. Sources the installed DSH runtime cannot enumerate
+remain `UNKNOWN`; the epoch invalidates overlapping reads but is not an atomic
+barrier.
+
 ### Client composition, Session references and the real surface
 
 The split Client keeps ONE Cordis root and ONE official
