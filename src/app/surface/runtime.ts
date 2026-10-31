@@ -264,6 +264,18 @@ export interface SurfaceInputBinding {
   /** Whether the native `/model` picker UI entry is actually installed
    *  (registered, not Host-owned) — the real business-entry fact. */
   modelPickerAvailable(): boolean
+  /**
+   * TSP-7 PR-E: the live standard-permission catalog for the Quiet Composer
+   * menu. A read-only projection of the SAME StatusRuntime authority the
+   * Shift+Tab cycle uses; the renderer builds labels/selection from it.
+   */
+  permissionOptions(): readonly string[]
+  /**
+   * TSP-7 PR-E: apply one explicitly chosen standard preset through the ONE
+   * StatusRuntime selection writer. The renderer never writes a permission
+   * itself and never keeps optimistic state.
+   */
+  selectPermission(id: string): void
 }
 
 /**
@@ -602,6 +614,17 @@ export interface SurfaceRuntimeOptions {
    *  installed. The footer's model/reasoning fallback reads this fact, not
    *  the presence of a painted composer button. */
   readonly modelPickerAvailable?: () => boolean
+  /**
+   * TSP-7 PR-E: the LATE-BOUND narrow Permission UI seam (TSP only). The
+   * composition root assigns the real StatusRuntime owner AFTER
+   * `createSurfaceRuntime` returns and BEFORE the renderer input is bound.
+   * `options()` is a read-only catalog read; `select()` is the SAME shared
+   * apply primitive the Shift+Tab cycle uses. PiTui supplies no consumer.
+   */
+  readonly permissionUi?: {
+    options(): readonly string[]
+    select(id: string): void
+  }
 }
 
 /**
@@ -2681,6 +2704,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             open(entry)
           },
           modelPickerAvailable: () => options.modelPickerAvailable?.() ?? false,
+          // TSP-7 PR-E: the late-bound Permission UI seam. The catalog read
+          // returns empty when no owner is composed; the action refuses loudly
+          // so a click on an unwired composition can never look like a write.
+          permissionOptions: () => options.permissionUi?.options() ?? [],
+          selectPermission: id => {
+            const permissionUi = options.permissionUi
+            if (permissionUi === undefined) throw new Error('permission UI owner is not composed')
+            permissionUi.select(id)
+          },
         }
         inputBindTarget = mounted
         return

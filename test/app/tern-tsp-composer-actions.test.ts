@@ -99,9 +99,9 @@ function composerButtons(pane: TspPane): Map<string, WireNode> {
   return out
 }
 
-/** The row node itself (the outer `row` keyed `composer-actions`). */
+/** The ONE Quiet Composer shell node (`dock.quiet-composer`). */
 function composerRow(pane: TspPane): WireNode | undefined {
-  return dockNodes(pane).find(node => /dock\.composer-actions-s\d+$/.test(node.id))
+  return dockNodes(pane).find(node => node.id === 'dock.quiet-composer')
 }
 
 /** A busy/idle snapshot with a model configured as asked. */
@@ -211,23 +211,22 @@ function click(pane: TspPane, node: WireNode): void {
 
 /* ------------------------------------------------------------- the row itself */
 
-test('composer actions: the row mounts between the editor and the statusline on an el+styles pane', async (t) => {
+test('composer actions: the Quiet Composer shell mounts between the editor and the footer on an el+styles pane', async (t) => {
   const m = await mountComposerActions({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'] })
   t.after(() => { void m.dispose() })
   const { pane } = m
   const buttons = composerButtons(pane)
-  assert.deepEqual([...buttons.keys()].sort(), ['composer-effort', 'composer-model', 'composer-send'],
-    'the idle row carries Model, Effort and Send — Stop only exists while busy')
-  assert.ok(composerRow(pane), 'the row node itself is mounted')
-  // The row sits AFTER the editor and BEFORE the first status row in the dock
-  // column (the frozen §4.1 order). The wire folds nodes in ADD order, so the
-  // flat dock list's indices ARE the column order.
+  assert.deepEqual([...buttons.keys()].sort(), ['composer-effort', 'composer-model', 'composer-permission', 'composer-send'],
+    'the idle shell carries Permission, Model, Effort and Send — Stop only exists while busy')
+  assert.ok(composerRow(pane), 'the ONE quiet-composer shell node is mounted')
+  // The Shell wraps the controlled editor and the controls; the native footer
+  // rows sit in their own footer group AFTER the shell.
   const ids = dockNodes(pane).map(node => node.id)
-  const editorAt = ids.indexOf('dock.composer')
-  const actionsAt = ids.findIndex(id => /dock\.composer-actions-s\d+$/.test(id))
-  const statusAt = ids.findIndex(id => id.startsWith('dock.status-row'))
-  assert.ok(editorAt >= 0 && actionsAt > editorAt, 'the action row follows the editor')
-  if (statusAt >= 0) assert.ok(actionsAt < statusAt, 'the action row precedes the statusline')
+  const shellAt = ids.indexOf('dock.quiet-composer')
+  const editorAt = ids.indexOf('dock.quiet-composer.composer')
+  const footerAt = ids.indexOf('dock.footer-group')
+  assert.ok(shellAt >= 0 && editorAt > shellAt, 'the editor is nested inside the shell')
+  if (footerAt >= 0) assert.ok(footerAt > shellAt, 'the footer group follows the shell')
 })
 
 test('footer Model/Reasoning visibility follows the actual native picker business entry, not painted chrome', async (t) => {
@@ -511,20 +510,21 @@ test('composer actions: the labels follow the width rule and never fabricate a v
   let buttons = composerButtons(pane)
   assert.equal(label(buttons.get('composer-model')), 'Model ▾')
   assert.equal(label(buttons.get('composer-effort')), 'Effort ▾')
-  // A configured model at the default 120 columns (>= 72): the bounded values appear.
+  // A configured model at the default 120 columns: the bounded values appear
+  // WITHOUT the legacy `Model ·` / `Effort ·` prefixes.
   await m.commitStatus(snapshotFor({
     model: { displayName: 'luna-fast', id: 'luna-fast', reasoningEffort: 'high' },
   }))
   buttons = composerButtons(pane)
-  assert.equal(label(buttons.get('composer-model')), 'Model · luna-fast ▾')
-  assert.equal(label(buttons.get('composer-effort')), 'Effort · high ▾')
+  assert.equal(label(buttons.get('composer-model')), 'luna-fast ▾')
+  assert.equal(label(buttons.get('composer-effort')), 'high ▾')
   // A very long display name is clamped by the shared middle clamp, never wrapped raw.
   await m.commitStatus(snapshotFor({
     model: { displayName: 'an-extremely-long-model-name-that-cannot-fit', id: 'x', reasoningEffort: 'high' },
   }))
   buttons = composerButtons(pane)
   const clamped = label(buttons.get('composer-model'))
-  assert.ok(clamped.startsWith('Model · ') && clamped.endsWith(' ▾'))
+  assert.ok(clamped.endsWith(' ▾'), clamped)
   assert.ok(!clamped.includes('an-extremely-long-model-name-that-cannot-fit'),
     'the value is clamped, never painted whole')
 })
@@ -534,13 +534,13 @@ test('composer actions: a narrow pane (cols < 72) keeps the short labels', async
   t.after(() => { void m.dispose() })
   const { pane } = m
   await m.commitStatus(snapshotFor({
-    model: { displayName: 'luna-fast', id: 'luna-fast', reasoningEffort: 'high' },
+    model: { displayName: 'provider/very-long-deepseek-model-variant-with-reasoning', id: 'x', reasoningEffort: 'high' },
   }))
-  // 60 columns — the pane's own resize event drives the SDK caps.
-  pane.event({ ev: 'resize', sf: pane.frames().at(-1)!.sf, cols: 60 })
+  // 50 columns (a ~400px pane): the pane's own resize event drives the SDK caps.
+  pane.event({ ev: 'resize', sf: pane.frames().at(-1)!.sf, cols: 50 })
   await settle(120) // window: let the pane ack the frame before reading the wire
   await m.commitStatus(snapshotFor({
-    model: { displayName: 'luna-fast', id: 'luna-fast', reasoningEffort: 'high' },
+    model: { displayName: 'provider/very-long-deepseek-model-variant-with-reasoning', id: 'x', reasoningEffort: 'high' },
   }))
   const buttons = composerButtons(pane)
   const label = (node: WireNode | undefined): string => {
@@ -548,8 +548,10 @@ test('composer actions: a narrow pane (cols < 72) keeps the short labels', async
     const text = node.p['text']
     return typeof text === 'string' ? text : String((node.c ?? []).map(c => String((c as unknown as WireNode).p?.['text'] ?? '')).join(''))
   }
-  assert.equal(label(buttons.get('composer-model')), 'Model ▾', 'the narrow pane drops the value')
-  assert.equal(label(buttons.get('composer-effort')), 'Effort ▾')
+  const model = label(buttons.get('composer-model'))
+  assert.ok(model.endsWith(' ▾') && model.includes('…'), `the narrow pane truncates the model: ${model}`)
+  assert.ok(!model.includes('provider/very-long-deepseek-model-variant-with-reasoning'))
+  assert.equal(label(buttons.get('composer-effort')), 'H ▾', 'the effort degrades to the identifiable H')
 })
 
 /* ----------------------------------------------------------- seat admission */

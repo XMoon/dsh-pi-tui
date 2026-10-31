@@ -88,6 +88,7 @@ reading is an additional rendering container, never a second renderer.
 | The temporary reading surface, its reading identity and its close | `src/tui/tsp/session.ts` (the reader slot) | A presenter-owned surface, a business owner, a second Session, or a persisted reading state |
 | Terminal rendering, pixel clipping and scroll view state | Tern client | Node-tree text, TypeScript props, guessed pixels |
 | Status facts (permission, workspace, usage, plan) | The ONE `StatusStore` the `SurfaceRuntime` creates and updates | A renderer-owned store, a second writer, or a value derived from the dock, the transcript or `process.cwd()` |
+| Composer presentation (controlled editor, Quiet Composer controls, Permission menu) | The renderer's presentational view + `StatusSnapshot.access` for the current permission label; permission writes go through `StatusRuntime.selectPermission` → the existing `ConfigPort.permissions.applyPermissionPreset` | A renderer-owned permission cache/writer, a label parsed into a preset id, a second input loop, or optimistic permission state |
 | Footer settings (mode/layout/custom items) | The ConfigPort + settings document; the TSP renderer consumes ONE boot-time read-only projection bound at mount (`bindNativeFooterConfig`) | A renderer-owned settings store, a config watcher, a second write path, or any command/extension execution from the projection |
 
 State-representation rule: authority, disposable projection, SDK transport
@@ -268,6 +269,13 @@ toggle/pressed state; none is a universal keyboard focus token. The client's
 caret/editing effect for a region-root focus was not established; do not
 classify that as a confirmed bug or confirmed correct caret behavior.
 
+The composer editor is the ONE visible focus seat. On a pane that negotiated
+`el` and `styles`, the Quiet Composer shell nests it at
+`dock.quiet-composer.composer`; the no-chrome branch keeps the historical
+`dock.composer`. `applyFocus` picks ONE of those paths through the same
+capability gate that decides whether the shell is mounted — never both, and
+never a guessed focus target.
+
 ### Reader event admission and reading anchor
 
 - An event addressed at the temporary reading surface is admitted only when ALL
@@ -320,6 +328,15 @@ or later build.
   simpler composition; write-critical controls may need fail-closed. OMP's
   component-initiated capability fallback is not an automatic unsupported-kind
   conversion in this SDK.
+- The Quiet Composer shell is a presentation composition over the negotiated
+  `el` + `styles` capabilities: the controlled editor, left Permission trigger
+  and right Model/Effort/Stop/Send controls share ONE shell. A pane without
+  that pair keeps the controlled editor and the native footer only, with no
+  fake button. The Permission menu offers only catalog-present standard ids
+  (`read-only`, `workspace-write`, `danger-full-access`); a missing/mismatched
+  current fact paints a read-only trigger, and every actual write goes through
+  the existing StatusRuntime permission owner. The footer visibility defaults
+  in `docs/guides/footer.md` remain the only Footer filtering authority.
 - A client build's advertised kinds/features/credits/cell size describe that
   run, not other sizes/fonts/builds.
 - Do not assume native browser Tab/Enter behavior for `el` nodes. Design
