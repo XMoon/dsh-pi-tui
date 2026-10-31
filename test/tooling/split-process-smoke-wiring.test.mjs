@@ -156,6 +156,9 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     'C1_HOLD_LONG_TURN',
     'C1_HOLD_TOOL',
     'C1_HOLD_CHILD',
+    'c2a-goal',
+    'c2a-maintenance',
+    'c2a-schedule',
     'C1_TIMED_QUESTION',
     'C1_SCENARIO',
     'C1_WORK_ROOT',
@@ -218,11 +221,12 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     assert.ok(source.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 9,
-    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row mutations, the whole-smoke mutation mode and the isolated surface LLM overlay')
+  assert.equal(extraPatchUses.length, 10,
+    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row mutations, the whole-smoke mutation mode, the isolated surface LLM overlay and the isolated Host Schedule overlay')
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
+  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: schedulePatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm\.patchPath/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: hostRuntimeMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
