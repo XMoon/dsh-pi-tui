@@ -162,6 +162,37 @@ test('an explicit custom tone overrides the item tone; absent keeps the item ton
   assert.equal(String(props(segs[0]!).text as string).includes('72%'), true, 'the tone override does not change the fact text')
 })
 
+test('an explicit palette-only tone (no Tern counterpart) RESETS the item tone instead of falling back', () => {
+  // `token-usage` emits `success`; `text`/`primary` are PiTui palette tokens
+  // with no negotiated Tern tone. An explicit override to one of them must
+  // leave the seg UNTONED (the client's own text styling) — the item's
+  // original `success` may not survive the override.
+  const layout = {
+    schemaVersion: 1,
+    rows: [{
+      left: [
+        { id: 'token-usage', format: 'pi', tone: 'text' as const },
+        { id: 'git-branch', tone: 'primary' as const },
+      ],
+      right: [],
+    }],
+  }
+  const rows = nativeStatuslineRows(fullSnapshot(), presentation({ doc: { footer: 'custom', footerLayout: layout } }))
+  const segs = children(rows[0]!)
+  assert.equal(props(segs[0]!).tone, undefined, 'tone:text resets the token-usage success tone (no fallback)')
+  assert.equal(props(segs[1]!).tone, undefined, 'tone:primary resets the item tone too')
+  // The control: WITHOUT an override the same items keep their own tones.
+  const plain = nativeStatuslineRows(fullSnapshot(), presentation({
+    doc: { footer: 'custom', footerLayout: { schemaVersion: 1, rows: [{ left: [{ id: 'token-usage', format: 'pi' }], right: [] }] } },
+  }))
+  assert.equal(props(children(plain[0]!)[0]!).tone, 'success', 'the un-overridden placement keeps the item tone')
+  // And an explicit `auto` keeps the item tone as well.
+  const auto = nativeStatuslineRows(fullSnapshot(), presentation({
+    doc: { footer: 'custom', footerLayout: { schemaVersion: 1, rows: [{ left: [{ id: 'token-usage', format: 'pi', tone: 'auto' as const }], right: [] }] } },
+  }))
+  assert.equal(props(children(auto[0]!)[0]!).tone, 'success', "tone:'auto' keeps the item tone")
+})
+
 test('a USER text definition renders its persisted text verbatim (USER layer only)', () => {
   const layout = { schemaVersion: 1, rows: [{ left: [{ id: 'user:environment' }], right: [] }] }
   const pres = presentation({

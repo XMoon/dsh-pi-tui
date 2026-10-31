@@ -355,9 +355,15 @@ function customRefSegments(
   // only — an unavailable placeholder never carries them.
   if (ref.prefix !== undefined) text = `${sanitizedPhysicalLine(ref.prefix)}${text}`
   if (ref.suffix !== undefined) text = `${text}${sanitizedPhysicalLine(ref.suffix)}`
-  const refTone = ref.tone !== undefined && ref.tone !== 'auto' ? nativeTone(ref.tone) : undefined
-  const tone = refTone !== undefined
-    ? refTone
+  // The placement Tone override: an EXPLICIT non-'auto' tone wins over the
+  // item's own tone. The mapping itself may legitimately produce `undefined`
+  // (a PiTui palette token like `text`/`primary` has no Tern counterpart —
+  // the client's own text styling then applies); that IS the override's
+  // result, never a reason to fall back to the item's original tone. Only an
+  // absent or 'auto' placement tone lets the item's own tone through.
+  const explicitTone = ref.tone !== undefined && ref.tone !== 'auto'
+  const tone = explicitTone
+    ? nativeTone(ref.tone)
     : nativeTone(segment.spans.find(span => span.tone !== undefined)?.tone)
   return { text, tone, importance: ref.importance ?? def.defaultImportance }
 }
