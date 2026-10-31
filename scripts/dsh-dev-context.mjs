@@ -13,7 +13,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, isAbsolute, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { fileURLToPath } from 'node:url'
 
@@ -140,13 +140,24 @@ export function readMaterializedDevState(root) {
   if (typeof value.root !== 'string' || resolve(value.root) !== directory) {
     fail(`${DEV_STATE_FILE} belongs to ${JSON.stringify(value.root)}, not ${directory}`)
   }
-  for (const field of ['node', 'pnpm', 'packageJsonHash', 'lockfileHash']) {
-    if (typeof value[field] !== 'string') fail(`${DEV_STATE_FILE} is missing a valid ${field} field`)
+  if (typeof value.node !== 'string' || !/^\d+$/u.test(value.node)) {
+    fail(`${DEV_STATE_FILE} is missing a valid node field`)
+  }
+  if (typeof value.pnpm !== 'string' || value.pnpm === '') {
+    fail(`${DEV_STATE_FILE} is missing a valid pnpm field`)
+  }
+  if (typeof value.packageJsonHash !== 'string' || !/^[0-9a-f]{64}$/u.test(value.packageJsonHash)) {
+    fail(`${DEV_STATE_FILE} is missing a valid packageJsonHash field`)
+  }
+  if (typeof value.lockfileHash !== 'string' || !/^[0-9a-f]{64}$/u.test(value.lockfileHash)) {
+    fail(`${DEV_STATE_FILE} is missing a valid lockfileHash field`)
   }
   if (value.mode === 'source') {
-    for (const field of ['repository', 'ref', 'expectedVersion', 'distribution']) {
-      if (typeof value[field] !== 'string') fail(`${DEV_STATE_FILE} is missing a valid source ${field} field`)
-    }
+    if (typeof value.repository !== 'string' || value.repository === '') fail(`${DEV_STATE_FILE} is missing a valid source repository field`)
+    if (typeof value.ref !== 'string' || !/^[0-9a-f]{40}$/u.test(value.ref)) fail(`${DEV_STATE_FILE} is missing a valid source ref field`)
+    if (typeof value.expectedVersion !== 'string' || value.expectedVersion === '') fail(`${DEV_STATE_FILE} is missing a valid source expectedVersion field`)
+    if (typeof value.distribution !== 'string' || !isAbsolute(value.distribution)) fail(`${DEV_STATE_FILE} is missing a valid source distribution field`)
+    if (value.ephemeral !== undefined && typeof value.ephemeral !== 'boolean') fail(`${DEV_STATE_FILE} is missing a valid source ephemeral field`)
   }
   return value
 }
