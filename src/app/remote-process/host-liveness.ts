@@ -588,11 +588,18 @@ export class HostActivityObserver implements HostLivenessObserver {
         reasons.add('source-unavailable')
         return 'UNKNOWN'
       }
-      if (state === FIBER_ACTIVE || state === FIBER_LOADING || state === FIBER_UNLOADING) {
-        // ACTIVE, LOADING and UNLOADING rows can own work; only an exact
-        // id+plugin qualification is allowed to be treated as passive.
+      if (state === FIBER_ACTIVE) {
+        // ACTIVE is the only state in which an exact qualified passive row is
+        // safe to ignore as a source.
         if (qualified) continue
         reasons.add('unqualified-host-source')
+        return 'UNKNOWN'
+      }
+      if (state === FIBER_LOADING || state === FIBER_UNLOADING) {
+        // A qualified identity proves the row's family, not that an in-flight
+        // mount/unmount holds no work. Treat every transitional row as
+        // UNKNOWN; an unqualified one is additionally named as unqualified.
+        reasons.add(qualified ? 'source-unavailable' : 'unqualified-host-source')
         return 'UNKNOWN'
       }
       // Unknown future FiberState values fail closed.
