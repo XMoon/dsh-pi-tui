@@ -40,6 +40,7 @@ import { isolatedSvgRasterSupported } from '../../../client/media/svg/rasterize.
 import type { SvgRasterLoader, SvgRasterState } from '../../../client/media/svg/raster-loader.ts'
 import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
+import type { ImageProtocolPreference } from '../../graphics/image-protocol-preference.ts'
 import { SVG_VIEWER_CHORDS, SVG_VIEWER_SCROLL_LABEL } from '../../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
@@ -75,6 +76,8 @@ export interface SvgViewerInput {
    * `Image` path stays for every other surface.
    */
   readonly graphics?: ImageGraphics
+  /** The app's ONE startup image-protocol preference. */
+  readonly imageProtocolPreference?: ImageProtocolPreference
 }
 
 /** The two Viewer pages. */
@@ -394,7 +397,7 @@ export class SvgViewerPanel implements Component {
   /** Whether this surface may paint real SVG pixels at all: Kitty and Direct
    *  SIXEL (the isolated raster lane is Linux-only); iTerm2 stays excluded. */
   private previewSupported(): boolean {
-    const protocol = effectiveImageProtocol(this.input.graphics)
+    const protocol = effectiveImageProtocol(this.input.graphics, this.input.imageProtocolPreference)
     return this.input.loader !== undefined
       && this.admission.ok
       && (protocol === 'kitty' || protocol === 'sixel')

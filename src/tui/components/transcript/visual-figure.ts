@@ -24,6 +24,7 @@ import { ChartBody } from './chart-body.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
 import { SvgThumbnail, type SvgThumbnailTheme } from '../media/svg-thumbnail.ts'
 import type { ImageGraphics } from '../../graphics/native-image.ts'
+import type { ImageProtocolPreference } from '../../graphics/image-protocol-preference.ts'
 import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
 import { color } from '../../theme/runtime.ts'
 
@@ -75,6 +76,8 @@ export interface VisualFigureOptions {
   readonly svgAdmissionWidth?: number
   /** The ONE managed graphics owner of this physical terminal (Image-7A). */
   readonly graphics?: ImageGraphics
+  /** The app's ONE startup image-protocol preference. */
+  readonly imageProtocolPreference?: ImageProtocolPreference
 }
 
 /** The selected device's textual label (colour is never the only signal). */
@@ -188,6 +191,7 @@ export class VisualFigureComponent implements Component {
             options.requestRender,
             undefined,
             options.graphics,
+            options.imageProtocolPreference,
           )
         : undefined
       this.actions = [
@@ -226,7 +230,7 @@ export class VisualFigureComponent implements Component {
     // action rows stay those of the LAST render (they never move with the
     // asynchronous raster).
     let thumbnailBody = this.painted.thumbnailBody
-    if (effectiveImageProtocol(this.options.graphics) === 'sixel' && this.thumbnail !== undefined) {
+    if (effectiveImageProtocol(this.options.graphics, this.options.imageProtocolPreference) === 'sixel' && this.thumbnail !== undefined) {
       thumbnailBody = undefined
       const live = this.thumbnail.paintedImageBody(width)
       const startRow = this.painted.thumbnailStartRow
@@ -275,7 +279,7 @@ export class VisualFigureComponent implements Component {
       // body, and the rows stay inert.
       thumbnailStartRow = bodyRows + 1
       thumbnailMaxRows = Math.max(0, thumbnailRows.length - 1)
-      if (effectiveImageProtocol(this.options.graphics) !== 'sixel') {
+      if (effectiveImageProtocol(this.options.graphics, this.options.imageProtocolPreference) !== 'sixel') {
         // Kitty's placement is synchronous with this render: the snapshot is
         // the same fact the user sees. SIXEL must not declare pixels here —
         // its committed footprint is read at hit time (see `paintedHitMap`).

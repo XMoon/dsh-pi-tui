@@ -18,7 +18,7 @@
  */
 
 import { getCapabilities } from '@xmoon76/pi-tui'
-import { imageProtocolPreference } from './image-protocol-preference.ts'
+import { imageProtocolPreference, type ImageProtocolPreference } from './image-protocol-preference.ts'
 import type { ImageGraphics } from './native-image.ts'
 
 /** The image protocol a consumer may paint with right now. */
@@ -65,7 +65,10 @@ function isMultiplexerTopology(environment: NodeJS.ProcessEnv): boolean {
  * and `getCapabilities().images` are not authorities for an admitted SIXEL
  * owner — the owner's own readiness projection is.
  */
-export function effectiveImageProtocol(graphics: ImageGraphics | undefined): EffectiveImageProtocol {
+export function effectiveImageProtocol(
+  graphics: ImageGraphics | undefined,
+  preference: ImageProtocolPreference = imageProtocolPreference(process.env),
+): EffectiveImageProtocol {
   if (graphics !== undefined && graphics.mode === 'zellij-negotiated') {
     // ONE selection projection, never the inherited fork capability: a
     // negotiated pane answers exactly the protocol the live negotiation
@@ -74,8 +77,13 @@ export function effectiveImageProtocol(graphics: ImageGraphics | undefined): Eff
   }
   if (graphics !== undefined && graphics.mode !== 'sixel') return graphics.canPaint() ? 'kitty' : null
   if (graphics !== undefined) return graphics.canPaint() ? 'sixel' : null
-  const preference = imageProtocolPreference(process.env)
   if (preference === 'none' || preference === 'sixel') return null
   if (isMultiplexerTopology(process.env)) return null
-  return getCapabilities().images ?? null
+  // An explicit protocol never accepts the OTHER static legacy capability:
+  // `iterm2` may only answer the Direct iTerm2 path, and `kitty` may only
+  // answer Kitty. A mismatch is text, not a cross-protocol fallback.
+  const images = getCapabilities().images
+  if (preference === 'iterm2') return images === 'iterm2' ? 'iterm2' : null
+  if (preference === 'kitty') return images === 'kitty' ? 'kitty' : null
+  return images ?? null
 }
