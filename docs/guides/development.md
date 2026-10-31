@@ -120,18 +120,37 @@ checkouts:
 ~/.cache/dsh-pi-tui/source-packs/<exact-sha>/
 ```
 
-The normal flow is:
+The normal flow uses the explicit source tasks. `main` keeps its tracked mode
+`npm`, so these tasks pass `--mode source` explicitly; a plain doctor/bootstrap
+without the mode would resolve the tracked npm mode:
 
 ```bash
-pnpm dev:doctor
-pnpm dev:bootstrap
-pnpm dev:doctor
+mise run source:doctor
+mise run source:bootstrap
+mise run source:doctor    # must report READY
+mise run build
+mise run source:profile
+mise run source:dsh
 ```
 
+`source:doctor` and `source:bootstrap` call the existing
+`scripts/dev-doctor.mjs` / `scripts/dev-bootstrap.mjs` with `--mode source`; they
+preserve the per-SHA pack cache, locks, state and rollback semantics.
+`source:profile` and `source:dsh` require a READY source doctor, load the
+generated `.dsh-dev-env`, and invoke this worktree's
+`./node_modules/.bin/dsh`, never the mise npm CLI. Their profile lives under
+`temp/source-dsh-home`; `source:dsh` accepts `--cwd <path>` for a different
+business workspace.
+
+The generated `.dsh-dev-env` does not export `DSH_MODE=source` (the tracked
+mode remains the policy). A shell that needs source mode must set
+`DSH_MODE=source` explicitly for that shell after `source ./.dsh-dev-env`; do
+not add a global `DSH_MODE` setting. If a command reports that the source
+environment is not loaded, use `pnpm dev:shell` or the explicit export before
+commands that need the source-distribution environment.
+
 The second doctor reports `READY` when the source pack and materialization are
-correct. If it warns that the source environment is not loaded, use
-`source ./.dsh-dev-env` or `pnpm dev:shell` before commands that need the
-source-distribution environment.
+correct. `source:profile`/`source:dsh` fail closed until that is true.
 
 Bootstrap reuses a valid pack for the exact SHA. On a miss it uses a shared bare
 Harness object repository plus an independent worktree for the SHA, invokes the
@@ -374,27 +393,28 @@ memory/time bound (for example `systemd-run --user --scope -q
 
 ## Running the source-built DSH interactively
 
-For source-mode interactive testing, use the worktree's own built DSH CLI, a
-built TUI bundle and an isolated profile that links that bundle:
+Source Mode is a long-lived workflow. Use the explicit source tasks rather than
+the mise npm CLI:
 
 ```bash
-export DSH_NEXT_ROOT=<source-mode worktree>
-export DSH_HOME=<isolated home>
-cd "$DSH_NEXT_ROOT"
-pnpm dev:bootstrap
-source ./.dsh-dev-env
-pnpm build
-"$DSH_NEXT_ROOT/node_modules/.bin/dsh" plugin --profile pi-tui -- add 'link:.'
-cd -
-exec "$DSH_NEXT_ROOT/node_modules/.bin/dsh" --profile pi-tui "$@"
+mise run source:doctor
+mise run source:bootstrap
+mise run source:doctor    # must report READY
+mise run build
+mise run source:profile
+mise run source:dsh
 ```
 
-- Keep `DSH_HOME` isolated from the real `~/.dsh`; the `pi-tui` profile inside it
-  is a `link:.` to the worktree, so the plugin add must run from that root.
-- dsh treats the startup cwd as the workspace, so the final `exec` runs from the
-  caller's directory.
-- After changing `packages/pi-tui/src`, run `pnpm build` explicitly (the root
-  bundle embeds the fork dist).
+- `source:profile` / `source:dsh` use the absolute source CLI at this worktree's
+  `node_modules/.bin/dsh` and the isolated `temp/source-dsh-home`; the npm mise
+  CLI is a different tool and must not be used for Source Mode.
+- `source:profile` runs `dsh plugin --profile pi-tui -- add 'link:.'` from the
+  worktree root, so the profile links the current checkout.
+- `source:dsh -- --cwd /path/to/workspace` starts the same source CLI and
+  profile from another business workspace; the CLI path and plugin link remain
+  absolute to the source worktree.
+- After changing `packages/pi-tui/src`, run `mise run build` explicitly (the
+  root bundle embeds the fork dist).
 - Authentication: a fresh isolated home has none. Configure it yourself, or copy
   the approved credential/profile inputs only with explicit permission, preserve
   `0600`, keep `sessions/`/`storages/`/`user-history/` fresh, and never inspect or
@@ -403,7 +423,7 @@ exec "$DSH_NEXT_ROOT/node_modules/.bin/dsh" --profile pi-tui "$@"
 ## Full Source compatibility
 
 ```bash
-pnpm compat:dsh:source -- --dsh-dir "/path/to/deepseek-harness"
+mise exec -- pnpm compat:dsh:source -- --dsh-dir "/path/to/deepseek-harness"
 ```
 
 This is the CI-equivalent full Source compatibility proof: exact upstream source
@@ -423,6 +443,9 @@ compatibility.
 - Do not use a branch name or package version as a source-pack cache key.
 - Do not modify the real `pi-tui` profile during development.
 - The interactive source launcher must use an isolated `DSH_HOME`.
+- Source Mode commands must use the `source:*` tasks or the documented explicit
+  mode; never replace them with bare `dsh`, the mise npm CLI or a plain pnpm
+  install.
 - The managed per-SHA Harness checkout must remain clean (ignored build outputs
   are acceptable).
 - Background bash jobs may ignore the `workdir` parameter; prefix them with an

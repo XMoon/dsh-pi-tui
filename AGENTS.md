@@ -380,18 +380,31 @@ tools, scope the install with
 `MISE_ENABLE_TOOLS=node,pnpm,npm:@deepseek-ai/dsh mise install --locked` (the
 same allowlist CI uses).
 
-On a source-mode worktree (a worktree whose tracked `test/compat/dsh-mode.json`
-selects `source` — `next` is not always source-mode), `mise run setup` must not
-be used. A plain `pnpm install` before bootstrap leaves the DSH workspace state
-incorrect (`workspace DSH incorrect` / `local state missing`); run
-`pnpm dev:doctor` first and let `pnpm dev:bootstrap` perform the dependency
-install itself, then re-run `pnpm dev:doctor` until it reports `READY`. A plain
-`pnpm install` after bootstrap re-resolves `@deepseek-ai/*` to registry versions
-and breaks the source-mode workspace again; use `pnpm dev:shell` (or
-`source ./.dsh-dev-env`) for commands that need the source environment, and
-re-run `pnpm dev:bootstrap` after any real install. Keep each worktree's
-`node_modules` and `dist` independent; never symlink them, and build in that
-worktree before using a profile.
+Source Mode is a long-lived workflow, not legacy. On a source worktree use the
+explicit source tasks; their mode is always `source` regardless of the tracked
+`test/compat/dsh-mode.json` default:
+
+```sh
+mise run source:doctor
+mise run source:bootstrap
+mise run source:doctor    # must report READY
+mise run build
+mise run source:profile
+mise run source:dsh
+```
+
+`mise run setup` must not be used in a source worktree. `source:profile` and
+`source:dsh` use this worktree's `./node_modules/.bin/dsh` and the isolated
+`temp/source-dsh-home`; never use the mise npm CLI or the real `~/.dsh` for
+Source Mode. A plain `pnpm install` before bootstrap leaves the DSH workspace
+state incorrect (`workspace DSH incorrect` / `local state missing`); the
+bootstrap task performs the dependency install itself, then `source:doctor`
+must report `READY`. A plain `pnpm install` after bootstrap re-resolves
+`@deepseek-ai/*` to registry versions and breaks the source-mode workspace
+again; use `pnpm dev:shell` (or `source ./.dsh-dev-env`) for commands that need
+the source environment, and re-run `source:bootstrap` after any real install.
+Keep each worktree's `node_modules` and `dist` independent; never symlink them,
+and build in that worktree before using a profile.
 
 For an interactive npm-mode TUI session in this worktree:
 
