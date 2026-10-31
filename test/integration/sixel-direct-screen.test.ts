@@ -1332,12 +1332,22 @@ test('E2-06: a published Assistant SIXEL figure exposes the committed hit and it
   // stable action layout is not re-derived.
   app.scrollToTop()
   await waitViewport(terminal, 'Service topology', 'the figure back on screen')
-  terminal.writes.length = 0
+  // The viewport text alone does not prove the restored figure committed a
+  // raster: without this precondition the release below could pass vacuously.
+  await until(
+    () => bodyRecord.body.paintedVisualHits(innerWidth)[0]?.thumbnailBody !== undefined,
+    'the restored Assistant figure to commit its pixels',
+  )
   const handle = app.openSettingsWorkspace(
     { readSnapshot: () => ({ configReadiness: 'ready' as const, rows: [], capturedAt: 0 }) },
     { aboutVersionFacts: { tui: 'test-bundle', dsh: undefined } },
   )
-  await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the covering screen to be observed')
+  // The geometry query is not a frame-completion boundary: the covering
+  // screen releases the occurrence when it commits its own frame.
+  await until(
+    () => bodyRecord.body.paintedVisualHits(innerWidth)[0]?.thumbnailBody === undefined,
+    'the covering workspace to release the Assistant pixel body',
+  )
   const covered = bodyRecord.body.paintedVisualHits(innerWidth)
   assert.equal(covered[0]?.thumbnailBody, undefined, 'a covered transcript exposes no pixel hit')
   handle.close()
