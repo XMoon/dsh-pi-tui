@@ -1486,7 +1486,7 @@ test('composer Model and Effort clicks reach the real command owner and writer',
     fixture.pane.event({ ev: 'action', sf: fixture.pane.frames().at(-1)!.sf, id: button!.id, act: 'click' })
   }
   try {
-    await waitFor('booted', () => fixture.pane.output.text().includes('dock.composer'))
+    await waitFor('booted', () => fixture.pane.output.text().includes('dock.quiet-composer.composer'))
     fixture.pane.key('create live session\r')
     await waitFor('real Agent turn', () => fixture.pane.output.text().includes('model-live-ok'))
     // ── The MODEL entry: click → the registered handler's own catalog read →
@@ -2708,7 +2708,7 @@ test('a Host-owned /model registration leaves the composer UI opener unavailable
     ],
   })
   try {
-    await waitFor('booted', () => fixture.pane.output.text().includes('dock.composer'))
+    await waitFor('booted', () => fixture.pane.output.text().includes('dock.quiet-composer.composer'))
     // The composer action row still paints (the pane is capable), but its
     // Model/Effort buttons must be dead: the Host-owned name degraded the
     // TUI registration, so the UI entry does not exist and the click is
@@ -2748,7 +2748,7 @@ test('the composer UI entry obeys the native picker capability admission', async
     // NO modelPicker: the pane advertises el+styles but not the picker kinds.
   })
   try {
-    await waitFor('booted', () => fixture.pane.output.text().includes('dock.composer'))
+    await waitFor('booted', () => fixture.pane.output.text().includes('dock.quiet-composer.composer'))
     // The row paints (el+styles negotiated)...
     const nodes = (await import('../support/tsp-picker-wire.ts')).wireNodes(fixture.pane)
     const modelButton = nodes.find(node => node.k === 'el' && /\.composer-model-s\d+$/.test(String(node.id)))

@@ -38,7 +38,7 @@
  * @module @xmoon76/dsh-pi-tui/tui/tsp/session
  */
 
-import { connect as sdkConnect, html, ui, View } from '@stencil-hq/tern'
+import { connect as sdkConnect, ui, View } from '@stencil-hq/tern'
 import type { Key, Node, ScrollTo, Session, SessionInput, Surface, Tree, TspEvent } from '@stencil-hq/tern'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { StatusSnapshot, StatusSnapshotReader } from '../../domain/status/types.ts'
@@ -55,7 +55,7 @@ import type { SettledQuestionAnswersLookup, SurfaceInteractionPresenter } from '
 import type { SurfaceDraftImageOccurrence, SurfaceImageBinding } from '../../app/surface/runtime.ts'
 import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
-import { TSP_COMPOSER_SEND_LABEL, TSP_COMPOSER_STOP_LABEL, TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
+import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
 import { imageProtocolPreference } from '../graphics/image-protocol-preference.ts'
 import { clampMiddle } from './picker-text.ts'
@@ -66,6 +66,7 @@ import { TspModelPicker } from './model-picker.ts'
 import { TspPresetPicker } from './preset-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
 import { nativeStatuslineRows, compileNativeFooterPresentation, type NativeFooterPresentation } from './statusline-view.ts'
+import { quietComposerView, QUIET_COMPOSER_SHEET, QUIET_COMPOSER_STYLES, QUIET_COMPOSER_ROLES, type QuietComposerPermissionOption } from './quiet-composer-view.ts'
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import type { TspFooterAffordances } from '../../domain/footer/layout.ts'
 import { TspWorkHub } from './work-hub.ts'
@@ -241,6 +242,18 @@ export interface TspInputHandlers {
    *  (registered, not Host-owned). Optional only for old test fixtures; an
    *  absent fact falls back to the negotiated-kind check below. */
   modelPickerAvailable?(): boolean
+  /**
+   * TSP-7 PR-E: the live standard-permission catalog for the Quiet Composer
+   * menu. A read-only projection of the SAME StatusRuntime authority the
+   * Shift+Tab cycle uses. Absent on a test/composition without the seam: the
+   * menu reads an empty catalog and never dispatches.
+   */
+  permissionOptions?(): readonly string[]
+  /**
+   * TSP-7 PR-E: apply one explicitly chosen standard preset through the ONE
+   * StatusRuntime selection writer (never optimistic, never a renderer store).
+   */
+  selectPermission?(id: string): void
 }
 
 /** The B1 binding: editor-local + lifecycle only (submissions are B2). */
@@ -836,6 +849,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   let busyEpoch = 0
   /**
+   * TSP-7 PR-E: the ONLY local presentation state of the Quiet Composer
+   * Permission menu. `permissionMenuEpoch` advances on every false→true
+   * expansion so a click minted for an older expansion can never resolve onto
+   * the new one; `permissionMenuIndex` is the keyboard-highlighted option.
+   * Neither is a business pending flag: the StatusRuntime owns every write.
+   */
+  let permissionMenuOpen = false
+  let permissionMenuEpoch = 0
+  let permissionMenuIndex = 0
+  /** Close the menu and invalidate in-flight option identities. Returns
+   *  whether the menu was open (the caller decides whether to repaint). */
+  function closePermissionMenu(): boolean {
+    if (!permissionMenuOpen) return false
+    permissionMenuOpen = false
+    permissionMenuIndex = 0
+    return true
+  }
+  /**
    * PR-C: the immutable image scope of the CURRENT display subject, captured
    * ONCE per projection source. An ordinary repaint or delta REUSES it: the
    * scope is never re-resolved when an async read settles, so a retired
@@ -903,6 +934,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  the composer dead after the first modal close). */
   let lastAppliedFocusId: string | null | undefined
 
+  /** The ONE composer-chrome capability gate (PR-C row / PR-E Quiet
+   *  Composer): without `el`+`styles` the renderer keeps the controlled
+   *  editor + native footer only, never a fake text button. */
+  const composerChromeSupported = (): boolean =>
+    session.caps.features.includes('styles') && session.caps.kinds.includes('el')
+
+  /** The editor's REAL node path: inside the Quiet Composer Shell it is
+   *  `dock.quiet-composer.composer` (region -> shell key -> editor key); the
+   *  no-chrome branch keeps the historical `dock.composer`. ONE function so
+   *  `applyFocus` can never focus two paths or the wrong one. */
+  const composerEditorFocusId = (): string =>
+    composerChromeSupported() ? 'dock.quiet-composer.composer' : 'dock.composer'
+
   /** Apply the seat's desired hardware focus after a committed frame. */
   const applyFocus = (force: boolean): void => {
     if (disposed) return
@@ -915,6 +959,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       lastAppliedFocusId = undefined
       return
     }
+    const composerFocusId = composerEditorFocusId()
     const desired = seat.hasModalSeat()
       ? seat.desiredFocusId()
       : workHub?.isOpen() === true
@@ -925,10 +970,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             ? presetPicker.desiredFocusId() ?? null
             : modelPicker?.isOpen() === true
               ? modelPicker.desiredFocusId() ?? null
-              : 'dock.composer'
+              : composerFocusId
     if (!force && desired === lastAppliedFocusId) return
     lastAppliedFocusId = desired
-    composer.setFocused(desired === 'dock.composer')
+    composer.setFocused(desired === composerFocusId)
     surface.focus(desired)
   }
 
@@ -2017,30 +2062,29 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const preview = dockDraftNodes(draftStates)
     if (preview !== undefined) lines.push(preview)
     // The controlled composer: SDK `ui.editor` with client-supplied
-    // text/cursor (UTF-16). The native edit/undo/send features are NOT
-    // advertised (`sendable` stays unset); the program owns every edit.
-    lines.push(ui.editor({
-      key: 'composer',
-      text: composer.state().text,
-      cursor: composer.state().cursor,
-      maxLines: 8,
-      placeholder: 'Message',
-      prompt: '> ',
-    }))
-    // TSP-7 PR-C: the composer action row (Model / Effort / Send / Stop)
-    // follows the editor and precedes the native statusline. It is undefined
-    // on a pane without `el`+`styles` — the honest omission, never a fake
-    // text-link control (§4.1/§4.2).
-    const actionsRow = composerActionsRow()
-    if (actionsRow !== undefined) lines.push(actionsRow)
-    // TSP-7 PR-A/PR-D: the native status rows follow the editor. They are
-    // projected from the LAST FORMALLY COMMITTED snapshot through THIS
-    // mount's compiled footer presentation (the frozen PR-A/B default when
-    // no config was bound), and they are suppressed for the whole hydration
-    // window so an outgoing subject's status can never appear beside the
-    // incoming subject's transcript.
-    if (presentedStatus !== undefined && !hydrating) {
-      lines.push(...nativeStatuslineRows(presentedStatus, footerPresentation, nativeFooterAffordances()))
+    // text/cursor (UTF-16). On an `el`+`styles` pane it is wrapped in the ONE
+    // Quiet Composer shell with the native control row; every other pane keeps
+    // the pre-PR-C editor exactly as before. The native edit/undo/send
+    // features are NOT advertised; the program owns every edit.
+    const editorNode = composerEditorNode()
+    const quietShell = composerActionsSupported() ? quietComposerNode(editorNode) : undefined
+    lines.push(quietShell ?? editorNode)
+    // TSP-7 PR-A/PR-D/PR-E: the native status rows follow the composer. They
+    // are projected from the LAST FORMALLY COMMITTED snapshot through THIS
+    // mount's compiled footer presentation (the frozen PR-A/B default when no
+    // config was bound), suppressed for the whole hydration window, and — on
+    // the Quiet Composer branch — wrapped in the ONE transparent footer group
+    // so the Shell→Footer gap belongs to the presentation, never a synthetic
+    // row inside the dock. An empty projection adds NO wrapper and NO height.
+    const footerRows = presentedStatus !== undefined && !hydrating
+      ? nativeStatuslineRows(presentedStatus, footerPresentation, nativeFooterAffordances())
+      : []
+    if (footerRows.length > 0) {
+      if (composerActionsSupported()) {
+        lines.push(ui.col({ key: 'footer-group', role: QUIET_COMPOSER_ROLES.footerGroup, gap: 'none' }, ...footerRows))
+      } else {
+        lines.push(...footerRows)
+      }
     }
     return ui.col({ key: 'dock' }, ...lines)
   }
@@ -2071,6 +2115,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // The new subject committed: the hydration input fence lifts with it.
       hydrating = false
       scopeEpoch += 1
+      // TSP-7 PR-E: a new presentation scope invalidates any open Permission
+      // menu expansion; the option keys themselves also carry the epoch.
+      closePermissionMenu()
       scopePrefix = `s${scopeEpoch}-`
       scopeKeys = new TranscriptNodeKeys()
       // PR-C: the retired subject's image subscriptions go with it, and the
@@ -2181,6 +2228,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     beginSessionHydration() {
       if (disposed) return
+      // TSP-7 PR-E: the open Permission menu belongs to the outgoing subject;
+      // revoke its expansion identity with the subject before any later frame
+      // can paint a stale option target.
+      closePermissionMenu()
       // B3-A2 §8.2: the Reader belongs to the OUTGOING subject, so it is
       // revoked FIRST — before any retiring Presenter callback can run — and
       // its close stays owned here. `resetSessionFacts()` deliberately does
@@ -2350,24 +2401,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return true
   }
 
-  // ── TSP-7 PR-C: the composer action row (Model / Effort / Send / Stop) ──
+  // ── TSP-7 PR-C/PR-E: the ONE Quiet Composer (editor + controls) ──
   //
-  // The dock's ONE native control row between the editor and the statusline.
-  // It exists ONLY where the pane negotiated BOTH `el` and `styles` (§4.2 of
-  // the PR-C plan): without them a `html.button` paints as bare text — the
-  // documented measured trap — so the row is omitted entirely (the keyboard
-  // routes `/model`, Enter and Ctrl+C keep working; nothing fake is drawn).
-  const COMPOSER_ACTIONS_SHEET = 'dsh-composer-actions'
-  const COMPOSER_MODEL_ROLE = 'dsh-composer-model'
-  const COMPOSER_EFFORT_ROLE = 'dsh-composer-effort'
-  const COMPOSER_SEND_ROLE = 'dsh-composer-send'
-  const COMPOSER_STOP_ROLE = 'dsh-composer-stop'
-  /** The width (terminal columns) at or above which the value labels appear. */
-  const COMPOSER_VALUE_COLS = 72
-  /** The display-width budget a value label may occupy (ellipsis-bounded). */
-  const COMPOSER_VALUE_WIDTH = 14
-  const composerActionsSupported = (): boolean =>
-    session.caps.features.includes('styles') && session.caps.kinds.includes('el')
+  // The shell exists ONLY where the pane negotiated BOTH `el` and `styles`
+  // (the documented measured trap: without them an `el` button paints as bare
+  // text). Without them the dock keeps the controlled editor + native footer
+  // and draws no fake control.
+  const composerActionsSupported = (): boolean => composerChromeSupported()
   /** The native Model picker the composer's Model/Effort buttons open needs
    *  the picker surface itself (`picker`/`row`/`overlay`); `el`+`styles` alone
    *  only proves the button can paint, not that its business entry can run. */
@@ -2380,59 +2420,53 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     composerActionsSupported()
     && modelPickerCapable()
     && (boundHandlers?.modelPickerAvailable?.() ?? true)
+  /** The three standard presets the Quiet Composer menu may offer, in the
+   * Owner-frozen order. `auto`/custom presets stay available through
+   * `/permission` and Shift+Tab but never enter this three-row menu. */
+  const STANDARD_PERMISSION_OPTIONS = [
+    { id: 'read-only', label: 'Read Only' },
+    { id: 'workspace-write', label: 'Workspace Write' },
+    { id: 'danger-full-access', label: 'Full Access' },
+  ] as const
+  /** The render-time menu projection: catalog ids intersected with the
+   * standard three, and the authoritative current id marked selected. */
+  const permissionMenuOptions = (): readonly QuietComposerPermissionOption[] => {
+    const handlers = boundHandlers
+    if (handlers === undefined) return []
+    const roster = handlers.permissionOptions?.() ?? []
+    const fact = presentedStatus?.access.permissionPreset
+    return STANDARD_PERMISSION_OPTIONS
+      .filter(option => roster.includes(option.id))
+      .map(option => ({
+        id: option.id,
+        label: option.label,
+        selected: fact?.matched === true && fact.id === option.id,
+      }))
+  }
+  /** Whether the Quiet Composer really provides an operable Permission
+   * control for the CURRENT main subject — the PR-F footer fallback reads
+   * this exact fact (never a status value guess). */
+  const permissionComposerAffordance = (): boolean =>
+    composerActionsSupported()
+    && boundHandlers !== undefined
+    && presentedStatus?.view.subject.kind === 'main'
+    && presentedStatus?.access.permissionPreset?.matched === true
+    && permissionMenuOptions().length > 0
 
   /**
    * PR-F: the LIVE composer capability facts the universal footer visibility
    * uses for its default-On fallback. Each flag means "the TSP dock really
    * presents and can operate this control now" — never "a status value
-   * exists". PR-F has no Permission control (the Quiet Composer lands in
-   * PR-E), so `permission` stays false and the permission item's default-On
-   * hide falls back to visible.
+   * exists". PR-E now provides the real Permission control; the model and
+   * reasoning controls exist whenever the Quiet Composer chrome does.
    */
   const nativeFooterAffordances = (): TspFooterAffordances => ({
-    permission: false,
+    permission: permissionComposerAffordance(),
     model: modelPickerAvailable(),
     reasoning: modelPickerAvailable(),
   })
   if (composerActionsSupported()) {
-    surface.stylesheet(COMPOSER_ACTIONS_SHEET, `
-      [data-role="${COMPOSER_MODEL_ROLE}"],
-      [data-role="${COMPOSER_EFFORT_ROLE}"],
-      [data-role="${COMPOSER_SEND_ROLE}"],
-      [data-role="${COMPOSER_STOP_ROLE}"] {
-        border: 1px solid var(--accent);
-        background: var(--card);
-        color: var(--t1);
-        padding: 1px 8px;
-        border-radius: 4px;
-        font-family: var(--sans);
-      }
-      [data-role="${COMPOSER_SEND_ROLE}"] {
-        background: var(--raise);
-        font-weight: bold;
-      }
-      [data-role="${COMPOSER_MODEL_ROLE}"]:hover,
-      [data-role="${COMPOSER_EFFORT_ROLE}"]:hover,
-      [data-role="${COMPOSER_SEND_ROLE}"]:hover,
-      [data-role="${COMPOSER_STOP_ROLE}"]:hover {
-        background: var(--raise);
-      }
-      [data-role="${COMPOSER_MODEL_ROLE}"]:focus-visible,
-      [data-role="${COMPOSER_EFFORT_ROLE}"]:focus-visible,
-      [data-role="${COMPOSER_SEND_ROLE}"]:focus-visible,
-      [data-role="${COMPOSER_STOP_ROLE}"]:focus-visible {
-        outline: 1px solid var(--accent);
-        outline-offset: 1px;
-      }
-      [data-role="${COMPOSER_SEND_ROLE}"][aria-disabled] {
-        opacity: 0.55;
-        cursor: not-allowed;
-        background: var(--card);
-      }
-      [data-role="${COMPOSER_SEND_ROLE}"][aria-disabled]:hover {
-        background: var(--card);
-      }
-    `)
+    surface.stylesheet(QUIET_COMPOSER_SHEET, QUIET_COMPOSER_STYLES)
   }
 
   /**
@@ -2514,93 +2548,219 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
   }
 
-  /** The bounded, sanitized value label of one composer control (§2.1/§2.2). */
-  const composerValueLabel = (value: string | undefined): string | undefined => {
-    if (value === undefined || value === '') return undefined
-    if (session.caps.cols < COMPOSER_VALUE_COLS) return undefined
-    const clean = sanitizedPhysicalLine(value).trim()
-    if (clean === '') return undefined
-    return clampMiddle(clean, COMPOSER_VALUE_WIDTH)
+  /** The Quiet Composer's narrow-pane threshold (measured: 400px pane is
+   *  below this, the 637px GUI pane is above it). */
+  const QUIET_COMPOSER_NARROW_COLS = 56
+  /** The bounded display budgets of the Quiet Composer labels. */
+  const QUIET_COMPOSER_MODEL_WIDTH = 34
+  const QUIET_COMPOSER_MODEL_NARROW_WIDTH = 14
+  const QUIET_COMPOSER_PERMISSION_WIDTH = 24
+
+  /** The controlled editor node: the SAME program-owned draft/cursor cell,
+   *  with the v2 placeholder and NO `> ` prompt inside the quiet shell. */
+  const composerEditorNode = (): Node => {
+    const state = composer.state()
+    return composerActionsSupported()
+      ? ui.editor({
+          key: 'composer',
+          text: state.text,
+          cursor: state.cursor,
+          maxLines: 8,
+          placeholder: 'What would you like to work on?',
+        })
+      : ui.editor({
+          key: 'composer',
+          text: state.text,
+          cursor: state.cursor,
+          maxLines: 8,
+          placeholder: 'Message',
+          prompt: '> ',
+        })
   }
 
-  /** The composer action row: PR-C's ONE native control row (§4.1). */
-  const composerActionsRow = (): Node | undefined => {
-    if (!composerActionsSupported()) return undefined
+  /** The authoritative permission label, one-line sanitized and bounded. */
+  const permissionTriggerLabel = (): string => {
+    const fact = presentedStatus?.access.permissionPreset
+    const source = fact?.label !== undefined && fact.label !== '' ? fact.label : fact?.id
+    const clean = source === undefined ? '' : sanitizedPhysicalLine(source).trim()
+    if (clean === '') return 'Permission'
+    if (session.caps.cols < QUIET_COMPOSER_NARROW_COLS && fact?.id === 'workspace-write') return 'Write'
+    return clampMiddle(clean, QUIET_COMPOSER_PERMISSION_WIDTH)
+  }
+
+  /** The edit-time admission of the permission menu: a real main-subject
+   *  permission fact, a non-empty standard roster, the bound UI owner and no
+   *  modal/Reader/picker/hydration/disposed owner. */
+  const permissionMenuAdmitted = (): boolean =>
+    permissionComposerAffordance() && visualActionsAdmitted()
+
+  /** Toggle the menu; opening starts a NEW expansion identity and lands the
+   *  keyboard highlight on the current preset when one is present. */
+  const composerPermissionToggled = (): void => {
+    if (!permissionMenuAdmitted()) return
+    if (permissionMenuOpen) {
+      closePermissionMenu()
+      render()
+      return
+    }
+    const options = permissionMenuOptions()
+    if (options.length === 0) return
+    permissionMenuOpen = true
+    permissionMenuEpoch += 1
+    const selected = options.findIndex(option => option.selected)
+    permissionMenuIndex = selected < 0 ? 0 : selected
+    render()
+  }
+
+  /** One admitted option click. The captured expansion scope and epoch are
+   *  both re-checked against the live renderer before the single writer is
+   *  called; the menu closes FIRST so no second click can ever double-apply. */
+  const permissionOptionChosen = (renderScope: number, id: string, menuEpoch: number): void => {
+    if (disposed || hydrating || !inputBound) return
+    if (renderScope !== scopeEpoch || !permissionMenuOpen || menuEpoch !== permissionMenuEpoch) return
+    if (!permissionMenuAdmitted()) {
+      closePermissionMenu()
+      render()
+      return
+    }
+    const option = permissionMenuOptions().find(candidate => candidate.id === id)
+    if (option === undefined) {
+      closePermissionMenu()
+      render()
+      return
+    }
+    closePermissionMenu()
+    render()
+    if (option.selected) return // the current preset is a no-op, never a write
+    const handlers = boundHandlers
+    const select = handlers?.selectPermission
+    if (select === undefined) {
+      display.notify('permission selection is unavailable in this session', 'error')
+      return
+    }
+    try {
+      select(id)
+    } catch (error) {
+      display.notify('permission selection is unavailable in this session', 'error')
+      options.logError?.('tsp renderer: permission selection entry refused', { error: errorText(error) })
+    }
+  }
+
+  /** The menu's keyboard slice: Up/Down cycle, Enter chooses the highlighted
+   *  option, Escape closes ONLY the menu. Returns true when the key was
+   *  consumed by the menu. */
+  const permissionMenuHandleKey = (key: Key): boolean => {
+    if (!permissionMenuOpen) return false
+    const optionsNow = permissionMenuOptions()
+    if (optionsNow.length === 0) {
+      closePermissionMenu()
+      render()
+      return false
+    }
+    const count = optionsNow.length
+    if (key.name === 'up') {
+      permissionMenuIndex = (Math.min(permissionMenuIndex, count - 1) - 1 + count) % count
+      render()
+      return true
+    }
+    if (key.name === 'down') {
+      permissionMenuIndex = (Math.min(permissionMenuIndex, count - 1) + 1) % count
+      render()
+      return true
+    }
+    if (key.name === 'enter') {
+      const option = optionsNow[Math.min(permissionMenuIndex, count - 1)]!
+      permissionOptionChosen(scopeEpoch, option.id, permissionMenuEpoch)
+      return true
+    }
+    if (key.name === 'escape') {
+      closePermissionMenu()
+      render()
+      return true
+    }
+    // Any other key closes the menu and then reaches the ORIGINAL composer
+    // path exactly once (never both a menu action and a composer action).
+    if (closePermissionMenu()) render()
+    return false
+  }
+
+  /** The Quiet Composer's model/effort labels + title, with the frozen
+   *  narrow-pane degradation and external-fact sanitization. */
+  const quietComposerModelView = (): { label: string; title: string; interactive: boolean } => {
     const model = presentedStatus?.composition.model
-    const modelValue = composerValueLabel(model?.displayName)
-    const effortValue = composerValueLabel(model?.reasoningEffort)
-    // Stop exists ONLY while the CURRENT formally-committed snapshot says the
-    // main subject is busy; a non-busy subject never paints a dead control.
-    const busy = presentedStatus?.activity.busy === true && !hydrating
-    // The title interpolates EXTERNAL facts (a provider's model name/effort):
-    // every component passes the SAME physical-line sanitization as the
-    // visible labels, so a hostile name cannot smuggle control bytes into the
-    // tooltip (terminal-output contract).
-    const safeName = model === undefined ? undefined : sanitizedPhysicalLine(model.displayName).trim()
-    const safeEffort = model === undefined || model.reasoningEffort === undefined
+    const cleanName = model?.displayName === undefined ? undefined : sanitizedPhysicalLine(model.displayName).trim()
+    const cleanEffort = model?.reasoningEffort === undefined ? undefined : sanitizedPhysicalLine(model.reasoningEffort).trim()
+    const narrow = session.caps.cols < QUIET_COMPOSER_NARROW_COLS
+    const value = cleanName === undefined || cleanName === ''
       ? undefined
-      : sanitizedPhysicalLine(model.reasoningEffort).trim()
-    const modelTitle = model === undefined
-      ? 'Model — type /model to switch'
-      : `Model ${safeName}${safeEffort === undefined ? '' : ` · effort ${safeEffort}`} — type /model to switch`
-    const submittable = composerDraftSubmittable()
-    // PR-C external review F2: the row's node keys carry the presentation-scope
-    // EPOCH, so a click minted under one display subject can never land on the
-    // same-named button of its successor — after a session switch the old node
-    // id simply does not exist in the new view, and the SDK's own dispatch
-    // drops it. The epoch advances ONLY on a subject change (never per status
-    // revision), which keeps §4.1's stable-key contract: within one subject
-    // the identity is continuous, so the client never remounts the row.
-    const actionScope = `s${scopeEpoch}`
-    return ui.row(
-      { key: `composer-actions-${actionScope}`, wrap: true, justify: 'between', gap: 'xs', role: 'dsh-composer-actions' },
-      ui.row(
-        { key: `composer-selectors-${actionScope}`, wrap: true, gap: 'xs' },
-        html.button({
-          key: `composer-model-${actionScope}`,
-          role: COMPOSER_MODEL_ROLE,
-          title: modelTitle,
-          aria: 'Switch model',
-          onClick: () => { composerModelClicked('models') },
-        }, `Model${modelValue === undefined ? '' : ` · ${modelValue}`} ▾`),
-        html.button({
-          key: `composer-effort-${actionScope}`,
-          role: COMPOSER_EFFORT_ROLE,
-          title: safeEffort === undefined
-            ? 'Reasoning effort — type /model to change'
-            : `Reasoning effort ${safeEffort} — type /model to change`,
-          aria: 'Change reasoning effort',
-          onClick: () => { composerModelClicked('effort') },
-        }, `Effort${effortValue === undefined ? '' : ` · ${effortValue}`} ▾`),
-      ),
-      ui.row(
-        { key: `composer-delivery-${actionScope}`, gap: 'xs' },
-        html.button({
-          key: `composer-send-${actionScope}`,
-          role: COMPOSER_SEND_ROLE,
-          title: submittable ? `Send — ${TSP_COMPOSER_SEND_LABEL}` : 'Type a message to send',
-          aria: 'Send message',
-          // The VISIBLE disabled state: the client does not ENFORCE disabled on
-          // an `el` button (measured), so this attribute paints the muted
-          // presentation while the handler's own re-check stays the real gate.
-          ...(submittable ? {} : { attrs: { 'aria-disabled': 'true', disabled: 'disabled' } as Readonly<Record<string, string>> }),
-          onClick: () => { composerSendClicked() },
-        }, 'Send'),
-        ...(busy ? [html.button({
-          // PR-C (external review r3): the Stop node's identity carries the
-          // busy LIFETIME serial beside the subject scope, so each run of the
-          // same session paints under its OWN id — a stale click from the
-          // previous run cannot resolve onto this one. Model/Effort/Send keep
-          // their stable subject-scoped keys (no cross-run identity exists for
-          // them to confuse).
-          key: `composer-stop-${actionScope}r${busyEpoch}`,
-          role: COMPOSER_STOP_ROLE,
-          title: `Stop — ${TSP_COMPOSER_STOP_LABEL}`,
-          aria: 'Stop the running turn',
-          onClick: () => { composerStopClicked() },
-        }, 'Stop')] : []),
-      ),
-    )
+      : clampMiddle(cleanName, narrow ? QUIET_COMPOSER_MODEL_NARROW_WIDTH : QUIET_COMPOSER_MODEL_WIDTH)
+    return {
+      label: `${value ?? 'Model'} ▾`,
+      title: model === undefined
+        ? 'Model — type /model to switch'
+        : `Model ${cleanName}${cleanEffort === undefined || cleanEffort === '' ? '' : ` · effort ${cleanEffort}`} — type /model to switch`,
+      interactive: boundHandlers !== undefined,
+    }
+  }
+  const quietComposerEffortView = (): { label: string; title: string; interactive: boolean } => {
+    const effort = presentedStatus?.composition.model?.reasoningEffort
+    const clean = effort === undefined ? undefined : sanitizedPhysicalLine(effort).trim()
+    if (clean === undefined || clean === '') {
+      return { label: 'Effort ▾', title: 'Reasoning effort — type /model to change', interactive: boundHandlers !== undefined }
+    }
+    return {
+      label: `${session.caps.cols < QUIET_COMPOSER_NARROW_COLS ? 'H' : clampMiddle(clean, 14)} ▾`,
+      title: `Reasoning effort ${clean} — type /model to change`,
+      interactive: boundHandlers !== undefined,
+    }
+  }
+
+  /** Build the ONE Quiet Composer shell around the controlled editor. */
+  const quietComposerNode = (editor: Node): Node | undefined => {
+    if (!composerActionsSupported()) return undefined
+    // A modal/Reader/picker/hydration frame invalidates an open menu before
+    // it can paint a stale click target.
+    if (permissionMenuOpen && !permissionMenuAdmitted()) closePermissionMenu()
+    const options = permissionMenuOptions()
+    const index = Math.min(Math.max(0, permissionMenuIndex), Math.max(0, options.length - 1))
+    permissionMenuIndex = index
+    const model = quietComposerModelView()
+    const effort = quietComposerEffortView()
+    const renderScope = scopeEpoch
+    return quietComposerView({
+      editor,
+      scope: `s${renderScope}`,
+      busyEpoch,
+      permission: {
+        label: permissionTriggerLabel(),
+        interactive: permissionComposerAffordance(),
+        expanded: permissionMenuOpen && options.length > 0,
+        options,
+        menuEpoch: permissionMenuEpoch,
+      },
+      model,
+      effort,
+      busy: presentedStatus?.activity.busy === true && !hydrating,
+      sendable: composerDraftSubmittable(),
+      onPermissionToggle: () => { composerPermissionToggled() },
+      onPermissionChoose: (id, menuEpoch) => { permissionOptionChosen(renderScope, id, menuEpoch) },
+      onModel: () => {
+        if (closePermissionMenu()) render()
+        composerModelClicked('models')
+      },
+      onEffort: () => {
+        if (closePermissionMenu()) render()
+        composerModelClicked('effort')
+      },
+      onSend: () => {
+        if (closePermissionMenu()) render()
+        composerSendClicked()
+      },
+      onStop: () => {
+        if (closePermissionMenu()) render()
+        composerStopClicked()
+      },
+    })
   }
 
   /** The EXACT payload of one admitted publication: the final ChartFact as
@@ -2734,6 +2894,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    unconditional exit. Interrupting a live Agent must not kill the
     //    TUI. The composer's exit-empty (below) is the only exit gesture.
     if (key.ctrl === true && key.name === 'c') {
+      // Ctrl+C always belongs to the original cancel owner; the local menu
+      // expansion is revoked without consuming the intent.
+      if (closePermissionMenu()) render()
       handlers.cancel()
       return false
     }
@@ -2741,6 +2904,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (sessionBrowser?.handleKey(key)) return false
     if (presetPicker?.handleKey(key)) return false
     if (modelPicker?.handleKey(key)) return false
+    // TSP-7 PR-E: the Quiet Composer Permission menu sits AFTER every seat/
+    // Reader/picker owner and BEFORE the original Escape cancel. Up/Down
+    // cycle, Enter chooses, Escape closes ONLY the menu; any other key closes
+    // the menu and then reaches the ONE composer reducer exactly once.
+    if (permissionMenuHandleKey(key)) return false
     if (key.name === 'escape') {
       handlers.cancel()
       return false

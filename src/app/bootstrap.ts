@@ -53,6 +53,7 @@ import { foldSessionTitle } from '@deepseek-ai/dsh-session-title'
 import { TUI_STARTUP_SERVICE } from '../startup.ts'
 import { createSessionPresentation } from './surface/session-presentation.ts'
 import { createStatusRuntime } from './surface/status-runtime.ts'
+import type { StatusRuntime } from './surface/status-runtime.ts'
 import { createInputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
 import { createApplicationEvents, type ApplicationEventsOwner } from './surface/application-events.ts'
@@ -636,6 +637,13 @@ export function applyRunnerWithRuntime(
     /** PR-F: the real `/model` picker business-entry availability (registration,
      *  not just painted chrome); late-bound with the picker opener below. */
     let modelPickerAvailableOwner: (() => boolean) | undefined
+    /**
+     * TSP-7 PR-E: the ONE late-bound Permission UI owner (the existing
+     * StatusRuntime, assigned after it is constructed below). The surface is
+     * created before the status owner, so the narrow read/action slot keeps
+     * the same dependency direction and time order as the Model picker seam.
+     */
+    let permissionUiOwner: Pick<StatusRuntime, 'permissionOptions' | 'selectPermission'> | undefined
     const surface = createSurfaceRuntime<SessionEvent>({
       tuiVersion: bundleVersion(),
       notificationPresentation,
@@ -668,6 +676,16 @@ export function applyRunnerWithRuntime(
         openRegisteredModelPicker(entry)
       },
       modelPickerAvailable: () => modelPickerAvailableOwner?.() ?? false,
+      // TSP-7 PR-E: the LATE-BOUND narrow Permission UI seam (TSP only). A
+      // click before the StatusRuntime assignment reaches the throwing
+      // select placeholder; the catalog read returns empty until then.
+      permissionUi: {
+        options: () => permissionUiOwner?.permissionOptions() ?? [],
+        select: id => {
+          if (permissionUiOwner === undefined) throw new Error('permission UI owner not composed')
+          permissionUiOwner.selectPermission(id)
+        },
+      },
     })
 
     // The live Agent is declared before the TUI-facing facade so every read
@@ -2180,6 +2198,10 @@ export function applyRunnerWithRuntime(
         },
       }),
     })
+    // TSP-7 PR-E: arm the Permission UI owner BEFORE `bindRendererInput()`
+    // can deliver the first click/key. The renderer only reaches this owner
+    // through the narrow surface seam above.
+    permissionUiOwner = status
     // A5b-2: the client-local input-history owner (known cwds, the canonical
     // last row and the per-session recall projection). Constructed before the
     // mount; it only touches the display seam inside `activateBootRecall`.

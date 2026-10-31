@@ -161,6 +161,56 @@ test('the cycle computes next from the projection current and dispatches EXACTLY
     'the notice is the gesture feedback')
 })
 
+test('the shared apply primitive still lets the cycle traverse a non-standard auto preset', async () => {
+  const h = harness({ current: 'workspace-write', names: ['read-only', 'workspace-write', 'auto'] })
+  h.runtime.cyclePermission()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(h.applied, [{ sessionId: 'session-a', presetId: 'auto' }],
+    'the menu restriction must never narrow the Shift+Tab cycle catalog')
+})
+
+test('selectPermission accepts ONLY the three standard ids present in the live catalog', async () => {
+  const valid = harness({ current: 'read-only', names: ['read-only', 'workspace-write', 'danger-full-access', 'auto'] })
+  valid.runtime.selectPermission('workspace-write')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(valid.applied, [{ sessionId: 'session-a', presetId: 'workspace-write' }])
+
+  const missing = harness({ current: 'read-only', names: ['read-only', 'auto'] })
+  missing.runtime.selectPermission('danger-full-access')
+  const nonStandard = harness({ current: 'read-only', names: ['read-only', 'workspace-write', 'auto'] })
+  nonStandard.runtime.selectPermission('auto')
+  const alreadyCurrent = harness({ current: 'workspace-write', names: ['read-only', 'workspace-write', 'danger-full-access'] })
+  alreadyCurrent.runtime.selectPermission('workspace-write')
+  const noScope = harness({ current: 'read-only', noScope: true })
+  noScope.runtime.selectPermission('workspace-write')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  for (const h of [missing, nonStandard, alreadyCurrent, noScope]) {
+    assert.deepEqual(h.applied, [], 'an invalid/missing/current/live-scope-less selection never dispatches')
+    assert.deepEqual(h.notices, [], 'and it never fabricates a notice')
+  }
+})
+
+test('permissionOptions returns a NEW readonly array of the live catalog', () => {
+  const h = harness({ names: ['read-only', 'workspace-write', 'auto'] })
+  const options = h.runtime.permissionOptions()
+  assert.deepEqual(options, ['read-only', 'workspace-write', 'auto'])
+  ;(options as string[]).push('mutated')
+  assert.deepEqual(h.runtime.permissionOptions(), ['read-only', 'workspace-write', 'auto'],
+    'the port table is never exposed by reference')
+})
+
+test('selectPermission keeps the same stale-scope/transport silence as the cycle', async () => {
+  const staleScope = harness({ current: 'read-only', staleAfterApply: true })
+  staleScope.runtime.selectPermission('workspace-write')
+  const staleTransport = harness({ current: 'read-only', transportStaleAfterApply: true })
+  staleTransport.runtime.selectPermission('workspace-write')
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.deepEqual(staleScope.applied, [{ sessionId: 'session-a', presetId: 'workspace-write' }])
+  assert.deepEqual(staleScope.notices, [], 'a stale scope never notifies the replacement session')
+  assert.deepEqual(staleTransport.applied, [{ sessionId: 'session-a', presetId: 'workspace-write' }])
+  assert.deepEqual(staleTransport.notices, [], 'a same-id transport rollover never notifies the replacement binding')
+})
+
 test('applied does NOT install the value locally no status repaint claims the commit', async () => {
   const h = harness({ current: 'read-only' })
   const commits: unknown[] = []

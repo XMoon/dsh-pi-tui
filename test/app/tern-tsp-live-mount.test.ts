@@ -229,7 +229,7 @@ interface Harness {
   replaceMain(): void
   exitRequested(): boolean
   /** PR-C (TSP-7): the handlers the input bind delivered (undefined pre-bind). */
-  boundHandlers(): { openModelPicker(entry: 'models' | 'effort'): void } | undefined
+  boundHandlers(): Parameters<TspRenderer['bindInput']>[0] | undefined
   dispose(): Promise<void>
 }
 
@@ -237,9 +237,13 @@ async function mountTspHarness(options: {
   requestExit?: () => void
   onFatal?: (error: unknown) => void
   sessionBrowserCapabilities?: boolean
+  /** PR-E (TSP-7): advertise `el` so the Quiet Composer shell mounts. */
+  composerActions?: boolean
   /** PR-C (TSP-7): the composition's late-bound `/model` UI entry, injected
    *  exactly as `src/app/bootstrap.ts` injects it into `createSurfaceRuntime`. */
   openModelPicker?: (entry: 'models' | 'effort') => void
+  /** PR-E (TSP-7): the composition's late-bound Permission UI seam. */
+  permissionUi?: { options(): readonly string[]; select(id: string): void }
 } = {}): Promise<Harness & { session: Session }> {
   const hello = options.sessionBrowserCapabilities
     ? {
@@ -247,7 +251,9 @@ async function mountTspHarness(options: {
       kinds: [...HELLO.kinds, 'picker', 'row', 'overlay', 'text', 'md'],
       features: [...HELLO.features, 'scroll'],
     }
-    : HELLO
+    : options.composerActions === true
+      ? { ...HELLO, kinds: [...HELLO.kinds, 'el'] }
+      : HELLO
   const tern = new ScriptedTern(hello)
   const session = await openSession(tern)
   let folder = new TranscriptFolder()
@@ -313,6 +319,9 @@ async function mountTspHarness(options: {
     // PR-C (TSP-7): the composition's late-bound `/model` UI entry, when the
     // case supplies one (the production bootstrap always does).
     ...(options.openModelPicker === undefined ? {} : { openModelPicker: options.openModelPicker }),
+    // PR-E (TSP-7): the narrow Permission UI seam, forwarded by the runtime
+    // into the renderer input binding exactly like the production bootstrap.
+    ...(options.permissionUi === undefined ? {} : { permissionUi: options.permissionUi }),
   })
   surface.attachEventRouting(source)
 
@@ -693,6 +702,83 @@ test('an unwired composition refuses the /model UI entry loudly, never silently'
     // VISIBLE (the renderer reports it), not a silent no-op.
     assert.throws(() => bound!.openModelPicker('models'),
       /model picker command entry is not wired/)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('the late-bound Permission UI seam reaches the bound renderer input exactly once', async () => {
+  const calls: string[] = []
+  const harness = await mountTspHarness({
+    permissionUi: {
+      options: () => ['read-only', 'workspace-write'],
+      select: id => { calls.push(id) },
+    },
+  })
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound)
+    assert.deepEqual(bound.permissionOptions?.(), ['read-only', 'workspace-write'])
+    bound.selectPermission?.('workspace-write')
+    await settle() // window: let the seam callback run before reading the record
+    assert.deepEqual(calls, ['workspace-write'], 'the renderer reaches the ONE late-bound StatusRuntime seam')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('an unwired Permission UI seam reads empty and refuses the select loudly', async () => {
+  const harness = await mountTspHarness()
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound)
+    assert.deepEqual(bound.permissionOptions?.(), [], 'no owner composes an empty catalog, never a fabricated one')
+    assert.throws(() => bound.selectPermission?.('workspace-write'), /permission UI owner is not composed/)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('production assembly: surface.commitStatus + the Permission seam reach the Quiet Composer menu and one select', async () => {
+  const selects: string[] = []
+  const harness = await mountTspHarness({
+    composerActions: true,
+    permissionUi: {
+      options: () => ['read-only', 'workspace-write', 'danger-full-access'],
+      select: id => { selects.push(id) },
+    },
+  })
+  try {
+    harness.surface.bindRendererInput()
+    harness.surface.commitStatus(
+      { access: { permissionPreset: { id: 'workspace-write', label: 'Workspace Write', matched: true } } } as never,
+      {},
+      undefined,
+    )
+    await waitUntil('the quiet composer permission trigger paints', () =>
+      wireNodes({ frames: () => harness.tern.frames }).some(node => node.k === 'el'
+        && String(node.id).includes('.composer-permission-s')
+        && !String(node.id).includes('option')))
+    const trigger = wireNodes({ frames: () => harness.tern.frames }).find(node => node.k === 'el'
+      && String(node.id).includes('.composer-permission-s')
+      && !String(node.id).includes('option'))
+    assert.ok(trigger)
+    harnessFreeInput(harness.tern, { ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: trigger!.id, act: 'click' })
+    await waitUntil('the three standard permission options paint', () =>
+      wireNodes({ frames: () => harness.tern.frames }).filter(node => node.k === 'el'
+        && String(node.id).includes('.composer-permission-option-')).length === 3)
+    const full = wireNodes({ frames: () => harness.tern.frames }).find(node => node.k === 'el'
+      && String(node.id).includes('.composer-permission-option-')
+      && String(node.p['text'] ?? '').includes('Full Access'))
+    assert.ok(full)
+    harnessFreeInput(harness.tern, { ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: full!.id, act: 'click' })
+    await waitUntil('the select callback ran', () => selects.length === 1)
+    assert.deepEqual(selects, ['danger-full-access'])
   } finally {
     await harness.dispose()
     await harness.session.close()
