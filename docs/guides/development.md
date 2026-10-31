@@ -50,7 +50,7 @@ The supported long-lived Source Mode flow uses the explicit source tasks:
 | Need | npm mode (main default) | Source Mode |
 |---|---|---|
 | Workspace install | `mise run setup` | `mise run source:bootstrap` |
-| Status | `mise run setup` / `pnpm dev:doctor` | `mise run source:doctor` |
+| Workspace status | `mise run setup` output + lock/`node_modules`; legacy `pnpm dev:doctor` may be `MISSING` | `mise run source:doctor` must be `READY` |
 | Build | `mise run build` | `mise run build` |
 | Interactive profile | `mise run dev:profile` / `dev:dsh` | `mise run source:profile` / `source:dsh` |
 | CLI identity | mise-managed npm DSH CLI | this worktree's `node_modules/.bin/dsh` |
@@ -58,6 +58,12 @@ The supported long-lived Source Mode flow uses the explicit source tasks:
 The detailed source runbook below is the authority; the table is only an
 orientation summary. For every non-ready source result, run
 `mise run source:bootstrap`. The doctor is a read-only diagnostic (`READY`, `STALE`, `MISSING` or `BROKEN`).
+
+`mise run setup` is an INSTALL action, not a doctor or state writer. A fresh npm
+worktree therefore has no `.dsh-dev-state.json` after setup; the legacy
+`pnpm dev:doctor` may report `MISSING` while the npm workspace is correctly
+installed. That legacy state belongs to the old bootstrap protocol and to Source
+Mode; do not run `pnpm dev:bootstrap` merely to turn the legacy doctor green.
 
 The bootstrap is idempotent: it does not remove `node_modules` or rewrite a
 tracked lockfile. The root `pnpm-workspace.yaml` uses
@@ -111,7 +117,8 @@ mise run setup
 ```
 
 The legacy `pnpm dev:doctor` / `pnpm dev:bootstrap` pair remains available for
-diagnosis and existing local state:
+legacy bootstrap state and Source Mode diagnosis; it is not the status writer
+for `mise run setup`:
 
 ```bash
 pnpm dev:doctor
@@ -152,6 +159,13 @@ generated `.dsh-dev-env`, and invoke this worktree's
 `./node_modules/.bin/dsh`, never the mise npm CLI. Their profile lives under
 `temp/source-dsh-home`; `source:dsh` accepts `--cwd <path>` for a different
 business workspace.
+
+A worktree whose last successful bootstrap committed a Source generation is
+source-materialized even when its tracked mode is `npm`. `mise run setup` and the
+npm `dev:profile`/`dev:dsh` entries reject that state before spawning pnpm or
+`dsh`; continue with `source:doctor` and the source tasks. This guard also
+rejects stale, malformed, symlinked, and foreign-root state instead of treating
+it as an npm worktree.
 
 The generated `.dsh-dev-env` does not export `DSH_MODE=source` (the tracked
 mode remains the policy). A shell that needs source mode must set

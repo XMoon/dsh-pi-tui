@@ -103,7 +103,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      MISE_ENABLE_TOOLS: "node,pnpm,npm:@deepseek-ai/dsh"
+      # Source Mode only needs Node/pnpm here; its exact-SHA distribution is
+      # prepared by prepare-dsh-source and materialized by ci-deps, never by
+      # the mise npm CLI.
+      MISE_ENABLE_TOOLS: "${{ needs.dsh-context.outputs.mode == 'source' && 'node,pnpm' || 'node,pnpm,npm:@deepseek-ai/dsh' }}"
 
     steps:
       - name: Checkout
@@ -118,15 +121,12 @@ jobs:
           install: true
           install_args: '--locked'
 
-      - name: Verify tool versions, committed lock and sidecar
+      - name: Verify Node and pnpm pins plus committed lock sidecar
         run: |
           set -euo pipefail
-          EXPECTED_DSH="$(node -p "require('./package.json').devDependencies['@deepseek-ai/dsh-agent']")"
           EXPECTED_PNPM="$(node -p "require('./package.json').packageManager.split('@').pop()")"
-          ACTUAL_DSH="$(mise exec -- dsh --version)"
           ACTUAL_PNPM="$(mise exec -- pnpm --version)"
           ACTUAL_NODE_MAJOR="$(mise exec -- node -p "process.versions.node.split('.')[0]")"
-          test "$ACTUAL_DSH" = "$EXPECTED_DSH"
           test "$ACTUAL_PNPM" = "$EXPECTED_PNPM"
           test "$ACTUAL_NODE_MAJOR" = "24"
           node -e '
@@ -141,7 +141,30 @@ jobs:
           '
           test -z "$(git status --porcelain -- mise.lock .mise)"
 
+      - name: Verify npm DSH CLI version
+        if: ${{ needs.dsh-context.outputs.mode == 'npm' }}
+        run: |
+          set -euo pipefail
+          EXPECTED_DSH="$(node -p "require('./package.json').devDependencies['@deepseek-ai/dsh-agent']")"
+          ACTUAL_DSH="$(mise exec -- dsh --version)"
+          test "$ACTUAL_DSH" = "$EXPECTED_DSH"
+
+      - name: Verify Source toolchain contract
+        if: ${{ needs.dsh-context.outputs.mode == 'source' }}
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("node:fs")
+            const config = JSON.parse(fs.readFileSync("test/compat/dsh-source.json", "utf8"))
+            if (config.schemaVersion !== 1) throw new Error("DSH source config schemaVersion must be 1")
+            if (typeof config.repository !== "string" || config.repository.length === 0) throw new Error("DSH source config repository is missing")
+            if (!/^[0-9a-f]{40}$/u.test(config.ref)) throw new Error("DSH source config ref must be an exact 40-character SHA")
+            if (typeof config.expectedVersion !== "string" || config.expectedVersion.length === 0) throw new Error("DSH source config expectedVersion is missing")
+          '
+          mise tasks ls | grep -Eq 'source:(doctor|bootstrap|profile|dsh)'
+
       - name: Materialize workspace dependencies through the task
+        if: ${{ needs.dsh-context.outputs.mode == 'npm' }}
         run: mise run setup
 
   # ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
@@ -108,6 +108,73 @@ export function readModeConfig(path) {
     fail(`unsupported DSH mode ${JSON.stringify(mode)}; expected source or npm`)
   }
   return mode
+}
+
+/** Read the last bootstrap-committed materialization state, if any. */
+export function readMaterializedDevState(root) {
+  const directory = resolve(root)
+  const path = join(directory, DEV_STATE_FILE)
+  if (!existsSync(path)) return undefined
+  let info
+  try {
+    info = lstatSync(path)
+  } catch (error) {
+    fail(`${DEV_STATE_FILE} could not be inspected: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
+    fail(`${DEV_STATE_FILE} must be a regular file owned by this worktree: ${path}`)
+  }
+  let value
+  try {
+    value = JSON.parse(readFileSync(path, 'utf8'))
+  } catch (error) {
+    fail(`${DEV_STATE_FILE} could not be read: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    fail(`${DEV_STATE_FILE} must be an object`)
+  }
+  if (value.schemaVersion !== 1) fail(`${DEV_STATE_FILE} has an unsupported schemaVersion`)
+  if (value.mode !== 'npm' && value.mode !== 'source') {
+    fail(`${DEV_STATE_FILE} has an unsupported mode ${JSON.stringify(value.mode)}`)
+  }
+  if (typeof value.root !== 'string' || resolve(value.root) !== directory) {
+    fail(`${DEV_STATE_FILE} belongs to ${JSON.stringify(value.root)}, not ${directory}`)
+  }
+  for (const field of ['node', 'pnpm', 'packageJsonHash', 'lockfileHash']) {
+    if (typeof value[field] !== 'string') fail(`${DEV_STATE_FILE} is missing a valid ${field} field`)
+  }
+  if (value.mode === 'source') {
+    for (const field of ['repository', 'ref', 'expectedVersion', 'distribution']) {
+      if (typeof value[field] !== 'string') fail(`${DEV_STATE_FILE} is missing a valid source ${field} field`)
+    }
+  }
+  return value
+}
+
+/** Read the tracked mode policy without falling back to generated environment state. */
+export function trackedMode(root) {
+  const path = join(resolve(root), MODE_CONFIG_RELATIVE)
+  return existsSync(path) ? readModeConfig(path) : undefined
+}
+
+/**
+ * Guard an npm-only operation against the tracked mode, an explicit mode
+ * request, and a worktree whose last bootstrap committed a Source generation.
+ * `context.mode` answers the first two; the state file answers the last one.
+ */
+export function assertNpmWorktree(root, context, command) {
+  const directory = resolve(root)
+  const tracked = trackedMode(directory)
+  if (tracked === 'source') {
+    fail(`${command} refuses the tracked source mode for ${directory}; use the Source Mode tasks`)
+  }
+  if (context.mode !== 'npm') {
+    fail(`${command} refuses mode=${context.mode} for ${directory}; use the Source Mode tasks`)
+  }
+  const state = readMaterializedDevState(directory)
+  if (state !== undefined && state.mode === 'source') {
+    fail(`${command} refuses ${directory}: ${DEV_STATE_FILE} records a Source materialization; use the Source Mode tasks`)
+  }
 }
 
 export function cacheRoot(environment = process.env) {

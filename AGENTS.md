@@ -375,7 +375,9 @@ mise run setup
 
 `mise install` provides the project Node, pnpm and the DSH CLI whose exact
 version comes from `package.json`; `mise run setup` performs the npm-mode frozen
-install and refuses `source` mode. If your global mise config declares other
+install and refuses `source` mode. `setup` is an install action, not a doctor or
+state writer: a fresh npm worktree may still report legacy `pnpm dev:doctor`
+`MISSING`; that is not a setup failure. If your global mise config declares other
 tools, scope the install with
 `MISE_ENABLE_TOOLS=node,pnpm,npm:@deepseek-ai/dsh mise install --locked` (the
 same allowlist CI uses).
@@ -393,10 +395,11 @@ mise run source:profile
 mise run source:dsh
 ```
 
-`mise run setup` must not be used in a source worktree. `source:profile` and
-`source:dsh` use this worktree's `./node_modules/.bin/dsh` and the isolated
-`temp/source-dsh-home`; never use a bare `dsh`, the mise npm CLI or the real
-`~/.dsh` for Source Mode. A plain `pnpm install` before bootstrap leaves the DSH workspace
+A worktree with an existing Source materialization must not run `mise run setup`
+or the npm `dev:profile`/`dev:dsh` entries, even when its tracked mode is npm;
+use the Source tasks. `source:profile` and `source:dsh` use this worktree's
+`./node_modules/.bin/dsh` and the isolated `temp/source-dsh-home`; never use a
+bare `dsh`, the mise npm CLI or the real `~/.dsh` for Source Mode. A plain `pnpm install` before bootstrap leaves the DSH workspace
 state incorrect (`workspace DSH incorrect` / `local state missing`); the
 bootstrap task performs the dependency install itself, then `source:doctor`
 must report `READY`. A plain `pnpm install` after bootstrap re-resolves

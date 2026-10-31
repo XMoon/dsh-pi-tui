@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -21,7 +21,8 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { REQUIRED_PHASES } from '../../scripts/ci-verdict.mjs'
 import { DSH_REPOSITORY } from '../../scripts/dsh-dev-context.mjs'
 import { _test as setupTest, runMiseSetup } from '../../scripts/mise-setup.mjs'
-import { _test as profileTest } from '../../scripts/mise-dev-profile.mjs'
+import { _test as profileTest, runMiseDevProfile } from '../../scripts/mise-dev-profile.mjs'
+import { runMiseDevDsh } from '../../scripts/mise-dev-dsh.mjs'
 import { _test as sourceModeTest } from '../../scripts/mise-source-mode.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -48,6 +49,61 @@ function taskEnv(task) {
   const match = /^env = \{ (.*) \}$/mu.exec(taskBody(task))
   if (match === null) return {}
   return Object.fromEntries([...match[1].matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*)"/gu)].map(([, key, value]) => [key, value]))
+}
+
+
+function writeNpmFixture(root, { mode = 'npm', source = false } = {}) {
+  writeFileSync(join(root, 'package.json'), `${JSON.stringify({
+    name: 'mise-worktree-fixture',
+    private: true,
+    packageManager: 'pnpm@12.11.2',
+  }, null, 2)}\n`)
+  writeFileSync(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9.0\n')
+  mkdirSync(join(root, 'test', 'compat'), { recursive: true })
+  writeFileSync(join(root, 'test', 'compat', 'dsh-mode.json'), `${JSON.stringify({ schemaVersion: 1, mode })}\n`)
+  if (source) {
+    writeFileSync(join(root, 'test', 'compat', 'dsh-source.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      repository: DSH_REPOSITORY,
+      ref: 'a'.repeat(40),
+      expectedVersion: '0.2.1-rc.4',
+    })}\n`)
+  }
+}
+
+function writeMaterializedState(root, { mode = 'source', stateRoot = root, ...overrides } = {}) {
+  const state = {
+    schemaVersion: 1,
+    mode,
+    node: '24',
+    pnpm: '12.11.2',
+    root: stateRoot,
+    packageJsonHash: 'a'.repeat(64),
+    lockfileHash: 'b'.repeat(64),
+    ...overrides,
+  }
+  if (mode === 'source') {
+    Object.assign(state, {
+      repository: DSH_REPOSITORY,
+      ref: 'a'.repeat(40),
+      expectedVersion: '0.2.1-rc.4',
+      distribution: join(root, 'source-pack'),
+      ...overrides,
+    })
+  }
+  writeFileSync(join(root, '.dsh-dev-state.json'), `${JSON.stringify(state, null, 2)}\n`)
+}
+
+function fakeCommand(root, name, record) {
+  const directory = join(root, 'bin')
+  mkdirSync(directory, { recursive: true })
+  const command = join(directory, name)
+  writeFileSync(command, `#!/usr/bin/env node
+const { appendFileSync } = require('node:fs')
+appendFileSync(${JSON.stringify(record)}, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd() }) + String.fromCharCode(10))
+`)
+  chmodSync(command, 0o755)
+  return command
 }
 
 function allowBuildsFromMatrix() {
@@ -101,7 +157,7 @@ test('the mise task map mirrors the existing pnpm entry points without adding ga
   assert.equal(taskRun('test'), 'pnpm test')
   assert.equal(taskRun('verify:release'), 'pnpm verify:release')
   assert.equal(taskRun('dev:profile'), 'node scripts/mise-dev-profile.mjs')
-  assert.equal(taskRun('dev:dsh'), 'dsh --profile pi-tui-dev')
+  assert.equal(taskRun('dev:dsh'), 'node scripts/mise-dev-dsh.mjs')
   assert.equal(taskRun('source:doctor'), 'node scripts/dev-doctor.mjs --mode source')
   assert.equal(taskRun('source:bootstrap'), 'node scripts/dev-bootstrap.mjs --mode source')
   assert.equal(taskRun('source:profile'), 'node scripts/mise-source-mode.mjs profile')
@@ -177,21 +233,28 @@ writeFileSync(${JSON.stringify(record)}, 'spawned')
   assert.equal(existsSync(record), false, 'the source-mode guard must fail before pnpm install starts')
 })
 
-test('the CI mise-toolchain job is a required, SHA-pinned contract lane', () => {
+test('the CI mise-toolchain job is a required, mode-aware contract lane', () => {
   const workflow = parseYaml(readFileSync(join(ROOT, '.github', 'workflows', 'ci.yml'), 'utf8'))
   const job = workflow.jobs['mise-toolchain']
   assert.notEqual(job, undefined, 'ci.yml must define the mise-toolchain job')
-  assert.equal(job.env.MISE_ENABLE_TOOLS, 'node,pnpm,npm:@deepseek-ai/dsh')
+  assert.match(job.env.MISE_ENABLE_TOOLS, /mode == 'source' && 'node,pnpm' \|\| 'node,pnpm,npm:@deepseek-ai\/dsh'/u)
   const setup = (job.steps ?? []).find(step => typeof step.uses === 'string' && step.uses.startsWith('jdx/mise-action@'))
   assert.notEqual(setup, undefined, 'the job must use the official mise action')
   assert.match(setup.uses, /@[0-9a-f]{40}$/u, 'the third-party action must be pinned to a full commit SHA')
   assert.equal(setup.with.install, true)
   assert.equal(setup.with.install_args, '--locked', 'the CI install must require the committed lockfile')
-  const runText = (job.steps ?? []).map(step => step.run).filter(Boolean).join('\n')
-  assert.match(runText, /mise exec -- dsh --version/u)
-  assert.match(runText, /mise run setup/u)
-  assert.match(runText, /missing committed mise sidecar/u)
-  assert.match(runText, /git status --porcelain -- mise\.lock \.mise/u)
+
+  const npmSetup = (job.steps ?? []).find(step => step.run === 'mise run setup')
+  assert.notEqual(npmSetup, undefined, 'the npm-mode setup step must exist')
+  assert.match(npmSetup.if, /mode == 'npm'/u, 'mise run setup must be limited to npm mode')
+  const npmVersion = (job.steps ?? []).find(step => typeof step.run === 'string' && step.run.includes('mise exec -- dsh --version'))
+  assert.notEqual(npmVersion, undefined, 'the npm CLI version check must exist')
+  assert.match(npmVersion.if, /mode == 'npm'/u, 'the npm CLI check must be limited to npm mode')
+  const sourceCheck = (job.steps ?? []).find(step => step.name === 'Verify Source toolchain contract')
+  assert.notEqual(sourceCheck, undefined, 'the source-mode contract step must exist')
+  assert.match(sourceCheck.if, /mode == 'source'/u, 'the source contract must be limited to source mode')
+  assert.doesNotMatch(sourceCheck.run, /mise run setup/u, 'source mode must never run the npm setup task')
+  assert.match((job.steps ?? []).map(step => step.run).filter(Boolean).join('\n'), /missing committed mise sidecar/u)
   assert.ok(REQUIRED_PHASES.includes('mise-toolchain'), 'the contract lane must block qualification')
 })
 
@@ -217,10 +280,135 @@ test('the development profile refuses the real DSH home and an unbuilt checkout'
   assert.throws(() => profileTest.assertIsolatedHome({}), /DSH_HOME is not set/u)
   assert.throws(() => profileTest.assertIsolatedHome({ DSH_HOME: join(homedir(), '.dsh') }), /refusing to install/u)
   assert.throws(() => profileTest.assertIsolatedHome({ DSH_HOME: join(homedir(), '.dsh', 'profiles') }), /refusing to install/u)
-  profileTest.assertIsolatedHome({ DSH_HOME: join(root, 'home') })
+  profileTest.assertIsolatedHome({ DSH_HOME: join(root, 'temp', 'mise-dsh-home') }, 'mise run dev:profile', root)
   assert.throws(() => profileTest.assertBuildOutput(root), /run `mise run build` first/u)
   mkdirSync(join(root, 'dist'), { recursive: true })
   writeFileSync(join(root, 'dist', 'index.mjs'), 'export {}\n')
   profileTest.assertBuildOutput(root)
   assert.equal(setupTest.INSTALL_ARGUMENTS.join(' '), 'install --frozen-lockfile')
+})
+
+
+test('mise run setup refuses a committed Source materialization even without DSH_MODE', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-mise-setup-materialized-')
+  writeNpmFixture(root)
+  writeMaterializedState(root)
+  const record = join(root, 'pnpm-record.json')
+  const fakePnpm = fakeCommand(root, 'pnpm-fixture', record)
+  const environment = { PATH: `${join(root, 'bin')}:${process.env.PATH}`, XDG_CACHE_HOME: join(root, 'cache'), PNPM_EXECUTABLE: fakePnpm }
+  assert.throws(() => runMiseSetup({ root, environment }), /records a Source materialization/u)
+  assert.throws(() => runMiseSetup({ root, environment: { ...environment, DSH_MODE: 'npm' } }), /records a Source materialization/u)
+  assert.equal(existsSync(record), false, 'the Source-materialization guard must fail before pnpm')
+  assert.equal(JSON.parse(readFileSync(join(root, '.dsh-dev-state.json'), 'utf8')).mode, 'source')
+})
+
+test('mise run setup rejects stale, malformed and foreign materialization state', (t) => {
+  const life = testLifecycle(t)
+  for (const [name, mutate] of [
+    ['stale hash', root => writeMaterializedState(root, { packageJsonHash: '0'.repeat(64) })],
+    ['foreign root', root => writeMaterializedState(root, { stateRoot: join(root, 'other-worktree') })],
+    ['malformed json', root => writeFileSync(join(root, '.dsh-dev-state.json'), '{not-json\n')],
+    ['symlink state', root => {
+      writeMaterializedState(root, { mode: 'npm' })
+      const target = join(root, 'real-state.json')
+      writeFileSync(target, readFileSync(join(root, '.dsh-dev-state.json')))
+      unlinkSync(join(root, '.dsh-dev-state.json'))
+      symlinkSync(target, join(root, '.dsh-dev-state.json'))
+    }],
+  ]) {
+    const root = life.tempDir(`dsh-mise-setup-${name.replaceAll(' ', '-')}-`)
+    writeNpmFixture(root)
+    mutate(root)
+    const record = join(root, 'pnpm-record.json')
+    const fakePnpm = fakeCommand(root, 'pnpm-fixture', record)
+    assert.throws(
+      () => runMiseSetup({ root, environment: { PATH: `${join(root, 'bin')}:${process.env.PATH}`, PNPM_EXECUTABLE: fakePnpm } }),
+      /dsh-dev-state|belongs to|regular file/u,
+      `${name} must fail closed`,
+    )
+    assert.equal(existsSync(record), false, `${name} must not spawn pnpm`)
+  }
+})
+
+test('npm profile and dev:dsh reject a Source-materialized worktree before spawning dsh', (t) => {
+  const life = testLifecycle(t)
+  const make = (name, stateMode) => {
+    const root = life.tempDir(`dsh-mise-entry-${name}-`)
+    writeNpmFixture(root, { mode: 'npm' })
+    if (stateMode !== undefined) writeMaterializedState(root, { mode: stateMode })
+    mkdirSync(join(root, 'dist'), { recursive: true })
+    writeFileSync(join(root, 'dist', 'index.mjs'), 'export {}\n')
+    const record = join(root, 'dsh-record.json')
+    fakeCommand(root, 'dsh', record)
+    const environment = { PATH: `${join(root, 'bin')}:${process.env.PATH}`, DSH_HOME: join(root, 'temp', 'mise-dsh-home') }
+    return { root, record, environment }
+  }
+  for (const entry of ['profile', 'dsh']) {
+    const source = make(`source-${entry}`, 'source')
+    const run = entry === 'profile' ? runMiseDevProfile : runMiseDevDsh
+    assert.throws(() => run({ root: source.root, environment: source.environment }), /records a Source materialization/u)
+    assert.equal(existsSync(source.record), false, `${entry} must not spawn dsh for a Source worktree`)
+
+    const tracked = make(`tracked-${entry}`, undefined)
+    writeNpmFixture(tracked.root, { mode: 'source', source: true })
+    assert.throws(() => run({ root: tracked.root, environment: tracked.environment }), /tracked source mode/u)
+    assert.equal(existsSync(tracked.record), false, `${entry} must not spawn dsh for a tracked Source worktree`)
+  }
+})
+
+test('npm profile and dev:dsh still start on a clean npm worktree', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-mise-entry-npm-')
+  writeNpmFixture(root)
+  mkdirSync(join(root, 'dist'), { recursive: true })
+  writeFileSync(join(root, 'dist', 'index.mjs'), 'export {}\n')
+  const record = join(root, 'dsh-record.json')
+  fakeCommand(root, 'dsh', record)
+  const environment = { PATH: `${join(root, 'bin')}:${process.env.PATH}`, DSH_HOME: join(root, 'temp', 'mise-dsh-home') }
+  runMiseDevProfile({ root, environment })
+  runMiseDevDsh({ root, environment, args: [] })
+  const calls = readFileSync(record, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+  assert.deepEqual(calls[0].args, ['plugin', '--profile', 'pi-tui-dev', '--', 'add', 'link:.'])
+  assert.deepEqual(calls[1].args, ['--profile', 'pi-tui-dev'])
+})
+
+test('the canonical DSH_HOME guard rejects symlinks into the real home and foreign worktrees', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-mise-home-root-')
+  const otherRoot = life.tempDir('dsh-mise-home-other-')
+  const fakeHome = life.tempDir('dsh-mise-home-fake-')
+  mkdirSync(join(fakeHome, '.dsh'))
+  mkdirSync(join(root, 'temp'))
+  mkdirSync(join(otherRoot, 'temp', 'mise-dsh-home'), { recursive: true })
+  const previousHome = process.env.HOME
+  process.env.HOME = fakeHome
+  try {
+    profileTest.assertIsolatedHome({ DSH_HOME: join(root, 'temp', 'mise-dsh-home') }, 'test', root)
+    assert.throws(
+      () => profileTest.assertIsolatedHome({ DSH_HOME: join(otherRoot, 'temp', 'mise-dsh-home') }, 'test', root),
+      /outside this worktree/u,
+    )
+    symlinkSync(join(fakeHome, '.dsh'), join(root, 'temp', 'linked-home'), 'dir')
+    assert.throws(
+      () => profileTest.assertIsolatedHome({ DSH_HOME: join(root, 'temp', 'linked-home', 'nested') }, 'test', root),
+      /real ~\/\.dsh/u,
+    )
+    symlinkSync(join(fakeHome, '.dsh'), join(root, 'temp', 'target-home'))
+    assert.throws(
+      () => profileTest.assertIsolatedHome({ DSH_HOME: join(root, 'temp', 'target-home') }, 'test', root),
+      /real ~\/\.dsh/u,
+    )
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+  }
+})
+
+
+test('development docs distinguish setup from legacy doctor state', () => {
+  const guide = readFileSync(join(ROOT, 'docs', 'guides', 'development.md'), 'utf8')
+  assert.match(guide, /`mise run setup` is an INSTALL action, not a doctor or\s+state writer/u)
+  assert.match(guide, /legacy\s+`pnpm dev:doctor` may report `MISSING`/u)
+  assert.match(guide, /source-materialized even when its tracked mode is `npm`/u)
 })
