@@ -178,6 +178,15 @@ test('compiled custom text is an ordinary synchronous footer item', () => {
     context: { taskBrowserAvailable: false, extensionFooterText: '' },
   })
   assert.ok(plain(rendered).includes('PROD'))
+  // The TSP-only placement field is inert on the PiTui composer: a hidden
+  // placement still renders exactly the same here.
+  const hidden = composer.render({
+    snapshot: emptyStatusSnapshot(),
+    layout: { schemaVersion: 1, rows: [{ left: [{ id: 'user:environment', hideInTsp: true }], right: [] }] },
+    width: 80,
+    context: { taskBrowserAvailable: false, extensionFooterText: '' },
+  })
+  assert.equal(hidden, rendered)
 })
 
 test('the Add picker searches custom definitions and creates multiple items automatically', () => {
@@ -219,10 +228,10 @@ test('the Add picker searches custom definitions and creates multiple items auto
 
 test('custom item editing separates default and placement tone entries', () => {
   assert.deepEqual(itemMenuFor(['plain'], 'text').map(entry => entry.kind), [
-    'custom-text', 'custom-tone', 'tone', 'advanced', 'custom-name', 'custom-delete',
+    'custom-text', 'custom-tone', 'tone', 'hide-tsp', 'advanced', 'custom-name', 'custom-delete',
   ])
   assert.deepEqual(itemMenuFor(['plain'], 'command').map(entry => entry.kind), [
-    'custom-command', 'custom-refresh', 'custom-timeout', 'custom-tone', 'tone', 'advanced', 'custom-name', 'custom-delete',
+    'custom-command', 'custom-refresh', 'custom-timeout', 'custom-tone', 'tone', 'hide-tsp', 'advanced', 'custom-name', 'custom-delete',
   ])
 })
 
@@ -248,7 +257,7 @@ test('custom names cannot collide with an extension-owned user namespace id', ()
   }, registry, catalog)
   m.activate() // row
   m.activate() // item
-  for (let i = 0; i < 4; i += 1) m.moveDown() // Rename definition
+  for (let i = 0; i < 5; i += 1) m.moveDown() // Rename definition
   m.activate()
   for (let i = 0; i < 'environment'.length; i += 1) m.backspace()
   m.text('occupied')
@@ -297,8 +306,9 @@ test('custom Text supports text/tone editing, rename, and referenced delete clea
   assert.equal(m.customItem('user:environment')?.tone, 'primary')
 
   // Rename: all references receive the new canonical id.
-  m.moveDown()
-  m.moveDown()
+  m.moveDown() // Hide in TSP
+  m.moveDown() // Advanced
+  m.moveDown() // Rename definition
   m.activate()
   for (let i = 0; i < 'environment'.length; i += 1) m.backspace()
   m.text('stage')

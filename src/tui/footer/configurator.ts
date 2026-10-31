@@ -59,7 +59,7 @@ import {
 } from './configurator-model.ts'
 import type { FooterConfiguratorModel } from './configurator-model.ts'
 import { effectiveCustomCommandRefreshMs, effectiveCustomCommandTimeoutMs } from '../../domain/footer/custom-items.ts'
-import { MAX_ITEMS_PER_ROW, stripControlChars } from '../../domain/footer/layout.ts'
+import { MAX_ITEMS_PER_ROW, defaultHideInTsp, stripControlChars } from '../../domain/footer/layout.ts'
 import type { FooterItemRegistry } from './item-registry.ts'
 import type { FooterItemRef, FooterLayoutV1, FooterTone } from './presentation-types.ts'
 
@@ -1123,6 +1123,13 @@ export class FooterConfiguratorPanel implements Component {
             // (Strong/Dim/…), never as the 'Auto' fallback.
             const label = toneChoicesFor(ref?.tone).find(choice => choice.value === tone)?.label ?? 'Auto'
             return this.menuRow(marker, toneMenuLabel(entry.kind), this.tonePaint(tone, label), active)
+          }
+          if (entry.kind === 'hide-tsp') {
+            // The EDITOR default, not the renderer's capability fallback:
+            // a pane without the matching composer control must never show
+            // the user's saved On as Off.
+            const hidden = ref?.hideInTsp ?? defaultHideInTsp(ref?.id ?? '')
+            return this.menuRow(marker, 'Hide in TSP', color.text(hidden ? 'On' : 'Off'), active)
           }
           if (entry.kind === 'custom-text') {
             const value = customItem?.kind === 'text' ? customItem.text : undefined

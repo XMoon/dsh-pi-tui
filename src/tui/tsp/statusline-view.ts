@@ -35,6 +35,7 @@ import { FooterCustomItemCatalog } from '../footer/custom-item-catalog.ts'
 import type { FooterItemDefinition, FooterRenderContext } from '../footer/presentation-types.ts'
 import type { FooterItemRef, FooterLayoutV1, FooterTone } from '../footer/presentation-types.ts'
 import type { FooterItemRegistry } from '../footer/item-registry.ts'
+import { hideFooterRefInTsp, type TspFooterAffordances } from '../../domain/footer/layout.ts'
 import { customItemName, CUSTOM_FOOTER_ITEM_PREFIX } from '../../domain/footer/custom-items.ts'
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
@@ -200,10 +201,30 @@ function itemText(snapshot: StatusSnapshot, item: StatuslineItem): { text: strin
   return { text, tone }
 }
 
-/** Build one row's `ui.seg` children (an absent item contributes nothing). */
-function rowSegments(snapshot: StatusSnapshot, items: readonly StatuslineItem[]): Node[] {
+/**
+ * The no-composer-affordance fallback: nothing is provided, so every
+ * default-On item falls back to its historical visible form. The real mount
+ * always passes the LIVE capability result — this default exists for the
+ * pure projection's unconfigured/unnegotiated shape.
+ */
+const NO_COMPOSER_AFFORDANCES: TspFooterAffordances = {
+  permission: false,
+  model: false,
+  reasoning: false,
+}
+
+/** Build one row's `ui.seg` children (an absent item contributes nothing).
+ * The PR-F universal visibility filter runs BEFORE rendering: a hidden
+ * placement never reaches the formatter (so it can never surface an
+ * `Unavailable` marker or consume a separator/priority slot). */
+function rowSegments(
+  snapshot: StatusSnapshot,
+  items: readonly StatuslineItem[],
+  affordances: TspFooterAffordances,
+): Node[] {
   const segments: Node[] = []
   for (const item of items) {
+    if (hideFooterRefInTsp({ id: item.id, format: item.format }, affordances)) continue
     const rendered = itemText(snapshot, item)
     if (rendered === undefined) continue
     segments.push(ui.seg({
@@ -266,6 +287,11 @@ export function compileNativeFooterPresentation(config: TspNativeFooterConfig): 
     for (const row of config.layout.rows) {
       for (const ref of [...row.left, ...row.right]) {
         if (ref.id === 'view-scope') continue // the retired inert builtin
+        // A placement the user explicitly hides never renders and never
+        // emits an `Unavailable` marker, so it must not raise the
+        // unavailable-items notice either (the notice exists for visible
+        // placements only).
+        if (ref.hideInTsp === true) continue
         if (isExtensionId(ref.id)) { unsupported = true; continue }
         if (registry.get(ref.id) === undefined) unsupported = true
       }
@@ -374,7 +400,11 @@ function customRefSegments(
  * Keys are derived from the STABLE PLACEMENT PATH (row/zone/index) — never
  * from the bare user id — so a duplicate id keeps two independent segments.
  */
-function customRows(snapshot: StatusSnapshot, presentation: NativeFooterPresentation): readonly Node[] {
+function customRows(
+  snapshot: StatusSnapshot,
+  presentation: NativeFooterPresentation,
+  affordances: TspFooterAffordances,
+): readonly Node[] {
   const layout = presentation.layout
   if (layout === undefined) return []
   const rows: Node[] = []
@@ -383,6 +413,10 @@ function customRows(snapshot: StatusSnapshot, presentation: NativeFooterPresenta
     const segments: Node[] = []
     for (const [zone, refs] of [['left', row.left], ['right', row.right]] as const) {
       for (const [index, ref] of refs.entries()) {
+        // The same universal decision as the fixed presets — BEFORE the
+        // unavailable/empty checks, so a hidden unsupported placement is
+        // silent rather than an `Unavailable` marker.
+        if (hideFooterRefInTsp(ref, affordances)) continue
         const rendered = customRefSegments(snapshot, presentation, ref, zone)
         if (rendered === undefined) continue
         segments.push(ui.seg({
@@ -406,25 +440,34 @@ function customRows(snapshot: StatusSnapshot, presentation: NativeFooterPresenta
  */
 export function nativeStatuslineRows(snapshot: StatusSnapshot): readonly Node[]
 /**
- * PR-D: the configured projection. With a presentation the mode decides the
- * shape (`default` keeps the frozen PR-A/B rows; `compact` is the fixed TSP
- * single row; `custom` walks the validated layout); without one the frozen
- * default stays byte-for-byte (an unconfigured mount keeps PR-A/B).
+ * PR-D/PR-F: the configured projection. With a presentation the mode decides
+ * the shape (`default` keeps the frozen PR-A/B rows; `compact` is the fixed
+ * TSP single row; `custom` walks the validated layout); without one the
+ * frozen default stays byte-for-byte (an unconfigured mount keeps PR-A/B).
+ * `affordances` is the LIVE composer capability result for this frame.
  */
-export function nativeStatuslineRows(snapshot: StatusSnapshot, presentation: NativeFooterPresentation | undefined): readonly Node[]
-export function nativeStatuslineRows(snapshot: StatusSnapshot, presentation?: NativeFooterPresentation): readonly Node[] {
+export function nativeStatuslineRows(
+  snapshot: StatusSnapshot,
+  presentation: NativeFooterPresentation | undefined,
+  affordances?: TspFooterAffordances,
+): readonly Node[]
+export function nativeStatuslineRows(
+  snapshot: StatusSnapshot,
+  presentation?: NativeFooterPresentation,
+  affordances: TspFooterAffordances = NO_COMPOSER_AFFORDANCES,
+): readonly Node[] {
   if (presentation === undefined || presentation.mode === 'default') {
     const rows: Node[] = []
-    const rowOne = rowSegments(snapshot, ROW_ONE)
+    const rowOne = rowSegments(snapshot, ROW_ONE, affordances)
     if (rowOne.length > 0) rows.push(ui.status({ key: 'status-row-1' }, ...rowOne))
-    const rowTwo = rowSegments(snapshot, ROW_TWO)
+    const rowTwo = rowSegments(snapshot, ROW_TWO, affordances)
     if (rowTwo.length > 0) rows.push(ui.status({ key: 'status-row-2' }, ...rowTwo))
     return rows
   }
   if (presentation.mode === 'compact') {
-    const row = rowSegments(snapshot, COMPACT_ROW)
+    const row = rowSegments(snapshot, COMPACT_ROW, affordances)
     if (row.length > 0) return [ui.status({ key: 'status-row-1' }, ...row)]
     return []
   }
-  return customRows(snapshot, presentation)
+  return customRows(snapshot, presentation, affordances)
 }

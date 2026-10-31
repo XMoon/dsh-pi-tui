@@ -99,6 +99,18 @@ test('PR-A: the two native rows carry the frozen keys, sides and priorities', ()
   assert.deepEqual(rowTwo.map(node => props(node).side), [undefined, 'right'])
 })
 
+test('PR-F: the pure default projection applies the universal visibility decision', () => {
+  const visible = nativeStatuslineRows(fullSnapshot(), undefined, { permission: false, model: false, reasoning: false })
+  assert.ok(children(visible[0]!).some(node => props(node).key === 'status-r1-permission'),
+    'without a permission control the default-On item falls back to visible')
+  const hidden = nativeStatuslineRows(fullSnapshot(), undefined, { permission: true, model: true, reasoning: true })
+  assert.ok(!children(hidden[0]!).some(node => props(node).key === 'status-r1-permission'),
+    'with the control present the default-On item is hidden')
+  assert.deepEqual(children(hidden[0]!).map(node => props(node).key),
+    children(visible[0]!).map(node => props(node).key).filter(key => key !== 'status-r1-permission'),
+    'the remaining frozen placements keep their order')
+})
+
 test('PR-A: the seg text comes from the existing builtin formatter, never a re-implementation', () => {
   const rows = nativeStatuslineRows(fullSnapshot())
   const texts = segTexts(rows)

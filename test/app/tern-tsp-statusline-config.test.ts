@@ -20,7 +20,7 @@ import {
   nativeStatuslineRows,
   type NativeFooterPresentation,
 } from '../../src/tui/tsp/statusline-view.ts'
-import { resolveTspNativeFooterConfig } from '../../src/domain/footer/tsp-native-config.ts'
+import { resolveTspNativeFooterConfig, TSP_FOOTER_NOTICES } from '../../src/domain/footer/tsp-native-config.ts'
 import type { FooterCustomTextItemSettings } from '../../src/domain/footer/custom-items.ts'
 
 function props(node: Node): Record<string, unknown> {
@@ -329,6 +329,131 @@ test('a one-row custom layout mounts exactly one status node', () => {
   const rows = nativeStatuslineRows(fullSnapshot(), presentation({ doc: { footer: 'custom', footerLayout: layout } }))
   assert.equal(rows.length, 1)
   assert.deepEqual(children(rows[0]!).map(seg => props(seg).side), [undefined, 'right'])
+})
+
+// ── PR-F: universal Hide in TSP ─────────────────────────────────────────────
+
+const NO_AFFORDANCES = { permission: false, model: false, reasoning: false }
+const ALL_AFFORDANCES = { permission: true, model: true, reasoning: true }
+
+function segKeys(rows: readonly Node[]): string[] {
+  return rows.flatMap(row => children(row).map(seg => String(props(seg).key)))
+}
+
+test('PR-F: default/compact keep the permission item only when its composer affordance is absent', () => {
+  const snapshot = fullSnapshot()
+  for (const footer of ['default', 'compact'] as const) {
+    const pres = presentation({ doc: { footer } })
+    const visible = nativeStatuslineRows(snapshot, pres, NO_AFFORDANCES)
+    assert.ok(segKeys(visible).includes('status-r1-permission'), `${footer}: the default-On item falls back to visible`)
+    const hidden = nativeStatuslineRows(snapshot, pres, ALL_AFFORDANCES)
+    assert.ok(!segKeys(hidden).includes('status-r1-permission'), `${footer}: the affordance hides the default-On item`)
+    // The rest of the fixed row keeps its exact order and priorities.
+    const before = children(visible[0]!).filter(seg => props(seg).key !== 'status-r1-permission')
+    const after = children(hidden[0]!)
+    assert.deepEqual(after.map(seg => props(seg).key), before.map(seg => props(seg).key),
+      `${footer}: hiding one placement must not reorder the others`)
+    assert.deepEqual(after.map(seg => props(seg).priority), before.map(seg => props(seg).priority),
+      `${footer}: hiding one placement must not change another placement's priority`)
+  }
+})
+
+test('PR-F: custom placements prefer the explicit boolean, then the per-id default', () => {
+  const layout = {
+    schemaVersion: 1,
+    rows: [{
+      left: [
+        { id: 'permission-preset' },
+        { id: 'model' },
+        { id: 'reasoning' },
+        { id: 'cwd' },
+        { id: 'context', hideInTsp: true },
+        { id: 'context' },
+      ],
+      right: [],
+    }],
+  }
+  const pres = presentation({ doc: { footer: 'custom', footerLayout: layout } })
+  // With every composer control present the three default-On ids hide; the
+  // explicitly hidden context placement hides; cwd and the second context
+  // placement stay in their persisted positions.
+  assert.deepEqual(segKeys(nativeStatuslineRows(fullSnapshot(), pres, ALL_AFFORDANCES)),
+    ['footer-r1-l3', 'footer-r1-l5'])
+  // Without the composer affordances the absent default-On ids fall back to
+  // visible, while the explicit context true stays hidden.
+  assert.deepEqual(segKeys(nativeStatuslineRows(fullSnapshot(), pres, NO_AFFORDANCES)),
+    ['footer-r1-l0', 'footer-r1-l1', 'footer-r1-l2', 'footer-r1-l3', 'footer-r1-l5'])
+
+  // Explicit false overrides a default-On id even when its control exists;
+  // explicit true hides a default-Off id even without any control.
+  const overrides = {
+    schemaVersion: 1,
+    rows: [{
+      left: [
+        { id: 'model', hideInTsp: false },
+        { id: 'permission-preset', hideInTsp: false },
+        { id: 'reasoning', hideInTsp: true },
+        { id: 'cwd', hideInTsp: true },
+      ],
+      right: [],
+    }],
+  }
+  const overridePres = presentation({ doc: { footer: 'custom', footerLayout: overrides } })
+  assert.deepEqual(segKeys(nativeStatuslineRows(fullSnapshot(), overridePres, ALL_AFFORDANCES)),
+    ['footer-r1-l0', 'footer-r1-l1'])
+  assert.deepEqual(segKeys(nativeStatuslineRows(fullSnapshot(), overridePres, NO_AFFORDANCES)),
+    ['footer-r1-l0', 'footer-r1-l1'])
+})
+
+test('PR-F: a hidden unsupported placement is silent, never an Unavailable marker', () => {
+  const userItems = {
+    items: [{ schemaVersion: 1 as const, id: 'user:clock', kind: 'command' as const, command: 'date +%H:%M' }],
+    invalidCount: 0,
+  }
+  const hiddenLayout = { schemaVersion: 1, rows: [{ left: [{ id: 'user:clock', hideInTsp: true }], right: [] }] }
+  const hiddenPres = presentation({ doc: { footer: 'custom', footerLayout: hiddenLayout }, userItems })
+  assert.ok(!hiddenPres.notices.includes(TSP_FOOTER_NOTICES.unavailableItems),
+    'a fully hidden unsupported placement must not raise the unavailable-items notice')
+  const hidden = nativeStatuslineRows(fullSnapshot(), hiddenPres, NO_AFFORDANCES)
+  assert.deepEqual(hidden, [], 'a fully hidden row creates no empty status node')
+
+  const shownLayout = { schemaVersion: 1, rows: [{ left: [{ id: 'user:clock' }], right: [] }] }
+  const shownPres = presentation({ doc: { footer: 'custom', footerLayout: shownLayout }, userItems })
+  assert.ok(shownPres.notices.includes(TSP_FOOTER_NOTICES.unavailableItems),
+    'an unhidden unsupported placement keeps the original unavailable notice')
+  const shown = nativeStatuslineRows(fullSnapshot(), shownPres, NO_AFFORDANCES)
+  assert.equal(shown.length, 1)
+  const segs = children(shown[0]!)
+  assert.equal(segs.length, 1)
+  assert.match(String(props(segs[0]!).text), /^Unavailable:/)
+
+  // A mixed layout keeps the notice for the VISIBLE unsupported placement.
+  const mixedLayout = {
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'user:clock', hideInTsp: true }, { id: 'ext:acme/uptime' }], right: [] }],
+  }
+  assert.ok(presentation({ doc: { footer: 'custom', footerLayout: mixedLayout }, userItems }).notices
+    .includes(TSP_FOOTER_NOTICES.unavailableItems))
+})
+
+test('PR-F: all-hidden rows and command fallback custom both apply the same filter', () => {
+  const layout = {
+    schemaVersion: 1,
+    rows: [{
+      left: [{ id: 'cwd', hideInTsp: true }, { id: 'git-branch' }],
+      right: [{ id: 'context', hideInTsp: true }],
+    }],
+  }
+  const rows = nativeStatuslineRows(fullSnapshot(),
+    presentation({ doc: { footer: 'command', footerFallbackMode: 'custom', footerLayout: layout } }), NO_AFFORDANCES)
+  assert.deepEqual(segKeys(rows), ['footer-r1-l1'], 'the un-hidden branch survives the command fallback projection')
+
+  const allHidden = {
+    schemaVersion: 1,
+    rows: [{ left: [{ id: 'cwd', hideInTsp: true }], right: [{ id: 'context', hideInTsp: true }] }],
+  }
+  assert.deepEqual(nativeStatuslineRows(fullSnapshot(),
+    presentation({ doc: { footer: 'custom', footerLayout: allHidden } }), NO_AFFORDANCES), [])
 })
 
 // ── Mount-local registry ownership (the plan §3.3 single-registry rule) ─────

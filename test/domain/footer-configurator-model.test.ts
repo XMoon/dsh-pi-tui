@@ -339,6 +339,7 @@ test('Esc walks the hierarchy ONE level at a time (row → item → picker → i
   assert.equal(m.state().mode, 'tone')
   m.cancel()
   assert.equal(m.state().mode, 'item', 'Tone Esc returns to the item editor')
+  m.moveDown() // Hide in TSP
   m.moveDown() // Advanced…
   m.activate()
   assert.equal(m.state().mode, 'advanced')
@@ -434,7 +435,9 @@ test('Advanced: prefix/suffix/importance round-trip; empty removes the override'
   m.activate()
   walkTo(m, 'model')
   m.activate() // item editor
-  // Advanced is the LAST menu row (model now has Style, Tone, Advanced).
+  // Advanced is the LAST menu row (model now has Style, Tone, Hide in TSP,
+  // Advanced).
+  m.moveDown()
   m.moveDown()
   m.moveDown()
   m.activate()
@@ -461,7 +464,7 @@ test('Advanced: prefix/suffix/importance round-trip; empty removes the override'
   // the pickers hang off the item editor (row → item → advanced).
   m.cancel()
   assert.equal(m.state().mode, 'item')
-  assert.equal(m.state().itemCursor, 2, 'the menu cursor still sits on Advanced')
+  assert.equal(m.state().itemCursor, 3, 'the menu cursor still sits on Advanced')
   // Importance: digits only, bounds-checked.
   m.activate() // → the advanced editor (field resets to prefix)
   m.moveDown()
@@ -495,7 +498,8 @@ test('Advanced: Reset to default clears every ref override', () => {
   m.activate()
   m.moveDown() // Primary
   m.activate() // applied → back to the item editor
-  m.moveDown() // Advanced (menu cursor rides from Tone to Advanced)
+  m.moveDown() // Hide in TSP (menu cursor rides from Tone to Hide in TSP)
+  m.moveDown() // Advanced
   m.activate()
   m.moveDown()
   m.moveDown()
@@ -568,8 +572,9 @@ test('the editable text is sanitized and bounded (the draft must re-parse)', () 
   m.activate()
   walkTo(m, 'model')
   m.activate()
-  m.moveDown()
-  m.moveDown()
+  m.moveDown() // Tone
+  m.moveDown() // Hide in TSP
+  m.moveDown() // Advanced
   m.activate() // Advanced
   m.activate() // edit prefix
   // Control characters never enter the buffer (the readable residue is
@@ -597,7 +602,8 @@ test('preset resets re-anchor every page cursor (a stale buffer never survives)'
   walkTo(m, 'model')
   m.activate() // item editor
   m.moveDown() // Tone
-  m.moveDown() // Advanced (model menu: Style, Tone, Advanced)
+  m.moveDown() // Hide in TSP
+  m.moveDown() // Advanced (model menu: Style, Tone, Hide in TSP, Advanced)
   m.activate() // the advanced page
   m.activate() // editing the prefix (buffer seeded)
   m.text('STALE')
@@ -696,6 +702,88 @@ test('isDirty starts clean on open', () => {
   assert.equal(customModel().m.isDirty(), false, 'a placed custom definition does not read as dirty')
 })
 
+test('Hide in TSP: a default-On item toggles to explicit false and canonicalizes back', () => {
+  const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model' }], right: [] }] }
+  const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
+  const ref = (): import('../../src/domain/footer/layout.ts').FooterItemRef => m.state().layout.rows[0]!.left[0]!
+  openItemMenu(m, 'model')
+  assert.equal(ref().hideInTsp, undefined, 'the editor reads the id default (On) as absent')
+  // menu: Style → Tone → Hide in TSP → Advanced
+  m.moveDown()
+  m.moveDown()
+  m.activate()
+  assert.equal(m.state().mode, 'item', 'Enter toggles in place')
+  assert.equal(ref().hideInTsp, false, 'the default-On item stores a real false override')
+  assert.equal(m.isDirty(), true)
+  assert.equal(m.preview().rows[0]!.left[0]!.hideInTsp, false, 'the saved projection keeps the override')
+  m.activate()
+  assert.equal(ref().hideInTsp, undefined, 'toggling back restores the canonical absent form')
+  assert.equal(m.isDirty(), false)
+  assert.equal(m.preview().rows[0]!.left[0]!.hideInTsp, undefined, 'the default-equal value is omitted on save')
+})
+
+test('Hide in TSP: a default-Off item stores explicit true and Reset clears it', () => {
+  const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'cwd' }], right: [] }] }
+  const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
+  const ref = (): import('../../src/domain/footer/layout.ts').FooterItemRef => m.state().layout.rows[0]!.left[0]!
+  openItemMenu(m, 'cwd')
+  m.moveDown()
+  m.moveDown()
+  m.activate()
+  assert.equal(ref().hideInTsp, true, 'a default-Off item stores a real true override')
+  assert.equal(m.preview().rows[0]!.left[0]!.hideInTsp, true)
+  // Advanced → Reset to default clears the visibility override with every
+  // other placement field.
+  m.moveDown() // Advanced
+  m.activate()
+  m.moveDown()
+  m.moveDown()
+  m.moveDown()
+  assert.equal(m.state().advancedField, 'reset')
+  m.activate()
+  assert.equal(ref().hideInTsp, undefined)
+  assert.equal(m.isDirty(), false)
+})
+
+test('Hide in TSP: explicit default values read clean and are omitted from the saved projection', () => {
+  const defaultOn = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model', hideInTsp: true }], right: [] }] }
+  const m = new FooterConfiguratorModel(defaultOn, createBuiltinFooterRegistry())
+  assert.equal(m.isDirty(), false, 'an explicit default-On value is the same fact as absent')
+  assert.equal(m.preview().rows[0]!.left[0]!.hideInTsp, undefined)
+
+  const defaultOff = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'cwd', hideInTsp: false }], right: [] }] }
+  const m2 = new FooterConfiguratorModel(defaultOff, createBuiltinFooterRegistry())
+  assert.equal(m2.isDirty(), false, 'an explicit default-Off value is the same fact as absent')
+  assert.equal(m2.preview().rows[0]!.left[0]!.hideInTsp, undefined)
+
+  // Non-default explicit values are real overrides and stay in the save.
+  const overrides = {
+    schemaVersion: 1 as const,
+    rows: [{ left: [{ id: 'model', hideInTsp: false }, { id: 'cwd', hideInTsp: true }], right: [] }],
+  }
+  const m3 = new FooterConfiguratorModel(overrides, createBuiltinFooterRegistry())
+  assert.equal(m3.isDirty(), false, 'the loaded overrides are the baseline')
+  assert.deepEqual(m3.preview().rows[0]!.left.map(ref => ref.hideInTsp), [false, true])
+})
+
+test('Hide in TSP: duplicate placements stay independent through reorder', () => {
+  const layout = {
+    schemaVersion: 1 as const,
+    rows: [{ left: [{ id: 'context', hideInTsp: true }, { id: 'context' }, { id: 'git-branch' }], right: [] }],
+  }
+  const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
+  const visibility = (): Array<boolean | undefined> => m.preview().rows[0]!.left.map(ref => ref.hideInTsp)
+  assert.deepEqual(visibility(), [true, undefined, undefined], 'only the first placement is hidden')
+  m.activate()
+  m.startMove()
+  m.moveDown()
+  assert.deepEqual(visibility(), [undefined, true, undefined], 'reorder moves the placement and its own value')
+  assert.equal(m.isDirty(), true)
+  m.moveUp()
+  assert.deepEqual(visibility(), [true, undefined, undefined])
+  assert.equal(m.isDirty(), false, 'the reorder round-trip is clean')
+})
+
 test('removing an item is dirty; re-adding it at the same slot is clean', () => {
   const layout = { schemaVersion: 1 as const, rows: [{ left: [{ id: 'model' }], right: [] }] }
   const m = new FooterConfiguratorModel(layout, createBuiltinFooterRegistry())
@@ -773,7 +861,8 @@ test('empty-string prefix/suffix are the same fact as absent', () => {
   m.activate() // row
   m.activate() // item (cursor 0 = model)
   m.moveDown() // menu: Style → Tone
-  m.moveDown() // Tone → Advanced
+  m.moveDown() // Tone → Hide in TSP
+  m.moveDown() // Hide in TSP → Advanced
   m.activate() // advanced page (Prefix selected)
   m.activate() // open the inline editor (seeds '')
   m.activate() // commit the empty buffer → the field is deleted
@@ -812,7 +901,9 @@ test('custom definition text and tone edits dirty; restores clean', () => {
 test('rename and delete of a custom definition count as dirty', () => {
   const { m } = customModel()
   openItemMenu(m, 'user:env')
-  // Menu: 0 Text, 1 Default tone, 2 Tone, 3 Advanced, 4 Rename, 5 Delete.
+  // Menu: 0 Text, 1 Default tone, 2 Tone, 3 Hide in TSP, 4 Advanced, 5 Rename,
+  // 6 Delete.
+  m.moveDown()
   m.moveDown()
   m.moveDown()
   m.moveDown()
@@ -827,7 +918,7 @@ test('rename and delete of a custom definition count as dirty', () => {
   m.activate() // rename back
   assert.equal(m.isDirty(), false, 'rename back is clean')
 
-  m.moveDown() // menu entry 5 = Delete definition
+  m.moveDown() // menu entry 6 = Delete definition
   m.activate() // delete page
   m.activate() // confirm
   assert.equal(m.state().mode, 'row', 'delete returns to the row page')
@@ -861,7 +952,7 @@ test('a custom definition placed MULTIPLE times: rename and delete update every 
   // Rename the definition: every duplicate ref follows the new id and the
   // per-placement overrides survive.
   m.activate() // item editor (still on the second placement)
-  for (let i = 0; i < 4; i += 1) m.moveDown() // 4 Rename definition
+  for (let i = 0; i < 5; i += 1) m.moveDown() // 5 Rename definition
   m.activate() // custom-name
   m.text('2')
   m.activate() // commit user:env → user:env2
@@ -973,8 +1064,9 @@ test('create then delete of a NEW custom item returns to clean', () => {
   m.activate() // create with Auto — the definition is created AND placed
   assert.equal(m.isDirty(), true, 'the created definition + its placement are dirty')
   m.activate() // item editor (the cursor landed on the new item)
-  // Menu: 0 Text, 1 Default tone, 2 Tone, 3 Advanced, 4 Rename, 5 Delete.
-  for (let i = 0; i < 5; i += 1) m.moveDown()
+  // Menu: 0 Text, 1 Default tone, 2 Tone, 3 Hide in TSP, 4 Advanced, 5 Rename,
+  // 6 Delete.
+  for (let i = 0; i < 6; i += 1) m.moveDown()
   m.activate() // delete page
   m.activate() // confirm — removes the definition and every reference
   assert.equal(m.state().mode, 'row')
@@ -1063,7 +1155,7 @@ test('the item editor edits command, refresh, timeout and definition tone', () =
   m.activate() // row
   m.activate() // item
   // Menu: 0 Command, 1 Refresh, 2 Timeout, 3 Default tone, 4 Tone,
-  // 5 Advanced, 6 Rename, 7 Delete.
+  // 5 Hide in TSP, 6 Advanced, 7 Rename, 8 Delete.
   m.activate() // Command inline editor
   assert.equal(m.state().mode, 'custom-command')
   m.text('!') // append
@@ -1098,8 +1190,8 @@ test('rename and delete of a command definition update every layout reference', 
   const m = commandModel()
   m.activate() // row
   m.activate() // item
-  // Rename: menu index 6.
-  for (let i = 0; i < 6; i += 1) m.moveDown()
+  // Rename: menu index 7.
+  for (let i = 0; i < 7; i += 1) m.moveDown()
   m.activate()
   for (let i = 0; i < 'clock'.length; i += 1) m.backspace()
   m.text('time')
@@ -1107,7 +1199,7 @@ test('rename and delete of a command definition update every layout reference', 
   assert.equal(m.customItem('user:time')?.kind, 'command')
   assert.equal(m.state().layout.rows[0]!.left[0]!.id, 'user:time')
 
-  // Delete: menu index 7 (the renamed item's menu is the same length).
+  // Delete: menu index 8 (the renamed item's menu is the same length).
   m.moveDown()
   m.activate()
   assert.equal(m.state().mode, 'custom-delete')
@@ -1202,8 +1294,8 @@ test('create then delete of a NEW command item returns to clean', () => {
   assert.equal(m.isDirty(), true)
   m.activate() // item editor (the cursor landed on the new item)
   // Menu: 0 Command, 1 Refresh, 2 Timeout, 3 Default tone, 4 Tone,
-  // 5 Advanced, 6 Rename, 7 Delete.
-  for (let i = 0; i < 7; i += 1) m.moveDown()
+  // 5 Hide in TSP, 6 Advanced, 7 Rename, 8 Delete.
+  for (let i = 0; i < 8; i += 1) m.moveDown()
   m.activate() // delete page
   m.activate() // confirm
   assert.equal(m.state().mode, 'row')

@@ -23,6 +23,47 @@ export interface FooterItemRef {
   readonly suffix?: string
   /** User importance override; absent = the definition default. */
   readonly importance?: number
+  /** TSP-only placement visibility: true hides this placement in the TSP
+   * renderer, false forces the default display attempt. Absent = the id's
+   * default (permission-preset/model/reasoning default hidden, others
+   * shown). PiTui ignores the field entirely. */
+  readonly hideInTsp?: boolean
+}
+
+/** The per-id default `Hide in TSP` value (Owner-frozen): the three items
+ * that a capable TSP composer already carries are hidden by default; every
+ * other item keeps the historical TSP behavior. This is the EDITOR default
+ * (a capability shortage must never turn the editor's On into Off). */
+export function defaultHideInTsp(id: string): boolean {
+  return id === 'permission-preset' || id === 'model' || id === 'reasoning'
+}
+
+/** The composer affordances the TSP renderer currently provides: each one
+ * is "can present AND operate this control NOW", never "does a status value
+ * exist". Used only for the default-On capability fallback. */
+export interface TspFooterAffordances {
+  readonly permission: boolean
+  readonly model: boolean
+  readonly reasoning: boolean
+}
+
+/** The ONE TSP effective-visibility decision for one placement. An explicit
+ * user boolean always wins; otherwise the three default-On ids hide only
+ * when their corresponding composer control is actually available (so the
+ * permission state never disappears on an old client without the control),
+ * and every other id stays visible. */
+export function hideFooterRefInTsp(
+  ref: FooterItemRef,
+  affordances: TspFooterAffordances,
+): boolean {
+  if (ref.hideInTsp !== undefined) return ref.hideInTsp
+  if (!defaultHideInTsp(ref.id)) return false
+  switch (ref.id) {
+    case 'permission-preset': return affordances.permission
+    case 'model': return affordances.model
+    case 'reasoning': return affordances.reasoning
+    default: return false
+  }
 }
 
 /** The separator between surviving items of one zone. */
@@ -117,6 +158,7 @@ function parseItemRef(input: unknown, index: number): FooterItemRef | FooterLayo
     prefix?: string
     suffix?: string
     importance?: number
+    hideInTsp?: boolean
   } = { id }
   if (input.format !== undefined) {
     // An unknown format string is accepted (never a parse failure): the
@@ -157,6 +199,15 @@ function parseItemRef(input: unknown, index: number): FooterItemRef | FooterLayo
       return { kind: 'error', message: `item ${index}: importance must be a number in 0..${MAX_IMPORTANCE}` }
     }
     ref.importance = input.importance
+  }
+  // Only the two explicit booleans are accepted: any other type is a
+  // malformed layout (fail-soft to the default layout), never silently
+  // coerced to a default value.
+  if (input.hideInTsp !== undefined) {
+    if (typeof input.hideInTsp !== 'boolean') {
+      return { kind: 'error', message: `item ${index}: hideInTsp must be a boolean` }
+    }
+    ref.hideInTsp = input.hideInTsp
   }
   return ref as FooterItemRef
 }

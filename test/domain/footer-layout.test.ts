@@ -7,7 +7,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback, stripControlChars } from '../../src/domain/footer/layout.ts'
+import { defaultHideInTsp, hideFooterRefInTsp, isFooterLayout, parseFooterLayout, resolveCommandFooterFallback, stripControlChars } from '../../src/domain/footer/layout.ts'
 import {
   COMPACT_FOOTER_LAYOUT,
   DEFAULT_FOOTER_LAYOUT,
@@ -223,4 +223,75 @@ test('TPS PR-3: a persisted legacy performance style survives parsing unchanged'
   })
   assert.ok(isFooterLayout(parsed))
   assert.deepEqual(parsed.rows[0]!.left.map(ref => ref.format), ['speed', 'latency'])
+})
+
+test('hideInTsp: absent/true/false parse, and every explicit value survives', () => {
+  const parsed = parseFooterLayout({
+    schemaVersion: 1,
+    rows: [{
+      left: [
+        { id: 'permission-preset' },
+        { id: 'model', hideInTsp: false },
+        { id: 'reasoning', hideInTsp: true },
+        { id: 'cwd', hideInTsp: true },
+      ],
+      right: [],
+    }],
+  })
+  assert.ok(isFooterLayout(parsed), `hideInTsp booleans must parse: ${JSON.stringify(parsed)}`)
+  const left = parsed.rows[0]!.left
+  assert.deepEqual(left.map(ref => ref.hideInTsp), [undefined, false, true, true])
+  // The parser never canonicalizes an explicit false away (the safety
+  // override for a default-On id).
+  assert.equal(left[1]!.hideInTsp, false)
+})
+
+test('hideInTsp: non-boolean values fail soft instead of being coerced', () => {
+  for (const bad of [1, 0, 'true', 'false', null, {}]) {
+    const parsed = parseFooterLayout({
+      schemaVersion: 1,
+      rows: [{ left: [{ id: 'model', hideInTsp: bad }], right: [] }],
+    })
+    assert.equal(isFooterLayout(parsed), false, `hideInTsp ${JSON.stringify(bad)} must be rejected`)
+    assert.match(String((parsed as { message?: string }).message), /hideInTsp must be a boolean/)
+  }
+})
+
+test('defaultHideInTsp: permission-preset/model/reasoning default On; every other id Off', () => {
+  for (const id of ['permission-preset', 'model', 'reasoning']) {
+    assert.equal(defaultHideInTsp(id), true, `${id} defaults to hidden in TSP`)
+  }
+  for (const id of ['cwd', 'context', 'token-usage', 'user:env', 'ext:owner/item', 'completely-unknown']) {
+    assert.equal(defaultHideInTsp(id), false, `${id} defaults to shown in TSP`)
+  }
+})
+
+test('hideFooterRefInTsp: explicit boolean wins; absent default-On follows the matching affordance', () => {
+  const noAffordances = { permission: false, model: false, reasoning: false }
+  const allAffordances = { permission: true, model: true, reasoning: true }
+
+  // Explicit values are unconditional, even against a missing control.
+  assert.equal(hideFooterRefInTsp({ id: 'permission-preset', hideInTsp: true }, noAffordances), true)
+  assert.equal(hideFooterRefInTsp({ id: 'model', hideInTsp: true }, noAffordances), true)
+  assert.equal(hideFooterRefInTsp({ id: 'cwd', hideInTsp: true }, allAffordances), true)
+  // Explicit false always attempts the normal display, never hides.
+  assert.equal(hideFooterRefInTsp({ id: 'permission-preset', hideInTsp: false }, allAffordances), false)
+  assert.equal(hideFooterRefInTsp({ id: 'reasoning', hideInTsp: false }, allAffordances), false)
+
+  // Absent defaults: each id reads ONLY its own affordance (never a shared
+  // boolean) and every other id stays visible regardless of capabilities.
+  assert.equal(hideFooterRefInTsp({ id: 'permission-preset' }, noAffordances), false)
+  assert.equal(hideFooterRefInTsp({ id: 'permission-preset' }, allAffordances), true)
+  assert.equal(hideFooterRefInTsp({ id: 'model' }, noAffordances), false)
+  assert.equal(hideFooterRefInTsp({ id: 'model' }, { ...noAffordances, model: true }), true)
+  assert.equal(hideFooterRefInTsp({ id: 'reasoning' }, { ...noAffordances, reasoning: true }), true)
+  assert.equal(hideFooterRefInTsp({ id: 'reasoning' }, { ...noAffordances, model: true }), false,
+    'a model affordance must never control reasoning')
+  assert.equal(hideFooterRefInTsp({ id: 'cwd' }, allAffordances), false)
+  assert.equal(hideFooterRefInTsp({ id: 'user:env' }, allAffordances), false)
+
+  // Duplicate placements are independent: the same id with different
+  // explicit values produces different decisions.
+  assert.equal(hideFooterRefInTsp({ id: 'context', hideInTsp: true }, noAffordances), true)
+  assert.equal(hideFooterRefInTsp({ id: 'context' }, noAffordances), false)
 })

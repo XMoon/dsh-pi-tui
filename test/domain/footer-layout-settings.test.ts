@@ -15,6 +15,7 @@ import { initialStatusSnapshot } from '../../src/domain/status/snapshot.ts'
 import { FooterComposer } from '../../src/tui/footer/composer.ts'
 import { createBuiltinFooterRegistry } from '../../src/tui/footer/builtin-items.ts'
 import { emptyStatusSnapshot, type StatusSnapshot } from '../../src/domain/status/types.ts'
+import { Config as TuiConfigSchema } from '../../src/app/config/schema.ts'
 
 /** Deep-mutable build shape (the snapshot is deeply readonly). */
 type DeepMutable<T> = { -readonly [K in keyof T]: DeepMutable<T[K]> }
@@ -392,4 +393,20 @@ test('setFooterPreset clears an active custom layout (a preset switch means a bu
   assert.ok(view.includes('p/m'), `the builtin compact layout must render:\n${view}`)
   assert.ok(!view.includes('working'), `the custom run-state item must be gone:\n${view}`)
   app.stop()
+})
+
+test('the plugin config schema preserves hideInTsp on a custom placement', () => {
+  const config = TuiConfigSchema({
+    footerLayout: {
+      schemaVersion: 1,
+      rows: [{ left: [{ id: 'model', hideInTsp: false }, { id: 'cwd', hideInTsp: true }], right: [] }],
+    },
+  } as never)
+  const layout = config.footerLayout.get() as {
+    rows: Array<{ left: Array<{ id: string; hideInTsp?: boolean }> }>
+  }
+  assert.deepEqual(layout.rows[0]!.left.map(ref => [ref.id, ref.hideInTsp]), [
+    ['model', false],
+    ['cwd', true],
+  ], 'the persisted settings contract must not strip the TSP placement field')
 })
