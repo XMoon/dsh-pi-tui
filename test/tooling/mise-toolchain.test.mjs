@@ -331,6 +331,20 @@ test('mise run setup rejects stale, malformed and foreign materialization state'
   }
 })
 
+test('mise run setup rejects an npm state with malformed writer hashes', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-mise-setup-malformed-npm-')
+  writeNpmFixture(root)
+  writeMaterializedState(root, { mode: 'npm', packageJsonHash: 'garbage', lockfileHash: 'garbage' })
+  const record = join(root, 'pnpm-record.json')
+  const fakePnpm = fakeCommand(root, 'pnpm-fixture', record)
+  assert.throws(
+    () => runMiseSetup({ root, environment: { PATH: `${join(root, 'bin')}:${process.env.PATH}`, PNPM_EXECUTABLE: fakePnpm } }),
+    /packageJsonHash/u,
+  )
+  assert.equal(existsSync(record), false, 'a malformed npm state must not spawn pnpm')
+})
+
 test('npm profile and dev:dsh reject a Source-materialized worktree before spawning dsh', (t) => {
   const life = testLifecycle(t)
   const make = (name, stateMode) => {
