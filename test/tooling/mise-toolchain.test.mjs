@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -22,6 +22,7 @@ import { REQUIRED_PHASES } from '../../scripts/ci-verdict.mjs'
 import { DSH_REPOSITORY } from '../../scripts/dsh-dev-context.mjs'
 import { _test as setupTest, runMiseSetup } from '../../scripts/mise-setup.mjs'
 import { _test as profileTest } from '../../scripts/mise-dev-profile.mjs'
+import { _test as sourceModeTest } from '../../scripts/mise-source-mode.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const MISE_TOML = readFileSync(join(ROOT, 'mise.toml'), 'utf8')
@@ -92,6 +93,10 @@ test('the mise task map mirrors the existing pnpm entry points without adding ga
   assert.equal(taskRun('verify:release'), 'pnpm verify:release')
   assert.equal(taskRun('dev:profile'), 'node scripts/mise-dev-profile.mjs')
   assert.equal(taskRun('dev:dsh'), 'dsh --profile pi-tui-dev')
+  assert.equal(taskRun('source:doctor'), 'node scripts/dev-doctor.mjs --mode source')
+  assert.equal(taskRun('source:bootstrap'), 'node scripts/dev-bootstrap.mjs --mode source')
+  assert.equal(taskRun('source:profile'), 'node scripts/mise-source-mode.mjs profile')
+  assert.equal(taskRun('source:dsh'), 'node scripts/mise-source-mode.mjs dsh')
   assert.doesNotMatch(MISE_TOML, /^\[tasks\."(smoke|gate):/mu, 'mise must not mirror smoke/gate lanes')
   assert.doesNotMatch(MISE_TOML, /^\[env\]/mu, 'mise must not set a global development environment')
 })
@@ -173,6 +178,22 @@ test('the CI mise-toolchain job is a required, SHA-pinned contract lane', () => 
   assert.match(runText, /missing committed mise sidecar/u)
   assert.match(runText, /git status --porcelain -- mise\.lock \.mise/u)
   assert.ok(REQUIRED_PHASES.includes('mise-toolchain'), 'the contract lane must block qualification')
+})
+
+test('the source-mode helper accepts only a CLI inside this worktree', (t) => {
+  const life = testLifecycle(t)
+  const root = life.tempDir('dsh-mise-source-')
+  mkdirSync(join(root, 'node_modules', '.bin'), { recursive: true })
+  mkdirSync(join(root, 'node_modules', '.pnpm', 'source-dsh', 'node_modules', '@deepseek-ai', 'dsh'), { recursive: true })
+  const cli = join(root, 'node_modules', '.bin', 'dsh')
+  symlinkSync(join(root, 'node_modules', '.pnpm', 'source-dsh', 'node_modules', '@deepseek-ai', 'dsh'), cli, 'dir')
+  assert.equal(sourceModeTest.sourceCliPath(root), join(root, 'node_modules', '.pnpm', 'source-dsh', 'node_modules', '@deepseek-ai', 'dsh'))
+  const outsideRoot = life.tempDir('dsh-mise-source-outside-')
+  const outside = join(outsideRoot, 'outside-dsh')
+  mkdirSync(outside)
+  mkdirSync(join(outsideRoot, 'node_modules', '.bin'), { recursive: true })
+  symlinkSync(outside, join(outsideRoot, 'node_modules', '.bin', 'dsh'), 'dir')
+  assert.throws(() => sourceModeTest.sourceCliPath(outsideRoot), /outside this worktree/u)
 })
 
 test('the development profile refuses the real DSH home and an unbuilt checkout', (t) => {

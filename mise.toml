@@ -59,3 +59,23 @@ run = "node scripts/mise-dev-profile.mjs"
 description = "Run the isolated development profile for this checkout"
 env = { DSH_HOME = "{{ config_root }}/temp/mise-dsh-home" }
 run = "dsh --profile pi-tui-dev"
+
+[tasks."source:doctor"]
+description = "Check the pinned Source Mode environment"
+env = { DSH_MODE = "source" }
+run = "node scripts/dev-doctor.mjs --mode source"
+
+[tasks."source:bootstrap"]
+description = "Materialize the pinned Source Mode environment"
+env = { DSH_MODE = "source" }
+run = "node scripts/dev-bootstrap.mjs --mode source"
+
+[tasks."source:profile"]
+description = "Install this checkout's built TUI into an isolated Source Mode profile"
+env = { DSH_HOME = "{{ config_root }}/temp/source-dsh-home", DSH_MODE = "source" }
+run = "node scripts/mise-source-mode.mjs profile"
+
+[tasks."source:dsh"]
+description = "Run the isolated Source Mode profile with the source-built DSH CLI"
+env = { DSH_HOME = "{{ config_root }}/temp/source-dsh-home", DSH_MODE = "source" }
+run = "node scripts/mise-source-mode.mjs dsh"
