@@ -152,6 +152,44 @@ sanitizer keeps its own vetted OSC 8 contract; that contract is unchanged).
 - **Never** add a terminal emulator, PTY, image passthrough or a
   color-preserving parser dependency to solve this.
 
+## Image protocol preference (`PI_IMAGE_PROTOCOL`)
+
+`PI_IMAGE_PROTOCOL` is the ONE Client-local startup preference for inline image
+pixels. `src/tui/graphics/image-protocol-preference.ts` parses it once per
+application/renderer lifetime; it is a protocol SELECTION, never a capability.
+The real transport admission described below still decides whether the selected
+family can actually paint.
+
+| Value (trimmed, case-insensitive) | Meaning |
+|---|---|
+| unset / empty / `auto` | Existing automatic order: Direct/Zellij keep `Kitty > SIXEL > text`; tmux keeps its live U1/Sxl relative order. |
+| `kitty` | Only an admitted Kitty transport; no SIXEL or iTerm2 fallback. |
+| `sixel` | Only an admitted SIXEL transport; a static Kitty/iTerm2 detection cannot satisfy it. |
+| `iterm2` | Only the Direct legacy OSC 1337 path; multiplexer panes paint text. |
+| `none` / `0` | Hard off for every renderer's image pixels; attachment input, persistence and model input are unchanged. |
+| Any other value | A startup configuration error that names the variable, the actual value and the allowed values. |
+
+Only `auto` applies the strict local Zellij + Windows Terminal compatibility
+rule: a Kitty `a=q OK` is treated as the known startup false positive only when
+`ZELLIJ` is a non-empty session marker, `TMUX` and `STY` are empty,
+`WT_SESSION` is non-empty, `TERM_PROGRAM` is absent/empty or exactly
+`windows_terminal` (lowercased), no SSH marker is set, no conflicting
+Kitty/Ghostty/WezTerm/iTerm/Warp marker or `TERM` identity is present, and the
+preference is `auto`. The filter only discards Kitty's startup answer: SIXEL is
+still selected solely from the pane's DA1 attribute `4`, the local Zellij
+`>= 0.45.0` gate and Screen readiness; otherwise the pane paints text. Every
+other automatic environment keeps the existing order. An explicit
+`kitty`/`sixel`/`iterm2`/`none` always overrides this auto rule.
+
+No preference may bypass a physical gate: Direct SIXEL still requires DA1
+attribute `4` plus the Screen's real cell/background facts; Zellij still needs
+its one bounded negotiation and version gate; tmux still needs the live single
+display client plus `sixel_support=1`/`Sxl` (native) or U1/passthrough (virtual
+Kitty); a managed DCS still needs the trusted registry. The experimental TSP
+renderer's native `ui.image` path is enabled only for `auto` with the negotiated
+`image`+`blobs` capability; explicit values render text-only disabled status,
+while `ui.chart`, model attachments and attachment persistence are unaffected.
+
 ## Kitty graphics ownership
 
 Inline Kitty graphics are the ONE protocol family with a Client-local
@@ -222,8 +260,9 @@ retirement and the resident budget.
   no multiplexer in between. `TERM` is not an identity fact; a `tmux*`/`screen*`
   value (or `TMUX`/`ZELLIJ`/`STY`, or Herdr) still denies the DIRECT path
   because it is a transport boundary, not a brand policy. `PI_IMAGE_PROTOCOL=none/0`
-  is the global hard opt-out and `iterm2` keeps the iTerm2 path; no environment
-  override can force admission past a null or non-Kitty effective capability.
+  is the global hard opt-out, `iterm2` keeps the Direct iTerm2 path, and
+  `sixel` never changes this static answer: it denies the Native Kitty factory
+  above and is satisfied only by the Direct SIXEL owner's own DA1/Screen facts.
   A non-empty `ZELLIJ` marker makes the process a CANDIDATE: a separate Zellij
   factory creates the same one `KittyGraphicsCore` / `KittyTerminalFacade`
   Native path, sends exactly one per-handle bounded `a=q` query after the real
@@ -476,15 +515,21 @@ therefore have different authorities and must never be collapsed:
   binding is immutable for the TUI lifetime; any later mismatch, lost server
   support or lost Sxl revokes the handle one way, and only a restart may choose
   a transport again.
-- **The factory order is fixed.** Native Kitty, ONE Zellij negotiated handle
-  (Kitty > SIXEL > text), native tmux SIXEL, tmux virtual Kitty, then Direct
-  SIXEL. A live known-U1 Kitty/Ghostty tmux
-  client (or the explicit `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1` assertion) keeps
-  the virtual transport ahead of SIXEL; a merely pending unknown-renderer U1
-  probe does not outrank a proven Sxl client. `PI_TUI_TMUX_KITTY_IMAGES=0`
-  disables only the virtual Kitty transport and never this native SIXEL route;
-  `PI_IMAGE_PROTOCOL=none|0|kitty|iterm2` and every nested/other multiplexer
-  deny it before any tmux query.
+- **The automatic factory order is fixed.** `auto` tries Native Kitty, ONE
+  Zellij negotiated handle (Kitty > SIXEL > text), native tmux SIXEL, tmux
+  virtual Kitty, then Direct SIXEL. The explicit preferences use only their own
+  subset of that order and never create a competing backend: `kitty` never
+  admits a SIXEL transport (no Direct SIXEL factory, no native tmux SIXEL, and
+  the Zellij handle never considers it); `sixel` never constructs Native Kitty
+  or tmux virtual Kitty; `iterm2`/`none` create no managed handle. A live
+  known-U1 Kitty/Ghostty tmux client (or the explicit
+  `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1` assertion) keeps the virtual transport
+  ahead of SIXEL in `auto`; a merely pending unknown-renderer U1 probe does not
+  outrank a proven Sxl client. `PI_TUI_TMUX_KITTY_IMAGES=0` disables only the
+  virtual Kitty transport and never this native SIXEL route;
+  `PI_IMAGE_PROTOCOL=none|0|kitty|iterm2` denies native tmux SIXEL before any
+  tmux query, while `sixel` admits only that native SIXEL route (never the
+  virtual Kitty one).
 - **Writes are trusted complete DCS only.** `src/tui/graphics/tmux-sixel.ts`
   wraps the real `Terminal` and scans the byte stream for the owner's exact
   `ESC P0;1;q … ESC \` DCS. The fork's `BoundedTerminalWriter` can split a
@@ -523,19 +568,30 @@ A Zellij pane inherits the outer terminal's environment, so `TERM_PROGRAM`,
 `WT_SESSION`, `getCapabilities().images` and an inherited Kitty capability are
 not pane capability proof. The product creates ONE `zellij-negotiated` handle
 per app lifetime when `ZELLIJ` is a non-empty session marker with no nested
-`TMUX`/`STY` and no explicit `none`/`0`/`iterm2` override. That handle owns both
-the existing Native Kitty Core/Facade and a potential Direct SIXEL owner; only
-one of them can ever become paintable.
+`TMUX`/`STY`. `PI_IMAGE_PROTOCOL=none`/`0`/`iterm2` creates no Zellij handle;
+`sixel` and `kitty` create it with their own single-protocol policy. That
+handle owns both the existing Native Kitty Core/Facade and a potential Direct
+SIXEL owner; only one of them can ever become paintable.
 
-- **Selection is driven by two live pane facts, exactly once.** The existing
-  bounded Kitty `a=q` query (500 ms) answers the pane's Kitty transport; the
-  terminal's passive primary DA1 observation (`onSixelSupport`, attribute `4`)
-  answers SIXEL. Kitty wins whenever its probe returns the matching `OK`, even
-  if DA1 also declares SIXEL. SIXEL is selected only when Kitty did not admit,
-  DA1 declares attribute `4`, and the LOCAL `zellij --version` is strictly
-  `>= 0.45.0` (older programs advertised SIXEL unconditionally). No answer, a
-  timeout, a missing/malformed version or an ineligible version settles to
-  text; DA1 has ONE 800 ms initial bound. Unknown is never treated as positive.
+- **Selection is driven by two live pane facts, exactly once.** In `auto`, the
+  existing bounded Kitty `a=q` query (500 ms) answers the pane's Kitty
+  transport; the terminal's passive primary DA1 observation
+  (`onSixelSupport`, attribute `4`) answers SIXEL. Kitty wins whenever its
+  probe returns the matching `OK`, even if DA1 also declares SIXEL, except for
+  the strict local Windows Terminal rule described above, where the startup
+  `OK` is filtered to `denied`. SIXEL is selected only when Kitty did not
+  admit, DA1 declares attribute `4`, and the LOCAL `zellij --version` is
+  strictly `>= 0.45.0` (older programs advertised SIXEL unconditionally). No
+  answer, a timeout, a missing/malformed version or an ineligible version
+  settles to text; DA1 has ONE 800 ms initial bound. Unknown is never treated
+  as positive.
+- **Explicit protocol values keep one decision path.** `kitty` sends the same
+  ONE `a=q` and accepts only a matching `OK`; SIXEL is never eligible. `sixel`
+  sends NO Kitty probe at all (`ZellijKittyAdmission.denyWithoutProbe()` commits
+  the Kitty branch denied after the coordinator's capability/callback wiring
+  exists), creates no Kitty pixel delegate, and still requires the same DA1 +
+  local version + Screen readiness; failure is text. Both modes keep the same
+  one-way selection and the same bounded re-query/revoke contract.
 - **No runtime protocol switching.** Once `kitty` or `sixel` is committed the
   choice never changes. A late Kitty `OK` or DA1 reply is consumed but inert.
   After SIXEL is selected, a later complete DA1 that omits attribute `4`

@@ -21,6 +21,7 @@
  */
 
 import { getCapabilities, type Terminal } from '@xmoon76/pi-tui'
+import { imageProtocolPreference } from './image-protocol-preference.ts'
 
 /** Admission state of the Direct SIXEL candidate for this terminal lifetime. */
 export type SixelDirectVerdict = 'pending' | 'admitted' | 'denied'
@@ -58,17 +59,14 @@ function isMultiplexedTopology(environment: NodeJS.ProcessEnv): boolean {
  * configuration/topology facts; they never guess a pixel capability.
  */
 function staticDenial(environment: NodeJS.ProcessEnv, legacyImages: 'kitty' | 'iterm2' | null): string | undefined {
-  // The fork's own override precedence: `none`/`0` is a hard off and an
-  // explicit legacy protocol keeps its mature path. Any other value
-  // (including an unknown one such as `sixel`) stays on the existing auto
-  // semantics, so it must not become a SIXEL override here.
-  const configured = environment.PI_IMAGE_PROTOCOL?.toLowerCase()
-  if (configured === 'none' || configured === '0') return 'pi-image-protocol-hard-off'
-  if (configured === 'kitty' || configured === 'iterm2') return 'pi-image-protocol-explicit-legacy'
+  const preference = imageProtocolPreference(environment)
+  if (preference === 'none') return 'pi-image-protocol-hard-off'
+  if (preference === 'kitty' || preference === 'iterm2') return 'pi-image-protocol-explicit-legacy'
   if (isMultiplexedTopology(environment)) return 'multiplexed-topology'
-  // A terminal the fork already classifies as Kitty/iTerm2 paints through that
-  // protocol; SIXEL must not invert that precedence automatically.
-  if (legacyImages !== null) return 'legacy-image-protocol'
+  // `sixel` deliberately bypasses ONLY the fork's static Kitty/iTerm2 brand
+  // precedence: the real DA1 attribute, the Screen cell/background facts and
+  // the single owner below still decide whether anything is painted.
+  if (preference === 'auto' && legacyImages !== null) return 'legacy-image-protocol'
   return undefined
 }
 

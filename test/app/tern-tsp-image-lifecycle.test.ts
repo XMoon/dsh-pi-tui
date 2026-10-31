@@ -1153,3 +1153,77 @@ test('typing with two large draft previews up does not re-hash their bytes into 
     `each edit projects in ${perEdit.toFixed(2)}ms (25 edits in ${elapsedMs.toFixed(1)}ms)`)
   await harness.dispose()
 })
+
+// ── PI_IMAGE_PROTOCOL: the same override governs the native TSP path ───────
+
+function currentNodeText(tern: ScriptedTern): string {
+  return currentNodes(tern)
+    .map(node => (typeof node.props.text === 'string' ? node.props.text : ''))
+    .join('\n')
+}
+
+test('T02/T03/T08: every explicit protocol performs zero image reads, blobs or image nodes', async (t) => {
+  for (const protocol of ['none', 'kitty', 'sixel', 'iterm2'] as const) {
+    await t.test(protocol, async () => {
+      const previous = process.env.PI_IMAGE_PROTOCOL
+      process.env.PI_IMAGE_PROTOCOL = protocol
+      let harness: Harness | undefined
+      try {
+        harness = await mountHarness()
+        commit(harness.renderer, [toolRowWithImage()], {})
+        await until('the disabled image status', () =>
+          currentNodeText(harness!.tern).includes('Image preview disabled by PI_IMAGE_PROTOCOL'))
+        assert.deepEqual(harness.reads, [], 'no attachment read')
+        assert.deepEqual(harness.tern.blobIds(), [], 'no session.blob op')
+        assert.deepEqual(currentImageNodes(harness.tern), [], 'no ui.image node')
+        assert.match(currentNodeText(harness.tern), /\[IMAGE\] shot\.png · 640×360 · 3\.8 KiB · Image preview disabled by PI_IMAGE_PROTOCOL/u,
+          'the identity and policy status stay visible')
+      } finally {
+        await harness?.dispose()
+        if (previous === undefined) delete process.env.PI_IMAGE_PROTOCOL
+        else process.env.PI_IMAGE_PROTOCOL = previous
+      }
+    })
+  }
+})
+
+test('T04: none keeps a staged draft and its count while sending no chip/blob/read', async () => {
+  const previous = process.env.PI_IMAGE_PROTOCOL
+  process.env.PI_IMAGE_PROTOCOL = 'none'
+  const harness = await mountHarness()
+  try {
+    const staged = localDraft(1, '[image #1 (640×360)]', 1024, 'shot.png')
+    harness.stageDrafts(`look at this ${staged.placeholder}`, [staged])
+    await until('the draft-count line', () => (dockStatusText(harness.tern) ?? '').startsWith('Draft 1'))
+    assert.deepEqual(dockDraftRows(harness.tern), [], 'no draft preview row or chip')
+    assert.deepEqual(harness.reads, [], 'the staged local bytes are not read')
+    assert.deepEqual(harness.tern.blobIds(), [], 'no preview blob')
+    assert.equal(currentImageNodes(harness.tern).length, 0, 'no ui.image node')
+  } finally {
+    await harness.dispose()
+    if (previous === undefined) delete process.env.PI_IMAGE_PROTOCOL
+    else process.env.PI_IMAGE_PROTOCOL = previous
+  }
+})
+
+test('T07: an invalid PI_IMAGE_PROTOCOL fails the TSP mount before any frame', async () => {
+  const previous = process.env.PI_IMAGE_PROTOCOL
+  process.env.PI_IMAGE_PROTOCOL = 'sixelx'
+  const tern = new ScriptedTern()
+  const session = await sdkConnect({ env: {}, input: tern.input, output: tern.output, exitHooks: false, timeout: 500 })
+  assert.ok(session !== null)
+  try {
+    assert.throws(
+      () => mountTspRenderer(session, {
+        copyVisual: async () => false,
+        requestExit: () => {},
+      }),
+      /Invalid PI_IMAGE_PROTOCOL/u,
+    )
+    assert.deepEqual(tern.events, [], 'no frame or blob was written before the configuration error')
+  } finally {
+    await session.close()
+    if (previous === undefined) delete process.env.PI_IMAGE_PROTOCOL
+    else process.env.PI_IMAGE_PROTOCOL = previous
+  }
+})

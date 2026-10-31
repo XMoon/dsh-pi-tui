@@ -75,6 +75,7 @@ const ENV_KEYS = [
   'WARP_TERMINAL_SESSION_UUID',
   'PI_IMAGE_PROTOCOL',
   'PI_TUI_TMUX_KITTY_IMAGES',
+  'WT_SESSION',
 ] as const
 
 /** Apply exactly one real environment through the real detection path. */
@@ -930,6 +931,26 @@ test('an ENOTSUPPORTED reply leaves the real TuiApp text-only with no read or ma
     assert.equal(wire.includes('a=t,f=100') || wire.includes('a=p,'), false, 'no managed image after rejection')
     assert.equal(wire.includes('a=T,'), false, 'no legacy image after rejection')
     assert.ok(vt.getScrollBuffer().join('\n').includes('🖼️ rejected.png'))
+  } finally {
+    h.app.dispose()
+    apps.started.delete(h.app)
+  }
+})
+
+test('explicit PI_IMAGE_PROTOCOL=kitty overrides the strict WT auto filter in the real Zellij product', async (t) => {
+  const h = started(product(t, zellijEnvironment({
+    PI_IMAGE_PROTOCOL: 'kitty',
+    TERM_PROGRAM: 'Windows_Terminal',
+    TERM: 'xterm-256color',
+    WT_SESSION: 'wt-session',
+  })))
+  const vt = h.terminal
+  try {
+    vt.sendInput(probeReply(vt))
+    await until(() => (h.graphics as unknown as { selectedProtocol(): 'kitty' | 'sixel' | null }).selectedProtocol() === 'kitty',
+      'the explicit Kitty selection')
+    assert.equal(h.graphics.canPaint(), true)
+    assert.equal(vt.writes.join('').includes('\x1bP0;1;q'), false, 'no SIXEL fallback')
   } finally {
     h.app.dispose()
     apps.started.delete(h.app)

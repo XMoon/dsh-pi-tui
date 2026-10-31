@@ -15,7 +15,7 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { afterEach, beforeEach } from 'node:test'
 import { resetCapabilitiesCache, setCapabilities, type Terminal, type TerminalProgressState } from '@xmoon76/pi-tui'
 import { effectiveImageProtocol } from '../../src/tui/graphics/image-capability.ts'
 import type { ImageGraphics } from '../../src/tui/graphics/native-image.ts'
@@ -27,6 +27,24 @@ import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
 import { createFakeTmuxCli } from '../support/fake-tmux-cli.ts'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+/** Every terminal-identity fact the classifier reads; the lane also clears them. */
+const TERMINAL_ENV_KEYS = ['ZELLIJ', 'TMUX', 'STY', 'TERM', 'TERM_PROGRAM', 'PI_IMAGE_PROTOCOL'] as const
+let environmentSnapshot: Map<string, string | undefined>
+
+beforeEach(() => {
+  environmentSnapshot = new Map(TERMINAL_ENV_KEYS.map(key => [key, process.env[key]]))
+  for (const key of TERMINAL_ENV_KEYS) delete process.env[key]
+  resetCapabilitiesCache()
+})
+
+afterEach(() => {
+  for (const [key, value] of environmentSnapshot) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  resetCapabilitiesCache()
+})
 
 /** A sink that records the bytes the facade really offered it. */
 class RecordingTerminal implements Terminal {
@@ -514,6 +532,56 @@ test('source to sink: the admitted component really emits the managed grid, and 
   } finally {
     cli.dispose()
   }
+})
+
+test('explicit none and sixel are text-only even when the fork detects Kitty', () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  process.env.PI_IMAGE_PROTOCOL = 'none'
+  assert.equal(effectiveImageProtocol(undefined), null, 'none is a hard off')
+  process.env.PI_IMAGE_PROTOCOL = 'sixel'
+  assert.equal(effectiveImageProtocol(undefined), null,
+    'sixel is never satisfied by the fork static capability; only its managed owner may paint')
+  process.env.PI_IMAGE_PROTOCOL = 'auto'
+  assert.equal(effectiveImageProtocol(undefined), 'kitty', 'auto keeps the fork answer')
+})
+
+test('every multiplexer topology blocks a legacy passthrough when no managed handle exists', () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const topologyCases: ReadonlyArray<readonly [string, Record<string, string | undefined>]> = [
+    ['ZELLIJ', { ZELLIJ: '0' }],
+    ['TMUX', { TMUX: '/tmp/tmux-1000/default,1,0' }],
+    ['STY', { STY: '1234.pts-0.host' }],
+    ['TERM tmux', { TERM: 'tmux-256color' }],
+    ['TERM screen', { TERM: 'screen-256color' }],
+    ['Herdr', { TERM_PROGRAM: 'herdr' }],
+    ['explicit kitty in tmux', { TMUX: '/tmp/tmux-1000/default,1,0', PI_IMAGE_PROTOCOL: 'kitty' }],
+    ['explicit iterm2 in tmux', { TMUX: '/tmp/tmux-1000/default,1,0', PI_IMAGE_PROTOCOL: 'iterm2' }],
+  ]
+  for (const [name, environment] of topologyCases) {
+    for (const key of TERMINAL_ENV_KEYS) delete process.env[key]
+    for (const [key, value] of Object.entries(environment)) {
+      if (value !== undefined) process.env[key] = value
+    }
+    setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+    assert.equal(effectiveImageProtocol(undefined), null, `${name}: no legacy image bytes may leak through a pane`)
+  }
+  for (const key of TERMINAL_ENV_KEYS) delete process.env[key]
+  process.env.ZELLIJ = ''
+  process.env.TMUX = ''
+  process.env.STY = ''
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined), 'kitty', 'an empty marker is not a session')
+})
+
+test('explicit iterm2 and kitty on an ordinary Direct terminal keep only their own answer', () => {
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  process.env.PI_IMAGE_PROTOCOL = 'iterm2'
+  assert.equal(effectiveImageProtocol(undefined), 'iterm2')
+  process.env.PI_IMAGE_PROTOCOL = 'sixel'
+  assert.equal(effectiveImageProtocol(undefined), null, 'sixel never falls back to legacy iTerm2')
+  process.env.PI_IMAGE_PROTOCOL = 'kitty'
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined), 'kitty')
 })
 
 /**

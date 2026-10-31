@@ -292,6 +292,51 @@ test('N10: environment gates reject before any tmux subprocess', (t) => {
   }
 })
 
+test('N10b: explicit sixel admits native SIXEL without any tmux Kitty probe', (t) => {
+  const cli = createSixelFakeTmuxCli(t)
+  try {
+    const env = { ...cli.env, PI_IMAGE_PROTOCOL: 'sixel' }
+    const identity = probeTmuxSixelIdentity(env)
+    assert.ok(identity, 'the live server/client/Sxl facts still decide')
+    assert.equal(cli.calls().some(line => line.startsWith('show-options')), false,
+      'the Kitty-specific passthrough probe never runs')
+    const graphics = createTmuxSixelGraphics(new VirtualTerminal(), env)
+    assert.ok(graphics)
+    assert.equal(graphics.mode, 'sixel')
+    graphics.dispose()
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('N10c: explicit kitty never falls back to native SIXEL', (t) => {
+  const cli = createSixelFakeTmuxCli(t)
+  try {
+    const graphics = createTmuxSixelGraphics(new VirtualTerminal(), {
+      ...cli.env,
+      PI_IMAGE_PROTOCOL: 'kitty',
+    })
+    assert.equal(graphics, undefined, 'SIXEL is denied by the explicit kitty choice')
+    assert.equal(cli.calls().some(line => line.includes('#{sixel_support}')), false,
+      'no native SIXEL eligibility query runs')
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('N10d: an invalid PI_IMAGE_PROTOCOL is a startup error before any tmux query', (t) => {
+  const cli = createSixelFakeTmuxCli(t)
+  try {
+    assert.throws(
+      () => probeTmuxSixelIdentity({ ...cli.env, PI_IMAGE_PROTOCOL: 'sixelx' }),
+      /Invalid PI_IMAGE_PROTOCOL/u,
+    )
+    assert.deepEqual(cli.calls(), [])
+  } finally {
+    cli.dispose()
+  }
+})
+
 test('N11: known-U1 tmux Kitty keeps precedence; a real Sxl outranks a pending U1 probe', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {

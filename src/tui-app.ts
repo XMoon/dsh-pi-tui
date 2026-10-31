@@ -251,6 +251,7 @@ import { createTmuxSixelGraphics, isTmuxSixelTerminal } from './tui/graphics/tmu
 import { createTmuxKittyGraphics } from './tui/graphics/tmux-image.ts'
 import { createZellijNegotiatedGraphics } from './tui/graphics/zellij-sixel.ts'
 import { effectiveImageProtocol } from './tui/graphics/image-capability.ts'
+import { imageProtocolPreference } from './tui/graphics/image-protocol-preference.ts'
 import { TmuxGraphicsRevokedError } from './tui/graphics/kitty-terminal.ts'
 import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
@@ -4327,36 +4328,72 @@ export class TuiApp {
     // The managed graphics handle is created ONCE per physical terminal, from
     // the real terminal the screens will write through, and both screens plus
     // every first-party graphics consumer share the SAME facade/Core. The
-    // native transport is preferred; a Ghostty-host Zellij pane gets its own
-    // live-query admission; native tmux SIXEL then takes a proven Sxl pane
-    // before the tmux virtual Kitty factory, whose known-U1 positives keep
-    // their fixed precedence inside the SIXEL factory. Every factory fails
-    // closed, so a terminal that admits none keeps `getCapabilities()`
-    // untouched and every consumer keeps its legacy `Image`/text path.
-    const graphics: ImageGraphics | undefined = createNativeKittyGraphics(resizeAware)
-      // ONE Zellij candidate handle decides Kitty > SIXEL > text from the live
-      // pane answers. It must come before both tmux and every other SIXEL
-      // factory so two Zellij writers can never compete.
-      ?? createZellijNegotiatedGraphics(
-        resizeAware,
-        process.env,
-        () => this.requestRender(),
-        () => this.settleThumbnailRender(),
-      )
-      // Native tmux SIXEL owns the pane's own DCS before the tmux virtual Kitty
-      // factory gets a chance: a real Sxl client outranks a pending U1 probe,
-      // while a live known-U1 Kitty/Ghostty facility keeps its fixed precedence
-      // inside the factory (which then returns undefined).
-      ?? createTmuxSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
-      ?? createTmuxKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
-      // Direct SIXEL is the LAST candidate and never a fallback: a managed Kitty
-      // handle keeps precedence even while its own admission is pending/denied,
-      // and a statically excluded topology returns no handle at all (no DA1
-      // subscription, no encoder, no output).
-      // The SIXEL owner's settle is a PIXEL settle: it changes the body height of
-      // the cards that own the raster, so it goes through the SAME seam the
-      // loader settles use (mark the fullscreen row map dirty, then repaint).
-      ?? createDirectSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
+    // startup `PI_IMAGE_PROTOCOL` preference chooses the candidate ORDER
+    // exclusively; each candidate still applies its own real admission, and an
+    // explicit preference never becomes a fabricated capability. Invalid
+    // configuration throws here, before any graphics owner exists.
+    //
+    // auto:    Native Kitty -> ONE Zellij negotiated -> native tmux SIXEL ->
+    //          tmux virtual Kitty -> Direct SIXEL (the existing order).
+    // kitty:   Native Kitty -> Zellij negotiated -> tmux virtual Kitty.
+    // sixel:   Zellij negotiated -> native tmux SIXEL -> Direct SIXEL, and the
+    //          Zellij handle sends no Kitty probe.
+    // iterm2:  no managed handle; a Direct terminal keeps the legacy path.
+    // none:    no managed handle and every consumer paints text.
+    const imagePreference = imageProtocolPreference(process.env)
+    let graphics: ImageGraphics | undefined
+    switch (imagePreference) {
+      case 'none':
+      case 'iterm2':
+        break
+      case 'kitty':
+        graphics = createNativeKittyGraphics(resizeAware)
+          ?? createZellijNegotiatedGraphics(
+            resizeAware,
+            process.env,
+            () => this.requestRender(),
+            () => this.settleThumbnailRender(),
+          )
+          ?? createTmuxKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
+        break
+      case 'sixel':
+        graphics = createZellijNegotiatedGraphics(
+          resizeAware,
+          process.env,
+          () => this.requestRender(),
+          () => this.settleThumbnailRender(),
+        )
+          ?? createTmuxSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
+          ?? createDirectSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
+        break
+      case 'auto':
+        graphics = createNativeKittyGraphics(resizeAware)
+          // ONE Zellij candidate handle decides Kitty > SIXEL > text from the
+          // live pane answers. It must come before both tmux and every other
+          // SIXEL factory so two Zellij writers can never compete.
+          ?? createZellijNegotiatedGraphics(
+            resizeAware,
+            process.env,
+            () => this.requestRender(),
+            () => this.settleThumbnailRender(),
+          )
+          // Native tmux SIXEL owns the pane's own DCS before the tmux virtual
+          // Kitty factory gets a chance: a real Sxl client outranks a pending
+          // U1 probe, while a live known-U1 Kitty/Ghostty facility keeps its
+          // fixed precedence inside the factory (which then returns undefined).
+          ?? createTmuxSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
+          ?? createTmuxKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
+          // Direct SIXEL is the LAST candidate and never a fallback: a managed
+          // Kitty handle keeps precedence even while its own admission is
+          // pending/denied, and a statically excluded topology returns no
+          // handle at all (no DA1 subscription, no encoder, no output).
+          // The SIXEL owner's settle is a PIXEL settle: it changes the body
+          // height of the cards that own the raster, so it goes through the
+          // SAME seam the loader settles use (mark the fullscreen row map
+          // dirty, then repaint).
+          ?? createDirectSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
+        break
+    }
     this.graphics = graphics
     this.terminal = graphics?.terminal ?? resizeAware
     // A revoked tmux admission refuses a whole managed physical batch from

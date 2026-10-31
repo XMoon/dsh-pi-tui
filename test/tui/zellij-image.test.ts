@@ -33,6 +33,7 @@ import {
 import {
   ZELLIJ_SIXEL_DA1_TIMEOUT_MS,
   createZellijNegotiatedGraphics,
+  isKnownLocalWindowsTerminalZellij,
   zellijVersionEligible,
   type ZellijNegotiatedGraphics,
 } from '../../src/tui/graphics/zellij-sixel.ts'
@@ -177,6 +178,122 @@ beforeEach(() => {
 
 afterEach(() => {
   resetCapabilitiesCache()
+})
+
+test('the strict auto Zellij + WT filter requires every local condition at once', () => {
+  const base: NodeJS.ProcessEnv = {
+    ZELLIJ: '1',
+    WT_SESSION: 'wt-session',
+    TERM: 'xterm-256color',
+    PI_IMAGE_PROTOCOL: 'auto',
+  }
+  assert.equal(isKnownLocalWindowsTerminalZellij(base), true, 'baseline')
+  assert.equal(isKnownLocalWindowsTerminalZellij({ ...base, TERM_PROGRAM: 'Windows_Terminal' }), true)
+  assert.equal(isKnownLocalWindowsTerminalZellij({ ...base, TERM_PROGRAM: 'windows_terminal' }), true)
+
+  const rejected: ReadonlyArray<readonly [string, NodeJS.ProcessEnv]> = [
+    ['missing ZELLIJ', { ...base, ZELLIJ: undefined }],
+    ['empty ZELLIJ', { ...base, ZELLIJ: '' }],
+    ['nested TMUX', { ...base, TMUX: '/tmp/tmux,1,0' }],
+    ['nested STY', { ...base, STY: 'screen-1' }],
+    ['missing WT_SESSION', { ...base, WT_SESSION: undefined }],
+    ['empty WT_SESSION', { ...base, WT_SESSION: '' }],
+    ['conflicting TERM_PROGRAM', { ...base, TERM_PROGRAM: 'ghostty' }],
+    ['SSH_CONNECTION', { ...base, SSH_CONNECTION: '10.0.0.1 22 10.0.0.2 50000' }],
+    ['SSH_CLIENT', { ...base, SSH_CLIENT: '10.0.0.1 50000 22' }],
+    ['SSH_TTY', { ...base, SSH_TTY: '/dev/pts/1' }],
+    ['KITTY_WINDOW_ID', { ...base, KITTY_WINDOW_ID: '1' }],
+    ['GHOSTTY_RESOURCES_DIR', { ...base, GHOSTTY_RESOURCES_DIR: '/ghostty' }],
+    ['WEZTERM_PANE', { ...base, WEZTERM_PANE: '1' }],
+    ['ITERM_SESSION_ID', { ...base, ITERM_SESSION_ID: 'iterm' }],
+    ['WARP_SESSION_ID', { ...base, WARP_SESSION_ID: 'warp' }],
+    ['WARP_TERMINAL_SESSION_UUID', { ...base, WARP_TERMINAL_SESSION_UUID: 'warp' }],
+    ['TERM xterm-kitty', { ...base, TERM: 'xterm-kitty' }],
+    ['TERM xterm-ghostty', { ...base, TERM: 'xterm-ghostty' }],
+    ['TERM wezterm', { ...base, TERM: 'wezterm' }],
+    ['explicit kitty', { ...base, PI_IMAGE_PROTOCOL: 'kitty' }],
+    ['explicit sixel', { ...base, PI_IMAGE_PROTOCOL: 'sixel' }],
+    ['explicit iterm2', { ...base, PI_IMAGE_PROTOCOL: 'iterm2' }],
+    ['explicit none', { ...base, PI_IMAGE_PROTOCOL: 'none' }],
+  ]
+  for (const [name, environment] of rejected) {
+    assert.equal(isKnownLocalWindowsTerminalZellij(environment), false, name)
+  }
+})
+
+test('auto strict WT filters a startup Kitty OK and still selects SIXEL from DA1 + version', (t) => {
+  const h = negotiatedFactory(t, createFakeZellijCli(t), {
+    ZELLIJ: '1',
+    WT_SESSION: 'wt-session',
+    TERM_PROGRAM: 'Windows_Terminal',
+    TERM: 'xterm-256color',
+  })
+  h.graphics.terminal.start(() => {}, () => {})
+  h.terminal.declareSixel(true)
+  h.terminal.sendInput(probeReply(h.terminal))
+  assert.equal(h.graphics.selectedProtocol(), 'sixel', 'the WT false-positive OK never selects Kitty')
+  assert.equal(h.kittySelected(), 0, 'no Kitty product callback')
+  assert.equal(h.terminal.text.includes('a=t,f=100'), false, 'zero Kitty upload')
+  const body = h.graphics.image(
+    { pngBase64: PNG, widthPx: 64, heightPx: 64 },
+    { maxWidthCells: 20, maxHeightCells: 6, fallback: '[fallback]' },
+  )
+  assert.equal(body.render(80).join('').includes('\x1b_G'), false, 'no Kitty delegate is created')
+})
+
+test('auto strict WT with a filtered Kitty OK and no DA1 settles text', async (t) => {
+  const h = negotiatedFactory(t, createFakeZellijCli(t), {
+    ZELLIJ: '1',
+    WT_SESSION: 'wt-session',
+    TERM_PROGRAM: 'Windows_Terminal',
+    TERM: 'xterm-256color',
+  })
+  h.graphics.terminal.start(() => {}, () => {})
+  h.terminal.sendInput(probeReply(h.terminal))
+  // reason: the ONE initial DA1 bound is the product contract.
+  await new Promise(resolve => setTimeout(resolve, ZELLIJ_SIXEL_DA1_TIMEOUT_MS + 60))
+  assert.equal(h.graphics.selectedProtocol(), null, 'no DA1 positive leaves the pane text-only')
+  assert.equal(h.graphics.canPaint(), false)
+  assert.equal(h.terminal.text.includes('a=t,f=100'), false, 'no Kitty upload after the filtered OK')
+})
+
+test('explicit kitty overrides only the WT auto filter and still needs a real OK', (t) => {
+  const h = negotiatedFactory(t, createFakeZellijCli(t), {
+    ZELLIJ: '1',
+    WT_SESSION: 'wt-session',
+    TERM_PROGRAM: 'Windows_Terminal',
+    TERM: 'xterm-256color',
+    PI_IMAGE_PROTOCOL: 'kitty',
+  })
+  h.graphics.terminal.start(() => {}, () => {})
+  h.terminal.declareSixel(true)
+  h.terminal.sendInput(probeReply(h.terminal))
+  assert.equal(h.graphics.selectedProtocol(), 'kitty', 'the explicit user choice wins over the auto filter')
+
+  const denied = negotiatedFactory(t, createFakeZellijCli(t), {
+    ZELLIJ: '1',
+    WT_SESSION: 'wt-session',
+    TERM_PROGRAM: 'Windows_Terminal',
+    PI_IMAGE_PROTOCOL: 'kitty',
+  })
+  denied.graphics.terminal.start(() => {}, () => {})
+  denied.terminal.declareSixel(true)
+  denied.terminal.sendInput(probeReply(denied.terminal, 'ENOTSUPPORTED:disabled'))
+  assert.equal(denied.graphics.selectedProtocol(), null, 'no SIXEL fallback for explicit kitty')
+})
+
+test('explicit sixel sends no Kitty query even when the pane would answer OK', (t) => {
+  const h = negotiatedFactory(t, createFakeZellijCli(t), { PI_IMAGE_PROTOCOL: 'sixel' })
+  h.graphics.terminal.start(() => {}, () => {})
+  assert.equal((h.terminal.text.match(/a=q,/g) ?? []).length, 0, 'zero Kitty probe bytes')
+  h.terminal.declareSixel(true)
+  assert.equal(h.graphics.selectedProtocol(), 'sixel', 'DA1 + version select SIXEL')
+  assert.equal(h.kittySelected(), 0, 'no Kitty callback')
+  const body = h.graphics.image(
+    { pngBase64: PNG, widthPx: 64, heightPx: 64 },
+    { maxWidthCells: 20, maxHeightCells: 6, fallback: '[fallback]' },
+  )
+  assert.equal(body.render(80).join('').includes('\x1b_G'), false, 'no Kitty pixel delegate')
 })
 
 test('every Zellij host and static capability class creates a pending handle and queries only after start', () => {
@@ -722,17 +839,21 @@ test('ZA07: topology and explicit-protocol gates stay exactly as before', (t) =>
   explicitKitty.terminal.sendInput(probeReply(explicitKitty.terminal, 'ENOTSUPPORTED:disabled'))
   assert.equal(explicitKitty.graphics.selectedProtocol(), null, 'an explicit kitty never falls into SIXEL')
 
-  // PI_IMAGE_PROTOCOL=sixel is not a manual grant: the real DA1 is still required.
+  // PI_IMAGE_PROTOCOL=sixel is a real override: it sends NO Kitty query and
+  // still requires the pane's DA1 + local version; no automatic Kitty fallback.
   const explicitSixel = negotiatedFactory(t, cli, { PI_IMAGE_PROTOCOL: 'sixel' })
   explicitSixel.graphics.terminal.start(() => {}, () => {})
-  explicitSixel.terminal.sendInput(probeReply(explicitSixel.terminal, 'ENOTSUPPORTED:disabled'))
-  explicitSixel.terminal.declareSixel(false)
-  assert.equal(explicitSixel.graphics.selectedProtocol(), null, 'no DA1 attr4 means text')
-  const automaticSixel = negotiatedFactory(t, cli, { PI_IMAGE_PROTOCOL: 'sixel' })
-  automaticSixel.graphics.terminal.start(() => {}, () => {})
-  automaticSixel.terminal.declareSixel(true)
-  automaticSixel.terminal.sendInput(probeReply(automaticSixel.terminal, 'ENOTSUPPORTED:disabled'))
-  assert.equal(automaticSixel.graphics.selectedProtocol(), 'sixel', 'the existing auto semantics still apply')
+  assert.equal((explicitSixel.terminal.text.match(/a=q,/g) ?? []).length, 0,
+    'explicit sixel never probes Kitty')
+  explicitSixel.terminal.declareSixel(true)
+  assert.equal(explicitSixel.graphics.selectedProtocol(), 'sixel')
+  assert.equal(explicitSixel.kittySelected(), 0)
+
+  const explicitSixelNoDa1 = negotiatedFactory(t, cli, { PI_IMAGE_PROTOCOL: 'sixel' })
+  explicitSixelNoDa1.graphics.terminal.start(() => {}, () => {})
+  explicitSixelNoDa1.terminal.declareSixel(false)
+  assert.equal(explicitSixelNoDa1.graphics.selectedProtocol(), null, 'no DA1 attr4 means text')
+  assert.equal((explicitSixelNoDa1.terminal.text.match(/a=q,/g) ?? []).length, 0)
 })
 
 test('ZA08: after Kitty is locked, every late DA1 and duplicate probe reply is inert', (t) => {

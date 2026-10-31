@@ -167,6 +167,7 @@ async function startTmuxSixelApp(
     imageTheme?: { fallbackColor: (text: string) => string }
     svgLoader?: SvgRasterLoader
     clientReport?: string
+    environment?: Record<string, string | undefined>
     cellWidthPx?: number
     cellHeightPx?: number
   } = {},
@@ -180,6 +181,10 @@ async function startTmuxSixelApp(
     text: options.clientReport ?? 'main\t/dev/pts/12\twork\txterm-256color\txterm(1.0)\t0\n',
   })
   installFakeServerEnv(t, cli)
+  for (const [key, value] of Object.entries(options.environment ?? {})) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
 
   const home = testLifecycle(t).tempDir('tmux-sixel-app-')
   const previousHome = process.env.DSH_HOME
@@ -604,6 +609,20 @@ test('E08: after a live revocation the old raster is not a ghost hit and the sur
 })
 
 // ── E04: the existing transport precedence is unchanged ────────────────────
+
+test('E12: explicit sixel paints native tmux SIXEL with no tmux Kitty probe', async (t) => {
+  const h = await startTmuxSixelApp(t, { environment: { PI_IMAGE_PROTOCOL: 'sixel' } })
+  assert.equal(h.cli.calls().some(line => line.startsWith('show-options')), false,
+    'the Kitty passthrough probe never ran')
+  const png = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
+  const image = h.store.add({ bytes: png, mediaType: 'image/png', width: 80, height: 40, name: 'forced.png' })
+  h.terminal.writes.length = 0
+  h.terminal.sendInput(image.placeholder)
+  await until(() => paintedRasters(h.terminal).length > 0, 'the forced native tmux SIXEL raster')
+  const wire = h.terminal.writes.join('')
+  assert.equal(wire.includes('\x1b_G'), false, 'no virtual Kitty APC is created')
+  assert.ok(decodeSixel(paintedRasters(h.terminal).at(-1)!).width > 0)
+})
 
 test('E04: known-U1 Kitty, hard-off and non-tmux topologies never fall into tmux SIXEL', async (t) => {
   const { createTmuxKittyGraphics } = await import('../../src/tui/graphics/tmux-image.ts')

@@ -24,6 +24,7 @@ import {
   type Terminal,
 } from '@xmoon76/pi-tui'
 import { KittyGraphicsCore, type KittyGraphicsCoreOptions, type KittyImage, type KittyImageSource } from './kitty-core.ts'
+import { imageProtocolPreference } from './image-protocol-preference.ts'
 import { calculateNativeCellSize, encodeKittyPlacement, type KittyPlacementGeometry } from './kitty-native.ts'
 import { KittyTerminalFacade } from './kitty-terminal.ts'
 import type { DirectSixelGraphics } from './sixel-image.ts'
@@ -212,17 +213,27 @@ const MULTIPLEXER_ENV_KEYS = ['TMUX', 'ZELLIJ', 'STY'] as const
  * Whether the managed native topology is present: a Direct capable Kitty
  * protocol terminal, with no multiplexer in between.
  *
+ * The explicit `PI_IMAGE_PROTOCOL` preference is applied BEFORE every
+ * detection fact: `sixel`, `iterm2` and `none` never admit this factory, so a
+ * static Kitty detection (or the fork's own legacy override) cannot keep a
+ * Kitty owner alive for a user who asked for another protocol. `kitty` and
+ * `auto` keep the existing capability/topology logic; `kitty` therefore still
+ * needs the fork's effective `images === 'kitty'` answer, and `auto` keeps the
+ * terminal's own detection order.
+ *
  * The fork's effective `images === 'kitty'` capability is deliberately the
- * protocol authority: it already covers Kitty, Ghostty, WezTerm, Warp, Tern and
- * a user's explicit `PI_IMAGE_PROTOCOL=kitty` override. No terminal-brand
- * allowlist is applied. `TERM` is not an identity fact — `xterm-ghostty`,
- * `xterm-256color`, a custom value or no `TERM` at all are accepted — it only
- * rejects a known multiplexer prefix (`tmux*`/`screen*`), alongside the
- * `TMUX`/`ZELLIJ`/`STY` keys and Herdr. Those transport exclusions are what
- * keep an inherited capability from being mistaken for a direct pane
- * protocol.
+ * protocol authority for the admitted case: it already covers Kitty, Ghostty,
+ * WezTerm, Warp, Tern and a user's explicit `PI_IMAGE_PROTOCOL=kitty`
+ * override. No terminal-brand allowlist is applied. `TERM` is not an identity
+ * fact — `xterm-ghostty`, `xterm-256color`, a custom value or no `TERM` at all
+ * are accepted — it only rejects a known multiplexer prefix
+ * (`tmux*`/`screen*`), alongside the `TMUX`/`ZELLIJ`/`STY` keys and Herdr.
+ * Those transport exclusions are what keep an inherited capability from being
+ * mistaken for a direct pane protocol.
  */
 export function admitsNativeKitty(environment: NodeJS.ProcessEnv = process.env): boolean {
+  const preference = imageProtocolPreference(environment)
+  if (preference !== 'auto' && preference !== 'kitty') return false
   if (getCapabilities().images !== 'kitty') return false
   const termProgram = (environment.TERM_PROGRAM ?? '').toLowerCase()
   const term = (environment.TERM ?? '').toLowerCase()

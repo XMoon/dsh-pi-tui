@@ -218,6 +218,8 @@ interface StartOptions {
   da1?: boolean
   /** Leave the live pane answers to the test (a Viewer opened before settle). */
   deferSettle?: boolean
+  /** Extra terminal environment facts applied after the fixture defaults. */
+  environment?: Record<string, string | undefined>
   cellWidthPx?: number
   cellHeightPx?: number
   imageLoader?: ImageLoader
@@ -253,6 +255,10 @@ async function startZellijSixelApp(t: test.TestContext, options: StartOptions = 
     ZELLIJ_SESSION_NAME: 'zellij-sixel-itest',
     PI_TUI_TMUX_KITTY_IMAGES: '0',
   })
+  for (const [key, value] of Object.entries(options.environment ?? {})) {
+    if (value === undefined) delete environment[key]
+    else environment[key] = value
+  }
   const restore = applyEnvironment(environment)
   t.after(restore)
   const previousHome = process.env.DSH_HOME
@@ -400,6 +406,67 @@ function assistantSvgVisual(svg: string): TranscriptFolder {
   }, [publication])
   return folder
 }
+
+// ── Z01b/Z06b/Z08b: explicit preference and the strict WT auto filter ──────
+
+test('Z01b: auto strict WT ignores the startup Kitty OK and paints SIXEL through the real TuiApp', async (t) => {
+  const h = await startZellijSixelApp(t, {
+    deferSettle: true,
+    environment: {
+      WT_SESSION: 'wt-session',
+      TERM_PROGRAM: 'Windows_Terminal',
+      TERM: 'xterm-256color',
+    },
+  })
+  h.terminal.declareDa1(true)
+  h.terminal.sendInput(probeReply(h.terminal))
+  await until(() => h.graphics.selectedProtocol() === 'sixel', 'the filtered WT negotiation')
+  await until(() => h.graphics.canPaint(), 'the SIXEL owner facts')
+  assert.equal(h.terminal.writes.join('').includes('\x1b_Ga=t'), false, 'zero Kitty upload after the false OK')
+
+  const png = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
+  const image = h.store.add({ bytes: png, mediaType: 'image/png', width: 80, height: 40, name: 'wt.png' })
+  h.terminal.writes.length = 0
+  h.terminal.sendInput(image.placeholder)
+  await until(() => paintedRasters(h.terminal).length > 0, 'the real product SIXEL raster')
+  const wire = h.terminal.writes.join('')
+  assert.equal(wire.includes('\x1b_Ga=t'), false, 'no Kitty delegate ever painted')
+  assert.equal(wire.includes('a=p,'), false, 'no Kitty placement ever painted')
+  assert.ok(decodeSixel(paintedRasters(h.terminal).at(-1)!).width > 0)
+})
+
+test('Z06b: explicit sixel sends no Kitty query and paints through the same real product chain', async (t) => {
+  const h = await startZellijSixelApp(t, {
+    deferSettle: true,
+    environment: { PI_IMAGE_PROTOCOL: 'sixel' },
+  })
+  assert.equal(h.terminal.writes.join('').includes('a=q,'), false, 'zero Kitty probe bytes')
+  h.terminal.declareDa1(true)
+  await until(() => h.graphics.selectedProtocol() === 'sixel', 'the explicit SIXEL selection')
+  await until(() => h.graphics.canPaint(), 'the SIXEL owner facts')
+  const png = await pngFromRgba(fill(80, 40, () => [0, 220, 0, 255]), 80, 40)
+  const image = h.store.add({ bytes: png, mediaType: 'image/png', width: 80, height: 40, name: 'forced.png' })
+  h.terminal.writes.length = 0
+  h.terminal.sendInput(image.placeholder)
+  await until(() => paintedRasters(h.terminal).length > 0, 'the explicit SIXEL raster')
+  assert.equal(h.terminal.writes.join('').includes('\x1b_G'), false, 'no Kitty bytes at all')
+})
+
+test('Z08b: explicit kitty overrides the strict WT auto filter and keeps only Kitty', async (t) => {
+  const h = await startZellijSixelApp(t, {
+    deferSettle: true,
+    environment: {
+      PI_IMAGE_PROTOCOL: 'kitty',
+      WT_SESSION: 'wt-session',
+      TERM_PROGRAM: 'Windows_Terminal',
+      TERM: 'xterm-256color',
+    },
+  })
+  h.terminal.declareDa1(true)
+  h.terminal.sendInput(probeReply(h.terminal))
+  await until(() => h.graphics.selectedProtocol() === 'kitty', 'the explicit Kitty selection')
+  assert.equal(h.terminal.writes.join('').includes('\x1bP0;1;q'), false, 'zero SIXEL DCS')
+})
 
 // ── ZE01: Kitty timeout + DA1 positive paints one real SIXEL DCS ──────────
 

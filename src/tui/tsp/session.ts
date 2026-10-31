@@ -57,6 +57,7 @@ import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { TSP_COMPOSER_SEND_LABEL, TSP_COMPOSER_STOP_LABEL, TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
+import { imageProtocolPreference } from '../graphics/image-protocol-preference.ts'
 import { clampMiddle } from './picker-text.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
@@ -400,6 +401,10 @@ function errorText(value: unknown): string {
 
 /** Mount the renderer over an already-connected SDK session. */
 export function mountTspRenderer(session: Session, options: TspRendererOptions): TspRenderer {
+  // The startup image preference is a renderer-lifetime fact: parse it before
+  // the surface exists so an invalid value is a startup configuration error,
+  // never a silent fallback, and never drifts mid-session.
+  const imagePreference = imageProtocolPreference(process.env)
   // Ownership rule (R2-3): the session belongs to the CALLER until this mount
   // succeeds. A throwing `open` therefore re-raises WITHOUT closing here —
   // `connectTspRenderer` (the owner that connected it) performs the recorded
@@ -1268,10 +1273,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /**
    * PR-C: whether the pane can carry a native image at all. The `image` kind
    * and the `blobs` feature are NEGOTIATED by the client — the mapper never
-   * infers them from a TypeScript prop.
+   * infers them from a TypeScript prop. The SAME `PI_IMAGE_PROTOCOL` policy
+   * that governs PiTui pixels governs this native TSP path: only `auto` may
+   * send an image node/blob. Any explicit value is a deliberate disable of
+   * ANSI/native image preview, not a request to emulate another transport.
    */
   const nativeImagesSupported = (): boolean =>
-    session.caps.kinds.includes('image') && session.caps.features.includes('blobs')
+    imagePreference === 'auto'
+    && session.caps.kinds.includes('image')
+    && session.caps.features.includes('blobs')
 
   /**
    * PR-C: the image attachments the CURRENT window projects, in window
@@ -1338,7 +1348,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const states = new Map<string, ToolImageState>()
     const refs = projectedImageRefs()
     if (!nativeImagesSupported()) {
-      for (const ref of refs) states.set(ref.attachmentId, { state: 'unsupported' })
+      // Distinguish a user-disabled preview from a pane that never negotiated
+      // the capability: the former is a policy outcome, not a Tern limitation.
+      const state: ToolImageState = imagePreference === 'auto' ? { state: 'unsupported' } : { state: 'disabled' }
+      for (const ref of refs) states.set(ref.attachmentId, state)
       return states
     }
     const scope = activeImageScope
@@ -1852,9 +1865,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * publish.
    */
   const dockPreviewLimit = (): number => {
+    // The same policy gate as every native image path: a user-disabled image
+    // preview has no chip, no read and no blob even when the pane advertises
+    // `styles`+`image`+`blobs`.
+    if (!nativeImagesSupported()) return 0
     const canPreview = previewStylesSupported()
-      && session.caps.features.includes('blobs')
-      && session.caps.kinds.includes('image')
     if (!canPreview) return 0
     const cols = session.caps.cols
     return cols < DOCK_DRAFT_SINGLE_PREVIEW_COLS ? 0 : cols < DOCK_DRAFT_TWO_PREVIEW_COLS ? 1 : 2
