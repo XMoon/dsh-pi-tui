@@ -58,7 +58,7 @@ run = "node scripts/mise-dev-profile.mjs"
 [tasks."dev:dsh"]
 description = "Run the isolated development profile for this checkout"
 env = { DSH_HOME = "{{ config_root }}/temp/mise-dsh-home" }
-run = "dsh --profile pi-tui-dev"
+run = "node scripts/mise-dev-dsh.mjs"
 
 [tasks."source:doctor"]
 description = "Check the pinned Source Mode environment"

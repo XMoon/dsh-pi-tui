@@ -128,6 +128,16 @@ test('a fully successful npm release-tag run qualifies with split-process succes
   assert.equal(decision.ok, true)
 })
 
+test('mise-toolchain is required in both npm and source modes', () => {
+  for (const mode of ['npm', 'source']) {
+    const phases = phasesAt('success', { mode }).map(phase =>
+      phase.name === 'mise-toolchain' ? { ...phase, result: 'skipped' } : phase)
+    const decision = verdict({ role: 'qualify', mode, ref: PR_REF, phases })
+    assert.equal(decision.ok, false, `${mode} mode must not qualify without the mise contract`)
+    assert.match(decision.failures.join('\n'), /'mise-toolchain' is 'skipped'/u)
+  }
+})
+
 test('a fully successful source run qualifies with the source mode-statuses', () => {
   const decision = verdict({ role: 'qualify', mode: 'source', ref: RELEASE_REF, phases: phasesAt('success', { mode: 'source', ref: RELEASE_REF }) })
   assert.deepEqual(decision.failures, [])
