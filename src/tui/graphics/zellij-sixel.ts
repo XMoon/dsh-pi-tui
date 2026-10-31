@@ -187,6 +187,8 @@ export class ZellijGraphicsAdmission {
   private readonly environment: NodeJS.ProcessEnv
   private readonly callbacks: ZellijGraphicsCallbacks
   private readonly preference: ImageProtocolPreference
+  /** Frozen at construction: never re-read a mutable environment mid-negotiation. */
+  private readonly windowsTerminalAutoFilter: boolean
   private state: ZellijGraphicsState = 'pending'
   private kittyOutcome: 'allowed' | 'denied' | undefined
   private da1Supported: boolean | undefined
@@ -204,6 +206,7 @@ export class ZellijGraphicsAdmission {
     this.environment = environment
     this.callbacks = callbacks
     this.preference = imageProtocolPreference(environment)
+    this.windowsTerminalAutoFilter = isKnownLocalWindowsTerminalZellij(environment)
     this.kittyAdmission = new ZellijKittyAdmission(undefined, undefined, (outcome) => {
       if (this.disposed) return
       this.kittyOutcome = outcome
@@ -362,7 +365,7 @@ export class ZellijGraphicsAdmission {
     // the user's assertion even in the same environment, and `sixel` has
     // already denied Kitty without probing.
     const effectiveKittyOutcome = this.preference === 'auto'
-      && isKnownLocalWindowsTerminalZellij(this.environment)
+      && this.windowsTerminalAutoFilter
       && this.kittyOutcome === 'allowed'
         ? 'denied'
         : this.kittyOutcome
