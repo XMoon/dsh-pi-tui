@@ -1,0 +1,14 @@
+{
+  "name": "mise-npm-install",
+  "private": true,
+  "aube": {
+    "allowBuilds": {
+      "@deepseek-ai/dsh-subprocess-local": true,
+      "koffi": true,
+      "node-pty": true
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.4"
+  }
+}

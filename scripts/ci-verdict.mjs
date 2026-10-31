@@ -46,6 +46,7 @@ import { fileURLToPath } from 'node:url'
  */
 export const REQUIRED_PHASES = [
   'dsh-context',
+  'mise-toolchain',
   'build',
   'typecheck',
   'product-shard',

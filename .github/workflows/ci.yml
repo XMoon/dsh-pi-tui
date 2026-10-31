@@ -91,6 +91,49 @@ jobs:
         run: node scripts/dsh-ci-context.mjs
 
   # ---------------------------------------------------------------------------
+  # The mise toolchain contract. This is the ONLY job that installs the
+  # project DSH CLI: the regular test jobs stay on pnpm/setup and do not pay
+  # for a second tool store. It proves the template pins match package.json,
+  # the committed lock/sidecar is complete, and the task entry points work.
+  # ---------------------------------------------------------------------------
+  mise-toolchain:
+    name: mise toolchain contract
+    needs: dsh-context
+    if: ${{ needs.dsh-context.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MISE_ENABLE_TOOLS: "node,pnpm,npm:@deepseek-ai/dsh"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup mise toolchain from mise.lock
+        uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          version: '2026.10.23'
+          install: true
+
+      - name: Verify tool versions and lock sidecar
+        run: |
+          set -euo pipefail
+          EXPECTED_DSH="$(node -p "require('./package.json').devDependencies['@deepseek-ai/dsh-agent']")"
+          EXPECTED_PNPM="$(node -p "require('./package.json').packageManager.split('@').pop()")"
+          ACTUAL_DSH="$(mise exec -- dsh --version)"
+          ACTUAL_PNPM="$(mise exec -- pnpm --version)"
+          ACTUAL_NODE_MAJOR="$(mise exec -- node -p "process.versions.node.split('.')[0]")"
+          test "$ACTUAL_DSH" = "$EXPECTED_DSH"
+          test "$ACTUAL_PNPM" = "$EXPECTED_PNPM"
+          test "$ACTUAL_NODE_MAJOR" = "24"
+          mise lock --sidecars
+
+      - name: Materialize workspace dependencies through the task
+        run: mise run setup
+
+  # ---------------------------------------------------------------------------
   # Build the pinned source family once. The artifact contains only official
   # release tarballs and the generated distribution manifest.
   # ---------------------------------------------------------------------------
@@ -1083,6 +1126,7 @@ jobs:
     name: Publish the qualified artifact
     needs:
       - dsh-context
+      - mise-toolchain
       - prepare-dsh-source
       - build
       - typecheck
@@ -1137,6 +1181,7 @@ jobs:
             --mode "$DSH_MODE" \
             --ref "$GITHUB_REF" \
             --phase "dsh-context=${{ needs.dsh-context.result }}" \
+            --phase "mise-toolchain=${{ needs['mise-toolchain'].result }}" \
             --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
             --phase "client-family-compat=${{ needs['client-family-compat'].result }}" \
             --phase "build=${{ needs.build.result }}" \
@@ -1202,6 +1247,7 @@ jobs:
     name: Pipeline summary
     needs:
       - dsh-context
+      - mise-toolchain
       - prepare-dsh-source
       - build
       - typecheck
@@ -1256,6 +1302,7 @@ jobs:
             --started "${STARTED:-}" \
             $RELEASE_ARG \
             --phase "dsh-context=${{ needs.dsh-context.result }}" \
+            --phase "mise-toolchain=${{ needs['mise-toolchain'].result }}" \
             --phase "prepare-dsh-source=${{ needs['prepare-dsh-source'].result }}" \
             --phase "client-family-compat=${{ needs['client-family-compat'].result }}" \
             --phase "build=${{ needs.build.result }}" \

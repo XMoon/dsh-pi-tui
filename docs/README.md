@@ -92,7 +92,7 @@ MANDATORY or BLOCKING.
 | Path | Audience | What it owns |
 |---|---|---|
 | `guides/code-review.md` | contributors/reviewers | Repository review checkpoints, evidence tiers, documentation-policy gate, PR acceptance vs stage closure |
-| `guides/development.md` | contributors | Worktree policy, npm/source DSH modes, doctor/bootstrap, source-build diagnosis, benchmark/replay method |
+| `guides/development.md` | contributors | Worktree policy, mise toolchain and isolated profile, npm/source DSH modes, doctor/bootstrap, source-build diagnosis, benchmark/replay method |
 | `guides/releasing.md` | ops | Versioning, bilingual changelog/README metadata, verification, tag and publication procedure |
 | `guides/tmux-testing.md` | contributors | When/how to verify in tmux, capture flow, Focus-replay and measurement procedures, traps |
 | `guides/tern-pane-testing.md` | TSP contributors | Real Tern-pane harness vs headless evidence, run conditions, the appearance/theme switch, assertion-vs-measurement and limits |

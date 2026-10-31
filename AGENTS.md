@@ -248,13 +248,16 @@ extension-facing contract.
 Common checks:
 
 ```sh
-pnpm build
-pnpm typecheck
-pnpm test
+mise run build
+mise run typecheck
+mise run test
 ```
 
-Use the smallest relevant validation for the current change. Prefer targeted
-tests first; do not run expensive compatibility suites mechanically.
+`mise` is the project tool entry for Node, pnpm and the pinned DSH CLI. The
+mise tasks are thin proxies; keep using the existing pnpm/script lanes for
+everything else (`mise exec -- pnpm <script>`). Use the smallest relevant
+validation for the current change. Prefer targeted tests first; do not run
+expensive compatibility suites mechanically.
 
 Adding or changing a test? Read `docs/guides/testing.md` first: it owns the
 test-tree ownership map, the new-test rules, the lane commands and the
@@ -312,7 +315,9 @@ of them only when the resolved DSH mode is `source`), `test:tmux`,
 `Build and pack` runs the root `build`, `typecheck:bundle` and `test:product`
 in separate jobs, then a lifecycle-free `pack:artifact` candidate qualified by
 the eight packed-artifact smokes through `smoke:release`; the qualification job
-also runs `smoke:startup-strictness`. The remaining jobs
+also runs `smoke:startup-strictness`. The `mise-toolchain` job installs the
+locked project toolchain, proves the DSH CLI version and the committed lock
+sidecar, and runs `mise run setup`. The remaining jobs
 run `smoke:boundary`, `smoke:official-presets`, `compat:dsh:client-family`, the
 tarball smokes and `pnpm audit`. `split-process` runs only for an npm release
 tag: PR, main and next runs legitimately report it as `skipped`, and
@@ -364,22 +369,41 @@ Validation mechanics for this toolchain:
 When entering a development worktree:
 
 ```sh
-pnpm dev:doctor
+mise install --locked
+mise run setup
 ```
 
-Use `pnpm dev:bootstrap` only when the environment is not ready. On a
-source-mode worktree (a worktree whose tracked `test/compat/dsh-mode.json`
-selects `source` — `next` is not always source-mode), a plain `pnpm install`
-before bootstrap leaves the DSH workspace state incorrect (`workspace DSH
-incorrect` / `local state missing`); run `pnpm dev:doctor` first and let
-`pnpm dev:bootstrap` perform the dependency install itself, then re-run
-`pnpm dev:doctor` until it reports `READY`. A plain `pnpm install` after
-bootstrap re-resolves `@deepseek-ai/*` to registry versions and breaks the
-source-mode workspace again; use `pnpm dev:shell` (or
+`mise install` provides the project Node, pnpm and the DSH CLI whose exact
+version comes from `package.json`; `mise run setup` performs the npm-mode frozen
+install and refuses `source` mode. If your global mise config declares other
+tools, scope the install with
+`MISE_ENABLE_TOOLS=node,pnpm,npm:@deepseek-ai/dsh mise install --locked` (the
+same allowlist CI uses).
+
+On a source-mode worktree (a worktree whose tracked `test/compat/dsh-mode.json`
+selects `source` — `next` is not always source-mode), `mise run setup` must not
+be used. A plain `pnpm install` before bootstrap leaves the DSH workspace state
+incorrect (`workspace DSH incorrect` / `local state missing`); run
+`pnpm dev:doctor` first and let `pnpm dev:bootstrap` perform the dependency
+install itself, then re-run `pnpm dev:doctor` until it reports `READY`. A plain
+`pnpm install` after bootstrap re-resolves `@deepseek-ai/*` to registry versions
+and breaks the source-mode workspace again; use `pnpm dev:shell` (or
 `source ./.dsh-dev-env`) for commands that need the source environment, and
 re-run `pnpm dev:bootstrap` after any real install. Keep each worktree's
 `node_modules` and `dist` independent; never symlink them, and build in that
 worktree before using a profile.
+
+For an interactive npm-mode TUI session in this worktree:
+
+```sh
+mise run build
+mise run dev:profile
+mise run dev:dsh
+```
+
+The profile lives under the worktree's `temp/mise-dsh-home`. Never point
+`DSH_HOME` at the real `~/.dsh`, and never treat a direct `dsh` invocation as
+the isolated development profile.
 
 * `main` is the released npm-backed compatibility line; `next` is the
   forward-integration line and may use its tracked Source Mode.

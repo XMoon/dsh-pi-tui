@@ -33,9 +33,10 @@ test('Rule 2: dev:bootstrap reuses the existing per-SHA source pack', () => {
 })
 
 test('Rule 3: bootstrap repairs only non-ready environments', () => {
-  assert.match(agents, /Use `pnpm dev:bootstrap` only when the environment is not ready\./u)
-  assert.match(localDev, /reports `READY`, `STALE`, `MISSING` or `BROKEN`/u)
-  assert.match(localDev, /For every non-ready result[\s\S]*?pnpm dev:bootstrap/u)
+  assert.match(agents, /`mise run setup` must not\s+be used/u)
+  assert.match(agents, /run\s+`pnpm dev:doctor` first and let\s+`pnpm dev:bootstrap`/u)
+  assert.match(localDev, /read-only diagnostic \(`READY`, `STALE`, `MISSING`\s+or `BROKEN`\)/u)
+  assert.match(localDev, /For\s+every non-ready result[\s\S]*?pnpm dev:bootstrap/u)
 })
 
 test('Rule 4: the full source verifier is not routine validation', () => {
