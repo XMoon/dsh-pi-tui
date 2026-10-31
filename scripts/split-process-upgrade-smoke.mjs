@@ -7,6 +7,7 @@
  *
  *   old tgz installed in the one canonical profile (Host A + Client A)
  *   new tgz installed side-by-side as a real package root (Client B candidate)
+ *     only after Host A has admitted a Turn and Client A has exited
  *   same DSH_HOME / profile / UID / DSH rc.4 for both builds
  *
  * It then proves readLocalRecord -> /proc starttime -> assertBuildCompatible ->
@@ -45,10 +46,11 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { createServer } from 'node:net'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   dshInvocation,
@@ -79,6 +81,32 @@ function sleep(ms) {
 
 function sha256(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+/**
+ * sha256 over every regular file in one installed package tree. This proves
+ * byte identity of the old installation across the side-by-side install, not
+ * only that the profile still resolves the same directory path.
+ */
+function installedPayloadHash(packageRoot) {
+  const hash = createHash('sha256')
+  const files = readdirSync(packageRoot, { recursive: true })
+    .filter(name => {
+      try {
+        return statSync(join(packageRoot, name)).isFile()
+      } catch {
+        return false
+      }
+    })
+    .map(name => relative(packageRoot, join(packageRoot, name)).split(sep).join('/'))
+    .sort()
+  for (const name of files) {
+    hash.update(name)
+    hash.update('\0')
+    hash.update(sha256(join(packageRoot, ...name.split('/'))))
+    hash.update('\n')
+  }
+  return hash.digest('hex')
 }
 
 function readTarballManifest(path) {
@@ -461,21 +489,10 @@ async function main() {
     assert(existsSync(join(oldProfilePackage, 'dist', 'local-host.mjs')), 'the old profile install has no local Host entry')
     assert(existsSync(join(oldProfilePackage, 'dist', 'local-client.mjs')), 'the old profile install has no local Client entry')
     const oldBuildId = productionBuildId(oldProfilePackage, targetDshVersion)
+    const oldPayloadHash = installedPayloadHash(oldProfilePackage)
     evidence.old.buildId = oldBuildId
+    evidence.old.payloadSha256 = oldPayloadHash
     evidence.old.profilePackage = basename(oldProfilePackage)
-
-    // ── Install the NEW build side-by-side; the old profile stays untouched ─
-    const sideBuildPackage = installSideBuild(sideBuildDir, newArtifact.path, env)
-    const newBuildId = productionBuildId(sideBuildPackage, targetDshVersion)
-    assert(newBuildId !== oldBuildId, 'the two packaged builds produced the same production buildId')
-    evidence.new.buildId = newBuildId
-    evidence.new.sideBuildPackage = basename(sideBuildPackage)
-    // Prove the profile still resolves the OLD installation at the moment the
-    // new Client is introduced: the old Host's lazy imports stay on disk.
-    const profileAnchor = join(profileDir, 'package.json')
-    const resolvedProfileIndex = realpathSync(createRequireFrom(profileAnchor).resolve(EXPECTED_PACKAGE_NAME))
-    const resolvedProfilePackage = dirname(dirname(resolvedProfileIndex))
-    assert(resolvedProfilePackage === oldProfilePackage, 'the profile no longer resolves the old installation before the mismatch')
 
     const anchor = realpathSync(join(harnessDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
     const c1Work = writeC1WorkFixture(profileDir, workRoot)
@@ -539,6 +556,33 @@ async function main() {
     assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released before the upgrade attempt')
     evidence.work.clientAPid = clientAPid
     evidence.work.workContinuedAfterClientExit = true
+
+    // ── Install the NEW build side-by-side while Host A works ───────────────
+    // The old Host and its admitted Turn already exist at this point, so this
+    // is the real "introduce another installation while the old Host runs"
+    // ordering. The old profile must keep both its resolution target and its
+    // byte-identical payload; the production buildId is re-derived from disk.
+    assert(alive(hostAReady.pid), 'Host A died before the side-by-side new install')
+    assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released before the side-by-side new install')
+    const sideBuildPackage = installSideBuild(sideBuildDir, newArtifact.path, env)
+    const newBuildId = productionBuildId(sideBuildPackage, targetDshVersion)
+    assert(newBuildId !== oldBuildId, 'the two packaged builds produced the same production buildId')
+    assert(productionBuildId(oldProfilePackage, targetDshVersion) === oldBuildId,
+      'the side-by-side install changed the old profile production buildId')
+    assert(installedPayloadHash(oldProfilePackage) === oldPayloadHash,
+      'the side-by-side install changed bytes in the old profile payload')
+    const profileAnchor = join(profileDir, 'package.json')
+    const resolvedProfileIndex = realpathSync(createRequireFrom(profileAnchor).resolve(EXPECTED_PACKAGE_NAME))
+    const resolvedProfilePackage = dirname(dirname(resolvedProfileIndex))
+    assert(resolvedProfilePackage === oldProfilePackage, 'the profile no longer resolves the old installation after the side-by-side install')
+    assert(alive(hostAReady.pid), 'Host A died on the side-by-side new install')
+    assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore, 'Host A after the side-by-side new install')
+    assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released by the side-by-side new install')
+    evidence.new.buildId = newBuildId
+    evidence.new.sideBuildPackage = basename(sideBuildPackage)
+    evidence.new.installedAfterAdmittedWork = true
+    evidence.old.profilePayloadUnchanged = true
+    evidence.old.profileBuildIdUnchanged = true
 
     // ── Capture old credentials while Host A still owns them ───────────────
     const scopeDir = scopeDirOf(dshHome, hostABefore.scopeId)
