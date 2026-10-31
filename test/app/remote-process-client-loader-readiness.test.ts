@@ -27,6 +27,7 @@ import { createRemoteHostRuntime, type InProcessHostCarrier } from '../../src/ap
 import { mountRemoteClientDomainPrerequisites } from '../../src/app/remote/client-runtime.ts'
 import { createSplitClientInteractionDelivery } from '../../src/app/remote-process/client-interaction-delivery.ts'
 import {
+  assertInteractionStartupReady,
   createInteractionStartupGate,
   INTERACTION_STARTUP_GATE,
 } from '../../src/app/remote-process/local-client-entry.ts'
@@ -147,36 +148,21 @@ test('a cancelled startup disposes the Gateway before the Loader barrier settles
   await hostRuntime.dispose()
 })
 
-test('a forwarded Host question without the Session resolver fails closed instead of delegating', async t => {
+test('a missing Session resolver fails the production gate before the Gateway starts', async t => {
   const life = testLifecycle(t)
-  const host = await createRemoteApplicationHostFixture(life, 'preset')
-  const hostRuntime = await createRemoteHostRuntime(host.ctx)
   const ctx = new Context()
   life.defer(() => ctx.fiber.dispose())
   let openStreams = 0
   const gate = await installGate(ctx)
-  await installClientTransport(ctx, hostRuntime.carrier, endpoint => { if (endpoint === '$events') openStreams += 1 })
-  gate.release()
-  const deadline = Date.now() + 15_000
-  const connection = ctx.get('connection') as unknown as {
-    generation: { getSnapshot(): unknown }
+  let thrown: unknown
+  try {
+    assertInteractionStartupReady(gate, undefined)
+  } catch (error) {
+    thrown = error
   }
-  while (connection.generation.getSnapshot() === undefined) {
-    if (Date.now() > deadline) throw new Error('the Gateway never reached its first generation')
-    await new Promise(resolve => setTimeout(resolve, 10))
-  }
-  const userQuestions = host.ctx.get('userQuestions') as unknown as {
-    ask(request: unknown): Promise<unknown>
-  }
-  const agent = await host.harness.create(SessionId('m4-c1b-loader-no-resolver'))
-  await assert.rejects(
-    userQuestions.ask({ agent, questions: [{ id: 'q1', question: 'Continue?' }] }),
-    (error: unknown) => {
-      assert.equal((error as { code?: string }).code, 'NO_PROVIDER')
-      return true
-    },
-    'a missing official Session resolver must fail closed with NO_PROVIDER',
-  )
-  assert.equal(openStreams, 1, 'the missing-resolver negative must still start the real Gateway once')
-  await hostRuntime.dispose()
+  assert.match(String(thrown), /official Session Agent resolver did not install/u,
+    'the production gate did not reject a missing Session resolver')
+  assert.equal(openStreams, 0, 'a rejected preflight must not install or start the Gateway')
+  gate.cancel(new Error('test finished before gate release'))
+  await (ctx.get('loader') as Loader).await()
 })
