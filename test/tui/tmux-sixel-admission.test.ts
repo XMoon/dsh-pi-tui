@@ -337,6 +337,20 @@ test('N10d: an invalid PI_IMAGE_PROTOCOL is a startup error before any tmux quer
   }
 })
 
+test('F4: live SIXEL re-probes use the startup preference, not a later env mutation', (t) => {
+  const cli = createSixelFakeTmuxCli(t)
+  try {
+    const identity = admitted(cli)
+    const admission = new TmuxSixelAdmission(identity, cli.env, 'sixel')
+    assert.equal(admission.isAllowed(true), true)
+    cli.env.PI_IMAGE_PROTOCOL = 'kitty'
+    assert.equal(admission.isAllowed(true), true,
+      'the startup sixel preference must not be revoked by a later env mutation')
+  } finally {
+    cli.dispose()
+  }
+})
+
 test('N11: known-U1 tmux Kitty keeps precedence; a real Sxl outranks a pending U1 probe', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {

@@ -141,6 +141,21 @@ test('every environment gate rejects BEFORE any tmux command is spawned', (t) =>
   }
 })
 
+test('F4: live Kitty re-probes use the startup preference, not a later env mutation', (t) => {
+  const cli = createFakeTmuxCli(t)
+  try {
+    const identity = probeTmuxKittyIdentity(cli.env)
+    assert.ok(identity)
+    const admission = new TmuxKittyAdmission(identity, cli.env)
+    assert.equal(admission.isAllowed(true), true)
+    cli.env.PI_IMAGE_PROTOCOL = 'sixel'
+    assert.equal(admission.isAllowed(true), true,
+      'a startup auto preference must not be revoked by a later env mutation')
+  } finally {
+    cli.dispose()
+  }
+})
+
 test('an unset opt-in attempts the strict admission automatically', (t) => {
   const cli = createFakeTmuxCli(t)
   try {

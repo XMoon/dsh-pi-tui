@@ -20,7 +20,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { imageProtocolPreference } from './image-protocol-preference.ts'
+import { imageProtocolPreference, type ImageProtocolPreference } from './image-protocol-preference.ts'
 
 /**
  * The environment variable that gates the tmux virtual backend. Leaving it unset
@@ -104,14 +104,13 @@ export function parseTmuxDisplayClients(report: string): TmuxDisplayClient[] | u
  * They are necessary but never sufficient: the real server query below is what
  * decides the live binding.
  */
-function environmentAdmits(env: NodeJS.ProcessEnv): boolean {
+function environmentAdmits(env: NodeJS.ProcessEnv, preference: ImageProtocolPreference): boolean {
   const optIn = env[TMUX_KITTY_IMAGES_ENV]
   if (optIn !== undefined && optIn !== '1') return false
   if (!nonEmpty(env.TMUX) || !nonEmpty(env.TMUX_PANE)) return false
   if (env.ZELLIJ !== undefined || env.STY !== undefined) return false
   if (!(env.TERM ?? '').startsWith('tmux')) return false
   if (env.TERM_PROGRAM === 'herdr') return false
-  const preference = imageProtocolPreference(env)
   if (preference === 'none' || preference === 'iterm2') return false
   return true
 }
@@ -273,12 +272,17 @@ export function probeTmuxDisplayIdentity(env: NodeJS.ProcessEnv = process.env): 
  * tmux/screen instance IS rejected: nested multiplexers remain outside this
  * transport contract.
  */
-export function probeTmuxKittyIdentity(env: NodeJS.ProcessEnv = process.env): TmuxKittyIdentity | undefined {
+export function probeTmuxKittyIdentity(
+  env: NodeJS.ProcessEnv = process.env,
+  preference: ImageProtocolPreference = imageProtocolPreference(env),
+): TmuxKittyIdentity | undefined {
   // The explicit SIXEL preference must deny ONLY the Kitty transport. It is a
   // separate check in the Kitty-specific entry: the shared display-identity
-  // probe and the native SIXEL admission must keep working unchanged.
-  if (imageProtocolPreference(env) === 'sixel') return undefined
-  if (!environmentAdmits(env)) return undefined
+  // probe and the native SIXEL admission must keep working unchanged. The
+  // preference is the caller's startup snapshot; live re-probes must pass the
+  // same value rather than re-reading a mutable environment.
+  if (preference === 'sixel') return undefined
+  if (!environmentAdmits(env, preference)) return undefined
   const paneId = env.TMUX_PANE
   if (paneId === undefined) return undefined
 
@@ -310,6 +314,7 @@ export class TmuxKittyAdmission {
   private readonly env: NodeJS.ProcessEnv
   private readonly placeholderAllowed: (() => boolean) | undefined
   private readonly placeholderDenied: (() => boolean) | undefined
+  private readonly preference: ImageProtocolPreference
   private revoked = false
   private hasProbed = false
   private lastProbeAt = 0
@@ -320,11 +325,13 @@ export class TmuxKittyAdmission {
     env: NodeJS.ProcessEnv = process.env,
     placeholderAllowed?: () => boolean,
     placeholderDenied?: () => boolean,
+    preference: ImageProtocolPreference = imageProtocolPreference(env),
   ) {
     this.initial = initial
     this.env = env
     this.placeholderAllowed = placeholderAllowed
     this.placeholderDenied = placeholderDenied
+    this.preference = preference
   }
 
   isAllowed(force = false): boolean {
@@ -352,7 +359,7 @@ export class TmuxKittyAdmission {
     if (!force && this.hasProbed && now - this.lastProbeAt < PROBE_CACHE_TTL_MS) {
       return this.lastProbeAllowed
     }
-    const probed = probeTmuxKittyIdentity(this.env)
+    const probed = probeTmuxKittyIdentity(this.env, this.preference)
     const allowed = probed !== undefined && sameTmuxDisplayIdentity(probed, this.initial)
     this.hasProbed = true
     this.lastProbeAt = now
