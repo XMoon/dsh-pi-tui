@@ -39,7 +39,9 @@ mise run setup
 
 `mise run setup` reads the tracked mode policy and performs a frozen pnpm
 install only for `mode: "npm"`; a `source` worktree is refused before pnpm
-starts. Tool installation belongs to mise, workspace materialization to the
+starts. It is deliberately stricter than the general `DSH_MODE` override rule:
+a one-off `DSH_MODE=npm` must not run a plain install in a tracked source
+worktree. Tool installation belongs to mise, workspace materialization to the
 task.
 
 `pnpm dev:doctor` remains the read-only diagnostic (`READY`, `STALE`, `MISSING`

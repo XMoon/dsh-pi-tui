@@ -116,8 +116,9 @@ jobs:
         with:
           version: '2026.10.23'
           install: true
+          install_args: '--locked'
 
-      - name: Verify tool versions and lock sidecar
+      - name: Verify tool versions, committed lock and sidecar
         run: |
           set -euo pipefail
           EXPECTED_DSH="$(node -p "require('./package.json').devDependencies['@deepseek-ai/dsh-agent']")"
@@ -128,7 +129,17 @@ jobs:
           test "$ACTUAL_DSH" = "$EXPECTED_DSH"
           test "$ACTUAL_PNPM" = "$EXPECTED_PNPM"
           test "$ACTUAL_NODE_MAJOR" = "24"
-          mise lock --sidecars
+          node -e '
+            const fs = require("node:fs")
+            const lock = fs.readFileSync("mise.lock", "utf8")
+            const match = /aube = \{ path = "([^"]+)", digest = "sha256:[0-9a-f]{64}" \}/u.exec(lock)
+            if (match === null) throw new Error("mise.lock has no npm sidecar reference")
+            for (const file of ["aube-lock.yaml", "package.json"]) {
+              const path = `${match[1]}/${file}`
+              if (!fs.existsSync(path)) throw new Error(`missing committed mise sidecar ${path}`)
+            }
+          '
+          test -z "$(git status --porcelain -- mise.lock .mise)"
 
       - name: Materialize workspace dependencies through the task
         run: mise run setup
