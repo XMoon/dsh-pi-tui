@@ -52,7 +52,8 @@ test('the mise tool pins take their versions from the single package.json author
   assert.match(MISE_TOML,
     /^"npm:@deepseek-ai\/dsh" = \{ version = "\{\{ read_json\(path='package\.json'\)\['devDependencies'\]\['@deepseek-ai\/dsh-agent'\] \}\}", allow_builds = \[[^\]]*\] \}$/mu,
     'the DSH CLI version must be templated from the exact dsh-agent devDependency')
-  assert.equal(packageJson.devDependencies['@deepseek-ai/dsh-agent'], '0.2.1-rc.4')
+  assert.match(packageJson.devDependencies['@deepseek-ai/dsh-agent'], /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u,
+    'the dsh-agent devDependency must remain the exact version authority')
 
   const line = MISE_TOML.split('\n').find(candidate => candidate.startsWith('"npm:@deepseek-ai/dsh"'))
   const allowMatch = /allow_builds = \[(.*)\]/u.exec(line)
@@ -66,8 +67,9 @@ test('mise.lock records the resolved tools and the npm sidecar exists', () => {
   const dshSection = /\[\[tools\."npm:@deepseek-ai\/dsh"\]\]\nversion = "(?<version>[^"]+)"/u.exec(MISE_LOCK)
   assert.notEqual(dshSection, null, 'mise.lock must record the npm DSH tool')
   assert.equal(dshSection.groups.version, packageJson.devDependencies['@deepseek-ai/dsh-agent'])
+  const expectedPnpm = packageJson.packageManager.split('@').pop()
   assert.match(MISE_LOCK, /\[\[tools\.node\]\]\nversion = "24\./u)
-  assert.match(MISE_LOCK, /\[\[tools\.pnpm\]\]\nversion = "12\.11\.2"/u)
+  assert.ok(MISE_LOCK.includes(`[[tools.pnpm]]\nversion = "${expectedPnpm}"`), 'mise.lock must record the packageManager pnpm version')
 
   const sidecar = /aube = \{ path = "(?<path>[^"]+)", digest = "sha256:[0-9a-f]{64}" \}/u.exec(MISE_LOCK)
   assert.notEqual(sidecar, null, 'mise.lock must reference the aube sidecar with a digest')
@@ -164,9 +166,12 @@ test('the CI mise-toolchain job is a required, SHA-pinned contract lane', () => 
   assert.notEqual(setup, undefined, 'the job must use the official mise action')
   assert.match(setup.uses, /@[0-9a-f]{40}$/u, 'the third-party action must be pinned to a full commit SHA')
   assert.equal(setup.with.install, true)
+  assert.equal(setup.with.install_args, '--locked', 'the CI install must require the committed lockfile')
   const runText = (job.steps ?? []).map(step => step.run).filter(Boolean).join('\n')
   assert.match(runText, /mise exec -- dsh --version/u)
   assert.match(runText, /mise run setup/u)
+  assert.match(runText, /missing committed mise sidecar/u)
+  assert.match(runText, /git status --porcelain -- mise\.lock \.mise/u)
   assert.ok(REQUIRED_PHASES.includes('mise-toolchain'), 'the contract lane must block qualification')
 })
 
