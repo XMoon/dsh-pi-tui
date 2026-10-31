@@ -571,7 +571,21 @@ async function runLocalHostEntryOwned(options: LocalHostEntryOptions, scratchOwn
         releaseSignalAdmission()
         return
       }
-      const initialLiveness = await liveness.snapshot()
+      // The first observation is asynchronous (a mounted Schedule catalog can
+      // take up to its bound). A stop admitted during that window owns the
+      // process: wait for it, and never publish Ready after a stop request.
+      const initialLivenessPromise = liveness.snapshot()
+      const livenessBarrier = process.env.SPLIT_PROCESS_HOST_LIVENESS_BARRIER
+      if (livenessBarrier !== undefined && livenessBarrier !== '') {
+        writeEntryRecord({ m4a0: 'qualification', processRole: 'host', op: 'liveness-barrier', pid: process.pid })
+        await waitForQualificationBarrier(livenessBarrier)
+      }
+      const initialLiveness = await initialLivenessPromise
+      if (stopping !== undefined || pendingStop !== undefined) {
+        await stopped
+        releaseSignalAdmission()
+        return
+      }
       writeEntryRecord({ m4a0: 'ready', ...status, liveness: initialLiveness, localHost: publishedHost.identity })
       attachEntryControl(async request => {
         if (request.op === 'status') {

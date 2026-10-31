@@ -2242,6 +2242,46 @@ async function main() {
       })
     }
 
+    // T19/R1b: the SAME stop-admission guarantee across the new asynchronous
+    // first-liveness observation. The Host is held after publication while the
+    // initial snapshot is in flight; a signal here must still own the process
+    // and must never emit Ready after the observation returns.
+    for (const [signal, expectedCode] of [['SIGTERM', 0], ['SIGINT', 130]]) {
+      const livenessBarrierPath = join(workDir, `r1-liveness-barrier-${signal}`)
+      const r1bHost = new EntryProcess('host', entries.host, {
+        ...base,
+        env: {
+          ...base.env,
+          SPLIT_PROCESS_HOST_LIVENESS_BARRIER: livenessBarrierPath,
+        },
+      })
+      const held = await r1bHost.waitFor(
+        record => record.m4a0 === 'qualification' && record.op === 'liveness-barrier',
+        `T19b ${signal} liveness barrier`,
+        120_000,
+      )
+      assert(typeof held.pid === 'number' && held.pid > 0, `T19b ${signal}: the liveness barrier record has no PID`)
+      assert(!r1bHost.records.some(record => record.m4a0 === 'ready'), `T19b ${signal}: Ready was published before the stop`)
+      r1bHost.kill(signal)
+      const stopRequested = await r1bHost.waitFor(record => record.m4a0 === 'stop-requested', `T19b ${signal} admission`, 60_000)
+      assert(
+        stopRequested.signal === signal && stopRequested.phase === 'running',
+        `T19b ${signal}: unexpected admission record ${JSON.stringify(stopRequested)}`,
+      )
+      writeFileSync(livenessBarrierPath, 'release\n', { mode: 0o600 })
+      const cleanup = await r1bHost.waitFor(record => record.m4a0 === 'cleanup' || record.m4a0 === 'cleanup-failure', `T19b ${signal} cleanup`, 60_000)
+      assert(
+        cleanup.m4a0 === 'cleanup' && cleanup.status === 'completed' && cleanup.phase === 'shutdown',
+        `T19b ${signal}: cleanup was ${JSON.stringify(cleanup)}`,
+      )
+      const exit = await r1bHost.waitForExit(60_000)
+      assert(exit.code === expectedCode && exit.signal === null, `T19b ${signal} exit was ${JSON.stringify(exit)}`)
+      assert(!r1bHost.records.some(record => record.m4a0 === 'ready'), `T19b ${signal}: the Host emitted Ready after a stop request`)
+      assert(!r1bHost.records.some(record => record.m4a0 === 'failure'), `T19b ${signal}: the Host reported a boot failure`)
+      await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 10_000)
+      trace(`t19b-${signal.toLowerCase()}`, { signal, exit: exit.code, cleanup: cleanup.status, readyEmitted: false, livenessBarrier: true })
+    }
+
     // T20: a forced exit after this Host created its scratch and BEFORE
     // runProfile installs the launcher's signal handlers bypasses the async
     // finally. The synchronous exit mirror must remove only this process's
@@ -3018,6 +3058,30 @@ async function main() {
         await exitC1Client(c2, 'T47 C2')
         await stopC1Host(host)
         trace('t47', { hostPid: ready.pid, sessionId, jobId: registered.jobId, jobStatus: settled.status, hostAlive: true, processOutput: true })
+      }
+
+      // Host liveness: one real DSH JobRegistry unowned Job. No Client and no
+      // Agent is involved; the observer must see the registry's unowned list
+      // and event lifecycle directly.
+      {
+        const { host, ready, workRoot } = await startC1Host('unowned-job', 'c2a-unowned-job', {
+          C1_UNOWNED_JOB_ARM: join(workDir, 'c2a-unowned-job.arm'),
+        })
+        writeFileSync(join(workDir, 'c2a-unowned-job.arm'), 'arm\n', { mode: 0o600 })
+        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'unowned-job-created', 'C2A unowned job created', 120_000)
+        const runningLiveness = (await hostStatus(host)).liveness
+        assert(runningLiveness?.verdict === 'BLOCKED', `C2A the unowned Job did not block: ${JSON.stringify(runningLiveness)}`)
+        assert(runningLiveness.reasons?.includes('job-running'), 'C2A the unowned Job did not contribute job-running')
+        assert(runningLiveness.sourceStates?.jobs === 'ACTIVE', 'C2A the unowned Job did not make the jobs source ACTIVE')
+        writeFileSync(join(workRoot, 'unowned-job.release'), 'release\n', { mode: 0o600 })
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'unowned-job-released' && event.jobId === created.jobId, 'C2A unowned job released', 120_000)
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'job-event' && event.event === 'settled' && event.jobId === created.jobId, 'C2A unowned job settled', 120_000)
+        const settledLiveness = (await hostStatus(host)).liveness
+        assert(!settledLiveness.reasons?.includes('job-running') && !settledLiveness.reasons?.includes('job-stopping'),
+          `C2A a settled unowned Job left a ghost reason: ${JSON.stringify(settledLiveness)}`)
+        assert(settledLiveness.sourceStates?.jobs === 'IDLE', `C2A the unowned Job source did not return to IDLE: ${JSON.stringify(settledLiveness.sourceStates)}`)
+        await stopC1Host(host)
+        trace('c2a-unowned-job', { hostPid: ready.pid, jobId: created.jobId, runningVerdict: runningLiveness.verdict, settledJobsState: settledLiveness.sourceStates.jobs })
       }
 
       // Host liveness: an armed Goal plus the REAL goal-round-driver's

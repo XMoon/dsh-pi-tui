@@ -14,7 +14,8 @@
  *
  * Scenario protocol (frozen):
  *   C1_SCENARIO = long-turn | foreground-tool | job | child | question |
- *                 approval-allow | approval-reject | goal | maintenance | schedule
+ *                 approval-allow | approval-reject | goal | maintenance | schedule |
+ *                 unowned-job
  *   C1_WORK_ROOT = private 0700 directory under the isolated work dir
  *   C1_HOLD_<NAME> = absolute barrier file path the smoke releases
  */
@@ -40,6 +41,7 @@ const SCENARIOS = new Set([
   'goal',
   'maintenance',
   'schedule',
+  'unowned-job',
 ])
 
 /** Quote one token for the Host shell used by the harmless fixture commands. */
@@ -269,7 +271,7 @@ class C1Model extends LlmAdapter {
       return
     }
 
-    if (this.scenario === 'goal' || this.scenario === 'maintenance' || this.scenario === 'schedule') {
+    if (this.scenario === 'goal' || this.scenario === 'maintenance' || this.scenario === 'schedule' || this.scenario === 'unowned-job') {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: `${this.scenario} answer ${token}` }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `${this.scenario} answer ${token}` } }
@@ -643,6 +645,63 @@ export function apply(ctx) {
           })
         })
       })
+    }
+  }
+
+  // Host-liveness unowned-Job qualification: start one real DSH Job with no
+  // Session owner and hold it until the smoke releases it. The observer must
+  // see it through the unowned registry list and the official event stream.
+  if (scenario === 'unowned-job') {
+    const armBarrier = process.env.C1_UNOWNED_JOB_ARM
+    if (armBarrier !== undefined && armBarrier !== '') {
+      const timer = setInterval(() => {
+        if (!existsSync(armBarrier)) return
+        clearInterval(timer)
+        try {
+          // An unowned Job requires a global controller; the Host-only overlay
+          // does not mount tool-jobs at the root, so this test fixture attaches
+          // its own unscoped controller through the official registry seam.
+          const detachController = ctx.jobs.attachController('c2a-unowned-job')
+          ctx.effect(() => () => detachController())
+          const id = ctx.jobs.start({
+            kind: 'c2a-unowned',
+            label: 'C2A unowned qualification job',
+            run(handle) {
+              record('unowned-job-created', { jobId: String(handle.id), status: 'running' })
+              const release = join(root, 'unowned-job.release')
+              let settle
+              const done = new Promise(resolve => { settle = resolve })
+              let settled = false
+              let poll
+              const finish = outcome => {
+                if (settled) return
+                settled = true
+                if (poll !== undefined) clearInterval(poll)
+                settle(outcome)
+              }
+              poll = setInterval(() => {
+                if (!existsSync(release)) return
+                record('unowned-job-released', { jobId: String(handle.id) })
+                finish({ status: 'completed' })
+              }, 20)
+              poll.unref?.()
+              ctx.effect(() => () => clearInterval(poll))
+              return {
+                cancel(reason) {
+                  record('unowned-job-cancelled', { jobId: String(handle.id), reason })
+                  finish({ status: 'killed', ...(reason === undefined ? {} : { detail: reason }) })
+                },
+                done,
+              }
+            },
+          })
+          record('unowned-job-armed', { jobId: String(id) })
+        } catch (error) {
+          record('unowned-job-start-failed', { error: error instanceof Error ? error.message : String(error) })
+        }
+      }, 20)
+      timer.unref?.()
+      ctx.effect(() => () => clearInterval(timer))
     }
   }
 

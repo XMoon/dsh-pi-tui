@@ -179,6 +179,18 @@ interface LoaderLike {
 /** Cordis `FiberState.ACTIVE` (the enum is a const enum with no runtime value). */
 const FIBER_ACTIVE = 2
 
+/**
+ * Loader rows explicitly qualified as passive in the pinned stock Host
+ * composition. The set is the rc.4 Host-only roster that was reviewed as
+ * passive or as belonging to one of the observer's own source families;
+ * `schedule` is qualified when a profile mounts the official Schedule row.
+ * Any row not listed here (for example `terminal-controller`, a custom plugin
+ * or a future official autonomous service) fails closed as an unqualified
+ * Host source.
+ */
+const QUALIFIED_HOST_ROW_IDS: ReadonlySet<string> = new Set(`
+include plugin-manager timer hmr llm deepseek-llm-api-extensions session session-log-deepseek typert typert-loader typert-gateway remote-access session-title session-title-llm user-questions agent plugin-package-inventory-deepseek agent-default-model jobs llm-retry config-editor settings authorization deepseek-account credentials llm-pi-ai session-persistence-jsonl attachment-local session-query-sqlite working-directory tool-working-directory session-projection storage storage-json storage-domain session-projection-cache otel session-telemetry-otel subprocess sandbox sandbox-policy bash-sandbox approval permission shell-env fs-observation-policy skill commands command-feedback goal goal-round-driver token-meter subagent subagent-spawn-in-process subagent-fork-in-process ptc-runtime timeout-policy spill-local spill-policy session-checkpoint-policy image-offload repeat-tool-reminder web web-search-deepseek web-deepseek-api web-fetch-http mcp-resources tools system-prompt agent-loop fs-sandbox llm-deepseek llm-deepseek-account tui-startup pi-tui-performance-host workspace-files pi-tui-visual-tools webserver job-controller workspace file-reference-local agent-preset-registry subagent-model-selection-settings cordis-host-runner preset-standard preset-ptc preset-minimal preset-cordis split-host-connection split-host-api-remotes split-host-file-upload split-host-session-stats split-host-turn-outline split-host-session-controller split-host-settings-controller split-host-session-log-download split-host-pi-tui-runtime schedule`.trim().split(/\s+/u))
+
 /** Reasons that positively establish current work or a future keepalive obligation. */
 const BLOCKING_REASONS: ReadonlySet<ActivityReason> = new Set([
   'agent-running',
@@ -509,8 +521,12 @@ export class HostActivityObserver implements HostLivenessObserver {
     }
     for (const entry of entries) {
       if (entry.fiber?.state !== FIBER_ACTIVE) continue
+      const id = entry.options?.id ?? ''
       const name = entry.options?.name ?? ''
-      if (name.startsWith('@deepseek-ai/') || name.startsWith('@xmoon76/') || name.startsWith('cordis:')) continue
+      if (
+        QUALIFIED_HOST_ROW_IDS.has(id)
+        && (name.startsWith('@deepseek-ai/') || name.startsWith('@xmoon76/') || name.startsWith('cordis:'))
+      ) continue
       reasons.add('unqualified-host-source')
       return 'UNKNOWN'
     }
