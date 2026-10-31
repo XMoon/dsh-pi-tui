@@ -412,6 +412,20 @@ Ctrl+V 会读取系统剪贴板：剪贴板里是图片时得到规范占位符 
 
 全屏图片信息行最右 3 格 `[-]`/`[+]` 只折叠该图片；点击图片正文打开只读查看器。`/view-image` 列出当前已挂载 transcript window 的图片，`Enter` 查看、`Esc back` 返回原列表。
 
+### 图片协议选择
+
+默认按 `auto` 自动协商（Direct/Zellij 为 Kitty > SIXEL > 文本；tmux 保留其 live U1/Sxl 相对优先级）。可在启动时用同一个 `PI_IMAGE_PROTOCOL` 显式选择：
+
+```sh
+PI_IMAGE_PROTOCOL=auto    # 默认自动协商；严格识别的 Zellij + Windows Terminal 会避开已知的 Kitty 启动期假阳性
+PI_IMAGE_PROTOCOL=kitty   # 只使用已准入的 Kitty 传输，否则文本
+PI_IMAGE_PROTOCOL=sixel   # 只使用已准入的 SIXEL 传输（Direct 需真实 DA1；Zellij/tmux 仍走各自安全门），否则文本
+PI_IMAGE_PROTOCOL=iterm2  # 仅 Direct 的 legacy iTerm2 路径；Multiplexer 不假装转发
+PI_IMAGE_PROTOCOL=none    # 关闭所有渲染后端的图片像素；0 等价
+```
+
+显式值是对协议**选择**，不是对不支持终端的保证：tmux 的 live client/Sxl/U1、Zellij 的 DA1/版本/Screen 就绪以及 DCS 所有权检查仍然生效。非法值会在启动时报错。`none` 只关闭终端像素预览，不影响图片附件、模型输入或发送；实验性 TSP renderer 的原生图片也遵循同一开关。
+
 ### TSP renderer（实验性）
 
 设置 `DSH_PI_TUI_RENDERER=tsp` 后启用实验性 Tern TSP renderer：支持原生工具卡、

@@ -42,6 +42,7 @@ import { parseKittyApc } from '../../src/tui/graphics/kitty-native.ts'
 import { KITTY_VIRTUAL_PLACEHOLDER } from '../../src/tui/graphics/tmux-virtual.ts'
 import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
 import { NativeKittyImage } from '../../src/tui/graphics/native-image.ts'
+import { createNativeKittyGraphics } from '../../src/tui/graphics/native-image.ts'
 import type { KittyGraphics } from '../../src/tui/graphics/native-image.ts'
 import type { ZellijNegotiatedGraphics } from '../../src/tui/graphics/zellij-sixel.ts'
 
@@ -1123,4 +1124,20 @@ test('a normal main-screen stop is unaffected by the teardown hardening', () => 
   assert.ok(result.stopped.includes('showCursor'))
   assert.ok(result.stopped.includes('terminal.stop'))
   assert.equal(result.owned, true)
+})
+
+test('PI_IMAGE_PROTOCOL=sixel refuses the Native Kitty factory even when static detection says Kitty', () => {
+  const restore = applyGhosttyEnvironment({
+    TERM_PROGRAM: 'kitty',
+    TERM: 'xterm-256color',
+    PI_IMAGE_PROTOCOL: 'sixel',
+    PI_TUI_TMUX_KITTY_IMAGES: '0',
+  })
+  try {
+    assert.equal(getCapabilities().images, 'kitty', 'the fork still reports its static Kitty detection')
+    assert.equal(createNativeKittyGraphics(new VirtualTerminal(100, 40)), undefined,
+      'the explicit SIXEL preference closes the Native Kitty owner')
+  } finally {
+    restore()
+  }
 })

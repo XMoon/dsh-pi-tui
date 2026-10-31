@@ -118,6 +118,7 @@ test('every environment gate rejects BEFORE any tmux command is spawned', (t) =>
     { name: 'protocol none', mutate: (env) => { env.PI_IMAGE_PROTOCOL = 'none' } },
     { name: 'protocol 0', mutate: (env) => { env.PI_IMAGE_PROTOCOL = '0' } },
     { name: 'protocol iterm2', mutate: (env) => { env.PI_IMAGE_PROTOCOL = 'iterm2' } },
+    { name: 'protocol sixel', mutate: (env) => { env.PI_IMAGE_PROTOCOL = 'sixel' } },
   ]
   for (const entry of cases) {
     const cli = createFakeTmuxCli(t)
@@ -128,6 +129,15 @@ test('every environment gate rejects BEFORE any tmux command is spawned', (t) =>
     } finally {
       cli.dispose()
     }
+  }
+
+  const invalidCli = createFakeTmuxCli(t)
+  try {
+    invalidCli.env.PI_IMAGE_PROTOCOL = 'sixelx'
+    assert.throws(() => probeTmuxKittyIdentity(invalidCli.env), /Invalid PI_IMAGE_PROTOCOL/u)
+    assert.deepEqual(invalidCli.calls(), [], 'an invalid value is rejected before any tmux query')
+  } finally {
+    invalidCli.dispose()
   }
 })
 

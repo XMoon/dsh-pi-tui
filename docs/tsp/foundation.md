@@ -359,6 +359,12 @@ feature — one native image node. The flat text is not drawn again beside the
 block-wise body, and a tool card's own args, status, target and children are
 unchanged.
 
+TSP native `ui.image` follows the same Client-local `PI_IMAGE_PROTOCOL` policy:
+it is enabled only for `auto`; an explicit value projects the text identity with
+a disabled status and sends no blob. This does not affect `ui.chart`, model
+attachments or attachment persistence. See
+[terminal output](../architecture/terminal-output.md#image-protocol-preference-pi_image_protocol).
+
 - The authority for WHICH attachment a row shows is that row's own structured
   content: User `content`, Assistant `displayBlocks` (while an opaque block is
   open) or its settled `content`, Tool `resultBlocks`. A display name, the flat

@@ -33,6 +33,7 @@ import {
   tmuxPaneEnvironmentAdmits,
   type TmuxDisplayIdentity,
 } from './tmux-admission.ts'
+import { imageProtocolPreference } from './image-protocol-preference.ts'
 
 /** The immutable live binding a native tmux SIXEL handle may use. */
 export interface TmuxSixelIdentity extends TmuxDisplayIdentity {}
@@ -40,10 +41,10 @@ export interface TmuxSixelIdentity extends TmuxDisplayIdentity {}
 /** The short live-probe cache used by the component render path. */
 const PROBE_CACHE_TTL_MS = 250
 
-/** Legacy/explicit protocols that must never be overridden by tmux SIXEL. */
+/** The explicit preferences that must never be satisfied by tmux SIXEL. */
 function protocolDeniesSixel(env: NodeJS.ProcessEnv): boolean {
-  const protocol = (env.PI_IMAGE_PROTOCOL ?? '').toLowerCase()
-  return protocol === 'none' || protocol === '0' || protocol === 'kitty' || protocol === 'iterm2'
+  const preference = imageProtocolPreference(env)
+  return preference !== 'auto' && preference !== 'sixel'
 }
 
 /** One line-terminated value: exactly one non-empty line, no hidden records. */

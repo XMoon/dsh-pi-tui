@@ -42,6 +42,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
+import { resetCapabilitiesCache } from '@xmoon76/pi-tui'
 import { DraftImageStore } from '../../src/client/media/image/draft-store.ts'
 import type { TuiAppEvents } from '../../src/tui-app.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
@@ -202,6 +203,8 @@ async function startSixelApp(
     copySelection?: (text: string) => Promise<boolean>
     /** A denied topology issues no readiness query: let the test skip the waits. */
     skipSixelReadiness?: boolean
+    /** Whether the terminal's passive DA1 declares SIXEL; defaults to true. */
+    da1?: boolean
   } = {},
 ): Promise<AppFixture> {
   const home = testLifecycle(t).tempDir('sixel-app-')
@@ -263,8 +266,9 @@ async function startSixelApp(
   }
 
   // The terminal's own DA1; the geometry and background replies come from the
-  // terminal itself (see `write`), exactly like a real tty.
-  if (options.skipSixelReadiness !== true) {
+  // terminal itself (see `write`), exactly like a real tty. A DA1-negative case
+  // keeps the owner pending and therefore issues no readiness query.
+  if (options.skipSixelReadiness !== true && options.da1 !== false) {
     terminal.declareSixel()
     await until(() => terminal.writes.join('').includes('\x1b[16t'), 'the `CSI 16t` geometry query')
     await until(() => terminal.writes.join('').includes('\x1b]11;?'), 'the OSC 11 background query')
@@ -1655,6 +1659,87 @@ test('E2-09: a long 24-image transcript fills the registry, then re-encodes old 
   assert.ok(paintedRasters(terminal).length < 400, `the whole journey stays bounded: ${paintedRasters(terminal).length} rasters`)
   terminal.sendInput('\x1b')
   await waitViewport(terminal, 'Service topology', 'the transcript after the SVG Viewer')
+})
+
+test('E2 positive override: PI_IMAGE_PROTOCOL=sixel paints Direct SIXEL while static detection says Kitty', async (t) => {
+  const previous = {
+    protocol: process.env.PI_IMAGE_PROTOCOL,
+    termProgram: process.env.TERM_PROGRAM,
+    term: process.env.TERM,
+  }
+  process.env.PI_IMAGE_PROTOCOL = 'sixel'
+  process.env.TERM_PROGRAM = 'kitty'
+  process.env.TERM = 'xterm-kitty'
+  resetCapabilitiesCache()
+  t.after(() => {
+    if (previous.protocol === undefined) delete process.env.PI_IMAGE_PROTOCOL
+    else process.env.PI_IMAGE_PROTOCOL = previous.protocol
+    if (previous.termProgram === undefined) delete process.env.TERM_PROGRAM
+    else process.env.TERM_PROGRAM = previous.termProgram
+    if (previous.term === undefined) delete process.env.TERM
+    else process.env.TERM = previous.term
+    resetCapabilitiesCache()
+  })
+
+  const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
+  const { terminal, store } = await startSixelApp(t)
+  const image = store.add({ bytes: png, mediaType: 'image/png', width: 80, height: 40, name: 'forced.png' })
+  terminal.writes.length = 0
+  terminal.sendInput(image.placeholder)
+  await until(() => paintedRasters(terminal).length > 0, 'the forced Direct SIXEL raster')
+  const wire = terminal.writes.join('')
+  assert.equal(wire.includes('\x1b_G'), false, 'the static Kitty capability emits no APC')
+  const decoded = decodeSixel(paintedRasters(terminal).at(-1)!)
+  assert.equal(decoded.width, 80)
+  assert.ok(pixelAt(decoded, 4, 4)[0] > 180, 'the SIXEL raster carries the source pixels')
+})
+
+test('E2 negative override: PI_IMAGE_PROTOCOL=sixel without DA1 stays text and never falls back to Kitty', async (t) => {
+  const previous = {
+    protocol: process.env.PI_IMAGE_PROTOCOL,
+    termProgram: process.env.TERM_PROGRAM,
+    term: process.env.TERM,
+  }
+  process.env.PI_IMAGE_PROTOCOL = 'sixel'
+  process.env.TERM_PROGRAM = 'kitty'
+  process.env.TERM = 'xterm-kitty'
+  resetCapabilitiesCache()
+  t.after(() => {
+    if (previous.protocol === undefined) delete process.env.PI_IMAGE_PROTOCOL
+    else process.env.PI_IMAGE_PROTOCOL = previous.protocol
+    if (previous.termProgram === undefined) delete process.env.TERM_PROGRAM
+    else process.env.TERM_PROGRAM = previous.termProgram
+    if (previous.term === undefined) delete process.env.TERM
+    else process.env.TERM = previous.term
+    resetCapabilitiesCache()
+  })
+
+  const png = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
+  let reads = 0
+  const { terminal, app } = await startSixelApp(t, {
+    da1: false,
+    imageLoader: new ImageLoader(async () => {
+      reads += 1
+      return { ref: {}, data: png }
+    }),
+    imageTheme: { fallbackColor: (text: string) => text },
+  })
+  const ref = {
+    attachmentId: 'att-no-da1',
+    mediaType: 'image/png',
+    bytes: png.byteLength,
+    width: 80,
+    height: 40,
+    name: 'no-da1.png',
+  } as const
+  terminal.writes.length = 0
+  app.setTranscript(transcriptWith(ref).messages())
+  app.requestRender()
+  await waitViewport(terminal, 'no-da1.png', 'the text identity row')
+  assert.equal(reads, 0, 'no image bytes are read while the SIXEL owner is pending')
+  const wire = terminal.writes.join('')
+  assert.equal(wire.includes('\x1bP0;1;q'), false, 'no SIXEL DCS without DA1')
+  assert.equal(wire.includes('\x1b_G'), false, 'no Kitty fallback without DA1')
 })
 
 test('E2 negative: PI_IMAGE_PROTOCOL=none fails closed with no raster, read or encode', async (t) => {

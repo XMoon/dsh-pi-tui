@@ -25,6 +25,7 @@ import {
   type KittyImageSource,
 } from './kitty-core.ts'
 import { KITTY_APC_INTRODUCER, KITTY_APC_TERMINATOR, parseKittyApc } from './kitty-native.ts'
+import { imageProtocolPreference } from './image-protocol-preference.ts'
 import { KittyTerminalFacade } from './kitty-terminal.ts'
 import {
   NativeKittyImage,
@@ -53,14 +54,16 @@ export const ZELLIJ_PROBE_TIMEOUT_MS = 500
  *
  * The candidate decision is deliberately transport-only: a non-empty `ZELLIJ`
  * session marker, no explicit `TMUX`/`STY` session in between, and no explicit
- * image opt-out (`PI_IMAGE_PROTOCOL=none/0`) or iTerm2 override. Host brand,
- * `TERM_PROGRAM`, `TERM`, session name, inherited WezTerm/Warp markers and the
- * fork's static capability verdict are NOT admission facts: the per-handle
- * live `a=q` answer is the authority for this pane.
+ * image hard-off (`none`/`0`) or iTerm2 override. `sixel` stays a candidate:
+ * the negotiated handle then selects SIXEL from the pane's real DA1 and the
+ * local version without sending any Kitty probe. Host brand, `TERM_PROGRAM`,
+ * `TERM`, session name, inherited WezTerm/Warp markers and the fork's static
+ * capability verdict are NOT admission facts: the per-handle live SIXEL/Kitty
+ * facts are the authority for this pane.
  */
 export function candidateZellijKitty(environment: NodeJS.ProcessEnv = process.env): boolean {
-  const protocol = (environment.PI_IMAGE_PROTOCOL ?? '').toLowerCase()
-  if (protocol === 'none' || protocol === '0' || protocol === 'iterm2') return false
+  const preference = imageProtocolPreference(environment)
+  if (preference === 'none' || preference === 'iterm2') return false
   if ((environment.ZELLIJ ?? '') === '') return false
   if ((environment.TMUX ?? '') !== '' || (environment.STY ?? '') !== '') return false
   return true
@@ -205,7 +208,23 @@ export class ZellijKittyAdmission {
     this.onSettled?.(outcome)
   }
 
-  /** Cancel the pending timer; late replies are consumed but never promote. */
+  /**
+   * Deny this handle WITHOUT sending the Kitty probe.
+   *
+   * Used only by the negotiated Zellij handle when the user explicitly chose
+   * SIXEL: the facade lifecycle still starts normally, but no Kitty query byte
+   * may be written and no Kitty delegate may ever exist. The state is
+   * committed before `onSettled` runs (the same ordering as a real reply), and
+   * a repeated call in a non-pending state produces no second notification.
+   */
+  denyWithoutProbe(): void {
+    if (this.disposed || this.state !== 'pending') return
+    this.settle('denied')
+  }
+
+  /**
+   * Cancel the pending timer; late replies are consumed but never promote.
+   */
   dispose(): void {
     this.disposed = true
     this.clearTimer()

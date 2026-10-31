@@ -232,21 +232,40 @@ test('an empty multiplexer marker is not a session', () => {
   }
 })
 
-test('an unknown PI_IMAGE_PROTOCOL value keeps the existing auto semantics', () => {
-  // `sixel` is not a supported override in I8-1; it must NOT force admission.
+test('an unknown PI_IMAGE_PROTOCOL value is a startup configuration error, never auto', () => {
   const harness = new DirectTerminalHarness()
   try {
-    const capability = createDirectSixelCapability(
-      harness.terminal,
-      { ...DIRECT_ENV, PI_IMAGE_PROTOCOL: 'sixel' },
-      null,
+    assert.throws(
+      () => createDirectSixelCapability(harness.terminal, { ...DIRECT_ENV, PI_IMAGE_PROTOCOL: 'sixelx' }, null),
+      /Invalid PI_IMAGE_PROTOCOL/u,
     )
-    assert.equal(capability.verdict, 'pending', 'an unknown override must not admit anything by itself')
-    harness.send(WT_DA1)
-    assert.equal(capability.verdict, 'admitted', 'the real DA1 observation still decides')
   } finally {
     harness.cleanup()
   }
+})
+
+test('explicit sixel bypasses only the fork static legacy precedence and still needs DA1', () => {
+  for (const legacyImages of ['kitty', 'iterm2'] as const) {
+    const harness = new DirectTerminalHarness()
+    try {
+      const capability = createDirectSixelCapability(
+        harness.terminal,
+        { ...DIRECT_ENV, PI_IMAGE_PROTOCOL: 'sixel' },
+        legacyImages,
+      )
+      assert.equal(capability.verdict, 'pending', `${legacyImages}: static detection is not a denial`)
+      harness.send(WT_DA1)
+      assert.equal(capability.verdict, 'admitted', `${legacyImages}: the real DA1 still decides`)
+    } finally {
+      harness.cleanup()
+    }
+  }
+})
+
+test('explicit sixel never bypasses the multiplexer gate', () => {
+  deniedWithoutSubscription({ ...DIRECT_ENV, PI_IMAGE_PROTOCOL: 'sixel', TMUX: '/tmp/tmux,1,0' }, 'kitty')
+  deniedWithoutSubscription({ ...DIRECT_ENV, PI_IMAGE_PROTOCOL: 'sixel', ZELLIJ: '0' }, 'kitty')
+  deniedWithoutSubscription({ ...DIRECT_ENV, PI_IMAGE_PROTOCOL: 'sixel', TERM: 'screen-256color' }, 'kitty')
 })
 
 test('dispose is idempotent and freezes the verdict', () => {

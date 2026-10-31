@@ -9,6 +9,20 @@
  *
  *   pending -> kitty | sixel | none | revoked
  *
+ * The startup `PI_IMAGE_PROTOCOL` preference selects which protocols the
+ * negotiation may consider at all:
+ *
+ * - `auto` keeps Kitty > SIXEL > text, except that a strict local Zellij +
+ *   Windows Terminal environment treats an `a=q OK` as the known startup
+ *   false positive it is: the Kitty outcome is filtered to `denied` and the
+ *   existing DA1/version gate may still select SIXEL.
+ * - `kitty` sends the same ONE `a=q` and only a matching `OK` may select
+ *   Kitty; SIXEL is never considered.
+ * - `sixel` sends NO Kitty query at all (`denyWithoutProbe`), and SIXEL is
+ *   selected only from the pane's DA1 attribute `4` plus the LOCAL Zellij
+ *   version gate.
+ * - `iterm2`/`none` never create this handle.
+ *
  * Kitty wins whenever its own probe answered `OK` (even if DA1 also declares
  * SIXEL). SIXEL is selected only when Kitty did not admit, the pane's DA1
  * declares attribute `4`, and the LOCAL Zellij program is at least 0.45.0 —
@@ -34,6 +48,7 @@ import { execFileSync } from 'node:child_process'
 import type { Component, Terminal } from '@xmoon76/pi-tui'
 import type { SixelRaster } from '../../client/media/sixel/types.ts'
 import { KittyGraphicsCore, type KittyImageSource } from './kitty-core.ts'
+import { imageProtocolPreference, type ImageProtocolPreference } from './image-protocol-preference.ts'
 import { NativeKittyImage, type NativeKittyImageOptions, type PixelBody } from './native-image.ts'
 import {
   createSixelGraphicsWithAdmission,
@@ -109,6 +124,42 @@ export function zellijVersionEligible(environment: NodeJS.ProcessEnv = process.e
   return patch >= 0
 }
 
+/**
+ * The strict auto-mode Zellij + Windows Terminal Kitty-false-positive filter.
+ *
+ * `WT_SESSION` alone is never proof that this pane's outer terminal is Windows
+ * Terminal: it is inherited into the pane and may coexist with SSH, another
+ * multiplexer or a conflicting brand marker. This predicate demands every
+ * condition from the product contract at once, including `preference === auto`
+ * (an explicit user protocol choice always wins), and is used ONLY to discard
+ * an otherwise-positive Kitty startup answer. It never proves SIXEL and never
+ * issues a query.
+ */
+export function isKnownLocalWindowsTerminalZellij(environment: NodeJS.ProcessEnv = process.env): boolean {
+  if (imageProtocolPreference(environment) !== 'auto') return false
+  if ((environment.ZELLIJ ?? '') === '') return false
+  if ((environment.TMUX ?? '') !== '' || (environment.STY ?? '') !== '') return false
+  if ((environment.WT_SESSION ?? '') === '') return false
+  const termProgram = (environment.TERM_PROGRAM ?? '').toLowerCase()
+  if (termProgram !== '' && termProgram !== 'windows_terminal') return false
+  for (const key of ['SSH_CONNECTION', 'SSH_CLIENT', 'SSH_TTY'] as const) {
+    if ((environment[key] ?? '') !== '') return false
+  }
+  for (const key of [
+    'KITTY_WINDOW_ID',
+    'GHOSTTY_RESOURCES_DIR',
+    'WEZTERM_PANE',
+    'ITERM_SESSION_ID',
+    'WARP_SESSION_ID',
+    'WARP_TERMINAL_SESSION_UUID',
+  ] as const) {
+    if ((environment[key] ?? '') !== '') return false
+  }
+  const term = (environment.TERM ?? '').toLowerCase()
+  if (term === 'xterm-kitty' || term === 'xterm-ghostty' || term === 'wezterm') return false
+  return true
+}
+
 type ZellijGraphicsState = 'pending' | 'kitty' | 'sixel' | 'none' | 'revoked'
 
 interface ZellijGraphicsCallbacks {
@@ -126,13 +177,16 @@ interface ZellijGraphicsCallbacks {
  * Timers, input-active state, the initial DA1 fact, the Kitty settlement and
  * the one outstanding re-query lease are all committed here before any
  * callback runs. Late/duplicate answers are consumed but never change a
- * settled state.
+ * settled state. The explicit preference is fixed at construction: `sixel`
+ * commits the Kitty admission to `denied` before `start()` can write a byte;
+ * `kitty` never considers SIXEL; `auto` alone applies the WT filter.
  */
 export class ZellijGraphicsAdmission {
   readonly kittyAdmission: ZellijKittyAdmission
   readonly capability: SixelCapability
   private readonly environment: NodeJS.ProcessEnv
   private readonly callbacks: ZellijGraphicsCallbacks
+  private readonly preference: ImageProtocolPreference
   private state: ZellijGraphicsState = 'pending'
   private kittyOutcome: 'allowed' | 'denied' | undefined
   private da1Supported: boolean | undefined
@@ -149,6 +203,7 @@ export class ZellijGraphicsAdmission {
   constructor(environment: NodeJS.ProcessEnv = process.env, callbacks: ZellijGraphicsCallbacks) {
     this.environment = environment
     this.callbacks = callbacks
+    this.preference = imageProtocolPreference(environment)
     this.kittyAdmission = new ZellijKittyAdmission(undefined, undefined, (outcome) => {
       if (this.disposed) return
       this.kittyOutcome = outcome
@@ -168,6 +223,11 @@ export class ZellijGraphicsAdmission {
       },
       dispose(): void {},
     }
+    // Explicit SIXEL: the facade still owns its normal lifecycle, but the
+    // Kitty branch is committed to `denied` AFTER the capability/callback
+    // wiring exists, so `start()` can never write the `a=q` query or a late
+    // reply callback into a half-constructed coordinator.
+    if (this.preference === 'sixel') this.kittyAdmission.denyWithoutProbe()
   }
 
   /** The public selection projection. */
@@ -297,11 +357,20 @@ export class ZellijGraphicsAdmission {
 
   private tryFinalize(timedOut = false): void {
     if (this.disposed || this.state !== 'pending') return
-    if (this.kittyOutcome === 'allowed') {
+    // The WT compatibility rule is a NEGATIVE filter on the automatic Kitty
+    // answer only: it never grants SIXEL by itself. An explicit `kitty` keeps
+    // the user's assertion even in the same environment, and `sixel` has
+    // already denied Kitty without probing.
+    const effectiveKittyOutcome = this.preference === 'auto'
+      && isKnownLocalWindowsTerminalZellij(this.environment)
+      && this.kittyOutcome === 'allowed'
+        ? 'denied'
+        : this.kittyOutcome
+    if (effectiveKittyOutcome === 'allowed') {
       this.selectKitty()
       return
     }
-    if (this.kittyOutcome === 'denied') {
+    if (effectiveKittyOutcome === 'denied') {
       if (this.sixelEligible()) {
         this.selectSixel()
         return
@@ -323,7 +392,7 @@ export class ZellijGraphicsAdmission {
   }
 
   private sixelEligible(): boolean {
-    if ((this.environment.PI_IMAGE_PROTOCOL ?? '').toLowerCase() === 'kitty') return false
+    if (this.preference === 'kitty') return false
     return this.da1Supported === true && this.versionEligible === true
   }
 

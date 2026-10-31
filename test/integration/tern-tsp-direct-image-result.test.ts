@@ -288,3 +288,60 @@ test('a REAL durable image reaches a User body and an Assistant body as native b
     await fixture.settle()
   }
 })
+
+test('PI_IMAGE_PROTOCOL=none keeps the real Direct attachment chain at zero blobs and image nodes', async (t) => {
+  const { testLifecycle } = await import('../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const previous = process.env.PI_IMAGE_PROTOCOL
+  process.env.PI_IMAGE_PROTOCOL = 'none'
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['DIRECT', '-IMAGE', '-DISABLED'],
+    startup: { sessionId: SESSION_ID },
+    persistedBlankSessions: [{ id: SESSION_ID }],
+    nativeImages: true,
+  })
+  try {
+    const attachments = fixture.ctx.get('attachments') as unknown as FixtureAttachments
+    const png = await realPng('#abcdef', 4)
+    const image = (await attachments.saveImages([{ data: png, mediaType: 'image/png', name: 'disabled.png' }]))[0]!
+
+    const session = await sessionOf(fixture)
+    session.append('turn/start', { turn: 1 })
+    session.append('step/start', { turn: 1, step: 0 })
+    session.append('tool/call', {
+      turn: 1,
+      step: 0,
+      callId: ToolCallId('call-image-disabled'),
+      name: 'read_image',
+      arguments: '{"path":"disabled.png"}',
+    })
+    session.append('tool/result', {
+      turn: 1,
+      step: 0,
+      message: {
+        id: MessageId('result-image-disabled'),
+        role: 'tool',
+        toolCallId: ToolCallId('call-image-disabled'),
+        content: [
+          { type: 'text', text: 'Here is the screenshot.' },
+          { type: 'image', attachment: image },
+        ],
+        source: { kind: 'tool', callId: ToolCallId('call-image-disabled') },
+      },
+    }, { surfaceOp: 'append' })
+
+    await waitFor('the pane rendered the disabled image status', () =>
+      fixture.pane.output.text().includes('Image preview disabled by PI_IMAGE_PROTOCOL'), 30_000)
+    const wire = fixture.pane.output.text()
+    assert.deepEqual(blobIds(wire), [], 'no session.blob message reached the real SDK wire')
+    assert.equal(wire.includes('[IMAGE] disabled.png'), true,
+      'the identity line still names the attachment')
+    assert.equal(wire.includes('"k":"image"'), false, 'no native image node was added')
+  } finally {
+    // The fixture's settle disposes the app, the pane and the Host context
+    // before the next case starts: a bounded teardown, not a blind sleep.
+    await fixture.settle()
+    if (previous === undefined) delete process.env.PI_IMAGE_PROTOCOL
+    else process.env.PI_IMAGE_PROTOCOL = previous
+  }
+})

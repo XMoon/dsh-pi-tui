@@ -7,6 +7,19 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **Zellij + Windows Terminal 自动模式避开 Kitty 启动期假阳性。** 在严格识别的本地
+  Zellij + Windows Terminal 环境中，启动期的 Kitty `OK` 不再抢占图片协议；pane 的
+  DA1 与本地 Zellij 版本满足条件时自动使用 SIXEL，否则显示文本。真实 Kitty 及其他
+  自动环境仍保持 Kitty 优先。
+
+- **`PI_IMAGE_PROTOCOL` 成为全后端一致的显式协议选择。** 支持 `auto`、`kitty`、
+  `sixel`、`iterm2`、`none`/`0`：显式值只会尝试所选协议，失败时显示文本而不会切换到
+  其他协议；未知值在启动时报错。PiTUI Direct、Zellij、tmux 与实验性 TSP renderer
+  共用这一开关，tmux/Zellij 的真实传输安全门槛和 DCS 所有权不变。`none` 不影响图片
+  附件、模型输入或发送。
+
 ## [0.5.4] - 2026-10-29
 
 ### 安装与版本对应

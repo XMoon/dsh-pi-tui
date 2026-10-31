@@ -515,6 +515,20 @@ Images in user messages, assistant messages and tool results are shown inside th
 
 The rightmost three cells of a fullscreen image info row are `[-]`/`[+]`, folding only that image; clicking its body opens the read-only viewer. `/view-image` lists the images of the currently mounted transcript window; `Enter` views one and `Esc back` returns to the same list.
 
+### Image protocol selection
+
+The default is `auto` (Direct/Zellij use Kitty > SIXEL > text; tmux keeps its live U1/Sxl relative priority). Choose a protocol explicitly at startup with the same `PI_IMAGE_PROTOCOL` variable:
+
+```sh
+PI_IMAGE_PROTOCOL=auto    # default; strict local Zellij + Windows Terminal avoids the known startup Kitty false positive
+PI_IMAGE_PROTOCOL=kitty   # only an admitted Kitty transport, otherwise text
+PI_IMAGE_PROTOCOL=sixel   # only an admitted SIXEL transport (Direct needs real DA1; Zellij/tmux keep their own gates), otherwise text
+PI_IMAGE_PROTOCOL=iterm2  # Direct legacy iTerm2 only; multiplexers never pretend to forward it
+PI_IMAGE_PROTOCOL=none    # disable image pixels for every renderer; 0 is equivalent
+```
+
+An explicit value is a protocol **selection**, not a promise for an unsupported terminal: tmux live-client/Sxl/U1 checks, Zellij DA1/version/Screen readiness and DCS ownership still apply. Invalid values fail startup. `none` only disables terminal pixel previews; image attachments, model input and sending are unchanged. The experimental TSP renderer's native images follow the same switch.
+
 ### TSP renderer (experimental)
 
 Set `DSH_PI_TUI_RENDERER=tsp` to enable the experimental Tern TSP renderer:

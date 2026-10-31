@@ -18,10 +18,27 @@
  */
 
 import { getCapabilities } from '@xmoon76/pi-tui'
+import { imageProtocolPreference } from './image-protocol-preference.ts'
 import type { ImageGraphics } from './native-image.ts'
 
 /** The image protocol a consumer may paint with right now. */
 export type EffectiveImageProtocol = 'kitty' | 'iterm2' | 'sixel' | null
+
+/**
+ * Whether the process sits behind a transport boundary that must admit its own
+ * protocol. Used only when NO managed handle exists: an inherited fork
+ * capability must never leak a legacy Kitty/iTerm2 image sequence through a
+ * multiplexer pane.
+ */
+function isMultiplexerTopology(environment: NodeJS.ProcessEnv): boolean {
+  for (const marker of ['ZELLIJ', 'TMUX', 'STY'] as const) {
+    if ((environment[marker] ?? '') !== '') return true
+  }
+  const term = (environment.TERM ?? '').toLowerCase()
+  return term.startsWith('tmux')
+    || term.startsWith('screen')
+    || (environment.TERM_PROGRAM ?? '').toLowerCase() === 'herdr'
+}
 
 /**
  * Whether THIS render may paint real pixels, and through which protocol.
@@ -34,12 +51,19 @@ export type EffectiveImageProtocol = 'kitty' | 'iterm2' | 'sixel' | null
  * instead. An EMPTY `ZELLIJ` value is not a Zellij session marker and must not
  * suppress a direct terminal's own capability.
  *
+ * Without a managed handle the explicit preference answers first: `none` and
+ * `sixel` are text-only, and every multiplexer topology is text-only even when
+ * the fork's static capability says `kitty`/`iterm2` (an explicit legacy
+ * override must not become passthrough). Only an ordinary Direct terminal may
+ * keep the fork's own `iterm2` answer, or a `kitty` answer owned by the Native
+ * factory above.
+ *
  * SIXEL (Image-8 / I8-2A) is the LAST branch and never a fallback: an existing
  * managed Kitty handle keeps precedence even while it is denied or pending, so
  * a revoked tmux virtual pane or an unanswered Zellij pane query still paints
  * text and never silently degrades to a different protocol. `PI_IMAGE_PROTOCOL`
- * and `getCapabilities().images` are not authorities for it — the Direct SIXEL
- * owner's own readiness projection is.
+ * and `getCapabilities().images` are not authorities for an admitted SIXEL
+ * owner — the owner's own readiness projection is.
  */
 export function effectiveImageProtocol(graphics: ImageGraphics | undefined): EffectiveImageProtocol {
   if (graphics !== undefined && graphics.mode === 'zellij-negotiated') {
@@ -50,6 +74,8 @@ export function effectiveImageProtocol(graphics: ImageGraphics | undefined): Eff
   }
   if (graphics !== undefined && graphics.mode !== 'sixel') return graphics.canPaint() ? 'kitty' : null
   if (graphics !== undefined) return graphics.canPaint() ? 'sixel' : null
-  if ((process.env.ZELLIJ ?? '') !== '') return null
+  const preference = imageProtocolPreference(process.env)
+  if (preference === 'none' || preference === 'sixel') return null
+  if (isMultiplexerTopology(process.env)) return null
   return getCapabilities().images ?? null
 }

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Zellij + Windows Terminal automatic mode avoids the startup Kitty false
+  positive.** In a strictly recognized local Zellij + Windows Terminal
+  environment, an early Kitty `OK` no longer selects Kitty; when the pane's DA1
+  and the local Zellij version qualify, SIXEL is used, otherwise text. Real
+  Kitty and every other automatic environment keep Kitty priority.
+
+- **`PI_IMAGE_PROTOCOL` is now one explicit protocol selection across every
+  backend.** It accepts `auto`, `kitty`, `sixel`, `iterm2` and `none`/`0`:
+  explicit values try only the selected protocol and fall back to text instead
+  of switching transports; unknown values fail startup. PiTUI Direct, Zellij,
+  tmux and the experimental TSP renderer share the switch, while the real
+  tmux/Zellij transport gates and DCS ownership stay unchanged. `none` does not
+  affect image attachments, model input or sending.
+
 ## [0.5.4] - 2026-10-29
 
 ### Installation and version pairing
