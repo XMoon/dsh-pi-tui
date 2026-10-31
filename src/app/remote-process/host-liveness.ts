@@ -176,20 +176,77 @@ interface LoaderLike {
   entries(): Iterable<LoaderEntryLike>
 }
 
-/** Cordis `FiberState.ACTIVE` (the enum is a const enum with no runtime value). */
+/** Cordis `FiberState` values used by Loader source qualification. */
+const FIBER_PENDING = 0
+const FIBER_LOADING = 1
 const FIBER_ACTIVE = 2
+const FIBER_FAILED = 3
+const FIBER_DISPOSED = 4
+const FIBER_UNLOADING = 5
 
 /**
  * Loader rows explicitly qualified as passive in the pinned stock Host
- * composition. The set is the rc.4 Host-only roster that was reviewed as
- * passive or as belonging to one of the observer's own source families;
- * `schedule` is qualified when a profile mounts the official Schedule row.
- * Any row not listed here (for example `terminal-controller`, a custom plugin
- * or a future official autonomous service) fails closed as an unqualified
- * Host source.
+ * composition, bound to BOTH their row id and the exact plugin identity.
+ * The map is the rc.4 Host-only roster that was reviewed as passive or as
+ * belonging to one of the observer's own source families; `schedule` is
+ * qualified when a profile mounts the official Schedule row. A row id reused
+ * with a different plugin, an unknown active row, a custom plugin or a future
+ * official autonomous service fails closed as an unqualified Host source.
  */
-const QUALIFIED_HOST_ROW_IDS: ReadonlySet<string> = new Set(`
-include plugin-manager timer hmr llm deepseek-llm-api-extensions session session-log-deepseek typert typert-loader typert-gateway remote-access session-title session-title-llm user-questions agent plugin-package-inventory-deepseek agent-default-model jobs llm-retry config-editor settings authorization deepseek-account credentials llm-pi-ai session-persistence-jsonl attachment-local session-query-sqlite working-directory tool-working-directory session-projection storage storage-json storage-domain session-projection-cache otel session-telemetry-otel subprocess sandbox sandbox-policy bash-sandbox approval permission shell-env fs-observation-policy skill commands command-feedback goal goal-round-driver token-meter subagent subagent-spawn-in-process subagent-fork-in-process ptc-runtime timeout-policy spill-local spill-policy session-checkpoint-policy image-offload repeat-tool-reminder web web-search-deepseek web-deepseek-api web-fetch-http mcp-resources tools system-prompt agent-loop fs-sandbox llm-deepseek llm-deepseek-account tui-startup pi-tui-performance-host workspace-files pi-tui-visual-tools webserver job-controller workspace file-reference-local agent-preset-registry subagent-model-selection-settings cordis-host-runner preset-standard preset-ptc preset-minimal preset-cordis split-host-connection split-host-api-remotes split-host-file-upload split-host-session-stats split-host-turn-outline split-host-session-controller split-host-settings-controller split-host-session-log-download split-host-pi-tui-runtime schedule`.trim().split(/\s+/u))
+const QUALIFIED_HOST_ROWS: ReadonlyMap<string, string> = new Map(
+  `include=cordis:include plugin-manager=@deepseek-ai/dsh-plugin-manager
+timer=@deepseek-ai/cordis-plugin-timer hmr=@deepseek-ai/dsh-hmr
+llm=@deepseek-ai/dsh-llm deepseek-llm-api-extensions=@deepseek-ai/dsh-deepseek-llm-api-extensions
+session=@deepseek-ai/dsh-session session-log-deepseek=@deepseek-ai/dsh-session-log-deepseek
+typert=@deepseek-ai/dsh-typert-registry typert-loader=@deepseek-ai/dsh-typert-loader
+typert-gateway=@deepseek-ai/dsh-api-gateway remote-access=@deepseek-ai/dsh-api-remote-access
+session-title=@deepseek-ai/dsh-session-title session-title-llm=@deepseek-ai/dsh-session-title-first-prompt-llm
+user-questions=@deepseek-ai/dsh-user-questions agent=@deepseek-ai/dsh-agent
+plugin-package-inventory-deepseek=@deepseek-ai/dsh-plugin-package-inventory-deepseek agent-default-model=@deepseek-ai/dsh-agent-default-model
+jobs=@deepseek-ai/dsh-jobs-local llm-retry=@deepseek-ai/dsh-llm-retry
+config-editor=@deepseek-ai/dsh-config-editor settings=@deepseek-ai/dsh-settings
+authorization=@deepseek-ai/dsh-authorization deepseek-account=@deepseek-ai/dsh-deepseek-account-platform
+credentials=@deepseek-ai/dsh-credentials-local llm-pi-ai=@deepseek-ai/dsh-llm-pi-ai
+session-persistence-jsonl=@deepseek-ai/dsh-session-persistence-jsonl attachment-local=@deepseek-ai/dsh-attachment-local
+session-query-sqlite=@deepseek-ai/dsh-session-query-sqlite working-directory=@deepseek-ai/dsh-working-directory
+tool-working-directory=@deepseek-ai/dsh-tool-working-directory session-projection=@deepseek-ai/dsh-session-projection
+storage=@deepseek-ai/dsh-storage storage-json=@deepseek-ai/dsh-storage-json
+storage-domain=@deepseek-ai/dsh-storage-domain session-projection-cache=@deepseek-ai/dsh-session-projection-cache
+otel=@deepseek-ai/dsh-otel session-telemetry-otel=@deepseek-ai/dsh-session-telemetry-otel
+subprocess=@deepseek-ai/dsh-subprocess-local sandbox=@deepseek-ai/dsh-sandbox-local
+sandbox-policy=@deepseek-ai/dsh-sandbox-policy bash-sandbox=@deepseek-ai/dsh-bash-sandbox
+approval=@deepseek-ai/dsh-user-approval permission=@deepseek-ai/dsh-permission-presets
+shell-env=@deepseek-ai/dsh-shell-env fs-observation-policy=@deepseek-ai/dsh-fs-observation-policy
+skill=@deepseek-ai/dsh-skill commands=@deepseek-ai/dsh-commands
+command-feedback=@deepseek-ai/dsh-command-feedback goal=@deepseek-ai/dsh-goal
+goal-round-driver=@deepseek-ai/dsh-goal-round-driver token-meter=@deepseek-ai/dsh-token-meter
+subagent=@deepseek-ai/dsh-subagent subagent-spawn-in-process=@deepseek-ai/dsh-subagent-spawn-in-process
+subagent-fork-in-process=@deepseek-ai/dsh-subagent-fork-in-process ptc-runtime=@deepseek-ai/dsh-ptc-runtime-node
+timeout-policy=@deepseek-ai/dsh-tool-call-timeout-policy spill-local=@deepseek-ai/dsh-spill-local
+spill-policy=@deepseek-ai/dsh-spill-policy session-checkpoint-policy=@deepseek-ai/dsh-session-checkpoint-policy
+image-offload=@deepseek-ai/dsh-compaction-image-offload repeat-tool-reminder=@deepseek-ai/dsh-repeat-tool-reminder
+web=@deepseek-ai/dsh-web web-search-deepseek=@deepseek-ai/dsh-web-search-deepseek
+web-deepseek-api=@deepseek-ai/dsh-web-deepseek-api web-fetch-http=@deepseek-ai/dsh-web-fetch-http
+mcp-resources=@deepseek-ai/dsh-mcp-resources tools=@deepseek-ai/dsh-tools
+system-prompt=@deepseek-ai/dsh-system-prompt agent-loop=@deepseek-ai/dsh-agent-loop
+fs-sandbox=@deepseek-ai/dsh-fs-sandbox llm-deepseek=@deepseek-ai/dsh-llm-deepseek-api-key
+llm-deepseek-account=@deepseek-ai/dsh-llm-deepseek-account tui-startup=@xmoon76/dsh-pi-tui/startup
+pi-tui-performance-host=@xmoon76/dsh-pi-tui/performance-host workspace-files=@deepseek-ai/dsh-api-workspace-files
+pi-tui-visual-tools=@xmoon76/dsh-pi-tui/visual-tools webserver=@deepseek-ai/dsh-host-webserver
+job-controller=@deepseek-ai/dsh-api-job-controller workspace=@deepseek-ai/dsh-workspace
+file-reference-local=@deepseek-ai/dsh-file-reference-local agent-preset-registry=@deepseek-ai/dsh-agent-preset-registry
+subagent-model-selection-settings=@deepseek-ai/dsh-tool-subagent/model-selection-settings cordis-host-runner=@deepseek-ai/dsh-cordis-host-runner
+preset-standard=@deepseek-ai/dsh-agent-preset preset-ptc=@deepseek-ai/dsh-agent-preset
+preset-minimal=@deepseek-ai/dsh-agent-preset preset-cordis=@deepseek-ai/dsh-agent-preset
+split-host-connection=@deepseek-ai/dsh-client-connection split-host-api-remotes=@deepseek-ai/dsh-api-remotes
+split-host-file-upload=@deepseek-ai/dsh-client-file-upload split-host-session-stats=@deepseek-ai/dsh-session-stats
+split-host-turn-outline=@deepseek-ai/dsh-session-turn-outline split-host-session-controller=@deepseek-ai/dsh-api-session-controller
+split-host-settings-controller=@deepseek-ai/dsh-api-settings-controller split-host-session-log-download=@deepseek-ai/dsh-session-log-export
+split-host-pi-tui-runtime=@xmoon76/dsh-pi-tui/host-runtime schedule=@deepseek-ai/dsh-schedule`.trim().split(/\s+/u).map(entry => {
+    const separator = entry.indexOf('=')
+    return [entry.slice(0, separator), entry.slice(separator + 1)] as const
+  }),
+)
 
 /** Reasons that positively establish current work or a future keepalive obligation. */
 const BLOCKING_REASONS: ReadonlySet<ActivityReason> = new Set([
@@ -520,14 +577,26 @@ export class HostActivityObserver implements HostLivenessObserver {
       return 'UNKNOWN'
     }
     for (const entry of entries) {
-      if (entry.fiber?.state !== FIBER_ACTIVE) continue
+      const state = entry.fiber?.state
+      // A row that never started, or has fully disposed, owns no resource.
+      if (state === undefined || state === FIBER_PENDING || state === FIBER_DISPOSED) continue
       const id = entry.options?.id ?? ''
       const name = entry.options?.name ?? ''
-      if (
-        QUALIFIED_HOST_ROW_IDS.has(id)
-        && (name.startsWith('@deepseek-ai/') || name.startsWith('@xmoon76/') || name.startsWith('cordis:'))
-      ) continue
-      reasons.add('unqualified-host-source')
+      const qualified = QUALIFIED_HOST_ROWS.get(id) === name
+      if (state === FIBER_FAILED) {
+        // A failed Loader row may still hold partially started resources.
+        reasons.add('source-unavailable')
+        return 'UNKNOWN'
+      }
+      if (state === FIBER_ACTIVE || state === FIBER_LOADING || state === FIBER_UNLOADING) {
+        // ACTIVE, LOADING and UNLOADING rows can own work; only an exact
+        // id+plugin qualification is allowed to be treated as passive.
+        if (qualified) continue
+        reasons.add('unqualified-host-source')
+        return 'UNKNOWN'
+      }
+      // Unknown future FiberState values fail closed.
+      reasons.add('source-unavailable')
       return 'UNKNOWN'
     }
     return 'IDLE'

@@ -549,6 +549,66 @@ test('a qualified stock Loader row is not treated as an unqualified source', asy
   }
 })
 
+test('an allowed row id bound to a different official plugin is unqualified', async () => {
+  const context = new Context()
+  provideAgents(context, [])
+  provideJobs(context, {})
+  provideGoals(context, {})
+  provideLoader(context, [
+    { options: { id: 'schedule', name: '@deepseek-ai/dsh-api-terminal-controller' }, fiber: { state: 2 } },
+  ])
+  const observer = new HostActivityObserver(context)
+  try {
+    const snapshot = await observer.snapshot()
+    assert.equal(snapshot.verdict, 'UNKNOWN')
+    assert.ok(snapshot.reasons.includes('unqualified-host-source'))
+    assert.equal(snapshot.sourceStates.other, 'UNKNOWN')
+  } finally {
+    observer.close()
+    await disposeContext(context)
+  }
+})
+
+test('an unqualified plugin in UNLOADING still reports UNKNOWN', async () => {
+  const context = new Context()
+  provideAgents(context, [])
+  provideJobs(context, {})
+  provideGoals(context, {})
+  provideLoader(context, [
+    { options: { id: 'custom-unloading', name: 'file:///tmp/custom-unloading.mjs' }, fiber: { state: 5 } },
+  ])
+  const observer = new HostActivityObserver(context)
+  try {
+    const snapshot = await observer.snapshot()
+    assert.equal(snapshot.verdict, 'UNKNOWN')
+    assert.ok(snapshot.reasons.includes('unqualified-host-source'))
+    assert.equal(snapshot.sourceStates.other, 'UNKNOWN')
+  } finally {
+    observer.close()
+    await disposeContext(context)
+  }
+})
+
+test('a FAILED Loader row is source-unavailable rather than idle', async () => {
+  const context = new Context()
+  provideAgents(context, [])
+  provideJobs(context, {})
+  provideGoals(context, {})
+  provideLoader(context, [
+    { options: { id: 'agent', name: '@deepseek-ai/dsh-agent' }, fiber: { state: 3 } },
+  ])
+  const observer = new HostActivityObserver(context)
+  try {
+    const snapshot = await observer.snapshot()
+    assert.equal(snapshot.verdict, 'UNKNOWN')
+    assert.ok(snapshot.reasons.includes('source-unavailable'))
+    assert.equal(snapshot.sourceStates.other, 'UNKNOWN')
+  } finally {
+    observer.close()
+    await disposeContext(context)
+  }
+})
+
 test('an active third-party Loader row is an unqualified Host source', async () => {
   const context = new Context()
   provideAgents(context, [])
