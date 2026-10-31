@@ -67,7 +67,7 @@ function shellQuote(value) {
 
 export function runSourceProfile({ root = ROOT, environment = process.env, command = 'profile', cwd = root } = {}) {
   if (command !== 'profile' && command !== 'dsh') fail(`unknown Source Mode command ${command}`)
-  assertIsolatedHome(environment)
+  assertIsolatedHome(environment, 'mise run source:profile')
   assertSourceReady(environment)
   assertBuildOutput(root)
   const envFile = join(root, '.dsh-dev-env')

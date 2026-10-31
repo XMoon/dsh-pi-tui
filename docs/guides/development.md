@@ -44,14 +44,25 @@ a one-off `DSH_MODE=npm` must not run a plain install in a tracked source
 worktree. Tool installation belongs to mise, workspace materialization to the
 task.
 
-`pnpm dev:doctor` remains the read-only diagnostic (`READY`, `STALE`, `MISSING`
-or `BROKEN`) and `pnpm dev:bootstrap` remains the Source Mode materializer. For
-every non-ready result, repair the CURRENT worktree with `pnpm dev:bootstrap`.
+`pnpm dev:doctor` and `pnpm dev:bootstrap` remain legacy aliases and diagnostics.
+The supported long-lived Source Mode flow uses the explicit source tasks:
+
+| Need | npm mode (main default) | Source Mode |
+|---|---|---|
+| Workspace install | `mise run setup` | `mise run source:bootstrap` |
+| Status | `mise run setup` / `pnpm dev:doctor` | `mise run source:doctor` |
+| Build | `mise run build` | `mise run build` |
+| Interactive profile | `mise run dev:profile` / `dev:dsh` | `mise run source:profile` / `source:dsh` |
+| CLI identity | mise-managed npm DSH CLI | this worktree's `node_modules/.bin/dsh` |
+
+The detailed source runbook below is the authority; the table is only an
+orientation summary. For every non-ready source result, run
+`mise run source:bootstrap`. The doctor is a read-only diagnostic (`READY`, `STALE`, `MISSING` or `BROKEN`).
 
 The bootstrap is idempotent: it does not remove `node_modules` or rewrite a
 tracked lockfile. The root `pnpm-workspace.yaml` uses
 `verifyDepsBeforeRun: warn`, so pnpm may report stale dependencies without
-repairing them; Source Mode repair remains owned by `dev:bootstrap`. Source-mode
+repairing them; Source Mode repair remains owned by `source:bootstrap`. Source-mode
 shells override the setting to `false` because their materialized DSH
 distribution intentionally differs from the tracked registry metadata.
 

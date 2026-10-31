@@ -395,8 +395,8 @@ mise run source:dsh
 
 `mise run setup` must not be used in a source worktree. `source:profile` and
 `source:dsh` use this worktree's `./node_modules/.bin/dsh` and the isolated
-`temp/source-dsh-home`; never use the mise npm CLI or the real `~/.dsh` for
-Source Mode. A plain `pnpm install` before bootstrap leaves the DSH workspace
+`temp/source-dsh-home`; never use a bare `dsh`, the mise npm CLI or the real
+`~/.dsh` for Source Mode. A plain `pnpm install` before bootstrap leaves the DSH workspace
 state incorrect (`workspace DSH incorrect` / `local state missing`); the
 bootstrap task performs the dependency install itself, then `source:doctor`
 must report `READY`. A plain `pnpm install` after bootstrap re-resolves

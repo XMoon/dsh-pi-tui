@@ -30,15 +30,24 @@ const MISE_LOCK = readFileSync(join(ROOT, 'mise.lock'), 'utf8')
 const packageJson = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
 const matrix = JSON.parse(readFileSync(join(ROOT, 'src', 'dsh-compat-matrix.json'), 'utf8'))
 
-function taskRun(task) {
+function taskBody(task) {
   const header = task.includes(':') ? `[tasks."${task}"]` : `[tasks.${task}]`
   const start = MISE_TOML.indexOf(`${header}\n`)
   assert.notEqual(start, -1, `mise.toml must declare ${header}`)
   const next = MISE_TOML.indexOf('\n[', start + header.length)
-  const body = MISE_TOML.slice(start, next === -1 ? undefined : next)
-  const match = /^run = "(.*)"$/mu.exec(body)
-  assert.notEqual(match, null, `${header} must declare a run command`)
+  return MISE_TOML.slice(start, next === -1 ? undefined : next)
+}
+
+function taskRun(task) {
+  const match = /^run = "(.*)"$/mu.exec(taskBody(task))
+  assert.notEqual(match, null, `${task} must declare a run command`)
   return match[1]
+}
+
+function taskEnv(task) {
+  const match = /^env = \{ (.*) \}$/mu.exec(taskBody(task))
+  if (match === null) return {}
+  return Object.fromEntries([...match[1].matchAll(/([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"([^"]*)"/gu)].map(([, key, value]) => [key, value]))
 }
 
 function allowBuildsFromMatrix() {
@@ -97,6 +106,12 @@ test('the mise task map mirrors the existing pnpm entry points without adding ga
   assert.equal(taskRun('source:bootstrap'), 'node scripts/dev-bootstrap.mjs --mode source')
   assert.equal(taskRun('source:profile'), 'node scripts/mise-source-mode.mjs profile')
   assert.equal(taskRun('source:dsh'), 'node scripts/mise-source-mode.mjs dsh')
+  for (const task of ['source:doctor', 'source:bootstrap', 'source:profile', 'source:dsh']) {
+    assert.equal(taskEnv(task).DSH_MODE, 'source', `${task} must select source mode explicitly`)
+  }
+  for (const task of ['source:profile', 'source:dsh']) {
+    assert.match(taskEnv(task).DSH_HOME, /\/temp\/source-dsh-home$/u, `${task} must use the isolated source home`)
+  }
   assert.doesNotMatch(MISE_TOML, /^\[tasks\."(smoke|gate):/mu, 'mise must not mirror smoke/gate lanes')
   assert.doesNotMatch(MISE_TOML, /^\[env\]/mu, 'mise must not set a global development environment')
 })
