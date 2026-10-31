@@ -2432,6 +2432,13 @@ test('E2-10c: a bottom-cropped image hit survives resize, a capturing overlay an
       - projection.fullscreenPaintSnapshot.scrollTop
     return { entryIndex, attachment, entryTop, screenRow, rows: attachment.bodyEnd - attachment.bodyStart }
   }
+  const transcriptWidth = (): number => (app as unknown as { transcriptRenderWidth(): number }).transcriptRenderWidth()
+  const liveImageBody = (): { rows: number; endCol: number; cropTopRows?: number } | undefined => {
+    const mounted = (app as unknown as {
+      mountedImageOccurrences(): { message: unknown; thumbnail?: { paintedImageBody(width: number): { rows: number; endCol: number; cropTopRows?: number } | undefined } }[]
+    }).mountedImageOccurrences()
+    return mounted.find(occurrence => occurrence.message === message)?.thumbnail?.paintedImageBody(transcriptWidth())
+  }
 
   // Put the image's top at the viewport row 10: the bottom four rows are
   // clipped, and the Screen must materialize a bottom-cropped DCS.
@@ -2445,6 +2452,7 @@ test('E2-10c: a bottom-cropped image hit survives resize, a capturing overlay an
   await until(() => readImage().rows > 0 && paintedRasters(terminal).length > 0, 'the bottom-cropped image body', 30_000)
   await terminal.waitForRender()
   const bottom = readImage()
+  assert.ok(liveImageBody() !== undefined, 'the committed image has a live pixel body before cover')
   assert.equal(bottom.attachment.bodyStart - bottom.attachment.infoRow - 1, 0, 'the bottom crop has no top offset')
   assert.ok(bottom.rows > 0 && bottom.rows < 12, `the image bottom is really clipped (${bottom.rows} of 12 rows)`)
   const bottomDcs = paintedRasters(terminal).at(-1)!
@@ -2497,13 +2505,13 @@ test('E2-10c: a bottom-cropped image hit survives resize, a capturing overlay an
     { readSnapshot: () => ({ configReadiness: 'ready' as const, rows: [], capturedAt: 0 }) },
     { aboutVersionFacts: { tui: 'test-bundle', dsh: undefined } },
   )
-  await until(() => readImage().rows === 0, 'the covered transcript to release its image body', 30_000)
+  await until(() => liveImageBody() === undefined, 'the covered image to release', 30_000)
   terminal.sendInput(`\x1b[<0;1;${overlaid.screenRow + overlaid.rows}M`)
   terminal.sendInput(`\x1b[<0;1;${overlaid.screenRow + overlaid.rows}m`)
   assert.equal(workspaceOpen(), true, 'the Settings screen still owns the workspace lease')
   handle.close()
   // The transcript returns when the covering Settings screen closes.
-  await until(() => readImage().rows > 0, 'the restored bottom-cropped body', 30_000)
+  await until(() => liveImageBody() !== undefined, 'the restored image body', 30_000)
   await terminal.waitForRender()
   const restored = readImage()
   const beforeRestoredViewer = paintedRasters(terminal).length

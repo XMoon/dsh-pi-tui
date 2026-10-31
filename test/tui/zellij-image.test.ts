@@ -257,6 +257,27 @@ test('auto strict WT with a filtered Kitty OK and no DA1 settles text', async (t
   assert.equal(h.terminal.text.includes('a=t,f=100'), false, 'no Kitty upload after the filtered OK')
 })
 
+test('auto strict WT freezes the compatibility filter before a late env change', (t) => {
+  const cli = createFakeZellijCli(t)
+  const environment = zellijSixelEnvironment(cli, {
+    ZELLIJ: '1',
+    WT_SESSION: 'wt-session',
+    TERM_PROGRAM: 'Windows_Terminal',
+    TERM: 'xterm-256color',
+  })
+  const terminal = new RecordingTerminal()
+  const graphics = createZellijNegotiatedGraphics(terminal, environment, () => {}, () => {})
+  assert.ok(graphics)
+  t.after(() => graphics.dispose())
+  graphics.terminal.start(() => {}, () => {})
+  // A plugin/debug mutation after startup must not re-enable the filtered OK.
+  environment.PI_IMAGE_PROTOCOL = 'kitty'
+  terminal.declareSixel(true)
+  terminal.sendInput(probeReply(terminal))
+  assert.equal(graphics.selectedProtocol(), 'sixel', 'the startup auto WT decision stays frozen')
+  assert.equal(terminal.text.includes('a=t,f=100'), false, 'no Kitty upload after the late mutation')
+})
+
 test('explicit kitty overrides only the WT auto filter and still needs a real OK', (t) => {
   const h = negotiatedFactory(t, createFakeZellijCli(t), {
     ZELLIJ: '1',
