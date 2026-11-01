@@ -31,6 +31,7 @@ import { svgDigest, svgHumanText, type SvgFact } from '../../src/domain/visual/s
 import { SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
 import { setAssistantVisualPresentation } from '../../src/domain/visual/presentation.ts'
 import { mountTspRenderer, type TspInputHandlers, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
 import {
   TSP_VISUAL_CHORDS,
   TSP_VISUAL_COPY_LABEL,
@@ -114,8 +115,8 @@ class ScriptedTern {
         setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(hello)}\u001b\\\u001b[?62;52;c`), 1)
         return
       }
-      for (const match of text.matchAll(/\u001b_tsp;b;id=([0-9a-f]+);(?:mime=([^;]+);)?/g)) {
-        this.events.push({ kind: 'blob', id: match[1] as string, mime: match[2] })
+      for (const blob of readTspBlobMessages(bytes)) {
+        this.events.push({ kind: 'blob', id: blob.id, mime: blob.mime })
       }
       for (const match of text.matchAll(/\u001b_tsp;s;([\s\S]*?)\u001b\\/g)) {
         const body = JSON.parse(match[1] as string) as { name?: string; css?: string }

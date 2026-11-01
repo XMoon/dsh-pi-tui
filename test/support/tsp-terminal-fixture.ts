@@ -16,6 +16,8 @@
 import { EventEmitter } from 'node:events'
 import { concatBytes, type Op, type TermInput, type TermOutput } from '@stencil-hq/tern'
 
+import { readTspBlobMessages } from './tsp-blob-wire.ts'
+
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
 
@@ -249,10 +251,9 @@ export function installTspPane(options: {
     for (const match of text.matchAll(/\u001b_tsp;o;([\s\S]*?)\u001b\\/g)) {
       openBodies.push(JSON.parse(match[1]!) as { readonly id: string; readonly mode?: string; readonly title?: string; readonly listen?: boolean })
     }
-    for (const match of text.matchAll(/\u001b_tsp;b;id=([0-9a-f]*);/g)) {
-      const id = match[1]!
-      blobList.push(id)
-      orderedWireEvents.push({ kind: 'blob', id })
+    for (const blob of readTspBlobMessages(bytes)) {
+      blobList.push(blob.id)
+      orderedWireEvents.push({ kind: 'blob', id: blob.id })
     }
     for (const match of text.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
       frames += 1
@@ -273,9 +274,11 @@ export function installTspPane(options: {
   const stdoutDescriptor = Object.getOwnPropertyDescriptor(process, 'stdout')
   Object.defineProperty(process, 'stdin', { configurable: true, get: () => input })
   Object.defineProperty(process, 'stdout', { configurable: true, get: () => output })
-  // The shipped SDK declines inside multiplexers (`TMUX`/`STY`/`ZELLIJ` are
-  // truthy even as "0") and under an explicit `TERN_TSP=0`. Clear them for the
-  // duration: the simulated pane IS the tty authority here.
+  // This fake scripted pane answers the DA1 probe, so it must stay on the SDK's
+  // non-tmux admission branch: clearing `TMUX` keeps the conditional tmux branch
+  // (which asks `tmux show-options @tern-tsp` and never sends DA1) out of the
+  // lane. `STY`/`ZELLIJ`/`TERN_TSP=0` are declined outright, and each is truthy
+  // even as "0" — the simulated pane IS the tty authority here.
   const declined = ['TMUX', 'STY', 'ZELLIJ', 'TERN_TSP', 'DSH_PI_TUI_RENDERER', 'DSH_PI_TUI_LOG'] as const
   const previousEnv = new Map<string, string | undefined>()
   for (const name of declined) {

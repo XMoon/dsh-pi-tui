@@ -24,6 +24,7 @@ import test from 'node:test'
 import { EventEmitter } from 'node:events'
 import { connect as sdkConnect, concatBytes } from '@stencil-hq/tern'
 import type { Op, Session, TermInput, TermOutput } from '@stencil-hq/tern'
+import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
 import { ImageLoader } from '../../src/client/media/image/loader.ts'
 import type { DraftImage } from '../../src/client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../src/domain/media/types.ts'
@@ -110,8 +111,8 @@ class ScriptedTern {
         setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(hello)}\u001b\\\u001b[?62;52;c`), 1)
         return
       }
-      for (const match of text.matchAll(/\u001b_tsp;b;id=([0-9a-f]*);/g)) {
-        this.events.push({ kind: 'blob', id: match[1]! })
+      for (const blob of readTspBlobMessages(bytes)) {
+        this.events.push({ kind: 'blob', id: blob.id })
       }
       // Stylesheet messages: `ESC_tsp;s;{"sf":…,"name":…,"css":…}ESC\\`.
       for (const match of text.matchAll(/\u001b_tsp;s;([\s\S]*?)\u001b\\/g)) {
