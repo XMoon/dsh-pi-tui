@@ -1301,7 +1301,8 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
    */
   const nativeItems = (slot: QuestionSlot): readonly Question[] => slot.questions.map((question, index) => {
     const choices = (question.options ?? []).map((option, at) => {
-      const { label, recommended } = parseRecommended(option.label)
+      const { label } = parseRecommended(option.label)
+      const recommended = isRecommended(question, option)
       const detail = option.description === undefined || option.description === ''
         ? undefined
         : sanitizeDisplayText(option.description)
@@ -1350,13 +1351,20 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   }
 
   /** The one-line keyboard cursor of a page the native form cannot highlight. */
+  /**
+   * The one-line keyboard cursor of the current page: which row the arrows are
+   * on, and the key that actually acts on it. The hint is the REAL binding — a
+   * multi page toggles with Space and continues with Enter, a single page
+   * selects with Enter — so a user who follows it can never be misled.
+   */
   const keyboardCursorLine = (slot: QuestionSlot): string => {
     const row = seatRows(slot)[slot.highlight]
     if (row === undefined) return 'Keyboard cursor: none · up/down move'
     const label = sanitizedPhysicalLine(row.label)
-    return row.kind === 'other'
-      ? `Keyboard cursor: [${slot.highlight + 1}] ${label} · Enter type`
-      : `Keyboard cursor: [${slot.highlight + 1}] ${label} · Enter select`
+    if (row.kind === 'other') return `Keyboard cursor: [${slot.highlight + 1}] ${label} · Enter type`
+    const multi = questionAt(slot, slot.tab)?.multiSelect === true
+    return `Keyboard cursor: [${slot.highlight + 1}] ${label} · `
+      + (multi ? 'space toggle · enter continue' : 'enter select')
   }
 
   /**
@@ -1376,6 +1384,19 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
       }
     }
     return { text: slot.text, cursor: slot.cursor, placeholder: 'Type something…' }
+  }
+
+  /**
+   * Whether one option of the CURRENT page is the recommended one.
+   *
+   * There is exactly ONE rule — the one `seatRows` already applies: an explicit
+   * `(recommended)` suffix OR the request's `intent.approve` label. Every
+   * projection (native steps, safe form, legacy rows) reads it here, so a
+   * projection can never silently redefine what "recommended" means.
+   */
+  const isRecommended = (question: TuiQuestion, option: { readonly label: string }): boolean => {
+    const { recommended } = parseRecommended(option.label)
+    return recommended || (question.intent?.approve !== undefined && option.label === question.intent.approve)
   }
 
   /** The native choice/steps page of the current question. */
@@ -1430,8 +1451,13 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
         ...options.map((option, index) => ui.col({ key: `${CHOICE_PREFIX}${index}`, gap: 'none' },
           ui.button({
             key: 'pick',
-            text: sanitizedPhysicalLine(parseRecommended(option.label).label),
-            keys: [String(index + 1)],
+            // The suffix is stripped for the label, so the mark is put back as
+            // its own non-misleading note — the answer value stays the raw label.
+            text: sanitizedPhysicalLine(parseRecommended(option.label).label
+              + (isRecommended(question, option) ? ' (recommended)' : '')),
+            // A digit only reaches 1–9 (see `digitOf`); a 10th option must not
+            // advertise a keycap that cannot act.
+            keys: index < 9 ? [String(index + 1)] : undefined,
             on: draftAt(slot, slot.tab)?.selected.has(option.label) === true,
             actions: { click: FORM_CHOICE_ACTION },
           }),
@@ -1448,6 +1474,12 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
       prompt: '> ',
       placeholder: 'Type your answer',
     }))
+    // The SAME cursor line the native steps page paints: a page whose choices
+    // are keyboard-operable must show which one the keys will hit, and here too
+    // a pointer pick hides it.
+    if (options.length > 0 && slot.keyboardCursorShown) {
+      body.push(ui.text({ key: 'keyboard-cursor', text: keyboardCursorLine(slot) }))
+    }
     body.push(ui.row({ key: rowKey, gap: 'md', justify: 'between' },
       ui.button({ key: 'back', text: 'Back', actions: { click: FORM_BACK_ACTION } }),
       ui.button({ key: 'next', text: 'Next', variant: 'primary', keys: ['⏎'], actions: { click: FORM_NEXT_ACTION } }),
