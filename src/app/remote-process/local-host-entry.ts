@@ -52,12 +52,14 @@ import { cleanupOwnedFiles, type LocalInstanceRecord } from './local-discovery.t
 
 /**
  * The Host-only overlay applied over the profile's own patch stack. It keeps
- * `tui-startup` mounted (the Host rows gated on `tuiStartup` need its parsed
- * facts) and disables only the three surface rows that must not exist in a
- * Host-only PID, then adds the two B1 rows plus the official Session-serving
- * rows and the ONE built-in PiTui Host Runtime row. The base Gateway,
- * webserver, credentials, agents, sessions and jobs are reused, never mounted
- * twice.
+ * `tui-startup` mounted for the consumers that genuinely need its parsed
+ * startup facts, but the Host execution rows never use that mutable provider
+ * as their Dispose gate: reloading `tui-startup` must not dispose
+ * already-accepted Host Session/Agent/Connection ownership. It disables only
+ * the three surface rows that must not exist in a Host-only PID, then adds the
+ * two B1 rows plus the official Session-serving rows and the ONE built-in
+ * PiTui Host Runtime row. The base Gateway, webserver, workspace-files,
+ * credentials, agents, sessions and jobs are reused, never mounted twice.
  */
 export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Host rows only.
 - id: tui-app
@@ -67,13 +69,20 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 - id: pi-tui-builtins
   disabled: true
 
+# Infrastructure lifetime is independent of the mutable tuiStartup provider.
+- id: webserver
+  inject: []
+- id: workspace-files
+  inject: []
+
 - insert:
     # One official Connection owner (loopback /connect + /api) behind the
-    # profile's existing tuiStartup-gated webserver. trustedHosts stays empty:
-    # loopback and the listener's own bind IP are the only accepted authorities.
+    # profile's existing webserver (whose Host-only lifetime is independent of
+    # tuiStartup). trustedHosts stays empty: loopback and the listener's own
+    # bind IP are the only accepted authorities.
     - id: split-host-connection
       name: '@deepseek-ai/dsh-client-connection'
-      inject: [tuiStartup, credentials, webServer]
+      inject: [credentials, webServer]
       config:
         trustedHosts: []
 
@@ -87,36 +96,36 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
     # never re-mounted by the built-in PiTui Host Runtime or the Client.
     - id: split-host-file-upload
       name: '@deepseek-ai/dsh-client-file-upload'
-      inject: [tuiStartup, agents, attachments, commands, connection]
+      inject: [agents, attachments, commands, connection]
 
     - id: split-host-session-stats
       name: '@deepseek-ai/dsh-session-stats'
-      inject: [tuiStartup, sessionProjections]
+      inject: [sessionProjections]
 
     - id: split-host-turn-outline
       name: '@deepseek-ai/dsh-session-turn-outline'
-      inject: [tuiStartup, sessionProjections]
+      inject: [sessionProjections]
 
     - id: split-host-session-controller
       name: '@deepseek-ai/dsh-api-session-controller'
-      inject: [tuiStartup, agentDefaultModel, agents, attachments, fileUploads, fs, llm, remoteAccess, sessions, sessionProjections, sessionQuery, typert, workspaceRegistry]
+      inject: [agentDefaultModel, agents, attachments, fileUploads, fs, llm, remoteAccess, sessions, sessionProjections, sessionQuery, typert, workspaceRegistry]
       config:
         nativeOpen: false
 
     - id: split-host-settings-controller
       name: '@deepseek-ai/dsh-api-settings-controller'
-      inject: [tuiStartup, typert]
+      inject: [typert]
 
     - id: split-host-session-log-download
       name: '@deepseek-ai/dsh-session-log-export'
-      inject: [tuiStartup, commands, connection]
+      inject: [commands, connection]
 
     # The package's ONE built-in Host Runtime row: the private contribution plus
     # the two private business services. Business features are NOT separate
     # Loader rows or package subpaths.
     - id: split-host-pi-tui-runtime
       name: '@xmoon76/dsh-pi-tui/host-runtime'
-      inject: [tuiStartup, typert, agents, fileReferences, workingDirectory]
+      inject: [typert, agents, fileReferences, workingDirectory]
 `
 
 interface OfficialDshModules {
