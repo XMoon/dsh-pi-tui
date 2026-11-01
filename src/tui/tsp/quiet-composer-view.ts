@@ -40,6 +40,8 @@ export interface QuietComposerPermissionOption {
   readonly id: string
   readonly label: string
   readonly selected: boolean
+  /** Keyboard-highlighted row (menu-local; independent of `selected`). */
+  readonly highlighted?: boolean
 }
 
 /** The fixed render-time input of the Quiet Composer view. */
@@ -86,7 +88,14 @@ export function quietComposerView(input: QuietComposerViewInput): Node {
           role: QUIET_COMPOSER_ROLES.permissionOption,
           title: option.label,
           aria: option.label,
-          ...(option.selected ? { attrs: { 'data-current': 'true' } as Readonly<Record<string, string>> } : {}),
+          ...(option.selected || option.highlighted === true
+            ? {
+                attrs: {
+                  ...(option.selected ? { 'data-current': 'true' } : {}),
+                  ...(option.highlighted === true ? { 'data-highlight': 'true' } : {}),
+                } as Readonly<Record<string, string>>,
+              }
+            : {}),
           onClick: () => input.onPermissionChoose(option.id, permission.menuEpoch),
         }, `${option.label}${option.selected ? ' ✓' : ''}`)),
       )
@@ -246,6 +255,9 @@ export const QUIET_COMPOSER_STYLES = `
   }
   [data-role='dsh.composer.permission-menu'] [data-role='dsh.composer.permission.option']:hover {
     background: rgb(from var(--t1) r g b / 4%);
+  }
+  [data-role='dsh.composer.permission-menu'] [data-role='dsh.composer.permission.option'][data-highlight='true'] {
+    background: rgb(from var(--t1) r g b / 7%);
   }
   [data-role='dsh.composer.permission-menu'] [data-role='dsh.composer.permission.option'][data-current='true'] {
     color: var(--t1);

@@ -552,6 +552,28 @@ test('composer actions: a narrow pane (cols < 72) keeps the short labels', async
   assert.ok(model.endsWith(' ▾') && model.includes('…'), `the narrow pane truncates the model: ${model}`)
   assert.ok(!model.includes('provider/very-long-deepseek-model-variant-with-reasoning'))
   assert.equal(label(buttons.get('composer-effort')), 'H ▾', 'the effort degrades to the identifiable H')
+  const effortLabels: Array<[string, string]> = [
+    ['low', 'L ▾'],
+    ['medium', 'M ▾'],
+    ['max', 'Max ▾'],
+    ['off', 'Off ▾'],
+  ]
+  for (const [value, expected] of effortLabels) {
+    await m.commitStatus(snapshotFor({
+      model: { displayName: 'luna-fast', id: 'x', reasoningEffort: value },
+    }))
+    await settle(120)
+    const next = composerButtons(pane)
+    assert.equal(label(next.get('composer-effort')), expected,
+      `the narrow effort ${value} keeps its real value identity`)
+  }
+  await m.commitStatus(snapshotFor({
+    model: { displayName: 'luna-fast', id: 'x', reasoningEffort: 'custom-effort' },
+  }))
+  await settle(120)
+  const unknown = label(composerButtons(pane).get('composer-effort'))
+  assert.notEqual(unknown, 'H ▾', 'an unknown effort is never relabelled as High')
+  assert.ok(unknown.endsWith(' ▾') && unknown.length <= 10, `the unknown effort stays bounded: ${unknown}`)
 })
 
 /* ----------------------------------------------------------- seat admission */
