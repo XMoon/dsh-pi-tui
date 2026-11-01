@@ -141,6 +141,22 @@ test('the protected ten-row dependency assertion rejects a reintroduced tuiStart
   )
 })
 
+test('the protected ten-row dependency assertion rejects a duplicated protected row', () => {
+  const insertEntry = OVERLAY_ENTRIES.find(entry => entry.insert !== undefined)
+  const insertRows = insertEntry?.insert
+  assert.ok(insertRows !== undefined, 'the overlay must insert the Host execution rows')
+  const protectedRow = insertRows.find(candidate => candidate.id === 'split-host-session-stats')
+  assert.ok(protectedRow !== undefined, 'the negative control needs one real protected row to duplicate')
+  const duplicated = OVERLAY_ENTRIES.map(entry => entry === insertEntry
+    ? { ...entry, insert: [...insertRows, protectedRow] }
+    : entry)
+  assert.throws(
+    () => assertHostExecutionInject(duplicated),
+    /the overlay must own exactly one "split-host-session-stats" row/u,
+    'the negative control must reject the duplicated row itself',
+  )
+})
+
 interface FixtureRow {
   readonly options: { readonly id: string; readonly name: string; readonly disabled?: boolean }
   readonly fiber?: { readonly state: number }
