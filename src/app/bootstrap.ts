@@ -633,6 +633,9 @@ export function applyRunnerWithRuntime(
      * the command itself uses; there is no second async owner here.
      */
     let openRegisteredModelPicker: ((entry: 'models' | 'effort') => void) | undefined
+    /** PR-F: the real `/model` picker business-entry availability (registration,
+     *  not just painted chrome); late-bound with the picker opener below. */
+    let modelPickerAvailableOwner: (() => boolean) | undefined
     const surface = createSurfaceRuntime<SessionEvent>({
       tuiVersion: bundleVersion(),
       notificationPresentation,
@@ -664,6 +667,7 @@ export function applyRunnerWithRuntime(
         if (openRegisteredModelPicker === undefined) throw new Error('model picker command not registered')
         openRegisteredModelPicker(entry)
       },
+      modelPickerAvailable: () => modelPickerAvailableOwner?.() ?? false,
     })
 
     // The live Agent is declared before the TUI-facing facade so every read
@@ -3676,6 +3680,7 @@ export function applyRunnerWithRuntime(
         sessionId: () => ownership.currentSessionId(),
       })
     }
+    modelPickerAvailableOwner = () => command.modelPickerAvailable()
     // PR4 §2.2: the DIRECT branch's Host command catalog arrives through the
     // pre-mount prefetch above; the REMOTE branch has no Direct agent to
     // prefetch, so a RESUMED session installs its authoritative Host catalog

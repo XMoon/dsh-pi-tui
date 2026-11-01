@@ -139,6 +139,9 @@ async function mountComposerActions(options: {
   readonly cols?: number
   readonly modelPickerKinds?: boolean
   readonly footerLayout?: unknown
+  /** The real `/model` UI entry availability (default true for this row
+   *  fixture; a Host-owned `/model` supplies false). */
+  readonly modelPickerAvailable?: boolean
 } = {}): Promise<Mounted> {
   const pane = installTspPane({
     // The composer row needs `el` + `styles`; the model picker needs its own
@@ -171,6 +174,7 @@ async function mountComposerActions(options: {
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
     openModelPicker: entry => { calls.modelEntries.push(entry) },
+    modelPickerAvailable: () => options.modelPickerAvailable ?? true,
   })
   let current = snapshotFor({})
   const reader: StatusSnapshotReader = { snapshot: () => current }
@@ -226,31 +230,43 @@ test('composer actions: the row mounts between the editor and the statusline on 
   if (statusAt >= 0) assert.ok(actionsAt < statusAt, 'the action row precedes the statusline')
 })
 
-test('footer Model/Reasoning visibility follows the actual native picker capability, not el+styles', async (t) => {
+test('footer Model/Reasoning visibility follows the actual native picker business entry, not painted chrome', async (t) => {
   const layout = { schemaVersion: 1, rows: [{ left: [{ id: 'model' }, { id: 'reasoning' }], right: [] }] }
+  const textOf = (pane: TspPane): string => dockNodes(pane).filter(node => node.k === 'seg').map(node => String(node.p.text ?? '')).join('|')
+  const status = snapshotFor({
+    model: { displayName: 'luna-fast', id: 'luna-fast', reasoningEffort: 'high' },
+  })
+
   const withoutPicker = await mountComposerActions({
     kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'],
     footerLayout: layout,
   })
   t.after(() => { void withoutPicker.dispose() })
-  await withoutPicker.commitStatus(snapshotFor({
-    model: { displayName: 'luna-fast', id: 'luna-fast', reasoningEffort: 'high' },
-  }))
-  const visible = dockNodes(withoutPicker.pane).filter(node => node.k === 'seg').map(node => String(node.p.text ?? '')).join('|')
+  await withoutPicker.commitStatus(status)
+  const visible = textOf(withoutPicker.pane)
   assert.ok(visible.includes('luna') && visible.includes('@high'),
     `without picker kinds the native model/reasoning placeholders fall back to visible: ${visible}`)
+
+  const hostOwned = await mountComposerActions({
+    kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el', 'picker', 'row', 'overlay'],
+    footerLayout: layout,
+    modelPickerAvailable: false,
+  })
+  t.after(() => { void hostOwned.dispose() })
+  await hostOwned.commitStatus(status)
+  const hostOwnedText = textOf(hostOwned.pane)
+  assert.ok(hostOwnedText.includes('luna') && hostOwnedText.includes('@high'),
+    `a Host-owned /model without a TUI opener falls back to the Footer status: ${hostOwnedText}`)
 
   const withPicker = await mountComposerActions({
     kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el', 'picker', 'row', 'overlay'],
     footerLayout: layout,
   })
   t.after(() => { void withPicker.dispose() })
-  await withPicker.commitStatus(snapshotFor({
-    model: { displayName: 'luna-fast', id: 'luna-fast', reasoningEffort: 'high' },
-  }))
-  const hidden = dockNodes(withPicker.pane).filter(node => node.k === 'seg').map(node => String(node.p.text ?? '')).join('|')
+  await withPicker.commitStatus(status)
+  const hidden = textOf(withPicker.pane)
   assert.ok(!hidden.includes('luna') && !hidden.includes('@high'),
-    `with picker kinds the default-On model/reasoning placements stay hidden: ${hidden}`)
+    `with the real picker entry the default-On model/reasoning placements stay hidden: ${hidden}`)
 })
 
 test('composer actions: a pane without el or styles mounts NO row and never a fake control', async (t) => {
