@@ -2364,6 +2364,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const COMPOSER_VALUE_WIDTH = 14
   const composerActionsSupported = (): boolean =>
     session.caps.features.includes('styles') && session.caps.kinds.includes('el')
+  /** The native Model picker the composer's Model/Effort buttons open needs
+   *  the picker surface itself (`picker`/`row`/`overlay`); `el`+`styles` alone
+   *  only proves the button can paint, not that its business entry can run. */
+  const modelPickerCapable = (): boolean =>
+    ['picker', 'row', 'overlay'].every(kind => session.caps.kinds.includes(kind))
 
   /**
    * PR-F: the LIVE composer capability facts the universal footer visibility
@@ -2375,8 +2380,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   const nativeFooterAffordances = (): TspFooterAffordances => ({
     permission: false,
-    model: composerActionsSupported(),
-    reasoning: composerActionsSupported(),
+    model: modelPickerCapable(),
+    reasoning: modelPickerCapable(),
   })
   if (composerActionsSupported()) {
     surface.stylesheet(COMPOSER_ACTIONS_SHEET, `
