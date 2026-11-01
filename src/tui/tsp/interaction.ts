@@ -26,7 +26,7 @@
 import { ui } from '@stencil-hq/tern'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
-import type { Key, Node } from '@stencil-hq/tern'
+import type { ActionEvent, ChangeEvent, Key, Node, Question, TspEvent } from '@stencil-hq/tern'
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import { cancellationError } from '../../runtime/process/tasks.ts'
 import type {
@@ -51,6 +51,48 @@ const LAYER_KEY = 'interaction-layer'
 const LAYER_ID = 'layer'
 /** The free-text `ui.input` key; its node id is `layer.modal-<epoch>.answer`. */
 const ANSWER_KEY = 'answer'
+/** The native Questions form's key, scoped by the page visit. */
+const QUESTIONS_KEY = 'qform'
+/** The native Tool approval's key. */
+const APPROVAL_TOOL_KEY = 'approval-tool'
+/** The Review button row's key, scoped by the page visit. */
+const REVIEW_ROW_KEY = 'review-actions'
+/** The safe (optionless/Masked) form's button row key, scoped by the visit. */
+const FORM_ROW_KEY = 'form-actions'
+/**
+ * The arguments block's bound: a FRACTION of its overlay body, so the native
+ * decision controls stay inside the visible card on a narrow or short pane
+ * while the FULL text stays readable by scrolling. It is a relation to the real
+ * container, never a measured pixel or line budget.
+ */
+const APPROVAL_ARGS_BOUNDS = { h: 0.5 } as const
+
+/**
+ * The one scoped role of the native Tool approval. The seat paints it and the
+ * renderer's ONE scoped stylesheet keys on it, so the two cannot drift: it is
+ * exported for exactly that reason, not as a general-purpose surface API.
+ */
+export const NATIVE_APPROVAL_ROLE = 'dsh-native-approval'
+/** The Native item token prefix: a stable INDEX, never a source question id. */
+const ITEM_PREFIX = 'q-'
+/** The Native choice token prefix: a stable INDEX, never a source label. */
+const CHOICE_PREFIX = 'o-'
+/** The pointer action names of the Review page's three real buttons. */
+const REVIEW_SUBMIT_ACTION = 'review-submit'
+const REVIEW_BACK_ACTION = 'review-back'
+const REVIEW_CANCEL_ACTION = 'review-cancel'
+/** The pointer action names of the safe form's three real buttons. */
+const FORM_NEXT_ACTION = 'form-next'
+const FORM_BACK_ACTION = 'form-back'
+const FORM_CANCEL_ACTION = 'form-cancel'
+/** The native page actions the client emits on the Questions form itself. */
+const PAGE_NEXT = 'next'
+const PAGE_BACK = 'back'
+const PAGE_SKIP = 'skip'
+const PAGE_SUBMIT = 'submit'
+/** The native approval actions that may carry a decision at all. */
+const TOOL_ALLOW = 'allow'
+const TOOL_DENY = 'deny'
 /** One bullet per grapheme cluster for a masked value's DISPLAY. */
 const MASK_GLYPH = '•'
 
@@ -70,13 +112,11 @@ export interface TspInteractionCallbacks {
 }
 
 /**
- * The event projection the seat gates: only the discriminant is read. The SDK
- * yields the full `TspEvent` union; a narrow structural read keeps the seat
- * free of transport DTOs.
+ * The event the seat gates: the official SDK union, narrowed by its `ev`
+ * discriminant inside `handleEvent`. The seat reads the transport's own field
+ * names (`sf`/`id`/`act`/`item`/`value`) and never a copy of them.
  */
-export interface TspInteractionEvent {
-  readonly ev: string
-}
+export type TspInteractionEvent = TspEvent
 
 /** What the seat needs from the owning renderer (session.ts). */
 export interface TspInteractionSeatOptions {
@@ -107,6 +147,29 @@ export interface TspInteractionSeatOptions {
    * seat, and it is idempotent (a promoted slot may run it again).
    */
   readonly beforeModalSeat?: () => void
+  /**
+   * The id of the ONE base surface this seat presents into. A native pointer
+   * event addressed at another surface (a temporary Screen, a foreign session)
+   * is a foreign object, never a near-miss: the seat checks `event.sf` against
+   * this id before it reads the event's node id at all.
+   */
+  readonly surfaceId: string
+  /**
+   * Whether THIS pane negotiated the exact kind set the native Questions form
+   * paints (`questions` + `button` + `input` + `overlay` + `col` + `text`).
+   * Derived once from the negotiated handshake at mount — never guessed from a
+   * version string or a window size. Without it the seat keeps the legacy text
+   * presentation for every question.
+   */
+  readonly nativeQuestions: boolean
+  /**
+   * Whether THIS pane can carry the native Tool approval (`tool` + `overlay` +
+   * `col` + `text` + `code` AND the `styles` feature). The feature half is not
+   * decoration: the approval is only honest once the pane can hide the client's
+   * Enter keycap, which the application deliberately refuses to treat as an
+   * approval. Without it the seat keeps the legacy text approval.
+   */
+  readonly nativeApproval: boolean
 }
 
 /** The seat's narrow surface for its owning renderer. */
@@ -220,6 +283,16 @@ function bare(key: Key): boolean {
   return key.ctrl !== true && key.alt !== true && key.meta !== true && key.shift !== true
 }
 
+/**
+ * A bare digit as a 0-based option index — the same numbers the native form
+ * prints on its choice keycaps. `Key.name` is a lowercase character, so `1`–`9`
+ * arrive as themselves and every other name parses to `NaN`.
+ */
+function digitOf(key: Key): number | undefined {
+  const value = Number.parseInt(key.name, 10)
+  return Number.isNaN(value) || value < 1 || value > 9 ? undefined : value - 1
+}
+
 /** One option label with its `(recommended)` presentation suffix split off. */
 function parseRecommended(label: string): { label: string; recommended: boolean } {
   const suffix = /\s*\(recommended\)\s*$/i
@@ -285,6 +358,22 @@ interface QuestionSlot {
   settled: boolean
   /** The current page: `0..questions.length-1`, or `questions.length` = review. */
   tab: number
+  /**
+   * The page/Review VISIT identity. Every move onto or off a page bumps it, so
+   * the native form and the Review buttons of a re-visited page get NEW node
+   * ids: a pointer event produced by a superseded visit can never be addressed
+   * at the current one. A draft mutation or a status repaint on the SAME page
+   * never bumps it (that would remount the native form and drop its own
+   * selection/focus). It scopes ids only — never a second page state.
+   */
+  visitEpoch: number
+  /**
+   * Whether this page has ASKED for the keyboard cursor (the first Arrow move).
+   * The native Questions form has no public highlight prop, so the keyboard
+   * path shows its own one-line cursor instead of faking a selection; a real
+   * choice or a page change hides it again. Presentation only.
+   */
+  keyboardCursorShown: boolean
   /** The highlighted row of the current question's option list. */
   highlight: number
   /** The question whose free-text editor is open (`undefined` = list/navigation). */
@@ -598,6 +687,40 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     slot.cursor = slot.text.length
   }
 
+  /**
+   * The ONE "apply a selection" entry: the keyboard row and the native pointer
+   * both arrive here, so there is exactly one answer semantic in the seat.
+   * `labels` is the COMPLETE selection the caller wants for the current
+   * question. A single-select choice replaces the selection AND clears a custom
+   * answer (`submitBatch` prefers a nonblank custom for single-select, so
+   * keeping it would submit old text instead of the choice just made) — and the
+   * LIVE editor buffer goes with it, or the replaced text would resurrect the
+   * moment this question's Other row is opened again. An empty multi-select set
+   * clears the choices but never fabricates a skip (the `syncTextDraft` rule).
+   */
+  const applySelection = (slot: QuestionSlot, labels: readonly string[]): void => {
+    const draft = draftAt(slot, slot.tab)
+    const question = questionAt(slot, slot.tab)
+    if (draft === undefined || question === undefined) return
+    if (question.multiSelect !== true && labels.length > 1) return
+    const before = answerKey(draft)
+    draft.selected.clear()
+    for (const label of labels) draft.selected.add(label)
+    if (draft.selected.size > 0) draft.skipped = false
+    if (question.multiSelect !== true && draft.selected.size > 0) {
+      draft.custom = ''
+      if (slot.textOwner === slot.tab) {
+        slot.text = ''
+        slot.cursor = 0
+      }
+    }
+    if (answerKey(draft) !== before) {
+      slot.keyboardCursorShown = false
+      notifyMutation(slot)
+    }
+  }
+
+
   /** The recommended row (intent.approve match, else a `(recommended)` suffix). */
   const seedHighlight = (slot: QuestionSlot): void => {
     const seat = seatRows(slot)
@@ -614,6 +737,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
 
   /** Synchronize the page-local mode after a page change (or at construction). */
   const syncQuestionState = (slot: QuestionSlot): void => {
+    slot.keyboardCursorShown = false
     if (optionless(slot)) {
       slot.editing = slot.tab
       seedText(slot)
@@ -623,13 +747,17 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     seedHighlight(slot)
   }
 
+  /** The ONE page move. Every entry (keyboard, native Next/Skip/Back/Submit)
+   *  goes through here, so a new page always gets a new native node id. */
   const advance = (slot: QuestionSlot): void => {
     slot.tab += 1
+    slot.visitEpoch += 1
     syncQuestionState(slot)
   }
 
   const moveBack = (slot: QuestionSlot): void => {
     slot.tab = Math.max(0, slot.tab - 1)
+    slot.visitEpoch += 1
     syncQuestionState(slot)
   }
 
@@ -644,8 +772,41 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
         draft.custom = ''
         draft.skipped = true
         notifyMutation(slot)
+        // `onAnswerMutation` is an external, reentrant callback: it can retire
+        // or replace this very request. Nothing below may then page a slot that
+        // is no longer the seat's own.
+        if (active !== slot || slot.settled) return
       }
     }
+    advance(slot)
+  }
+
+  /**
+   * An explicit Skip of the CURRENT question: its local answer is dropped (a
+   * question the user skipped must never carry an old choice into the final
+   * batch), the draft is marked skipped, and the page advances once. This is the
+   * native Skip button; the keyboard Right keeps {@link moveForward}'s
+   * answered-stays rule.
+   */
+  const skipCurrent = (slot: QuestionSlot): void => {
+    const draft = draftAt(slot, slot.tab)
+    if (draft !== undefined) {
+      const before = answerKey(draft)
+      draft.selected.clear()
+      draft.custom = ''
+      draft.skipped = true
+      if (slot.textOwner === slot.tab) {
+        slot.text = ''
+        slot.cursor = 0
+      }
+      if (answerKey(draft) !== before) notifyMutation(slot)
+      if (active !== slot || slot.settled) return
+    }
+    advance(slot)
+  }
+
+  /** Open the Review page (the one `tab === questions.length` state). */
+  const goReview = (slot: QuestionSlot): void => {
     advance(slot)
   }
 
@@ -724,37 +885,15 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
       enterEdit(slot)
       return
     }
-    const draft = draftAt(slot, slot.tab)
     const question = questionAt(slot, slot.tab)
-    if (draft === undefined || question === undefined || row.value === undefined) return
+    if (question === undefined || row.value === undefined) return
     if (question.multiSelect === true) {
       // Enter on a multi-select list is the continue/skip authority, never a
       // toggle (Space is the toggle).
-      if (!draftAnswered(draft)) {
-        const before = answerKey(draft)
-        draft.selected.clear()
-        draft.custom = ''
-        draft.skipped = true
-        if (answerKey(draft) !== before) notifyMutation(slot)
-      }
-      advance(slot)
+      moveForward(slot)
       return
     }
-    const before = answerKey(draft)
-    draft.selected.clear()
-    draft.selected.add(row.value)
-    // An ordinary single-select choice REPLACES a custom answer (submit prefers
-    // a nonblank custom for single-select, so keeping it would submit the OLD
-    // text instead of the option the user just chose) — and the LIVE editor
-    // buffer goes with it, or the replaced text would resurrect the moment this
-    // question's Other row is opened again.
-    draft.custom = ''
-    draft.skipped = false
-    if (slot.textOwner === slot.tab) {
-      slot.text = ''
-      slot.cursor = 0
-    }
-    if (answerKey(draft) !== before) notifyMutation(slot)
+    applySelection(slot, [row.value])
     advance(slot)
   }
 
@@ -769,11 +908,10 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     }
     const draft = draftAt(slot, slot.tab)
     if (draft === undefined || row.value === undefined) return
-    const before = answerKey(draft)
-    if (draft.selected.has(row.value)) draft.selected.delete(row.value)
-    else draft.selected.add(row.value)
-    draft.skipped = false
-    if (answerKey(draft) !== before) notifyMutation(slot)
+    const labels = [...draft.selected]
+    applySelection(slot, draft.selected.has(row.value)
+      ? labels.filter(label => label !== row.value)
+      : [...labels, row.value])
   }
 
   /** The final answer batch, normalized EXACTLY like `QuestionFlow.submit()`:
@@ -1012,11 +1150,13 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     const seat = seatRows(slot)
     if (key.name === 'up') {
       slot.highlight = Math.max(0, slot.highlight - 1)
+      slot.keyboardCursorShown = true
       options.render()
       return true
     }
     if (key.name === 'down') {
       slot.highlight = Math.min(seat.length - 1, slot.highlight + 1)
+      slot.keyboardCursorShown = true
       options.render()
       return true
     }
@@ -1040,8 +1180,29 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
       options.render()
       return true
     }
-    // Tab, Shift+Tab, digits and every other control key are consumed with no
-    // second shortcut vocabulary.
+    // A bare digit picks the option it numbers on the native form and STAYS on
+    // the page (the native keycaps are the same numbers).
+    const digit = digitOf(key)
+    if (digit !== undefined && bare(key)) {
+      const row = seat[digit]
+      if (row !== undefined && row.kind === 'option' && row.value !== undefined) {
+        const draft = draftAt(slot, slot.tab)
+        if (draft !== undefined) {
+          const multi = questionAt(slot, slot.tab)?.multiSelect === true
+          // A digit applies the SAME one selection entry as a click or Enter:
+          // a single-select choice, or one member of the multi-select set
+          // (which toggles, exactly like Space).
+          applySelection(slot, multi && draft.selected.has(row.value)
+            ? [...draft.selected].filter(label => label !== row.value)
+            : multi ? [...draft.selected, row.value] : [row.value])
+          slot.highlight = digit
+        }
+      }
+      options.render()
+      return true
+    }
+    // Tab, Shift+Tab and every other control key are consumed with no second
+    // shortcut vocabulary.
     return true
   }
 
@@ -1049,26 +1210,207 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
 
   const overlayKey = (): string => `modal-${modalEpoch}`
 
-  const approvalOverlay = (slot: ApprovalSlot): Node => {
-    // The tool identity is a ONE-line label: fold it so an embedded LF can never
-    // forge an extra approval row. The reason/args prose below stays multi-line.
-    const body: Node[] = [ui.text({ key: 'tool', text: sanitizedPhysicalLine(`tool: ${slot.request.toolName}`) })]
-    if (slot.request.reason !== undefined && slot.request.reason !== '') {
-      body.push(ui.text({ key: 'reason', text: sanitizeDisplayText(slot.request.reason) }))
-    }
-    if (slot.request.arguments !== undefined) {
-      body.push(ui.code({ key: 'args', text: sanitizeDisplayText(slot.request.arguments) }))
-    }
-    if (slot.request.danger === true) {
-      // The danger decision already happened upstream; the seat only presents it
-      // (never re-runs `dangerCommand`).
-      body.push(ui.text({ key: 'danger', text: 'Dangerous command', tone: 'error' }))
-    }
-    body.push(ui.text({ key: 'hint', text: 'y allow once · n reject · esc cancel' }))
-    return ui.overlay({ key: overlayKey(), modal: true, head: 'Approval required', anchor: 'center', size: 'md' }, ...body)
+  /** The wire id of one DIRECT child of the current modal overlay. The id is
+   *  the region name plus the keys the tree was really built with — the same
+   *  derivation the SDK performs — never a guessed path. */
+  const overlayId = (key: string): string => `${LAYER_ID}.${overlayKey()}.${key}`
+
+  /** The native Questions form's key/id for THIS page visit. The visit epoch is
+   *  what makes a superseded visit's node id unreachable. */
+  const questionsKey = (slot: QuestionSlot): string => `${QUESTIONS_KEY}-${slot.visitEpoch}`
+  const questionsId = (slot: QuestionSlot): string => overlayId(questionsKey(slot))
+
+  /** The SDK's `other` answer child of the native form: keyed `<item>.other`. */
+  const otherKey = (slot: QuestionSlot): string => `${ITEM_PREFIX}${slot.tab}.other`
+  const otherId = (slot: QuestionSlot): string => `${questionsId(slot)}.${otherKey(slot)}`
+
+  /** The Review row's key/id: scoped by the visit, so an earlier visit's
+   *  Submit button is a DIFFERENT node and can never commit again. */
+  const reviewRowKey = (slot: QuestionSlot): string => `${REVIEW_ROW_KEY}-${slot.visitEpoch}`
+  /** The safe form's button row, scoped by the visit for the same reason. */
+  const formRowKey = (slot: QuestionSlot): string => `${FORM_ROW_KEY}-${slot.visitEpoch}`
+
+  /** One button of the current Review row / safe-form row, by its real id. */
+  const rowButtonId = (rowKey: string, buttonKey: string): string => `${overlayId(rowKey)}.${buttonKey}`
+
+  /** Whether the CURRENT page is the native choice/steps presentation. */
+  const usesNativeSteps = (slot: QuestionSlot): boolean => {
+    if (!options.nativeQuestions || slot.tab >= slot.questions.length) return false
+    const question = slot.questions[slot.tab] as TuiQuestion
+    return question.masked !== true && (question.options?.length ?? 0) > 0
   }
 
-  const questionOverlay = (slot: QuestionSlot): Node => {
+  /** Whether the CURRENT page is the same-style safe form (a non-native pane
+   *  keeps the legacy text presentation instead: it has no `button` kind). */
+  const usesSafeForm = (slot: QuestionSlot): boolean => {
+    if (!options.nativeQuestions || slot.tab >= slot.questions.length) return false
+    const question = slot.questions[slot.tab] as TuiQuestion
+    return question.masked === true || optionless(slot)
+  }
+
+  /**
+   * The Native `items` projection: one entry per source question, IN SOURCE
+   * ORDER, addressed by a stable index token (`q-N` / `o-N`) so a duplicate
+   * option label or an odd source id can never collide with another answer.
+   * The mapping lives only here — there is no second dictionary — and the
+   * projection neither reads nor writes the Host. Labels keep the request's
+   * real text (nothing is shortened for a screenshot); `recommended` is a
+   * plain, non-misleading note on the real option. `required` is deliberately
+   * `false` for every question: this flow allows Skip, so the Native form must
+   * not invent a stronger business rule than the source request carries.
+   */
+  const nativeItems = (slot: QuestionSlot): readonly Question[] => slot.questions.map((question, index) => {
+    const choices = (question.options ?? []).map((option, at) => {
+      const { label, recommended } = parseRecommended(option.label)
+      const detail = option.description === undefined || option.description === ''
+        ? undefined
+        : sanitizeDisplayText(option.description)
+      return {
+        value: `${CHOICE_PREFIX}${at}`,
+        label: sanitizedPhysicalLine(label),
+        ...(recommended
+          ? { detail: detail === undefined ? 'Recommended' : `${detail} · Recommended` }
+          : detail === undefined ? {} : { detail }),
+      }
+    })
+    const plain = choices.length === 0 ? {} : { choices }
+    return {
+      id: `${ITEM_PREFIX}${index}`,
+      prompt: sanitizeDisplayText(question.question),
+      ...(question.detail === undefined || question.detail === '' ? {} : { description: sanitizeDisplayText(question.detail) }),
+      ...plain,
+      ...(question.multiSelect === true ? { multi: true } : {}),
+      ...(choices.length === 0 || question.masked === true ? {} : { other: { placeholder: 'Type something…' } }),
+      required: false,
+    }
+  })
+
+  /**
+   * The Native `answers` projection: a Render Props view of `slot.drafts`, and
+   * a SELECTION-ONLY one. A custom answer belongs to the controlled `other`
+   * input (two different semantics are never merged into one Native value), a
+   * skipped or unanswered question is simply absent, and a masked question is
+   * NEVER projected — its plaintext can therefore not reach `answers` at all.
+   * This is not a second answer store: every later decision re-derives from the
+   * drafts.
+   */
+  const nativeAnswers = (slot: QuestionSlot): Record<string, string | readonly string[]> => {
+    const answers: Record<string, string | readonly string[]> = {}
+    for (const [index, question] of slot.questions.entries()) {
+      if (question.masked === true) continue
+      const draft = slot.drafts[index] as SlotDraft
+      const picked: string[] = []
+      for (const [at, option] of (question.options ?? []).entries()) {
+        if (draft.selected.has(option.label)) picked.push(`${CHOICE_PREFIX}${at}`)
+      }
+      if (picked.length === 0) continue
+      answers[`${ITEM_PREFIX}${index}`] = question.multiSelect === true ? picked : (picked[0] as string)
+    }
+    return answers
+  }
+
+  /** The one-line keyboard cursor of a page the native form cannot highlight. */
+  const keyboardCursorLine = (slot: QuestionSlot): string => {
+    const row = seatRows(slot)[slot.highlight]
+    if (row === undefined) return 'Keyboard cursor: none · up/down move'
+    const label = sanitizedPhysicalLine(row.label)
+    return row.kind === 'other'
+      ? `Keyboard cursor: [${slot.highlight + 1}] ${label} · Enter type`
+      : `Keyboard cursor: [${slot.highlight + 1}] ${label} · Enter select`
+  }
+
+  /** The native choice/steps page of the current question. */
+  const nativeStepsOverlay = (slot: QuestionSlot): Node => {
+    const question = slot.questions[slot.tab] as TuiQuestion
+    const total = slot.questions.length
+    const body: Node[] = []
+    // The controller's status and the question's own heading are REAL facts of
+    // this request, so they go on a small first line of the SAME overlay rather
+    // than into a field the SDK does not have.
+    const statusText = slot.status?.text
+    if (statusText !== undefined && statusText !== '') body.push(ui.text({ key: 'status', text: sanitizedPhysicalLine(statusText) }))
+    if (question.header !== undefined) body.push(ui.text({ key: 'header', text: sanitizedPhysicalLine(question.header) }))
+    body.push(ui.questions({
+      key: questionsKey(slot),
+      variant: 'steps',
+      items: nativeItems(slot),
+      step: slot.tab,
+      answers: nativeAnswers(slot),
+      submit: 'Review answers',
+    }, ui.input({ key: otherKey(slot), text: slot.text, cursor: slot.cursor, placeholder: 'Type something…' })))
+    if (slot.keyboardCursorShown) body.push(ui.text({ key: 'keyboard-cursor', text: keyboardCursorLine(slot) }))
+    return ui.overlay({ key: overlayKey(), modal: true, head: `Question ${slot.tab + 1}/${total}`, anchor: 'center', size: 'lg' }, ...body)
+  }
+
+  /**
+   * The optionless / masked page: the same overlay style, but a real controlled
+   * input and REAL buttons — never a text line that pretends to be one. A
+   * masked value is projected as bullets ONLY (the input's own `secret` affordance
+   * would hand the plaintext to the client, so the seat keeps computing bullets).
+   */
+  const safeFormOverlay = (slot: QuestionSlot): Node => {
+    const question = slot.questions[slot.tab] as TuiQuestion
+    const total = slot.questions.length
+    const masked = question.masked === true
+    const rowKey = formRowKey(slot)
+    const body: Node[] = []
+    const statusText = slot.status?.text
+    if (statusText !== undefined && statusText !== '') body.push(ui.text({ key: 'status', text: sanitizedPhysicalLine(statusText) }))
+    if (question.header !== undefined) body.push(ui.text({ key: 'header', text: sanitizedPhysicalLine(question.header) }))
+    body.push(ui.text({ key: 'question', wrap: 'word', text: sanitizeDisplayText(question.question) }))
+    if (question.detail !== undefined) body.push(ui.text({ key: 'detail', wrap: 'word', text: sanitizeDisplayText(question.detail) }))
+    body.push(ui.input({
+      key: ANSWER_KEY,
+      text: masked ? maskedValue(slot.text) : slot.text,
+      cursor: masked ? graphemeCountBefore(slot.text, slot.cursor) : slot.cursor,
+      prompt: '> ',
+      placeholder: 'Type your answer',
+    }))
+    body.push(ui.row({ key: rowKey, gap: 'md', justify: 'between' },
+      ui.button({ key: 'back', text: 'Back', actions: { click: FORM_BACK_ACTION } }),
+      ui.button({ key: 'next', text: 'Next', variant: 'primary', keys: ['⏎'], actions: { click: FORM_NEXT_ACTION } }),
+      ui.button({ key: 'cancel', text: 'Cancel', actions: { click: FORM_CANCEL_ACTION } }),
+    ))
+    return ui.overlay({ key: overlayKey(), modal: true, head: `Question ${slot.tab + 1}/${total}`, anchor: 'center', size: 'lg' }, ...body)
+  }
+
+  /**
+   * The Review page (the ONE `tab === questions.length` state): the real
+   * question text with its real answer in source order, so the confirmation is
+   * readable rather than indexed. Its three buttons are the only pointer path to
+   * the original `submitBatch` / back / `cancelQuestion`.
+   */
+  const reviewOverlay = (slot: QuestionSlot): Node => {
+    const rowKey = reviewRowKey(slot)
+    // Three mutually exclusive buckets, so the summary line never leaves a
+    // question unaccounted for (an unanswered page is neither answered nor skipped).
+    const answered = slot.drafts.filter(draft => !draft.skipped && (draft.selected.size > 0 || draft.custom.trim() !== '')).length
+    const skipped = slot.drafts.filter(draft => draft.skipped).length
+    const unanswered = slot.drafts.length - answered - skipped
+    const body: Node[] = [
+      ui.text({
+        key: 'summary',
+        text: sanitizedPhysicalLine(`${slot.questions.length} question${slot.questions.length === 1 ? '' : 's'} · ${answered} answered · ${skipped} skipped`
+          + (unanswered === 0 ? '' : ` · ${unanswered} not answered`)),
+      }),
+    ]
+    for (const [index, question] of slot.questions.entries()) {
+      const draft = slot.drafts[index] as SlotDraft
+      body.push(ui.col({ key: `entry-${index}`, gap: 'none' },
+        ui.text({ key: 'prompt', wrap: 'word', text: sanitizeDisplayText(question.question) }),
+        ui.text({ key: 'answer', wrap: 'word', text: sanitizeDisplayText(answerSummary(question, draft)) }),
+      ))
+    }
+    body.push(ui.row({ key: rowKey, gap: 'md', justify: 'between' },
+      ui.button({ key: 'back', text: 'Back', actions: { click: REVIEW_BACK_ACTION } }),
+      ui.button({ key: 'submit', text: 'Submit answers', variant: 'primary', keys: ['⏎'], actions: { click: REVIEW_SUBMIT_ACTION } }),
+      ui.button({ key: 'cancel', text: 'Cancel', actions: { click: REVIEW_CANCEL_ACTION } }),
+    ))
+    return ui.overlay({ key: overlayKey(), modal: true, head: 'Review answers', anchor: 'center', size: 'lg' }, ...body)
+  }
+
+  /** The legacy text form, kept for a pane without the native interaction kinds. */
+  const legacyQuestionOverlay = (slot: QuestionSlot): Node => {
     const total = slot.questions.length
     const body: Node[] = []
     if (slot.tab >= total) {
@@ -1137,12 +1479,284 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     return ui.overlay({ key: overlayKey(), modal: true, head: `Question ${slot.tab + 1}/${total}`, anchor: 'center', size: 'md' }, ...body)
   }
 
+  /**
+   * The presentation this pane negotiated: Review, then the safe form for a
+   * masked/optionless page, then the native steps form — all as ordinary
+   * children of the ONE modal overlay, and all reading the same Slot. A pane
+   * without the native kinds keeps the legacy text form (a smaller fallback,
+   * not a second flow).
+   */
+  const questionOverlay = (slot: QuestionSlot): Node => {
+    if (!options.nativeQuestions) return legacyQuestionOverlay(slot)
+    if (slot.tab >= slot.questions.length) return reviewOverlay(slot)
+    if (usesNativeSteps(slot)) return nativeStepsOverlay(slot)
+    return safeFormOverlay(slot)
+  }
+
+  /** The native approval: the full tool facts FIRST, then the native control. */
+  const nativeApprovalOverlay = (slot: ApprovalSlot): Node => {
+    const request = slot.request
+    // The tool identity is a ONE-line label: fold it so an embedded LF can never
+    // forge an extra approval row. The reason/args prose stays multi-line.
+    const body: Node[] = [
+      ui.text({ key: 'tool-name', wrap: 'word', text: sanitizedPhysicalLine(`Tool: ${request.toolName}`) }),
+    ]
+    if (request.reason !== undefined && request.reason !== '') {
+      body.push(ui.text({ key: 'reason', wrap: 'word', text: sanitizeDisplayText(request.reason) }))
+    }
+    if (request.danger === true) {
+      // The danger decision already happened upstream; the seat only presents it
+      // (never re-runs `dangerCommand`).
+      body.push(ui.badge({ key: 'danger', tone: 'error', text: 'Dangerous command' }))
+    }
+    if (request.arguments !== undefined) {
+      // The full argument body stays COMPLETE and readable, but it is bounded to
+      // a fraction of the overlay's own body: a measured client run showed an
+      // unbounded code block pushes the native decision buttons below the
+      // visible card on a 400px-wide or short pane. A fraction is a relation to
+      // the real container, not a pixel or line budget.
+      body.push(ui.scroll({ key: 'args', variant: 'bar', max: APPROVAL_ARGS_BOUNDS },
+        ui.code({ key: 'body', wrap: true, text: sanitizeDisplayText(request.arguments) })))
+    }
+    // The native approval control comes LAST and carries NO body children: a
+    // client draws its buttons between the head and the body, so putting the
+    // arguments inside the tool would offer the decision before the evidence.
+    // `always:false` removes the long-lived grant this product cannot honour,
+    // and the Tool has NO SDK handler: its events fall through to the Session
+    // iterator, which is the one admission point.
+    body.push(ui.tool({
+      key: APPROVAL_TOOL_KEY,
+      role: NATIVE_APPROVAL_ROLE,
+      name: sanitizedPhysicalLine(request.toolName),
+      title: 'Approve tool call',
+      status: 'ask',
+      confirm: 'card',
+      frame: 'inline',
+      ask: { text: 'Allow this tool call?', allow: 'Allow once', deny: 'Reject', always: false },
+    }))
+    body.push(ui.text({ key: 'hint', text: 'Y allow once · N reject · Esc cancel' }))
+    return ui.overlay({ key: overlayKey(), modal: true, head: 'Approval required', anchor: 'center', size: 'lg' }, ...body)
+  }
+
+  /** The legacy text approval (a pane without the native approval capability). */
+  const legacyApprovalOverlay = (slot: ApprovalSlot): Node => {
+    // The tool identity is a ONE-line label: fold it so an embedded LF can never
+    // forge an extra approval row. The reason/args prose below stays multi-line.
+    const body: Node[] = [ui.text({ key: 'tool', text: sanitizedPhysicalLine(`tool: ${slot.request.toolName}`) })]
+    if (slot.request.reason !== undefined && slot.request.reason !== '') {
+      body.push(ui.text({ key: 'reason', text: sanitizeDisplayText(slot.request.reason) }))
+    }
+    if (slot.request.arguments !== undefined) {
+      body.push(ui.code({ key: 'args', text: sanitizeDisplayText(slot.request.arguments) }))
+    }
+    if (slot.request.danger === true) {
+      body.push(ui.text({ key: 'danger', text: 'Dangerous command', tone: 'error' }))
+    }
+    body.push(ui.text({ key: 'hint', text: 'y allow once · n reject · esc cancel' }))
+    return ui.overlay({ key: overlayKey(), modal: true, head: 'Approval required', anchor: 'center', size: 'md' }, ...body)
+  }
+
+  const approvalOverlay = (slot: ApprovalSlot): Node =>
+    options.nativeApproval ? nativeApprovalOverlay(slot) : legacyApprovalOverlay(slot)
+
   const listOverlay = (callbacks: TspInteractionCallbacks): Node => {
     const { rows, index } = listState(callbacks)
     const body: Node[] = rows.map((row, position) =>
       ui.text({ key: `continued-${position}`, text: sanitizeDisplayText(`${position === index ? '❯' : ' '} ${row.sessionId} · ${row.callId}`) }))
     body.push(ui.text({ key: 'hint', text: 'enter open · esc close' }))
     return ui.overlay({ key: overlayKey(), modal: true, head: 'Continued questions', anchor: 'center', size: 'md' }, ...body)
+  }
+
+  /**
+   * The Review page's three real buttons. The event must address the EXACT
+   * button node id of the CURRENT review visit — not a substring, not the
+   * overlay — so a button of an earlier visit can never submit again.
+   */
+  const reviewActionEvent = (slot: QuestionSlot, event: ActionEvent): boolean => {
+    if (event.id === rowButtonId(reviewRowKey(slot), 'submit') && event.act === REVIEW_SUBMIT_ACTION) {
+      submitBatch(slot)
+      return true
+    }
+    if (event.id === rowButtonId(reviewRowKey(slot), 'back') && event.act === REVIEW_BACK_ACTION) {
+      moveBack(slot)
+      options.render()
+      return true
+    }
+    if (event.id === rowButtonId(reviewRowKey(slot), 'cancel') && event.act === REVIEW_CANCEL_ACTION) {
+      cancelQuestion(slot)
+      return true
+    }
+    return false
+  }
+
+  /** The safe form's three buttons (Back / Next / Cancel), same exact-id rule. */
+  const formActionEvent = (slot: QuestionSlot, event: ActionEvent): boolean => {
+    if (event.id === rowButtonId(formRowKey(slot), 'next') && event.act === FORM_NEXT_ACTION) {
+      // A click on Next is exactly the keyboard commit for this page.
+      commitText(slot)
+      options.render()
+      return true
+    }
+    if (event.id === rowButtonId(formRowKey(slot), 'back') && event.act === FORM_BACK_ACTION) {
+      moveBack(slot)
+      options.render()
+      return true
+    }
+    if (event.id === rowButtonId(formRowKey(slot), 'cancel') && event.act === FORM_CANCEL_ACTION) {
+      cancelQuestion(slot)
+      return true
+    }
+    return false
+  }
+
+  /**
+   * A native choice `change`: admitted only for the CURRENT visit's form node,
+   * only for the CURRENT page's item token, and only with a value made of
+   * `o-N` tokens this question really offers. The client's JSON is treated as a
+   * claim to verify, never as authority: an out-of-range or malformed token is
+   * dropped instead of inventing an answer.
+   */
+  const nativeChoiceEvent = (slot: QuestionSlot, event: ChangeEvent): boolean => {
+    if (event.id !== questionsId(slot)) return false
+    if (event.item !== `${ITEM_PREFIX}${slot.tab}`) return false
+    const question = questionAt(slot, slot.tab)
+    if (question === undefined || question.masked === true) return false
+    const raw = event.value
+    const tokens = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : undefined
+    if (tokens === undefined) return false
+    if (question.multiSelect !== true && tokens.length !== 1) return false
+    const offered = question.options ?? []
+    const labels: string[] = []
+    for (const token of tokens) {
+      if (typeof token !== 'string' || !token.startsWith(CHOICE_PREFIX)) return false
+      const index = Number.parseInt(token.slice(CHOICE_PREFIX.length), 10)
+      const option = offered[index]
+      // The token must be BOTH in range and canonically spelled, so a payload
+      // like `o-01` or `o-` is a refusal, not a coerced answer.
+      if (option === undefined || `${CHOICE_PREFIX}${index}` !== token) return false
+      labels.push(option.label)
+    }
+    applySelection(slot, labels)
+    options.render()
+    return true
+  }
+
+  /**
+   * A native page action (`next` / `skip` / `back` / `submit`). The node id
+   * already pins the request AND the page visit; an `item` that names a
+   * different page is refused, and `submit` is honoured only on the last
+   * question — where it opens the Review page and NEVER settles.
+   */
+  const nativePageEvent = (slot: QuestionSlot, event: ActionEvent): boolean => {
+    if (event.id !== questionsId(slot)) return false
+    // The client emits `item` as the CURRENT question on every page action and
+    // NO item on the final submit (measured on the pinned client). The admission
+    // follows that shape exactly: a page action without its exact `q-N` is
+    // malformed and dropped, not applied to whichever page happens to be current.
+    if (event.act === PAGE_SUBMIT) {
+      if (event.item !== undefined) return false
+      if (slot.tab !== slot.questions.length - 1) return false
+      goReview(slot)
+      options.render()
+      return true
+    }
+    if (event.item !== `${ITEM_PREFIX}${slot.tab}`) return false
+    if (event.act === PAGE_NEXT) {
+      moveForward(slot)
+      options.render()
+      return true
+    }
+    if (event.act === PAGE_SKIP) {
+      skipCurrent(slot)
+      options.render()
+      return true
+    }
+    if (event.act === PAGE_BACK) {
+      moveBack(slot)
+      options.render()
+      return true
+    }
+    return false
+  }
+
+  /**
+   * A native Tool approval. ONLY the current approval Tool node's own
+   * `allow`/`deny` with NO scope value is a decision: `always`, a
+   * `session`/`always` value, another node's action, a settled slot, an aborted
+   * lifetime or a replaced request all fall through as nothing. The decision
+   * then runs the ORIGINAL settlement, exactly like the `y`/`n` keys.
+   */
+  const approvalEvent = (slot: ApprovalSlot, event: ActionEvent | ChangeEvent): boolean => {
+    if (event.ev !== 'action') return false
+    if (event.id !== overlayId(APPROVAL_TOOL_KEY)) return false
+    if (event.value !== undefined) return false
+    if (slot.signal?.aborted === true) return false
+    if (event.act === TOOL_ALLOW) {
+      settle(slot, () => slot.resolve('allowed-once'))
+      return true
+    }
+    if (event.act === TOOL_DENY) {
+      settle(slot, () => slot.resolve('rejected'))
+      return true
+    }
+    return false
+  }
+
+  /**
+   * Gate one pointer/native event of the active modal.
+   *
+   * `true` means the CALLER must re-assert the seat's own focus — the existing
+   * contract for a claim addressed at the (masked) composer underneath. A
+   * native action the seat applied already committed its own frame through
+   * `options.render()` (which applies focus), so it answers `false`; anything
+   * that is not an exact hit on the current form answers `false` too and is
+   * still swallowed by the modal-first branch, because a form that owns the
+   * keyboard owns the pane.
+   */
+  const handleEvent = (event: TspInteractionEvent): boolean => {
+    if (active === undefined && !listOpen) return false
+    const slot = active
+    // `sf` is absent on the events that address no surface at all (theme,
+    // motion); an event without this surface's id is foreign to the seat.
+    if (slot !== undefined && slot.settled !== true && slot.signal?.aborted !== true
+      && 'sf' in event && event.sf === options.surfaceId) {
+      if (slot.kind === 'approval') {
+        if ((event.ev === 'action' || event.ev === 'change') && approvalEvent(slot, event)) return false
+      } else if (slot.tab >= slot.questions.length) {
+        if (event.ev === 'action' && reviewActionEvent(slot, event)) return false
+      } else if (usesNativeSteps(slot)) {
+        if (event.ev === 'change') {
+          if (nativeChoiceEvent(slot, event)) return false
+          // A refused change (another item, a foreign payload) leaves the client
+          // showing a pick the seat does not hold. Re-commit the seat's own
+          // projection so the painted form and the authority cannot diverge.
+          options.render()
+          return false
+        }
+        if (event.ev === 'action' && nativePageEvent(slot, event)) return false
+        // A click that claims THIS page's own answer field is the pointer path
+        // into the same editor the keyboard opens; the SDK never becomes a
+        // second input owner (a keystroke still arrives as a key).
+        if (event.ev === 'focus' && event.id === otherId(slot)) {
+          enterEdit(slot)
+          options.render()
+          return true
+        }
+      } else if (usesSafeForm(slot)) {
+        if (event.ev === 'action' && formActionEvent(slot, event)) return false
+        if (event.ev === 'focus' && event.id === overlayId(ANSWER_KEY)) {
+          enterEdit(slot)
+          options.render()
+          return true
+        }
+      }
+    }
+    // The SDK has no modal input-capture concept: an event addressed at the
+    // underlying composer (a terminal focus claim, or a native edit/undo/send
+    // that B2 never advertised) must not take the seat, so the seat's own caret
+    // is re-asserted. Every other unmatched event is still swallowed by the
+    // modal-first branch and reaches no Model/Preset/Work/Visual business path.
+    return event.ev === 'focus' || event.ev === 'edit' || event.ev === 'undo' || event.ev === 'send'
   }
 
   const renderEmptyLayer = (): Node => ui.col({ key: LAYER_KEY })
@@ -1157,12 +1771,13 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   }
 
   const desiredFocusId = (): string | null => {
-    if (active !== undefined && active.kind === 'question' && active.editing === active.tab) {
-      // The input is a DIRECT child of the overlay, so the id derives from the
-      // two keys the tree was built with (never a guessed path).
-      return `${LAYER_ID}.${overlayKey()}.${ANSWER_KEY}`
-    }
-    return null
+    const slot = active
+    if (slot === undefined || slot.kind !== 'question') return null
+    if (slot.editing !== slot.tab || slot.tab >= slot.questions.length) return null
+    // Both branches are the ids the tree THIS render actually built: the native
+    // page's answer field is a child of the native form, the safe/legacy page's
+    // is a direct child of the overlay. Never a guessed path.
+    return usesNativeSteps(slot) ? otherId(slot) : overlayId(ANSWER_KEY)
   }
 
   // ── The renderer-facing presenter ──
@@ -1231,6 +1846,8 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
           detach: undefined,
           settled: false,
           tab: initial === undefined ? 0 : Math.min(Math.max(0, initial.tab), questions.length),
+          visitEpoch: 0,
+          keyboardCursorShown: false,
           highlight: 0,
           editing: undefined,
           textOwner: -1,
@@ -1296,14 +1913,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
       return handleListKey(key, callbacks)
     },
     openContinuedList,
-    handleEvent(event) {
-      if (active === undefined && !listOpen) return false
-      // The SDK has no modal input-capture concept: an event addressed at the
-      // underlying composer (a terminal focus claim, or a native edit/undo/send
-      // that B2 never advertised) must not take the seat. Anything else keeps
-      // its existing handling.
-      return event.ev === 'focus' || event.ev === 'edit' || event.ev === 'undo' || event.ev === 'send'
-    },
+    handleEvent,
     renderLayer,
     renderEmptyLayer,
     desiredFocusId,
