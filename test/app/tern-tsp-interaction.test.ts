@@ -2245,3 +2245,161 @@ test('RFL-003: a masked page WITH options opens on option navigation, not on tex
 function overlayIdOfAnswer(harness: Harness): string {
   return wireNodes(harness.pane).find(node => node.k === 'input' && node.id.endsWith('.answer'))?.id ?? 'none'
 }
+
+test('F5: a masked page with options shows the keyboard cursor and hides it on a pointer pick', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const single = harness.renderer.interaction.askQuestions(
+      [question({ id: 'kc1', question: 'Which?', masked: true, options: [{ label: 'a' }, { label: 'b' }] })],
+      undefined, recorder.status, false)
+    void single.catch(() => {})
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the masked page opened')
+    const cursor = () => modalNode(harness.pane, '.keyboard-cursor')?.p.text
+    assert.equal(cursor(), undefined, 'no cursor line before an arrow is pressed')
+    harness.pane.key('\x1b[B')   // down -> the second option
+    await waitFor(() => cursor() !== undefined, 'the safe form paints the keyboard cursor line')
+    assert.match(String(cursor()), /Keyboard cursor: \[2\] b · enter select/,
+      'and it names the row AND the single-select key')
+
+    // A pointer pick hides it again, on the safe form too.
+    const pick = wireNodes(harness.pane).find(node => node.k === 'button' && node.id.endsWith('.o-1.pick'))
+    assert.ok(pick !== undefined)
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: pick.id, act: 'form-choice' })
+    await waitFor(() => cursor() === undefined, 'a pointer pick hides the cursor line')
+    assert.equal(recorder.mutations, 1, 'and the pick is one real answer change')
+    harness.pane.key('\x1b')
+    await assert.rejects(single, /question flow cancelled/)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('F5: the cursor line names the MULTI-select keys (space toggle, enter continue)', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const multi = harness.renderer.interaction.askQuestions(
+      [question({ id: 'kc2', question: 'Which?', masked: true, multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] })],
+      undefined, recorder.status, false)
+    void multi.catch(() => {})
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the masked multi page opened')
+    harness.pane.key('\x1b[B')
+    await waitFor(() => modalNode(harness.pane, '.keyboard-cursor') !== undefined, 'the cursor line appeared')
+    assert.match(String(modalNode(harness.pane, '.keyboard-cursor')?.p.text),
+      /space toggle · enter continue/, 'the hint is the real multi-select binding, never "Enter select"')
+    // And the hint is right: Space toggles, Enter continues.
+    harness.pane.key(' ')
+    await waitFor(() => recorder.mutations === 1, 'Space toggled the highlighted option')
+    assert.deepEqual(recorder.drafts.at(-1)?.answers[0]?.selected, ['b'])
+    harness.pane.key('\r')
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await multi, [{ id: 'kc2', selected: ['b'] }])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('F6: a `(recommended)` suffix keeps its mark on the native form', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const suffix = harness.renderer.interaction.askQuestions(
+      [question({ id: 'rec1', question: 'Which?', options: [{ label: 'slow' }, { label: 'fast (recommended)' }] })],
+      undefined, undefined, false)
+    void suffix.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const choices = (nativeForm(harness.pane).p.items as Array<Record<string, unknown>>)[0]!.choices as Array<Record<string, unknown>>
+    assert.equal(choices[0]!.label, 'slow')
+    assert.equal(choices[1]!.label, 'fast', 'the suffix is stripped from the label')
+    assert.match(String(choices[1]!.detail ?? ''), /Recommended/, 'and the recommendation is stated')
+    harness.pane.key('\x1b')
+    await assert.rejects(suffix, /question flow cancelled/)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('F6: `intent.approve` recommends the same way the suffix does', async () => {
+  // A separate harness: one seat shows one request at a time, so a queued
+  // second ask would never be painted for the assertion to read.
+  const harness = await mountNativeHarness()
+  try {
+    const intent = harness.renderer.interaction.askQuestions(
+      [question({
+        id: 'rec2', question: 'Approve?', intent: { kind: 'approve', approve: 'yes' },
+        options: [{ label: 'no' }, { label: 'yes' }],
+      })], undefined, undefined, false)
+    void intent.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const choices = (nativeForm(harness.pane).p.items as Array<Record<string, unknown>>)[0]!.choices as Array<Record<string, unknown>>
+    assert.match(String(choices[1]!.detail ?? ''), /Recommended/,
+      '`intent.approve` marks the same way the suffix does')
+    assert.equal(String(choices[0]!.detail ?? ''), '', 'and only the recommended one carries the note')
+    harness.pane.key('\x1b')
+    await assert.rejects(intent, /question flow cancelled/)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('F6: the safe form restores the recommendation mark for a masked page', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const masked = harness.renderer.interaction.askQuestions(
+      [question({ id: 'rec3', question: 'Which?', masked: true, options: [{ label: 'plain' }, { label: 'best (recommended)' }] })],
+      undefined, undefined, false)
+    void masked.catch(() => {})
+    await waitFor(() => wireNodes(harness.pane).some(node => node.k === 'button' && node.id.endsWith('.o-1.pick')),
+      'the masked page painted its choices')
+    const labels = wireNodes(harness.pane).filter(node => node.k === 'button').map(node => String(node.p.text ?? ''))
+    assert.ok(labels.some(text => text.includes('best (recommended)')),
+      `the safe form restores the recommendation mark: ${labels.join(' / ')}`)
+    harness.pane.key('\x1b')
+    await assert.rejects(masked, /question flow cancelled/)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('F6: the recommended answer value is still the ORIGINAL label', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({ id: 'rec4', question: 'Which?', intent: { kind: 'approve', approve: 'ship (recommended)' }, options: [{ label: 'wait' }, { label: 'ship (recommended)' }] })],
+      undefined, undefined, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const form = nativeForm(harness.pane)
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: form.id, item: 'q-0', value: 'o-1' })
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'submit' })
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'rec4', selected: ['ship (recommended)'] }],
+      'the display projection never rewrites the answer value')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('P3: a 10th option advertises no keycap it cannot honour', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const options = Array.from({ length: 10 }, (_unused, index) => ({ label: `opt-${index}` }))
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({ id: 'ten', question: 'Which?', masked: true, options })], undefined, undefined, false)
+    void answers.catch(() => {})
+    await waitFor(() => wireNodes(harness.pane).filter(node => node.k === 'button').length === 13,
+      'all ten choices plus the three page controls are painted')
+    const buttons = wireNodes(harness.pane).filter(node => node.k === 'button' && node.id.includes('.o-'))
+    assert.equal(buttons.length, 10)
+    const keysOf = (index: number) => buttons.find(node => node.id.endsWith(`.o-${index}.pick`))?.p.keys
+    assert.deepEqual(keysOf(0), ['1'], 'the first nine carry their digit keycap')
+    assert.deepEqual(keysOf(8), ['9'])
+    assert.equal(keysOf(9), undefined, 'and the tenth advertises none, since no digit reaches it')
+    harness.pane.key('\x1b')
+    await assert.rejects(answers, /question flow cancelled/)
+  } finally {
+    await harness.dispose()
+  }
+})
