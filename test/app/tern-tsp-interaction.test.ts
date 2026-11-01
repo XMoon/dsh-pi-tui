@@ -1951,3 +1951,215 @@ test('a mixed native queue keeps FIFO, and Alt+Q still reads the parked rows ove
     await harness.dispose()
   }
 })
+
+test('REGRESSION: a masked answer never rides into the NEXT page’s native Other field', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const secret = 'cross-page-secret-77'
+    const questions = [
+      question({ id: 'x1', question: 'Token?', masked: true }),
+      question({ id: 'x2', question: 'Which target?', options: [{ label: 'a' }, { label: 'b' }] }),
+    ]
+    const answers = harness.renderer.interaction.askQuestions(questions, undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the masked page opened')
+    harness.pane.key(secret)
+    await waitFor(() => recorder.drafts.at(-1)?.answers[0]?.custom === secret, 'the masked draft holds the real value')
+    assert.equal(wireText(harness.pane).includes(secret), false, 'the masked page itself leaks nothing')
+    // Commit the masked answer: the flow moves to the NEXT page, which has
+    // options and therefore paints the native steps form with its OWN Other
+    // input. The live buffer is re-seeded per page (the regression this case
+    // pins), so the previous page's secret can never be painted here.
+    harness.pane.key('\r')
+    await nativeFormReady(harness.pane, 'the next page is the native steps form')
+    await waitForKeyDeliveryWindow()
+    assert.equal(wireText(harness.pane).includes(secret), false,
+      `the previous masked answer must never reach the next page's wire: ${wireText(harness.pane).slice(0, 200)}`)
+    const other = wireNodes(harness.pane).find(node => node.k === 'input' && node.id.endsWith('.other'))
+    assert.ok(other !== undefined, 'the native page paints its Other field')
+    assert.equal(String(other.p.text ?? ''), '', 'and it starts from THIS page’s own draft')
+    harness.pane.key('\x1b')
+    await assert.rejects(answers, /question flow cancelled/)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('REGRESSION: a restored draft containing a masked answer never reaches a later choice page', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const secret = 'restored-secret-91'
+    const questions = [
+      question({ id: 'r1', question: 'Token?', masked: true }),
+      question({ id: 'r2', question: 'Which target?', options: [{ label: 'a' }, { label: 'b' }] }),
+    ]
+    const status: TuiQuestionStatus = {
+      ...recorder.status,
+      initialDraft: {
+        tab: 0,
+        answers: [
+          { selected: [], custom: secret, skipped: false },
+          { selected: [], custom: '', skipped: false },
+        ],
+      },
+    }
+    const answers = harness.renderer.interaction.askQuestions(questions, undefined, status, false)
+    void answers.catch(() => {})
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the restored masked page opened')
+    assert.equal(wireText(harness.pane).includes(secret), false, 'the restored masked page leaks nothing')
+    assert.ok(wireText(harness.pane).includes('•••••••••••••••'), 'and it shows one bullet per grapheme')
+    // Commit the restored answer: the flow moves to the NEXT page (the native
+    // steps form). Enter is the masked page's commit, exactly as the keyboard
+    // contract says.
+    harness.pane.key('\r')
+    await nativeFormReady(harness.pane, 'the choice page opened')
+    await waitForKeyDeliveryWindow()
+    assert.equal(wireText(harness.pane).includes(secret), false,
+      'a restored masked draft must not ride into the next page’s wire')
+    harness.pane.key('\r')
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'r1', selected: [], custom: secret }, { id: 'r2', selected: ['a'] }],
+      'the authoritative answer still carries the real secret')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a masked page that ALSO carries options keeps them visible, operable and masked', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const secret = 'masked-with-options-33'
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({
+        id: 'mo',
+        question: 'API key (or pick a saved one)',
+        masked: true,
+        options: [{ label: 'vault', description: 'read from the vault' }, { label: 'env' }],
+      })], undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the masked page opened')
+    const texts = wireNodes(harness.pane).filter(node => node.k === 'button').map(node => String(node.p.text ?? ''))
+    assert.deepEqual(texts, ['vault', 'env', 'Back', 'Next', 'Cancel'],
+      `the choices are painted as real buttons next to the page controls: ${texts.join(',')}`)
+    assert.ok(wireText(harness.pane).includes('read from the vault'), 'the option description is not dropped')
+    // A pointer pick on an option lands in the same draft the keyboard writes.
+    const pick = wireNodes(harness.pane).find(node => node.k === 'button' && node.id.endsWith('.o-0.pick'))
+    assert.ok(pick !== undefined, 'the option button carries its own exact node id')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: pick.id, act: 'form-choice' })
+    await waitFor(() => recorder.mutations === 1, 'the pointer pick fired the real-answer hook once')
+    assert.deepEqual(recorder.drafts.at(-1)?.answers[0], { selected: ['vault'], custom: '', skipped: false },
+      'the option really landed in the seat draft')
+    // A button of another visit is inert.
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: pick.id.replace('form-choices-0', 'form-choices-9'), act: 'form-choice' })
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: pick.id, act: 'allow' })
+    await waitForKeyDeliveryWindow()
+    assert.equal(recorder.mutations, 1, 'a stale or mismatched option action changes nothing')
+    // The secret stays masked while the choice is visible. The page opens with
+    // the EDIT open (an optionless/masked page does), so the keystrokes are the
+    // input's; assert that first instead of assuming it.
+    await waitFor(() => lastOp(harness.ops(), 'focus')?.[1] === 'layer.modal-1.answer',
+      'the masked input owns the caret before typing')
+    harness.pane.key(secret)
+    await waitFor(() => recorder.drafts.at(-1)?.answers[0]?.custom === secret, 'the typed secret is held by the draft')
+    assert.equal(wireText(harness.pane).includes(secret), false, 'the masked text never reaches the wire')
+    // One bullet per GRAPHEME of the value the seat holds, exactly as the
+    // masked contract says. Read the FOLDED node: the SDK streams a long value
+    // through `text` append ops, so the raw wire is not one contiguous run.
+    const field = wireNodes(harness.pane).find(node => node.k === 'input' && node.id.endsWith('.answer'))
+    assert.ok(field !== undefined, 'the safe form paints its answer field')
+    const bullets = [...secret].length
+    assert.equal(String(field.p.text ?? ''), '•'.repeat(bullets), `one bullet per grapheme (${bullets} expected)`)
+    assert.equal(Number(field.p.cursor), bullets, 'and the caret counts graphemes too')
+    // Two-layer keyboard contract on the SAME page: the field owns the keys
+    // first (Esc leaves the edit and keeps the text), and only then do the digit
+    // bindings operate the option list the user can actually see.
+    harness.pane.key('\r')       // commit the secret -> Review (the page's commit)
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\x1b[D')   // Back to the page: the draft survives
+    await waitFor(() => wireNodes(harness.pane).some(node => node.k === 'button' && node.id.endsWith('.o-0.pick')),
+      'the page came back with its choices')
+    harness.pane.key('\x1b')     // leave the field's edit: the text stays
+    await waitFor(() => lastOp(harness.ops(), 'focus')?.[1] !== 'layer.modal-1.answer',
+      'Esc left the answer field')
+    const mutationsBeforeDigit = recorder.mutations
+    harness.pane.key('2')        // the digit now picks the visible option
+    await waitFor(() => recorder.mutations === mutationsBeforeDigit + 1, 'the digit picked the visible option')
+    assert.deepEqual(recorder.drafts.at(-1)?.answers[0]?.selected, ['env'],
+      'the keyboard chose the option the pane really shows')
+
+    // The existing single-select rule is unchanged: a nonblank custom answer
+    // REPLACES the choice (the same rule `submitBatch`/the PiTui flow apply), so
+    // the batch carries the secret only — never the stale pick it superseded.
+    harness.pane.key('\r')       // the digit pick commits -> Review
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    // The LAST real decision wins, and the secret that the choice superseded is
+    // gone from the batch exactly as the pre-existing single-select rule says
+    // (an empty custom is not reported at all).
+    const finalBatch = await answers
+    assert.deepEqual(finalBatch, [{ id: 'mo', selected: ['env'] }],
+      'the batch carries the visible option the keyboard picked through the original sink')
+    assert.equal(JSON.stringify(finalBatch).includes(secret), false,
+      'a superseded secret never rides into the batch')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a pane that lacks only the badge kind keeps the legacy approval (no half-shown danger marker)', async () => {
+  const harness = await mountHarness({
+    kinds: ['col', 'card', 'section', 'md', 'code', 'tool', 'questions', 'overlay', 'row', 'text', 'input', 'button', 'scroll'],
+    features: ['flow', 'styles'],
+  })
+  try {
+    const outcome = harness.renderer.interaction.showApprovalPrompt(
+      { toolName: 'bash', reason: 'deletes things', arguments: '{"cmd":"rm -rf"}', danger: true }, true)
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the approval opened')
+    assert.equal(toolNode(harness.pane), undefined, 'a pane without `badge` never gets the native ask control')
+    assert.equal(wireNodes(harness.pane).some(node => node.k === 'badge'), false, 'and no unnegotiated badge is sent')
+    assert.ok(wireText(harness.pane).includes('Dangerous command'), 'the legacy form still states the danger fact')
+    assert.equal(wireText(harness.pane).includes('dsh-native-approval-shortcuts'), false, 'and no sheet is installed')
+    harness.pane.key('n')
+    assert.equal(await outcome, 'rejected')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('clicking the ALREADY selected option still hides the keyboard cursor without a second mutation', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({ id: 'kc', question: 'Which?', options: [{ label: 'a' }, { label: 'b' }] })], undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const cursor = () => wireNodes(harness.pane).some(node => node.id.endsWith('.keyboard-cursor'))
+    harness.pane.key('\x1b[B')
+    await waitFor(() => cursor(), 'the Arrow press showed the keyboard cursor')
+    const form = nativeForm(harness.pane)
+    // Pick 'b' (the highlighted row) once: a real change, one hook.
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: form.id, item: 'q-0', value: 'o-1' })
+    await waitFor(() => recorder.mutations === 1, 'the first pick fired the hook')
+    await waitFor(() => !cursor(), 'the first pick hid the keyboard cursor')
+    // Show it again, then re-click the SAME option: no semantic change, but the
+    // pointer is clearly in use, so the cursor line must still go away.
+    harness.pane.key('\x1b[A')
+    await waitFor(() => cursor(), 'the Arrow press showed it again')
+    const form2 = nativeForm(harness.pane)
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: form2.id, item: 'q-0', value: 'o-1' })
+    await waitFor(() => !cursor(), 're-clicking the selected option hides the keyboard cursor')
+    await waitForKeyDeliveryWindow()
+    assert.equal(recorder.mutations, 1, 'and a no-op pick still fires no real-answer hook')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'submit' })
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'kc', selected: ['b'] }])
+  } finally {
+    await harness.dispose()
+  }
+})

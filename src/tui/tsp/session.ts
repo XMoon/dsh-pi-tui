@@ -506,7 +506,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * paints, read from the negotiated handshake — never from a version label or
    * a window size. Questions needs its own form kind plus the pieces of the
    * same-style safe/Review pages; the Tool approval additionally needs
-   * `styles`, because the pane must be able to hide the Enter keycap below
+   * `badge` is in the set because a dangerous request paints a danger marker,
+   * and an approval that cannot show one is not an honest approval. It also
+   * needs `styles`, because the pane must be able to hide the Enter keycap below
    * before the form may advertise a shortcut the application deliberately
    * refuses to honour. A pane that lacks either half keeps the text form; it
    * never gets a misleading affordance and never a fabricated result.
@@ -514,7 +516,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const nativeQuestionsCapable = (): boolean =>
     ['questions', 'button', 'input', 'overlay', 'col', 'row', 'text'].every(kind => session.caps.kinds.includes(kind))
   const nativeApprovalCapable = (): boolean =>
-    ['tool', 'overlay', 'col', 'text', 'code', 'scroll'].every(kind => session.caps.kinds.includes(kind))
+    ['tool', 'overlay', 'col', 'text', 'code', 'scroll', 'badge'].every(kind => session.caps.kinds.includes(kind))
     && session.caps.features.includes('styles')
   if (nativeApprovalCapable()) {
     // ONE scoped rule, installed once at surface init (never from `render()`):
