@@ -85,6 +85,10 @@ const REVIEW_CANCEL_ACTION = 'review-cancel'
 const FORM_NEXT_ACTION = 'form-next'
 const FORM_BACK_ACTION = 'form-back'
 const FORM_CANCEL_ACTION = 'form-cancel'
+/** The pointer action of one option of the safe form's own choice list. */
+const FORM_CHOICE_ACTION = 'form-choice'
+/** The safe form's choice-list row key, scoped by the visit like its button row. */
+const FORM_CHOICES_KEY = 'form-choices'
 /** The native page actions the client emits on the Questions form itself. */
 const PAGE_NEXT = 'next'
 const PAGE_BACK = 'back'
@@ -738,9 +742,23 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   /** Synchronize the page-local mode after a page change (or at construction). */
   const syncQuestionState = (slot: QuestionSlot): void => {
     slot.keyboardCursorShown = false
+    // The live buffer belongs to a PAGE: `seedText` re-seeds it whenever the
+    // page changes, so a page never paints (or commits) another page's text.
+    // This is load-bearing for a masked answer: without it the secret of the
+    // previous page would be handed to the next page's answer field, and the
+    // native form always paints that field.
+    seedText(slot)
+    // The SAFE form (masked / optionless) always shows its answer field, so the
+    // page opens with that field as the editor — otherwise the pane paints an
+    // input no keyboard can reach and the keys would go to the composer seat.
+    // A masked page WITH options is the same page: the field is still the
+    // primary answer surface, and its choices stay pointer targets.
+    if (options.nativeQuestions && safeFormPage(slot)) {
+      slot.editing = slot.tab
+      return
+    }
     if (optionless(slot)) {
       slot.editing = slot.tab
-      seedText(slot)
       return
     }
     slot.editing = undefined
@@ -1229,6 +1247,10 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   const reviewRowKey = (slot: QuestionSlot): string => `${REVIEW_ROW_KEY}-${slot.visitEpoch}`
   /** The safe form's button row, scoped by the visit for the same reason. */
   const formRowKey = (slot: QuestionSlot): string => `${FORM_ROW_KEY}-${slot.visitEpoch}`
+  /** The safe form's own choice list, and one option's pick button inside it. */
+  const formChoicesKey = (slot: QuestionSlot): string => `${FORM_CHOICES_KEY}-${slot.visitEpoch}`
+  const formChoiceId = (slot: QuestionSlot, index: number): string =>
+    `${overlayId(formChoicesKey(slot))}.${CHOICE_PREFIX}${index}.pick`
 
   /** One button of the current Review row / safe-form row, by its real id. */
   const rowButtonId = (rowKey: string, buttonKey: string): string => `${overlayId(rowKey)}.${buttonKey}`
@@ -1240,13 +1262,21 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     return question.masked !== true && (question.options?.length ?? 0) > 0
   }
 
-  /** Whether the CURRENT page is the same-style safe form (a non-native pane
-   *  keeps the legacy text presentation instead: it has no `button` kind). */
-  const usesSafeForm = (slot: QuestionSlot): boolean => {
-    if (!options.nativeQuestions || slot.tab >= slot.questions.length) return false
+  /**
+   * Whether the CURRENT page is a same-style "safe" page (masked or optionless).
+   * It is the ONE predicate behind both the presentation choice and the page's
+   * initial editing state, so an input can never be painted as unreachable.
+   */
+  const safeFormPage = (slot: QuestionSlot): boolean => {
+    if (slot.tab >= slot.questions.length) return false
     const question = slot.questions[slot.tab] as TuiQuestion
     return question.masked === true || optionless(slot)
   }
+
+  /** Whether the CURRENT page uses the same-style safe form (a non-native pane
+   *  keeps the legacy text presentation instead: it has no `button` kind). */
+  const usesSafeForm = (slot: QuestionSlot): boolean =>
+    options.nativeQuestions && safeFormPage(slot)
 
   /**
    * The Native `items` projection: one entry per source question, IN SOURCE
@@ -1319,6 +1349,25 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
       : `Keyboard cursor: [${slot.highlight + 1}] ${label} · Enter select`
   }
 
+  /**
+   * The native page's answer field, as the SDK's `<item>.other` child. A masked
+   * page sends BULLETS only (one per grapheme, with the caret counted the same
+   * way), so the plaintext can never reach the frame; a plain page sends its own
+   * text. Either way the value is the CURRENT page's buffer (see
+   * `syncQuestionState`), never another page's.
+   */
+  const nativeOtherField = (slot: QuestionSlot): { text: string; cursor: number; placeholder: string } => {
+    const question = questionAt(slot, slot.tab)
+    if (question?.masked === true) {
+      return {
+        text: maskedValue(slot.text),
+        cursor: graphemeCountBefore(slot.text, slot.cursor),
+        placeholder: 'Type your answer',
+      }
+    }
+    return { text: slot.text, cursor: slot.cursor, placeholder: 'Type something…' }
+  }
+
   /** The native choice/steps page of the current question. */
   const nativeStepsOverlay = (slot: QuestionSlot): Node => {
     const question = slot.questions[slot.tab] as TuiQuestion
@@ -1337,7 +1386,7 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
       step: slot.tab,
       answers: nativeAnswers(slot),
       submit: 'Review answers',
-    }, ui.input({ key: otherKey(slot), text: slot.text, cursor: slot.cursor, placeholder: 'Type something…' })))
+    }, ui.input({ key: otherKey(slot), ...nativeOtherField(slot) })))
     if (slot.keyboardCursorShown) body.push(ui.text({ key: 'keyboard-cursor', text: keyboardCursorLine(slot) }))
     return ui.overlay({ key: overlayKey(), modal: true, head: `Question ${slot.tab + 1}/${total}`, anchor: 'center', size: 'lg' }, ...body)
   }
@@ -1359,6 +1408,29 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     if (question.header !== undefined) body.push(ui.text({ key: 'header', text: sanitizedPhysicalLine(question.header) }))
     body.push(ui.text({ key: 'question', wrap: 'word', text: sanitizeDisplayText(question.question) }))
     if (question.detail !== undefined) body.push(ui.text({ key: 'detail', wrap: 'word', text: sanitizeDisplayText(question.detail) }))
+    // `masked` does not mean "no choices": a request may carry BOTH options and
+    // a secret free-text answer (the PiTui flow supports it). Those choices are
+    // painted here as REAL buttons, because a choice the user cannot see but can
+    // still hit with a key is not a choice. The selection still lands in the same
+    // `slot.drafts` through the same `applySelection` entry as every other path.
+    const seat = seatRows(slot)
+    const options = question.options ?? []
+    if (options.length > 0) {
+      body.push(ui.col({ key: formChoicesKey(slot), gap: 'xs' },
+        ...options.map((option, index) => ui.col({ key: `${CHOICE_PREFIX}${index}`, gap: 'none' },
+          ui.button({
+            key: 'pick',
+            text: sanitizedPhysicalLine(parseRecommended(option.label).label),
+            keys: [String(index + 1)],
+            on: draftAt(slot, slot.tab)?.selected.has(option.label) === true,
+            actions: { click: FORM_CHOICE_ACTION },
+          }),
+          ...(option.description === undefined || option.description === ''
+            ? []
+            : [ui.text({ key: 'detail', wrap: 'word', text: sanitizeDisplayText(option.description) })]),
+        )),
+      ))
+    }
     body.push(ui.input({
       key: ANSWER_KEY,
       text: masked ? maskedValue(slot.text) : slot.text,
@@ -1589,8 +1661,21 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     return false
   }
 
-  /** The safe form's three buttons (Back / Next / Cancel), same exact-id rule. */
+  /** The safe form's buttons AND its own option list: same exact-id rule. */
   const formActionEvent = (slot: QuestionSlot, event: ActionEvent): boolean => {
+    if (event.act === FORM_CHOICE_ACTION) {
+      const offered = questionAt(slot, slot.tab)?.options ?? []
+      for (const [index, option] of offered.entries()) {
+        if (event.id !== formChoiceId(slot, index)) continue
+        // A pointer pick hides the keyboard cursor whether or not the answer
+        // changed: the cursor line exists only while the keyboard is in use.
+        slot.keyboardCursorShown = false
+        applySelection(slot, [option.label])
+        options.render()
+        return true
+      }
+      return false
+    }
     if (event.id === rowButtonId(formRowKey(slot), 'next') && event.act === FORM_NEXT_ACTION) {
       // A click on Next is exactly the keyboard commit for this page.
       commitText(slot)
@@ -1636,6 +1721,10 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
       if (option === undefined || `${CHOICE_PREFIX}${index}` !== token) return false
       labels.push(option.label)
     }
+    // A pointer pick always answers the keyboard cursor line (the plan's rule),
+    // independently of whether the answer itself changed — `applySelection`
+    // still fires the controller hook only on a real semantic change.
+    slot.keyboardCursorShown = false
     applySelection(slot, labels)
     options.render()
     return true
