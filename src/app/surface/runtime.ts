@@ -261,6 +261,9 @@ export interface SurfaceInputBinding {
    * a fabricated picker request. PiTui supplies no consumer.
    */
   openModelPicker(entry: 'models' | 'effort'): void
+  /** Whether the native `/model` picker UI entry is actually installed
+   *  (registered, not Host-owned) — the real business-entry fact. */
+  modelPickerAvailable(): boolean
 }
 
 /**
@@ -595,6 +598,10 @@ export interface SurfaceRuntimeOptions {
    * async owner.
    */
   readonly openModelPicker?: (entry: 'models' | 'effort') => void
+  /** PR-C/PR-F: whether the native `/model` picker UI entry is actually
+   *  installed. The footer's model/reasoning fallback reads this fact, not
+   *  the presence of a painted composer button. */
+  readonly modelPickerAvailable?: () => boolean
 }
 
 /**
@@ -2673,6 +2680,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             if (open === undefined) throw new Error('the model picker command entry is not wired in this composition')
             open(entry)
           },
+          modelPickerAvailable: () => options.modelPickerAvailable?.() ?? false,
         }
         inputBindTarget = mounted
         return

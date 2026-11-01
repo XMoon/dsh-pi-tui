@@ -406,6 +406,10 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
    * panel's initial presentation focus.
    */
   openModelPicker(entry: 'models' | 'effort'): void
+  /** Whether the native `/model` picker UI entry is actually installed
+   *  (registered, not Host-owned). The footer affordance uses this real
+   *  business-entry fact, never the painted button alone. */
+  modelPickerAvailable(): boolean
   /** Request one catalog refresh through the coordinator. */
   requestCatalogRefresh(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
   /** Whether the catalog coordinator is registered yet. */
@@ -772,6 +776,8 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       deps.logError(`tui-runner: model picker UI entry failed: ${safeErrorMessage(error)}`)
     })
   }
+
+  const modelPickerAvailable = (): boolean => commandsRegistered && modelPickerOpener !== undefined
 
   const registerCommands = (initial?: InitialCommandCatalog): void => {
     if (commandsRegistered) return
@@ -1316,6 +1322,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     // owner would hand out the pre-registration default forever.
     withCommandDelivery: (delivery, run) => withCommandDelivery(delivery, run),
     openModelPicker,
+    modelPickerAvailable,
     requestCatalogRefresh,
     catalogRefreshAvailable,
     isSkillInvocation,

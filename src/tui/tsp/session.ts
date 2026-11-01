@@ -237,6 +237,10 @@ export interface TspInputHandlers {
    * re-checks its own seat admission before forwarding.
    */
   openModelPicker(entry: 'models' | 'effort'): void
+  /** Whether the native `/model` picker business entry is actually installed
+   *  (registered, not Host-owned). Optional only for old test fixtures; an
+   *  absent fact falls back to the negotiated-kind check below. */
+  modelPickerAvailable?(): boolean
 }
 
 /** The B1 binding: editor-local + lifecycle only (submissions are B2). */
@@ -2369,6 +2373,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  only proves the button can paint, not that its business entry can run. */
   const modelPickerCapable = (): boolean =>
     ['picker', 'row', 'overlay'].every(kind => session.caps.kinds.includes(kind))
+  /** The REAL `/model` business entry: negotiated picker kinds AND the
+   *  registered UI opener (a Host-owned `/model` leaves the name registered
+   *  but no TUI opener). */
+  const modelPickerAvailable = (): boolean =>
+    modelPickerCapable() && (boundHandlers?.modelPickerAvailable?.() ?? true)
 
   /**
    * PR-F: the LIVE composer capability facts the universal footer visibility
@@ -2380,8 +2389,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    */
   const nativeFooterAffordances = (): TspFooterAffordances => ({
     permission: false,
-    model: modelPickerCapable(),
-    reasoning: modelPickerCapable(),
+    model: modelPickerAvailable(),
+    reasoning: modelPickerAvailable(),
   })
   if (composerActionsSupported()) {
     surface.stylesheet(COMPOSER_ACTIONS_SHEET, `
