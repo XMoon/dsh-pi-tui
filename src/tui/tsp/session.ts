@@ -2377,7 +2377,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  registered UI opener (a Host-owned `/model` leaves the name registered
    *  but no TUI opener). */
   const modelPickerAvailable = (): boolean =>
-    modelPickerCapable() && (boundHandlers?.modelPickerAvailable?.() ?? true)
+    composerActionsSupported()
+    && modelPickerCapable()
+    && (boundHandlers?.modelPickerAvailable?.() ?? true)
 
   /**
    * PR-F: the LIVE composer capability facts the universal footer visibility
