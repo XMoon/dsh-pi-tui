@@ -27,6 +27,7 @@ import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts
 import { emptyStatusSnapshot, type StatusSnapshot, type StatusSnapshotReader } from '../../src/domain/status/types.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
 import { settle, waitUntil } from '../support/tsp-runner-harness.ts'
+import { resolveTspNativeFooterConfig } from '../../src/domain/footer/tsp-native-config.ts'
 import type { Op } from '@stencil-hq/tern'
 
 /** The wire node shape the helper folds (see tsp-picker-wire.ts). */
@@ -137,6 +138,7 @@ async function mountComposerActions(options: {
   readonly features?: readonly string[]
   readonly cols?: number
   readonly modelPickerKinds?: boolean
+  readonly footerLayout?: unknown
 } = {}): Promise<Mounted> {
   const pane = installTspPane({
     // The composer row needs `el` + `styles`; the model picker needs its own
@@ -173,6 +175,13 @@ async function mountComposerActions(options: {
   let current = snapshotFor({})
   const reader: StatusSnapshotReader = { snapshot: () => current }
   renderer.bindStatusReader(reader)
+  if (options.footerLayout !== undefined) {
+    renderer.bindNativeFooterConfig(resolveTspNativeFooterConfig({
+      doc: { footer: 'custom', footerLayout: options.footerLayout },
+      readiness: 'ready',
+      userItems: { items: [], invalidCount: 0 },
+    }))
+  }
   const notify = renderer.display.notify.bind(renderer.display)
   renderer.display.notify = (text, kind) => { calls.notifications.push(text); notify(text, kind) }
   const mounted: Mounted = {
@@ -215,6 +224,33 @@ test('composer actions: the row mounts between the editor and the statusline on 
   const statusAt = ids.findIndex(id => id.startsWith('dock.status-row'))
   assert.ok(editorAt >= 0 && actionsAt > editorAt, 'the action row follows the editor')
   if (statusAt >= 0) assert.ok(actionsAt < statusAt, 'the action row precedes the statusline')
+})
+
+test('footer Model/Reasoning visibility follows the actual native picker capability, not el+styles', async (t) => {
+  const layout = { schemaVersion: 1, rows: [{ left: [{ id: 'model' }, { id: 'reasoning' }], right: [] }] }
+  const withoutPicker = await mountComposerActions({
+    kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'],
+    footerLayout: layout,
+  })
+  t.after(() => { void withoutPicker.dispose() })
+  await withoutPicker.commitStatus(snapshotFor({
+    model: { displayName: 'luna-fast', id: 'luna-fast', reasoningEffort: 'high' },
+  }))
+  const visible = dockNodes(withoutPicker.pane).filter(node => node.k === 'seg').map(node => String(node.p.text ?? '')).join('|')
+  assert.ok(visible.includes('luna') && visible.includes('@high'),
+    `without picker kinds the native model/reasoning placeholders fall back to visible: ${visible}`)
+
+  const withPicker = await mountComposerActions({
+    kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el', 'picker', 'row', 'overlay'],
+    footerLayout: layout,
+  })
+  t.after(() => { void withPicker.dispose() })
+  await withPicker.commitStatus(snapshotFor({
+    model: { displayName: 'luna-fast', id: 'luna-fast', reasoningEffort: 'high' },
+  }))
+  const hidden = dockNodes(withPicker.pane).filter(node => node.k === 'seg').map(node => String(node.p.text ?? '')).join('|')
+  assert.ok(!hidden.includes('luna') && !hidden.includes('@high'),
+    `with picker kinds the default-On model/reasoning placements stay hidden: ${hidden}`)
 })
 
 test('composer actions: a pane without el or styles mounts NO row and never a fake control', async (t) => {
