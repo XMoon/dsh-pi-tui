@@ -36,6 +36,7 @@ import type { SurfaceEventRoutingSource } from '../../src/app/surface/event-rout
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
+import { wireNodes, type WireNode } from '../support/tsp-picker-wire.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import type { TuiQuestionStatus } from '../../src/app/surface/interaction-presenter.ts'
 type AskUserQuestionAnswer = { readonly answers: readonly { readonly id: string; readonly selected: string[]; readonly custom?: string }[] }
@@ -83,11 +84,17 @@ class ScriptedTern {
   readonly output = new FakeOutput()
   readonly frames: WireFrame[] = []
   readonly closeBodies: unknown[] = []
-  constructor() {
+  /** The advertised handshake: the base vocabulary, or the native modal kinds
+   *  on top of it when the case opts in (the seat's own capability gate reads
+   *  exactly this, so a case that wants the native branch must NEGOTIATE it). */
+  constructor(nativeInteraction = false) {
+    const hello = nativeInteraction
+      ? { ...HELLO, kinds: [...HELLO.kinds, 'questions', 'overlay', 'row', 'text', 'input', 'button', 'scroll'] }
+      : HELLO
     this.output.onWrite = bytes => {
       const text = DECODER.decode(bytes)
       if (text.includes('\u001b[c')) {
-        setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(HELLO)}\u001b\\\u001b[?62;52;c`), 1)
+        setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(hello)}\u001b\\\u001b[?62;52;c`), 1)
         return
       }
       for (const match of text.matchAll(/\u001b_tsp;x;([\s\S]*?)\u001b\\/g)) {
@@ -104,6 +111,9 @@ class ScriptedTern {
   }
   ops(): Op[] { return this.frames.flatMap(frame => frame.ops) }
   key(sequence: string): void { this.input.type(sequence) }
+  /** ONE pane event, written the way a real pane writes it (the SDK decodes
+   *  it; no test calls a node handler directly). */
+  event(value: unknown): void { this.input.type(`\u001b_tsp;e;${JSON.stringify({ sf: 's1', ...value as object })}\u001b\\`) }
 }
 
 // ── The fake Host SERVICE PLANE (the one external boundary) ─────────────────
@@ -283,8 +293,10 @@ async function mountRunnerHarness(options: {
   readonly projection?: { readonly active: unknown[]; readonly settled: unknown[] }
   /** The remaining wait the NEXT official claim reports (the Host deadline). */
   readonly remainingMs?: number
+  /** Negotiate the native modal kinds, so the seat takes its native branch. */
+  readonly nativeInteraction?: boolean
 } = {}): Promise<RunnerHarness> {
-  const tern = new ScriptedTern()
+  const tern = new ScriptedTern(options.nativeInteraction === true)
   const session: Session | null = await sdkConnect({
     env: {},
     input: tern.input,
@@ -1700,6 +1712,224 @@ test('an ordinary Session event keeps the Alt+Q list open (only a publication cl
     // The list still works: Enter reopens the parked call through the controller.
     harness.tern.key('\r')
     await waitFor(() => harness.tern.output.text().includes('Still parked?'), 'the reopened form')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── The native composite branch on the PRODUCTION chain ─────────────────────
+//
+// The chain above is re-walked with the pane NEGOTIATING the native modal kinds,
+// so the events that decide the outcome are the shapes a real client emits
+// (`change` with the question as `item`, `action{act:'next'}`, a Review button's
+// own pointer action, the Tool's `allow`/`deny`) delivered as raw tty bytes and
+// decoded by the shipped SDK. Nothing calls a seat method directly: Host request
+// → real controller → native form → SDK iterator → seat admission → the
+// ORIGINAL Host sink, in one continuous run. The Host SERVICE PLANE stays the
+// single stand-in boundary of the fixture manifest above.
+
+/** The live native Questions node (call it only after the frame was awaited). */
+function nativeFormOfNode(harness: RunnerHarness): WireNode {
+  const node = wireNodes({ frames: () => harness.tern.frames }).find(entry => entry.k === 'questions')
+  assert.ok(node !== undefined, 'the native questions form is on the wire')
+  return node
+}
+
+/** Await the native Questions node of the current frame. */
+async function nativeFormOf(harness: RunnerHarness, label = 'the native form reached the pane'): Promise<WireNode> {
+  await waitFor(() => wireNodes({ frames: () => harness.tern.frames }).some(node => node.k === 'questions'), label, 8_000)
+  return nativeFormOfNode(harness)
+}
+
+/** Await one Review/safe-row button by its key suffix. */
+async function buttonOf(harness: RunnerHarness, suffix: string): Promise<WireNode> {
+  await waitFor(() => wireNodes({ frames: () => harness.tern.frames })
+    .some(node => node.k === 'button' && node.id.endsWith(suffix)), `the ${suffix} button reached the pane`, 8_000)
+  const node = wireNodes({ frames: () => harness.tern.frames }).find(entry => entry.k === 'button' && entry.id.endsWith(suffix))
+  assert.ok(node !== undefined)
+  return node
+}
+
+/** The answers the seat currently projects back onto the native form. */
+function projectedAnswers(harness: RunnerHarness): Record<string, unknown> {
+  return (nativeFormOfNode(harness).p.answers ?? {}) as Record<string, unknown>
+}
+
+test('NATIVE chain: pointer events on the real form reach the official answer sink only through Review', async () => {
+  const harness = await mountRunnerHarness({ nativeInteraction: true })
+  try {
+    let outcome: unknown = 'PENDING'
+    const delivered = harness.questionRequest({
+      agent: { session: { id: SESSION_ID } },
+      wait: { callId: 'call-native-1' },
+      questions: [
+        { id: 'q1', question: 'Which target?', options: [{ label: 'alpha' }, { label: 'beta' }] },
+        { id: 'q2', question: 'Which checks?', options: [{ label: 'smoke' }, { label: 'metrics' }], multiSelect: true },
+      ],
+      signal: new AbortController().signal,
+    })
+    void delivered.then(value => { outcome = value }, error => { outcome = error })
+    const form = await nativeFormOf(harness)
+    assert.equal(wireNodes({ frames: () => harness.tern.frames }).some(node => node.id.endsWith('.row-0')), false,
+      'the native pane paints no legacy text option row')
+
+    harness.tern.event({ ev: 'change', id: form.id, item: 'q-0', value: 'o-1' })
+    await waitFor(() => projectedAnswers(harness)['q-0'] === 'o-1', 'the pick is projected back from the seat draft')
+    harness.tern.event({ ev: 'action', id: nativeFormOfNode(harness).id, act: 'next', item: 'q-0' })
+    await waitFor(() => nativeFormOfNode(harness).p.step === 1, 'the second page is current')
+    harness.tern.event({ ev: 'change', id: nativeFormOfNode(harness).id, item: 'q-1', value: ['o-1', 'o-0'] })
+    await waitFor(() => JSON.stringify(projectedAnswers(harness)['q-1']) === '["o-0","o-1"]',
+      'the multi pick is projected in SOURCE order, not the client order')
+    assert.equal(outcome, 'PENDING', 'no page action wrote to the Host')
+
+    harness.tern.event({ ev: 'action', id: nativeFormOfNode(harness).id, act: 'submit', value: { 'q-0': 'injected' } })
+    const submit = await buttonOf(harness, '.submit')
+    assert.equal(outcome, 'PENDING', 'the native Submit only opened Review and wrote nothing')
+    assert.equal(harness.tern.output.text().includes('injected'), false,
+      'the client submit payload never reaches the wire at all')
+    harness.tern.event({ ev: 'action', id: submit.id, act: 'review-submit' })
+    assert.deepEqual(await delivered,
+      { answers: [{ id: 'q1', selected: ['beta'] }, { id: 'q2', selected: ['smoke', 'metrics'] }] },
+      'the official producer observed the real labels in source option order')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('NATIVE chain: the real Tool approval settles the ORIGINAL approval sink', async () => {
+  const harness = await mountRunnerHarness({ nativeInteraction: true })
+  try {
+    let settled = 'PENDING'
+    const allowed = harness.approvalRequest({
+      toolName: 'bash',
+      reason: 'needs the shell',
+      arguments: '{"command":"ls -la"}',
+      signal: new AbortController().signal,
+    })
+    void allowed.then(value => { settled = String(value) })
+    await waitFor(() => wireNodes({ frames: () => harness.tern.frames }).some(node => node.k === 'tool'),
+      'the native approval reached the pane', 8_000)
+    const tool = wireNodes({ frames: () => harness.tern.frames }).find(node => node.k === 'tool')!
+    const overlayId = overlayAdds(harness.tern.ops()).at(-1)!
+    const children = wireNodes({ frames: () => harness.tern.frames })
+      .filter(node => node.id.startsWith(`${overlayId}.`) && !node.id.slice(overlayId.length + 1).includes('.'))
+      .map(node => String(node.id.split('.').at(-1)))
+    // This chain's `lookupCallArgs` stand-in supplies NO arguments, so the
+    // order proof here is the tool identity and the reason. The full
+    // arguments-before-decision order is proven on the wire where the seat
+    // really receives them (`tern-tsp-interaction.test.ts`).
+    assert.ok(children.indexOf('tool-name') < children.indexOf('approval-tool')
+      && children.indexOf('reason') < children.indexOf('approval-tool'),
+      `every tool fact is rendered BEFORE the approval control: ${children.join(',')}`)
+    // A smuggled long-lived grant decides nothing.
+    harness.tern.event({ ev: 'action', id: tool.id, act: 'allow', value: 'session' })
+    // A refused approval action has no positive sink by contract (the promise must
+    // stay pending), so this is a bounded negative-observation window covering the
+    // only continuation the seat could still schedule for it.
+    await new Promise(resolve => setTimeout(resolve, 200))  // reason: bounded negative-observation window
+    assert.equal(settled, 'PENDING', 'a scoped allow never approves')
+    harness.tern.event({ ev: 'action', id: tool.id, act: 'allow' })
+    assert.equal(await allowed, 'allowed-once', 'the official approval sink saw exactly the original outcome')
+
+    const denied = harness.approvalRequest({ toolName: 'write', reason: 'touches files', signal: new AbortController().signal })
+    await waitFor(() => wireNodes({ frames: () => harness.tern.frames }).some(node => node.k === 'tool' && node.id !== tool.id),
+      'the successor mounted its own tool node', 8_000)
+    const second = wireNodes({ frames: () => harness.tern.frames }).find(node => node.k === 'tool' && node.id !== tool.id)!
+    harness.tern.event({ ev: 'action', id: second.id, act: 'deny' })
+    assert.equal(await denied, 'rejected')
+    // A replay of the retired node id cannot settle a successor.
+    harness.tern.event({ ev: 'action', id: second.id, act: 'allow' })
+    // The retired request must settle NOTHING, so there is no authoritative signal
+    // to await; this window covers one input dispatch plus the seat's synchronous
+    // handling of it.
+    await new Promise(resolve => setTimeout(resolve, 150))  // reason: bounded negative-observation window
+    assert.equal(settled, 'allowed-once', 'the first approval never re-settles')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('NATIVE chain: a timed Host Question parks, reopens through Alt+Q and answers late on the native form', async () => {
+  const harness = await mountRunnerHarness({ nativeInteraction: true, remainingMs: 150 })
+  try {
+    const delivered = harness.questionRequest({
+      agent: { session: { id: SESSION_ID } },
+      wait: { callId: 'call-native-timed', timed: true },
+      questions: [{ id: 'q-t', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] }],
+      signal: new AbortController().signal,
+    }).then(value => value, (error: unknown) => error)
+    await nativeFormOf(harness, 'the timed native form opened')
+    assert.ok(harness.tern.output.text().includes('Foreground wait'), 'the real countdown status is rendered')
+    // The Host's own deadline window: `remainingMs` is 150, so this wait is the
+    // real timed wait elapsing before the Host records its timeout bookkeeping.
+    await new Promise(resolve => setTimeout(resolve, 1_200))  // reason: the Host deadline window elapsing
+    harness.plane.markContinued('call-native-timed', [{ id: 'q-t', question: 'Pick', options: [{ label: 'A' }, { label: 'B' }] }])
+    assert.equal((await delivered as { code?: string }).code, 'ASK_TIMED_OUT')
+    await waitFor(() => harness.tern.output.text().includes('The Agent continued'), 'the continued form was offered', 8_000)
+    const offered = await nativeFormOf(harness, 'the offered late-answer form is native')
+    // One pick, then park: the draft belongs to the controller, not the client.
+    harness.tern.event({ ev: 'change', id: offered.id, item: 'q-0', value: 'o-1' })
+    await waitFor(() => projectedAnswers(harness)['q-0'] === 'o-1', 'the pick registered on the native form')
+    harness.tern.key('\x1b')
+    await waitFor(() => harness.tern.output.text().includes('Continued questions: 1'), 'the parked count is in the dock', 8_000)
+    harness.tern.key('\x1b[113;3u')   // Alt+Q (CSI-u): the fresh authoritative list
+    await waitFor(() => harness.tern.output.text().includes('call-native-timed'), 'the parked row is listed', 8_000)
+    harness.tern.key('\r')            // reopen through the controller's own recheck
+    const restored = await nativeFormOf(harness, 'the reopened late-answer form is native again')
+    assert.deepEqual(projectedAnswers(harness)['q-0'], 'o-1',
+      'the reopened native form restored the parked draft instead of starting blank')
+    // The restored pick still needs the explicit Review commit.
+    harness.tern.event({ ev: 'action', id: restored.id, act: 'submit' })
+    const submit = await buttonOf(harness, '.submit')
+    harness.tern.event({ ev: 'action', id: submit.id, act: 'review-submit' })
+    await waitFor(() => harness.plane.continuedAnswers.length === 1, 'the official answerContinued sink got exactly one answer', 8_000)
+    assert.deepEqual(harness.plane.continuedAnswers[0]?.answer, { answers: [{ id: 'q-t', selected: ['B'] }] },
+      'the late answer carried the restored pick through the ORIGINAL sink')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('NATIVE chain: a background transcript repaint with a modal open never clears the modal layer', async () => {
+  const harness = await mountRunnerHarness({ nativeInteraction: true })
+  try {
+    const outcome = harness.approvalRequest({
+      toolName: 'bash', reason: 'needs the shell', signal: new AbortController().signal,
+    })
+    await waitFor(() => wireNodes({ frames: () => harness.tern.frames }).some(node => node.k === 'tool'),
+      'the native approval is presented', 8_000)
+    // The wire id of the open modal, and the SAME node's key as the submitted
+    // layer tree carries it (`layerRenders` records the view, the frames the ids).
+    const overlayId = overlayAdds(harness.tern.ops()).at(-1)!
+    const overlayKey = overlayId.split('.').at(-1)!
+    const rendersBefore = harness.layerRenders.length
+
+    // A real background paint (the transcript owner committing, not the seat):
+    // the ONE base render must keep submitting the seat's layer.
+    harness.surface.paintNow()
+    harness.surface.paintNow()
+    await waitFor(() => harness.layerRenders.length > rendersBefore, 'the background repaint committed')
+    const layers = harness.layerRenders.slice(rendersBefore)
+    assert.ok(layers.length >= 1)
+    for (const layer of layers) {
+      assert.ok(layer.includes(`\"key\":\"${overlayKey}\"`), `the repaint still submits the live modal layer: ${layer.slice(0, 160)}`)
+    }
+    assert.equal(harness.tern.ops().some(op => op[0] === 'del' && op[1] === overlayId), false,
+      'a repaint never unmounts the open modal')
+
+    // The approval is still answerable afterwards, on the same node.
+    const tool = wireNodes({ frames: () => harness.tern.frames }).find(node => node.k === 'tool')!
+    harness.tern.event({ ev: 'action', id: tool.id, act: 'allow' })
+    assert.equal(await outcome, 'allowed-once')
+
+    // The negative control that makes the loop above mean something: with the
+    // seat FREE, the SAME repaint path submits a layer with no modal in it.
+    await waitFor(() => harness.tern.ops().some(op => op[0] === 'del' && op[1] === overlayId), 'the modal unmounted')
+    const idleBefore = harness.layerRenders.length
+    harness.surface.paintNow()
+    await waitFor(() => harness.layerRenders.length > idleBefore, 'the idle repaint committed')
+    assert.equal(harness.layerRenders.slice(idleBefore).some(layer => layer.includes('\"modal-\"')), false,
+      'the same repaint path submits no modal once the seat is free')
   } finally {
     await harness.dispose()
   }
