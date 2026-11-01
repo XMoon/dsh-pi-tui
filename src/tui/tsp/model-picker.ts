@@ -493,7 +493,9 @@ export class TspModelPicker {
       return true
     }
     if (event.ev !== 'action') return false
-    const intent = actionIntent(target.panel, event.act, event.value)
+    // 0.2.0 ActionEvent.value is Json; this picker's strip protocol is string-only.
+    const value = typeof event.value === 'string' ? event.value : undefined
+    const intent = actionIntent(target.panel, event.act, value)
     if (intent !== undefined) this.act(target.panel, target.revision, intent)
     return true
   }
