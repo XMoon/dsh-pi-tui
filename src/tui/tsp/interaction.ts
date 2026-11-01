@@ -701,15 +701,23 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
    * LIVE editor buffer goes with it, or the replaced text would resurrect the
    * moment this question's Other row is opened again. An empty multi-select set
    * clears the choices but never fabricates a skip (the `syncTextDraft` rule).
+   * With `toggle` the labels are ADDED to / REMOVED from the existing set (the
+   * multi-select rule), so a second pick never discards the first one.
    */
-  const applySelection = (slot: QuestionSlot, labels: readonly string[]): void => {
+  const applySelection = (slot: QuestionSlot, labels: readonly string[], toggle = false): void => {
     const draft = draftAt(slot, slot.tab)
     const question = questionAt(slot, slot.tab)
     if (draft === undefined || question === undefined) return
     if (question.multiSelect !== true && labels.length > 1) return
+    if (toggle && question.multiSelect !== true) return
     const before = answerKey(draft)
-    draft.selected.clear()
-    for (const label of labels) draft.selected.add(label)
+    if (!toggle) draft.selected.clear()
+    for (const label of labels) {
+      if (toggle) {
+        if (draft.selected.has(label)) draft.selected.delete(label)
+        else draft.selected.add(label)
+      } else draft.selected.add(label)
+    }
     if (draft.selected.size > 0) draft.skipped = false
     if (question.multiSelect !== true && draft.selected.size > 0) {
       draft.custom = ''
@@ -753,10 +761,12 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     // input no keyboard can reach and the keys would go to the composer seat.
     // A masked page WITH options is the same page: the field is still the
     // primary answer surface, and its choices stay pointer targets.
-    if (options.nativeQuestions && safeFormPage(slot)) {
-      slot.editing = slot.tab
-      return
-    }
+    // The safe form PRESENTS the same way for masked and optionless pages, but
+    // the initial EDITING state is a different question: only a page with NO
+    // choices opens with the field, because there is nothing else to operate.
+    // A masked page that carries choices opens on option navigation (§2.4: a
+    // digit selects directly and stays on the page); its field is entered by
+    // clicking it, and Esc then leaves the edit — the two-layer contract.
     if (optionless(slot)) {
       slot.editing = slot.tab
       return
@@ -1664,13 +1674,18 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
   /** The safe form's buttons AND its own option list: same exact-id rule. */
   const formActionEvent = (slot: QuestionSlot, event: ActionEvent): boolean => {
     if (event.act === FORM_CHOICE_ACTION) {
-      const offered = questionAt(slot, slot.tab)?.options ?? []
+      const question = questionAt(slot, slot.tab)
+      const offered = question?.options ?? []
       for (const [index, option] of offered.entries()) {
         if (event.id !== formChoiceId(slot, index)) continue
         // A pointer pick hides the keyboard cursor whether or not the answer
         // changed: the cursor line exists only while the keyboard is in use.
         slot.keyboardCursorShown = false
-        applySelection(slot, [option.label])
+        // ONE selection entry, and the question's OWN selection rule with it:
+        // a multi page toggles (a second pick adds, a repeat removes), a single
+        // page replaces. `applySelection` still fires the controller hook only
+        // on a real semantic change.
+        applySelection(slot, [option.label], question?.multiSelect === true)
         options.render()
         return true
       }

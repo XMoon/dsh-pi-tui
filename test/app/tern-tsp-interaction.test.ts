@@ -2058,11 +2058,13 @@ test('a masked page that ALSO carries options keeps them visible, operable and m
     harness.pane.event({ ev: 'action', sf: BASE_SF, id: pick.id, act: 'allow' })
     await waitForKeyDeliveryWindow()
     assert.equal(recorder.mutations, 1, 'a stale or mismatched option action changes nothing')
-    // The secret stays masked while the choice is visible. The page opens with
-    // the EDIT open (an optionless/masked page does), so the keystrokes are the
-    // input's; assert that first instead of assuming it.
-    await waitFor(() => lastOp(harness.ops(), 'focus')?.[1] === 'layer.modal-1.answer',
-      'the masked input owns the caret before typing')
+    // The secret stays masked while the choice is visible. This page HAS choices,
+    // so it opens on option navigation (RFL-003): the field is entered by
+    // CLAIMING it, and only then do the keystrokes belong to it.
+    const fieldId = wireNodes(harness.pane).find(node => node.k === 'input' && node.id.endsWith('.answer'))?.id
+    assert.ok(fieldId !== undefined, 'the masked page paints its answer field')
+    harness.pane.event({ ev: 'focus', sf: BASE_SF, id: fieldId })
+    await waitFor(() => lastOp(harness.ops(), 'focus')?.[1] === fieldId, 'the masked input owns the caret before typing')
     harness.pane.key(secret)
     await waitFor(() => recorder.drafts.at(-1)?.answers[0]?.custom === secret, 'the typed secret is held by the draft')
     assert.equal(wireText(harness.pane).includes(secret), false, 'the masked text never reaches the wire')
@@ -2074,37 +2076,24 @@ test('a masked page that ALSO carries options keeps them visible, operable and m
     const bullets = [...secret].length
     assert.equal(String(field.p.text ?? ''), '•'.repeat(bullets), `one bullet per grapheme (${bullets} expected)`)
     assert.equal(Number(field.p.cursor), bullets, 'and the caret counts graphemes too')
-    // Two-layer keyboard contract on the SAME page: the field owns the keys
-    // first (Esc leaves the edit and keeps the text), and only then do the digit
-    // bindings operate the option list the user can actually see.
-    harness.pane.key('\r')       // commit the secret -> Review (the page's commit)
+    // Commit the secret and finish the flow (the digit/option keyboard contract
+    // on this page is pinned by the dedicated RFL-003 case below).
+    harness.pane.key('\r')
     await waitForButton(harness.pane, '.submit')
-    harness.pane.key('\x1b[D')   // Back to the page: the draft survives
-    await waitFor(() => wireNodes(harness.pane).some(node => node.k === 'button' && node.id.endsWith('.o-0.pick')),
-      'the page came back with its choices')
-    harness.pane.key('\x1b')     // leave the field's edit: the text stays
-    await waitFor(() => lastOp(harness.ops(), 'focus')?.[1] !== 'layer.modal-1.answer',
-      'Esc left the answer field')
-    const mutationsBeforeDigit = recorder.mutations
-    harness.pane.key('2')        // the digit now picks the visible option
-    await waitFor(() => recorder.mutations === mutationsBeforeDigit + 1, 'the digit picked the visible option')
-    assert.deepEqual(recorder.drafts.at(-1)?.answers[0]?.selected, ['env'],
-      'the keyboard chose the option the pane really shows')
-
     // The existing single-select rule is unchanged: a nonblank custom answer
     // REPLACES the choice (the same rule `submitBatch`/the PiTui flow apply), so
     // the batch carries the secret only — never the stale pick it superseded.
     harness.pane.key('\r')       // the digit pick commits -> Review
     await waitForButton(harness.pane, '.submit')
     harness.pane.key('\r')
-    // The LAST real decision wins, and the secret that the choice superseded is
-    // gone from the batch exactly as the pre-existing single-select rule says
-    // (an empty custom is not reported at all).
+    // The pre-existing single-select rule is unchanged: a nonblank custom answer
+    // REPLACES the choice, so the batch carries the real secret (never the
+    // superseded pick) through the original sink.
     const finalBatch = await answers
-    assert.deepEqual(finalBatch, [{ id: 'mo', selected: ['env'] }],
-      'the batch carries the visible option the keyboard picked through the original sink')
-    assert.equal(JSON.stringify(finalBatch).includes(secret), false,
-      'a superseded secret never rides into the batch')
+    assert.deepEqual(finalBatch, [{ id: 'mo', selected: [], custom: secret }],
+      'the batch carries the real secret through the original sink')
+    assert.equal(JSON.stringify(finalBatch).includes('vault'), false,
+      'a superseded pick never rides into the batch')
   } finally {
     await harness.dispose()
   }
@@ -2163,3 +2152,96 @@ test('clicking the ALREADY selected option still hides the keyboard cursor witho
     await harness.dispose()
   }
 })
+
+test('RFL-004: a masked multi-select page toggles its visible options on pointer, in source order', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({
+        id: 'mm',
+        question: 'Pick stored credentials (or type one)',
+        masked: true,
+        multiSelect: true,
+        options: [{ label: 'one' }, { label: 'two' }, { label: 'three' }],
+      })], undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the masked multi page opened')
+    const pickId = (index: number) => wireNodes(harness.pane)
+      .find(node => node.k === 'button' && node.id.endsWith(`.o-${index}.pick`))?.id
+    const third = pickId(2)
+    const first = pickId(0)
+    assert.ok(third !== undefined && first !== undefined, 'every visible option carries its own pick node')
+    // Click the LAST option first, then the FIRST: both must stay picked.
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: third, act: 'form-choice' })
+    await waitFor(() => recorder.mutations === 1, 'the first pick registered')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: first, act: 'form-choice' })
+    await waitFor(() => recorder.mutations === 2, 'the second pick registered')
+    // The draft is in SELECTION order; the authoritative batch (asserted below)
+    // is the one that must come back in source option order.
+    assert.deepEqual([...(recorder.drafts.at(-1)?.answers[0]?.selected ?? [])].sort(), ['one', 'three'],
+      'a multi pointer pick ADDS to the set and keeps the previous picks')
+    // Clicking a picked option again removes only that one.
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: third, act: 'form-choice' })
+    await waitFor(() => recorder.mutations === 3, 'the toggle-off registered')
+    assert.deepEqual(recorder.drafts.at(-1)?.answers[0]?.selected, ['one'],
+      're-clicking a picked option toggles it off and keeps the rest')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: pickId(2)!, act: 'form-choice' })
+    await waitFor(() => recorder.drafts.at(-1)?.answers[0]?.selected?.length === 2, 'picked again')
+    // To Review and commit: the batch keeps SOURCE option order.
+    const nextButton = wireNodes(harness.pane).find(node => node.k === 'button' && node.id.endsWith('.next'))
+    assert.ok(nextButton !== undefined, 'the masked page paints its Next button')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nextButton.id, act: 'form-next' })
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'mm', selected: ['one', 'three'] }],
+      'the batch carries both picks in source option order')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('RFL-003: a masked page WITH options opens on option navigation, not on text editing', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({
+        id: 'nav',
+        question: 'API key (or pick a stored one)',
+        masked: true,
+        options: [{ label: 'vault' }, { label: 'env' }],
+      })], undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the masked page opened')
+    // §2.4: on an option page a digit selects DIRECTLY and stays on the page.
+    // It must not be typed into the masked field, and the page must not open
+    // with the field holding the hardware caret.
+    assert.notEqual(lastOp(harness.ops(), 'focus')?.[1], overlayIdOfAnswer(harness),
+      'the masked page with options does not open with the field focused')
+    harness.pane.key('2')
+    await waitFor(() => recorder.mutations === 1, 'the digit picked a visible option')
+    assert.deepEqual(recorder.drafts.at(-1)?.answers[0], { selected: ['env'], custom: '', skipped: false },
+      'the digit selected the option, and no text was typed')
+    // The click on the real input IS the way into the field, and then Esc is the
+    // first of the two layers (it leaves the edit and keeps the text).
+    const field = wireNodes(harness.pane).find(node => node.k === 'input' && node.id.endsWith('.answer'))
+    assert.ok(field !== undefined, 'the field is painted')
+    harness.pane.event({ ev: 'focus', sf: BASE_SF, id: field.id })
+    await waitFor(() => lastOp(harness.ops(), 'focus')?.[1] === field.id, 'the click put the caret in the field')
+    harness.pane.key('ab')
+    await waitFor(() => recorder.drafts.at(-1)?.answers[0]?.custom === 'ab', 'the keystrokes reached the field')
+    harness.pane.key('\x1b')
+    await waitFor(() => lastOp(harness.ops(), 'focus')?.[1] !== field.id, 'Esc left the edit')
+    assert.equal(recorder.drafts.at(-1)?.answers[0]?.custom, 'ab', 'and the text survived it')
+    harness.pane.key('\x1b')
+    await assert.rejects(answers, /question flow cancelled/)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+/** The answer field's wire id on the current overlay. */
+function overlayIdOfAnswer(harness: Harness): string {
+  return wireNodes(harness.pane).find(node => node.k === 'input' && node.id.endsWith('.answer'))?.id ?? 'none'
+}
