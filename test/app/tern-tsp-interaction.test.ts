@@ -2403,3 +2403,87 @@ test('P3: a 10th option advertises no keycap it cannot honour', async () => {
     await harness.dispose()
   }
 })
+
+test('F7: on a masked page WITH options, Enter selects the highlighted option and Next skips — never both', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({ id: 'nx', question: 'Which?', masked: true, options: [{ label: 'a' }, { label: 'b' }] })],
+      undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the masked page opened')
+    // The ⏎ keycap must not claim Enter runs the Next button: on a page with
+    // choices Enter confirms the highlighted option instead.
+    const next = wireNodes(harness.pane).find(node => node.k === 'button' && node.id.endsWith('.next'))
+    assert.ok(next !== undefined, 'the page paints its Next button')
+    assert.deepEqual(next.p.keys, undefined,
+      'a page with choices does not advertise ⏎ for Next (Enter selects instead)')
+    // Enter really selects the highlighted option and advances.
+    harness.pane.key('\x1b[B')   // down to the second option
+    await waitFor(() => modalNode(harness.pane, '.keyboard-cursor') !== undefined, 'the cursor line appeared')
+    harness.pane.key('\r')
+    await waitFor(() => recorder.mutations >= 1, 'Enter confirmed the highlighted option')
+    assert.deepEqual(recorder.drafts.at(-1)?.answers[0]?.selected, ['b'],
+      'Enter selected the highlighted option, it did not skip')
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'nx', selected: ['b'] }])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('F7: a free-text page keeps its ⏎ keycap, because Enter really commits the text', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({ id: 'ft', question: 'Anything else?' })], undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the free-text page opened')
+    const next = wireNodes(harness.pane).find(node => node.k === 'button' && node.id.endsWith('.next'))
+    assert.ok(next !== undefined, 'the page paints its Next button')
+    assert.deepEqual(next.p.keys, ['⏎'], 'a page with NO choices keeps the keycap: Enter commits the text')
+    // And the keycap is honest: clicking Next commits the typed text.
+    harness.pane.key('ok')
+    await waitFor(() => recorder.drafts.at(-1)?.answers[0]?.custom === 'ok', 'the text reached the draft')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: next.id, act: 'form-next' })
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'ft', selected: [], custom: 'ok' }])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('F7: clicking Next on an unanswered masked page with options skips the question', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [
+        question({ id: 'sk1', question: 'Which?', masked: true, options: [{ label: 'a' }, { label: 'b' }] }),
+        question({ id: 'sk2', question: 'Second?', options: [{ label: 'x' }] }),
+      ], undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the masked page opened')
+    const next = wireNodes(harness.pane).find(node => node.k === 'button' && node.id.endsWith('.next'))
+    assert.ok(next !== undefined)
+    // No answer at all: the frozen skip rule marks it skipped, it does NOT pick
+    // the highlighted option (that is Enter's job, and only Enter's).
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: next.id, act: 'form-next' })
+    await waitFor(() => recorder.drafts.at(-1)?.answers[0]?.skipped === true, 'Next marked the question skipped')
+    assert.deepEqual(recorder.drafts.at(-1)?.answers[0]?.selected, [], 'and it selected nothing')
+    await nativeFormReady(harness.pane, 'the second question is the native steps form')
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: nativeForm(harness.pane).id, item: 'q-1', value: 'o-0' })
+    await waitFor(() => recorder.drafts.at(-1)?.answers[1]?.selected?.length === 1, 'the second question answered')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'submit' })
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'sk1', selected: [] }, { id: 'sk2', selected: ['x'] }],
+      'the batch carries the skip, not an accidental selection')
+  } finally {
+    await harness.dispose()
+  }
+})
