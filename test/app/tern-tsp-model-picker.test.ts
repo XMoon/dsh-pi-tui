@@ -731,6 +731,47 @@ test('native Model: the catalogue owns its Reasoning Effort strip and it only dr
   m.handle.close()
 })
 
+test('native Model: a non-string `strip` value takes no draft and no write, while a string still drafts', async (t) => {
+  // SDK 0.2.0 widened `ActionEvent.value` to `Json`. This page's strip channel names
+  // ONE candidate id, so the boundary is the event itself: anything that is not a
+  // string never reaches the draft, the page or the write. The bar's own actions do
+  // not read `value`, so a JSON payload must not cost them their existing admission.
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  const onId = (): string | undefined =>
+    ((props(pane).strip as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? [])
+      .find((item) => item.on === true)?.id as string | undefined
+  const low = stripId(pane, 'low')
+  const node = picker(pane)!.id
+  // The strip-shaped values a `Json` field can now carry, all addressed at the REAL
+  // mounted node: none of them names a candidate this page offers.
+  for (const value of [{ col: low, dir: 'asc' }, [low], 2, true, null, ''] as const) {
+    pane.event({ ev: 'action', sf: pane.frames().at(-1)!.sf, id: node, act: 'strip', value })
+  }
+  await settle(30)
+  assert.equal(onId(), stripId(pane, 'high'), 'no JSON-shaped strip value moves the draft')
+  assert.deepEqual(m.writes, [], 'and none of them starts a write')
+  assert.equal(picker(pane)!.id, node, 'and none of them re-renders the page')
+
+  // Positive control on the SAME mounted page: the string channel still drafts.
+  action(pane, 'strip', low)
+  await waitUntil('the string strip value drafted Low', () => onId() === low)
+  assert.deepEqual(m.writes, [], 'a strip draft still never writes')
+
+  // `close` is the panel's dismissal authority and ignores `value` entirely: the
+  // narrowing must not turn a JSON payload into a rejection.
+  pane.event({
+    ev: 'action',
+    sf: pane.frames().at(-1)!.sf,
+    id: picker(pane)!.id,
+    act: 'close',
+    value: { reason: 'backdrop' },
+  })
+  await waitUntil('a JSON-valued close still dismisses the panel', () => picker(pane) === undefined)
+  m.handle.close()
+})
+
 test('native Model: a strip chip label is clamped to the pane\'s own strip capacity', async (t) => {
   // The client wraps the chips onto further rows but can neither shrink nor wrap ONE
   // chip, so a label wider than the strip's chip container is cut at the sheet's edge
@@ -3054,4 +3095,71 @@ test('native Model: the Reader keeps its own view keys through a running or fail
   // browse and every write.
   assert.equal(props(pane).query, '', 'and it did not turn the key into a search edit')
   m.handle.close()
+})
+
+test('native Model: a Focus queued behind a stalled frame credit flushes only the newest one', async (t) => {
+  // SDK 0.2.0 drops an already-queued `focus` op when a newer `Surface.focus()`
+  // arrives: a Focus still waiting for a frame credit may name a node of a View
+  // the client never received. The application keeps doing exactly what it did
+  // before — it decides the seat and calls `surface.focus(desired)` once, with no
+  // app-side queue and no second keyboard seat — so what this case qualifies is
+  // the pair: the newest queued Focus is the one that reaches the wire, and the
+  // stale hand-back to the composer never does. The pane's credits are the SDK's
+  // own advertised two, never changed by the test.
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  /** The `['focus', id]` ops the SDK really SENT, in order: a queued op is not wire yet. */
+  const sentFocus = (): Array<string | null> =>
+    pane.frames().flatMap(frame => frame.ops
+      .filter(op => op[0] === 'focus')
+      .map(op => (op[1] === null ? null : String(op[1]))))
+  const openCaret = sentFocus().at(-1)
+  assert.equal(typeof openCaret, 'string', 'the open picker put the caret somewhere')
+  assert.notEqual(openCaret, 'dock.composer', 'and that place is not the composer')
+
+  t.after(() => pane.releaseAcks())
+  pane.holdAcks()
+  // Spend the two credits through props that really change the frame, so the
+  // caret changes below can only be QUEUED, never sent.
+  const sentBefore = pane.frameCount()
+  for (const next of [twinEffortDirectory, directory, twinEffortDirectory]) {
+    m.handle.setDirectory(next)
+    await settle(40)
+  }
+  const stalled = pane.frameCount()
+  assert.equal(stalled, sentBefore + 2, `exactly the two credits went out (${sentBefore} -> ${stalled})`)
+  const beforeQueue = sentFocus()
+
+  // Two PRODUCTION caret changes while the credit is blocked: closing hands the
+  // caret back to the composer, reopening takes it for the layer again.
+  m.handle.close()
+  await settle(40)
+  const writes: unknown[] = []
+  const again = m.renderer.modelPresentation!.open({
+    subject: { sessionless: true },
+    entry: 'models',
+    isCurrent: () => true,
+    retry: () => {},
+    apply: (selection: unknown) => { writes.push(selection); return 'committed' },
+    runOwned: (label, task, options) =>
+      runOwned(label, task, { ...options, diag: { debug() {}, warn() {}, error() {} } as never }),
+  })
+  again.setLoading()
+  again.setDirectory(directory)
+  await settle(60)
+  assert.deepEqual(sentFocus(), beforeQueue,
+    'neither caret change reached the wire while the credit was blocked')
+  assert.equal(pane.frameCount(), stalled, 'and no frame was sent behind the stall either')
+
+  pane.releaseAcks()
+  await waitUntil('the pending View and its queued ops flush', () => pane.frameCount() > stalled)
+  await settle(80)
+  const flushed = sentFocus().slice(beforeQueue.length)
+  assert.deepEqual(flushed, [openCaret],
+    `the flush carries ONE Focus, the current seat's, never the stale composer hand-back: ${JSON.stringify(flushed)}`)
+  assert.equal(picker(pane) !== undefined, true, 'and the page that Focus names is really painted')
+  assert.equal(inDetails(pane), false, 'the reopened catalogue is the current page')
+  assert.deepEqual(writes, [], 'and none of this flush wrote anything')
+  again.close()
 })
