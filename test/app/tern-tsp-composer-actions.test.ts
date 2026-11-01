@@ -237,6 +237,16 @@ test('footer Model/Reasoning visibility follows the actual native picker busines
     model: { displayName: 'luna-fast', id: 'luna-fast', reasoningEffort: 'high' },
   })
 
+  const noChrome = await mountComposerActions({
+    kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool'],
+    footerLayout: layout,
+  })
+  t.after(() => { void noChrome.dispose() })
+  await noChrome.commitStatus(status)
+  const noChromeText = textOf(noChrome.pane)
+  assert.ok(noChromeText.includes('luna') && noChromeText.includes('@high'),
+    `without el+styles there is no composer control, so the Footer status stays visible: ${noChromeText}`)
+
   const withoutPicker = await mountComposerActions({
     kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'],
     footerLayout: layout,
