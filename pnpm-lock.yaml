@@ -173,8 +173,8 @@ importers:
         specifier: 2.6.2
         version: 2.6.2
       '@stencil-hq/tern':
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.2.0
+        version: 0.2.0
       chalk:
         specifier: ^5.4.1
         version: 5.6.2
@@ -3741,8 +3741,8 @@ packages:
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
 
-  '@stencil-hq/tern@0.1.0':
-    resolution: {integrity: sha512-CVwFMnlDcLzU9NeILdpaE3jlxMgiHbKuJr3RJ4cvnBZKT03gItIuO57JvSALEbwW03bXHlfCx24u+qgDXtzJZg==}
+  '@stencil-hq/tern@0.2.0':
+    resolution: {integrity: sha512-yPHByMKANO4618AsN20f8kanmaSLQiozpBJYV/hoDY3q3BTLCdX+fVc2LNF3lN/iNASJ1TCxutl5YjvDQ5jnOw==}
     engines: {node: '>=22'}
 
   '@swc/helpers@0.5.23':
@@ -8105,7 +8105,7 @@ snapshots:
 
   '@standard-schema/spec@1.1.0': {}
 
-  '@stencil-hq/tern@0.1.0': {}
+  '@stencil-hq/tern@0.2.0': {}
 
   '@swc/helpers@0.5.23':
     dependencies:
