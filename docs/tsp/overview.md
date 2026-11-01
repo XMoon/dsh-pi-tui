@@ -44,10 +44,15 @@ TSP opt-in set
        -> throw: startup failure
 ```
 
-Unsupported terminals (SSH, tmux, screen, zellij, `TERN_TSP=0`) are declined by
-the SDK. Default environments never load the SDK (lazy import), and
-`src/startup.ts` stays dependency-free. The TSP path remains experimental; it
-has no public selector and does not flip the product default.
+The SDK declines a terminal that is not Tern and an explicit `TERN_TSP=0`, and
+it declines the multiplexers that prevent the protocol (`screen`, `zellij`).
+Inside tmux it attempts TSP only for a pane marked as Tern-drawn (`TMUX_PANE`
+plus a non-empty `@tern-tsp` option), using its own handshake and holding that
+pane's `allow-set-title` off until the session closes; any other tmux pane
+declines. This states SDK admission, not the qualified behavior of any
+particular client build's GUI. Default environments never load the SDK (lazy
+import), and `src/startup.ts` stays dependency-free. The TSP path remains
+experimental; it has no public selector and does not flip the product default.
 
 ## One projection chain
 
