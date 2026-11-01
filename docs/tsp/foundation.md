@@ -304,6 +304,64 @@ arbitration. A client may intercept pointer clicks with a modal backdrop, but
 that is not permission to skip currentness/ownership checks on every UI event
 or later build.
 
+**Native composite presentation.** A Question or Approval may be painted with a
+client-owned composite (a native choice/steps form, a native tool-approval
+control, real buttons). The composite owns presentation and a local intent ONLY.
+The one controller and the one seat keep their authority unchanged: the active
+slot, the FIFO order, withdrawn/retired lifetimes, settle-once, and the Host
+answer/approval outcome. Render state (choices, current page, visible answers)
+flows one way out of the seat's own draft; a composite never becomes a second
+answer store and its own submit payload is never written to the Host.
+
+**One event route, exact admission.** Composite `action`/`change` events reach
+the seat through the single Session event iterator, and no SDK node handler is
+bound on those nodes: a handler would consume the event before the iterator and
+silently split delivery. An event is admitted only when the surface id, the
+active request, the current modal/page visit, the exact node id that visit
+painted, and an enumerated payload value ALL agree; anything else is dropped
+rather than reinterpreted, and never matched by a substring or by the action name
+alone. A page or panel change repaints the same stable keys, so the visit
+identity belongs in the node key: an action from a superseded visit can never
+advance, select or settle the current one. Keyboard and pointer converge on the
+same local transition, so both share one answer semantics.
+
+**Projection safety.** Ordinary non-sensitive questions project onto indexed
+native choice tokens derived from source order; the source option labels remain
+the answer values and the source question ids remain the answer keys. Free text
+and masked values never enter the native choice map: a masked value is painted as
+bullets everywhere (props, children, action payloads and logs) while the
+authoritative answer returned to the Host keeps its real value. A client-side
+selection order is never an answer order. The final native `submit` opens the
+review step only; the explicit review commit is the single business write, and
+no-data/cancel/restore semantics are unchanged.
+
+**Approval reading order and outcomes.** The complete tool identity, reason,
+danger marker and argument body are painted BEFORE the native approval control in
+the same overlay, and that control carries no body children: a client places an
+approval panel between the head and the body, so arguments put inside the tool
+would be read after the decision. Only `allowed-once`, `rejected` and `cancelled`
+exist; a native long-lived grant (`always`/`session`) is never accepted, and its
+affordance is hidden rather than reinterpreted.
+
+**Capability and fallback.** Each composite family is enabled by the exact kind
+and feature combination it really paints, gated separately because they fail
+differently: an Approval whose client draws a shortcut keycap the application
+deliberately ignores must first be able to hide that keycap, or the pane keeps
+the text approval instead of advertising a binding that does not exist. A missing
+capability falls back to the existing non-native form; it never fabricates a
+business result and never infers compatibility from a version label.
+
+**Visual contract.** A composite is judged against the same host, layout and
+scope as its non-native form, never against an isolated component demo: high-risk
+facts stay readable and scrollable, the decision controls stay reachable, and
+content that already carries one frame is not wrapped in a second. Real-GUI,
+headless, SDK-level and business-chain evidence are separate tiers that do not
+substitute for one another.
+
+Where a composite's own affordance contradicts the application's key contract,
+the minimum correction is ONE scoped rule installed once on the surface, never a
+per-render style write and never a broad client theme override.
+
 ## 5. Layout, native components and capability policy
 
 - A `picker` is a terminal-owned data-first sheet. A picker `item` and a generic
@@ -724,7 +782,10 @@ universal/version-independent claim; a tier qualifies a claim, not a repository.
   cancellation error, never a fabricated answer. Masked plaintext must be
   absent from the whole wire. Cold continued Questions stay parked. A
   tentative Session opening is not an owner replacement, but a published B must
-  never leave A's modal owning presentation/input.
+  never leave A's modal owning presentation/input. A native composite form is a
+  presentation of this same seat, never a second owner: see §4 "Modal scope" for
+  its event admission, projection and reading-order obligations, and for the
+  capability gate that falls back to the non-native form.
 - **Narrow/Preview/reachability.** `preview` is a layout hint; key info and
   every action need another reachable path. Reachability, not a pixel promise.
   Measured constants are parameters of the verified environment; never lower a
