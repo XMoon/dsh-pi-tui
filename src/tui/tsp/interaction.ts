@@ -1482,7 +1482,18 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
     }
     body.push(ui.row({ key: rowKey, gap: 'md', justify: 'between' },
       ui.button({ key: 'back', text: 'Back', actions: { click: FORM_BACK_ACTION } }),
-      ui.button({ key: 'next', text: 'Next', variant: 'primary', keys: ['⏎'], actions: { click: FORM_NEXT_ACTION } }),
+      ui.button({
+        key: 'next',
+        text: 'Next',
+        variant: 'primary',
+        // Enter is advertised ONLY where it really runs this button. On a page
+        // with choices Enter confirms the highlighted option (the frozen option
+        // semantics), so a ⏎ keycap here would promise a skip and deliver a
+        // selection. A page with no choices keeps it: there Enter commits the
+        // text, which is exactly what Next does.
+        keys: options.length > 0 ? undefined : ['⏎'],
+        actions: { click: FORM_NEXT_ACTION },
+      }),
       ui.button({ key: 'cancel', text: 'Cancel', actions: { click: FORM_CANCEL_ACTION } }),
     ))
     return ui.overlay({ key: overlayKey(), modal: true, head: `Question ${slot.tab + 1}/${total}`, anchor: 'center', size: 'lg' }, ...body)
