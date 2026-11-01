@@ -61,7 +61,7 @@ import { imageProtocolPreference } from '../graphics/image-protocol-preference.t
 import { clampMiddle } from './picker-text.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
-import { createTspInteractionSeat, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
+import { createTspInteractionSeat, NATIVE_APPROVAL_ROLE, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
 import { TspModelPicker } from './model-picker.ts'
 import { TspPresetPicker } from './preset-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
@@ -501,6 +501,31 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
     `)
   }
+  /**
+   * The native modal capability: the EXACT kind set each composite really
+   * paints, read from the negotiated handshake — never from a version label or
+   * a window size. Questions needs its own form kind plus the pieces of the
+   * same-style safe/Review pages; the Tool approval additionally needs
+   * `styles`, because the pane must be able to hide the Enter keycap below
+   * before the form may advertise a shortcut the application deliberately
+   * refuses to honour. A pane that lacks either half keeps the text form; it
+   * never gets a misleading affordance and never a fabricated result.
+   */
+  const nativeQuestionsCapable = (): boolean =>
+    ['questions', 'button', 'input', 'overlay', 'col', 'row', 'text'].every(kind => session.caps.kinds.includes(kind))
+  const nativeApprovalCapable = (): boolean =>
+    ['tool', 'overlay', 'col', 'text', 'code', 'scroll'].every(kind => session.caps.kinds.includes(kind))
+    && session.caps.features.includes('styles')
+  if (nativeApprovalCapable()) {
+    // ONE scoped rule, installed once at surface init (never from `render()`):
+    // it hides ONLY the Enter keycap the client draws on the native approval's
+    // Allow button. It changes no button, theme, event or outcome; the seat
+    // still refuses a bare Enter (`handleApprovalKey` consumes it), so leaving
+    // the keycap painted would advertise a binding that does not exist.
+    surface.stylesheet('dsh-native-approval-shortcuts', `
+      [data-role="${NATIVE_APPROVAL_ROLE}"] .sf-tool-ask-btn .sf-kbd { display: none; }
+    `)
+  }
   let disposed = false
   let exitRequested = false
   /** Monotonic renderer-local identities (notices; scope epochs). */
@@ -611,6 +636,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // modal takes the LOGICAL seat. Retire it synchronously here, BEFORE the
     // form becomes visible/answerable; the close stays owned by this renderer.
     beforeModalSeat: () => { retireWorkDetails('modal') },
+    // The native modal inputs: the base surface's OWN id (an event addressed at
+    // another surface is foreign to this seat) plus the two negotiated
+    // capability decisions taken above from the handshake. The seat never reads
+    // the transport, a version label or a window size to decide them.
+    surfaceId: surface.id,
+    nativeQuestions: nativeQuestionsCapable(),
+    nativeApproval: nativeApprovalCapable(),
   })
   modelPicker = new TspModelPicker({
     render: () => render(),
@@ -3034,9 +3066,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         if ('sf' in input.event && input.event.sf === details.surface.id) return false
         // While the Screen exists the masked base takes no user input claim at
         // all — not even through an event carrying the base surface id.
+        // The native modal's `change` belongs to this same class: a choice made
+        // on a base form the user may not be looking at must never reach it.
         if (input.event.ev === 'focus' || input.event.ev === 'edit' || input.event.ev === 'undo'
           || input.event.ev === 'send' || input.event.ev === 'toggle'
-          || input.event.ev === 'select' || input.event.ev === 'activate' || input.event.ev === 'action') {
+          || input.event.ev === 'select' || input.event.ev === 'activate' || input.event.ev === 'action'
+          || input.event.ev === 'change') {
           return false
         }
       }

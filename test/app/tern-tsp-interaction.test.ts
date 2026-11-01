@@ -762,6 +762,11 @@ test('withdrawPresentation drops the form and releases the input (the promise st
     onFatal: error => { throw new Error(`unexpected fatal: ${String(error)}`) },
     notify: () => {},
     setSettledQuestionAnswersLookup: () => {},
+    // The shared seat interface's three modal inputs: these unit seats are
+    // built without a pane, so they exercise the legacy (non-native) branch.
+    surfaceId: 's1',
+    nativeQuestions: false,
+    nativeApproval: false,
   })
   const callbacks = { listContinuedQuestions: () => [], reopenContinuedQuestion: () => false }
   const abort = new AbortController()
@@ -805,6 +810,11 @@ test('a lifetime retired BEFORE its slot exists never mounts, and its own lifeti
     onFatal: error => { fatals.push(error) },
     notify: () => {},
     setSettledQuestionAnswersLookup: () => {},
+    // The shared seat interface's three modal inputs: these unit seats are
+    // built without a pane, so they exercise the legacy (non-native) branch.
+    surfaceId: 's1',
+    nativeQuestions: false,
+    nativeApproval: false,
   })
   const callbacks = { listContinuedQuestions: () => [], reopenContinuedQuestion: () => false }
   const abort = new AbortController()
@@ -844,6 +854,11 @@ test('a withdrawal whose frame commit fails reaches the renderer fatal sink and 
     onFatal: error => { fatals.push(error) },
     notify: () => {},
     setSettledQuestionAnswersLookup: () => {},
+    // The shared seat interface's three modal inputs: these unit seats are
+    // built without a pane, so they exercise the legacy (non-native) branch.
+    surfaceId: 's1',
+    nativeQuestions: false,
+    nativeApproval: false,
   })
   const abort = new AbortController()
   const answers = seat.presenter
@@ -880,6 +895,11 @@ test('a frame failure while PRESENTING a form is fatal, settles once and leaves 
     onFatal: error => { fatals.push(error) },
     notify: () => {},
     setSettledQuestionAnswersLookup: () => {},
+    // The shared seat interface's three modal inputs: these unit seats are
+    // built without a pane, so they exercise the legacy (non-native) branch.
+    surfaceId: 's1',
+    nativeQuestions: false,
+    nativeApproval: false,
   })
   try {
     // The approval path: the broken FIRST presentation must not resolve an
@@ -962,6 +982,11 @@ test('a retired request detaches its real listener and cannot write into the sea
     onFatal: () => {},
     notify: () => {},
     setSettledQuestionAnswersLookup: () => {},
+    // The shared seat interface's three modal inputs: these unit seats are
+    // built without a pane, so they exercise the legacy (non-native) branch.
+    surfaceId: 's1',
+    nativeQuestions: false,
+    nativeApproval: false,
   })
   const callbacks = { listContinuedQuestions: () => [], reopenContinuedQuestion: () => false }
   const key = (name: string) => ({ name, ctrl: false, alt: false, shift: false, meta: false })
@@ -1044,6 +1069,11 @@ test('closeTransientList releases the seat and the input (a replacement never in
     onFatal: error => { throw new Error(`unexpected fatal: ${String(error)}`) },
     notify: () => {},
     setSettledQuestionAnswersLookup: () => {},
+    // The shared seat interface's three modal inputs: these unit seats are
+    // built without a pane, so they exercise the legacy (non-native) branch.
+    surfaceId: 's1',
+    nativeQuestions: false,
+    nativeApproval: false,
   })
   const callbacks = {
     listContinuedQuestions: () => [{ sessionId: 'session-a', callId: 'call-1', presentation: 'parked' as const }],
@@ -1068,6 +1098,11 @@ test('a batched withdrawal commits ONE frame and never promotes a member of the 
     onFatal: error => { throw new Error(`unexpected fatal: ${String(error)}`) },
     notify: () => {},
     setSettledQuestionAnswersLookup: () => {},
+    // The shared seat interface's three modal inputs: these unit seats are
+    // built without a pane, so they exercise the legacy (non-native) branch.
+    surfaceId: 's1',
+    nativeQuestions: false,
+    nativeApproval: false,
   })
   const first = new AbortController()
   const second = new AbortController()

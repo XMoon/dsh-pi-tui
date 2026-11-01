@@ -517,6 +517,11 @@ test('the timed claim, timeout and continued late answer drive the REAL TSP seat
     onFatal: () => {},
     notify: () => {},
     setSettledQuestionAnswersLookup: () => {},
+    // The shared seat interface's three modal inputs: these unit seats are
+    // built without a pane, so they exercise the legacy (non-native) branch.
+    surfaceId: 's1',
+    nativeQuestions: false,
+    nativeApproval: false,
   })
   const key = (name: string, extra: Partial<{ text: string; ctrl: boolean; alt: boolean; shift: boolean; meta: boolean }> = {}) =>
     ({ name, ctrl: false, alt: false, shift: false, meta: false, ...extra })
