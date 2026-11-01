@@ -29,6 +29,7 @@ import { dirname } from 'node:path'
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import { createDirectTspFixture, waitFor } from '../support/direct-tsp-fixture.ts'
+import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
 
 const SESSION_ID = 'prc-direct-image-session'
 
@@ -74,7 +75,7 @@ async function sessionOf(fixture: { readonly ctx: { sessions: { get(id: unknown)
 
 /** The blob ids the pane actually received, in order. */
 function blobIds(wire: string): string[] {
-  return [...wire.matchAll(/_tsp;b;id=([0-9a-f]*);/g)].map(match => match[1]!)
+  return readTspBlobMessages(wire).map(blob => blob.id)
 }
 
 /** Whether the pane drew a native image node carrying the blob id. The SDK
@@ -140,8 +141,13 @@ test('a tool result image is read through the REAL Direct attachment service and
       },
     }, { surfaceOp: 'append' })
 
-    await waitFor('the pane received the real image blob', () =>
-      blobIds(fixture.pane.output.text()).includes(expectedBlobId), 8_000)
+    // The `b` write and the `f` that carries its blob id are SEPARATE SDK writes
+    // (the frame waits for a credit), so the wait observes both facts the
+    // assertions below read instead of only the earlier one.
+    await waitFor('the pane drew a native image node carrying the real image blob', () => {
+      const sent = fixture.pane.output.text()
+      return blobIds(sent).includes(expectedBlobId) && drewImage(sent, expectedBlobId)
+    }, 8_000)
       .catch((error: unknown) => { throw error })
 
     const wire = fixture.pane.output.text()
@@ -152,9 +158,9 @@ test('a tool result image is read through the REAL Direct attachment service and
 
     // The bytes that reached the wire are the REAL stored bytes: the blob id
     // IS the SHA-256 of the admitted PNG.
-    const base64 = wire.match(new RegExp(`\u001b_tsp;b;id=${expectedBlobId};[^;]*;([A-Za-z0-9+/=]+)`))?.[1]
-    assert.ok(base64 !== undefined, 'the blob message is on the wire')
-    assert.deepEqual(new Uint8Array(Buffer.from(base64, 'base64')), png,
+    const sent = readTspBlobMessages(wire).find(blob => blob.id === expectedBlobId)
+    assert.ok(sent !== undefined, 'the blob message is on the wire')
+    assert.deepEqual(sent.bytes, png,
       'the wire carries the exact admitted bytes')
   } finally {
     // The fixture's teardown disposes the app, the pane and the Host
@@ -265,9 +271,14 @@ test('a REAL durable image reaches a User body and an Assistant body as native b
       },
     }, { surfaceOp: 'append' })
 
-    await waitFor('the pane received BOTH body blobs', () => {
-      const ids = blobIds(fixture.pane.output.text())
+    // Both body images have to be SENT (their `b` frames) and DRAWN (the later
+    // `f` ops that reference them): a blob write alone does not imply the frame
+    // has left the SDK's credit queue.
+    await waitFor('the pane drew both body images from their blobs', () => {
+      const sent = fixture.pane.output.text()
+      const ids = blobIds(sent)
       return ids.includes(userBlob) && ids.includes(assistantBlob)
+        && drewImage(sent, userBlob) && drewImage(sent, assistantBlob)
     }, 30_000)
 
     const wire = fixture.pane.output.text()
@@ -277,9 +288,9 @@ test('a REAL durable image reaches a User body and an Assistant body as native b
     assert.equal(wire.includes('[IMAGE] assistant-shot.png'), true, 'the assistant identity line names the real attachment')
     // The wire bytes ARE the admitted PNGs: two independent authorized reads.
     for (const [blob, png] of [[userBlob, userPng], [assistantBlob, assistantPng]] as const) {
-      const base64 = wire.match(new RegExp(`\\u001b_tsp;b;id=${blob};[^;]*;([A-Za-z0-9+/=]+)`))?.[1]
-      assert.ok(base64 !== undefined, `the blob ${blob.slice(0, 8)}… is on the wire`)
-      assert.deepEqual(new Uint8Array(Buffer.from(base64, 'base64')), png,
+      const sent = readTspBlobMessages(wire).find(message => message.id === blob)
+      assert.ok(sent !== undefined, `the blob ${blob.slice(0, 8)}… is on the wire`)
+      assert.deepEqual(sent.bytes, png,
         'the wire carries the exact admitted bytes')
     }
   } finally {
