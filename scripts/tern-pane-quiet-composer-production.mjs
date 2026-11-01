@@ -115,6 +115,14 @@ export default async function (h) {
     h.check('the menu paints the three standard permission options in order',
       options.map(node => textOf(h, node)).join('|') === 'Read Only|Workspace Write ✓|Full Access',
       options.map(node => textOf(h, node)).join('|'))
+    if (subjectCase === 'permission-open') {
+      h.capture('permission-menu-initial', 'PR-E permission menu opened: current ✓ before keyboard navigation')
+      await h.key('down', 300)
+      h.capture('permission-menu-highlight', 'PR-E permission menu after Down: keyboard highlight moved without a write')
+      h.check('keyboard highlight navigation dispatches no write',
+        records(h).filter(record => record.permissionSelect).length === 0,
+        JSON.stringify(records(h).filter(record => record.permissionSelect)))
+    }
     if (subjectCase === 'permission-select') {
       const full = options.find(node => textOf(h, node).startsWith('Full Access'))
       h.check('the Full Access option is present', full !== undefined)
