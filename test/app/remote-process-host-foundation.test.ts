@@ -33,13 +33,65 @@ interface OverlayRow {
   readonly config?: Record<string, unknown>
 }
 
-const OVERLAY_ROWS = (parseYaml(HOST_ONLY_PATCH) as Array<OverlayRow & { insert?: OverlayRow[] }>)
-  .flatMap(entry => entry.insert ?? [entry])
+/** One top-level overlay entry: an in-place row override or an `insert` group. */
+interface OverlayEntry extends OverlayRow {
+  readonly insert?: readonly OverlayRow[]
+}
+
+const OVERLAY_ENTRIES = parseYaml(HOST_ONLY_PATCH) as OverlayEntry[]
+const OVERLAY_ROWS = OVERLAY_ENTRIES.flatMap(entry => entry.insert ?? [entry])
 
 function row(id: string): OverlayRow {
   const matches = OVERLAY_ROWS.filter(candidate => candidate.id === id)
   assert.equal(matches.length, 1, `the overlay must own exactly one "${id}" row`)
   return matches[0]
+}
+
+/**
+ * The ten Host execution rows whose lifetime must not depend on the mutable
+ * `tuiStartup` provider: `webserver` / `workspace-files` are the two existing
+ * rows overridden in place, the other eight are the Host-only inserted rows.
+ */
+const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string[] }> = [
+  { id: 'webserver', inject: [] },
+  { id: 'workspace-files', inject: [] },
+  { id: 'split-host-connection', inject: ['credentials', 'webServer'] },
+  { id: 'split-host-file-upload', inject: ['agents', 'attachments', 'commands', 'connection'] },
+  { id: 'split-host-session-stats', inject: ['sessionProjections'] },
+  { id: 'split-host-turn-outline', inject: ['sessionProjections'] },
+  {
+    id: 'split-host-session-controller',
+    inject: [
+      'agentDefaultModel', 'agents', 'attachments', 'fileUploads', 'fs', 'llm',
+      'remoteAccess', 'sessions', 'sessionProjections', 'sessionQuery', 'typert', 'workspaceRegistry',
+    ],
+  },
+  { id: 'split-host-settings-controller', inject: ['typert'] },
+  { id: 'split-host-session-log-download', inject: ['commands', 'connection'] },
+  { id: 'split-host-pi-tui-runtime', inject: ['typert', 'agents', 'fileReferences', 'workingDirectory'] },
+]
+
+/**
+ * Pin the exact dependency set of the ten Host execution rows. Shared by the
+ * positive assertion and its negative control so the control proves THIS
+ * assertion group rejects a reintroduced `tuiStartup`, not a private copy.
+ */
+function assertHostExecutionInject(entries: readonly OverlayEntry[]): void {
+  const rows = entries.flatMap(entry => entry.insert ?? [entry])
+  for (const { id, inject } of HOST_EXECUTION_INJECT) {
+    const matches = rows.filter(candidate => candidate.id === id)
+    assert.equal(matches.length, 1, `the overlay must own exactly one "${id}" row`)
+    assert.deepEqual(matches[0].inject, inject, `the "${id}" row inject mismatch`)
+    assert.equal(matches[0].inject?.includes('tuiStartup'), false,
+      `the "${id}" row must not depend on the mutable tuiStartup provider`)
+  }
+  // The two existing rows are overridden in place; inserting them again would
+  // create a second service owner instead of retuning the production row.
+  for (const id of ['webserver', 'workspace-files']) {
+    const topLevel = entries.filter(entry => entry.insert === undefined && entry.id === id)
+    assert.equal(topLevel.length, 1, `the overlay must declare exactly one top-level "${id}" override`)
+    assert.deepEqual(topLevel[0].inject, [], `the "${id}" top-level override must inject nothing`)
+  }
 }
 
 const FOUNDATION_ROWS: ReadonlyArray<{ owner: string; id: string; name: string }> = [
@@ -70,15 +122,23 @@ test('the Host-only overlay declares the six official rows and ONE built-in Host
     'one built-in Host Runtime Loader row')
   assert.equal(OVERLAY_ROWS.some(candidate => /file-reference-host|terminal-progress-host/u.test(candidate.name ?? '')),
     false, 'the private features must not be independent Loader rows')
-  assert.deepEqual(row('split-host-pi-tui-runtime').inject,
-    ['tuiStartup', 'typert', 'agents', 'fileReferences', 'workingDirectory'])
   assert.deepEqual(row('split-host-session-controller').config, { nativeOpen: false })
-  assert.deepEqual(row('split-host-file-upload').inject,
-    ['tuiStartup', 'agents', 'attachments', 'commands', 'connection'])
-  assert.deepEqual(row('split-host-session-stats').inject, ['tuiStartup', 'sessionProjections'])
-  assert.deepEqual(row('split-host-turn-outline').inject, ['tuiStartup', 'sessionProjections'])
-  assert.deepEqual(row('split-host-settings-controller').inject, ['tuiStartup', 'typert'])
-  assert.deepEqual(row('split-host-session-log-download').inject, ['tuiStartup', 'commands', 'connection'])
+  // The exact ten-row dependency contract, including the two in-place overrides.
+  assertHostExecutionInject(OVERLAY_ENTRIES)
+})
+
+test('the protected ten-row dependency assertion rejects a reintroduced tuiStartup', () => {
+  const reintroduced = OVERLAY_ENTRIES.map(entry => entry.insert === undefined ? entry : {
+    ...entry,
+    insert: entry.insert.map(candidate => candidate.id === 'split-host-turn-outline'
+      ? { ...candidate, inject: [...(candidate.inject ?? []), 'tuiStartup'] }
+      : candidate),
+  })
+  assert.throws(
+    () => assertHostExecutionInject(reintroduced),
+    /split-host-turn-outline/u,
+    'the negative control must fail on the protected row id',
+  )
 })
 
 interface FixtureRow {

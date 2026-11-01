@@ -35,7 +35,8 @@ test('the Host-only overlay disables the TUI runner and the Client UI rows only'
   const disabled = [...HOST_ONLY_PATCH.matchAll(/^- id: (\S+)\n  disabled: true$/gmu)].map(match => match[1])
   assert.deepEqual(disabled, ['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins'])
   assert.equal((HOST_ONLY_PATCH.match(/disabled: true/gu) ?? []).length, 3)
-  assert.doesNotMatch(HOST_ONLY_PATCH, /id: tui-startup/u, 'Host rows gated on tuiStartup must keep their provider')
+  assert.doesNotMatch(HOST_ONLY_PATCH, /id: tui-startup/u,
+    'the overlay must not disable or redefine the tui-startup row itself')
 
   // Negative control: if any one disabled value is broken, this same assertion
   // no longer sees all three rows.
@@ -181,7 +182,7 @@ test('the Host-only overlay adds exactly the two B1 owner rows and no second gat
     {
       id: 'split-host-connection',
       name: '@deepseek-ai/dsh-client-connection',
-      inject: ['tuiStartup', 'credentials', 'webServer'],
+      inject: ['credentials', 'webServer'],
     },
     {
       id: 'split-host-api-remotes',
@@ -189,7 +190,10 @@ test('the Host-only overlay adds exactly the two B1 owner rows and no second gat
       inject: ['typertGateway', 'connection'],
     },
   ])
-  assert.doesNotMatch(HOST_ONLY_PATCH, /- id: (?:typert-gateway|webserver|agent|session|job-controller)\n/u)
+  // Only inserted rows mount a row. `webserver` and `workspace-files` are
+  // retuned by top-level in-place overrides (no `name`), which must never be
+  // turned into a second Loader row for the same service.
+  assert.doesNotMatch(HOST_ONLY_PATCH, /^    - id: (?:typert-gateway|webserver|agent|session|job-controller)$/mu)
   assert.match(HOST_ONLY_PATCH, /^- insert:$/mu)
   assert.doesNotMatch(HOST_ONLY_PATCH, /split-host-connection\n(?:.*\n)*?      disabled: true/u)
   assert.doesNotMatch(HOST_ONLY_PATCH, /split-host-api-remotes\n(?:.*\n)*?      disabled: true/u)

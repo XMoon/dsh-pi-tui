@@ -179,6 +179,22 @@ services (`piTuiFileReferences`, `piTuiTerminalProgress`); the feature modules
 are not independent Loader rows, configurable plugins or package subpaths. The
 row publishes `piTuiHostReady` only after both service bindings are live.
 
+The Host execution graph does not depend on the mutable `tui-startup` provider.
+The Host-only overlay overrides the existing `webserver` and `workspace-files`
+rows with `inject: []` and removes `tuiStartup` from the eight Host-only
+execution rows, which keep only their real service dependencies
+(`split-host-connection`, `split-host-file-upload`,
+`split-host-session-stats`, `split-host-turn-outline`,
+`split-host-session-controller`, `split-host-settings-controller`,
+`split-host-session-log-download`, `split-host-pi-tui-runtime`). A variable
+Startup module lifetime therefore cannot own — and dispose with itself — the
+Session, Agent, Connection and attachment ownership established for accepted
+work; the row lifetimes stay with the single DSH Loader. The `tui-startup` row
+itself remains mounted for the consumers that genuinely need its parsed startup
+facts and keeps following the official HMR lifecycle, so this contract is
+scoped to the listed execution rows and does not claim that every Host plugin,
+service or setting survives an arbitrary reload.
+
 `performance-host` remains an independent Host projection row, and
 `visual-tools` remains an independent Loader row; neither is absorbed into the
 built-in runtime. `src/app/remote/host-runtime.ts` is only the legacy in-process
