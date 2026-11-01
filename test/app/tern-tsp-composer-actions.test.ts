@@ -562,15 +562,16 @@ test('composer actions: a narrow pane (cols < 72) keeps the short labels', async
     await m.commitStatus(snapshotFor({
       model: { displayName: 'luna-fast', id: 'x', reasoningEffort: value },
     }))
-    await settle(120)
-    const next = composerButtons(pane)
-    assert.equal(label(next.get('composer-effort')), expected,
-      `the narrow effort ${value} keeps its real value identity`)
+    await waitUntil(`the narrow effort ${value} was painted`, () =>
+      label(composerButtons(pane).get('composer-effort')) === expected)
   }
   await m.commitStatus(snapshotFor({
     model: { displayName: 'luna-fast', id: 'x', reasoningEffort: 'custom-effort' },
   }))
-  await settle(120)
+  await waitUntil('the unknown effort was painted with a bounded label', () => {
+    const unknown = label(composerButtons(pane).get('composer-effort'))
+    return unknown !== 'H ▾' && unknown.endsWith(' ▾') && unknown.length <= 10
+  })
   const unknown = label(composerButtons(pane).get('composer-effort'))
   assert.notEqual(unknown, 'H ▾', 'an unknown effort is never relabelled as High')
   assert.ok(unknown.endsWith(' ▾') && unknown.length <= 10, `the unknown effort stays bounded: ${unknown}`)
