@@ -80,8 +80,9 @@ test('a chunk group whose final frame never arrives throws instead of dropping t
   const encoded = encodeBlob(SVG_BYTES, 'image/svg+xml', { limit: 24, chunk: () => 'cut' })
   const parts = DECODER.decode(encoded.bytes).split('\u001b\\')
   assert.equal(parts.length > 3, true, 'this body really arrived in several complete frames')
-  // Every frame but the last: the reassembly is left holding an unfinished group.
-  const truncated = parts.slice(0, parts.length - 2).join('\u001b\\')
+  // Every frame but the last, each still properly terminated: the reassembly is
+  // left holding an unfinished group.
+  const truncated = `${parts.slice(0, parts.length - 2).join('\u001b\\')}\u001b\\`
 
   assert.throws(() => readTspBlobMessages(truncated), /chunk cut never sent its final frame/)
 })
@@ -95,4 +96,67 @@ test('a second chunk id opened inside a group throws instead of overwriting the 
 
   assert.throws(() => readTspBlobMessages(parts.join('\u001b\\')),
     /chunk other interleaves the open chunk cut/)
+})
+
+test('a blob frame whose terminator never arrives throws instead of vanishing from the result', () => {
+  const text = DECODER.decode(encodeBlob(PNG_BYTES, 'image/png').bytes)
+  // The write stopped mid-frame: the bytes really went out, so reading them as
+  // "no blob" would be a false observation, not an absent one.
+  assert.throws(() => readTspBlobMessages(text.slice(0, text.length - 2)),
+    /a blob frame never reached its terminator/)
+  // The frame was cut short by the next APC frame instead of by the end.
+  assert.throws(() => readTspBlobMessages(`${text.slice(0, text.length - 2)}\u001b_tsp;f;{}\u001b\\`),
+    /a blob frame was cut short by the frame that followed it/)
+})
+
+test('an empty mime or chunk parameter throws instead of naming a blob nothing else can', () => {
+  const text = DECODER.decode(encodeBlob(PNG_BYTES, 'image/png').bytes)
+
+  assert.throws(() => readTspBlobMessages(text.replace('mime=image/png;', 'mime=;')),
+    /empty mime parameter/)
+  assert.throws(() => readTspBlobMessages(text.replace('mime=image/png;', 'c=;')),
+    /empty chunk parameter/)
+})
+
+test('a body that is not canonical Base64 throws instead of decoding to other bytes', () => {
+  const text = DECODER.decode(encodeBlob(PNG_BYTES, 'image/png').bytes)
+  const body = text.slice(text.indexOf('image/png;') + 'image/png;'.length, text.length - 2)
+  // `A===` is a whole number of characters and stays inside the alphabet, so a
+  // length check alone would let it decode into bytes the SDK never sent.
+  assert.equal(body.length % 4, 0, 'the real body is a whole number of quads')
+  assert.throws(() => readTspBlobMessages(`${text.slice(0, text.length - 2 - body.length)}A===\u001b\\`),
+    /padding characters in its final quad/)
+})
+
+test('a blob whose byte count is not a multiple of three keeps its padding quads and decodes exactly', () => {
+  // The padding is part of canonical Base64, not a defect: a real attachment is
+  // any length, and a reader that rejects `=` or `==` drops the frame that
+  // carries it. One byte pads to `==`, two pad to `=`, three close the quad.
+  for (const length of [1, 2, 4, 5]) {
+    const bytes = new Uint8Array(Array.from({ length }, (_, i) => 250 + i))
+    const encoded = encodeBlob(bytes, 'image/png')
+    const observed = readTspBlobMessages(encoded.bytes)
+    assert.equal(observed.length, 1, `${length} byte(s) came back as one blob`)
+    assert.deepEqual(observed[0]!.bytes, bytes, `${length} byte(s) decoded exactly`)
+    assert.equal(observed[0]!.id, encoded.id, `${length} byte(s) hashed to the id the SDK names`)
+  }
+  // The same padded body split across chunks still reassembles to one exact blob.
+  const padded = new Uint8Array([255, 254])
+  const encoded = encodeBlob(padded, 'image/png', { limit: 2, chunk: () => 'pad' })
+  const observed = readTspBlobMessages(encoded.bytes)
+  assert.equal(frameCount(encoded.bytes) > 1, true, 'the padded body really was chunked')
+  assert.equal(observed.length, 1)
+  assert.deepEqual(observed[0]!.bytes, padded)
+  assert.equal(observed[0]!.id, encoded.id)
+
+  // A body that is megabytes long AND padded AND chunked: a validation that
+  // backtracks over the whole string cannot run here at all, and a real
+  // attachment is exactly this shape.
+  const megabytes = new Uint8Array(1024 * 1024 + 1).fill(13)
+  const large = encodeBlob(megabytes, 'image/png', { limit: 65_536, chunk: () => 'big' })
+  const read = readTspBlobMessages(large.bytes)
+  assert.equal(frameCount(large.bytes) > 10, true, 'the body really arrived in many frames')
+  assert.equal(read.length, 1, 'one logical Blob off sixteen-odd frames')
+  assert.equal(read[0]!.bytes.length, megabytes.length, 'every byte came back')
+  assert.equal(read[0]!.id, large.id, 'and the hash is over the full reassembled bytes')
 })
