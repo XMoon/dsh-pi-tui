@@ -15,14 +15,15 @@ import { createHash } from 'node:crypto'
 
 const DECODER = new TextDecoder()
 
-/** One complete blob frame: `ESC _ tsp; b; <params>; <base64 body> ESC \`. */
-const BLOB_FRAME = /\u001b_tsp;b;([\s\S]*?)\u001b\\/g
+/** Where one APC frame starts. */
+const APC = '\u001b_tsp;'
+/** The terminator that closes an APC frame. */
+const STRING_TERMINATOR = '\u001b\\'
+/** The blob verb, right after the frame start. */
+const BLOB = 'b;'
 
 /** What a parameter key may hold (the SDK's own `keyByte` set). */
 const PARAM_KEY = /^[A-Za-z0-9_-]+$/
-
-/** The Base64 alphabet a framed body may hold. */
-const BASE64 = /^[A-Za-z0-9+/=]*$/
 
 /** A logical blob reassembled from the wire: the exact bytes, their MIME and hash. */
 export interface ObservedTspBlob {
@@ -45,6 +46,11 @@ function fail(message: string): never {
   throw new Error(`tsp blob wire: ${message}`)
 }
 
+/** The Base64 alphabet one framed piece may hold (a piece of a chunked body is
+ *  not itself a canonical Base64 string, so this is the per-piece check and
+ *  {@link CANONICAL_BASE64} is the check on the reassembled body). */
+const BASE64_CHARS = /^[A-Za-z0-9+/=]*$/
+
 /** The `key=value` parameters before a frame's body, keyed in send order. */
 function readParams(fields: readonly string[]): Map<string, string> {
   const params = new Map<string, string>()
@@ -55,7 +61,12 @@ function readParams(fields: readonly string[]): Map<string, string> {
     }
     const key = field.slice(0, at)
     if (params.has(key)) fail(`a blob frame repeats the ${key} parameter`)
-    params.set(key, field.slice(at + 1))
+    const value = field.slice(at + 1)
+    // The SDK writes what it was given: `mime=` only carries a real media type,
+    // and `c=` only carries the chunk id it chose, so an empty one is a torn frame.
+    if (key === 'mime' && value === '') fail('a blob frame sends an empty mime parameter')
+    if (key === 'c' && value === '') fail('a blob frame sends an empty chunk parameter')
+    params.set(key, value)
   }
   for (const key of params.keys()) {
     if (key !== 'mime' && key !== 'c' && key !== 'm') fail(`a blob frame carries the unknown parameter ${key}`)
@@ -67,13 +78,52 @@ function readParams(fields: readonly string[]): Map<string, string> {
 function readBody(content: string): { readonly params: Map<string, string>; readonly body: string } {
   const fields = content.split(';')
   const body = fields.pop()!
-  if (!BASE64.test(body)) fail(`a blob frame body is not Base64: ${JSON.stringify(body)}`)
+  if (!BASE64_CHARS.test(body)) fail(`a blob frame body holds a character outside the Base64 alphabet`)
   return { params: readParams(fields), body }
 }
 
 function decode(base64: string): Uint8Array {
-  if (base64.length % 4 !== 0) fail(`the reassembled Base64 body is not a whole number of quads`)
+  // Canonical Base64 (RFC 4648) checked WITHOUT a backtracking pattern: a real
+  // attachment body is megabytes long, and a nested-quantifier regex overflows
+  // the stack on it. Quads only, and `=` may appear solely as the last one or
+  // two characters of the final quad.
+  const length = base64.length
+  if (length % 4 !== 0) fail('the reassembled Base64 body is not a whole number of quads')
+  const firstPad = base64.indexOf('=')
+  if (firstPad !== -1) {
+    const pads = length - firstPad
+    if (pads > 2) fail(`a Base64 body holds ${pads} padding characters in its final quad`)
+    for (let at = firstPad; at < length; at++) {
+      if (base64[at] !== '=') fail('a Base64 body holds padding before its final quad')
+    }
+  }
   return new Uint8Array(Buffer.from(base64, 'base64'))
+}
+
+/**
+ * The content (parameters plus body, without the `b;` verb) of every complete
+ * blob frame, in physical order.
+ *
+ * Frames are located by their own boundaries rather than by a lazy match, so a
+ * blob frame whose terminator never arrives — the write was cut short, or the
+ * next frame began inside it — throws instead of disappearing from the result.
+ * The other verbs are skipped: this reader observes Blobs only.
+ */
+function readBlobFrames(text: string): string[] {
+  const starts: number[] = []
+  for (let at = text.indexOf(APC); at >= 0; at = text.indexOf(APC, at + APC.length)) starts.push(at)
+  const frames: string[] = []
+  starts.forEach((at, index) => {
+    const body = at + APC.length
+    if (!text.startsWith(BLOB, body)) return
+    const content = body + BLOB.length
+    const end = text.indexOf(STRING_TERMINATOR, content)
+    if (end < 0) fail('a blob frame never reached its terminator')
+    const next = index + 1 < starts.length ? starts[index + 1]! : text.length
+    if (next < end) fail('a blob frame was cut short by the frame that followed it')
+    frames.push(text.slice(content, end))
+  })
+  return frames
 }
 
 function observe(mime: string | undefined, base64: string): ObservedTspBlob {
@@ -95,8 +145,8 @@ export function readTspBlobMessages(wire: string | Uint8Array): readonly Observe
   const text = typeof wire === 'string' ? wire : DECODER.decode(wire)
   const blobs: ObservedTspBlob[] = []
   let open: OpenBlob | undefined
-  for (const match of text.matchAll(BLOB_FRAME)) {
-    const { params, body } = readBody(match[1]!)
+  for (const content of readBlobFrames(text)) {
+    const { params, body } = readBody(content)
     const chunk = params.get('c')
     const more = params.get('m')
     if (more !== undefined && more !== '1') fail(`a blob chunk marks continuation with ${JSON.stringify(more)}`)
