@@ -742,22 +742,27 @@ test('native Model: a non-string `strip` value takes no draft and no write, whil
   const onId = (): string | undefined =>
     ((props(pane).strip as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? [])
       .find((item) => item.on === true)?.id as string | undefined
+  // The bar's ids carry the panel REVISION (`base#revision`, `actionBase()`), so the
+  // painted token says exactly how many admitted intents this page has processed.
+  const token = (): number => Number(String(actionOf(pane, 'apply')?.id).split('#')[1])
   const low = stripId(pane, 'low')
   const node = picker(pane)!.id
+  const tokenBefore = token()
   // The strip-shaped values a `Json` field can now carry, all addressed at the REAL
   // mounted node: none of them names a candidate this page offers.
   for (const value of [{ col: low, dir: 'asc' }, [low], 2, true, null, ''] as const) {
     pane.event({ ev: 'action', sf: pane.frames().at(-1)!.sf, id: node, act: 'strip', value })
   }
-  await settle(30)
-  assert.equal(onId(), stripId(pane, 'high'), 'no JSON-shaped strip value moves the draft')
-  assert.deepEqual(m.writes, [], 'and none of them starts a write')
-  assert.equal(picker(pane)!.id, node, 'and none of them re-renders the page')
-
-  // Positive control on the SAME mounted page: the string channel still drafts.
+  // NO fixed window: the SDK reads this pane's events through ONE ordered queue, so
+  // waiting for a LEGAL strip value that follows the batch proves every refusal above
+  // it was already dispatched — and the revision token then proves how many of them
+  // were ADMITTED (exactly the sentinel, never a JSON payload).
   action(pane, 'strip', low)
-  await waitUntil('the string strip value drafted Low', () => onId() === low)
-  assert.deepEqual(m.writes, [], 'a strip draft still never writes')
+  await waitUntil('the legal strip value drafted Low, so the refusals above it were processed', () => onId() === low)
+  assert.equal(token(), tokenBefore + 1,
+    `the six JSON-shaped values advanced the page ${token() - tokenBefore - 1} time(s) beyond the one legal draft`)
+  assert.deepEqual(m.writes, [], 'and none of them starts a write')
+  assert.equal(picker(pane)!.id, node, 'and none of them re-mounts the picker node')
 
   // `close` is the panel's dismissal authority and ignores `value` entirely: the
   // narrowing must not turn a JSON payload into a rejection.
@@ -3120,21 +3125,31 @@ test('native Model: a Focus queued behind a stalled frame credit flushes only th
 
   t.after(() => pane.releaseAcks())
   pane.holdAcks()
-  // Spend the two credits through props that really change the frame, so the
-  // caret changes below can only be QUEUED, never sent.
-  const sentBefore = pane.frameCount()
-  for (const next of [twinEffortDirectory, directory, twinEffortDirectory]) {
+  // Spend the two credits as OBSERVED commits, one wait per credit: a frame the
+  // pane draws while the acks are held is RECORDED and not acked, so
+  // `unackedFrames()` is the authoritative fact that both credits are gone — no
+  // fixed window stands in for the credit boundary.
+  for (const next of [twinEffortDirectory, directory]) {
+    const before = pane.frameCount()
     m.handle.setDirectory(next)
-    await settle(40)
+    await waitUntil('a real frame spends one pane credit', () => pane.frameCount() > before)
   }
+  assert.equal(pane.unackedFrames().length, 2, 'both advertised credits are held un-acked')
   const stalled = pane.frameCount()
-  assert.equal(stalled, sentBefore + 2, `exactly the two credits went out (${sentBefore} -> ${stalled})`)
+  // One more View change with no credit left. Nothing can send it: the ONLY
+  // producer of an ack in this fixture is `releaseAcks()`, which this case holds
+  // until the flush below, so "the frame count cannot move" is a structural
+  // consequence of the stalled credit rather than a window we happened to wait in.
+  m.handle.setDirectory(twinEffortDirectory)
   const beforeQueue = sentFocus()
 
-  // Two PRODUCTION caret changes while the credit is blocked: closing hands the
-  // caret back to the composer, reopening takes it for the layer again.
+  // The two caret changes are SYNCHRONOUS dispatches: `handle.close()`, `open()`
+  // and `setDirectory()` run `render()` and then `applyFocus()` inside the same
+  // call (`session.ts`: the focus op always follows `surface.render`), so both
+  // `surface.focus()` calls are already in the SDK's queue by the time they
+  // return. The assertions below therefore observe the queue's SILENCE on the
+  // wire, not the absence of a dispatch.
   m.handle.close()
-  await settle(40)
   const writes: unknown[] = []
   const again = m.renderer.modelPresentation!.open({
     subject: { sessionless: true },
@@ -3147,14 +3162,15 @@ test('native Model: a Focus queued behind a stalled frame credit flushes only th
   })
   again.setLoading()
   again.setDirectory(directory)
-  await settle(60)
   assert.deepEqual(sentFocus(), beforeQueue,
     'neither caret change reached the wire while the credit was blocked')
   assert.equal(pane.frameCount(), stalled, 'and no frame was sent behind the stall either')
 
   pane.releaseAcks()
-  await waitUntil('the pending View and its queued ops flush', () => pane.frameCount() > stalled)
-  await settle(80)
+  await waitUntil('the flush writes the frame that carries the queued ops', () => sentFocus().length > beforeQueue.length)
+  // One recorded frame is one complete APC message, so everything it queued is
+  // already readable at this point: a stale Focus would have landed in the SAME
+  // flush frame (that is exactly what the SDK-level mutation witness shows).
   const flushed = sentFocus().slice(beforeQueue.length)
   assert.deepEqual(flushed, [openCaret],
     `the flush carries ONE Focus, the current seat's, never the stale composer hand-back: ${JSON.stringify(flushed)}`)
