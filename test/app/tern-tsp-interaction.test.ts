@@ -111,9 +111,18 @@ interface Harness {
   dispose(): Promise<void>
 }
 
-/** Mount the REAL TSP renderer over the scripted pane and bind the input. */
-async function mountHarness(): Promise<Harness> {
-  const pane = installTspPane()
+/** Mount the REAL TSP renderer over the scripted pane and bind the input.
+ *
+ * The default pane advertises the base vocabulary only, so the modal seat keeps
+ * the LEGACY text form — the fail-closed default, exactly like an older client.
+ * A case that wants the NATIVE composite branch opts in with
+ * `nativeInteraction`, and a negative case narrows the advertised sets. */
+async function mountHarness(options: {
+  readonly nativeInteraction?: boolean
+  readonly kinds?: readonly string[]
+  readonly features?: readonly string[]
+} = {}): Promise<Harness> {
+  const pane = installTspPane(options)
   const session = await sdkConnect({ app: 'dsh-pi-tui', timeout: 500 })
   assert.ok(session !== null, 'the scripted pane is accepted by the shipped SDK')
   const submits: string[] = []
@@ -1185,6 +1194,759 @@ test('the composer accepts input again only after the NEW projection scope commi
     harness.pane.key('b')
     await waitFor(() => harness.renderer.composer.getDraft() === 'b',
       'the composer accepts input once the new scope has committed')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+// ── The native composite branch (the negotiated Questions/Approval forms) ────
+//
+// These cases opt the scripted pane into the EXACT kind set the native
+// composites paint, so the seat takes its native branch; every case above keeps
+// the default advertised set and therefore qualifies the LEGACY branch. The
+// wire is still the only observation point, and each pointer event travels
+// through the shipped SDK's decoder as a real `SessionInput{event}`.
+//
+// A `void answers.catch(() => {})` beside a flow a case may leave open is not
+// a swallowed error: the case still awaits the outcome it names. It keeps a
+// failing ASSERTION from being reported as the seat's expected disposal
+// cancellation, which would hide the real cause (AGENTS.md: never hide a
+// contradiction).
+
+/** The base surface id the renderer opens first on this fixture. */
+const BASE_SF = 's1'
+
+/** The native Questions form on the live wire, or `undefined` while no frame
+ *  carrying it has been drawn yet (a `waitFor` predicate must answer "not
+ *  yet", it may not throw). */
+function findNativeForm(pane: TspPane): WireNode | undefined {
+  return wireNodes(pane).find(entry => entry.k === 'questions')
+}
+
+/** The asserting read, for after the frame has been awaited. */
+function nativeForm(pane: TspPane): WireNode {
+  const node = findNativeForm(pane)
+  assert.ok(node !== undefined, `the native questions form is on the wire: ${wireNodes(pane).map(entry => entry.k).join(',')}`)
+  return node
+}
+
+/** Await the native form of the CURRENT frame, then read it. */
+async function nativeFormReady(pane: TspPane, label = 'the native questions form reached the wire'): Promise<WireNode> {
+  await waitFor(() => findNativeForm(pane) !== undefined, label)
+  return nativeForm(pane)
+}
+
+/** A button of the current Review/safe row, awaited by its key suffix. */
+async function waitForButton(pane: TspPane, suffix: string): Promise<WireNode> {
+  await waitFor(() => wireNodes(pane).some(node => node.k === 'button' && node.id.endsWith(suffix)), `the ${suffix} button reached the wire`)
+  const node = wireNodes(pane).find(entry => entry.k === 'button' && entry.id.endsWith(suffix))
+  assert.ok(node !== undefined)
+  return node
+}
+
+/** The native Tool node of the current approval, if any is mounted. */
+function toolNode(pane: TspPane): WireNode | undefined {
+  return wireNodes(pane).find(entry => entry.k === 'tool')
+}
+
+/** The DIRECT children of one overlay, in the order the wire carries them. */
+function overlayChildren(pane: TspPane, id: string): string[] {
+  return wireNodes(pane)
+    .filter(node => node.id.startsWith(`${id}.`) && !node.id.slice(id.length + 1).includes('.'))
+    .map(node => String(node.id.split('.').at(-1)))
+}
+
+/** Mount the renderer on a pane that negotiated the native modal vocabulary. */
+async function mountNativeHarness(): Promise<Harness> {
+  return mountHarness({ nativeInteraction: true })
+}
+
+test('the native branch is taken only by a pane that negotiated it; a smaller pane keeps the text form', async () => {
+  const native = await mountNativeHarness()
+  try {
+    const answers = native.renderer.interaction.askQuestions(
+      [question({ id: 'cap-a', question: 'Which target?', options: [{ label: 'alpha' }] })], undefined, undefined, false)
+    await nativeFormReady(native.pane)
+    native.pane.key('\x1b')
+    await assert.rejects(answers, /question flow cancelled/)
+  } finally {
+    await native.dispose()
+  }
+
+  // The SAME request on a pane that advertises the base vocabulary only.
+  const legacy = await mountHarness()
+  try {
+    const answers = legacy.renderer.interaction.askQuestions(
+      [question({ id: 'cap-b', question: 'Which target?', options: [{ label: 'alpha' }] })], undefined, undefined, false)
+    await waitFor(() => overlayAdds(legacy.ops()).length === 1, 'the legacy form opened')
+    assert.equal(wireNodes(legacy.pane).some(node => node.k === 'questions'), false,
+      'a pane without the kind never gets a native form')
+    assert.ok(modalNode(legacy.pane, '.row-0') !== undefined, 'the legacy text option row is painted instead')
+    legacy.pane.key('\x1b')
+    await assert.rejects(answers, /question flow cancelled/)
+  } finally {
+    await legacy.dispose()
+  }
+})
+
+test('native projection: stable index tokens, the real labels, required:false, and status/heading OUTSIDE the form', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const questions = [
+      question({
+        id: 'q-0',
+        header: 'Deployment',
+        question: 'Which target?',
+        detail: 'Choose one.',
+        options: [{ label: 'alpha', description: 'the steady one' }, { label: 'beta (recommended)' }],
+      }),
+      question({ id: 'q-1', question: 'And again?', options: [{ label: 'alpha' }, { label: 'beta' }] }),
+    ]
+    const answers = harness.renderer.interaction.askQuestions(questions, undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const form = nativeForm(harness.pane)
+    const items = form.p.items as Array<Record<string, unknown>>
+    assert.deepEqual(items.map(item => item.id), ['q-0', 'q-1'], 'items are indexed by POSITION, in source order')
+    assert.equal(form.p.step, 0, 'the native step is the seat tab')
+    assert.equal(form.p.variant, 'steps')
+    assert.equal(form.p.submit, 'Review answers', 'the native submit label names the Review, never a Host write')
+    for (const item of items) {
+      assert.equal(item.required, false, 'Skip stays allowed: no invented required rule')
+      assert.equal(item.multi, undefined, 'a single-select question is not projected as multi')
+      assert.equal(item.other === undefined, false, 'a choice page keeps the Other answer field')
+    }
+    assert.deepEqual(items.map(item => item.prompt), ['Which target?', 'And again?'],
+      'the real question text is projected, not an index')
+    const choices = items[0]!.choices as Array<Record<string, unknown>>
+    assert.deepEqual(choices.map(choice => choice.value), ['o-0', 'o-1'], 'choice values are stable index tokens')
+    assert.equal(choices[0]!.label, 'alpha')
+    assert.equal(choices[0]!.detail, 'the steady one')
+    assert.equal(choices[1]!.label, 'beta', 'the (recommended) suffix is stripped from the DISPLAY label')
+    assert.match(String(choices[1]!.detail), /Recommended/)
+    // The controller status and the question heading are real facts of THIS
+    // request, so they ride a line of the same overlay, never a fake SDK field.
+    const order = overlayChildren(harness.pane, overlayAdds(harness.ops()).at(-1)!)
+    assert.ok(order.includes('status'), 'the status line is outside the native form')
+    assert.ok(order.includes('header'), 'the heading is outside the native form')
+    assert.ok(order.indexOf('status') < order.indexOf(String(form.id.split('.').at(-1))), 'and above the form')
+    assert.deepEqual(form.p.answers ?? {}, {}, 'nothing is selected yet, so no answer is projected')
+    harness.pane.key('\x1b')
+    await assert.rejects(answers, /question flow cancelled/)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a native pointer change selects the REAL label, fires only a semantic mutation, and keeps source order', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const questions = [question({
+      id: 'q1',
+      question: 'Pick any',
+      multiSelect: true,
+      // The client reports the picks in CLICK order; the answer must not.
+      options: [{ label: 'one' }, { label: 'two' }, { label: 'three' }],
+    })]
+    const answers = harness.renderer.interaction.askQuestions(questions, undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const form = nativeForm(harness.pane)
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: form.id, item: 'q-0', value: ['o-2'] })
+    await waitFor(() => recorder.mutations === 1, 'the first real pick fired the hook')
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: form.id, item: 'q-0', value: ['o-2', 'o-0'] })
+    await waitFor(() => recorder.mutations === 2, 'the second real pick fired the hook')
+    // Re-sending the same SET is not a semantic change.
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: form.id, item: 'q-0', value: ['o-2', 'o-0'] })
+    await waitForKeyDeliveryWindow()
+    assert.equal(recorder.mutations, 2, 'a repeated identical selection set fires no hook')
+    assert.deepEqual((nativeForm(harness.pane).p.answers as Record<string, unknown>)['q-0'], ['o-0', 'o-2'],
+      'the projected answer set follows SOURCE order, not the client order')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'submit' })
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'q1', selected: ['one', 'three'] }],
+      'the batch carries the real labels in source option order')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('the native last-step submit NEVER writes the Host; only the Review commit settles', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({ id: 'q2', question: 'Which?', options: [{ label: 'a' }, { label: 'b' }] })], undefined, undefined, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const form = nativeForm(harness.pane)
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: form.id, item: 'q-0', value: 'o-1' })
+    await waitFor(() => (nativeForm(harness.pane).p.answers as Record<string, unknown>)['q-0'] === 'o-1', 'the pick is projected')
+    // The client's own submit payload carries every answer: the seat must
+    // ignore its content and open Review only.
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: form.id, act: 'submit', value: { 'q-0': 'injected' } })
+    await waitForButton(harness.pane, '.submit')
+    let settled = false
+    void answers.then(() => { settled = true })
+    await waitForKeyDeliveryWindow()
+    assert.equal(settled, false, 'the native submit did not settle the question')
+    assert.equal(wireText(harness.pane).includes('injected'), false, 'the client submit payload is never projected')
+    const submit = modalNode(harness.pane, '.submit')
+    assert.ok(submit !== undefined, 'the Review page paints a real Submit button')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: submit.id, act: 'review-submit' })
+    assert.deepEqual(await answers, [{ id: 'q2', selected: ['b'] }], 'the Review commit is the one business write')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('native admission refuses a stale visit, another page, a foreign surface and a malformed payload', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const questions = [
+      question({ id: 'q3', question: 'first', options: [{ label: 'a' }, { label: 'b' }] }),
+      question({ id: 'q4', question: 'second', options: [{ label: 'c' }, { label: 'd' }] }),
+    ]
+    const answers = harness.renderer.interaction.askQuestions(questions, undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const firstVisit = nativeForm(harness.pane)
+    // An out-of-range token, a non-canonical spelling, a wrong JSON type,
+    // another page's item, a foreign surface and another request's node id are
+    // all refusals — never a coerced answer.
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: firstVisit.id, item: 'q-0', value: 'o-9' })
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: firstVisit.id, item: 'q-0', value: 'o-01' })
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: firstVisit.id, item: 'q-0', value: 7 })
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: firstVisit.id, item: 'q-1', value: 'o-0' })
+    harness.pane.event({ ev: 'change', sf: 'other-surface', id: firstVisit.id, item: 'q-0', value: 'o-0' })
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: 'layer.modal-99.qform-99', item: 'q-0', value: 'o-0' })
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: 'layer.modal-99.qform-99', act: 'submit' })
+    await waitForKeyDeliveryWindow()
+    assert.equal(recorder.mutations, 0, 'no refused event touched the draft')
+    assert.equal(recorder.drafts.length, 0, 'and no refused event reported a draft either')
+
+    // A REAL pick, then the page change makes that very node id stale.
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: firstVisit.id, item: 'q-0', value: 'o-0' })
+    await waitFor(() => recorder.mutations === 1, 'the real pick registered')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'next', item: 'q-0' })
+    await waitFor(() => findNativeForm(harness.pane) !== undefined && nativeForm(harness.pane).id !== firstVisit.id, 'the second page is a NEW node id')
+    const secondForm = nativeForm(harness.pane)
+    assert.equal(secondForm.p.step, 1, 'the native step followed the seat tab')
+    // The superseded visit can no longer select, page or settle anything.
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: firstVisit.id, item: 'q-0', value: 'o-1' })
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: firstVisit.id, act: 'submit' })
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: firstVisit.id, act: 'back' })
+    await waitForKeyDeliveryWindow()
+    assert.equal(nativeForm(harness.pane).id, secondForm.id, 'a stale visit moved nothing')
+    assert.equal(recorder.mutations, 1, 'a stale visit changed no answer')
+    // A page action on the CURRENT form that names a different item.
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: secondForm.id, act: 'next', item: 'q-0' })
+    await waitForKeyDeliveryWindow()
+    assert.equal(nativeForm(harness.pane).p.step, 1, 'an item that is not the current page is refused')
+
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: secondForm.id, item: 'q-1', value: 'o-1' })
+    await waitFor(() => recorder.mutations === 2, 'the second page pick registered')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'submit' })
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'q3', selected: ['a'] }, { id: 'q4', selected: ['d'] }],
+      'only the admitted events shaped the batch')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a page action without its exact current item is refused, and submit carries none', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const questions = [
+      question({ id: 'p1', question: 'first', options: [{ label: 'a' }, { label: 'b' }] }),
+      question({ id: 'p2', question: 'second', options: [{ label: 'c' }] }),
+    ]
+    const answers = harness.renderer.interaction.askQuestions(questions, undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const form = nativeForm(harness.pane)
+    // No item at all, and another page's item: both are malformed for a page action.
+    for (const act of ['next', 'skip', 'back']) {
+      harness.pane.event({ ev: 'action', sf: BASE_SF, id: form.id, act })
+      harness.pane.event({ ev: 'action', sf: BASE_SF, id: form.id, act, item: 'q-9' })
+    }
+    await waitForKeyDeliveryWindow()
+    assert.equal(nativeForm(harness.pane).p.step, 0, 'a page action without its exact item moved nothing')
+    assert.equal(recorder.drafts.length, 0, 'and it changed no draft')
+    // The real shape (item = the current question) still advances.
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: form.id, act: 'next', item: 'q-0' })
+    await waitFor(() => (nativeForm(harness.pane).p.step as number) === 1, 'the exact page action advanced')
+    const second = nativeForm(harness.pane)
+    // Submit is the mirror rule: it carries NO item, and one that does is refused.
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: second.id, act: 'submit', item: 'q-1' })
+    await waitForKeyDeliveryWindow()
+    assert.equal((nativeForm(harness.pane).p.step as number), 1, 'a submit carrying an item is refused')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: second.id, act: 'submit' })
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'p1', selected: [] }, { id: 'p2', selected: [] }])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('native Back keeps every draft; native Skip drops only the page it names', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const questions = [
+      question({ id: 'q5', question: 'first', options: [{ label: 'a' }] }),
+      question({ id: 'q6', question: 'second', options: [{ label: 'c' }, { label: 'd' }] }),
+    ]
+    const answers = harness.renderer.interaction.askQuestions(questions, undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: nativeForm(harness.pane).id, item: 'q-0', value: 'o-0' })
+    await waitFor(() => recorder.mutations === 1, 'the first pick registered')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'next', item: 'q-0' })
+    await waitFor(() => (nativeForm(harness.pane).p.step as number) === 1, 'the second page is current')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'back', item: 'q-1' })
+    await waitFor(() => (nativeForm(harness.pane).p.step as number) === 0, 'Back returned to the first page')
+    assert.deepEqual((nativeForm(harness.pane).p.answers as Record<string, unknown>)['q-0'], 'o-0',
+      'Back kept the earlier draft')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'next', item: 'q-0' })
+    await waitFor(() => (nativeForm(harness.pane).p.step as number) === 1, 'forward again')
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: nativeForm(harness.pane).id, item: 'q-1', value: 'o-1' })
+    await waitFor(() => (nativeForm(harness.pane).p.answers as Record<string, unknown>)['q-1'] === 'o-1', 'the second pick registered')
+    // An explicit Skip of THIS page: the answer it just got must not ride along.
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'skip', item: 'q-1' })
+    await waitForButton(harness.pane, '.submit')
+    await waitFor(() => findNativeForm(harness.pane) === undefined, 'Review owns the seat now')
+    assert.deepEqual(recorder.drafts.at(-1)?.answers[1], { selected: [], custom: '', skipped: true },
+      'the skipped page carries no stale answer')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'q5', selected: ['a'] }, { id: 'q6', selected: [] }])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+
+test('the Review buttons admit only their own exact current node; Back keeps drafts, Cancel cancels', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({ id: 'q7', question: 'Which?', options: [{ label: 'a' }] })], undefined, undefined, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: nativeForm(harness.pane).id, item: 'q-0', value: 'o-0' })
+    await waitFor(() => (nativeForm(harness.pane).p.answers as Record<string, unknown>)['q-0'] === 'o-0', 'the pick registered')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'submit' })
+    const submit = await waitForButton(harness.pane, '.submit')
+    assert.equal(String(modalNode(harness.pane, '.summary')?.p.text ?? ''),
+      '1 question · 1 answered · 0 skipped', 'the summary line accounts for every question')
+    // The right node with a wrong action name, and the right name on a node of
+    // another visit, are both refusals.
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: submit.id, act: 'allow' })
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: 'layer.modal-1.review-9.submit', act: 'review-submit' })
+    let settled = false
+    void answers.then(() => { settled = true })
+    await waitForKeyDeliveryWindow()
+    assert.equal(settled, false, 'a mismatched node/action pair never commits')
+    // Back leaves Review, and re-entering it mints a NEW row: the old Submit id
+    // is then a node of a superseded visit.
+    const back = wireNodes(harness.pane).find(node => node.k === 'button' && node.id.endsWith('.back'))
+    assert.ok(back !== undefined, 'Review paints a real Back button')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: back.id, act: 'review-back' })
+    await nativeFormReady(harness.pane, 'Back returned to the question')
+    assert.deepEqual((nativeForm(harness.pane).p.answers as Record<string, unknown>)['q-0'], 'o-0',
+      'Back kept the draft (it is a presentation move, not a reset)')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'submit' })
+    await waitFor(() => wireNodes(harness.pane).some(node => node.k === 'button' && node.id.endsWith('.submit') && node.id !== submit.id),
+      'the revisited Review is a NEW node id')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: submit.id, act: 'review-submit' })
+    await waitForKeyDeliveryWindow()
+    assert.equal(settled, false, 'the superseded Review button is inert')
+    const fresh = wireNodes(harness.pane).find(node => node.k === 'button' && node.id.endsWith('.submit'))!
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: fresh.id, act: 'review-submit' })
+    assert.deepEqual(await answers, [{ id: 'q7', selected: ['a'] }])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a Review Cancel action runs the original cancellation and releases the caret', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({ id: 'q8', question: 'Which?', options: [{ label: 'a' }] })], undefined, undefined, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'submit' })
+    const cancel = await waitForButton(harness.pane, '.cancel')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: cancel.id, act: 'review-cancel' })
+    await assert.rejects(answers, /question flow cancelled/)
+    await waitFor(() => lastOp(harness.ops(), 'focus')?.[1] === 'dock.composer', 'the composer regained the caret')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('the safe form paints REAL buttons for an optionless or masked page and never leaks the secret', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const secret = 'sentinel-secret-42'
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({ id: 'q9', question: 'Token?', masked: true })], undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await waitFor(() => overlayAdds(harness.ops()).length === 1, 'the safe form opened')
+    const kinds = wireNodes(harness.pane).map(node => node.k)
+    assert.equal(kinds.includes('questions'), false, 'a masked page is never projected as an empty native Steps form')
+    assert.ok(kinds.includes('button'), 'the safe form paints real buttons, not a text line pretending to be one')
+    harness.pane.key(secret)
+    await waitFor(() => recorder.drafts.at(-1)?.answers[0]?.custom === secret, 'the draft keeps the real value')
+    assert.ok(wireText(harness.pane).includes('•'), 'the pane shows bullets')
+    assert.equal(wireText(harness.pane).includes(secret), false, 'the masked plaintext never reaches the wire')
+    const next = wireNodes(harness.pane).find(node => node.k === 'button' && node.id.endsWith('.next'))
+    assert.ok(next !== undefined, 'the safe form paints a Next button')
+    // A pointer click on Next is exactly the keyboard commit for this page.
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: next.id, act: 'form-next' })
+    await waitForButton(harness.pane, '.submit')
+    const review = wireText(harness.pane)
+    assert.equal(review.includes(secret), false, 'Review keeps the sensitive answer bulleted')
+    assert.ok(review.includes('•'.repeat([...secret].length)), 'one bullet per grapheme')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'q9', selected: [], custom: secret }],
+      'the authoritative answer carries the real value')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('the Other input keeps ONE owner: a pointer focus opens the same editor at the real derived id', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({ id: 'q10', question: 'Which?', options: [{ label: 'a' }] })], undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const form = nativeForm(harness.pane)
+    const other = wireNodes(harness.pane).find(node => node.k === 'input' && node.id === `${form.id}.q-0.other`)
+    assert.ok(other !== undefined, 'the SDK-derived Other child carries the real id')
+    assert.equal(lastOp(harness.ops(), 'focus')?.[1], null, 'the choice page owns no caret')
+    // The stale guess the seat used to publish must NOT be what gets focused.
+    harness.pane.event({ ev: 'focus', sf: BASE_SF, id: 'layer.modal-1.answer' })
+    await waitForKeyDeliveryWindow()
+    assert.notEqual(lastOp(harness.ops(), 'focus')?.[1], 'layer.modal-1.answer', 'a foreign answer-field claim is refused')
+    harness.pane.event({ ev: 'focus', sf: BASE_SF, id: other.id })
+    await waitFor(() => lastOp(harness.ops(), 'focus')?.[1] === other.id, 'the caret went to the real Other id')
+    harness.pane.key('typed')
+    await waitFor(() => recorder.drafts.at(-1)?.answers[0]?.custom === 'typed', 'the keyboard stayed the input owner')
+    assert.deepEqual(nativeForm(harness.pane).p.answers ?? {}, {}, 'a custom answer never enters the native answers map')
+    harness.pane.key('\r')
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'q10', selected: [], custom: 'typed' }])
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('the keyboard cursor line answers an Arrow press and hides when a real choice arrives', async () => {
+  const harness = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const answers = harness.renderer.interaction.askQuestions(
+      [question({ id: 'q11', question: 'Which?', options: [{ label: 'a' }, { label: 'b' }] })], undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const cursor = () => wireNodes(harness.pane).some(node => node.id.endsWith('.keyboard-cursor'))
+    assert.equal(cursor(), false, 'the default mouse journey shows no keyboard line')
+    harness.pane.key('\x1b[B')   // Arrow down asks for the keyboard cursor
+    await waitFor(() => cursor(), 'the keyboard cursor line appeared')
+    assert.match(String(modalNode(harness.pane, '.keyboard-cursor')?.p.text ?? ''), /Keyboard cursor: \[2\] b/)
+    assert.equal(recorder.mutations, 0, 'a highlight is not an answer')
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: nativeForm(harness.pane).id, item: 'q-0', value: 'o-1' })
+    await waitFor(() => recorder.mutations === 1, 'the real pick registered')
+    await waitFor(() => !cursor(), 'a native choice hides the keyboard line')
+    // A digit picks in place and never leaves the page.
+    harness.pane.key('1')
+    await waitFor(() => recorder.mutations === 2, 'the digit pick registered')
+    assert.equal(nativeForm(harness.pane).p.step, 0, 'a digit stays on the page (Next pages)')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'submit' })
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'q11', selected: ['a'] }], 'the last real choice is the answer')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('the native approval paints the full tool facts BEFORE the ask control and gives the tool no body', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const outcome = harness.renderer.interaction.showApprovalPrompt(
+      { toolName: 'bash', reason: 'needs a shell', arguments: '{"cmd":"ls -la"}', danger: true }, true)
+    await waitFor(() => toolNode(harness.pane) !== undefined, 'the native approval reached the wire')
+    const overlayId = overlayAdds(harness.ops()).at(-1)!
+    const order = overlayChildren(harness.pane, overlayId)
+    const toolAt = order.findIndex(entry => entry === 'approval-tool')
+    const argsAt = order.findIndex(entry => entry === 'args')
+    assert.ok(toolAt >= 0, 'the native tool node is on the wire')
+    assert.ok(argsAt >= 0 && argsAt < toolAt, `the arguments are painted BEFORE the decision: ${order.join(',')}`)
+    assert.ok(order.indexOf('tool-name') < toolAt && order.indexOf('reason') < toolAt && order.indexOf('danger') < toolAt,
+      `every tool fact precedes the approval control: ${order.join(',')}`)
+    const tool = toolNode(harness.pane)!
+    assert.equal(tool.p.status, 'ask')
+    assert.equal(tool.p.confirm, 'card')
+    assert.equal(tool.p.frame, 'inline', 'one frame, not a ring inside a ring')
+    assert.equal(tool.p.role, 'dsh-native-approval', 'the scoped role the one stylesheet keys on')
+    assert.equal((tool.p.ask as Record<string, unknown>).always, false, 'the Always grant this product cannot honour is hidden')
+    assert.equal((tool.p.ask as Record<string, unknown>).allow, 'Allow once')
+    assert.equal(tool.c, undefined, 'the approval control carries NO body: the client draws its panel above it')
+    const args = wireNodes(harness.pane).find(node => node.id.endsWith('.args'))
+    assert.ok(args !== undefined && args.k === 'scroll', 'the arguments ride a bounded scroll region')
+    assert.deepEqual(args.p.max, { h: 0.5 }, 'a FRACTION of the overlay body, never a pixel or line budget')
+    assert.ok(wireNodes(harness.pane).some(node => node.id === `${args.id}.body` && node.k === 'code'),
+      'the full argument text is still there, readable inside that region')
+    assert.equal(wireNodes(harness.pane).filter(node => node.k === 'tool').length, 1, 'exactly ONE ask control')
+    assert.ok(wireText(harness.pane).includes('Dangerous command'), 'the danger marker is readable')
+    assert.ok(wireText(harness.pane).includes('Y allow once'), 'the real shortcuts are stated')
+    harness.pane.key('y')
+    assert.equal(await outcome, 'allowed-once')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('the approval Allow/Deny buttons settle the ORIGINAL promise once, and nothing else decides', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const outcome = harness.renderer.interaction.showApprovalPrompt(APPROVAL, true)
+    await waitFor(() => toolNode(harness.pane) !== undefined, 'the approval opened')
+    const tool = toolNode(harness.pane)!
+    const settles: ApprovalOutcome[] = []
+    void outcome.then(value => { settles.push(value) })
+    // `always`, a scope value on either button, another node, another surface,
+    // and a non-action event on the tool are ALL refusals.
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: tool.id, act: 'always' })
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: tool.id, act: 'allow', value: 'session' })
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: tool.id, act: 'allow', value: 'always' })
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: tool.id, act: 'deny', value: 'once' })
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: 'layer.modal-9.approval-tool', act: 'allow' })
+    harness.pane.event({ ev: 'action', sf: 'other-surface', id: tool.id, act: 'allow' })
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: tool.id, value: 'allow' })
+    harness.pane.event({ ev: 'select', sf: BASE_SF, id: tool.id, item: 'allow' })
+    await waitForKeyDeliveryWindow()
+    assert.deepEqual(settles, [], 'no refused approval action settled anything')
+    assert.deepEqual(harness.submits, [], 'none of them reached the composer either')
+    assert.ok(toolNode(harness.pane) !== undefined, 'the approval is still open')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: tool.id, act: 'allow' })
+    assert.equal(await outcome, 'allowed-once')
+    await waitForKeyDeliveryWindow()
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: tool.id, act: 'deny' })
+    await waitForKeyDeliveryWindow()
+    assert.deepEqual(settles, ['allowed-once'], 'a repeated click on the retired tool cannot settle twice')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a native approval for a DENY decision settles rejected, and Cancel keys still cancel', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const denied = harness.renderer.interaction.showApprovalPrompt(APPROVAL, true)
+    await waitFor(() => toolNode(harness.pane) !== undefined, 'the approval opened')
+    const tool = toolNode(harness.pane)!
+    const back = wireNodes(harness.pane).find(node => node.k === 'text' && node.id.endsWith('.hint'))
+    assert.ok(back !== undefined, 'the real shortcut line is present')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: tool.id, act: 'deny' })
+    assert.equal(await denied, 'rejected')
+    const cancelled = harness.renderer.interaction.showApprovalPrompt(APPROVAL, true)
+    await waitFor(() => toolNode(harness.pane) !== undefined, 'the next approval opened')
+    harness.pane.key('\x1b')
+    assert.equal(await cancelled, 'cancelled')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+
+test('the Enter-keycap rule is installed ONCE per surface, and only by a pane that can honour it', async () => {
+  const SHEET = 'dsh-native-approval-shortcuts'
+  const installs = (pane: TspPane) => (wireText(pane).match(new RegExp(SHEET, 'g')) ?? []).length
+  const native = await mountNativeHarness()
+  try {
+    const outcome = native.renderer.interaction.showApprovalPrompt(APPROVAL, true)
+    await waitFor(() => toolNode(native.pane) !== undefined, 'the approval opened')
+    assert.equal(installs(native.pane), 1, 'the scoped sheet is installed exactly once, never per render')
+    const sheet = wireText(native.pane)
+    assert.ok(sheet.includes('[data-role=\\"dsh-native-approval\\"] .sf-tool-ask-btn .sf-kbd { display: none; }'),
+      `and its body is exactly the one Enter-keycap rule: ${sheet.slice(sheet.indexOf(SHEET), sheet.indexOf(SHEET) + 240)}`)
+    native.pane.key('n')
+    await outcome
+    // Several more approvals and questions: STILL one install, and the rule is
+    // never re-sent from a render path.
+    for (let index = 0; index < 3; index += 1) {
+      const next = native.renderer.interaction.showApprovalPrompt(APPROVAL, true)
+      await waitFor(() => toolNode(native.pane) !== undefined, 'the approval opened')
+      native.pane.key('n')
+      await next
+    }
+    const questions = native.renderer.interaction.askQuestions(
+      [question({ id: 'sheet-q', question: 'Which?', options: [{ label: 'a' }] })], undefined, undefined, false)
+    await nativeFormReady(native.pane, 'the queued form opened')
+    native.pane.key('\x1b')
+    await assert.rejects(questions, /question flow cancelled/)
+    assert.equal(installs(native.pane), 1, 'still exactly one sheet install after every repaint')
+  } finally {
+    await native.dispose()
+  }
+
+  // A pane WITHOUT `styles` cannot hide the misleading keycap, so it must get
+  // neither the native approval nor the sheet — and it stays answerable.
+  const noStyles = await mountHarness({
+    kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'questions', 'overlay', 'row', 'text', 'input', 'button', 'scroll'],
+    features: ['flow'],
+  })
+  try {
+    const outcome = noStyles.renderer.interaction.showApprovalPrompt(APPROVAL, true)
+    await waitFor(() => overlayAdds(noStyles.ops()).length === 1, 'the approval opened')
+    assert.equal(toolNode(noStyles.pane), undefined, 'no native ask control without `styles`')
+    assert.equal(wireText(noStyles.pane).includes(SHEET), false, 'and no sheet without `styles`')
+    assert.ok(wireText(noStyles.pane).includes('y allow once'), 'the legacy text approval is still answerable')
+    noStyles.pane.key('y')
+    assert.equal(await outcome, 'allowed-once')
+  } finally {
+    await noStyles.dispose()
+  }
+
+  // A pane that advertises every native Questions kind EXCEPT `row`: the safe
+  // form and the Review page both build a `row`, so the gate must be fail-closed
+  // and the legacy text form must be what this pane really gets.
+  const noRow = await mountHarness({
+    kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'questions', 'overlay', 'text', 'input', 'button', 'scroll'],
+    features: ['flow', 'styles'],
+  })
+  try {
+    const questions = noRow.renderer.interaction.askQuestions(
+      [question({ id: 'norow-q', question: 'Which?', options: [{ label: 'a' }] })], undefined, undefined, false)
+    void questions.catch(() => {})
+    await waitFor(() => overlayAdds(noRow.ops()).length === 1, 'the question form opened')
+    assert.equal(findNativeForm(noRow.pane), undefined,
+      'a pane without the row kind never gets the native Questions form')
+    assert.ok(modalNode(noRow.pane, '.row-0') !== undefined, 'the legacy text rows are painted instead')
+    assert.equal(wireNodes(noRow.pane).some(node => node.k === 'row'), false,
+      'and no unnegotiated row node is ever sent')
+    noRow.pane.key('\x1b')
+    await assert.rejects(questions, /question flow cancelled/)
+  } finally {
+    await noRow.dispose()
+  }
+
+  // A pane with `styles` but no `tool` kind: same refusal, same fallback.
+  const noTool = await mountHarness({
+    kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'questions', 'overlay', 'row', 'text', 'input', 'button'],
+    features: ['flow', 'styles'],
+  })
+  try {
+    const outcome = noTool.renderer.interaction.showApprovalPrompt(APPROVAL, true)
+    await waitFor(() => overlayAdds(noTool.ops()).length === 1, 'the approval opened')
+    assert.equal(toolNode(noTool.pane), undefined, 'a pane without the tool kind never gets the native ask')
+    assert.equal(wireText(noTool.pane).includes(SHEET), false, 'and no sheet is installed for it')
+    noTool.pane.key('n')
+    assert.equal(await outcome, 'rejected')
+  } finally {
+    await noTool.dispose()
+  }
+
+  // A pane without the QUESTIONS kinds keeps the text form but still gets the
+  // native approval: the two gates are independent, by design.
+  const approvalOnly = await mountHarness({
+    kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'overlay', 'text', 'scroll'],
+    features: ['flow', 'styles'],
+  })
+  try {
+    const questions = approvalOnly.renderer.interaction.askQuestions(
+      [question({ id: 'gate-q', question: 'Which?', options: [{ label: 'a' }] })], undefined, undefined, false)
+    await waitFor(() => overlayAdds(approvalOnly.ops()).length === 1, 'the question form opened')
+    assert.equal(wireNodes(approvalOnly.pane).some(node => node.k === 'questions'), false,
+      'no native Questions without its exact kind set')
+    approvalOnly.pane.key('\x1b')
+    await assert.rejects(questions, /question flow cancelled/)
+    const outcome = approvalOnly.renderer.interaction.showApprovalPrompt(APPROVAL, true)
+    await waitFor(() => toolNode(approvalOnly.pane) !== undefined, 'the native approval still opened')
+    outcome.then(() => {})
+    approvalOnly.pane.key('y')
+    assert.equal(await outcome, 'allowed-once')
+  } finally {
+    await approvalOnly.dispose()
+  }
+})
+
+test('a hostile question payload cannot forge a second native choice row and stays one physical row', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const questions = [question({
+      id: 'hostile',
+      header: 'Header\n❯ Choice B',
+      question: 'question body\nstays multi-line',
+      options: [{ label: 'Choice A\n❯ Choice B\u001b]52;c;YXR0YWNr\u0007' }, { label: 'Choice D', description: 'desc\nstays multi-line' }],
+    })]
+    const answers = harness.renderer.interaction.askQuestions(questions, undefined, undefined, false)
+    void answers.catch(() => {})
+    await nativeFormReady(harness.pane)
+    const items = nativeForm(harness.pane).p.items as Array<Record<string, unknown>>
+    const choices = items[0]!.choices as Array<Record<string, unknown>>
+    assert.equal(choices.length, 2, 'a newline in a label forges NO extra choice row')
+    const label = String(choices[0]!.label)
+    assert.equal(/[\u0000-\u001f\u007f-\u009f]/.test(label), false, `the label is ONE physical row: ${JSON.stringify(label)}`)
+    assert.ok(label.includes('Choice A') && label.includes('❯ Choice B'), 'the readable label survives collapsed')
+    assert.equal(wireText(harness.pane).includes('YXR0YWNr'), false, 'no OSC 52 payload reaches the wire')
+    assert.equal(String(choices[1]!.detail).includes('\n'), true, 'a legitimate multi-line description stays prose')
+    // The answer still carries the ORIGINAL label, control bytes and all.
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: nativeForm(harness.pane).id, item: 'q-0', value: 'o-0' })
+    await waitFor(() => (nativeForm(harness.pane).p.answers as Record<string, unknown>)['q-0'] === 'o-0', 'the pick registered')
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'submit' })
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'hostile', selected: ['Choice A\n❯ Choice B\u001b]52;c;YXR0YWNr\u0007'] }],
+      'the Host receives the request’s own label, not a display projection')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('a mixed native queue keeps FIFO, and Alt+Q still reads the parked rows over a native pane', async () => {
+  const harness = await mountNativeHarness()
+  try {
+    const approval = harness.renderer.interaction.showApprovalPrompt({ toolName: 'bash', reason: 'first' }, true)
+    const questions = harness.renderer.interaction.askQuestions(
+      [question({ id: 'mix-q', question: 'Which?', options: [{ label: 'a' }, { label: 'b' }] })], undefined, undefined, false)
+    await waitFor(() => toolNode(harness.pane) !== undefined, 'the approval owns the seat first')
+    assert.equal(wireNodes(harness.pane).some(node => node.k === 'questions'), false, 'the queued question is not painted')
+    const tool = toolNode(harness.pane)!
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: tool.id, act: 'allow' })
+    assert.equal(await approval, 'allowed-once')
+    await nativeFormReady(harness.pane, 'the queued question took the seat')
+    harness.pane.event({ ev: 'change', sf: BASE_SF, id: nativeForm(harness.pane).id, item: 'q-0', value: 'o-0' })
+    harness.pane.event({ ev: 'action', sf: BASE_SF, id: nativeForm(harness.pane).id, act: 'submit' })
+    await waitForButton(harness.pane, '.submit')
+    harness.pane.key('\r')
+    assert.deepEqual(await questions, [{ id: 'mix-q', selected: ['a'] }])
+
+    // Alt+Q over the same native pane: the continued list is unchanged.
+    harness.continued.push({ sessionId: 'session-a', callId: 'call-parked', presentation: 'parked' })
+    harness.reopenAnswer = false
+    harness.pane.key('\x1bq')
+    await waitFor(() => wireText(harness.pane).includes('Continued questions'), 'the list opened')
+    assert.ok(wireText(harness.pane).includes('call-parked'), 'the parked row is listed')
+    harness.pane.key('\x1b')
+    await waitFor(() => wireText(harness.pane).includes('That question is no longer answerable')
+      || overlayAdds(harness.ops()).length === 3, 'Esc closed the list')
   } finally {
     await harness.dispose()
   }

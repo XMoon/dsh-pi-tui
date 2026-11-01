@@ -170,6 +170,15 @@ export function installTspPane(options: {
   readonly nativeImages?: boolean
   /** Advertise the NATIVE CHART kind (the PR-D chart projection). */
   readonly nativeChart?: boolean
+  /**
+   * Advertise the exact kind set the native modal composites paint: the
+   * `questions` form and the pieces its same-style safe/Review pages and the
+   * native Tool approval really construct (`overlay`/`row`/`text`/`input`/
+   * `button`; `tool` and `code` are already in the base vocabulary). A case
+   * that wants the LEGACY modal branch must leave this off — that is the
+   * fail-closed default, not an accident.
+   */
+  readonly nativeInteraction?: boolean
   readonly kinds?: readonly string[]
   readonly features?: readonly string[]
 } = {}): TspPane {
@@ -202,6 +211,7 @@ export function installTspPane(options: {
     ...(options.workDetails === true ? ['row', 'text'] : []),
     ...(options.nativeImages === true ? ['image'] : []),
     ...(options.nativeChart === true ? ['chart'] : []),
+    ...(options.nativeInteraction === true ? ['questions', 'overlay', 'row', 'text', 'input', 'button', 'scroll'] : []),
   ]))
   const nativeFeatures = [
     ...(options.presetPicker === true || options.sessionBrowser === true || options.workDetails === true ? ['scroll'] : []),
