@@ -2702,6 +2702,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       interactive: boundHandlers !== undefined,
     }
   }
+  /** The narrow-pane effort abbreviation: keep the REAL value's identity,
+   *  never a guessed `H` for every non-High value. Unknown free-form values
+   *  keep a bounded prefix instead of being relabelled. */
+  const narrowEffortLabel = (value: string): string => {
+    switch (value.toLowerCase()) {
+      case 'low': return 'L'
+      case 'medium': return 'M'
+      case 'high': return 'H'
+      case 'max': return 'Max'
+      case 'off': return 'Off'
+      default: return clampMiddle(value, 6)
+    }
+  }
   const quietComposerEffortView = (): { label: string; title: string; interactive: boolean } => {
     const effort = presentedStatus?.composition.model?.reasoningEffort
     const clean = effort === undefined ? undefined : sanitizedPhysicalLine(effort).trim()
@@ -2709,7 +2722,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       return { label: 'Effort ▾', title: 'Reasoning effort — type /model to change', interactive: boundHandlers !== undefined }
     }
     return {
-      label: `${session.caps.cols < QUIET_COMPOSER_NARROW_COLS ? 'H' : clampMiddle(clean, 14)} ▾`,
+      label: `${session.caps.cols < QUIET_COMPOSER_NARROW_COLS ? narrowEffortLabel(clean) : clampMiddle(clean, 14)} ▾`,
       title: `Reasoning effort ${clean} — type /model to change`,
       interactive: boundHandlers !== undefined,
     }
@@ -2721,9 +2734,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // A modal/Reader/picker/hydration frame invalidates an open menu before
     // it can paint a stale click target.
     if (permissionMenuOpen && !permissionMenuAdmitted()) closePermissionMenu()
-    const options = permissionMenuOptions()
-    const index = Math.min(Math.max(0, permissionMenuIndex), Math.max(0, options.length - 1))
+    const baseOptions = permissionMenuOptions()
+    const index = Math.min(Math.max(0, permissionMenuIndex), Math.max(0, baseOptions.length - 1))
     permissionMenuIndex = index
+    const options = baseOptions.map((option, optionIndex) => ({ ...option, highlighted: optionIndex === index }))
     const model = quietComposerModelView()
     const effort = quietComposerEffortView()
     const renderScope = scopeEpoch

@@ -978,7 +978,7 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
         // duplicate). The pushed projection repaints the committed value
         // if the switch landed.
         deps.surface.display.notify(
-          `permission switch to ${id} was dispatched but the result is unknown — check the footer before relying on it`,
+          `permission switch to ${id} was dispatched but the result is unknown — check the current permission in the Composer or with /permission before relying on it`,
           'error',
         )
         return

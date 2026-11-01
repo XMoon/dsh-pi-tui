@@ -128,6 +128,10 @@ test('permission menu: the trigger reads the committed label and the menu offers
   const current = options.filter(node => (node.p['attrs'] as Record<string, unknown> | undefined)?.['data-current'] === 'true')
   assert.equal(current.length, 1)
   assert.equal(textOf(pane, current[0]), 'Workspace Write ✓')
+  const highlighted = options.filter(node => (node.p['attrs'] as Record<string, unknown> | undefined)?.['data-highlight'] === 'true')
+  assert.equal(highlighted.length, 1)
+  assert.equal(textOf(pane, highlighted[0]), 'Workspace Write ✓',
+    'the keyboard highlight starts on the current preset and is a separate visual layer from the ✓')
   // Selecting the already-current preset closes the menu and never writes.
   click(pane, current[0]!)
   await settle(80)
@@ -230,6 +234,14 @@ test('permission menu keyboard: Esc closes only the menu; Down+Enter chooses; Ct
   click(pane, permissionTrigger(pane))
   await settle(80)
   pane.key('\u001b[B') // Down: the highlight starts on the current preset; move to Full Access
+  await settle(80)
+  const afterDown = permissionOptions(pane)
+  const highlightedAfterDown = afterDown.filter(node => (node.p['attrs'] as Record<string, unknown> | undefined)?.['data-highlight'] === 'true')
+  assert.equal(highlightedAfterDown.length, 1)
+  assert.equal(textOf(pane, highlightedAfterDown[0]), 'Full Access',
+    'Down moves the visible keyboard highlight to Full Access')
+  assert.ok(afterDown.some(node => (node.p['attrs'] as Record<string, unknown> | undefined)?.['data-current'] === 'true'
+    && textOf(pane, node) === 'Workspace Write ✓'), 'the committed current ✓ stays independent')
   pane.key('\r')
   await waitUntil('Down+Enter chooses the next standard preset', () => m.calls.selects.length === 1)
   assert.deepEqual(m.calls.selects, ['danger-full-access'])
