@@ -5290,3 +5290,52 @@ test('a claimed same-turn Agent relay without any real Process stays visible in 
   assert.equal(expanded.filter(block => block.kind === 'message' && block.message === relay).length, 1,
     'expanded Focus renders the relay exactly once')
 })
+
+test('a claimed relay separated from an earlier Process by a hard boundary fails open in collapsed Focus', () => {
+  // The turn DOES contain Process, but a `subagent-settled` Notice cuts the
+  // relay off from it: the canonical structure gives the relay no Work owner,
+  // so hiding it inside the Thought would lose the original Context.
+  const folder = new TranscriptFolder()
+  const settled = {
+    id: MessageId('relay-boundary-settled'), role: 'user',
+    content: [{ type: 'text', text: 'BOUNDARY_SETTLED' }],
+    source: { kind: 'subagent-settled', form: 'notice', summary: 'child settled', senderSessionId: 'session-child' },
+  }
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 6200, 0),
+    eventAt('user/message', {
+      id: MessageId('relay-boundary-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, 6201, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'process' } }, 6202, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('relay-boundary-c1'), name: 'read', arguments: '{}' }, 6203, 3),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('relay-boundary-r1'), role: 'tool', toolCallId: ToolCallId('relay-boundary-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('relay-boundary-c1') },
+      },
+    }, 6204, 4),
+    eventAt('user/message', settled, 6205, 5),
+    ...workingAgentRelayEvents('relay-after-boundary', 'AFTER_BOUNDARY_RELAY', 6206, 6),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('relay-boundary-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 6210, 10),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6211, 11),
+  ])
+  const messages = folder.messages()
+  const relay = messages.find(message => message.kind === 'system' && message.text === 'AFTER_BOUNDARY_RELAY')
+  assert.ok(relay !== undefined && relay.kind === 'system')
+  assert.equal(relay.contextPresentation?.sameTurnNextStep, true, 'fixture: a durable same-turn claim')
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind),
+    ['message', 'work', 'message', 'message', 'message'],
+    'fixture: the boundary cuts the relay off from the earlier Process (no Work owner)')
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.ok(collapsed.some(block => block.kind === 'message' && block.message === relay),
+    'a relay with Process ELSEWHERE in the turn still fails open when no Work owns it')
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === relay).length, 1,
+    'expanded Focus restores the relay exactly once in raw order')
+})
