@@ -10,10 +10,10 @@
 import type { SettingItem } from '@xmoon76/pi-tui'
 import type { AppKeybindingId } from '../keybindings/types.ts'
 import { color } from '../theme/runtime.ts'
-import type { RegisterOne, RegisterTuiCommand, TuiCommandRunner } from '../../commands.ts'
+import type { ClientReloadRefusalReason, RegisterOne, RegisterTuiCommand, TuiCommandRunner } from '../../commands.ts'
 
 /** The runner operations the utility commands consume. */
-type UtilityCommandRunner = Pick<TuiCommandRunner, 'requestExit' | 'listScopedCommands' | 'app'>
+type UtilityCommandRunner = Pick<TuiCommandRunner, 'requestExit' | 'listScopedCommands' | 'app' | 'requestClientReload'>
 
 export interface ExitCommandDeps {
   runner: Pick<UtilityCommandRunner, 'requestExit'>
@@ -23,6 +23,56 @@ export interface ExitCommandDeps {
 export interface HelpCommandDeps {
   runner: Pick<UtilityCommandRunner, 'listScopedCommands' | 'app'>
   registerOne: RegisterOne
+}
+
+/** The ONE fixed user notice of every Client reload decision (English). */
+export const CLIENT_RELOAD_REFUSAL_NOTICES: Readonly<Record<ClientReloadRefusalReason, string>> = {
+  unavailable: 'Client reload is available only in the split Client.',
+  'not-ready': 'Client reload is unavailable until the current Client is connected and ready.',
+  'draft-text': 'Client reload blocked: finish or clear the editor draft first.',
+  attachments: 'Client reload blocked: remove or submit the staged attachments first.',
+  submission: 'Client reload blocked: wait for the pending submission to settle.',
+  interaction: 'Client reload blocked: finish the current Question or Approval first.',
+  transition: 'Client reload blocked: wait for the current session operation to settle.',
+  'already-current': 'Client reload skipped: this Client already runs the installed build.',
+  'target-invalid': 'Client reload failed: the installed replacement Client is unavailable or incompatible.',
+  stopping: 'Client reload is unavailable because this Client is stopping.',
+}
+
+export interface ReloadClientCommandDeps {
+  runner: Pick<UtilityCommandRunner, 'requestClientReload'>
+  registerTuiCommand: RegisterTuiCommand
+  /** Record this command's draft disposition (the command line is never
+   *  restored into the editor on a refusal). */
+  recordCommandDraftDisposition: (commandId: string | undefined, disposition: 'restored' | 'suppressed') => void
+}
+
+/**
+ * M4 PR4 `/reload-client` — the manual split-Client process reload.
+ *
+ * It is a BARE Client-local command: no alias, no `input` schema, no
+ * keybinding. The handler performs no wait and starts nothing itself; the
+ * composed implementation (the runner's `requestClientReload`) makes the
+ * Client-local safety decision and, only when safe, asks the process entry's
+ * ONE-shot reexec handler in the SAME synchronous stack. A refusal returns its
+ * fixed notice here; `runLocalCommand`/the card-less submission route is the
+ * notice owner, and an accepted request never publishes a second message
+ * because the process is about to replace the old TUI.
+ */
+export function registerReloadClientCommand({ runner, registerTuiCommand, recordCommandDraftDisposition }: ReloadClientCommandDeps): void {
+  registerTuiCommand({
+    name: 'reload-client',
+    description: 'Reload this split Client process from the installed build (the Host and session stay)',
+    handler: (invocation) => {
+      // The command line is UI control, not user text: never restore it.
+      recordCommandDraftDisposition(invocation.commandId, 'suppressed')
+      const request = runner.requestClientReload
+      if (request === undefined) return { kind: 'error', text: CLIENT_RELOAD_REFUSAL_NOTICES.unavailable }
+      const result = request()
+      if (result.kind === 'accepted') return { kind: 'success' }
+      return { kind: 'error', text: CLIENT_RELOAD_REFUSAL_NOTICES[result.reason] }
+    },
+  })
 }
 
 /**

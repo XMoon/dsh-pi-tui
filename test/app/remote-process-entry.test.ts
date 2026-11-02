@@ -24,6 +24,7 @@ import { createControlDispatcher } from '../../src/app/remote-process/entry-cont
 import {
   assertHandoffRestored,
   assertHandoffSignalExclusivity,
+  ClientReexecRefusal,
   createClientReexecChildEnvironment,
   createClientReexecRequestHandler,
   expectedHostInstanceFromEnvironment,
@@ -513,6 +514,8 @@ test('the reexec preflight captures the authoritative Session and refuses an inc
       dshAnchor: fixture.intent.dshAnchor,
       profile: 'pi-tui',
       dshVersion: '0.2.1-rc.4',
+      // A DIFFERENT running build: the standard fixture is a real replacement.
+      currentBuildId: 'c'.repeat(64),
       targetPackageRootOverride: fixture.packageRoot,
       ...overrides,
     })
@@ -548,6 +551,20 @@ test('the reexec preflight captures the authoritative Session and refuses an inc
     () => prepare({ ...CONNECTED_STATUS, openSessionId: undefined }),
     /open Session has no authoritative id/u,
   )
+  // M4 PR4: the installed package IS the running build. A replacement would
+  // change nothing, so the preflight refuses instead of swapping the process.
+  const sameBuild = (() => {
+    try {
+      prepare(CONNECTED_STATUS, { currentBuildId: fixture.intent.targetBuildId })
+      return undefined
+    } catch (error) {
+      return error
+    }
+  })()
+  assert.ok(sameBuild instanceof ClientReexecRefusal, 'the same installed build must be a typed refusal')
+  assert.equal(sameBuild.reason, 'already-current')
+  assert.equal(sameBuild.message, 'local client reexec: the installed Client already runs this build',
+    'the message carries no profile path or PID')
 })
 
 
@@ -565,8 +582,13 @@ test('the reexec request latches one intent and keeps a refused Client running',
     requestStop: () => { stops += 1 },
     emit: record => { records.push(record) },
   })
-  handler.request()
-  handler.request()
+  // M4 PR4: BOTH the qualification probe and the public `/reload-client`
+  // command reach this ONE handler; the result vocabulary is the command's.
+  const first = handler.request()
+  const duplicate = handler.request()
+  assert.deepEqual(first, { kind: 'accepted' })
+  assert.deepEqual(duplicate, { kind: 'refused', reason: 'stopping' },
+    'a duplicate request reports the ONE stop it already owns')
   assert.equal(handler.intent, fixture.intent)
   assert.equal(prepareCalls, 1, 'a duplicate probe rewrote the one intent')
   assert.equal(stops, 1, 'a duplicate probe requested a second Client stop')
@@ -581,7 +603,7 @@ test('the reexec request latches one intent and keeps a refused Client running',
     requestStop: () => { throw new Error('must not stop before readiness') },
     emit: record => { notReadyRecords.push(record) },
   })
-  notReady.request()
+  assert.deepEqual(notReady.request(), { kind: 'refused', reason: 'not-ready' })
   assert.equal(notReady.intent, undefined)
   assert.equal(notReadyRecords.filter(record => record.m4r === 'handoff-request-ignored' && record.reason === 'not-ready').length, 1)
 
@@ -602,13 +624,24 @@ test('the reexec request latches one intent and keeps a refused Client running',
     requestStop: () => { retryStops += 1 },
     emit: record => { retryRecords.push(record) },
   })
-  retry.request()
+  assert.deepEqual(retry.request(), { kind: 'refused', reason: 'target-invalid' },
+    'an unclassified preflight failure is a replacement-package refusal')
   assert.equal(retry.intent, undefined)
   assert.equal(retryStops, 0, 'a rejected preflight stopped the live Client')
   assert.equal(retryRecords.filter(record => record.m4r === 'handoff-request-rejected').length, 1)
-  retry.request()
+  assert.deepEqual(retry.request(), { kind: 'accepted' })
   assert.equal(retry.intent, fixture.intent)
   assert.equal(retryStops, 1)
+
+  // The already-current refusal is a typed preflight reason, not a stop.
+  const current = createClientReexecRequestHandler({
+    status: () => CONNECTED_STATUS,
+    prepare: () => { throw new ClientReexecRefusal('already-current', 'local client reexec: the installed Client already runs this build') },
+    requestStop: () => { throw new Error('the current build must not be swapped for itself') },
+    emit: () => {},
+  })
+  assert.deepEqual(current.request(), { kind: 'refused', reason: 'already-current' })
+  assert.equal(current.intent, undefined)
 
   // A request that races the ONE stop coordinator is an observable no-op: the
   // Client is already releasing its resources and must not record a new intent.
@@ -620,7 +653,7 @@ test('the reexec request latches one intent and keeps a refused Client running',
     emit: record => { stoppingRecords.push(record) },
     canRequest: () => false,
   })
-  stopping.request()
+  assert.deepEqual(stopping.request(), { kind: 'refused', reason: 'stopping' })
   assert.equal(stopping.intent, undefined)
   assert.equal(stoppingRecords.filter(record => record.m4r === 'handoff-request-ignored' && record.reason === 'stopping').length, 1)
 })
@@ -982,8 +1015,21 @@ test('the reexec trigger is internal, singular and starts only after the ONE sea
     join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'app', 'remote-process', 'local-client-entry.ts'),
     'utf8',
   )
-  assert.match(source, /if \(process\.env\.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1'\)/u)
-  assert.match(source, /process\.on\('SIGUSR2', \(\) => \{ reexecHandler\?\.request\(\) \}\)/u)
+  // M4 PR4: the SIGUSR2 qualification trigger stays gated on the internal
+  // probe flag, but the ONE request handler of a real surface Client is
+  // created for BOTH the probe and the public `/reload-client` capability.
+  assert.match(source, /const reexecProbe = process\.env\.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1'/u)
+  assert.match(source, /if \(reexecProbe\) process\.on\('SIGUSR2', \(\) => \{ reexecHandler\?\.request\(\) \}\)/u)
+  assert.equal((source.match(/= createClientReexecRequestHandler\(/gu) ?? []).length, 1,
+    'the surface Client must own exactly ONE reexec request handler')
+  assert.match(source, /requestStop: \(\) => \{[\s\S]*?runDetached\('local client: reexec handoff', \(\) => stop\(0\)/u,
+    'the accepted request must enter the EXISTING stop coordinator')
+  assert.match(source, /requestClientReload: \(\) => reexecHandler!\.request\(\)/u,
+    'the process capability must call the SAME handler — never a second request path')
+  // The side-by-side target override belongs to the qualification probe only:
+  // the production command always resolves the installed profile package.
+  assert.match(source,
+    /const targetOverride = reexecProbe \? process\.env\.SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT : undefined/u)
   assert.equal((source.match(/\bspawn\(process\.execPath/gu) ?? []).length, 1, 'the entry must own exactly one replacement spawn')
   const finishSource = source.slice(
     source.indexOf('export async function finishClientEntryShutdown'),

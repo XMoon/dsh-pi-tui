@@ -246,6 +246,25 @@ export class QuestionSurfaceController {
     return registered
   }
 
+  /**
+   * Whether this surface currently holds UNSETTLED Client-local Question
+   * input (M4 PR4 `/reload-client` safety read). It reads the controller's
+   * EXISTING owner state synchronously — never a second cache and never the
+   * Host projection: a live foreground flow (presented, queued behind another
+   * modal or still opening its claim), a mounted continued form, or a
+   * continued entry that keeps a local draft. A parked entry with no draft
+   * holds no local input, so it does not block the Client from retiring; the
+   * Host keeps its own question and the replacement Client re-reads it.
+   */
+  hasReloadBlockingInput(): boolean {
+    if (this.disposed) return false
+    if (this.livePresentations.size > 0) return true
+    for (const entry of this.entries.values()) {
+      if (entry.state === 'visible' || entry.draft !== undefined) return true
+    }
+    return false
+  }
+
   /** Release every controller-owned registration: the port subscription, the
    *  mounted late-answer panels (their owned abort controllers) and every held
    *  claim / countdown. Every owner slot/set is retired before any callback

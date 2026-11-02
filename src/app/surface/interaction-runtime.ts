@@ -140,6 +140,15 @@ export interface InteractionRuntime {
    * accept keys for it. The full pass still runs later (hydration/activity).
    */
   withdrawReplacedPresentation(): void
+  /**
+   * M4 PR4: whether this surface currently holds UNSETTLED Client-local
+   * Question/Approval input — a live approval prompt (presented or FIFO-queued
+   * behind another modal), a refused-admission wait this owner would have to
+   * drain, or the Question controller's own live/continued local input. It is
+   * a SYNCHRONOUS read of the existing owner state, never the Host's pending
+   * question fact and never the footer's waiting icon.
+   */
+  hasReloadBlockingInput(): boolean
   /** Release the attention subscription, the controller and the answer lookup. */
   dispose(): void
 }
@@ -528,6 +537,12 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
     controller: () => questionController,
     attentionRows: () => questionController?.attentionRows() ?? [],
     publishAttention,
+    hasReloadBlockingInput() {
+      if (ended) return false
+      return liveApprovals.size > 0
+        || refusedPresentations.size > 0
+        || questionController?.hasReloadBlockingInput() === true
+    },
     withdrawReplacedApprovals,
     reconcilePresentation,
     reconcilePublishedPresentation,

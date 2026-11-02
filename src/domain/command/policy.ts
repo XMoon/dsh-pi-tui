@@ -53,6 +53,10 @@ export const SESSIONLESS_COMMANDS = new Set([
   // delivered files. With no session it must answer "No delivered files"
   // directly instead of creating a Session just to say so.
   'deliverables',
+  // `/reload-client` (M4 PR4) reloads the split Client PROCESS from the
+  // installed build — it never needs a Session and must not create one on a
+  // first-boot invocation (a sessionless split Client is a legal reload).
+  'reload-client',
 ])
 
 /**
@@ -93,6 +97,10 @@ export const LOCAL_COMMANDS = new Set([
   // `/settings` alias (see the registration comments: both pairings are
   // explicit aliases, and the near-synonym rule stays for NEW commands).
   'statusline',
+  // `/reload-client` (M4 PR4) is the Client-local PROCESS reload. It is a
+  // reserved local name (plugins can never shadow it) and is NOT the
+  // catalog/settings `/reload`, which keeps its own unchanged semantics.
+  'reload-client',
 ])
 
 /**

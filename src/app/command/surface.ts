@@ -36,7 +36,7 @@ import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
 import type { SessionScopeAuthority } from '../session/scope.ts'
 import type { SessionRuntime as ApplicationSessionRuntime } from '../session/runtime.ts'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from './catalog-refresh.ts'
-import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
+import { registerTuiCommands, type ClientReloadCommandResult, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
 import type { ClientCommandRegistry } from './client-command-registry.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
@@ -363,6 +363,14 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly openRewindPicker: () => void
   /** The ONE exit orchestration. */
   readonly requestExit: () => void
+  /**
+   * M4 PR4: the split Client's ONE manual reload entry. Supplied by the
+   * composition root only where a real Client process capability is mounted;
+   * absent on Direct, whose `/reload-client` answers its fixed unavailable
+   * refusal. Purely synchronous — the caller must not `await` between the
+   * safety decision and the process request.
+   */
+  readonly requestClientReload?: () => ClientReloadCommandResult
   /** The launcher's appExit. */
   readonly exit: TuiCommandRunner['exit']
 }
@@ -1266,6 +1274,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       enterView: (childId: Id, label: string | undefined, mode: 'one-shot' | 'continuable', parentSessionId: Id, activity: 'running' | 'inactive') =>
         deps.viewer.enterView(childId, label, mode, parentSessionId, activity),
       requestExit: deps.requestExit,
+      ...(deps.requestClientReload === undefined ? {} : {
+        requestClientReload: () => deps.requestClientReload!(),
+      }),
       exit: deps.exit,
     }
     // The ONE generic→concrete bridge of this owner: the frozen

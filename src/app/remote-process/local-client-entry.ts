@@ -60,6 +60,7 @@ import {
 } from './client-interaction-delivery.ts'
 import { createLocalClientSurfaceBridge } from './local-client-surface.ts'
 import { runDetached } from '../../runtime/process/tasks.ts'
+import type { ClientReloadProcessRefusal, ClientReloadRequestResult } from '../application-runtime.ts'
 
 interface OfficialClientHostModules {
   readonly Context: new () => import('@deepseek-ai/cordis').Context
@@ -320,30 +321,56 @@ export interface PrepareClientReexecOptions {
   readonly dshAnchor: string
   readonly profile: string
   readonly dshVersion: string
+  /** The RUNNING Client build fingerprint (`scope.buildId`), compared with the
+   *  resolved replacement target so the same installed build is never swapped
+   *  for itself. */
+  readonly currentBuildId: string
   /** Qualification-only side-by-side root, already a legal installed package. */
   readonly targetPackageRootOverride?: string
 }
 
+/**
+ * One typed preflight refusal. The reason is the process-owned vocabulary the
+ * command layer maps onto a fixed user notice; the message is the diagnostic
+ * detail (never surfaced verbatim by the command).
+ */
+export class ClientReexecRefusal extends Error {
+  readonly reason: ClientReloadProcessRefusal
+
+  constructor(reason: ClientReloadProcessRefusal, message: string) {
+    super(message)
+    this.name = 'ClientReexecRefusal'
+    this.reason = reason
+  }
+}
+
 export function prepareClientReexec(options: PrepareClientReexecOptions): ClientReexecIntent {
   const { status } = options
-  if (status.transport !== 'connected') throw new Error('local client reexec: the Client transport is not connected')
-  if (status.surfaceMounted !== true) throw new Error('local client reexec: the Client surface is not mounted')
+  if (status.transport !== 'connected') throw new ClientReexecRefusal('not-ready', 'local client reexec: the Client transport is not connected')
+  if (status.surfaceMounted !== true) throw new ClientReexecRefusal('not-ready', 'local client reexec: the Client surface is not mounted')
   const host = status.host
-  if (host === undefined) throw new Error('local client reexec: the Client has no authenticated Host identity')
+  if (host === undefined) throw new ClientReexecRefusal('not-ready', 'local client reexec: the Client has no authenticated Host identity')
   if (host.instanceId !== options.verifiedHostInstanceId) {
-    throw new Error('local client reexec: the live Host is not the authenticated Host instance')
+    throw new ClientReexecRefusal('not-ready', 'local client reexec: the live Host is not the authenticated Host instance')
   }
   let sessionId: string | undefined
   if (status.sessionOpen) {
     const open = status.openSessionId
     if (open === undefined || open === '') {
-      throw new Error('local client reexec: the open Session has no authoritative id')
+      throw new ClientReexecRefusal('not-ready', 'local client reexec: the open Session has no authoritative id')
     }
     sessionId = open
   }
   const target = options.targetPackageRootOverride === undefined
     ? resolveProfileInstalledClientTarget(options.profileDir, options.dshVersion)
     : inspectClientReexecTarget(options.targetPackageRootOverride, options.dshVersion)
+  // The installed package IS this running build: a replacement would change
+  // nothing, so this is a truthful refusal instead of a pointless process swap.
+  // The comparison uses the SAME production fingerprint the replacement child
+  // is verified against — never an npm version guess or an install timestamp.
+  if (target.buildId === options.currentBuildId) {
+    throw new ClientReexecRefusal('already-current', 'local client reexec: the installed Client already runs this build')
+  }
   return {
     expectedInstanceId: host.instanceId,
     ...(sessionId === undefined ? {} : { sessionId }),
@@ -370,7 +397,12 @@ export interface ClientReexecRequestOptions {
 }
 
 export interface ClientReexecRequestHandler {
-  request(): void
+  /**
+   * The ONE synchronous request entry. It reports the process preflight's
+   * decision so a command handler can publish a fixed user notice; the
+   * qualification SIGUSR2 probe ignores the result.
+   */
+  request(): ClientReloadRequestResult
   readonly intent: ClientReexecIntent | undefined
 }
 
@@ -383,19 +415,19 @@ export interface ClientReexecRequestHandler {
 export function createClientReexecRequestHandler(options: ClientReexecRequestOptions): ClientReexecRequestHandler {
   let intent: ClientReexecIntent | undefined
   return {
-    request(): void {
+    request(): ClientReloadRequestResult {
       if (intent !== undefined) {
         options.emit({ m4r: 'handoff-request-ignored', processRole: 'client', pid: process.pid, reason: 'already-requested' })
-        return
+        return { kind: 'refused', reason: 'stopping' }
       }
       if (options.canRequest?.() === false) {
         options.emit({ m4r: 'handoff-request-ignored', processRole: 'client', pid: process.pid, reason: 'stopping' })
-        return
+        return { kind: 'refused', reason: 'stopping' }
       }
       const status = options.status()
       if (status === undefined) {
         options.emit({ m4r: 'handoff-request-ignored', processRole: 'client', pid: process.pid, reason: 'not-ready' })
-        return
+        return { kind: 'refused', reason: 'not-ready' }
       }
       let prepared: ClientReexecIntent
       try {
@@ -407,7 +439,10 @@ export function createClientReexecRequestHandler(options: ClientReexecRequestOpt
           pid: process.pid,
           error: failureMessage(error),
         })
-        return
+        return {
+          kind: 'refused',
+          reason: error instanceof ClientReexecRefusal ? error.reason : 'target-invalid',
+        }
       }
       intent = prepared
       options.onAccepted?.(prepared)
@@ -421,6 +456,7 @@ export function createClientReexecRequestHandler(options: ClientReexecRequestOpt
         targetBundleVersion: prepared.targetBundleVersion,
       })
       options.requestStop(0)
+      return { kind: 'accepted' }
     },
     get intent(): ClientReexecIntent | undefined {
       return intent
@@ -1412,6 +1448,13 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           applyRunnerWithRuntime(pluginContext, input.config, input.override, {
             surfaceReady: () => bridge.markMounted(),
             surfaceFailed: error => bridge.fail(error),
+            // M4 PR4: the ONE process-owned manual reload capability of this
+            // real surface mount. The command handler has already made the
+            // Client-local safety decision in the SAME synchronous stack; this
+            // callback only drives the existing PR3 request latch/preflight.
+            ...(reexecHandler === undefined
+              ? {}
+              : { requestClientReload: () => reexecHandler!.request() }),
           })
         })
         await runnerFiber
@@ -1453,35 +1496,38 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           }, { diag })
         })
       }
-      // Qualification-only Client reexec (M4 PR3, internal trigger only): the
-      // OLD Client captures the authoritative open Session, releases itself
-      // through the EXISTING stop coordinator, then the replacement Client is
-      // spawned after the seat closed. No public command/keybinding reaches it.
-      if (process.env.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1') {
-        const targetOverride = process.env.SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT
-        if (targetOverride !== undefined && targetOverride !== '' && !isAbsolute(targetOverride)) {
-          throw new Error('local client entry: SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT must be an absolute path')
-        }
-        reexecHandler = createClientReexecRequestHandler({
-          status: () => handle?.status,
-          prepare: status => prepareClientReexec({
-            status,
-            verifiedHostInstanceId: host.identity.instanceId,
-            profileDir,
-            dshAnchor: options.dshAnchor,
-            profile: options.profile,
-            dshVersion: scope.dshVersion,
-            ...(targetOverride === undefined || targetOverride === '' ? {} : { targetPackageRootOverride: targetOverride }),
-          }),
-          requestStop: () => {
-            runDetached('local client: reexec handoff', () => stop(0), { diag })
-          },
-          emit,
-          canRequest: () => stopping === undefined,
-          onAccepted: accepted => { reexecIntent = accepted },
-        })
-        process.on('SIGUSR2', () => { reexecHandler?.request() })
+      // The ONE Client reexec request handler of this surface process (M4
+      // PR3/PR4). It is created for EVERY real surface Client, because the
+      // public manual `/reload-client` command and the qualification SIGUSR2
+      // probe share this SAME latch, preflight and stop path. The
+      // side-by-side target override belongs to the qualification flag ONLY:
+      // the production command always resolves the replacement through the
+      // active official profile.
+      const reexecProbe = process.env.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1'
+      const targetOverride = reexecProbe ? process.env.SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT : undefined
+      if (targetOverride !== undefined && targetOverride !== '' && !isAbsolute(targetOverride)) {
+        throw new Error('local client entry: SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT must be an absolute path')
       }
+      reexecHandler = createClientReexecRequestHandler({
+        status: () => handle?.status,
+        prepare: status => prepareClientReexec({
+          status,
+          verifiedHostInstanceId: host.identity.instanceId,
+          profileDir,
+          dshAnchor: options.dshAnchor,
+          profile: options.profile,
+          dshVersion: scope.dshVersion,
+          currentBuildId: scope.buildId,
+          ...(targetOverride === undefined || targetOverride === '' ? {} : { targetPackageRootOverride: targetOverride }),
+        }),
+        requestStop: () => {
+          runDetached('local client: reexec handoff', () => stop(0), { diag })
+        },
+        emit,
+        canRequest: () => stopping === undefined,
+        onAccepted: accepted => { reexecIntent = accepted },
+      })
+      if (reexecProbe) process.on('SIGUSR2', () => { reexecHandler?.request() })
       // A closed terminal (PTY HUP) is a normal Client exit: the physical
       // surface can no longer render or accept input. It joins the SAME
       // idempotent stop path as Esc / `/exit` / SIGINT / SIGTERM.

@@ -637,6 +637,8 @@ function mountQuestionOwner(options: {
   holdClaim(): { entered: Promise<void>; release: () => void }
   /** Resolve when the presenter received a Question form (this flow). */
   whenAskEntered(): Promise<void>
+  /** M4 PR4: the interaction owner's own reload-blocking local-input read. */
+  hasReloadBlockingInput(): boolean
   readonly dispose: () => void
 } {
   const published: DisplayActivityFacts[] = []
@@ -777,6 +779,7 @@ function mountQuestionOwner(options: {
       if (askEntered) return Promise.resolve()
       return new Promise<void>(resolve => { askWaiter = resolve })
     },
+    hasReloadBlockingInput: () => runtime.hasReloadBlockingInput(),
     /** Deliver ONE live question request through the REAL registered provider. */
     deliverQuestion: (request: Record<string, unknown>) => {
       assert.ok(questionProvider !== undefined, 'the controller registered its live provider')
@@ -1158,5 +1161,59 @@ test('PR-B EXT-F2b: a title-only facts commit still updates the legacy dock line
       wireNodes(harness.pane).some(node => typeof node.p.text === 'string' && node.p.text.includes('FACTS_ONLY_TITLE')))
   } finally {
     await harness.dispose()
+  }
+})
+
+// ── M4 PR4: the interaction owner's reload-blocking local input ────────────
+
+/**
+ * `/reload-client` must never retire the Client while a Client-local
+ * Question/Approval input is still owned: a presented OR FIFO-queued approval,
+ * a refused-admission wait, and the Question controller's live/continued form.
+ * The read is the interaction owner's own synchronous state — never the Host's
+ * pending-question fact and never the footer icon.
+ */
+test('M4 PR4: the interaction owner reports reload-blocking input for live approvals and questions', async () => {
+  const owner = mountQuestionOwner({ fifoSeat: true })
+  try {
+    assert.equal(owner.hasReloadBlockingInput(), false, 'an idle interaction owner owns no local input')
+
+    // A live Question mounted in the seat IS local input.
+    const question = new AbortController()
+    const deliveredQuestion = owner.deliverQuestion({
+      sessionId: SESSION_ID,
+      callId: 'call-live',
+      timed: false,
+      questions: [{ id: 'q1', question: 'pick', options: [] }],
+      signal: question.signal,
+    }).catch(() => undefined)
+    await owner.whenAskEntered()
+    assert.equal(owner.hasReloadBlockingInput(), true, 'a presented Question blocks the reload')
+
+    // An approval FIFO-QUEUED behind the active Question is alive but not
+    // presented: the presenter still holds it, so it is owned local input.
+    const approval = new AbortController()
+    const deliveredApproval = owner.deliverApproval({
+      sessionId: SESSION_ID,
+      toolName: 'bash',
+      reason: 'queued approval',
+      signal: approval.signal,
+    })
+    await Promise.resolve()
+    assert.equal(owner.hasReloadBlockingInput(), true, 'a queued approval is still owned local input')
+
+    // End the Question: its settle promotes the queued approval into the seat,
+    // which keeps the local-input fact true until the approval itself ends.
+    question.abort(new Error('turn cancelled'))
+    await deliveredQuestion
+    await Promise.resolve()
+    assert.equal(owner.hasReloadBlockingInput(), true,
+      'the promoted approval continues to own local input')
+    approval.abort()
+    await deliveredApproval
+    await Promise.resolve()
+    assert.equal(owner.hasReloadBlockingInput(), false, 'settled approvals release the local input')
+  } finally {
+    owner.dispose()
   }
 })

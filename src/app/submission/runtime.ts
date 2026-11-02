@@ -158,6 +158,19 @@ export interface SubmissionRuntime {
    * write and its terminal ack/echo settlement.
    */
   submitPrompt(submission: PromptSubmission): Promise<void>
+  /**
+   * M4 PR4: open ONE accepted business-write lifetime and return its release.
+   * The increment happens in the caller's SYNCHRONOUS acceptance stack; the
+   * release belongs to the write's existing terminal settlement. A gesture
+   * that never reaches its terminal leaves the lifetime open on purpose — the
+   * Client must not report an unsettled write as safe.
+   */
+  beginClientWrite(): () => void
+  /**
+   * M4 PR4: whether any accepted business write is still unsettled. Read
+   * synchronously by the Client reload safety gate; never cached.
+   */
+  hasUnsettledClientWrite(): boolean
 }
 
 const STALE_NOTICE =
@@ -170,6 +183,21 @@ const STALE_DROPPED_NOTICE =
 
 export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRuntime {
   const surface = deps.surface
+  // M4 PR4: the ONE business-write lifetime counter of this submission domain.
+  // Every accepted write lifecycle adds here at its SYNCHRONOUS admission and
+  // releases at its existing terminal settlement; the Client reload safety gate
+  // reads the count (never a cached boolean, never the display ack row).
+  let unsettledClientWrites = 0
+  const beginClientWrite = (): (() => void) => {
+    unsettledClientWrites += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      unsettledClientWrites -= 1
+    }
+  }
+  const hasUnsettledClientWrite = (): boolean => unsettledClientWrites > 0
   // Alt+Up may finish a queue mutation while a transition is waiting on the
   // same writer barrier. Keep its confirmed local representation until the
   // transition outcome is known: commit drops it, failure restores it.
@@ -208,6 +236,11 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
   }
 
   const submitPrompt = async (submission: PromptSubmission): Promise<void> => {
+    // M4 PR4: this entry can be reached without the submit FIFO (e.g. the
+    // command fallback), so it holds its OWN write lifetime from this
+    // synchronous admission until the writer promise settles. The FIFO layer
+    // keeps its own count; two layers may overlap, and each releases once.
+    const endWrite = beginClientWrite()
     const { text, scope, requestId, ackToken } = submission
     let echoInstalled = submission.echoInstalled
     const sessionId = scope.sessionId
@@ -281,6 +314,8 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
         return
       }
       throw error
+    } finally {
+      endWrite()
     }
   }
 
@@ -289,6 +324,8 @@ export function bindSubmissionRuntime(deps: SubmissionRuntimeDeps): SubmissionRu
     settleQueueRecalls,
     withWriter,
     submitPrompt,
+    beginClientWrite,
+    hasUnsettledClientWrite,
   }
 }
 
@@ -327,6 +364,13 @@ export interface ShellSubmitDeps {
   readonly writer: { prompt(sessionId: string, message: unknown, mode?: 'queue' | 'steer'): Promise<WriteOutcome> }
   readonly createMessage: (text: string) => unknown
   readonly diag: Diag
+  /**
+   * M4 PR4: the `!` gesture's accepted business-write lifetime release. It runs
+   * at this submit's EXISTING terminal settlement (or at the early gates where
+   * no write can happen), so the Client reload safety gate keeps refusing until
+   * the shell output's Session write has really settled.
+   */
+  readonly onSettled: () => void
 }
 
 /**
@@ -335,10 +379,14 @@ export interface ShellSubmitDeps {
  * runs and its outcome settles the ack row and the settled card.
  */
 export function submitShell(deps: ShellSubmitDeps): void {
-  if (deps.isDisposed()) return
+  if (deps.isDisposed()) {
+    deps.onSettled()
+    return
+  }
   if (deps.currentGeneration() !== deps.generationAtRun) {
     deps.terminalAck('shell submit skipped after a session switch')
     deps.notify('the session changed while the command ran — the output was not submitted', 'error')
+    deps.onSettled()
     return
   }
   const submitted = formatShellSubmitText(deps.command, deps.result)
@@ -370,15 +418,18 @@ export function submitShell(deps: ShellSubmitDeps): void {
     diag: deps.diag,
     sessionId: () => deps.currentAgent()?.session.id,
     onResult: (outcome) => {
+      deps.onSettled()
       if (deps.isDisposed()) return
       if (outcome !== 'ok') deps.terminalAck(`shell submit ${outcome}`)
       else if (deps.currentAgent() === undefined) deps.terminalAck('shell submit without an agent')
     },
     onCancel: () => {
+      deps.onSettled()
       if (deps.isDisposed()) return
       deps.terminalAck('shell submit cancelled')
     },
     onError: (error) => {
+      deps.onSettled()
       if (deps.isDisposed()) return
       // The submission failed before the write ran: keep the card (the output
       // is not lost) and surface the reason.
@@ -439,11 +490,18 @@ export interface PullBackQueueDeps {
   readonly discardStagedDraft: (kind: 'image' | 'file', id: number) => void
   /** Pin the recalled drafts for the duration of the writer section. */
   readonly pinRecalledDrafts: (text: string) => () => void
+  /** The semantic queue pull-back staging seams. */
   readonly readDraft: () => string
   readonly writeDraft: (text: string) => void
   readonly notify: (message: string, kind: 'info' | 'error') => void
   readonly refreshPendingInput: () => void
   readonly diag: Diag
+  /**
+   * M4 PR4: open the accepted business-write lifetime of the queue mutation
+   * (`dequeue` is a real queue write). The release runs at this workflow's
+   * EXISTING terminal callbacks, never on an arbitrary timer.
+   */
+  readonly beginClientWrite: () => () => void
 }
 
 /**
@@ -544,6 +602,10 @@ export function pullBackQueue(deps: PullBackQueueDeps): void {
   // mutation, FIFO admission keeps pending input behind it; confirmed removals
   // are reflected only after each settlement. The write enters through the
   // submission runtime's writer admission.
+  // M4 PR4: this accepted queue mutation holds ONE business-write lifetime
+  // until its existing terminal callbacks below; a Client reload must not
+  // retire while the removal is still in flight.
+  const endQueueWrite = deps.beginClientWrite()
   runOwned('queue pull-back', () => deps.withWriter(queuedScope, async () => {
     try {
       if (deps.isDisposed()) {
@@ -677,7 +739,9 @@ export function pullBackQueue(deps: PullBackQueueDeps): void {
   }), {
     diag: deps.diag,
     sessionId: () => deps.currentAgent()?.session.id,
+    onResult: () => { endQueueWrite() },
     onError: (_error) => {
+      endQueueWrite()
       if (deps.isDisposed()) return
       if (failureKind === 'transition') {
         deps.notify('a session transition is in progress — try again in a moment', 'info')
@@ -695,6 +759,7 @@ export function pullBackQueue(deps: PullBackQueueDeps): void {
       deps.notify('queue pull-back result is indeterminate — do not retry automatically', 'error')
     },
     onCancel: () => {
+      endQueueWrite()
       if (deps.isDisposed() || draftApplied || failureKind !== undefined) return
     },
   })

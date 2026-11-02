@@ -506,6 +506,471 @@ async function stopHostForCleanup(host) {
   try { await host.waitForExit(20_000) } catch { killProcessGroup(host) }
 }
 
+/**
+ * The stranded isolated homes U08 creates (the lane's finally cleanup kills
+ * their processes exactly like the primary home).
+ */
+const extraIsolatedHomes = []
+
+/** The minimal real PNG the attachment negative stages through `/image`. */
+function writeReloadProbePng(path) {
+  const bytes = Buffer.alloc(33)
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0)
+  bytes.set([0, 0, 0, 13], 8)
+  bytes.set([0x49, 0x48, 0x44, 0x52], 12)
+  bytes.writeUInt32BE(800, 16)
+  bytes.writeUInt32BE(100, 20)
+  writeFileSync(path, bytes, { mode: 0o600 })
+}
+
+/**
+ * M4 PR4 U08: the PRODUCTION manual `/reload-client` command over the real
+ * PTY, in a SECOND completely isolated profile/home round (U07's round is
+ * untouched).
+ *
+ * The already-fixA old build starts the Host and a connected Client with one
+ * admitted, still-running Turn. The real command then proves:
+ *   1. `already-current` — the installed profile package IS the running build:
+ *      a truthful notice, no stop, no reexec;
+ *   2. `attachments` — a staged image that the editor no longer references
+ *      still blocks (the real draft-store fact, not a placeholder count);
+ *   3. the positive path after an OFFICIAL IN-PLACE profile upgrade to the new
+ *      candidate: the same command resolves the PROFILE-INSTALLED replacement
+ *      (no qualification target override), reexecutes the old Client into a
+ *      new OS PID running the new build, and that Client restores the SAME
+ *      Host and Session;
+ *   4. `target-invalid` — with the installed package officially removed the
+ *      command refuses and keeps the live surface, the Host and the Turn.
+ *
+ * The negatives assert the SAME identity facts as U07: the old Client PID and
+ * kernel seat survive, Host identity/starttime/registry/launch bytes are
+ * unchanged, and the admitted Turn is never released or replayed.
+ */
+async function runUserCommandReloadRound(context) {
+  const { dsh, harnessDir, anchor, targetDshVersion, oldArtifact, newArtifact, workRoot, hosts, clients } = context
+  const roundRoot = join(workRoot, 'u08')
+  const home = join(roundRoot, 'home')
+  const dshHome = join(roundRoot, 'dsh-home')
+  const envWork = join(roundRoot, 'env')
+  const fixtureDir = join(roundRoot, 'fixture')
+  const c1WorkRoot = join(roundRoot, 'c1-work')
+  const scratch = join(roundRoot, 'scratch')
+  for (const directory of [home, dshHome, envWork, fixtureDir, c1WorkRoot, scratch]) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+  }
+  writeFileSync(join(envWork, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
+  const env = isolatedEnvironment(envWork, home, dshHome, join(roundRoot, 'evidence.json'))
+  extraIsolatedHomes.push(dshHome)
+
+  // ── The old profile owns the real old installation (official install) ────
+  const profileDir = join(dshHome, 'profiles', 'pi-tui')
+  installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)
+  installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)
+  installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)
+  installPlugin(dsh, oldArtifact.path, harnessDir, env, false)
+  assertProfileClientPeers(profileDir, targetDshVersion, 'U08 old profile install')
+  const profileOldPackage = realpathSync(join(profileDir, 'node_modules', EXPECTED_PACKAGE_NAME))
+  const oldBuildId = productionBuildId(profileOldPackage, targetDshVersion)
+  assert(oldArtifact.manifest.version === readJson(join(profileOldPackage, 'package.json')).version,
+    'U08 the old profile install carries another package version')
+  // The old Client keeps RUNNING across the in-place profile upgrade, so its
+  // own real installation lives side-by-side (the SAME old artifact through an
+  // official pnpm transaction — never a hand-written payload and never the
+  // qualification target override).
+  const sideOldPackage = installSideBuild(join(dshHome, 'profiles', 'u08-side-old'), oldArtifact.path, env, targetDshVersion)
+  assertEqual(productionBuildId(sideOldPackage, targetDshVersion), oldBuildId,
+    'U08 the side-by-side old installation produced another buildId')
+
+  const work = writeC1WorkFixture(profileDir, fixtureDir)
+  const releaseBarrier = join(roundRoot, 'long-turn.release')
+  const base = { cwd: profileDir, env: { ...env }, anchor, profile: 'pi-tui', scratch }
+  const hostBase = {
+    ...base,
+    env: {
+      ...base.env,
+      SPLIT_PROCESS_EXTRA_PATCH: work.patchPath,
+      C1_SCENARIO: 'long-turn',
+      C1_HOLD_LONG_TURN: releaseBarrier,
+      C1_WORK_ROOT: c1WorkRoot,
+    },
+  }
+
+  // ── Old Host (side-by-side old build) + connected old Client + held Turn ──
+  const host = new EntryProcess('host-u08', join(sideOldPackage, 'dist', 'local-host.mjs'), hostBase)
+  hosts.push(host)
+  const hostReady = await host.waitFor(record => record.m4a0 === 'ready', 'U08 Host ready', 240_000)
+  assertEqual(hostReady.localHost.buildId, oldBuildId, 'U08 Host did not publish the old production buildId')
+  const hostIdentity = safeIdentity(hostReady.localHost)
+  const scopeDir = scopeDirOf(dshHome, hostIdentity.scopeId)
+  const registryBefore = readFileSync(join(scopeDir, 'instance.json'))
+  const launchBefore = readFileSync(join(scopeDir, 'launch.json'))
+  const clientSeatName = `\0dsh-pi-tui-c-${hostIdentity.scopeId.slice(0, 40)}`
+
+  const reloadOldClient = new SurfaceEntryProcess(join(sideOldPackage, 'dist', 'local-client.mjs'), {
+    ...base,
+    workDir: roundRoot,
+  })
+  clients.push(reloadOldClient)
+  await reloadOldClient.waitFor(record => record.m4a0 === 'ready', 'U08 old Client ready', 240_000)
+  const reloadOldClientReady = reloadOldClient.records.find(record => record.m4a0 === 'ready')
+  const reloadOldClientPid = reloadOldClientReady?.pid
+  assert(Number.isInteger(reloadOldClientPid), 'U08 old Client ready record has no business PID')
+  const holdPrompt = 'u08-reload-client-hold'
+  reloadOldClient.send(`${holdPrompt}\r`)
+  await reloadOldClient.waitForScreen(holdPrompt, 'U08 old Client painted the admitted prompt', 120_000)
+  const sessionStatus = await reloadOldClient.waitFor(
+    record => record.m4b2s === 'surface-status' && record.sessionOpen === true && typeof record.openSessionId === 'string',
+    'U08 old Client open Session',
+    120_000,
+  )
+  const sessionId = sessionStatus.openSessionId
+  const held = await waitForC1WorkEvent(c1WorkRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'U08 Host Turn held')
+  assertEqual(held.agentStatus, 'running', 'U08 Host Turn is not running while held')
+  await reloadOldClient.waitFor(
+    record => record.m4a0 === 'ready' && record.transport === 'connected',
+    'U08 old Client connected transport',
+    60_000,
+  )
+  assert(alive(reloadOldClientPid), 'U08 old Client is not a live process')
+  assert(alive(hostIdentity.hostPid), 'U08 Host died while the old Client attached')
+  assertEqual(await seatIsFree(clientSeatName), false, 'U08 old Client does not hold the Client seat')
+
+  const assertOldSurfaceKept = async (label) => {
+    assert(alive(reloadOldClientPid), `${label}: the old Client PID died`)
+    assertEqual(await seatIsFree(clientSeatName), false, `${label}: the old Client seat was released`)
+    assertEqual(reloadOldClient.records.filter(record => record.m4r === 'handoff-requested').length, 0,
+      `${label}: a reload request reached the process sink`)
+    assertIdentityKept(safeIdentity((await hostStatus(host)).localHost), hostIdentity, `${label}: Host identity`)
+    assert(alive(hostIdentity.hostPid), `${label}: the Host died`)
+    assert(!c1WorkHadRelease(c1WorkRoot), `${label}: the admitted Turn was released`)
+    assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore), `${label}: the registry bytes changed`)
+    assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore), `${label}: the launch bytes changed`)
+  }
+
+  // ── U08 negative 1: same installed build → already-current, no stop ──────
+  reloadOldClient.send('/reload-client\r')
+  await reloadOldClient.waitForScreen('Client reload skipped: this Client already runs the installed build.',
+    'U08 already-current notice', 120_000)
+  await assertOldSurfaceKept('U08 already-current')
+
+  // ── U08 negative 2: a staged, unreferenced image blocks the reload ───────
+  const imagePath = join(roundRoot, 'u08-staged.png')
+  writeReloadProbePng(imagePath)
+  reloadOldClient.send(`/image ${imagePath}\r`)
+  await reloadOldClient.waitForScreen('attached [image', 'U08 staged image notice', 120_000)
+  // Remove the placeholder text ONLY: the staged image stays in the real draft
+  // store (the pinned/unreferenced case the safety gate must not miss).
+  reloadOldClient.send('\x7f'.repeat(200))
+  await sleep(300)
+  reloadOldClient.send('/reload-client\r')
+  await reloadOldClient.waitForScreen('Client reload blocked: remove or submit the staged attachments first.',
+    'U08 attachments refusal', 120_000)
+  await assertOldSurfaceKept('U08 attachments refusal')
+
+  // ── The official in-place profile upgrade to the new candidate ───────────
+  // The old Client keeps running from its own real old installation; the
+  // production command must resolve the NEW profile package, WITHOUT the
+  // qualification target override.
+  installPlugin(dsh, newArtifact.path, harnessDir, env, false)
+  assertProfileClientPeers(profileDir, targetDshVersion, 'U08 upgraded profile install')
+  const profileNewPackage = realpathSync(join(profileDir, 'node_modules', EXPECTED_PACKAGE_NAME))
+  const newBuildId = productionBuildId(profileNewPackage, targetDshVersion)
+  assertEqual(readJson(join(profileNewPackage, 'package.json')).version, newArtifact.manifest.version)
+  assertNotEqual(newBuildId, oldBuildId, 'U08 the official upgrade did not change the production buildId')
+
+  // Close the old Client (its in-memory staged image dies with it) and attach a
+  // fresh old-build Client to the SAME Host/Session for the positive command.
+  reloadOldClient.send('/exit\r')
+  const reloadOldClientExit = await reloadOldClient.waitForExit(120_000)
+  assertEqual(reloadOldClientExit.code, 0, `U08 old Client exit was ${JSON.stringify(reloadOldClientExit)}`)
+  await reloadOldClient.dispose()
+  assert(await seatIsFree(clientSeatName), 'U08 the old Client did not release its seat on /exit')
+  assert(alive(hostIdentity.hostPid), 'U08 Host died when the old Client exited')
+  assert(!c1WorkHadRelease(c1WorkRoot), 'U08 the admitted Turn was released by the old Client exit')
+  const sessionLogsBeforeReload = sessionLogFiles(dshHome)
+
+  const reloadClient = new SurfaceEntryProcess(join(sideOldPackage, 'dist', 'local-client.mjs'), {
+    ...base,
+    workDir: roundRoot,
+    env: { ...base.env, SPLIT_PROCESS_CLIENT_SESSION: sessionId },
+  })
+  clients.push(reloadClient)
+  await reloadClient.waitFor(record => record.m4a0 === 'ready', 'U08 old-build reload Client ready', 240_000)
+  const reloadClientReady = reloadClient.records.find(record => record.m4a0 === 'ready')
+  const reloadClientPid = reloadClientReady?.pid
+  assert(Number.isInteger(reloadClientPid), 'U08 old-build reload Client ready record has no business PID')
+  await reloadClient.waitFor(
+    record => record.m4b2s === 'surface-status' && record.sessionOpen === true && record.openSessionId === sessionId,
+    'U08 old-build reload Client opened the running Session',
+    120_000,
+  )
+  await reloadClient.waitForScreen(holdPrompt, 'U08 old-build reload Client painted the admitted prompt', 120_000)
+  assertEqual(await seatIsFree(clientSeatName), false, 'U08 old-build reload Client did not take the Client seat')
+  assertEqual(reloadClient.records.filter(record => record.m4r === 'handoff-requested').length, 0,
+    'U08 reload Client reloaded before the user command')
+
+  // ── U08 positive: the PRODUCTION `/reload-client` command drives the SAME
+  //    PR3 reexec/handoff chain into the newly installed build ─────────────
+  reloadClient.send('/reload-client\r')
+  const reloadRequested = await reloadClient.waitFor(
+    record => record.m4r === 'handoff-requested' && record.pid === reloadClientPid,
+    'U08 production command accepted the reload',
+    120_000,
+  )
+  assertEqual(reloadRequested.sessionId, sessionId, 'U08 the command captured another Session')
+  assertEqual(reloadRequested.expectedHostInstanceId, hostIdentity.instanceId, 'U08 the command captured another Host')
+  assertEqual(reloadRequested.targetBuildId, newBuildId, 'U08 the command resolved another target build')
+  assertEqual(reloadRequested.targetBundleVersion, newArtifact.manifest.version,
+    'U08 the command resolved another target bundle version')
+  const reloadClientClosed = await reloadClient.waitFor(
+    record => record.m4b2s === 'client-closed' && record.pid === reloadClientPid,
+    'U08 old-build reload Client released every owned Client resource',
+    120_000,
+  )
+  assertEqual(reloadClientClosed.sessionOpen, false, 'U08 reload Client still reported an open Session after its release')
+  assertEqual(reloadClientClosed.surfaceMounted, false, 'U08 reload Client still reported a mounted surface after its release')
+  assertDeepEqual(reloadClientClosed.owners, { typert: 0, connection: 0, remote: 0, fileUpload: 0, sessions: 0, jobs: 0 },
+    'U08 reload Client still owned Client services after its release')
+  const replacementStarted = await reloadClient.waitFor(
+    record => record.m4a0 === 'client-started' && record.pid !== reloadClientPid,
+    'U08 the replacement Client started as a new OS process',
+    120_000,
+  )
+  const replacementPid = replacementStarted.pid
+  assert(Number.isInteger(replacementPid) && replacementPid !== reloadClientPid, 'U08 the replacement Client has no new OS PID')
+  assert(alive(reloadClientPid), 'U08 the old Client parent exited before its replacement finished')
+  const replacementAuth = await reloadClient.waitFor(
+    record => record.m4a0 === 'host-authenticated' && record.pid === replacementPid,
+    'U08 the replacement Client authenticated the SAME Host',
+    180_000,
+  )
+  assertIdentityKept(replacementAuth.host, hostIdentity, 'U08 replacement Client authenticated Host')
+  const replacementRestored = await reloadClient.waitFor(
+    record => record.m4r === 'handoff-restored' && record.pid === replacementPid,
+    'U08 the replacement Client restored the original Session',
+    180_000,
+  )
+  assertEqual(replacementRestored.expectedHostInstanceId, hostIdentity.instanceId)
+  assertEqual(replacementRestored.hostInstanceId, hostIdentity.instanceId)
+  assertEqual(replacementRestored.sessionId, sessionId)
+  assertEqual(replacementRestored.sessionOpen, true)
+  assertEqual(replacementRestored.sessionHistoryOpen, true)
+  assertEqual(replacementRestored.surfaceMounted, true)
+  assertEqual(replacementRestored.transport, 'connected')
+  assertEqual(replacementRestored.clientBuildId, newBuildId, 'U08 the replacement Client does not run the new build')
+  assertNotEqual(replacementRestored.clientBuildId, oldBuildId, 'U08 the replacement Client re-ran the old build')
+  const replacementReady = await reloadClient.waitFor(
+    record => record.m4a0 === 'ready' && record.pid === replacementPid,
+    'U08 the replacement Client ready',
+    120_000,
+  )
+  assertEqual(replacementReady.transport, 'connected')
+  assertEqual(replacementReady.host?.instanceId, hostIdentity.instanceId)
+  assertEqual(replacementReady.sessionOpen, true)
+  assertEqual(replacementReady.openSessionId, sessionId)
+  await reloadClient.waitForScreen(holdPrompt, 'U08 the replacement surface painted the admitted prompt', 120_000)
+  assertEqual(await seatIsFree(clientSeatName), false, 'U08 the replacement Client does not hold the Client seat')
+  assert(alive(hostIdentity.hostPid), 'U08 the Host died during the command reload')
+  assert(readProcessStarttime(hostIdentity.hostPid) === hostIdentity.hostStarttime,
+    'U08 the Host starttime changed during the command reload')
+  assertIdentityKept(safeIdentity((await hostStatus(host)).localHost), hostIdentity, 'U08 Host after the command reload')
+  assert(!c1WorkHadRelease(c1WorkRoot), 'U08 the command reload released the admitted Turn')
+  assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore),
+    'U08 the command reload mutated the registry')
+  assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore),
+    'U08 the command reload mutated the launch material')
+  assertDeepEqual(sessionLogFiles(dshHome), sessionLogsBeforeReload,
+    'U08 the command reload created a new Session log')
+  const promptsAfterReload = (hostSessionEvents(dshHome, sessionId) ?? [])
+    .filter(event => event.type === 'user/message'
+      && event.data?.source?.kind === 'user'
+      && JSON.stringify(event.data?.content ?? []).includes(holdPrompt))
+  assertEqual(promptsAfterReload.length, 1, 'U08 the command reload replayed or duplicated the admitted prompt')
+
+  const replacementExit = await (async () => {
+    reloadClient.send('/exit\r')
+    return await reloadClient.waitForExit(120_000)
+  })()
+  assertEqual(replacementExit.code, 0, `U08 replacement Client exit was ${JSON.stringify(replacementExit)}`)
+  assert(await waitGone(replacementPid), 'U08 the replacement Client process did not exit')
+  assert(await waitGone(reloadClientPid), 'U08 the old Client waiting parent did not exit')
+  assert(await seatIsFree(clientSeatName), 'U08 the Client seat stayed owned after the replacement Client exited')
+  assert(alive(hostIdentity.hostPid), 'U08 the Host died when the replacement Client exited')
+  assert(!c1WorkHadRelease(c1WorkRoot), 'U08 the admitted Turn was released by the Client exit')
+
+  // Complete the admitted work and stop the Host through its own owner path.
+  writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+  await waitForC1WorkEvent(c1WorkRoot, event => event.kind === 'long-turn-released' && event.sessionId === sessionId, 'U08 Host Turn completes')
+  await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'U08 Host turn/end')
+  host.child.stdin.end()
+  assert(readProcessStarttime(hostIdentity.hostPid) === hostIdentity.hostStarttime,
+    'U08 the Host stop target starttime no longer matches')
+  process.kill(hostIdentity.hostPid, 'SIGTERM')
+  const hostStop = await host.waitFor(record => record.m4a0 === 'stop-requested', 'U08 Host stop-requested', 60_000)
+  assertEqual(hostStop.signal, 'SIGTERM')
+  const hostCleanup = await host.waitFor(
+    record => record.m4a0 === 'cleanup' || record.m4a0 === 'cleanup-failure',
+    'U08 Host cleanup',
+    120_000,
+  )
+  assertEqual(hostCleanup.m4a0, 'cleanup', `U08 Host cleanup was ${JSON.stringify(hostCleanup)}`)
+  assertEqual(hostCleanup.status, 'completed')
+  const hostExit = await host.waitForExit(120_000)
+  assertEqual(hostExit.code, 0, `U08 Host stop exit was ${JSON.stringify(hostExit)}`)
+  assert(await seatIsFree(`\0dsh-pi-tui-h-${hostIdentity.scopeId.slice(0, 40)}`), 'U08 the Host seat stayed owned')
+
+  return {
+    oldClientPid: reloadOldClientPid,
+    reloadCommandClientPid: reloadClientPid,
+    replacementClientPid: replacementPid,
+    oldBuildId,
+    newBuildId,
+    newBundleVersion: newArtifact.manifest.version,
+    oldBundleVersion: oldArtifact.manifest.version,
+    productionTargetResolvedFromProfile: true,
+    qualificationTargetOverrideUsed: false,
+    alreadyCurrentRefused: true,
+    alreadyCurrentKeptOldSurface: true,
+    attachmentsRefused: true,
+    attachmentsKeptOldSurface: true,
+    handoffRequestedByUserCommand: true,
+    oldClientOwnersReleased: true,
+    replacementClientNewPid: replacementPid !== reloadClientPid,
+    replacementClientNewBuild: replacementRestored.clientBuildId === newBuildId,
+    hostIdentityKept: true,
+    hostStarttimeKept: true,
+    sessionId,
+    sessionHistoryOpen: true,
+    surfacePromptVisible: true,
+    registryBytesUnchanged: true,
+    launchBytesUnchanged: true,
+    noNewSessionLog: true,
+    promptNotReplayed: true,
+    turnHeldAcrossReload: true,
+    exitCode: replacementExit.code,
+    hostStopExitCode: hostExit.code,
+  }
+}
+
+/**
+ * M4 PR4 U08 negative 3: the installed replacement target is OFFICIALLY
+ * removed while a Client is live. The command's process preflight resolves the
+ * PROFILE-installed package (never a qualification override), finds nothing,
+ * refuses with its fixed notice, and keeps the live surface, its Client seat,
+ * the Host identity and the admitted Turn's hold completely untouched.
+ *
+ * This round is isolated from the positive U08 round on purpose: removing the
+ * installed bundle is a destructive profile transaction, so it must never run
+ * while the positive round's held Turn is the thing under qualification.
+ */
+async function runUnavailableTargetRound(context) {
+  const { dsh, harnessDir, anchor, targetDshVersion, oldArtifact, workRoot, hosts, clients } = context
+  const roundRoot = join(workRoot, 'u08-target')
+  const home = join(roundRoot, 'home')
+  const dshHome = join(roundRoot, 'dsh-home')
+  const envWork = join(roundRoot, 'env')
+  const fixtureDir = join(roundRoot, 'fixture')
+  const c1WorkRoot = join(roundRoot, 'c1-work')
+  const scratch = join(roundRoot, 'scratch')
+  for (const directory of [home, dshHome, envWork, fixtureDir, c1WorkRoot, scratch]) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 })
+  }
+  writeFileSync(join(envWork, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
+  const env = isolatedEnvironment(envWork, home, dshHome, join(roundRoot, 'evidence.json'))
+  extraIsolatedHomes.push(dshHome)
+
+  const profileDir = join(dshHome, 'profiles', 'pi-tui')
+  installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)
+  installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)
+  installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)
+  installPlugin(dsh, oldArtifact.path, harnessDir, env, false)
+  assertProfileClientPeers(profileDir, targetDshVersion, 'U08 target-invalid profile install')
+  const profilePackage = realpathSync(join(profileDir, 'node_modules', EXPECTED_PACKAGE_NAME))
+
+  const work = writeC1WorkFixture(profileDir, fixtureDir)
+  const releaseBarrier = join(roundRoot, 'long-turn.release')
+  const base = { cwd: profileDir, env: { ...env }, anchor, profile: 'pi-tui', scratch }
+  const hostBase = {
+    ...base,
+    env: {
+      ...base.env,
+      SPLIT_PROCESS_EXTRA_PATCH: work.patchPath,
+      C1_SCENARIO: 'long-turn',
+      C1_HOLD_LONG_TURN: releaseBarrier,
+      C1_WORK_ROOT: c1WorkRoot,
+    },
+  }
+  const host = new EntryProcess('host-u08-target', join(profilePackage, 'dist', 'local-host.mjs'), hostBase)
+  hosts.push(host)
+  const hostReady = await host.waitFor(record => record.m4a0 === 'ready', 'U08 target-invalid Host ready', 240_000)
+  const hostIdentity = safeIdentity(hostReady.localHost)
+  const scopeDir = scopeDirOf(dshHome, hostIdentity.scopeId)
+  const registryBefore = readFileSync(join(scopeDir, 'instance.json'))
+  const launchBefore = readFileSync(join(scopeDir, 'launch.json'))
+  const clientSeatName = `\0dsh-pi-tui-c-${hostIdentity.scopeId.slice(0, 40)}`
+
+  const client = new SurfaceEntryProcess(join(profilePackage, 'dist', 'local-client.mjs'), { ...base, workDir: roundRoot })
+  clients.push(client)
+  await client.waitFor(record => record.m4a0 === 'ready', 'U08 target-invalid Client ready', 240_000)
+  const clientPid = client.records.find(record => record.m4a0 === 'ready')?.pid
+  assert(Number.isInteger(clientPid), 'U08 target-invalid Client ready record has no business PID')
+  const holdPrompt = 'u08-target-invalid-hold'
+  client.send(`${holdPrompt}\r`)
+  await client.waitForScreen(holdPrompt, 'U08 target-invalid Client painted the admitted prompt', 120_000)
+  const sessionStatus = await client.waitFor(
+    record => record.m4b2s === 'surface-status' && record.sessionOpen === true && typeof record.openSessionId === 'string',
+    'U08 target-invalid Client open Session',
+    120_000,
+  )
+  const sessionId = sessionStatus.openSessionId
+  await waitForC1WorkEvent(c1WorkRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'U08 target-invalid Turn held')
+  assertEqual(await seatIsFree(clientSeatName), false, 'U08 target-invalid Client does not hold the Client seat')
+
+  // The official DSH transaction removes the PROFILE-installed bundle while
+  // the Client/Host runtimes (already loaded) keep their modules.
+  const removal = runDsh(dsh, ['plugin', '--profile', 'pi-tui', 'remove', EXPECTED_PACKAGE_NAME], harnessDir, env)
+  assertEqual(removal.status, 0, `U08 the official package removal failed: ${removal.stderr ?? ''}`)
+  assert(!existsSync(join(profileDir, 'node_modules', EXPECTED_PACKAGE_NAME)),
+    'U08 the official removal left the installed package behind')
+  client.send('/reload-client\r')
+  await client.waitForScreen('Client reload failed: the installed replacement Client is unavailable or incompatible.',
+    'U08 target-invalid notice', 120_000)
+  assertEqual(client.records.filter(record => record.m4r === 'handoff-requested').length, 0,
+    'U08 the target-invalid refusal reached the process stop sink')
+  assert(alive(clientPid), 'U08 the target-invalid refusal killed the live Client')
+  assertEqual(await seatIsFree(clientSeatName), false, 'U08 the target-invalid refusal released the Client seat')
+  assertIdentityKept(safeIdentity((await hostStatus(host)).localHost), hostIdentity, 'U08 Host after the target-invalid refusal')
+  assert(alive(hostIdentity.hostPid), 'U08 the Host died on the target-invalid refusal')
+  assert(!c1WorkHadRelease(c1WorkRoot), 'U08 the target-invalid refusal released the admitted Turn')
+  assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore),
+    'U08 the target-invalid refusal mutated the registry')
+  assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore),
+    'U08 the target-invalid refusal mutated the launch material')
+
+  // This round is destructive for its own profile: end it directly (a graceful
+  // Host stop is not what this negative qualifies).
+  await client.dispose().catch(() => undefined)
+  killProcessGroup(host)
+  await host.waitForExit(30_000).catch(() => undefined)
+  assert(await seatIsFree(clientSeatName), 'U08 the target-invalid Client seat stayed owned after teardown')
+
+  return {
+    installedTargetOfficiallyRemoved: true,
+    targetInvalidRefused: true,
+    targetInvalidKeptOldSurface: true,
+    noReloadRequestReachedSink: true,
+    clientAliveAfterRefusal: true,
+    clientSeatKept: true,
+    hostIdentityKept: true,
+    hostAliveAfterRefusal: true,
+    registryBytesUnchanged: true,
+    launchBytesUnchanged: true,
+    sessionId,
+    turnHeldAcrossRefusal: true,
+    qualificationTargetOverrideUsed: false,
+  }
+}
+
 async function main() {
   const options = parseUpgradeArguments(process.argv.slice(2))
   if (options.help === true) {
@@ -879,6 +1344,31 @@ async function main() {
       exitCode: reexecExit.code,
       secretLeak: false,
     }
+
+    // ── U08: the PRODUCTION manual `/reload-client` command ────────────────
+    // A second fully isolated profile/home round: U07's round above and its
+    // negative controls stay untouched and are re-run exactly as before.
+    evidence.userCommandReload = await runUserCommandReloadRound({
+      dsh,
+      harnessDir,
+      anchor,
+      targetDshVersion,
+      oldArtifact,
+      newArtifact,
+      workRoot,
+      hosts,
+      clients,
+    })
+    evidence.userCommandReloadTargetInvalid = await runUnavailableTargetRound({
+      dsh,
+      harnessDir,
+      anchor,
+      targetDshVersion,
+      oldArtifact,
+      workRoot,
+      hosts,
+      clients,
+    })
 
     // ── U07 negative 1: a wrong expected Host instance is refused pre-connect ─
     const registryBeforeRefusal = readFileSync(join(scopeDir, 'instance.json'))
@@ -1367,6 +1857,7 @@ async function main() {
       killProcessGroup(host)
     }
     killIsolatedProcesses(dshHome)
+    for (const extraHome of extraIsolatedHomes) killIsolatedProcesses(extraHome)
     if (!KEEP) rmSync(workRoot, { recursive: true, force: true })
     else process.stderr.write(`preserved split-upgrade environment: ${workRoot}\n`)
   }
