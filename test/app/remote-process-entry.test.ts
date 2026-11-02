@@ -22,8 +22,10 @@ import { PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { startLocalClient, type LocalClientStatus } from '../../src/app/remote-process/client-bootstrap.ts'
 import { createControlDispatcher } from '../../src/app/remote-process/entry-control.ts'
 import {
+  assertHandoffSignalExclusivity,
   createClientReexecChildEnvironment,
   createClientReexecRequestHandler,
+  expectedHostInstanceFromEnvironment,
   finishClientEntryShutdown,
   handoffStartupFailureLine,
   inspectClientReexecTarget,
@@ -521,6 +523,17 @@ test('the reexec preflight captures the authoritative Session and refuses an inc
   const sessionless = prepare({ ...CONNECTED_STATUS, sessionOpen: false, openSessionId: undefined })
   assert.equal(sessionless.sessionId, undefined)
 
+  // The CURRENT live status owns the Session: a stale launch `startup.sessionId`
+  // is never used to invent one, and an open Session always wins.
+  const staleStartup = { sessionId: 'startup-stale' }
+  assert.equal(prepare({ ...CONNECTED_STATUS, startupFacts: staleStartup }).sessionId, 'session-s')
+  assert.equal(prepare({
+    ...CONNECTED_STATUS,
+    startupFacts: staleStartup,
+    sessionOpen: false,
+    openSessionId: undefined,
+  }).sessionId, undefined)
+
   assert.throws(() => prepare({ ...CONNECTED_STATUS, transport: 'disconnected' }), /transport is not connected/u)
   assert.throws(() => prepare({ ...CONNECTED_STATUS, surfaceMounted: false }), /surface is not mounted/u)
   assert.throws(() => prepare({ ...CONNECTED_STATUS, host: undefined }), /no authenticated Host identity/u)
@@ -828,4 +841,84 @@ test('the reexec trigger is internal, singular and starts only after the ONE sea
   )
   assert.match(source, /expectedInstanceId: expectedHostInstanceId/u,
     'the handoff Client must pass the expected instance into discovery')
+  assert.match(source, /spawn\(process\.execPath, \[entry\], \{/u,
+    'the replacement argv must carry only the real installed entry')
+})
+
+/** Run one assertion block with the exact SIGUSR2/handoff environment. */
+function withHandoffEnvironment(
+  values: Readonly<Record<string, string | undefined>>,
+  run: () => void,
+): void {
+  const names = [
+    'SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID',
+    'SPLIT_PROCESS_CLIENT_REEXEC_PROBE',
+    'SPLIT_PROCESS_CLIENT_HMR_PROBE',
+    'SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF',
+    'SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE',
+  ]
+  const before = new Map(names.map(name => [name, process.env[name]]))
+  try {
+    for (const name of names) delete process.env[name]
+    for (const [name, value] of Object.entries(values)) {
+      if (value !== undefined) process.env[name] = value
+    }
+    run()
+  } finally {
+    for (const [name, value] of before) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
+}
+
+test('the handoff expectation is a surface-only UUID and rejects every SIGUSR2 conflict', () => {
+  withHandoffEnvironment({}, () => {
+    assert.equal(expectedHostInstanceFromEnvironment('surface'), undefined)
+    assert.doesNotThrow(() => assertHandoffSignalExclusivity('surface', undefined))
+  })
+  withHandoffEnvironment({ SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID: REEXEC_HOST_INSTANCE }, () => {
+    assert.equal(expectedHostInstanceFromEnvironment('surface'), REEXEC_HOST_INSTANCE)
+    assert.throws(
+      () => expectedHostInstanceFromEnvironment('qualification'),
+      /requires surface mode/u,
+    )
+  })
+  withHandoffEnvironment({ SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID: 'not-a-uuid' }, () => {
+    assert.throws(() => expectedHostInstanceFromEnvironment('surface'), /Host instance UUID/u)
+  })
+  withHandoffEnvironment({ SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1' }, () => {
+    assert.doesNotThrow(() => assertHandoffSignalExclusivity('surface', undefined))
+    assert.throws(() => assertHandoffSignalExclusivity('qualification', undefined), /requires surface mode/u)
+  })
+  for (const [name, value] of [
+    ['SPLIT_PROCESS_CLIENT_HMR_PROBE', '1'],
+    ['SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF', '1'],
+    ['SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE', '/hold'],
+  ] as const) {
+    withHandoffEnvironment({ SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1', [name]: value }, () => {
+      assert.throws(
+        () => assertHandoffSignalExclusivity('surface', undefined),
+        /mutually exclusive with the HMR\/private-RPC\/T34 SIGUSR2 modes/u,
+      )
+    })
+  }
+  withHandoffEnvironment({
+    SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1',
+    SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID: REEXEC_HOST_INSTANCE,
+  }, () => {
+    assert.throws(
+      () => assertHandoffSignalExclusivity('surface', REEXEC_HOST_INSTANCE),
+      /reexec probe and the handoff expectation are mutually exclusive/u,
+    )
+  })
+  withHandoffEnvironment({
+    SPLIT_PROCESS_CLIENT_HMR_PROBE: '1',
+    SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID: REEXEC_HOST_INSTANCE,
+  }, () => {
+    assert.throws(
+      () => assertHandoffSignalExclusivity('surface', REEXEC_HOST_INSTANCE),
+      /may not inherit another SIGUSR2 qualification mode/u,
+    )
+  })
 })

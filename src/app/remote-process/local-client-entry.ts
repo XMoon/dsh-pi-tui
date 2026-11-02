@@ -586,7 +586,7 @@ export async function finishClientEntryShutdown(options: ClientEntryShutdownOpti
 }
 
 /** Read the one-shot handoff expectation; absent outside a replacement Client. */
-function expectedHostInstanceFromEnvironment(mode: LocalClientEntryMode): string | undefined {
+export function expectedHostInstanceFromEnvironment(mode: LocalClientEntryMode): string | undefined {
   const raw = process.env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID
   if (raw === undefined || raw === '') return undefined
   if (mode !== 'surface') {
@@ -603,7 +603,7 @@ function expectedHostInstanceFromEnvironment(mode: LocalClientEntryMode): string
  * process with the HMR, private-RPC or T34 qualification SIGUSR2 handlers, and
  * a replacement Client may not also be a probe Client.
  */
-function assertHandoffSignalExclusivity(mode: LocalClientEntryMode, expectedInstanceId: string | undefined): void {
+export function assertHandoffSignalExclusivity(mode: LocalClientEntryMode, expectedInstanceId: string | undefined): void {
   const reexecProbe = process.env.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1'
   const otherSignalMode = process.env.SPLIT_PROCESS_CLIENT_HMR_PROBE === '1'
     || process.env.SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF === '1'
