@@ -457,13 +457,18 @@ export interface ClientReexecChildExit {
 }
 
 /** Spawn the replacement Client on the SAME inherited terminal and await its exit. */
-async function spawnClientReexecChild(entry: string, env: NodeJS.ProcessEnv): Promise<ClientReexecChildExit> {
+async function spawnClientReexecChild(
+  entry: string,
+  env: NodeJS.ProcessEnv,
+  onSpawned: (child: ReexecChildHandle) => void,
+): Promise<ClientReexecChildExit> {
   const child = spawn(process.execPath, [entry], {
     cwd: process.cwd(),
     env,
     stdio: 'inherit',
     detached: false,
   })
+  onSpawned({ kill: signal => child.kill(signal) })
   return await new Promise<ClientReexecChildExit>((resolve, reject) => {
     let settled = false
     child.once('error', error => {
@@ -486,14 +491,52 @@ function clientReexecExitCode(exit: ClientReexecChildExit): number {
   return number === undefined ? 1 : 128 + number
 }
 
+/** The one replacement child as seen by the waiting parent. */
+export interface ReexecChildHandle {
+  kill(signal: NodeJS.Signals): boolean
+}
+
+/**
+ * Route one termination signal while a handoff is pending or already waiting.
+ * With no handoff, return false so the existing stop coordinator keeps owning
+ * the normal exit. A running replacement child receives the SAME signal; a
+ * handoff accepted but not yet spawned is cancelled instead of silently
+ * ignoring the signal. The old Client never starts a second stop.
+ */
+export function routeReexecTermination(
+  handoffAccepted: boolean,
+  child: ReexecChildHandle | undefined,
+  signal: NodeJS.Signals,
+  cancelPending: () => void,
+): boolean {
+  if (!handoffAccepted) return false
+  if (child !== undefined) {
+    child.kill(signal)
+    return true
+  }
+  cancelPending()
+  return true
+}
+
 /** The one Client shutdown tail: seat close strictly precedes any child spawn. */
 export interface ClientEntryShutdownOptions {
   readonly seat: ProcessSeat
-  readonly reexec?: { readonly intent: ClientReexecIntent; readonly teardownSucceeded: boolean }
+  readonly reexec?: {
+    readonly intent: ClientReexecIntent
+    readonly teardownSucceeded: boolean
+    /** A termination signal arrived before the replacement child spawned. */
+    readonly cancelled?: boolean
+  }
   readonly emit: EntryRecordSink
   readonly stderr: (line: string) => void
+  /** Observe the spawned child so a waiting parent can forward signals. */
+  readonly onChildSpawned?: (child: ReexecChildHandle) => void
   /** Narrow test seam; production spawns the real replacement process. */
-  readonly spawnChild?: (entry: string, env: NodeJS.ProcessEnv) => Promise<ClientReexecChildExit>
+  readonly spawnChild?: (
+    entry: string,
+    env: NodeJS.ProcessEnv,
+    onSpawned: (child: ReexecChildHandle) => void,
+  ) => Promise<ClientReexecChildExit>
 }
 
 /**
@@ -520,6 +563,19 @@ export async function finishClientEntryShutdown(options: ClientEntryShutdownOpti
   }
   const reexec = options.reexec
   if (reexec === undefined) return seatClosed ? undefined : 1
+  if (reexec.cancelled === true) {
+    const reason = new Error('local client entry: the Client handoff was cancelled by a termination signal')
+    options.emit({
+      m4r: 'handoff-failed',
+      processRole: 'client',
+      pid: process.pid,
+      phase: 'cancelled',
+      expectedHostInstanceId: reexec.intent.expectedInstanceId,
+      error: reason.message,
+    })
+    options.stderr(handoffStartupFailureLine(reason))
+    return 1
+  }
   if (!seatClosed || !reexec.teardownSucceeded) {
     const reason = new Error(seatClosed
       ? 'local client entry: the previous Client teardown did not complete'
@@ -566,7 +622,11 @@ export async function finishClientEntryShutdown(options: ClientEntryShutdownOpti
   const spawnChild = options.spawnChild ?? spawnClientReexecChild
   let exit: ClientReexecChildExit
   try {
-    exit = await spawnChild(target.entry, createClientReexecChildEnvironment(reexec.intent))
+    exit = await spawnChild(
+      target.entry,
+      createClientReexecChildEnvironment(reexec.intent),
+      child => options.onChildSpawned?.(child),
+    )
   } catch (error) {
     options.emit({
       m4r: 'handoff-failed',
@@ -896,6 +956,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   let reexecHandler: ClientReexecRequestHandler | undefined
   /** Set only when the ORIGINAL stop chain released every Client resource. */
   let reexecTeardownSucceeded = false
+  /** The ONE replacement child while the old PID waits as its parent. */
+  let reexecChild: ReexecChildHandle | undefined
+  /** A termination signal arrived after the handoff was accepted, before spawn. */
+  let reexecCancelled = false
   /** The CURRENT revision's surface bridge behind the ONE root `appExit`. */
   let activeBridge: import('./local-client-surface.ts').LocalClientSurfaceBridge | undefined
   /** The ONE serial revision task slot shared by HMR and stop. */
@@ -1050,10 +1114,12 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   // stages must enter the ONE stop coordinator instead of the default action.
   process.on('SIGTERM', () => {
     emit({ m4a0: 'signal', processRole: 'client', pid: process.pid, signal: 'SIGTERM' })
+    if (routeReexecTermination(reexecIntent !== undefined, reexecChild, 'SIGTERM', () => { reexecCancelled = true })) return
     runDetached('local client: SIGTERM shutdown', () => stop(0), { diag })
   })
   process.on('SIGINT', () => {
     emit({ m4a0: 'signal', processRole: 'client', pid: process.pid, signal: 'SIGINT' })
+    if (routeReexecTermination(reexecIntent !== undefined, reexecChild, 'SIGINT', () => { reexecCancelled = true })) return
     runDetached('local client: SIGINT shutdown', () => stop(130), { diag })
   })
 
@@ -1651,9 +1717,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       seat,
       ...(reexecIntent === undefined
         ? {}
-        : { reexec: { intent: reexecIntent, teardownSucceeded: reexecTeardownSucceeded } }),
+        : { reexec: { intent: reexecIntent, teardownSucceeded: reexecTeardownSucceeded, cancelled: reexecCancelled } }),
       emit,
       stderr: line => { process.stderr.write(`${line}\n`) },
+      onChildSpawned: child => { reexecChild = child },
     })
     if (reexecExitCode !== undefined) process.exitCode = reexecExitCode
     try {

@@ -190,12 +190,18 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   terminal as a new PID (`stdio: inherit`, no detached daemon, no second
   terminal owner). The old PID is only a waiting parent that forwards the
   child's exit status and holds no Client Context, TTY reader, seat or business
-  object. The replacement re-authenticates the expected Host, which is
-  discovered with a no-spawn expectation (`HOST_HANDOFF_UNAVAILABLE` when the
-  expected instance is absent/dead, `HOST_IDENTITY_MISMATCH` when another live
-  instance owns the scope) and must reopen the same Session against the current
-  generation; success requires the official Session history `openState` to be
-  `'open'`, and a sessionless handoff must stay sessionless. Failure never
+  object; a termination signal addressed to that PID is forwarded to the
+  replacement child, and a signal arriving after the handoff was accepted but
+  before the child spawned cancels the handoff without spawning. The
+  replacement re-authenticates the expected Host, which is discovered with a
+  no-spawn expectation (`HOST_HANDOFF_UNAVAILABLE` when the expected instance
+  is absent/dead, `HOST_IDENTITY_MISMATCH` when another live instance owns the
+  scope) and must reopen the same Session against the current generation;
+  success requires the official Session history `openState` to be `'open'`, and
+  a sessionless handoff must stay sessionless. Sessionless means the official
+  `tuiMainView` authority owns no Session: another reference source (gateway,
+  controller operation or child view) may legitimately retain a binding without
+  making the TUI non-sessionless. Failure never
   starts or replaces a Host, never replays an unacknowledged write and never
   rolls back to the old build automatically: the replacement exits nonzero with
   a concise manual-recovery line. No Cookie, token, SessionHandle, writer or UI
