@@ -32,7 +32,7 @@ import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftA
 import { prepareUserMessage, type DirectPrepareInputDeps } from './direct-message-preparation.ts'
 import { expandImagePlaceholders } from '../../client/media/image/placeholder.ts'
 import { clientTimeZone } from '../../client/time-zone.ts'
-import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
+import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, localCommandMayWrite, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
 import { resolveSubmitDelivery } from './command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
@@ -1414,10 +1414,18 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // in diagnostics — runOwned (AGENTS.md), never a bare void. The
     // handler may be a SYNC implementation, so the factory must run inside
     // runOwned (a sync throw would otherwise escape before the entry).
+    // M4 PR4 external review: an accepted local command that MAY write
+    // persisted config holds the accepted-command lifetime for its WHOLE
+    // handler (the async preparation before the write included). Read-only
+    // commands and `/reload-client` itself stay uncounted, so a refresh never
+    // blocks the reload and the reload never blocks itself. The lifetime is
+    // released at the same terminal callbacks that already settle the command.
+    const endLocalWrite = localCommandMayWrite(parsed.name) ? beginUnsettledClientWrite() : undefined
     runOwned('local command', () => handler(invocation), {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
       onResult: (result) => {
+        endLocalWrite?.()
         if (deps.isCleanedUp()) return
         if (result !== undefined && result.kind === 'error') {
           if (bridgeCommandRef !== undefined) deps.extensions.recordError(bridgeCommandRef, new Error(result.text))
@@ -1432,6 +1440,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         }
       },
       onError: (error) => {
+        endLocalWrite?.()
         if (deps.isCleanedUp()) return
         if (bridgeCommandRef !== undefined) deps.extensions.recordError(bridgeCommandRef, error)
         const message = safeErrorMessage(error)
@@ -1441,6 +1450,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           // The cordis logger must not block the user notice.
         }
         deps.app().notify(message, 'error')
+      },
+      onCancel: () => {
+        endLocalWrite?.()
       },
     })
   }
