@@ -524,6 +524,38 @@ function writeReloadProbePng(path) {
 }
 
 /**
+ * Wait until the REAL painted composer no longer contains `needle`. This is an
+ * authoritative editor-state read (the same painter the user sees), so the U08
+ * attachment negative never races a slow PTY with a fixed delay: the command is
+ * submitted only after the placeholder is provably gone from the composer.
+ */
+async function waitForClearedComposer(client, needle, label, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const viewport = await client.viewport()
+    const separators = []
+    for (let index = 0; index < viewport.length; index += 1) {
+      if (/^─+$/u.test(viewport[index].trim())) separators.push(index)
+    }
+    if (separators.length > 0) {
+      // The input box is drawn between its top and bottom rule; use the
+      // SECOND-TO-LAST rule so the footer rule below it is not mistaken for
+      // the box top (the harness's own composer read).
+      const top = separators.length >= 2 ? separators[separators.length - 2] : separators[separators.length - 1]
+      const bottom = separators.length >= 2 ? separators[separators.length - 1] : viewport.length
+      const composer = viewport.slice(top + 1, bottom).join('\n')
+      if (composer.includes('❯') && !composer.includes(needle)) return
+    }
+    if (client.exited) {
+      throw new Error(`${label}: the Client exited while its composer still showed ${JSON.stringify(needle)}; raw=${JSON.stringify(client.raw.slice(-1500))}`)
+    }
+    await sleep(50)
+  }
+  const viewport = await client.viewport()
+  throw new Error(`${label}: timed out waiting for the composer to clear ${JSON.stringify(needle)}; viewport=${JSON.stringify(viewport)}`)
+}
+
+/**
  * M4 PR4 U08: the PRODUCTION manual `/reload-client` command over the real
  * PTY, in a SECOND completely isolated profile/home round (U07's round is
  * untouched).
@@ -659,9 +691,13 @@ async function runUserCommandReloadRound(context) {
   reloadOldClient.send(`/image ${imagePath}\r`)
   await reloadOldClient.waitForScreen('attached [image', 'U08 staged image notice', 120_000)
   // Remove the placeholder text ONLY: the staged image stays in the real draft
-  // store (the pinned/unreferenced case the safety gate must not miss).
+  // store (the pinned/unreferenced case the safety gate must not miss). The
+  // removal is awaited through the REAL painted composer (an authoritative
+  // editor state), never a fixed delay: a slow PTY could otherwise still hold
+  // the placeholder when the command is submitted and the negative would become
+  // a draft-text refusal instead.
   reloadOldClient.send('\x7f'.repeat(200))
-  await sleep(300)
+  await waitForClearedComposer(reloadOldClient, '[image #', 'U08 staged placeholder cleared')
   reloadOldClient.send('/reload-client\r')
   await reloadOldClient.waitForScreen('Client reload blocked: remove or submit the staged attachments first.',
     'U08 attachments refusal', 120_000)

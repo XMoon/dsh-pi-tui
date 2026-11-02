@@ -23,7 +23,7 @@
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { createSubmissionController, type SubmissionControllerDeps } from '../../src/app/submission/controller.ts'
+import { createSubmissionController, type SubmissionController, type SubmissionControllerDeps } from '../../src/app/submission/controller.ts'
 import {
   bindSubmissionRuntime,
   pullBackQueue,
@@ -45,6 +45,7 @@ interface AgentLike {
   status: string
   readonly session: { readonly id: string }
   readonly options: Record<string, unknown>
+  cancel(): void
 }
 
 interface Harness {
@@ -72,7 +73,7 @@ function startHarness(): Harness {
     setSubmitPending: () => {},
     clearSettledLocalMessages: () => {},
   }
-  const agent: AgentLike = { status: 'idle', session: { id: 'session-a' }, options: {} }
+  const agent: AgentLike = { status: 'idle', session: { id: 'session-a' }, options: {}, cancel: () => {} }
   const core = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
   core.setCurrentOwner({} as never, 'session-a')
   const scopeAuthority = createSessionScopeAuthority({
@@ -272,28 +273,108 @@ test('the /reload-client control command itself is not counted as a business wri
   assert.equal(harness.controller.hasUnsettledClientWrite(), false)
 })
 
-test('the ! shell gesture keeps the write lifetime until the real user-shell owner settles', async () => {
-  let releaseResult!: (result: HostUserShellResult) => void
+/**
+ * A REAL `SubmissionController` + REAL `createUserShell` composition whose
+ * Session writer is HELD by the test: the accepted `!` gesture's context-mode
+ * output write is therefore provably in flight while the assertion runs.
+ */
+interface ShellHarness {
+  readonly controller: SubmissionController
+  readonly writes: { readonly sessionId: string; readonly message: unknown }[]
+  finishWrite(outcome: WriteOutcome): void
+  finishShell(result: HostUserShellResult): void
+  readonly executions: number
+}
+
+function startShellHarness(): ShellHarness {
+  let draft = ''
+  const notices: string[] = []
+  const writes: { sessionId: string; message: unknown }[] = []
+  const writeResolvers: ((outcome: WriteOutcome) => void)[] = []
+  const shellResolvers: ((result: HostUserShellResult) => void)[] = []
   let executions = 0
-  const shell = createUserShell<{ session: { id: string }; status: string; cancel(): void }>({
-    app: () => ({
-      pushLocalMessage: () => ({ card: true }),
-      updateLocalMessage: (card: unknown) => card,
-      clearSettledLocalMessages: () => {},
-    }) as never,
+  const composer = {
+    getDraft: () => draft,
+    setDraft: (text: string) => { draft = text },
+    setEditorText: (text: string) => { draft = text },
+    insertIntoEditor: (text: string) => { draft += text },
+    notify: (message: string) => { notices.push(message) },
+    setSubmitPending: () => {},
+    clearSettledLocalMessages: () => {},
+    pushLocalMessage: (message: unknown) => message,
+    updateLocalMessage: (message: unknown) => message,
+  }
+  const agent: AgentLike = { status: 'idle', session: { id: 'session-a' }, options: {}, cancel: () => {} }
+  const core = createSessionOwnershipCore({ isSurfaceDisposed: () => false, resetForGeneration: () => {} })
+  core.setCurrentOwner({} as never, 'session-a')
+  const scopeAuthority = createSessionScopeAuthority({
+    current: () => {
+      const subject = core.subject()
+      if (subject === undefined) throw new Error('fixture: the owner is not published')
+      return { sessionId: 'session-a', generation: core.generation(), subject }
+    },
+    isSubjectCurrent: (subject) => core.isSubjectCurrent(subject),
+  })
+  const sessionWriter = {
+    prompt: (sessionId: string, message: unknown) => new Promise<WriteOutcome>((resolve) => {
+      writes.push({ sessionId, message })
+      writeResolvers.push(resolve)
+    }),
+    updateQueue: async () => ({ kind: 'committed' as const, value: undefined }),
+  }
+  const runtimeSurface: SubmissionRuntimeSurface = {
+    withWriter: async (_scope, task) => task(),
+    withPromptAdmission: async (_scope, _line, task) => task(),
+    isDisposed: () => false,
+    isScopeCurrent: () => true,
+    mergeDraftIntoEditor: (text) => {
+      const merged = mergeDraft(draft, text)
+      draft = merged
+      return merged === text
+    },
+    restoreStaleDraftIntoEditor: (text) => {
+      const merged = mergeDraft(draft, text)
+      draft = merged
+      return merged === text ? 'merged-verbatim' : 'merged'
+    },
+    consumeDraftAttachments: () => {},
+    markDispatch: () => {},
+    beginLocalSubmission: () => {},
+    settleLocalSubmission: () => {},
+    settleSubmitAck: () => {},
+    notify: (message) => { notices.push(message) },
+    refuseByTransitionFence: (text) => { draft = mergeDraft(draft, text) },
+    prepareMessage: async (text, requestId) => preparePrompt('session-a', text, { images, files }, requestId),
+    prompt: sessionWriter.prompt,
+  }
+  const images = new DraftImageStore()
+  const files = new DraftFileStore()
+  const submissionRuntime = bindSubmissionRuntime({ surface: runtimeSurface })
+  let controller: ReturnType<typeof createSubmissionController<AgentLike>> | undefined
+  const shell = createUserShell<AgentLike>({
+    app: () => composer as never,
     notify: () => {},
     diag: DIAG,
     isCleanedUp: () => false,
-    liveAgent: () => ({ session: { id: 'session-a' }, status: 'idle', cancel: () => {} }),
-    ownership: { generation: () => 1 },
+    liveAgent: () => agent,
+    ownership: { generation: () => core.generation() },
     session: {
       withWriter: async (_scope, task) => task(),
       interrupt: async () => ({ kind: 'committed', value: undefined }),
     },
-    requireLiveScope: () => ({ sessionId: 'session-a' } as never),
-    captureLiveScope: () => ({ sessionId: 'session-a' } as never),
-    writerSection: async <T,>(task: () => Promise<T>) => task(),
-    writer: { prompt: async () => ({ kind: 'committed', value: undefined }) } as never,
+    requireLiveScope: () => {
+      const live = scopeAuthority.captureLive()
+      if (live === undefined) throw new Error('fixture: the owner is not live')
+      return live
+    },
+    captureLiveScope: () => scopeAuthority.captureLive(),
+    // The REAL controller writer section: the accepted shell gesture's own
+    // writer admission owner.
+    writerSection: async (task) => {
+      if (controller === undefined) throw new Error('fixture: the controller is not built')
+      return await controller.withWriterSection(task)
+    },
+    writer: sessionWriter as never,
     status: { sessionCwd: () => '/tmp' },
     tuiSettings: undefined,
     shell: {
@@ -303,40 +384,166 @@ test('the ! shell gesture keeps the write lifetime until the real user-shell own
         return {
           kind: 'executing',
           execution: {
-            result: () => new Promise<HostUserShellResult>(resolve => { releaseResult = resolve }),
+            result: () => new Promise<HostUserShellResult>(resolve => { shellResolvers.push(resolve) }),
             output: async function* () { /* no output */ },
           },
         }
       },
     } as never,
-    submission: { settleAck: () => {}, markDispatch: () => {} },
+    submission: {
+      settleAck: (reason, options) => { controller?.settleLocalSubmitAck(reason, options) },
+      markDispatch: (sessionId) => { controller?.markDispatch(sessionId) },
+    },
   })
-  let ended = 0
-  shell.run('!! echo hi', 1, () => { ended += 1 })
+  const command = {
+    wasAdvertisedClaim: () => false,
+    hostClaimOf: () => undefined,
+    hostOriginClaimOf: () => undefined,
+    hostCatalogResolves: () => false,
+    clientClaimsLine: () => false,
+    isSkillWrapperName: () => false,
+    isSkillInvocation: () => false,
+    withCommandDelivery: <T,>(_delivery: unknown, run: () => T): T => run(),
+    takeCommandDraftDisposition: () => undefined,
+    clientCommands: { get: () => undefined, execute: async () => undefined },
+  }
+  const deps: SubmissionControllerDeps<AgentLike> = {
+    app: () => composer,
+    diag: DIAG,
+    signal: new AbortController().signal,
+    isCleanedUp: () => false,
+    logError: () => {},
+    liveAgent: () => agent,
+    ownership: {
+      generation: () => core.generation(),
+      captureSubject: () => core.subject(),
+      transitionPending: () => false,
+    },
+    scope: {
+      captureLive: () => scopeAuthority.captureLive(),
+      isCurrent: (scope) => scopeAuthority.isCurrent(scope),
+      requireLive: () => {
+        const live = scopeAuthority.captureLive()
+        if (live === undefined) throw new Error('fixture: the owner is not live')
+        return live
+      },
+    },
+    session: {
+      ensureSession: async () => {},
+      beginCommandSettlement: () => {},
+      abortCommandSettlement: () => {},
+      settleCommandSettlement: () => {},
+      trackSettlementWork: () => {},
+    },
+    submissionRuntime,
+    command: command as unknown as SubmissionControllerDeps<AgentLike>['command'],
+    commandPlane: { available: () => true, execute: async () => undefined, findHandler: () => undefined },
+    backendKind: 'remote',
+    backend: {
+      hostFile: { canonicalizeMentions: async (_scope: unknown, text: string) => text } as never,
+      pendingInputReader: { snapshot: () => ({ running: true, items: [] }) },
+      sessionWriter: sessionWriter as never,
+      hostCommand: { execute: async () => ({ kind: 'committed', matched: false }) } as never,
+    },
+    drafts: { images, files },
+    status: { sessionCwd: () => '/tmp' },
+    surface: { refreshPendingInput: () => {} },
+    history: {
+      persist: () => {},
+      persistAfterSession: async (resolveSession, persist) => { persist(await resolveSession()) },
+    },
+    viewer: { isViewing: () => false },
+    extensions: {
+      findContribution: () => undefined,
+      handlerFor: () => undefined,
+      commandIdFor: () => undefined,
+      recordHealthRef: () => undefined,
+      recordError: () => {},
+      clearError: () => {},
+    },
+    artifacts: { start: () => {} },
+    shell: { run: (text, ackToken, endWrite) => shell.run(text, ackToken, endWrite), interrupt: () => shell.interrupt() },
+    supportsLocalShellCards: true,
+    supportsTuiBuiltinUi: true,
+    retainsStaleDraftRestore: true,
+    model: { selected: { get current() { return undefined } } },
+    image: { attachments: () => undefined as never, llm: () => undefined as never },
+    tuiSettings: undefined,
+    captureMatches: (subject) => core.isSubjectCurrent(subject as never),
+    ownerWasReplaced: (subject) => core.subjectAuthority.ownerReplaced(subject as never),
+    direct: { withPromptAdmission: async (_agent, _hasImages, task) => task() },
+    requestExit: () => {},
+    isPlanActive: () => false,
+    prepareTransport: async (text, requestId) => preparePrompt('session-a', text, { images, files }, requestId),
+  }
+  controller = createSubmissionController<AgentLike>(deps)
+  return {
+    controller,
+    writes,
+    finishWrite: (outcome) => {
+      const resolve = writeResolvers.shift()
+      assert.ok(resolve !== undefined, 'no Session write is pending')
+      resolve(outcome)
+    },
+    finishShell: (result) => {
+      const resolve = shellResolvers.shift()
+      assert.ok(resolve !== undefined, 'no Host shell execution is pending')
+      resolve(result)
+    },
+    get executions() { return executions },
+  }
+}
+
+test('the ! context-mode output write keeps the lifetime until the REAL Session writer settles', async () => {
+  const harness = startShellHarness()
+  harness.controller.submit('! echo hi')
+  assert.equal(harness.controller.hasUnsettledClientWrite(), true,
+    'the ! gesture is accepted synchronously, before any write starts')
   await drainMicrotasks()
-  assert.equal(executions, 1, 'the Host execution was admitted')
-  assert.equal(ended, 0, 'a running !! shell keeps the reload blocked')
-  releaseResult({ exit: { kind: 'exit', code: 0 }, aborted: false })
+  assert.equal(harness.executions, 1, 'the real user-shell owner admitted the Host execution')
+  assert.equal(harness.controller.hasUnsettledClientWrite(), true, 'a running ! shell is unsettled')
+
+  // The Host shell execution settles (the card result is now known), which
+  // starts the context-mode `!` output write through the REAL Session writer.
+  harness.finishShell({ exit: { kind: 'exit', code: 0 }, aborted: false })
   await drainMicrotasks()
-  assert.equal(ended, 1, "the !! card's settlement is the terminal path")
-  // The context-mode `!` submit of the output holds the lifetime until that
-  // Session write settles too: the user shell passes the SAME release into
-  // submitShell, which runs it at the write's terminal settlement.
-  let writeRelease!: () => void
-  const pendingWrite = new Promise<void>(resolve => { writeRelease = resolve })
-  shell.run('! echo hi', 1, () => { ended += 1 })
+  assert.equal(harness.writes.length, 1,
+    'the settled ! result reached the Session writer (the card already settled)')
+  assert.equal(harness.controller.hasUnsettledClientWrite(), true,
+    'the lifetime stays open while the REAL context-mode output write is in flight')
+
+  // The writer's terminal settlement is the ONE release point.
+  harness.finishWrite({ kind: 'committed', value: undefined })
   await drainMicrotasks()
-  assert.equal(executions, 2)
-  assert.equal(ended, 1, 'a running ! shell holds the lifetime')
-  // The context-mode submit runs `submitShell` with its own writer section;
-  // the test's held writer would be the submission runtime's, so this suite's
-  // shell harness uses a committed writer and only asserts the card terminal
-  // releases the SAME lifetime exactly once.
-  releaseResult({ exit: { kind: 'exit', code: 0 }, aborted: false })
+  assert.equal(harness.controller.hasUnsettledClientWrite(), false,
+    'the Session write terminal settlement releases the lifetime exactly once')
+
+  // A second gesture is still counted normally and released: no latch, no
+  // underflow from the first release.
+  harness.controller.submit('! echo again')
   await drainMicrotasks()
-  assert.equal(ended, 2, 'the ! gesture releases its lifetime at the real terminal path')
-  writeRelease()
-  await pendingWrite
+  assert.equal(harness.executions, 2)
+  assert.equal(harness.controller.hasUnsettledClientWrite(), true)
+  harness.finishShell({ exit: { kind: 'exit', code: 0 }, aborted: false })
+  await drainMicrotasks()
+  assert.equal(harness.writes.length, 2)
+  assert.equal(harness.controller.hasUnsettledClientWrite(), true)
+  harness.finishWrite({ kind: 'committed', value: undefined })
+  await drainMicrotasks()
+  assert.equal(harness.controller.hasUnsettledClientWrite(), false)
+})
+
+test('a !! shell keeps the lifetime until the real user-shell owner settles', async () => {
+  const harness = startShellHarness()
+  harness.controller.submit('!! echo hi')
+  await drainMicrotasks()
+  assert.equal(harness.executions, 1, 'the Host execution was admitted')
+  assert.equal(harness.controller.hasUnsettledClientWrite(), true, 'a running !! shell keeps the reload blocked')
+  harness.finishShell({ exit: { kind: 'exit', code: 0 }, aborted: false })
+  await drainMicrotasks()
+  assert.equal(harness.writes.length, 0, '!! never writes to the Session')
+  assert.equal(harness.controller.hasUnsettledClientWrite(), false,
+    "the !! card's settlement is the terminal path")
 })
 
 test('an Alt+Up queue mutation keeps the write lifetime until its queue write settles', async () => {
