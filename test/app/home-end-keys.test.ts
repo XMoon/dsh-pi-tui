@@ -621,6 +621,7 @@ function setupSettings(options: { homeEndKeys?: string } = {}) {
   // back to the `input` pair).
   applyHomeEndKeyMode(homeEndKeysModeOf(options.homeEndKeys))
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,

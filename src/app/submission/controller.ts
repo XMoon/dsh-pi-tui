@@ -359,6 +359,17 @@ export interface SubmissionController {
    * is deliberately NOT counted.
    */
   hasUnsettledClientWrite(): boolean
+  /**
+   * M4 PR4: begin ONE accepted Client-local semantic-work lifetime for an
+   * owner OUTSIDE the submission FIFO — the command coordinator's detached
+   * skill delivery and the rewind picker selection. Registration is
+   * synchronous at the acceptance point; the returned release is idempotent
+   * and MUST run at the operation's REAL settlement (success, refusal,
+   * failure or cancellation), never at an intermediate read or handler
+   * return. This is the SAME counter `hasUnsettledClientWrite()` reads:
+   * no second tracker, busy flag or reload state machine is created.
+   */
+  beginClientWrite(): () => void
 }
 
 /** Create the submission/input controller (plan §A5b-4). */
@@ -2133,5 +2144,6 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     markDispatch: (sessionId) => { submitLatencyTracker.mark(sessionId, 'dispatch') },
     prepareMessage,
     hasUnsettledClientWrite: () => unsettledClientWrites > 0 || deps.submissionRuntime.hasUnsettledClientWrite(),
+    beginClientWrite: () => beginUnsettledClientWrite(),
   }
 }

@@ -113,6 +113,7 @@ function setupSettings(options: { iconStyle?: string } = {}) {
     ...(options.iconStyle === undefined ? {} : { iconStyle: options.iconStyle }),
   })
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,

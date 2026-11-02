@@ -585,6 +585,7 @@ function setupSettings() {
   } as never)
   const settings = fakeTuiSettings()
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,

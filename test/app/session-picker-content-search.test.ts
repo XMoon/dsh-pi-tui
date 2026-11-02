@@ -129,6 +129,7 @@ function harness(options: {
       sessionStatus: () => undefined,
   }
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,

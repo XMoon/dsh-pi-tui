@@ -52,6 +52,7 @@ afterEach(() => {
 function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
   const state: { agent: Agent | undefined } = { agent: undefined }
   return {
+    beginClientWrite: () => () => {},
     ctx,
     app,
     deliveredFilesSnapshot: () => undefined,

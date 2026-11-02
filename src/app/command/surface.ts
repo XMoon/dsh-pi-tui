@@ -344,6 +344,9 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly submission: {
     prepareDeps: () => Parameters<typeof prepareUserMessage>[2]
     settleQueueRecalls(committed: boolean): void
+    /** M4 PR4: the controller-owned accepted-write lifetime (the SAME
+     *  `beginUnsettledClientWrite`, never a second counter). */
+    beginClientWrite(): () => void
   }
   /** The shared prompt-assembly state objects. */
   readonly promptState: {
@@ -1277,6 +1280,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       ...(deps.requestClientReload === undefined ? {} : {
         requestClientReload: () => deps.requestClientReload!(),
       }),
+      beginClientWrite: () => deps.submission.beginClientWrite(),
       exit: deps.exit,
     }
     // The ONE generic→concrete bridge of this owner: the frozen
