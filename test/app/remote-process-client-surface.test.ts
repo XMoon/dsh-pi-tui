@@ -358,6 +358,14 @@ test('a handoff restore succeeds only from a current official Session history op
     probe.notify('session')
     await assert.rejects(pending, /Session ownership changed/u)
   }
+  // A sessionless proof is refused when a listed Session already has an
+  // unowned binding (no main-view Session, but not "no Session" either).
+  {
+    const unowned = new HandoffProbe()
+    unowned.listed = ['s-1']
+    unowned.mountBinding()
+    await assert.rejects(observeHandoffOpen(unowned.sources), /unowned Session binding/u)
+  }
   // A sessionless proof needs a real mounted surface on a connected transport.
   {
     const unmounted = new HandoffProbe()
@@ -403,7 +411,15 @@ test('a settled handoff proof is re-verified immediately before the success clai
     assert.throws(() => proof.verify(), /no longer owns the restored Session/u)
     probe.owned = 's-1'
     probe.bindingObject = undefined
-    assert.throws(() => proof.verify(), /binding is no longer available/u)
+    assert.throws(() => proof.verify(), /binding changed after the handoff restore proof/u)
+  }
+  // A replacement binding under the SAME id and transport generation is not
+  // the generation this proof settled on, even when the new binding is open.
+  {
+    const probe = new HandoffProbe('s-1')
+    const proof = await observeHandoffOpen(probe.sources, 's-1')
+    probe.mountBinding()
+    assert.throws(() => proof.verify(), /binding changed after the handoff restore proof/u)
   }
   // Sessionless: a Session that appears after the proof is a refusal.
   {
@@ -414,6 +430,15 @@ test('a settled handoff proof is re-verified immediately before the success clai
     probe.owned = 's-1'
     probe.mountBinding()
     assert.throws(() => proof.verify(), /Session opened after the sessionless handoff restore proof/u)
+  }
+  // Sessionless: an UNOWNED binding appearing after the proof is also a refusal.
+  {
+    const probe = new HandoffProbe()
+    const proof = await observeHandoffOpen(probe.sources)
+    probe.listed = ['s-1']
+    probe.mountBinding()
+    assert.equal(probe.owned, undefined)
+    assert.throws(() => proof.verify(), /Session binding appeared after the sessionless handoff restore proof/u)
   }
   // A surface that retires after the proof is a refusal.
   {

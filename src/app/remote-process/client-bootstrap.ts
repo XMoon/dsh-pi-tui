@@ -405,6 +405,14 @@ function bindingOfListedSession<Id>(
   return undefined
 }
 
+/** Whether ANY listed Session currently has a retained binding (owned or not). */
+function anyListedBinding<Id>(sessions: HandoffOpenSessions<Id>): boolean {
+  for (const id of sessions.list.getSnapshot().ids) {
+    if (sessions.binding(id) !== undefined) return true
+  }
+  return false
+}
+
 /** Bound on one handoff restore observation (not a business timeout). */
 const HANDOFF_OPEN_TIMEOUT_MS = 30_000
 
@@ -419,15 +427,19 @@ export interface HandoffOpenSources<Id> {
 }
 
 /**
- * The exact generation and Session identity ONE handoff proof settled on.
- * `verify()` is the synchronous final currentness fence: it re-reads the SAME
- * live sources and refuses a rollover, a changed Session owner, a no-longer
- * open history, a sessionless proof that has since gained a Session, or a
- * retired physical surface. It holds no reference and no long-lived state.
+ * The exact generation, Session and binding identity ONE handoff proof settled
+ * on. `verify()` is the synchronous final currentness fence: it re-reads the
+ * SAME live sources and refuses a rollover, a changed Session owner OR a
+ * replacement binding under the same id, a no-longer open history, a
+ * sessionless proof that has since gained a Session/binding, or a retired
+ * physical surface. The binding is held only as an identity token for this
+ * one synchronous fence; it owns no lifetime and is not a second reference.
  */
 export interface HandoffRestoreProof {
   readonly generationId: number
   readonly sessionId?: string
+  /** The exact official binding identity settled on; absent = sessionless. */
+  readonly bindingIdentity?: object
   verify(): void
 }
 
@@ -436,6 +448,7 @@ function verifyHandoffRestoreProof<Id>(
   sources: HandoffOpenSources<Id>,
   generationId: number,
   sessionId: string | undefined,
+  bindingIdentity: object | undefined,
 ): void {
   const current = sources.transport.status()
   if (current.transport !== 'connected' || current.generationId !== generationId) {
@@ -449,14 +462,20 @@ function verifyHandoffRestoreProof<Id>(
     if (open !== undefined) {
       throw new Error('local client entry: a Session opened after the sessionless handoff restore proof')
     }
+    if (anyListedBinding(sources.sessions)) {
+      throw new Error('local client entry: a Session binding appeared after the sessionless handoff restore proof')
+    }
     return
+  }
+  if (bindingIdentity === undefined) {
+    throw new Error('local client entry: the handoff restore proof has no settled Session binding')
   }
   if (open !== sessionId) {
     throw new Error('local client entry: the handoff Client no longer owns the restored Session')
   }
   const binding = bindingOfListedSession(sources.sessions, sessionId)
-  if (binding === undefined) {
-    throw new Error('local client entry: the restored Session binding is no longer available')
+  if (binding === undefined || !Object.is(binding, bindingIdentity)) {
+    throw new Error('local client entry: the restored Session binding changed after the handoff restore proof')
   }
   if (binding.session.getSnapshot().openState !== 'open') {
     throw new Error('local client entry: the official Session history is no longer open')
@@ -503,12 +522,23 @@ export async function observeHandoffOpen<Id>(
     }
     const succeed = (): void => {
       if (settled) return
+      const settledBinding = observedBinding
+      if (sessionId !== undefined && settledBinding === undefined) {
+        settled = true
+        cleanup()
+        reject(new Error('local client entry: the handoff restore proof lost its settled Session binding'))
+        return
+      }
       settled = true
       cleanup()
       resolve({
         generationId: capturedGeneration,
-        ...(sessionId === undefined ? {} : { sessionId }),
-        verify: () => { verifyHandoffRestoreProof(sources, capturedGeneration, sessionId) },
+        ...(sessionId === undefined
+          ? {}
+          : { sessionId, bindingIdentity: settledBinding }),
+        verify: () => {
+          verifyHandoffRestoreProof(sources, capturedGeneration, sessionId, settledBinding)
+        },
       })
     }
     const fail = (error: Error): void => {
@@ -535,6 +565,10 @@ export async function observeHandoffOpen<Id>(
       if (sessionId === undefined) {
         if (open !== undefined) {
           fail(new Error('local client entry: a sessionless Client handoff opened a new Session'))
+          return
+        }
+        if (anyListedBinding(sources.sessions)) {
+          fail(new Error('local client entry: a sessionless Client handoff found an unowned Session binding'))
           return
         }
         succeed()
