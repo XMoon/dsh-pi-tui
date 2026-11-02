@@ -375,6 +375,14 @@ test('the relay and settled headers upgrade from the short id to the official ti
     assert.ok(h.rowContaining('Subagent settled · 可复用性审核员') !== undefined, `settled title:\n${h.rows().join('\n')}`)
     assert.ok(h.rowContaining(`${RELAY_SENDER} sent a message:`) !== undefined, 'the relay body is byte-for-byte unchanged')
     assert.ok(!h.rows().some(row => row.includes('success')), 'no invented outcome word')
+
+    // A later rename of the SAME live subject repaints both cards through the
+    // real component-cache invalidation (never a stale first title).
+    h.reader.statusTitles.set(RELAY_SENDER, '通讯降噪审核员')
+    await h.settle()
+    assert.ok(h.rowContaining('Agent message · 通讯降噪审核员') !== undefined, `renamed relay title:\n${h.rows().join('\n')}`)
+    assert.ok(h.rowContaining('Subagent settled · 通讯降噪审核员') !== undefined, `renamed settled title:\n${h.rows().join('\n')}`)
+    assert.ok(h.rowContaining('可复用性审核员') === undefined, 'the stale title is gone from both headers')
   } finally {
     h.dispose()
   }
