@@ -968,37 +968,41 @@ async function main() {
     )
     const sessionLogsBeforeChildFailure = sessionLogFiles(dshHome)
     clientA2.signalBusiness('SIGUSR2')
-    const reexecRequested2 = await clientA2.waitFor(
+    // The failed child ends the whole PTY process tree quickly. Wait for the
+    // real exit first, then flush the complete record tail once (the shared
+    // harness stops its 25ms poller on close) before asserting the sequence.
+    const childFailureExit = await clientA2.waitForExit(120_000)
+    clientA2.readRecords()
+    assertEqual(childFailureExit.code, 1, `the failed handoff exit was ${JSON.stringify(childFailureExit)}`)
+    assertEqual(childFailureExit.signal, null)
+    const reexecRequested2 = clientA2.records.find(
       record => record.m4r === 'handoff-requested' && record.pid === clientA2Pid,
-      'the second old Client accepted the reexec request',
-      120_000,
     )
+    assert(reexecRequested2 !== undefined,
+      `the second old Client never accepted the reexec request; records=${JSON.stringify(clientA2.records.slice(-6))}`)
     assertEqual(reexecRequested2.sessionId, sessionId)
-    const clientClosed2 = await clientA2.waitFor(
+    const clientClosed2 = clientA2.records.find(
       record => record.m4b2s === 'client-closed' && record.pid === clientA2Pid,
-      'the second old Client released every owned Client resource',
-      120_000,
     )
+    assert(clientClosed2 !== undefined,
+      `the second old Client never released its owners; records=${JSON.stringify(clientA2.records.slice(-6))}`)
     assertEqual(clientClosed2.sessionOpen, false)
     assertDeepEqual(clientClosed2.owners, { typert: 0, connection: 0, remote: 0, fileUpload: 0, sessions: 0, jobs: 0 })
-    const childFailure = await clientA2.waitFor(
+    const childFailure = clientA2.records.find(
       record => record.m4a0 === 'failure' && record.pid !== clientA2Pid,
-      'the replacement Client failed',
-      180_000,
     )
+    assert(childFailure !== undefined,
+      `the replacement Client did not report its failure; records=${JSON.stringify(clientA2.records.slice(-6))}`)
     assertMatch(childFailure.error, /qualification forced client bootstrap failure/u)
     assert(!clientA2.records.some(record => record.m4a0 === 'ready' && record.pid !== clientA2Pid),
       'a failed replacement Client published ready')
-    const parentExit = await clientA2.waitFor(
+    const parentExit = clientA2.records.find(
       record => record.m4r === 'handoff-parent-exit' && record.pid === clientA2Pid,
-      'the old Client parent reported the replacement exit',
-      120_000,
     )
+    assert(parentExit !== undefined,
+      `the old Client parent never reported the replacement exit; records=${JSON.stringify(clientA2.records.slice(-6))}`)
     assertEqual(parentExit.code, 1, `the old Client parent reported ${JSON.stringify(parentExit)}`)
     assertEqual(parentExit.signal, null)
-    const childFailureExit = await clientA2.waitForExit(120_000)
-    assertEqual(childFailureExit.code, 1, `the failed handoff exit was ${JSON.stringify(childFailureExit)}`)
-    assertEqual(childFailureExit.signal, null)
     assert(await waitGone(childFailure.pid), 'the failed replacement Client process stayed alive')
     assert(await waitGone(clientA2Pid), 'the old Client parent stayed alive after the failed child')
     assert(await seatIsFree(clientSeatName), 'the failed handoff did not release the Client seat')
