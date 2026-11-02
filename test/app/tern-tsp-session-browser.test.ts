@@ -21,6 +21,7 @@ import {
   sheetText,
   sendActivate,
   sendPickerAction,
+  sendResize,
   sendSelect,
   type WireNode,
 } from '../support/tsp-picker-wire.ts'
@@ -33,6 +34,43 @@ const order = (pane: TspPane): Array<string | PickerGroup> => props(pane).order 
 const details = (pane: TspPane): WireNode | undefined => layerNodes(pane, BROWSER).find((node) => node.k === 'overlay')
 const detailBody = (pane: TspPane): WireNode | undefined => layerNodes(pane, BROWSER)
   .find((node) => node.k === 'col' && node.id.includes('session-browser-details-body-'))
+
+/** The Details Reader's facts, read from the WIRE the pane received.
+ *
+ *  A pane that negotiated `kv` paints a group as one grid whose pairs live in the
+ *  node's OWN props, so the observation point is those props — not a text node the
+ *  component never built. A pane without `kv` alternates a muted label node with a
+ *  wrapped value node, which this reads in the same shape so one helper serves both
+ *  branches. Adding a hidden text copy of a gridded fact to keep an old extractor
+ *  happy would paint every fact twice and prove nothing about the client. */
+function detailGroups(pane: TspPane): Map<string, Array<readonly [string, string]>> {
+  const out = new Map<string, Array<readonly [string, string]>>()
+  for (const node of layerNodes(pane, BROWSER)) {
+    const key = String(node.p.key ?? '')
+    if (node.k === 'kv' && key.startsWith('session-browser-kv-')) {
+      const items = (node.p.items ?? []) as Array<{ readonly k?: unknown; readonly v?: unknown }>
+      out.set(key.slice('session-browser-kv-'.length), items.map((item) => [String(item.k), String(item.v)] as const))
+    }
+  }
+  return out
+}
+
+/** Every `kv` node id the layer really carries (a degradation case asserts it is
+ *  empty, so "no kv" is a fact about the wire and not about one lookup). */
+const kvNodes = (pane: TspPane): WireNode[] => layerNodes(pane, BROWSER).filter((node) => node.k === 'kv')
+
+/** The Reader's text nodes as `label | value` runs, the ORIGINAL shape: used by the
+ *  no-`kv` case and by the Host excerpt, which stays wrapped text at every capability. */
+const detailTextRuns = (pane: TspPane): string[] => layerNodes(pane, BROWSER)
+  .filter((node) => node.k === 'text')
+  .map((node) => {
+    const spans = node.p.spans
+    if (Array.isArray(spans)) {
+      return spans.map((entry) => String((entry as { t?: unknown })?.t ?? '')).join('')
+    }
+    return String(node.p.text ?? '')
+  })
+  .filter((text) => text !== '')
 const row = (id: string, overrides: Partial<SessionSummary> = {}): SessionSummary => ({
   id,
   updatedAt: 100,
@@ -86,8 +124,14 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     ],
     hasMore: true,
   }),
-}), waitForProjection = true, expectedState: 'ready' | 'loading' | 'error' = 'ready', openOptions: SessionBrowserOpenOptions = {}) {
-  const pane = installTspPane({ sessionBrowser: true })
+}), waitForProjection = true, expectedState: 'ready' | 'loading' | 'error' = 'ready', openOptions: SessionBrowserOpenOptions = {},
+  // The pane's OWN advertised capability set. A case defaults to the native Browser
+  // opt-in; a case that must prove the no-`kv` degradation passes its kinds verbatim,
+  // so `nativeKv` always arrives through the real handshake and is never a value the
+  // test forced on the View.
+  paneOptions: Parameters<typeof installTspPane>[0] = { sessionBrowser: true },
+) {
+  const pane = installTspPane(paneOptions)
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session, 'the scripted pane must connect through the shipped SDK')
@@ -580,11 +624,41 @@ test('Details preserves search state, scrolls its own body, and emits read-only 
   assert.equal(layerNodes(pane, BROWSER).filter((node) => node.k === 'overlay').length, 1)
   assert.ok(detailBody(pane))
   const firstDetails = sheetText(pane, BROWSER)
-  assert.match(firstDetails, /session-content/u)
-  assert.match(firstDetails, /Unrelated title/u)
-  assert.match(firstDetails, /Host content excerpt/u)
-  assert.ok(firstDetails.includes(`Created | ${new Date(10).toISOString()}`), firstDetails)
-  assert.ok(firstDetails.includes(`Updated | ${new Date(100).toISOString()}`), firstDetails)
+  // The four fact groups reach the pane as grids, so the text sheet carries only
+  // what is genuinely text here: the overlay head, the Back row, each group head
+  // and the Host excerpt. The FACTS are read from the grids' own props below.
+  assert.match(firstDetails, /Identity/u)
+  assert.match(firstDetails, /Host content excerpt/u, 'the excerpt source names the group in its head')
+  assert.match(firstDetails, /Matching content/u, 'and the excerpt label stays a text row')
+  const grids = detailGroups(pane)
+  assert.deepEqual([...grids.keys()], ['identity', 'activity', 'relationship', 'configuration'],
+    'each group is exactly ONE grid, in the reading order, and the excerpt is not one')
+  assert.deepEqual(grids.get('identity'), [
+    ['Session ID', 'session-content'],
+    ['Title', 'Unrelated title'],
+    ['State', 'Persisted session'],
+    ['Workspace', '/workspace/other'],
+  ], 'Identity carries the row\'s own complete facts in order')
+  assert.deepEqual(grids.get('activity'), [
+    ['Created', new Date(10).toISOString()],
+    ['Updated', new Date(100).toISOString()],
+  ], 'Activity is the ISO stamps the row really has')
+  assert.deepEqual(grids.get('relationship'), [['Parent session', 'session-other']],
+    'Lineage is the projection\'s own parent')
+  assert.deepEqual(grids.get('configuration'), [['Agent preset', 'reviewer']],
+    'Configuration is the projected preset')
+  for (const [, value] of [...grids.get('identity')!, ...grids.get('activity')!]) {
+    assert.doesNotMatch(value, /\u001b/u, `no grid value carries a control sequence: ${value}`)
+  }
+  // The excerpt is matched CONTENT, so it is one complete wrapped text node and not
+  // a grid pair — even on a pane that negotiated `kv`.
+  assert.equal(
+    kvNodes(pane).some((node) => String(node.p.key ?? '').endsWith('excerpt')),
+    false,
+    'the excerpt group holds no grid',
+  )
+  assert.ok(detailTextRuns(pane).some((text) => text === 'Host content excerpt'),
+    'and the excerpt body is the complete text the Host returned')
   assert.doesNotMatch(firstDetails, /\u001b/u)
   const firstBackId = layerNodes(pane, BROWSER).find((node) => node.k === 'row' && node.id.includes('session-browser-back-'))!.id
   const bodyId = detailBody(pane)!.id
@@ -686,8 +760,13 @@ test('host migration-required state is read-only in row detail, content hits, an
   await waitUntil('the selection frame is rendered', () => pane.frameCount() > framesBeforeSelect)
   sendPickerAction(pane, 'details', BROWSER)
   await waitUntil('Details opens for the migration-required row', () => details(pane) !== undefined, 3_000)
-  const text = sheetText(pane, BROWSER)
-  assert.ok(text.includes('State | Persisted session · Migration required'), text)
+  // The Host-authoritative state word reaches the grid value INTACT: the KV layout
+  // aligns the pair, it never recomputes, reorders or drops the fact `rowStateText`
+  // produced from the authoritative `formatStatus`.
+  const grids = detailGroups(pane)
+  assert.deepEqual(grids.get('identity')?.find(([label]) => label === 'State'),
+    ['State', 'Persisted session · Migration required'],
+    `the migration state survives into the grid value: ${JSON.stringify([...grids])}`)
   assert.equal(m.fatals.length, 0)
 })
 
@@ -700,9 +779,11 @@ test('Details reports Unknown rather than inferring an absent createdAt', async 
   await waitUntil('current row without createdAt is listed', () => items(pane).some((item) => item.id === 'session:session-current'))
   sendPickerAction(pane, 'details', BROWSER)
   await waitUntil('Details opens for row without createdAt', () => details(pane) !== undefined)
-  const text = sheetText(pane, BROWSER)
-  assert.ok(text.includes('Created | Unknown'), text)
-  assert.ok(text.includes(`Updated | ${new Date(3_000).toISOString()}`), text)
+  const grids = detailGroups(pane)
+  assert.deepEqual(grids.get('activity'), [
+    ['Created', 'Unknown'],
+    ['Updated', new Date(3_000).toISOString()],
+  ], `the absent stamp stays Unknown while the real one keeps its full ISO value: ${JSON.stringify([...grids])}`)
 })
 
 test('modal seat suspends Browser events and restores the same query/selection afterward', async (t) => {
@@ -806,4 +887,84 @@ test('capability negotiation fails closed without required Browser kinds or scro
       pane.restore()
     }
   }
+})
+
+test('native Session: a pane WITHOUT the kv kind still opens the complete text Details', async (t) => {
+  // The degradation is a HANDSHAKE fact: this pane advertises exactly the base the
+  // Browser entry already required (`picker`/`row`/`overlay`/`text`) plus the `scroll`
+  // feature it requires, and NO `kv`. Details must still open with the ORIGINAL text
+  // facts in the same order, Back must still return to the same query/selection, and
+  // the missing display kind must not turn a read-only page into a write.
+  const m = await mounted(t, reader({
+    list: async () => [row('session-current', { live: true, preset: 'reviewer', parentSession: undefined })],
+    projectionBatch: async (rows) => new Map(rows.map((entry) => [entry.id, { title: 'Current title', preset: 'reviewer' }])),
+    search: async () => undefined,
+  }), false, 'ready', {}, {
+    kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'picker', 'row', 'overlay', 'text'],
+    features: ['flow', 'styles', 'scroll'],
+  })
+  const { pane } = m
+  assert.ok(m.renderer.sessionBrowserPresentation, 'the missing `kv` kind refuses no business entry')
+  await waitUntil('the row is listed', () => items(pane).some((item) => item.id === 'session:session-current'))
+  sendPickerAction(pane, 'details', BROWSER)
+  await waitUntil('Details opens', () => details(pane) !== undefined)
+  assert.equal(kvNodes(pane).length, 0, 'not one `kv` node reached a pane that cannot draw one')
+  assert.equal(detailGroups(pane).size, 0, 'and no grid is read as the fact source')
+  const runs = detailTextRuns(pane)
+  // Every original fact, in the original order, complete — the pre-`kv` shape.
+  for (const fact of [
+    'Identity', 'Session ID', 'session-current', 'Title', 'Current title',
+    'State', 'Current session', 'Workspace', '/workspace/project',
+    'Activity', 'Created', new Date(10).toISOString(), 'Updated', new Date(100).toISOString(),
+    'Lineage', 'Parent session', 'No parent session',
+    'Configuration', 'Agent preset', 'reviewer',
+  ]) {
+    assert.ok(runs.includes(fact), `the degraded Details still carries ${JSON.stringify(fact)}: ${JSON.stringify(runs)}`)
+  }
+  assert.ok(runs.indexOf('Session ID') < runs.indexOf('Created'), 'the groups stay in their reading order')
+  const before = scrollOps(pane).length
+  pane.key('\u001b[B')
+  await waitUntil('the degraded Reader still scrolls its own body', () => scrollOps(pane).length === before + 1)
+  assert.deepEqual(scrollOps(pane).at(-1), { id: detailBody(pane)!.id, to: 'line-down' })
+  pane.key('\u001b')
+  await waitUntil('Esc returns from the degraded Details', () => details(pane) === undefined && picker(pane) !== undefined)
+  assert.equal(m.resumeIntents.length, 0, 'a degraded Reader is still read-only')
+})
+
+test('native Session: a KV re-render and a resize never remount the Reader body', async (t) => {
+  // The Reader's scroll target is the body node the frame REALLY drew, addressed by
+  // the id the SDK assigned it. The grid keys identify a GROUP within one reading, so
+  // a repaint (a re-read, or a resize at 1280 -> 400 -> 900) must keep the SAME body
+  // id and must not delete/re-add the scroll container out from under the scroll op.
+  const m = await mounted(t)
+  const { pane } = m
+  await waitUntil('the rows are listed', () => items(pane).length > 0)
+  sendSelect(pane, 'session:session-other', picker(pane)!.id)
+  await waitUntil('the row is selected', () => props(pane).selected === 'session:session-other')
+  sendPickerAction(pane, 'details', BROWSER)
+  await waitUntil('Details opens', () => details(pane) !== undefined)
+  assert.equal(kvNodes(pane).length, 4, 'each of the four fact groups is one grid')
+  const bodyId = detailBody(pane)!.id
+  const gridIds = kvNodes(pane).map((node) => node.id)
+  const factsBefore = detailGroups(pane)
+  for (const cols of [160, 50, 112]) {
+    sendResize(pane, cols)
+    await waitUntil(`the Details survive the resize to ${cols} columns`, () => details(pane) !== undefined)
+    assert.equal(detailBody(pane)!.id, bodyId, `the body keeps its drawn id at ${cols} columns`)
+    assert.deepEqual(detailGroups(pane), factsBefore, `every grid fact is unchanged at ${cols} columns`)
+    assert.deepEqual(kvNodes(pane).map((node) => node.id), gridIds, `the grids keep their ids at ${cols} columns`)
+  }
+  const before = scrollOps(pane).length
+  pane.key('\u001b[B')
+  await waitUntil('the scroll still addresses the drawn body', () => scrollOps(pane).length === before + 1)
+  assert.deepEqual(scrollOps(pane).at(-1), { id: bodyId, to: 'line-down' }, 'scroll names the id the client received')
+  // A re-read of the SAME row is a NEW reading: it must take a new body identity, so an
+  // op queued by the previous reading can never address this one.
+  pane.key('\u001b')
+  await waitUntil('Esc returns to the browse page', () => details(pane) === undefined && picker(pane) !== undefined)
+  sendPickerAction(pane, 'details', BROWSER)
+  await waitUntil('the second reading opens', () => details(pane) !== undefined)
+  assert.notEqual(detailBody(pane)!.id, bodyId, 'a new reading gets its own scroll body')
+  assert.deepEqual(detailGroups(pane), factsBefore, 'and it reads the same facts again')
+  assert.equal(m.resumeIntents.length, 0, 'nothing on this page wrote or resumed')
 })

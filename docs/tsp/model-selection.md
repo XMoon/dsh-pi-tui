@@ -43,6 +43,15 @@ The Reader is a read-only native overlay:
 
 - It carries each value ONCE; the client wraps it at the layout's real width, so
   no app-side bound clips it.
+- Its groups are Identity, then Configuration when the subject has configuration
+  facts, then Description when the model advertises one. Where the pane negotiated
+  the `kv` kind, each of the two labelled groups paints as ONE aligned grid and the
+  Description stays a standalone complete wrapped text; where it did not, the same
+  labelled facts are the original muted-label line over the complete value line.
+  The layout is a display choice only: the fact set, its order, its values and the
+  group boundaries are identical either way, a grid value is never ellipsized or
+  pre-split by the app, and a missing `kv` kind never drops a fact, refuses the
+  Reader, adds a duplicate text copy of a gridded fact, or changes the write path.
 - The app drives the native scroll container with the SDK's `scroll` op for the
   body node it actually built; it resolves that node's wire id from the rendered
   frame, never by guessing. There is no scroll position, cursor or height mirror

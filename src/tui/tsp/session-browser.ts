@@ -367,7 +367,30 @@ function rowStateText(panel: SessionBrowserPanel, row: SessionBrowserRow): strin
   return row.formatStatus === 'migration-required' ? `${base} · Migration required` : base
 }
 
-function detailReader(panel: SessionBrowserPanel, bind: (intent: BrowserIntent) => () => void): Node {
+/** The excerpt group's id: the ONE group whose body is Host content the user reads
+ *  as prose, so it is never a grid row (see `detailReader`). */
+const EXCERPT_GROUP_ID = 'excerpt'
+
+/**
+ * The read-only Session Details Reader.
+ *
+ * The four fact groups (Identity / Activity / Lineage / Configuration) are labelled
+ * short facts, so on a pane that negotiated `kv` each paints as ONE native grid: the
+ * client aligns every label with its value instead of paying a separate line per
+ * label, which is what lets a narrow pane show more of the same facts at once. The
+ * values are the SAME complete strings the text branch sends and the client owns any
+ * wrapping (`KvItem` has no `wrap`), so an unbroken ID or a long cwd stays whole.
+ *
+ * The Host search excerpt is a different shape: its value is matched CONTENT read as
+ * prose, so it keeps its own `Matching content` label plus one complete wrapped
+ * `ui.text` at EVERY capability. A pane without `kv` keeps the original per-fact text
+ * rows verbatim, in the same order, with the same scroll body and the same Back row.
+ */
+function detailReader(
+  panel: SessionBrowserPanel,
+  bind: (intent: BrowserIntent) => () => void,
+  nativeKv: boolean,
+): Node {
   const row = rowFor(panel, panel.selected)
   const scope = `${panel.serial}-${panel.readerEpoch}`
   const bodyKey = `${DETAILS_BODY_KEY_PREFIX}${scope}`
@@ -403,7 +426,7 @@ function detailReader(panel: SessionBrowserPanel, bind: (intent: BrowserIntent) 
       facts: [['Agent preset', row.preset ?? 'Unknown preset']],
     },
     ...(result?.snippet === undefined ? [] : [{
-      id: 'excerpt',
+      id: EXCERPT_GROUP_ID,
       head: `Host search excerpt · ${result.source}`,
       facts: [['Matching content', result.snippet]],
     }]),
@@ -423,18 +446,31 @@ function detailReader(panel: SessionBrowserPanel, bind: (intent: BrowserIntent) 
           : groups.map((group) => ui.col(
               { key: `session-browser-group-${group.id}`, gap: 'xs' },
               ui.text(span(sanitizeTerminalText(group.head), 'muted')),
-              ...group.facts.flatMap(([label, value]) => [
-                ui.text(span(label, 'muted')),
-                ui.text({ wrap: 'word' }, sanitizeTerminalText(value)),
-              ]),
+              ...(nativeKv && group.id !== EXCERPT_GROUP_ID
+                ? [ui.kv({
+                    key: `session-browser-kv-${group.id}`,
+                    layout: 'grid',
+                    items: group.facts.map(([label, value]) => ({
+                      k: sanitizeTerminalText(label),
+                      v: sanitizeTerminalText(value),
+                    })),
+                  })]
+                : group.facts.flatMap(([label, value]) => [
+                    ui.text(span(label, 'muted')),
+                    ui.text({ wrap: 'word' }, sanitizeTerminalText(value)),
+                  ])),
             )))
       ),
     ),
   )
 }
 
-function layer(panel: SessionBrowserPanel, bind: (intent: BrowserIntent) => () => void): Node {
-  return panel.page === 'details' ? detailReader(panel, bind) : pickerLayer(panel)
+function layer(
+  panel: SessionBrowserPanel,
+  bind: (intent: BrowserIntent) => () => void,
+  nativeKv: boolean,
+): Node {
+  return panel.page === 'details' ? detailReader(panel, bind, nativeKv) : pickerLayer(panel)
 }
 
 export class TspSessionBrowser {
@@ -444,6 +480,10 @@ export class TspSessionBrowser {
   private readonly notify: SessionBrowserPresentation['notify']
   private readonly nativeScroll: (id: string, to: ScrollTo) => void
   private readonly scrollSupported: boolean
+  /** Whether the pane negotiated the read-only `kv` kind. Like `scrollSupported`
+   *  it is a fixed mount-time capability of the pane, NOT panel state: it is never
+   *  part of a snapshot or a draft a re-read can rewrite. */
+  private readonly nativeKv: boolean
   private panel: SessionBrowserPanel | undefined
   private serial = 0
   private suspended = false
@@ -457,6 +497,7 @@ export class TspSessionBrowser {
     notify: SessionBrowserPresentation['notify']
     nativeScroll(id: string, to: ScrollTo): void
     scrollSupported: boolean
+    nativeKv: boolean
   }) {
     this.surfaceId = deps.surfaceId
     this.render = deps.render
@@ -464,6 +505,7 @@ export class TspSessionBrowser {
     this.notify = deps.notify
     this.nativeScroll = deps.nativeScroll
     this.scrollSupported = deps.scrollSupported
+    this.nativeKv = deps.nativeKv
   }
 
   readonly presentation: SessionBrowserPresentation = {
@@ -802,7 +844,7 @@ export class TspSessionBrowser {
       panel.revision++
     }
     const revision = panel.revision
-    const node = layer(panel, (intent) => () => this.act(panel, revision, intent))
+    const node = layer(panel, (intent) => () => this.act(panel, revision, intent), this.nativeKv)
     const pickerKey = `session-browser-picker-${panel.serial}`
     const backKey = `session-browser-back-${panel.serial}-${panel.readerEpoch}`
     for (const root of View.from({ layer: node }).regions) {

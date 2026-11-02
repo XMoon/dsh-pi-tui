@@ -45,6 +45,10 @@ export class TspModelPicker {
   /** The ONE Surface owner's native scroll op, addressed by a wire id of the
    *  frame this presenter built. The presenter never owns a Surface. */
   private readonly nativeScroll: (id: string, to: ScrollTo) => void
+  /** Whether the pane negotiated the read-only `kv` kind. The Reader's short
+   *  facts paint as one grid per group when it did, and as the plain labelled
+   *  text rows when it did not. A display fact only — it gates no command. */
+  private readonly nativeKv: boolean
   private panel: ModelPickerPanel | undefined
   private serial = 0
   /** The current frame's event targets: node id -> the revision it was built
@@ -64,11 +68,13 @@ export class TspModelPicker {
     canInteract(): boolean
     notify: ModelPresentation['notify']
     nativeScroll(id: string, to: ScrollTo): void
+    nativeKv: boolean
   }) {
     this.render = deps.render
     this.canInteract = deps.canInteract
     this.notify = deps.notify
     this.nativeScroll = deps.nativeScroll
+    this.nativeKv = deps.nativeKv
   }
 
   readonly presentation: ModelPresentation = {
@@ -512,6 +518,7 @@ export class TspModelPicker {
     const revision = panel.revision
     const layer = modelPickerLayer(panel, {
       paneWidth: this.cols * this.cellWidth,
+      nativeKv: this.nativeKv,
       bind: (intent) => () => this.act(panel, revision, intent),
     })
     // Every node in the model layer belongs to this panel, so an event whose

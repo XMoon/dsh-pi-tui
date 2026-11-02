@@ -16,15 +16,17 @@
  *  - a row activation (`activate` — the client's own click on the already-highlighted
  *    row — or `Enter`) opens the read-only Full details page DIRECTLY: there is no
  *    intermediate page and no second-level effort menu;
- *  - that read-only page is a native `overlay` Reader (`ui.text` with the client's
- *    own wrapping and a native scroll container) grouped into Identity /
- *    Configuration / Description: a picker row is ONE ellipsized line and cannot
- *    carry a long value. No overlay ON TOP of a picker, no `ui.el`, no self-drawn
- *    button, no global action menu.
+ *  - that read-only page is a native `overlay` Reader with a native scroll
+ *    container, grouped into Identity / Configuration / Description: a picker row is
+ *    ONE ellipsized line and cannot carry a long value. Each labelled group's facts
+ *    reach the page as ONE `ui.kv` grid where the pane negotiated `kv`, and as the
+ *    original label/value `ui.text` pair where it did not; the Description stays a
+ *    complete `ui.text` with the client's own wrapping either way. No overlay ON TOP
+ *    of a picker, no `ui.el`, no self-drawn button, no global action menu.
  * @module tui/tsp/model-picker-view
  */
 import { ui, span, type Node } from '@stencil-hq/tern'
-import type { PickerAction, PickerGroup, PickerItem, PickerProps } from '@stencil-hq/tern'
+import type { KvItem, PickerAction, PickerGroup, PickerItem, PickerProps } from '@stencil-hq/tern'
 import type { ModelPickerFailureRow } from '../pickers/model-directory.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
@@ -51,12 +53,19 @@ import {
   stripOffered,
   visibleModels,
   type ModelPickerPanel,
+  type ModelPickerReaderFact,
+  type ModelPickerReaderGroup,
 } from './model-picker-state.ts'
 
 export interface ModelPickerViewDeps {
   /** The pane width the client's geometry was reconstructed from (`cols *
    *  cell.w`), which prices the strip's own chip capacity. */
   readonly paneWidth: number
+  /** Whether the pane negotiated the `kv` kind. Every labelled short fact of the
+   *  Reader paints as ONE grid per group when it did, and as the original label +
+   *  value text rows when it did not. Display only: the facts themselves, their
+   *  order and their source are identical either way. */
+  readonly nativeKv: boolean
   /** Bind one intent to THIS frame's revision (admission lives in the presenter). */
   readonly bind: (intent: ModelPickerIntent) => () => void
 }
@@ -231,6 +240,35 @@ export const MODEL_DETAILS_BODY_KEY_PREFIX = 'model-details-body-'
 const MODEL_DETAILS_READER_KEY = 'model-details-reader'
 const MODEL_DETAILS_BACK_KEY = 'model-details-back'
 
+/** The labelled Reader facts the native grid can align: one `k`/`v` pair per fact.
+ *  A fact without a label (the Description group's single prose value) is not this
+ *  type, so the grid branch can never invent an empty label for it. */
+type LabelledReaderFact = ModelPickerReaderFact & { readonly label: string }
+
+/** The Reader groups whose facts are labelled short facts: `Identity` and
+ *  `Configuration`. `Description` is one value whose head IS its subject, so it is
+ *  never a grid row and keeps its own complete wrapped text at every capability. */
+const GRIDDED_GROUP_IDS: readonly string[] = ['identity', 'configuration']
+
+/**
+ * A group's facts as the pairs one grid paints, or `undefined` when the group
+ * cannot be one.
+ *
+ * The grid aligns a `k` with a `v`, so EVERY fact it carries must have a label. The
+ * state module gives every labelled group a label on every fact; a group that ever
+ * stopped satisfying that falls back to the original text rows rather than shipping
+ * an empty `k` or dropping a fact, because the Reader's contract is that everything
+ * it projects reaches the page.
+ */
+function gridItems(group: ModelPickerReaderGroup): readonly KvItem[] | undefined {
+  const facts = group.facts
+  if (!facts.every((fact): fact is LabelledReaderFact => fact.label !== undefined)) return undefined
+  return facts.map((fact) => ({
+    k: sanitizeDisplayText(fact.label),
+    v: sanitizeDisplayText(fact.value),
+  }))
+}
+
 /**
  * The read-only Reader: the `details` page's ONE node tree, in the layer region,
  * as a native `overlay` instead of a picker.
@@ -274,18 +312,29 @@ function detailsReader(panel: ModelPickerPanel, deps: ModelPickerViewDeps): Node
             ...(panel.notice === undefined
               ? []
               : [ui.text({ wrap: 'word' }, span(sanitizeDisplayText(panel.notice.text), panel.notice.tone))]),
-            ...groups.flatMap((group, index) => [
-              ui.col(
-                { key: `reader-group-${group.id}`, gap: 'xs' },
-                ui.text(span(sanitizeDisplayText(group.head), 'muted')),
-                ...group.facts.flatMap((fact) => [
-                  ...(fact.label === undefined ? [] : [ui.text(span(sanitizeDisplayText(fact.label), 'muted'))]),
-                  ui.text({ key: fact.id, text: sanitizeDisplayText(fact.value), wrap: fact.wrap }),
-                ]),
-              ),
-              // The rule closes the group, so it is never painted after the last one.
-              ...(index === groups.length - 1 ? [] : [ui.rule(), ui.spacer({ size: 'lg' })]),
-            ]),
+            ...groups.flatMap((group, index) => {
+              // The grid is a DISPLAY choice for the labelled groups only, taken from the
+              // pane's ONE negotiated `kv` fact; a group that cannot be a grid — because
+              // the kind is absent, or because a fact carries no label to align — keeps the
+              // ORIGINAL text rows, so no capability outcome can drop or blank a fact.
+              const items = deps.nativeKv && GRIDDED_GROUP_IDS.includes(group.id)
+                ? gridItems(group)
+                : undefined
+              return [
+                ui.col(
+                  { key: `reader-group-${group.id}`, gap: 'xs' },
+                  ui.text(span(sanitizeDisplayText(group.head), 'muted')),
+                  ...(items === undefined
+                    ? group.facts.flatMap((fact) => [
+                        ...(fact.label === undefined ? [] : [ui.text(span(sanitizeDisplayText(fact.label), 'muted'))]),
+                        ui.text({ key: fact.id, text: sanitizeDisplayText(fact.value), wrap: fact.wrap }),
+                      ])
+                    : [ui.kv({ key: `reader-kv-${group.id}`, layout: 'grid', items })]),
+                ),
+                // The rule closes the group, so it is never painted after the last one.
+                ...(index === groups.length - 1 ? [] : [ui.rule(), ui.spacer({ size: 'lg' })]),
+              ]
+            }),
           ]),
     ),
   )
