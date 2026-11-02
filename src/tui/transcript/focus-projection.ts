@@ -31,7 +31,9 @@ import { isSurfacedContext, isSurfacedInteractionTool } from '../../domain/trans
 import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } from './context-structure.ts'
 import {
   isFoldableWorkContext,
+  isWorkingAgentRelay,
   projectTranscriptStructure,
+  workByMemberOf,
   type TranscriptStructureBlock,
   type TranscriptWorkSpan,
 } from './structure.ts'
@@ -329,6 +331,11 @@ export function projectFocus(
     const leadBoundary = focusThoughtLeadBoundary(group)
     const foldableSnapshots: CollapsedFoldableSnapshotScope = {
       clusterByMember: clusterAdjacentAmbientContext(group).byMember,
+      // Hiding a carried row is only sound when the SAME group's canonical
+      // structure gives it a real Work owner (a Process run). An activity
+      // created by `turn/start` alone is NOT an owner: without any Process the
+      // row has no recoverable Thought content and must fail open.
+      workByMember: workByMemberOf(projectTranscriptStructure(group)),
       thoughtOwned: activity !== undefined,
     }
     const firstCommittedIndex = group.findIndex(isCommittedAnswer)
@@ -476,10 +483,15 @@ type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
  * foundation.
  * `thoughtOwned` is false where no Thought block will be emitted (a truncated
  * window without an activity) — the rows then fail open instead of disappearing.
+ * `workByMember` is the same group's canonical Work membership, used by the
+ * Agent-relay rule: a claimed relay is only carried when a REAL Process run
+ * owns it, so an activity-only turn (no Process at all) fails open. Snapshot
+ * and Working tool-jobs Notice keep their established activity-owner rule.
  * The Thought-lead boundary decides WHICH rows are foundation; anything at or
  * after it is Thought content. */
 interface CollapsedFoldableSnapshotScope {
   readonly clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>
+  readonly workByMember: ReadonlyMap<TranscriptMessage, TranscriptWorkSpan>
   readonly thoughtOwned: boolean
 }
 
@@ -492,7 +504,11 @@ function collapsedFocusRowDisposition(
   if (!isFocusPersistentInputRow(message)) return 'hidden'
   if (foldableSnapshots.thoughtOwned
     && index >= leadBoundary
-    && isFoldableWorkContext(message, foldableSnapshots.clusterByMember)) return 'hidden'
+    && isFoldableWorkContext(message, foldableSnapshots.clusterByMember)
+    // A claimed Agent relay additionally needs its REAL Work (Process) owner:
+    // an activity-only turn has no Process for the relay to be recovered
+    // through, so hiding it there would lose the original Context.
+    && (!isWorkingAgentRelay(message) || foldableSnapshots.workByMember.has(message))) return 'hidden'
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'
 }
