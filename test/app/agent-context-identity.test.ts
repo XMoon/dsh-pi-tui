@@ -143,8 +143,10 @@ function harness(): Harness {
   return harness
 }
 
-/** Wait for a held batch to settle and the continuation to run. */
-async function settle(rounds = 8): Promise<void> {
+/** Drain the owned task continuation turns after an explicitly released read.
+ * The fake's promises are already resolved or explicitly released, so this is
+ * a deterministic task drain for the publication microtasks, not a time window. */
+async function drainIdentity(rounds = 8): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
 }
 
@@ -175,7 +177,7 @@ test('an async fallback title yields to a later official title update', async ()
   h.reader.listed.push(summary('session-child-async-update'))
   h.reader.batchTitles.set('session-child-async-update', '异步标题')
   h.identity.observe([relayRow('session-child-async-update')], MAIN)
-  await settle()
+  await drainIdentity()
   assert.equal(h.labels().get('session-child-async-update'), '异步标题', 'the batch fallback is shown first')
   h.reader.statusTitles.set('session-child-async-update', '正式标题')
   h.identity.observe([relayRow('session-child-async-update')], MAIN)
@@ -201,7 +203,7 @@ test('the catalog label shows immediately and one projection batch resolves the 
   h.reader.batchTitles.set('session-child-2', '官方标题')
   h.identity.observe([relayRow('session-child-2')], MAIN)
   assert.equal(h.labels().get('session-child-2'), 'Catalog Reviewer', 'the synchronous frame shows the catalog label')
-  await settle()
+  await drainIdentity()
   assert.deepEqual(h.reader.listCalls, ['session-main'], 'ONE list per demand round')
   assert.deepEqual(h.reader.batchCalls, [['session-child-2']], 'only the already-listed matching row is projected')
   assert.equal(h.labels().get('session-child-2'), '官方标题', 'the official title then wins')
@@ -211,11 +213,11 @@ test('a cold cache miss stays unknown and is never retried by another frame', as
   const h = harness()
   h.reader.listed.push(summary('session-unrelated'))
   h.identity.observe([relayRow('session-child-3')], MAIN)
-  await settle()
+  await drainIdentity()
   assert.deepEqual(h.reader.batchCalls, [], 'no matching listed row means no projection batch')
   assert.equal(h.labels().has('session-child-3'), false, 'unknown is not published as a confirmed empty title')
   h.identity.observe([relayRow('session-child-3')], MAIN)
-  await settle()
+  await drainIdentity()
   assert.deepEqual(h.reader.listCalls, ['session-main'], 'a repeated frame reuses the demand round instead of polling')
 })
 
@@ -230,7 +232,7 @@ test('a new sender appearing while a batch is in flight gets its own demand roun
   h.identity.observe([relayRow('session-child-4'), relayRow('session-child-5')], MAIN)
   assert.equal(h.reader.listCalls.length, 1, 'the in-flight batch is reused for the frame')
   release()
-  await settle()
+  await drainIdentity()
   assert.equal(h.labels().get('session-child-4'), '四号审核员')
   assert.equal(h.labels().get('session-child-5'), '五号审核员', 'the later sender was demanded after the first batch settled')
   assert.deepEqual(h.reader.batchCalls, [[ 'session-child-4' ], ['session-child-5']])
@@ -249,7 +251,7 @@ test('a subject switch aborts the pending batch and drops every old name', async
   // Enter the child viewer: a DIFFERENT subject (and source identity).
   h.identity.observe([relayRow('session-child-7')], VIEWED)
   release()
-  await settle()
+  await drainIdentity()
   assert.equal(h.labels().get('session-child-6'), undefined, 'the old subject name was cleared')
   assert.equal(h.labels().get('session-child-7'), '子视图审核员')
   assert.ok(h.published.some(labels => labels.size === 0), 'the subject switch published the cleared map')
@@ -275,7 +277,7 @@ test('an async completion for a no-longer-current subject is discarded', async (
   h.identity.observe([relayRow('session-child-9')], MAIN)
   h.current = false
   release()
-  await settle()
+  await drainIdentity()
   assert.equal(h.labels().has('session-child-9'), false, 'a stale batch cannot relabel the live subject')
 })
 
@@ -283,7 +285,7 @@ test('a catalog commit re-resolves the SAME frame without another Session read',
   const h = harness()
   h.reader.listed.push(summary('session-unrelated'))
   h.identity.observe([relayRow('session-child-10')], MAIN)
-  await settle()
+  await drainIdentity()
   assert.equal(h.labels().has('session-child-10'), false)
   h.catalog.set('session-child-10', 'Catalog Later')
   h.identity.catalogChanged()
@@ -297,11 +299,11 @@ test('a failed list records the failure, keeps the fallback and is not retried',
   h.reader.listed.push(summary('session-child-11'))
   h.reader.listFailure = new Error('session list unavailable')
   h.identity.observe([relayRow('session-child-11')], MAIN)
-  await settle()
+  await drainIdentity()
   assert.equal(h.labels().get('session-child-11'), 'Catalog Reviewer', 'the truthful fallback survives the failure')
   assert.ok(h.diagnostics.some(line => line.includes('session list unavailable')), 'the failure reached the diagnostics channel')
   h.identity.observe([relayRow('session-child-11')], MAIN)
-  await settle()
+  await drainIdentity()
   assert.deepEqual(h.reader.listCalls, ['session-main'], 'a failure is not turned into a polling retry')
 })
 
@@ -315,7 +317,7 @@ test('dispose cancels the pending batch and publishes nothing afterwards', async
   const publishedBefore = h.published.length
   h.identity.dispose()
   release()
-  await settle()
+  await drainIdentity()
   assert.equal(h.published.length, publishedBefore, 'no publication after dispose')
   assert.equal(h.labels().has('session-child-12'), false)
 })

@@ -184,8 +184,8 @@ interface Harness {
   setViewed(folder: TranscriptFolder): void
   /** Leave the viewer. */
   clearViewed(): void
-  /** Repaint and settle async identity reads + the painted frame. */
-  settle(): Promise<void>
+  /** Repaint, drain the identity continuations and wait for the painted frame. */
+  paint(): Promise<void>
   /** The painted viewport rows, sequences stripped. */
   rows(): string[]
   rowContaining(needle: string): string | undefined
@@ -335,7 +335,7 @@ function mount(options: { mainFolder: TranscriptFolder; statusTitles?: Record<st
       viewed = { folder: next, window: new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 }) }
     },
     clearViewed() { viewed = undefined },
-    async settle() {
+    async paint() {
       for (let index = 0; index < 8; index += 1) await new Promise<void>(resolve => setTimeout(resolve, 0))
       surface.repaint()
       await vt.waitForRender()
@@ -360,7 +360,7 @@ test('the relay and settled headers upgrade from the short id to the official ti
   ])
   const h = mount({ mainFolder: folder })
   try {
-    await h.settle()
+    await h.paint()
     const relayHeader = h.rowContaining('Agent message')
     assert.ok(relayHeader !== undefined, `the relay header painted:\n${h.rows().join('\n')}`)
     assert.ok(relayHeader.includes(`Agent message · ${RELAY_SHORT}`), `the first frame shows the short session id: ${relayHeader}`)
@@ -370,7 +370,7 @@ test('the relay and settled headers upgrade from the short id to the official ti
     // The official title lands through the EXISTING semantic read (sync status);
     // the repaint must rebuild the two affected cards and nothing else.
     h.reader.statusTitles.set(RELAY_SENDER, '可复用性审核员')
-    await h.settle()
+    await h.paint()
     assert.ok(h.rowContaining('Agent message · 可复用性审核员') !== undefined, `relay title:\n${h.rows().join('\n')}`)
     assert.ok(h.rowContaining('Subagent settled · 可复用性审核员') !== undefined, `settled title:\n${h.rows().join('\n')}`)
     assert.ok(h.rowContaining(`${RELAY_SENDER} sent a message:`) !== undefined, 'the relay body is byte-for-byte unchanged')
@@ -379,7 +379,7 @@ test('the relay and settled headers upgrade from the short id to the official ti
     // A later rename of the SAME live subject repaints both cards through the
     // real component-cache invalidation (never a stale first title).
     h.reader.statusTitles.set(RELAY_SENDER, '通讯降噪审核员')
-    await h.settle()
+    await h.paint()
     assert.ok(h.rowContaining('Agent message · 通讯降噪审核员') !== undefined, `renamed relay title:\n${h.rows().join('\n')}`)
     assert.ok(h.rowContaining('Subagent settled · 通讯降噪审核员') !== undefined, `renamed settled title:\n${h.rows().join('\n')}`)
     assert.ok(h.rowContaining('可复用性审核员') === undefined, 'the stale title is gone from both headers')
@@ -406,7 +406,7 @@ test('the catalog label wins only for its exact childId (a duplicate label does 
     ],
   })
   try {
-    await h.settle()
+    await h.paint()
     // Give the deterministic catalog commit its frame, then repaint: the
     // enrichment re-resolves from the SAME committed rows.
     h.surface.repaint()
@@ -433,21 +433,21 @@ test('a stale async title completion never pollutes the next subject; a subject 
     h.reader.batchTitles.set(mainSender, '主会话审核员')
     h.reader.batchTitles.set(viewerSender, '子视图审核员')
     h.reader.holdNextBatch = new Promise<void>(resolve => { release = resolve })
-    await h.settle()
+    await h.paint()
     assert.ok(h.rowContaining(`Agent message · ${shortId(mainSender)}`) !== undefined, 'the held title frame shows the short id')
 
     // Enter the child viewer (a different subject AND projection source).
     h.setViewed(viewerFolder)
-    await h.settle()
+    await h.paint()
     assert.ok(h.rowContaining('Agent message · 子视图审核员') !== undefined, `the viewer resolves its own title:\n${h.rows().join('\n')}`)
     release()
-    await h.settle()
+    await h.paint()
     assert.ok(!h.rows().some(row => row.includes('主会话审核员')), 'the stale main-session completion must not leak into the viewer')
 
     // Back to the main subject: the viewer-specific map was dropped and the
     // main sender is demanded again (its title now settles).
     h.clearViewed()
-    await h.settle()
+    await h.paint()
     assert.ok(h.rowContaining('Agent message · 主会话审核员') !== undefined, `the re-entered subject re-demands:\n${h.rows().join('\n')}`)
     assert.ok(!h.rows().some(row => row.includes('子视图审核员')), 'the viewer name never leaks back')
     assert.equal(h.reader.listCalls, 3, 'one demand round per subject entry (main, viewer, main), never a poll')
@@ -477,7 +477,7 @@ test('a title landing keeps the folder search corpus, the open disclosure and th
   assert.ok(matchesBefore.length > 0, 'the raw folder corpus is searchable before the title lands')
   const h = mount({ mainFolder: folder })
   try {
-    await h.settle()
+    await h.paint()
     assert.ok(!h.rows().some(row => row.includes('审核步骤 20')), 'the long relay body starts collapsed')
     h.vt.sendInput('\x0f') // Ctrl+O: the transcript disclosure master
     await h.vt.waitForRender()
@@ -490,7 +490,7 @@ test('a title landing keeps the folder search corpus, the open disclosure and th
     assert.ok(scrollBefore !== undefined && scrollBefore.scrollTop === 0)
 
     h.reader.statusTitles.set(RELAY_SENDER, '可复用性审核员')
-    await h.settle()
+    await h.paint()
     assert.ok(h.rows().some(row => row.includes('Agent message · 可复用性审核员')), `title painted:\n${h.rows().join('\n')}`)
     const scrollAfter = h.surface.app.fullscreenScrollForTest()
     assert.equal(scrollAfter?.scrollTop, scrollBefore.scrollTop, 'the title change never moves the viewport')
