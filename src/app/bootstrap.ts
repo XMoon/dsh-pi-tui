@@ -3189,6 +3189,12 @@ export function applyRunnerWithRuntime(
     const tspRenderer = rendererMount !== undefined
     if (!tspRenderer) {
       app = surface.app
+      // Context identity (PiTui only): the readable display names of the
+      // relay/settled Agent cards ride the EXISTING semantic SessionReader
+      // port (official titles + projection batch); the Task Center's global
+      // descendant rows stay the catalog-label authority. TSP is explicitly
+      // out of this scope and presents its own transcript.
+      surface.attachAgentContextIdentity({ sessionReader: backend.sessionReader })
       settings.applySafeKeybindingsMode()
       settings.applyUserKeybindings()
       // M3: the user keybindings reload seam is EXPLICIT — `/keybindings

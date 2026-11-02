@@ -28,6 +28,7 @@ import { iconPrefix } from '../../icons.ts'
 import type { IconStyle } from '../../../domain/display/icons.ts'
 import { longMessageDisclosureWindow, type LongMessageDisclosureGeometry } from '../../transcript/long-message-disclosure.ts'
 import { systemContextBody } from '../../transcript/tool-presentation.ts'
+import { agentContextHeader, agentContextHeaderKind } from './agent-context-title.ts'
 import { color } from '../../theme/runtime.ts'
 import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
 import { sanitizeDisplayText } from '../../presentation/terminal-text.ts'
@@ -113,6 +114,12 @@ interface ContextRowOptions {
   readonly expanded: boolean
   readonly expandHint: string
   readonly iconStyle: IconStyle
+  /** The already-proven display name of this row's Agent sender (resolved by
+   * the application enrichment: official Session title, then descendant
+   * Catalog label). `undefined` keeps the row's original title. Only the two
+   * exact Agent Context pairs consume it; every other notice/relay row ignores
+   * it. */
+  readonly senderDisplayName?: string
 }
 
 /** The disclosure affordance appended to a muted header when the row is
@@ -144,9 +151,14 @@ export class NoticeContextRow implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
-    const { message, expanded, expandHint, iconStyle } = this.options
+    const { message, expanded, expandHint, iconStyle, senderDisplayName } = this.options
     const icon = iconPrefix(message.icon ?? 'context-notice', iconStyle)
-    const title = message.label === undefined || message.label === '' ? 'Notice' : sanitizedPhysicalLine(message.label)
+    // ONLY the exact `subagent-settled`/`notice` pair gets the Agent identity
+    // title; every other Notice keeps its producer label.
+    const agentKind = agentContextHeaderKind(message)
+    const title = agentKind === 'settled' && senderDisplayName !== undefined
+      ? agentContextHeader('settled', senderDisplayName)
+      : message.label === undefined || message.label === '' ? 'Notice' : sanitizedPhysicalLine(message.label)
     const head = `${icon}${title}${expanded ? '' : expandAffordance(expandHint)}`
     const rows = [headerRow(head, width)]
     if (message.summary !== undefined && message.summary !== '') {
@@ -188,10 +200,14 @@ export class RelayContextRow implements Component {
 
   render(width: number): string[] {
     if (this.cachedRows !== undefined && this.cachedWidth === width) return this.cachedRows
-    const { message, expanded, expandHint, iconStyle } = this.options
+    const { message, expanded, expandHint, iconStyle, senderDisplayName } = this.options
     const sender = message.contextPresentation?.senderSessionId
     const icon = iconPrefix(message.icon ?? 'context-generic', iconStyle)
-    const title = sender === undefined || sender === '' ? 'Agent message' : `Agent message · ${sanitizedPhysicalLine(sender)}`
+    // ONLY the exact `agent-message`/`relay` pair gets the Agent identity
+    // title; a foreign relay keeps the raw sender it always showed.
+    const title = agentContextHeaderKind(message) === 'relay' && senderDisplayName !== undefined
+      ? agentContextHeader('relay', senderDisplayName)
+      : sender === undefined || sender === '' ? 'Agent message' : `Agent message · ${sanitizedPhysicalLine(sender)}`
     // The relay body is the card's body: it wraps at the reduced budget and
     // takes the shared indent so its own disclosure marker (below) sits on
     // the SAME left edge — never a mixed boundary.
