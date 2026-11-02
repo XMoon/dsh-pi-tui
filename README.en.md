@@ -41,7 +41,7 @@ dsh --profile pi-tui
 > `0.5.2-rc.1` (peer floor `>=0.2.0-rc.2`, and npm semver excludes a
 > different-major.minor.patch prerelease). Use the pairing table below and
 > [compatibility guide](docs/guides/dsh-compatibility.md) for the matching rules; the
-> stable `0.5.4` publishes to `@latest`, not `@next`, so no installable compatible
+> stable `0.5.5` publishes to `@latest`, not `@next`, so no installable compatible
 > combination exists on those two moving channels. Validate this exact checkout
 > with `pnpm compat:dsh:npm`.
 
@@ -64,22 +64,29 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.4` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Current stable line; the minimum DSH version is 0.2.1-rc.2, and this checkout's exact validation target is 0.2.1-rc.4 |
+| `0.5.5` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Current stable line; the minimum DSH version is 0.2.1-rc.2, and this checkout's exact validation target is 0.2.1-rc.4 |
+| `0.5.4` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.3` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.1` (stable, previous) | `dsh-v0.2.0-rc.2` | Previous stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
 | `0.5.2-rc.1` (published next-channel preview) | `dsh-v0.2.0-rc.2` | Previous next preview: published to the npm `next` dist-tag on 2026-10-17; its whole peer floor stays `>=0.2.0-rc.2`, so it does not cover 0.2.1-rc.2 |
-| `dsh-v0.2.1-rc.1` (no paired TUI) | none | No released TUI in this matrix claims that intermediate release; never reuse `0.5.4` for it |
+| `dsh-v0.2.1-rc.1` (no paired TUI) | none | No released TUI in this matrix claims that intermediate release; never reuse `0.5.5` for it |
 | `0.5.0` (stable, previous) | `dsh-v0.1.7-rc.2`, `dsh-v0.2.0-rc.1` | Previous stable; 0.1.7-rc.2 minimum, exact validation target 0.2.0-rc.1 |
 | `0.4.9` (stable, previous) | `dsh-v0.1.7-rc.2` | Previous stable; the compatible TUI for a 0.1.7-rc.2 runtime |
 | `0.4.8` (stable, previous) | `dsh-v0.1.7-rc.1` | Previous stable; the compatible TUI for a 0.1.7-rc.1 runtime |
 | `0.4.6` (stable, previous) | `dsh-v0.1.5-rc.1`, `dsh-v0.1.5-rc.2` | Previous stable; the compatible TUI for a 0.1.5 runtime |
 | `0.4.7-alpha.2` (next, previous) | `dsh-v0.1.6-alpha.2` | Previous next line; the compatible TUI for a 0.1.6-alpha.2 runtime |
 
-Do not mix the stable and `@next` prerelease lines. `0.5.4` is the current
+Do not mix the stable and `@next` prerelease lines. `0.5.5` is the current
 stable release: its minimum DSH version (peer floor) stays the `0.2.1-rc.2`
 family, and this checkout's exact validation target is `0.2.1-rc.4`. The
-published `0.5.3` is the previous stable line and also pairs with `0.2.1-rc.2`,
-`0.2.1-rc.3` and `0.2.1-rc.4`. The intermediate
+published `0.5.4` and `0.5.3` are the previous stable lines and also pair with
+`0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.4`. The safe order for upgrading from
+an older stable line to `0.5.5`: let in-flight conversation turns and
+background jobs finish, exit the old TUI/DSH process normally, then install
+`0.5.5` with the official plugin command and start it again. Do not install
+the new package while an old process is still live and expect a
+zero-interruption hot swap; no in-place lossless upgrade of a running old
+Host is promised. The intermediate
 `dsh-v0.2.1-rc.1` has no paired TUI, and `0.5.2-rc.1` is the previous preview
 published to the npm `next` channel (its pairing, 0.2.0-rc.2, stays in the table
 above; it does not cover 0.2.1-rc.2). The previous stable
