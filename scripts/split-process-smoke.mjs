@@ -60,7 +60,7 @@ import { createServer as createHttpServer, request as httpRequest } from 'node:h
 import { createRequire } from 'node:module'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import xterm from '@xterm/headless'
@@ -76,7 +76,7 @@ import {
   runPnpmInstall,
   validateCandidateTarball,
 } from './pi2dsh-compat-smoke.mjs'
-import { loadDshDistribution, npmDshVersion } from './lib/dsh-distribution.mjs'
+import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const TRACE_PATH = process.env.SPLIT_PROCESS_TRACE
@@ -1030,17 +1030,18 @@ async function main() {
   const env = isolatedEnvironment(workDir, home, dshHome, join(workDir, 'evidence.json'))
   let isolatedScopeId
   try {
+    // The qualification work dir must be a real OS temp root outside this
+    // checkout: an ancestor `node_modules` would otherwise lend the Client
+    // peer set that the isolated installation must supply itself (issue #476).
+    const workDirFromCheckout = relative(realpathSync(PACKAGE_ROOT), realpathSync(workDir))
+    assert(workDirFromCheckout === '..' || workDirFromCheckout.startsWith(`..${sep}`),
+      `the split-process work dir must be outside the checkout: ${workDir}`)
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
       name: 'dsh-split-process-harness',
       private: true,
       type: 'module',
       dependencies: {
         '@deepseek-ai/dsh': targetDshVersion,
-        // The split Client shell supplies the official web seed's platform
-        // static from the installed Harness family. The CLI package does not
-        // pull this web-only sibling by itself, so the isolated harness must
-        // install it explicitly; production harness installs have it.
-        '@deepseek-ai/dsh-client-store': targetDshVersion,
       },
     }, null, 2) + '\n', 'utf8')
     runPnpmInstall(harnessDir, env, distribution)
@@ -1048,8 +1049,43 @@ async function main() {
     const version = runDsh(dsh, ['--version'], harnessDir, env)
     assert(version.status === 0, `installed DSH --version failed: ${version.stderr}`)
     assert(version.stdout.trim() === targetDshVersion, `installed DSH version ${version.stdout.trim()} != ${targetDshVersion}`)
-    installPlugin(dsh, tarball, harnessDir, env, false)
+    // The Client's static platform peer set belongs to the profile that will
+    // run it, exactly like a production profile dependency; the harness only
+    // anchors the DSH CLI installation (issue #476). The published store
+    // declares its zustand/immer engine imports only as devDependencies, so
+    // the profile must own those two as well; the pins are the exact versions
+    // DSH 0.2.1-rc.4 resolved for the store.
     const profileDir = join(dshHome, 'profiles', 'pi-tui')
+    const clientPeers = [
+      ['@deepseek-ai/dsh-client-store', targetDshVersion],
+      ['zustand', '4.5.7'],
+      ['immer', '10.2.0'],
+    ]
+    installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)
+    installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)
+    installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)
+    installPlugin(dsh, tarball, harnessDir, env, false)
+    const profileManifest = readJson(join(profileDir, 'package.json'))
+    for (const [name, version] of clientPeers) {
+      assert(profileManifest.dependencies?.[name] === version,
+        `the active profile does not declare the exact Client peer ${name}@${version}`)
+      assert(!(profileManifest.dsh?.profile?.bundles ?? []).includes(name),
+        `the plain Client peer ${name} must not become a profile bundle`)
+      const peerDir = realpathSync(join(profileDir, 'node_modules', name))
+      assert(readJson(join(peerDir, 'package.json')).version === version,
+        `the active profile installed a different ${name} version`)
+      const resolvedPeer = realpathSync(createRequire(join(profileDir, 'package.json')).resolve(name))
+      const peerRelative = relative(peerDir, resolvedPeer)
+      assert(peerRelative !== '' && peerRelative !== '..' && !peerRelative.startsWith(`..${sep}`),
+        `the active profile ${name} resolves outside its own package: ${resolvedPeer}`)
+    }
+    assert((profileManifest.dsh?.profile?.bundles ?? []).includes('@xmoon76/dsh-pi-tui'),
+      'the candidate bundle row disappeared from the active profile')
+    trace('client-peer-install', {
+      owner: 'active pi-tui profile',
+      peers: clientPeers.map(([name, version]) => `${name}@${version}`),
+      harnessOwnsClientPeer: false,
+    })
     const profilePackage = join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
     assert(existsSync(join(profilePackage, 'dist', 'local-host.mjs')), 'candidate host entry missing from profile install')
     assert(existsSync(join(profilePackage, 'dist', 'local-client.mjs')), 'candidate client entry missing from profile install')
@@ -1189,9 +1225,10 @@ async function main() {
     // - a non-matching `<DSH_HOME>/package.json` barrier shadows every enclosing
     //   package scope above it for THIS negative only (removed in `finally`);
     // - after the rename the profile-anchored resolver must really fail.
-    // The smoke work dir may live under the developer worktree (the Client peer
-    // set resolves from its `node_modules`, as the historical runs did); the
-    // barrier is what makes that layout equivalent for the Host artifact.
+    // The smoke work dir is outside the checkout; the barrier still shadows
+    // every enclosing package scope above the isolated DSH home, so the
+    // package-scope self-reference escape cannot reappear through another
+    // layout.
     const hostRuntimeArtifact = join(profilePackage, 'dist', 'host-runtime.mjs')
     const hostRuntimeAbsentPath = `${hostRuntimeArtifact}.artifact-absent`
     const packageScopeBarrier = join(dshHome, 'package.json')
@@ -2961,9 +2998,22 @@ async function main() {
       chmodSync(root, 0o700)
       return root
     }
-    const startC1Host = async (scenario, label, extraEnv = {}) => {
+    /**
+     * The `job` scenarios' release barrier must be visible INSIDE the Job's
+     * workspace-write sandbox. bwrap mounts an ephemeral `/tmp` there and
+     * binds only the session workspace, which is the installed profile; a
+     * barrier under the smoke work dir (also `/tmp`) would be invisible and
+     * the Job could never settle. The profile is still inside the isolated
+     * OS temp work dir, not the checkout.
+     */
+    const c1JobWorkRoot = label => {
+      const root = join(profileDir, `c1-${label}`)
+      mkdirSync(root, { recursive: true, mode: 0o700 })
+      chmodSync(root, 0o700)
+      return root
+    }
+    const startC1Host = async (scenario, label, extraEnv = {}, workRoot = c1WorkRoot(label)) => {
       await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 15_000)
-      const workRoot = c1WorkRoot(label)
       const host = new EntryProcess('host', entries.host, {
         ...base,
         env: {
@@ -3122,7 +3172,7 @@ async function main() {
       // keeps running after the Client exits and settles without one.
       {
         const releaseBarrier = join(workDir, 't47-job.release')
-        const { host, ready, workRoot } = await startC1Host('job', 't47')
+        const { host, ready, workRoot } = await startC1Host('job', 't47', {}, c1JobWorkRoot('t47'))
         const jobRelease = join(workRoot, 'job.release')
         rmSync(jobRelease, { force: true })
         const { client: c1 } = await startC1Client('T47 C1')
@@ -3869,7 +3919,7 @@ async function main() {
       // across the surface revision; the new surface re-attaches to the same
       // Session and reads the surviving work.
       {
-        const { host, ready, workRoot } = await startC1Host('job', 't58')
+        const { host, ready, workRoot } = await startC1Host('job', 't58', {}, c1JobWorkRoot('t58'))
         const { client } = await startC1Client('T58 Client', { SPLIT_PROCESS_CLIENT_HMR_PROBE: '1' })
         const sessionId = await openC1Session(client, 't58 prompt', 'T58')
         const job = await waitForC1WorkEvent(workRoot, event => event.kind === 'job-event' && event.event === 'registered', 'T58 running Job')

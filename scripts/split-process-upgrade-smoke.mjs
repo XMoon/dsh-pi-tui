@@ -55,6 +55,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { createServer } from 'node:net'
+import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
@@ -372,6 +373,39 @@ function createRequireFrom(anchor) {
   return createRequire(anchor)
 }
 
+/**
+ * Assert the active profile owns the exact Client peer set: plain
+ * dependencies (never bundle layers) that its own node_modules resolves. A
+ * harness devDependency or a checkout ancestor is not a Client peer owner
+ * (issue #476). The published store declares its zustand/immer engine imports
+ * only as devDependencies, so the profile must own the exact DSH 0.2.1-rc.4
+ * pins as well.
+ */
+function assertProfileClientPeers(profileDir, targetDshVersion, label) {
+  const manifest = readJson(join(profileDir, 'package.json'))
+  const peers = [
+    ['@deepseek-ai/dsh-client-store', targetDshVersion],
+    ['zustand', '4.5.7'],
+    ['immer', '10.2.0'],
+  ]
+  for (const [name, version] of peers) {
+    assert(manifest.dependencies?.[name] === version,
+      `${label}: the active profile does not declare the exact Client peer ${name}@${version}`)
+    assert(!(manifest.dsh?.profile?.bundles ?? []).includes(name),
+      `${label}: the plain Client peer ${name} must not become a profile bundle`)
+    const peerDir = realpathSync(join(profileDir, 'node_modules', name))
+    assert(readJson(join(peerDir, 'package.json')).version === version,
+      `${label}: the active profile installed a different ${name} version`)
+    const resolvedPeer = realpathSync(createRequireFrom(join(profileDir, 'package.json')).resolve(name))
+    const peerRelative = relative(peerDir, resolvedPeer)
+    assert(peerRelative !== '' && peerRelative !== '..' && !peerRelative.startsWith(`..${sep}`),
+      `${label}: the active profile ${name} resolves outside its own package: ${resolvedPeer}`)
+  }
+  assert((manifest.dsh?.profile?.bundles ?? []).includes(EXPECTED_PACKAGE_NAME),
+    `${label}: the candidate bundle row disappeared from the active profile`)
+  return peers
+}
+
 function assertNoSecret(label, text, secrets) {
   for (const secret of secrets) {
     if (secret === undefined || secret === '') continue
@@ -384,14 +418,19 @@ async function fetchStatus(url, options = {}) {
   return { status: response.status, setCookie: response.headers.get('set-cookie') ?? '' }
 }
 
-function installSideBuild(dir, tarball, env) {
+function installSideBuild(dir, tarball, env, targetDshVersion) {
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, '.npmrc'), 'registry=https://registry.npmjs.org\n', { mode: 0o600 })
   writeFileSync(join(dir, 'package.json'), JSON.stringify({
     name: 'c2d-side-by-side-build',
     private: true,
     version: '1.0.0',
-    dependencies: { [EXPECTED_PACKAGE_NAME]: `file:${tarball}` },
+    dependencies: {
+      [EXPECTED_PACKAGE_NAME]: `file:${tarball}`,
+      '@deepseek-ai/dsh-client-store': targetDshVersion,
+      zustand: '4.5.7',
+      immer: '10.2.0',
+    },
   }, null, 2) + '\n', 'utf8')
   const result = run('pnpm', [
     'install',
@@ -440,12 +479,14 @@ async function main() {
   }
   const targetDshVersion = npmDshVersion()
   const distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
-  mkdirSync(join(PACKAGE_ROOT, 'temp'), { recursive: true })
-  const workRoot = mkdtempSync(join(PACKAGE_ROOT, 'temp', 'split-upgrade-'))
+  const workRoot = mkdtempSync(join(tmpdir(), 'dsh-split-upgrade-'))
   const home = join(workRoot, 'home')
   const dshHome = join(workRoot, 'dsh-home')
   const harnessDir = join(workRoot, 'harness')
-  const sideBuildDir = join(workRoot, 'side-build')
+  // A sibling of the active profile, never a child: its own pnpm project must
+  // not discover or rewrite the running old profile, while DSH's `profiles/**`
+  // interception still applies to its installed Client build.
+  const sideBuildDir = join(dshHome, 'profiles', 'split-upgrade-side-build')
   const scratch = join(workRoot, 'scratch')
   for (const directory of [home, dshHome, harnessDir, scratch]) mkdirSync(directory, { recursive: true })
   writeFileSync(join(workRoot, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
@@ -470,13 +511,18 @@ async function main() {
   }
 
   try {
+    // The upgrade work root must be a real OS temp root outside this checkout:
+    // an ancestor `node_modules` would otherwise lend the Client peer set that
+    // each isolated installation must own itself (issue #476).
+    const workRootFromCheckout = relative(realpathSync(PACKAGE_ROOT), realpathSync(workRoot))
+    assert(workRootFromCheckout === '..' || workRootFromCheckout.startsWith(`..${sep}`),
+      `the split-upgrade work root must be outside the checkout: ${workRoot}`)
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
       name: 'dsh-split-upgrade-harness',
       private: true,
       type: 'module',
       dependencies: {
         '@deepseek-ai/dsh': targetDshVersion,
-        '@deepseek-ai/dsh-client-store': targetDshVersion,
       },
     }, null, 2) + '\n', 'utf8')
     runPnpmInstall(harnessDir, env, distribution)
@@ -486,8 +532,19 @@ async function main() {
       `installed DSH version ${JSON.stringify(version.stdout.trim())} is not the pinned ${targetDshVersion}`)
 
     // ── Install the OLD build into the one canonical profile ────────────────
-    installPlugin(dsh, oldArtifact.path, harnessDir, env, false)
+    // The Client's static platform peer belongs to the profile that will run
+    // it, exactly like a production profile dependency; the harness only
+    // anchors the DSH CLI installation (issue #476).
     const profileDir = join(dshHome, 'profiles', 'pi-tui')
+    installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)
+    installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)
+    installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)
+    installPlugin(dsh, oldArtifact.path, harnessDir, env, false)
+    const activeClientPeers = assertProfileClientPeers(profileDir, targetDshVersion, 'old profile install')
+    evidence.clientPeers = {
+      owner: 'active pi-tui profile',
+      packages: activeClientPeers.map(([name, version]) => `${name}@${version}`),
+    }
     const profilePackage = join(profileDir, 'node_modules', EXPECTED_PACKAGE_NAME)
     const oldProfilePackage = realpathSync(profilePackage)
     assert(existsSync(join(oldProfilePackage, 'dist', 'local-host.mjs')), 'the old profile install has no local Host entry')
@@ -568,7 +625,20 @@ async function main() {
     // byte-identical payload; the production buildId is re-derived from disk.
     assert(alive(hostAReady.pid), 'Host A died before the side-by-side new install')
     assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released before the side-by-side new install')
-    const sideBuildPackage = installSideBuild(sideBuildDir, newArtifact.path, env)
+    const sideBuildPackage = installSideBuild(sideBuildDir, newArtifact.path, env, targetDshVersion)
+    for (const [name, version] of [
+      ['@deepseek-ai/dsh-client-store', targetDshVersion],
+      ['zustand', '4.5.7'],
+      ['immer', '10.2.0'],
+    ]) {
+      const peerDir = realpathSync(join(sideBuildDir, 'node_modules', name))
+      assert(readJson(join(peerDir, 'package.json')).version === version,
+        `the side-by-side build installed a different ${name} version`)
+      const resolvedPeer = realpathSync(createRequireFrom(join(sideBuildDir, 'package.json')).resolve(name))
+      const peerRelative = relative(peerDir, resolvedPeer)
+      assert(peerRelative !== '' && peerRelative !== '..' && !peerRelative.startsWith(`..${sep}`),
+        `the side-by-side ${name} resolves outside its own package: ${resolvedPeer}`)
+    }
     const newBuildId = productionBuildId(sideBuildPackage, targetDshVersion)
     assert(newBuildId !== oldBuildId, 'the two packaged builds produced the same production buildId')
     assert(productionBuildId(oldProfilePackage, targetDshVersion) === oldBuildId,
@@ -587,6 +657,15 @@ async function main() {
     evidence.new.installedAfterAdmittedWork = true
     evidence.old.profilePayloadUnchanged = true
     evidence.old.profileBuildIdUnchanged = true
+    evidence.environment = {
+      workRootOutsideCheckout: true,
+      sideBuild: {
+        location: relative(dshHome, sideBuildDir).split(sep).join('/'),
+        siblingOfActiveProfile: true,
+        packages: activeClientPeers.map(([name, version]) => `${name}@${version}`),
+        reusesDshInstallationScope: true,
+      },
+    }
 
     // ── Capture old credentials while Host A still owns them ───────────────
     const scopeDir = scopeDirOf(dshHome, hostABefore.scopeId)
@@ -811,6 +890,10 @@ async function main() {
 
     // ── U06: after the old Host is gone, install the new build and boot it ─
     installPlugin(dsh, newArtifact.path, harnessDir, env, false)
+    // Replacing the bundle must not prune the Client peer from the same
+    // profile owner.
+    assertProfileClientPeers(profileDir, targetDshVersion, 'upgraded profile install')
+    evidence.clientPeers.upgradedProfileOwnsPeers = true
     const installedNewPackage = realpathSync(profilePackage)
     assert(existsSync(join(installedNewPackage, 'dist', 'local-host.mjs')), 'the upgraded profile has no new local Host entry')
     const installedNewBuildId = productionBuildId(installedNewPackage, targetDshVersion)

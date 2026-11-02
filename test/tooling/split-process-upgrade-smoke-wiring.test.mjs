@@ -69,3 +69,54 @@ test('the upgrade smoke proves cross-build compatibility instead of a build refu
   // The lane must never derive the old artifact by mutating the new one.
   assert.doesNotMatch(source, /writeFileSync\(.*newArtifact\.path/u)
 })
+
+test('both Client peer owners are real and every upgrade root is isolated', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  // The work root is a real OS temp root outside the checkout; a repo-local
+  // split-upgrade-* root would borrow the checkout's node_modules (issue #476).
+  assert.match(source, /const workRoot = [A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
+  assert.match(source, /relative\(realpathSync\(PACKAGE_ROOT\), realpathSync\(workRoot\)\)/u)
+  assert.match(source, /workRootFromCheckout\.startsWith\(`\.\.\$\{sep\}`\)/u)
+  assert.doesNotMatch(source, /join\(PACKAGE_ROOT, 'temp', 'split-upgrade-'\)/u)
+  assert.doesNotMatch(source, /mkdirSync\(join\(PACKAGE_ROOT, 'temp'\)/u)
+
+  // The active profile owns the exact Client peer set and installs it before
+  // the old bundle; the harness is only the DSH CLI anchor.
+  const profileStoreInstall = source.indexOf(
+    'installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)',
+  )
+  const zustandInstall = source.indexOf("installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)")
+  const immerInstall = source.indexOf("installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)")
+  const oldInstall = source.indexOf('installPlugin(dsh, oldArtifact.path, harnessDir, env, false)')
+  assert.ok(profileStoreInstall >= 0, 'the active profile must install the Client store through the official CLI')
+  assert.ok(zustandInstall > profileStoreInstall && immerInstall > zustandInstall,
+    'the published store\'s zustand/immer engine peers must follow the store install')
+  assert.ok(oldInstall > immerInstall, 'the active profile peer set must be installed before the old bundle')
+  const harnessManifest = source.slice(
+    source.indexOf("name: 'dsh-split-upgrade-harness'"),
+    source.indexOf('runPnpmInstall(harnessDir, env, distribution)'),
+  )
+  assert.doesNotMatch(harnessManifest, /dsh-client-store|zustand|immer/u,
+    'the isolated harness must not pretend to own the Client peer set')
+  assert.match(source, /assertProfileClientPeers\(profileDir, targetDshVersion, 'old profile install'\)/u)
+  assert.match(source, /assertProfileClientPeers\(profileDir, targetDshVersion, 'upgraded profile install'\)/u)
+  assert.match(source, /manifest\.dependencies\?\.\[name\] === version/u)
+  assert.match(source, /realpathSync\(createRequireFrom\(join\(profileDir, 'package\.json'\)\)\.resolve\(name\)\)/u)
+
+  // The side-build is a sibling profile project with its own exact peer
+  // closure, never a child of the active profile and never a second DSH or
+  // Cordis family.
+  assert.match(source, /const sideBuildDir = join\(dshHome, 'profiles', 'split-upgrade-side-build'\)/u)
+  assert.match(source, /function installSideBuild\(dir, tarball, env, targetDshVersion\)/u)
+  assert.match(source, /installSideBuild\(sideBuildDir, newArtifact\.path, env, targetDshVersion\)/u)
+  const sideBuildSource = source.slice(
+    source.indexOf('function installSideBuild'),
+    source.indexOf('function killProcessGroup'),
+  )
+  assert.match(sideBuildSource, /'@deepseek-ai\/dsh-client-store': targetDshVersion/u)
+  assert.match(sideBuildSource, /zustand: '4\.5\.7'/u)
+  assert.match(sideBuildSource, /immer: '10\.2\.0'/u)
+  assert.doesNotMatch(sideBuildSource, /@deepseek-ai\/cordis|'@deepseek-ai\/dsh':/u,
+    'the side-build must not copy the DSH family or a second Cordis')
+  assert.match(source, /the side-by-side \$\{name\} resolves outside its own package/u)
+})
