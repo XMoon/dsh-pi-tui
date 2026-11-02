@@ -891,6 +891,9 @@ async function main() {
     })
     clients.push(wrongExpectation)
     const wrongExpectationExit = await wrongExpectation.waitForExit(120_000)
+    // The shared PTY harness stops its 25ms record poller on close; flush the
+    // complete final JSONL lines once more before asserting on exit records.
+    wrongExpectation.readRecords()
     assert(wrongExpectationExit.code !== 0,
       `a wrong expected Host instance exited ${JSON.stringify(wrongExpectationExit)}`)
     assert(!wrongExpectation.records.some(record => record.m4a0 === 'ready'),
@@ -899,7 +902,7 @@ async function main() {
       'a wrong expected Host instance authenticated the live Host')
     const wrongFailure = wrongExpectation.records.find(record => record.m4a0 === 'failure')
     assert(wrongFailure?.code === 'HOST_IDENTITY_MISMATCH',
-      `the wrong expected Host instance failed as ${JSON.stringify(wrongFailure)}`)
+      `the wrong expected Host instance failed as ${JSON.stringify(wrongFailure)}; records=${JSON.stringify(wrongExpectation.records.slice(-6))}`)
     const wrongVisible = `${wrongExpectation.raw}\n${wrongExpectation.stderr}`
     const wrongFailureLines = wrongVisible.split('\n').filter(line => line.includes('Client handoff failed'))
     assertEqual(wrongFailureLines.length, 1, `the wrong expected Host produced ${String(wrongFailureLines.length)} handoff failure lines`)
