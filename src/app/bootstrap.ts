@@ -2023,6 +2023,7 @@ export function applyRunnerWithRuntime(
       submission: {
         prepareDeps: () => submission.prepareDeps(),
         settleQueueRecalls: (committed) => submissionRuntime.settleQueueRecalls(committed),
+        beginClientWrite: () => submission.beginClientWrite(),
       },
       promptState: { progressUpdates: progressUpdatesState, responseStyle: responseStyleState, gitAttribution: gitAttributionState },
       tuiSettings,

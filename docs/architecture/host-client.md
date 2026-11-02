@@ -220,12 +220,14 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   still counts), unsettled accepted user writes (a submitted prompt or Host
   command, a steer, a local shell run and its context-mode output write, a
   queue mutation, a persisted configuration write registered by the config
-  port — settings, credentials, the preset default — and the accepted local
-  command that may perform one, including its pre-write asynchronous
-  preparation; explicitly read-only local commands and `/reload-client` itself
-  never count), Client-local Question/Approval input (a presented or queued
-  form, a saved continued draft, an answer still being delivered, a
-  refused-admission wait) and an in-flight Session navigation/transition. Only
+  port — settings, credentials, the preset default — and the accepted action
+  owner that may perform one: the local command, the picker-detached skill
+  delivery and the rewind selection (whose pre-fork read runs before the fork
+  owner exists), including their asynchronous preparation; explicitly
+  read-only local commands and `/reload-client` itself never count),
+  Client-local Question/Approval input (a presented or queued form, a saved
+  continued draft, an answer still being delivered, a refused-admission wait)
+  and an in-flight Session navigation/transition. Only
   when every fact is clear does that SAME call stack call the process-owned
   one-shot request. A refusal publishes one fixed, actionable notice and keeps
   the old Client, its editor/drafts and the Host entirely alive; there is no

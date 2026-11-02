@@ -119,6 +119,7 @@ test('the picker projection loader covers EVERY main row beyond the legacy windo
 
   const state: { agent: Agent | undefined } = { agent: undefined }
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,

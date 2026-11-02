@@ -217,6 +217,7 @@ const DIRECTORY: ProviderCatalogEntry[] = [
 /** A stub runner with the same surface preset-command.test.ts uses. */
 function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
   return {
+    beginClientWrite: () => () => {},
     ctx,
     app,
     deliveredFilesSnapshot: () => undefined,

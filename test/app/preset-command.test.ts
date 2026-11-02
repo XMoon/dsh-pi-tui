@@ -273,6 +273,7 @@ function stubRunner(options: {
   })
   if (options.presetsPort !== undefined) Object.assign(catalog, { presets: options.presetsPort })
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx: options.ctx,
     app: options.app,

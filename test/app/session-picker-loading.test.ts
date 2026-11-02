@@ -91,6 +91,7 @@ function harness(
   const switched: string[] = []
   const switchScopes: Array<import('../../src/app/session/scope.ts').SessionScope | undefined> = []
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,

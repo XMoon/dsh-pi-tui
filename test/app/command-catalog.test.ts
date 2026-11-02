@@ -100,6 +100,7 @@ function stubRunner(
   // like the production provider).
   const catalog = new DirectCatalogPort(ctx as never, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined)
   return {
+    beginClientWrite: () => () => {},
     ctx,
     app,
     deliveredFilesSnapshot: () => undefined,

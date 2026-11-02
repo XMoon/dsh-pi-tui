@@ -131,6 +131,7 @@ function setupSettings(options: { wheelScrollLines?: string } = {}) {
     ...(options.wheelScrollLines === undefined ? {} : { wheelScrollLines: options.wheelScrollLines }),
   })
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,

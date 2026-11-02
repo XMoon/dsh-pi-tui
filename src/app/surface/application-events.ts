@@ -311,48 +311,62 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
       (value) => {
         const selectedSeq = Number(value)
         let adopted = false
+        // M4 PR4 (RFL-007): the accepted rewind selection owns the ONE
+        // accepted-write lifetime from this synchronous adoption point; it
+        // covers the pre-fork loadThrough read, the candidate resolution and
+        // the fork settlement. hasPendingForks remains the second layer for
+        // the fork itself; the same finally releases on every exit.
+        const endClientWrite = deps.submission.beginClientWrite()
         deps.lifecycle.runOwned('conversation rewind', async () => {
-          // §4.3: capture the identities, jump the window through the
-          // OFFICIAL loadThrough loop, re-check, derive the EXACT material
-          // from the loaded durable events (the full editor text, never the
-          // outline's bounded preview), then dispatch the existing fork.
-          const loaded = await deps.rewind.loadThrough(sourceId, selectedSeq, deps.lifecycle.signal())
-          if (deps.lifecycle.isCleanedUp()) return
-          if (loaded === undefined) {
-            // The cancellation becomes authoritative HERE (the official Remote
-            // read settles `undefined` on supersession): its owner is the
-            // navigation state observed at this point.
-            publishDetectionNotice(() => {
-              app.notify('the session changed while rewinding — try again', 'info')
-            })
-            return
+          try {
+            // §4.3: capture the identities, jump the window through the
+            // OFFICIAL loadThrough loop, re-check, derive the EXACT material
+            // from the loaded durable events (the full editor text, never the
+            // outline's bounded preview), then dispatch the existing fork.
+            const loaded = await deps.rewind.loadThrough(sourceId, selectedSeq, deps.lifecycle.signal())
+            if (deps.lifecycle.isCleanedUp()) return
+            if (loaded === undefined) {
+              // The cancellation becomes authoritative HERE (the official Remote
+              // read settles `undefined` on supersession): its owner is the
+              // navigation state observed at this point.
+              publishDetectionNotice(() => {
+                app.notify('the session changed while rewinding — try again', 'info')
+              })
+              return
+            }
+            if (!deps.rewind.isSelectionCurrent(sourceId, selectionIdentity)) {
+              // The TRANSPORT/selection supersession becomes authoritative here
+              // (its own `selectionIdentity` stays the binding owner; the
+              // NAVIGATION owner of the publication is the detection state).
+              publishDetectionNotice(() => {
+                app.notify('the session changed while rewinding — try again', 'info')
+              })
+              return
+            }
+            const candidate = rewindCandidateOfLoadedWindow(loaded as never, selectedSeq)
+            if (candidate === undefined) {
+              // The resolution failure becomes authoritative here.
+              publishDetectionNotice(() => {
+                app.notify('the selected turn could not be resolved — try again', 'error')
+              })
+              return
+            }
+            // RFL-007: the fork's promise MUST be awaited INSIDE the try — a
+            // bare `return promise` runs the finally at the return statement,
+            // before the fork settles, and would release the reload gate while
+            // the accepted rewind is still in flight.
+            return await deps.rewind.forkSession(
+              sourceId,
+              candidate.forkAtSeq,
+              () => {
+                adopted = true
+                app.setDraft(candidate.editorText)
+              },
+              pickerIdentity,
+            ).then(outcome => ({ outcome, candidate }))
+          } finally {
+            endClientWrite()
           }
-          if (!deps.rewind.isSelectionCurrent(sourceId, selectionIdentity)) {
-            // The TRANSPORT/selection supersession becomes authoritative here
-            // (its own `selectionIdentity` stays the binding owner; the
-            // NAVIGATION owner of the publication is the detection state).
-            publishDetectionNotice(() => {
-              app.notify('the session changed while rewinding — try again', 'info')
-            })
-            return
-          }
-          const candidate = rewindCandidateOfLoadedWindow(loaded as never, selectedSeq)
-          if (candidate === undefined) {
-            // The resolution failure becomes authoritative here.
-            publishDetectionNotice(() => {
-              app.notify('the selected turn could not be resolved — try again', 'error')
-            })
-            return
-          }
-          return deps.rewind.forkSession(
-            sourceId,
-            candidate.forkAtSeq,
-            () => {
-              adopted = true
-              app.setDraft(candidate.editorText)
-            },
-            pickerIdentity,
-          ).then(outcome => ({ outcome, candidate }))
         }, {
           sessionId: () => sourceId,
           onResult: (result) => {
