@@ -405,14 +405,6 @@ function bindingOfListedSession<Id>(
   return undefined
 }
 
-/** Whether ANY listed Session currently has a retained binding (owned or not). */
-function anyListedBinding<Id>(sessions: HandoffOpenSessions<Id>): boolean {
-  for (const id of sessions.list.getSnapshot().ids) {
-    if (sessions.binding(id) !== undefined) return true
-  }
-  return false
-}
-
 /** Bound on one handoff restore observation (not a business timeout). */
 const HANDOFF_OPEN_TIMEOUT_MS = 30_000
 
@@ -431,9 +423,12 @@ export interface HandoffOpenSources<Id> {
  * on. `verify()` is the synchronous final currentness fence: it re-reads the
  * SAME live sources and refuses a rollover, a changed Session owner OR a
  * replacement binding under the same id, a no-longer open history, a
- * sessionless proof that has since gained a Session/binding, or a retired
- * physical surface. The binding is held only as an identity token for this
- * one synchronous fence; it owns no lifetime and is not a second reference.
+ * sessionless proof whose `tuiMainView` owner has since opened a Session, or a
+ * retired physical surface. The binding is held only as an identity token for
+ * this one synchronous fence; it owns no lifetime and is not a second
+ * reference. Sessionless is defined by the official `tuiMainView` authority:
+ * other reference sources may legitimately retain a binding without making the
+ * TUI non-sessionless.
  */
 export interface HandoffRestoreProof {
   readonly generationId: number
@@ -461,9 +456,6 @@ function verifyHandoffRestoreProof<Id>(
   if (sessionId === undefined) {
     if (open !== undefined) {
       throw new Error('local client entry: a Session opened after the sessionless handoff restore proof')
-    }
-    if (anyListedBinding(sources.sessions)) {
-      throw new Error('local client entry: a Session binding appeared after the sessionless handoff restore proof')
     }
     return
   }
@@ -565,10 +557,6 @@ export async function observeHandoffOpen<Id>(
       if (sessionId === undefined) {
         if (open !== undefined) {
           fail(new Error('local client entry: a sessionless Client handoff opened a new Session'))
-          return
-        }
-        if (anyListedBinding(sources.sessions)) {
-          fail(new Error('local client entry: a sessionless Client handoff found an unowned Session binding'))
           return
         }
         succeed()

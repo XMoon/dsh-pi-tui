@@ -32,9 +32,11 @@ import {
   inspectClientReexecTarget,
   prepareClientReexec,
   resolveProfileInstalledClientTarget,
+  routeReexecTermination,
   stopLocalClient,
   surfaceStartupFailureLine,
   type ClientReexecIntent,
+  type ReexecChildHandle,
 } from '../../src/app/remote-process/local-client-entry.ts'
 import { LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
 import { collectHostEntryStatus } from '../../src/app/remote-process/host-bootstrap.ts'
@@ -809,6 +811,70 @@ test('a failing spawn is visible, nonzero and leaves no second Client owner', as
     'the visible handoff failure leaked a private spawn detail')
 })
 
+test('a termination signal routes to the replacement child or cancels a pre-spawn handoff', () => {
+  let cancelled = 0
+  const killCalls: Array<{ signal: NodeJS.Signals }> = []
+  const child: ReexecChildHandle = {
+    kill: signal => {
+      killCalls.push({ signal })
+      return true
+    },
+  }
+  // No handoff: the existing stop coordinator keeps owning the normal exit.
+  assert.equal(routeReexecTermination(false, undefined, 'SIGTERM', () => { cancelled += 1 }), false)
+  assert.deepEqual(killCalls, [])
+  assert.equal(cancelled, 0)
+  // Accepted but not spawned: cancel instead of silently ignoring the signal.
+  assert.equal(routeReexecTermination(true, undefined, 'SIGINT', () => { cancelled += 1 }), true)
+  assert.equal(cancelled, 1)
+  assert.deepEqual(killCalls, [])
+  // Waiting parent: forward the SAME signal to the replacement child.
+  assert.equal(routeReexecTermination(true, child, 'SIGTERM', () => { cancelled += 1 }), true)
+  assert.deepEqual(killCalls, [{ signal: 'SIGTERM' }])
+  assert.equal(cancelled, 1)
+})
+
+test('a handoff cancelled before spawn never spawns and reports one visible line', async t => {
+  const fixture = reexecFixture(t)
+  let spawned = 0
+  const stderr: string[] = []
+  const records: Array<Record<string, unknown>> = []
+  const code = await finishClientEntryShutdown({
+    seat: { close: async () => {} },
+    reexec: { intent: fixture.intent, teardownSucceeded: true, cancelled: true },
+    emit: record => { records.push(record) },
+    stderr: line => { stderr.push(line) },
+    spawnChild: async () => { spawned += 1; return { code: 0, signal: null } },
+  })
+  assert.equal(code, 1)
+  assert.equal(spawned, 0, 'a cancelled handoff still spawned the replacement')
+  assert.equal(records.filter(record => record.m4r === 'handoff-failed' && record.phase === 'cancelled').length, 1)
+  assert.equal(stderr.length, 1, 'a cancelled handoff must print ONE visible line')
+  assert.match(stderr[0], /^Client handoff failed: the Client handoff was cancelled by a termination signal\./u)
+  assert.match(stderr[0], /The Host was not stopped or replaced\./u)
+  assert.match(stderr[0], /Start a compatible Client manually to continue\./u)
+  assert.doesNotMatch(stderr[0], /\/home\/|\/tmp\/|\/proc\/|\bpid\b|cookie|token|connectUrl/iu)
+})
+
+test('the spawned replacement child is exposed to the waiting parent exactly once', async t => {
+  const fixture = reexecFixture(t)
+  const seen: ReexecChildHandle[] = []
+  const child: ReexecChildHandle = { kill: () => true }
+  const code = await finishClientEntryShutdown({
+    seat: { close: async () => {} },
+    reexec: { intent: fixture.intent, teardownSucceeded: true },
+    emit: () => {},
+    stderr: () => {},
+    onChildSpawned: handle => { seen.push(handle) },
+    spawnChild: async (_entry, _env, onSpawned) => {
+      onSpawned(child)
+      return { code: 0, signal: null }
+    },
+  })
+  assert.equal(code, 0)
+  assert.deepEqual(seen, [child])
+})
+
 test('a handoff failure line is concise, actionable and never leaks paths, PIDs or credentials', () => {
   const unavailable = handoffStartupFailureLine(
     new LocalScopeError('HOST_HANDOFF_UNAVAILABLE', 'local discovery: the expected Host is no longer available for Client handoff'),
@@ -901,6 +967,12 @@ test('the reexec trigger is internal, singular and starts only after the ONE sea
     'the handoff Client must pass the expected instance into discovery')
   assert.match(source, /spawn\(process\.execPath, \[entry\], \{/u,
     'the replacement argv must carry only the real installed entry')
+  assert.match(source,
+    /process\.on\('SIGTERM', \(\) => \{[\s\S]*?routeReexecTermination\(reexecIntent !== undefined, reexecChild, 'SIGTERM'/u,
+    'SIGTERM must be forwarded/cancelled while a handoff is pending or waiting')
+  assert.match(source,
+    /process\.on\('SIGINT', \(\) => \{[\s\S]*?routeReexecTermination\(reexecIntent !== undefined, reexecChild, 'SIGINT'/u,
+    'SIGINT must be forwarded/cancelled while a handoff is pending or waiting')
   // The handoff-restored claim is gated on the post-proof LIVE status, not on
   // the facts captured before the await.
   const awaitProofIndex = source.indexOf('const proof = await handle.awaitHandoffOpen(')

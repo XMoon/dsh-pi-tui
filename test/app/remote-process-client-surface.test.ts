@@ -358,13 +358,17 @@ test('a handoff restore succeeds only from a current official Session history op
     probe.notify('session')
     await assert.rejects(pending, /Session ownership changed/u)
   }
-  // A sessionless proof is refused when a listed Session already has an
-  // unowned binding (no main-view Session, but not "no Session" either).
+  // Other official reference sources (gateway/controllerOperation/tuiChildView)
+  // may legitimately retain a binding while the main TUI stays sessionless.
+  // `tuiMainView` is the authority, not the mere existence of a binding.
   {
-    const unowned = new HandoffProbe()
-    unowned.listed = ['s-1']
-    unowned.mountBinding()
-    await assert.rejects(observeHandoffOpen(unowned.sources), /unowned Session binding/u)
+    const otherReference = new HandoffProbe()
+    otherReference.listed = ['s-1']
+    otherReference.mountBinding()
+    assert.equal(otherReference.owned, undefined)
+    const proof = await observeHandoffOpen(otherReference.sources)
+    assert.equal(proof.sessionId, undefined)
+    proof.verify()
   }
   // A sessionless proof needs a real mounted surface on a connected transport.
   {
@@ -431,14 +435,15 @@ test('a settled handoff proof is re-verified immediately before the success clai
     probe.mountBinding()
     assert.throws(() => proof.verify(), /Session opened after the sessionless handoff restore proof/u)
   }
-  // Sessionless: an UNOWNED binding appearing after the proof is also a refusal.
+  // A non-main-view binding appearing after a sessionless proof does not turn
+  // the TUI into a session-owning surface: tuiMainView still owns nothing.
   {
     const probe = new HandoffProbe()
     const proof = await observeHandoffOpen(probe.sources)
     probe.listed = ['s-1']
     probe.mountBinding()
     assert.equal(probe.owned, undefined)
-    assert.throws(() => proof.verify(), /Session binding appeared after the sessionless handoff restore proof/u)
+    proof.verify()
   }
   // A surface that retires after the proof is a refusal.
   {
