@@ -41,6 +41,11 @@ export class TspPresetPicker {
   /** The ONE Surface owner's native scroll op, addressed by a wire id of the frame
    *  this presenter built. The presenter never owns a Surface. */
   private readonly nativeScroll: (id: string, to: ScrollTo) => void
+  /** Whether the pane negotiated the read-only `kv` kind: the Details page lays its
+   *  four identity facts out as one grid when it did, and keeps the original
+   *  label-over-value text lines when it did not. A client display fact only — it
+   *  gates no command, opens nothing and never retires a reading. */
+  private readonly nativeKv: boolean
   private panel: PresetPickerPanel | undefined
   private serial = 0
   /** The current frame's event targets: node id -> the revision it was built for. An
@@ -58,11 +63,13 @@ export class TspPresetPicker {
     canInteract(): boolean
     notify: PresetPresentation['notify']
     nativeScroll(id: string, to: ScrollTo): void
+    nativeKv: boolean
   }) {
     this.render = deps.render
     this.canInteract = deps.canInteract
     this.notify = deps.notify
     this.nativeScroll = deps.nativeScroll
+    this.nativeKv = deps.nativeKv
   }
 
   readonly presentation: PresetPresentation = {
@@ -491,6 +498,7 @@ export class TspPresetPicker {
     }
     const revision = panel.revision
     const layer = presetPickerLayer(panel, {
+      nativeKv: this.nativeKv,
       bind: (intent) => () => this.act(panel, revision, intent),
     })
     // Every node in the preset layer belongs to this panel, so an event whose `id` is ANY

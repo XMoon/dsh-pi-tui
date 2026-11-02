@@ -666,6 +666,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // The SAME ONE Surface owner performs the native scroll the Overview/Guide
     // reading keys ask for. The presenter names a wire id of the frame IT built.
     nativeScroll: (id, to) => { surface.scroll(id, to) },
+    // The same single handshake fact as the Model/Session Readers: which layout the
+    // Details page's four identity facts may use. A display capability, never an
+    // admission requirement — a pane without it keeps the original text lines.
+    nativeKv: session.caps.kinds.includes('kv'),
   })
   sessionBrowser = new TspSessionBrowser({
     surfaceId: surface.id,
