@@ -799,12 +799,24 @@ test('expected-instance handoff attaches only the exact authenticated Host and n
     assert.equal(verified.identity.instanceId, hostRecord.instanceId)
     assert.equal(connectRequests, 1, 'the expected Host must authenticate through the official /connect')
 
+    // The expected branch keeps the PR2 rule: a DIFFERENT installed build of
+    // the same protocol/DSH runtime is still the expected Host.
+    const crossBuild = { ...hostRecord, bundleVersion: '9.9.9', buildId: 'c'.repeat(64) }
+    identity = crossBuild
+    writeHost(crossBuild)
+    const crossBuildVerified = await ensureLocalHost({ ...options, expectedInstanceId: crossBuild.instanceId })
+    assert.equal(crossBuildVerified.identity.buildId, 'c'.repeat(64))
+    assert.notEqual(crossBuildVerified.identity.buildId, scope.buildId)
+    assert.equal(connectRequests, 2)
+    identity = hostRecord
+    writeHost(hostRecord)
+
     // Negative: another healthy Host is present but is not the expected instance.
     await assert.rejects(
       ensureLocalHost({ ...options, expectedInstanceId: randomUUID() }),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
     )
-    assert.equal(connectRequests, 1, 'an expected-instance mismatch must refuse BEFORE /connect')
+    assert.equal(connectRequests, 2, 'an expected-instance mismatch must refuse BEFORE /connect')
     assert.deepEqual(readFileSync(registryPath), registryBefore, 'a refused handoff rewrote the registry')
     assert.deepEqual(readFileSync(launchPath), launchBefore, 'a refused handoff rewrote the launch material')
 
@@ -814,7 +826,7 @@ test('expected-instance handoff attaches only the exact authenticated Host and n
       ensureLocalHost({ ...options, expectedInstanceId: hostRecord.instanceId }),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_HANDOFF_UNAVAILABLE',
     )
-    assert.equal(connectRequests, 1, 'a missing expected Host must not authenticate another candidate')
+    assert.equal(connectRequests, 2, 'a missing expected Host must not authenticate another candidate')
 
     // Negative: a dead expected Host is a refusal, never an automatic spawn.
     const dead = recordFor(scope, { origin, hostPid: 999_999_999, hostStarttime: '1' })
@@ -823,7 +835,7 @@ test('expected-instance handoff attaches only the exact authenticated Host and n
       ensureLocalHost({ ...options, expectedInstanceId: dead.instanceId }),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_HANDOFF_UNAVAILABLE',
     )
-    assert.equal(connectRequests, 1, 'a dead expected Host must not authenticate anything')
+    assert.equal(connectRequests, 2, 'a dead expected Host must not authenticate anything')
     assert.deepEqual(readFileSync(registryPath), Buffer.from(`${JSON.stringify(dead)}\n`),
       'a refused handoff rewrote the dead registry record')
 
@@ -834,7 +846,7 @@ test('expected-instance handoff attaches only the exact authenticated Host and n
       ensureLocalHost({ ...options, expectedInstanceId: hostRecord.instanceId }),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
     )
-    assert.equal(connectRequests, 2, 'the expected identity was authenticated before its echo mismatch')
+    assert.equal(connectRequests, 3, 'the expected identity was authenticated before its echo mismatch')
 
     // Negative: a protocol/DSH mismatch stays the existing refusal and no /connect happens.
     identity = hostRecord
@@ -844,14 +856,14 @@ test('expected-instance handoff attaches only the exact authenticated Host and n
       ensureLocalHost({ ...options, expectedInstanceId: foreign.instanceId }),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_PROTOCOL_INCOMPATIBLE',
     )
-    assert.equal(connectRequests, 2, 'an incompatible expected Host must not authenticate')
+    assert.equal(connectRequests, 3, 'an incompatible expected Host must not authenticate')
 
     // The ordinary ensure path is unchanged: a live Host is authenticated...
     writeHost(hostRecord)
     identity = hostRecord
     const ordinary = await ensureLocalHost(options)
     assert.equal(ordinary.identity.instanceId, hostRecord.instanceId)
-    assert.equal(connectRequests, 3)
+    assert.equal(connectRequests, 4)
     // ...and a missing registry still enters the ORIGINAL spawn path.
     rmSync(registryPath)
     await assert.rejects(
