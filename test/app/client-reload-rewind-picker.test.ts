@@ -303,6 +303,9 @@ test('every rewind terminal path releases the lifetime; picker cancellation regi
     const accepted = await harness.reload()
     assert.equal(accepted.kind, 'success', `${mode}: no leaked lifetime`)
     assert.equal(harness.forkCalls.value <= 1, true, `${mode}: never repeats the fork`)
+    assert.equal(harness.draft.value, '', `${mode}: no erroneous editor restoration`)
+    assert.equal(harness.notices.some(notice => notice.text.startsWith('rewound to turn')), false,
+      `${mode}: no success settlement on a failed/superseded rewind`)
   }
 
   const cancelled = setup('success')
