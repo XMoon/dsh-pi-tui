@@ -715,7 +715,7 @@ async function main() {
       'cross-build surface opened the running old Session',
       180_000,
     )
-    assert.equal(crossBuildSurfaceStatus.openSessionId, sessionId, 'cross-build surface opened another Session')
+    assert(crossBuildSurfaceStatus.openSessionId === sessionId, 'cross-build surface opened another Session')
     await crossBuildSurface.waitForScreen('c2d-upgrade-hold', 'cross-build surface painted the admitted prompt', 120_000)
     assert(alive(hostAReady.pid), 'Host A died while the cross-build surface was attached')
     assert(readProcessStarttime(hostAReady.pid) === hostABefore.hostStarttime,
