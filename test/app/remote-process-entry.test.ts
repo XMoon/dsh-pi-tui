@@ -22,6 +22,7 @@ import { PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
 import { startLocalClient, type LocalClientStatus } from '../../src/app/remote-process/client-bootstrap.ts'
 import { createControlDispatcher } from '../../src/app/remote-process/entry-control.ts'
 import {
+  assertHandoffRestored,
   assertHandoffSignalExclusivity,
   createClientReexecChildEnvironment,
   createClientReexecRequestHandler,
@@ -822,6 +823,49 @@ test('a handoff failure line is concise, actionable and never leaks paths, PIDs 
   }
 })
 
+test('the handoff-restored claim re-checks the LIVE Host, transport and surface', () => {
+  const facts = assertHandoffRestored(CONNECTED_STATUS, REEXEC_HOST_INSTANCE)
+  assert.equal(facts.hostInstanceId, REEXEC_HOST_INSTANCE)
+
+  // A Host identity mismatch after the open proof is a refusal.
+  assert.throws(
+    () => assertHandoffRestored({
+      ...CONNECTED_STATUS,
+      host: { ...CONNECTED_STATUS.host!, instanceId: randomUUID() },
+    }, REEXEC_HOST_INSTANCE),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
+  )
+  assert.throws(
+    () => assertHandoffRestored({ ...CONNECTED_STATUS, host: undefined }, REEXEC_HOST_INSTANCE),
+    (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
+  )
+  // The official transport may have dropped while the history open settled.
+  assert.throws(
+    () => assertHandoffRestored({ ...CONNECTED_STATUS, transport: 'disconnected' }, REEXEC_HOST_INSTANCE),
+    /no connected official transport/u,
+  )
+  assert.throws(
+    () => assertHandoffRestored({ ...CONNECTED_STATUS, transport: 'connecting' }, REEXEC_HOST_INSTANCE),
+    /no connected official transport/u,
+  )
+  // A surface that retired during the wait is not a restore.
+  assert.throws(
+    () => assertHandoffRestored({ ...CONNECTED_STATUS, surfaceMounted: false }, REEXEC_HOST_INSTANCE),
+    /surface is not mounted/u,
+  )
+  // An official transport fatal recorded while the proof was in flight wins
+  // even when the last status object still looks connected.
+  const fatal = new Error('local transport: the authenticated Host identity changed')
+  assert.throws(
+    () => assertHandoffRestored(CONNECTED_STATUS, REEXEC_HOST_INSTANCE, fatal),
+    error => error === fatal,
+  )
+  assert.throws(
+    () => assertHandoffRestored(CONNECTED_STATUS, REEXEC_HOST_INSTANCE, 'forced transport failure'),
+    /forced transport failure/u,
+  )
+})
+
 test('the reexec trigger is internal, singular and starts only after the ONE seat close', () => {
   const source = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'app', 'remote-process', 'local-client-entry.ts'),
@@ -843,6 +887,21 @@ test('the reexec trigger is internal, singular and starts only after the ONE sea
     'the handoff Client must pass the expected instance into discovery')
   assert.match(source, /spawn\(process\.execPath, \[entry\], \{/u,
     'the replacement argv must carry only the real installed entry')
+  // The handoff-restored claim is gated on the post-proof LIVE status, not on
+  // the facts captured before the await.
+  const awaitProofIndex = source.indexOf('await handle.awaitHandoffOpen(')
+  assert.ok(awaitProofIndex >= 0)
+  const liveGateIndex = source.indexOf(
+    'assertHandoffRestored(restored, expectedHostInstanceId, terminalError)',
+    awaitProofIndex,
+  )
+  assert.ok(liveGateIndex > awaitProofIndex,
+    'the handoff-restored claim must re-check the live status after the open proof')
+  const stopGateIndex = source.indexOf('if (stopping !== undefined)', awaitProofIndex)
+  assert.ok(stopGateIndex > awaitProofIndex && stopGateIndex < liveGateIndex,
+    'a stop that landed during the proof must be awaited before any restore claim')
+  assert.doesNotMatch(source, /transport: 'connected',\n\s*sessionOpen: restored\.sessionOpen/u,
+    'the handoff record must not hardcode a connected transport')
 })
 
 /** Run one assertion block with the exact SIGUSR2/handoff environment. */
