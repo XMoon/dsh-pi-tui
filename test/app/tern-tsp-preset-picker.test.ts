@@ -42,6 +42,7 @@ import {
   sendActivate,
   sendAction,
   sendPickerAction,
+  sendResize,
   sendSelect,
   type WireNode,
 } from '../support/tsp-picker-wire.ts'
@@ -74,6 +75,77 @@ function nodeText(entry: WireNode): string {
 function textOf(pane: TspPane, key: string): string | undefined {
   const entry = layer(pane).find((node) => node.k === 'text' && node.id.endsWith(`.${key}`))
   return entry === undefined ? undefined : nodeText(entry)
+}
+
+/**
+ * The Details page's ONE identity grid, read off the wire by its own key.
+ *
+ * A `kv` carries no per-fact child node: the pairs live in the grid's OWN props, which
+ * is the only honest observation of what reached the pane. Keeping this reader local to
+ * the file (and `textOf` reserved for real `ui.text`) is what stops a hidden duplicate
+ * text node from being invented just to satisfy an old extractor.
+ */
+function identityKv(pane: TspPane): WireNode | undefined {
+  return layer(pane).find((node) => node.k === 'kv'
+    && String(node.p.key ?? '').startsWith('preset-details-kv-identity-'))
+}
+
+/** The grid's pairs, verbatim: `v` stays whatever the wire carried, so a styled run
+ *  can still be read as its own `{t,s}` record instead of a flattened string. */
+function identityPairs(pane: TspPane): Array<{ readonly k: unknown; readonly v: unknown }> {
+  const items = identityKv(pane)?.p.items
+  return Array.isArray(items) ? items as Array<{ readonly k: unknown; readonly v: unknown }> : []
+}
+
+/** One grid value read as the text a reader would see (display ONLY — never the
+ *  evidence that a style role survived). */
+function kvValueText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (!Array.isArray(value)) return ''
+  return value.map((run) => typeof run === 'string'
+    ? run
+    : String((run as { t?: unknown }).t ?? '')).join('')
+}
+
+/** The Scope run roles exactly as the wire sent them: `[text, styleToken]` per run. */
+function kvValueRuns(value: unknown): Array<[string, string]> {
+  if (typeof value === 'string') return [[value, '']]
+  if (!Array.isArray(value)) return []
+  return value.map((run) => typeof run === 'string'
+    ? [run, ''] as [string, string]
+    : [String((run as { t?: unknown }).t ?? ''), String((run as { s?: unknown }).s ?? '')] as [string, string])
+}
+
+/** One grid fact's value read as text, by the label the app gave it. */
+function identityFact(pane: TspPane, label: string): string | undefined {
+  const pair = identityPairs(pane).find((entry) => entry.k === label)
+  return pair === undefined ? undefined : kvValueText(pair.v)
+}
+
+/** Whether the grid for the identity block exists at all: "no `kv`" must be a fact
+ *  about the wire, never the absence of one lookup. */
+const hasIdentityKv = (pane: TspPane): boolean => identityKv(pane) !== undefined
+
+/**
+ * The reconcile ops the SDK really sent about ONE wire id, from frame `fromFrame` on.
+ *
+ * A stable id in the FOLDED tree does NOT prove a stable node: a `del` followed by an
+ * `add` of the same key-derived id leaves the folded set looking untouched while the
+ * client actually remounted its scroll container (and lost the reading position). A
+ * "this reading was not remounted" claim therefore has to read the op stream itself.
+ */
+function opsNaming(pane: TspPane, id: string, fromFrame: number): string[] {
+  const out: string[] = []
+  pane.frames().forEach((frame, index) => {
+    if (index < fromFrame) return
+    for (const op of frame.ops as unknown as ReadonlyArray<ReadonlyArray<unknown>>) {
+      const kind = String(op[0])
+      if (kind === 'del' && String(op[1]) === id) out.push('del')
+      if (kind === 'add' && String((op[4] as WireNode | undefined)?.id ?? '') === id) out.push('add')
+      if (kind === 'set' && String(op[1]) === id) out.push('set')
+    }
+  })
+  return out
 }
 
 /** The Details overlay, or `undefined` while the catalogue shows. The page
@@ -144,10 +216,20 @@ async function mounted(
   options: {
     readonly subject?: { readonly sessionless: boolean }
     readonly withModel?: boolean
+    /**
+     * The pane's OWN advertised capability set. A case defaults to the native Preset
+     * opt-in; a case that must prove the no-`kv` degradation passes its kinds verbatim,
+     * so `nativeKv` always arrives through the real handshake and is never a value the
+     * test forced on the View.
+     */
+    readonly paneOptions?: Parameters<typeof installTspPane>[0]
   } = {},
 ) {
   const subject = options.subject ?? { sessionless: true }
-  const pane = installTspPane({ presetPicker: true, ...(options.withModel === true ? { modelPicker: true } : {}) })
+  const pane = installTspPane(options.paneOptions ?? {
+    presetPicker: true,
+    ...(options.withModel === true ? { modelPicker: true } : {}),
+  })
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session)
@@ -333,7 +415,8 @@ test('native Preset: a user preset reusing a shipped id stays Custom and gets no
   // copy or the shipped guide.
   await enterDetails(pane)
   assert.equal(guideMarkdown(pane), undefined, 'a Custom declaration has no guide on its Details page')
-  assert.equal(textOf(pane, 'details-type'), 'Custom')
+  assert.equal(identityFact(pane, 'Type'), 'Custom',
+    'the classification is the roster\'s own, read off the grid the pane really received')
 })
 
 /* --------------------------------------------------------- independent facts */
@@ -467,12 +550,25 @@ test('native Preset Details: the complete identity, the scope facts and the inli
   browse(pane, 'standard')
   await waitUntil('browse', () => props(pane).selected === 'preset:standard')
   await enterDetails(pane)
-  assert.equal(textOf(pane, 'details-name'), 'Standard mode')
-  assert.equal(textOf(pane, 'details-id'), 'standard')
-  assert.equal(textOf(pane, 'details-type'), 'Built-in')
+  // The four identity facts reach this pane as ONE negotiated grid: the grid's own
+  // props are the observation point, and no old `details-*` text node exists beside
+  // them (a duplicate kept for an extractor would paint the page twice).
+  const grid = identityKv(pane)
+  assert.ok(grid, 'the pane negotiated `kv`, so the identity block is a native grid')
+  assert.equal(grid.p.layout, 'grid', 'the grid is the aligned layout, not `inline`')
+  assert.deepEqual(identityPairs(pane).map((pair) => pair.k), ['Name', 'ID', 'Type', 'Scope'])
+  assert.equal(identityFact(pane, 'Name'), 'Standard mode')
+  assert.equal(identityFact(pane, 'ID'), 'standard')
+  assert.equal(identityFact(pane, 'Type'), 'Built-in')
   // The §2.1 scope sentence rides the Details page (Owner ruling "a": the catalogue
-  // has no paintable status slot).
-  assert.equal(textOf(pane, 'details-scope'), 'Use: next session only · Default: future new sessions')
+  // has no paintable status slot) as ONE value of the Scope row.
+  assert.equal(identityFact(pane, 'Scope'), 'Use: next session only · Default: future new sessions')
+  assert.equal(
+    layer(pane).filter((node) => node.k === 'text'
+      && /details-(name|id|type|scope)$/.test(node.id)).length,
+    0,
+    'no legacy identity text survives beside the grid',
+  )
   assert.equal(textOf(pane, 'details-description')?.startsWith('Full coding agent'), true)
   // A row that is none of the committed facts states NO relationship.
   assert.equal(layer(pane).some((node) => node.id.includes('.relation-')), false)
@@ -517,7 +613,14 @@ test('native Preset Details: a disabled write states its reason on the footer en
   await waitUntil('the recorded default', () => props(pane).selected === 'preset:ptc')
   assert.equal(action(pane, 'set-default')?.disabled, 'Already the default')
   await enterDetails(pane)
-  assert.equal(layer(pane).some((node) => node.id.endsWith('.relation-default')), true, 'the Details page states the default')
+  // The relationship stays OUTSIDE the grid: one text line of its own, naming the SAME
+  // value the state module committed. A pane that cannot show the grid shows it too.
+  const relation = layer(pane).find((node) => node.id.endsWith('.relation-default'))
+  assert.ok(relation, 'the Details page states the default')
+  assert.equal(relation.k, 'text', 'as its own text node, never as a fifth grid pair')
+  assert.equal(nodeText(relation), 'New-session default: ptc')
+  assert.deepEqual(identityPairs(pane).map((pair) => pair.k), ['Name', 'ID', 'Type', 'Scope'],
+    'the identity grid carries only the four facts')
   pane.key('\u001b')
   await waitUntil('back on the catalogue', () => picker(pane) !== undefined)
   // A broken row: BOTH writes refuse, the reason names the failure, and the Details
@@ -565,14 +668,18 @@ test('native Preset Details: every long value is complete and one native scroll 
   browse(pane, id)
   await waitUntil('the special card', () => props(pane).selected === `preset:${id}`)
   await enterDetails(pane)
-  // Nothing is truncated, re-flowed or pre-split: each value is the roster's own string.
-  assert.equal(textOf(pane, 'details-name'), name)
-  assert.equal(textOf(pane, 'details-id'), id)
-  assert.equal(textOf(pane, 'details-type'), 'Custom')
+  // Nothing is truncated, re-flowed or pre-split: each value is the roster's own
+  // string, carried whole in its grid pair — the folding is the client's job.
+  assert.equal(identityFact(pane, 'Name'), name)
+  assert.equal(identityFact(pane, 'ID'), id)
+  assert.equal(identityFact(pane, 'Type'), 'Custom')
+  const longIdPair = identityPairs(pane).find((pair) => pair.k === 'ID')
+  assert.equal(typeof longIdPair?.v, 'string', 'an unbroken id stays ONE value, never app-side runs')
+  assert.equal(String(longIdPair?.v).includes('…'), false, 'and carries no app-side ellipsis')
+  assert.equal(String(longIdPair?.v).length, id.length, 'every glyph of the 180-glyph id arrived')
   // The untrusted-text projection normalizes the roster string's CRLF to LF;
   // no content is dropped and the client renders the same lines.
   assert.equal(textOf(pane, 'details-description'), long.replace(/\r\n/g, '\n'))
-  assert.equal(layer(pane).find((entry) => entry.id.endsWith('.details-id'))?.p.wrap, 'char')
   assert.equal(layer(pane).find((entry) => entry.id.endsWith('.details-description'))?.p.wrap, 'word')
   // The full description lives in the page's ONE scrolling body, which is also the node
   // the app's own `scroll` op addresses.
@@ -598,6 +705,334 @@ test('native Preset Details: every long value is complete and one native scroll 
   await waitUntil('the broken card', () => props(pane).selected === 'preset:broken-one')
   await enterDetails(pane)
   assert.equal(textOf(pane, 'details-broken'), broken)
+})
+
+/* ------------------------------------------------- the negotiated KV grid */
+
+test('native Preset Details: negotiated KV identity has exactly four ordered full facts and no duplicate text', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  browse(pane, 'standard')
+  await waitUntil('browse', () => props(pane).selected === 'preset:standard')
+  await enterDetails(pane)
+  const grids = layer(pane).filter((node) => node.k === 'kv')
+  assert.equal(grids.length, 1, 'ONE grid for the identity block of this reading')
+  assert.equal(String(grids[0]?.p.key ?? '').startsWith('preset-details-kv-identity-'), true,
+    'and it is the identity grid the view builds, not some other kv node')
+  assert.equal(grids[0]?.p.layout, 'grid', 'the aligned grid layout, never `inline`')
+  assert.deepEqual(identityPairs(pane).map((pair) => pair.k), ['Name', 'ID', 'Type', 'Scope'],
+    'exactly the four facts, in the frozen order')
+  assert.deepEqual(identityPairs(pane).map((pair) => kvValueText(pair.v)), [
+    'Standard mode',
+    'standard',
+    'Built-in',
+    'Use: next session only · Default: future new sessions',
+  ], 'each fact carries its complete value, once')
+  // The grid REPLACES the text rows: no hidden duplicate is kept for an old extractor.
+  assert.equal(layer(pane).filter((node) => node.k === 'text'
+    && /details-(name|id|type|scope)$/.test(node.id)).length, 0,
+    'no legacy identity text node survives beside the grid')
+  assert.equal(layer(pane).filter((node) => node.k === 'text'
+    && ['Standard mode', 'standard', 'Built-in'].includes(nodeText(node))).length, 0,
+    'and no identity value is painted twice as text')
+  // Identity, description and guide stay in the SAME reading body (one scroll, one page).
+  const body = readingBody(pane)
+  assert.ok(body, 'the reading body is still the ONE scroll root')
+  const inside = (node: WireNode | undefined): boolean => node !== undefined && node.id.startsWith(`${body.id}.`)
+  assert.equal(inside(identityKv(pane)), true, 'the grid sits inside that body')
+  assert.equal(inside(layer(pane).find((node) => node.id.endsWith('.details-description'))), true,
+    'the description sits inside the SAME body')
+  assert.equal(inside(layer(pane).find((node) => node.k === 'md')), true,
+    'and the guide sits inside the SAME body')
+  assert.equal(m.applies.length, 0, 'a grid pair is not a writer')
+  assert.equal(m.defaults.length, 0, 'and not a default setter either')
+})
+
+test('native Preset Details: Scope styled spans preserve sessionless/live use scope and default scope', async (t) => {
+  // TWO real mounted panes, never a guessed window: the scope sentence comes from the
+  // subject the panel was opened on.
+  const sessionless = await mounted(t)
+  await sessionless.ready()
+  browse(sessionless.pane, 'standard')
+  await waitUntil('sessionless browse', () => props(sessionless.pane).selected === 'preset:standard')
+  await enterDetails(sessionless.pane)
+  const live = await mounted(t, { subject: { sessionless: false } })
+  await live.ready(roster({ currentId: 'standard' }))
+  browse(live.pane, 'standard')
+  await waitUntil('live browse', () => props(live.pane).selected === 'preset:standard')
+  await enterDetails(live.pane)
+  for (const entry of [
+    { name: 'sessionless', pane: sessionless.pane, use: 'next session only' },
+    { name: 'live', pane: live.pane, use: 'current blank session' },
+  ]) {
+    const scope = identityPairs(entry.pane).find((pair) => pair.k === 'Scope')
+    assert.ok(scope, `${entry.name}: Scope is one grid fact`)
+    // The four runs and their ROLES, read off the wire: a flattened string could not
+    // prove that the muted prefix survived the SDK's own serialization.
+    assert.deepEqual(kvValueRuns(scope.v), [
+      ['Use: ', 'muted'],
+      [entry.use, ''],
+      [' · Default: ', 'muted'],
+      ['future new sessions', ''],
+    ], `${entry.name}: the muted prefixes and the plain values keep their roles`)
+    assert.equal(identityPairs(entry.pane).length, 4,
+      `${entry.name}: the scope was never split into a Use row and a Default row`)
+    assert.equal(kvValueText(scope.v), `Use: ${entry.use} · Default: future new sessions`,
+      `${entry.name}: the whole sentence is one value`)
+  }
+})
+
+test('native Preset Details: a pane without kv keeps the complete legacy text Reader and writes nothing', async (t) => {
+  // The degradation is a HANDSHAKE fact: this pane advertises every kind the Preset
+  // entry already required (`picker`/`row`/`overlay` plus `text`, and `md` for the
+  // guide, which is already in the base set) plus the `scroll` feature — and NO `kv`.
+  // The real `connect()` + `mountTspRenderer()` therefore hand the presenter
+  // `nativeKv:false`; no test ever passes that boolean to a View by hand.
+  const m = await mounted(t, {
+    paneOptions: {
+      kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'picker', 'row', 'overlay', 'text'],
+      features: ['flow', 'styles', 'scroll'],
+    },
+  })
+  assert.ok(m.renderer.presetPresentation, 'the missing `kv` kind refuses no business entry')
+  await m.ready()
+  const { pane } = m
+  assert.equal(layer(pane).filter((node) => node.k === 'kv').length, 0, 'the catalogue paints no grid')
+  await enterDetails(pane)
+  assert.equal(hasIdentityKv(pane), false, 'not one `kv` node reached a pane that cannot draw one')
+  // The ORIGINAL eight text nodes, with the ORIGINAL keys, values and wrap.
+  assert.equal(textOf(pane, 'details-name'), 'PTC mode')
+  assert.equal(textOf(pane, 'details-id'), 'ptc')
+  assert.equal(textOf(pane, 'details-type'), 'Built-in')
+  assert.equal(textOf(pane, 'details-scope'), 'Use: next session only · Default: future new sessions')
+  assert.equal(layer(pane).find((node) => node.id.endsWith('.details-id'))?.p.wrap, 'char',
+    'the legacy long-value wrap survives exactly as before')
+  const scopeSpans = layer(pane).find((node) => node.id.endsWith('.details-scope'))?.p.spans
+  assert.deepEqual((scopeSpans as Array<Record<string, unknown>>).map((run) => [String(run.t ?? ''), String(run.s ?? '')]), [
+    ['Use: ', 'muted'],
+    ['next session only', ''],
+    [' · Default: ', 'muted'],
+    ['future new sessions', ''],
+  ], 'the legacy scope runs and their roles are untouched')
+  // The SAME four facts in the SAME order the grid branch paints: the capability
+  // changes the container, never the fact set.
+  assert.deepEqual(
+    layer(pane).filter((node) => node.k === 'text').map(nodeText)
+      .filter((text) => text === 'Name' || text === 'ID' || text === 'Type' || text === 'Scope'),
+    ['Name', 'ID', 'Type', 'Scope'],
+    'the labelled text rows carry the identical fact set and order',
+  )
+  // The relationship fact stays separate text in BOTH branches, and the guide rule
+  // still leads the description.
+  assert.equal(layer(pane).filter((node) => node.id.endsWith('.relation-default')).length, 1,
+    'the recorded default still states its relationship as its own text line')
+  const description = layer(pane).find((node) => node.id.endsWith('.details-description'))
+  assert.ok(description, 'the shipped row\'s description stays its own text node')
+  assert.equal(description.p.wrap, 'word', 'complete and word-wrapped, never folded into the grid')
+  // The page still reads, scrolls and returns through the SAME mechanisms, and wrote
+  // nothing on the way.
+  const body = readingBody(pane)
+  assert.ok(body, 'the degraded Reader keeps its own scroll body')
+  const before = scrollOps(pane).length
+  pane.key('\u001b[B')
+  await waitUntil('a body scroll reached the wire', () => scrollOps(pane).length === before + 1)
+  assert.equal(scrollOps(pane).at(-1)?.id, readingBody(pane)!.id, 'and names THAT body')
+  pane.key('\u001b')
+  await waitUntil('Esc returns to the catalogue', () => picker(pane) !== undefined)
+  assert.equal(m.applies.length, 0, 'a degraded Reader writes nothing')
+  assert.equal(m.defaults.length, 0)
+})
+
+test('native Preset Details: kv values sanitize untrusted content and never synthesize relationships', async (t) => {
+  // The grid is a new LAYOUT for facts that already had a sanitizer contract, so the
+  // `kv` branch must not become a second, unsanitised path to the wire. The values come
+  // through the REAL roster path, never as hand-made view inputs.
+  const m = await mounted(t)
+  const hostileName = 'Alpha\u001b]52;c;aGVsbG8=\u0007 Beta\u001b[31m Gamma'
+  const hostileId = 'osc\u001b]52;c;ZWN5aA==\u0007-id'
+  const cjk = `完整-${'x'.repeat(160)}`
+  await m.ready({
+    roster: {
+      presets: [
+        { id: hostileId, name: hostileName, description: 'd' },
+        { id: cjk, name: 'CJK 名前 🧪', description: 'd' },
+      ],
+      defaultId: undefined,
+    },
+    currentId: undefined,
+    pendingId: undefined,
+    defaultId: undefined,
+    canSetDefault: true,
+  })
+  const { pane } = m
+  browse(pane, hostileId)
+  await waitUntil('the hostile card is the browse target', () => props(pane).selected === `preset:${hostileId}`)
+  await enterDetails(pane)
+  const wire = JSON.stringify(layer(pane))
+  assert.equal(wire.includes('\u001b]52;'), false, 'no OSC-52 clipboard sequence reaches the wire')
+  assert.equal(wire.includes('\u001b[31m'), false, 'no raw SGR reaches the wire')
+  assert.equal(wire.includes('\u0007'), false, 'no raw BEL reaches the wire')
+  const name = identityFact(pane, 'Name')
+  assert.ok(name?.includes('Alpha'), `the readable name survives: ${JSON.stringify(name)}`)
+  assert.ok(name?.includes('Gamma'), 'including the text that followed the removed bytes')
+  assert.equal(identityFact(pane, 'ID'), 'osc-id', 'the id keeps its readable parts, control-free')
+  // A row that is none of Current/Next/Default states NO relationship — the grid never
+  // invents one, and no relation text appears either way.
+  assert.equal(identityPairs(pane).length, 4, 'exactly the four facts, no synthesized fifth')
+  assert.deepEqual(identityPairs(pane).map((pair) => pair.k), ['Name', 'ID', 'Type', 'Scope'])
+  assert.equal(layer(pane).some((node) => node.id.includes('.relation-')), false,
+    'and no relationship line was invented for an unrelated row')
+  // The CJK/unbroken sibling arrives whole through the SAME branch.
+  pane.key('\u001b')
+  await waitUntil('back on the catalogue', () => picker(pane) !== undefined)
+  browse(pane, cjk)
+  await waitUntil('the CJK card', () => props(pane).selected === `preset:${cjk}`)
+  await enterDetails(pane)
+  assert.equal(identityFact(pane, 'ID'), cjk, 'a CJK/unbroken id is carried complete')
+  assert.equal(identityFact(pane, 'Name'), 'CJK 名前 🧪', 'emoji and combining text survive whole')
+})
+
+test('native Preset Details: resize and a roster refresh keep one reading, a new reading retires them', async (t) => {
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  browse(pane, 'standard')
+  await waitUntil('browse', () => props(pane).selected === 'preset:standard')
+  await enterDetails(pane)
+  const bodyId = readingBody(pane)!.id
+  const first = identityKv(pane)
+  assert.ok(first, 'the reading opened on a grid')
+  const gridId = first.id
+  const gridKey = String(first.p.key)
+  // The op stream from HERE on: the frames that created this reading are already
+  // recorded, so any later `add`/`del` naming these ids is a real remount.
+  const openedAtFrame = pane.frameCount()
+  // A real geometry event re-lays the SAME reading: no scroll-root remount, no new grid.
+  sendResize(pane, 100)
+  await settle(30)
+  assert.equal(readingBody(pane)?.id, bodyId, 'a resize keeps the body id')
+  assert.equal(identityKv(pane)?.id, gridId, 'and the grid id')
+  assert.deepEqual(opsNaming(pane, bodyId, openedAtFrame).filter((op) => op !== 'set'), [],
+    'and the wire really never del/add-ed the scroll root across the resize')
+  assert.deepEqual(opsNaming(pane, gridId, openedAtFrame).filter((op) => op !== 'set'), [],
+    'nor the grid node')
+  // A real roster state update inside the same reading refreshes the VALUES only.
+  m.handle.setRoster({
+    roster: { presets: [{ id: 'standard', name: 'Renamed standard' }], defaultId: undefined },
+    currentId: undefined,
+    pendingId: undefined,
+    defaultId: undefined,
+    canSetDefault: true,
+  })
+  await waitUntil('the refreshed value reached the grid', () => identityFact(pane, 'Name') === 'Renamed standard')
+  assert.equal(String(identityKv(pane)?.p.key), gridKey, 'the grid keeps this reading\'s identity')
+  assert.equal(readingBody(pane)?.id, bodyId, 'and the state update did not change the body identity')
+  assert.deepEqual(opsNaming(pane, bodyId, openedAtFrame).filter((op) => op !== 'set'), [],
+    'the scroll root was not del+add\'d by a state change either')
+  assert.deepEqual(opsNaming(pane, gridId, openedAtFrame).filter((op) => op !== 'set'), [],
+    'the grid was updated in place, so the client never remounted it and lost the reading')
+  assert.ok(opsNaming(pane, gridId, openedAtFrame).includes('set'),
+    'and the refresh really travelled as a prop update on THAT node (not a silent no-op)')
+  // The scroll op still addresses the body this reading really built.
+  const before = scrollOps(pane).length
+  pane.key('\u001b[B')
+  await waitUntil('the scroll reached the wire', () => scrollOps(pane).length === before + 1)
+  assert.equal(scrollOps(pane).at(-1)?.id, bodyId, 'and names THAT body')
+  // A NEW reading is a NEW identity: the retired grid/body leave the live node set, so a
+  // queued op or event from the previous reading can no longer address anything here.
+  pane.key('\u001b')
+  await waitUntil('back on the catalogue', () => picker(pane) !== undefined)
+  await enterDetails(pane)
+  const second = identityKv(pane)
+  assert.ok(second, 'the new reading has its own grid')
+  assert.notEqual(String(second.p.key), gridKey, 'a re-entry is a NEW grid identity')
+  assert.notEqual(second.id, gridId)
+  assert.notEqual(readingBody(pane)?.id, bodyId, 'and a NEW scroll root')
+  assert.equal(layer(pane).filter((node) => node.k === 'kv').length, 1,
+    'exactly ONE grid is live: the retired reading left the tree')
+  const queued = scrollOps(pane).length
+  pane.key('\u001b')
+  await waitUntil('catalogue again', () => picker(pane) !== undefined)
+  pane.key('\u001b[B')
+  // reason: this contract IS an absence — a retired reading must receive no scroll op —
+  // and an absence has no authoritative signal to await, so this is a stated bounded
+  // observation window.
+  await settle(150)
+  assert.equal(scrollOps(pane).length, queued, 'no reading, no scroll target')
+})
+
+test('native Preset Details: a broken preset publishes no description and the grid never invents a fact', async (t) => {
+  // B07 + B08: the roster row carries ONLY a failure reason. The empty description is a
+  // real readable state, the failure keeps its own label and complete word-wrapped line,
+  // and the identity grid stays exactly four pairs — no synthetic empty fifth fact.
+  const m = await mounted(t)
+  await m.ready({
+    roster: {
+      presets: [
+        { id: 'standard' },
+        { id: 'legacy', name: 'Legacy preset', broken: 'plugin "legacy-tools" is not installed' },
+      ],
+      defaultId: 'standard',
+    },
+    currentId: undefined,
+    pendingId: undefined,
+    defaultId: 'standard',
+    canSetDefault: true,
+  })
+  const { pane } = m
+  browse(pane, 'legacy')
+  await waitUntil('the broken card', () => props(pane).selected === 'preset:legacy')
+  assert.equal(action(pane, 'use')?.disabled, 'Preset failed to load', 'both writes refuse the broken row')
+  assert.equal(action(pane, 'set-default')?.disabled, 'Preset failed to load')
+  await enterDetails(pane)
+  assert.equal(identityKv(pane) !== undefined, true, 'the broken row still gets the negotiated grid')
+  assert.deepEqual(identityPairs(pane).map((pair) => pair.k), ['Name', 'ID', 'Type', 'Scope'])
+  assert.deepEqual(identityPairs(pane).map((pair) => kvValueText(pair.v)), [
+    'Legacy preset', 'legacy', 'Custom', 'Use: next session only · Default: future new sessions',
+  ], 'four complete facts, none of them a placeholder')
+  assert.equal(layer(pane).filter((node) => node.k === 'kv').length, 1, 'and only ONE grid')
+  // The load-failure layer is untouched by the grid decision: original label + text.
+  assert.equal(nodeText(layer(pane).find((node) => node.k === 'text'
+    && nodeText(node) === 'Failed to load')!), 'Failed to load')
+  assert.equal(textOf(pane, 'details-broken'), 'plugin "legacy-tools" is not installed')
+  assert.equal(layer(pane).find((node) => node.id.endsWith('.details-broken'))?.p.wrap, 'word',
+    'the reason keeps its word-wrapped complete line')
+  // B08: the missing description is the original sentence, never an empty KV item.
+  assert.equal(nodeText(layer(pane).find((node) => node.k === 'text'
+    && nodeText(node) === 'No description provided.')!), 'No description provided.')
+  assert.equal(textOf(pane, 'details-description'), undefined, 'and no description node is fabricated')
+  assert.equal(guideMarkdown(pane), undefined, 'a Custom failure borrows no official guide')
+  assert.equal(m.applies.length, 0, 'reading the failure writes nothing')
+  assert.equal(m.defaults.length, 0)
+  // The transient read/write notice survives the grid decision: it stays its own text
+  // node inside the ONE reading body, the grid never absorbs it as a fact, and the
+  // reading still wrote nothing further. (What is proven here is containment and the
+  // fact count, NOT a painted order — the wire fold is insertion-ordered across frames,
+  // so node order in it says nothing about the page's visual sequence.)
+  pane.key('\u001b')
+  await waitUntil('back on the catalogue', () => picker(pane) !== undefined)
+  browse(pane, 'standard')
+  await waitUntil('a healthy row', () => props(pane).selected === 'preset:standard')
+  await tabToCatalogueAction(pane, 'use')
+  pane.key('\r')
+  await waitUntil('the write was admitted', () => m.applies.length === 1)
+  m.settleApply({ kind: 'rejected', message: 'preset "standard" does not resolve' })
+  await waitUntil('the refusal is visible', () => props(pane).message === 'preset "standard" does not resolve')
+  await enterDetails(pane)
+  const notice = layer(pane).find((node) => node.id.endsWith('.details-notice'))
+  assert.ok(notice, 'the reading still states the refusal that describes the state it was read in')
+  assert.equal(nodeText(notice), 'preset "standard" does not resolve')
+  assert.equal(notice.k, 'text', 'the notice stays a text node of its own')
+  const gridNode = identityKv(pane)
+  assert.ok(gridNode, 'and the identity grid is still the negotiated grid')
+  const noticeBody = readingBody(pane)
+  assert.ok(noticeBody, 'the reading body is still mounted')
+  assert.equal(notice.id.startsWith(`${noticeBody.id}.`) && gridNode.id.startsWith(`${noticeBody.id}.`), true,
+    'notice and grid are both descendants of the ONE reading body')
+  assert.equal(notice.id.startsWith(`${gridNode.id}.`), false, 'and the notice is not inside the grid subtree')
+  assert.equal(identityPairs(pane).length, 4, 'the notice never became a fifth fact')
+  assert.equal(m.applies.length, 1, 'and the reading still wrote nothing further')
 })
 
 /* --------------------------------------------------- page navigation ladder */
@@ -855,7 +1290,7 @@ test('native Preset: special ids and the search never collide with a control', a
   await waitUntil('token-shaped card browses', () => props(pane).selected === 'preset:use#3')
   // Its Details page still opens THAT preset, never a control.
   await enterDetails(pane)
-  assert.equal(textOf(pane, 'details-id'), 'use#3')
+  assert.equal(identityFact(pane, 'ID'), 'use#3', 'the grid describes THAT preset, never a control')
   pane.key('\u001b')
   await waitUntil('back', () => picker(pane) !== undefined)
   // The search filters by name/id, and Enter still writes nothing.
@@ -902,7 +1337,7 @@ test('native Preset: one layer carries exactly ONE page and nothing beside it', 
   assert.equal(layer(pane).filter((entry) => entry.k === 'picker').length, 0, 'no picker behind a reading page')
   assert.equal(layer(pane).filter((entry) => entry.k === 'overlay').length, 1)
   assert.equal(layer(pane).filter((entry) => entry.k === 'row').length, 1, 'ONE Back navigation row, nothing else interactive')
-  assert.equal(textOf(pane, 'details-id'), 'ptc')
+  assert.equal(identityFact(pane, 'ID'), 'ptc')
 })
 
 test('native Preset: opening Model and Preset alternates one layer, never two', async (t) => {
@@ -1054,6 +1489,19 @@ test('native Preset: a pane missing ANY required kind (individually) or the scro
     {
       name: 'no scroll feature',
       kinds: [...required],
+      features: ['flow', 'styles'],
+    },
+    {
+      // B03: `kv` is a DISPLAY kind. Offering it never loosens the base requirement —
+      // a pane that cannot mount a picker/overlay/text page is still refused with `kv`
+      // on offer, exactly as it was before this branch.
+      name: 'kv offered but `overlay` missing',
+      kinds: [...required.filter((kind) => kind !== 'overlay'), 'kv'],
+      features: full,
+    },
+    {
+      name: 'kv offered but no scroll feature',
+      kinds: [...required, 'kv'],
       features: ['flow', 'styles'],
     },
   ]
