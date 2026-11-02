@@ -25,8 +25,10 @@
  * @module app/remote-process/local-client-entry
  */
 
-import { constants, closeSync, existsSync, fchmodSync, fstatSync, lstatSync, openSync, realpathSync, statSync, writeSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { constants, closeSync, existsSync, fchmodSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync, writeSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { constants as osConstants } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { Context, Fiber } from '@deepseek-ai/cordis'
@@ -34,6 +36,7 @@ import { mergeCause } from '../remote/dispose-cause.ts'
 import { attachEntryControl, createEntryDiag, writeEntryRecord, type EntryRecordSink } from './entry-control.ts'
 import {
   bindProcessSeat,
+  computeBuildId,
   installedPackageRootFromEntry,
   LocalScopeError,
   readInstalledDshVersion,
@@ -45,6 +48,7 @@ import { ensureLocalHost, type VerifiedLocalHost } from './local-discovery.ts'
 import type {
   LocalClientComposition,
   LocalClientHandle,
+  LocalClientStatus,
   MountedLocalClientRunner,
   MountedRemoteClientDomains,
   MountedRemoteClientDomainPrerequisites,
@@ -185,6 +189,439 @@ function surfaceStartupFacts(options: LocalClientEntryOptions): { sessionId?: st
 
 /** The single internal Loader builtin name of the interaction startup gate. */
 export const INTERACTION_STARTUP_GATE = 'pi-tui-interaction-startup-gate'
+
+/** One validated replacement Client package (a real installed/side-by-side root). */
+export interface ClientReexecTarget {
+  readonly packageRoot: string
+  readonly entry: string
+  readonly buildId: string
+  readonly bundleVersion: string
+}
+
+/** The one-shot facts handed to the replacement Client OS process. */
+export interface ClientReexecIntent {
+  readonly expectedInstanceId: string
+  readonly sessionId?: string
+  readonly dshAnchor: string
+  readonly profile: string
+  readonly dshVersion: string
+  readonly targetPackageRoot: string
+  readonly targetEntry: string
+  readonly targetBuildId: string
+  readonly targetBundleVersion: string
+}
+
+const CLIENT_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
+/** The exact DSH runtime pin a candidate manifest declares (npm `devDependencies`). */
+const DSH_PIN_PACKAGE = '@deepseek-ai/dsh-agent'
+const INSTANCE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
+/**
+ * Environment that belongs to the OLD Client's qualification/fault-injection
+ * surface only. A replacement Client must not inherit a second SIGUSR2 probe,
+ * a stale hold barrier or a one-shot fault injection: those are not handoff
+ * state and would corrupt the new process.
+ */
+const OLD_CLIENT_ENVIRONMENT = [
+  'SPLIT_PROCESS_CLIENT_REEXEC_PROBE',
+  'SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT',
+  'SPLIT_PROCESS_CLIENT_REEXEC_CHILD_FAILURE',
+  'SPLIT_PROCESS_CLIENT_HMR_PROBE',
+  'SPLIT_PROCESS_CLIENT_HMR_FAIL',
+  'SPLIT_PROCESS_CLIENT_HMR_HOLD',
+  'SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF',
+  'SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE',
+  'SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY',
+  'SPLIT_PROCESS_CLIENT_HOLD_BEFORE_START',
+  'SPLIT_PROCESS_CLIENT_HOLD_STARTUP_GATE',
+  'SPLIT_PROCESS_CLIENT_FORCE_FAILURE',
+  'SPLIT_PROCESS_CLIENT_FORCE_STARTUP_FATAL',
+  'SPLIT_PROCESS_CLIENT_FORCE_REFRESH_UNRESPONSIVE_ONCE',
+  'SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK',
+  'SPLIT_PROCESS_CLIENT_OMIT_COOKIE',
+] as const
+
+function failureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * Validate one replacement Client package root and derive its production build
+ * fingerprint. The same checks apply to the package currently installed in the
+ * official profile and to the qualification-only side-by-side root override.
+ */
+export function inspectClientReexecTarget(packageRoot: string, dshVersion: string): ClientReexecTarget {
+  if (!isAbsolute(packageRoot)) throw new Error('local client reexec: the target package root must be absolute')
+  let root: string
+  try {
+    root = realpathSync(packageRoot)
+  } catch (error) {
+    throw new Error('local client reexec: the target package root is not readable', { cause: error })
+  }
+  const rootInfo = lstatSync(root)
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (!rootInfo.isDirectory()) throw new Error('local client reexec: the target package root is not a directory')
+  if (uid !== undefined && rootInfo.uid !== uid) {
+    throw new Error('local client reexec: the target package root is not owned by this process user')
+  }
+  let manifest: unknown
+  try {
+    manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as unknown
+  } catch (error) {
+    throw new Error('local client reexec: the target package manifest is not readable JSON', { cause: error })
+  }
+  if (!isRecord(manifest) || manifest.name !== CLIENT_PACKAGE_NAME) {
+    throw new Error(`local client reexec: the target package is not ${CLIENT_PACKAGE_NAME}`)
+  }
+  if (typeof manifest.version !== 'string' || manifest.version === '') {
+    throw new Error('local client reexec: the target package manifest has no version')
+  }
+  const devDependencies = manifest.devDependencies
+  if (!isRecord(devDependencies) || devDependencies[DSH_PIN_PACKAGE] !== dshVersion) {
+    throw new Error('local client reexec: the target package is pinned to a different DSH runtime')
+  }
+  const entry = join(root, 'dist', 'local-client.mjs')
+  let entryInfo
+  try {
+    entryInfo = lstatSync(entry)
+  } catch (error) {
+    throw new Error('local client reexec: the target package has no Client entry', { cause: error })
+  }
+  if (entryInfo.isSymbolicLink() || !entryInfo.isFile() || (uid !== undefined && entryInfo.uid !== uid)) {
+    throw new Error('local client reexec: the target Client entry must be a regular file owned by this process user')
+  }
+  return {
+    packageRoot: root,
+    entry,
+    buildId: computeBuildId(root, dshVersion),
+    bundleVersion: manifest.version,
+  }
+}
+
+/** Resolve the replacement package through the ACTIVE official profile. */
+export function resolveProfileInstalledClientTarget(profileDir: string, dshVersion: string): ClientReexecTarget {
+  let manifestPath: string
+  try {
+    manifestPath = createRequire(join(profileDir, 'package.json')).resolve(`${CLIENT_PACKAGE_NAME}/package.json`)
+  } catch (error) {
+    throw new Error(`local client reexec: the active profile does not resolve the installed ${CLIENT_PACKAGE_NAME}`, { cause: error })
+  }
+  return inspectClientReexecTarget(dirname(manifestPath), dshVersion)
+}
+
+/** The exact preflight of one reexec request. Pure: no Client resource is released. */
+export interface PrepareClientReexecOptions {
+  readonly status: LocalClientStatus
+  readonly verifiedHostInstanceId: string
+  readonly profileDir: string
+  readonly dshAnchor: string
+  readonly profile: string
+  readonly dshVersion: string
+  /** Qualification-only side-by-side root, already a legal installed package. */
+  readonly targetPackageRootOverride?: string
+}
+
+export function prepareClientReexec(options: PrepareClientReexecOptions): ClientReexecIntent {
+  const { status } = options
+  if (status.transport !== 'connected') throw new Error('local client reexec: the Client transport is not connected')
+  if (status.surfaceMounted !== true) throw new Error('local client reexec: the Client surface is not mounted')
+  const host = status.host
+  if (host === undefined) throw new Error('local client reexec: the Client has no authenticated Host identity')
+  if (host.instanceId !== options.verifiedHostInstanceId) {
+    throw new Error('local client reexec: the live Host is not the authenticated Host instance')
+  }
+  let sessionId: string | undefined
+  if (status.sessionOpen) {
+    const open = status.openSessionId
+    if (open === undefined || open === '') {
+      throw new Error('local client reexec: the open Session has no authoritative id')
+    }
+    sessionId = open
+  }
+  const target = options.targetPackageRootOverride === undefined
+    ? resolveProfileInstalledClientTarget(options.profileDir, options.dshVersion)
+    : inspectClientReexecTarget(options.targetPackageRootOverride, options.dshVersion)
+  return {
+    expectedInstanceId: host.instanceId,
+    ...(sessionId === undefined ? {} : { sessionId }),
+    dshAnchor: options.dshAnchor,
+    profile: options.profile,
+    dshVersion: options.dshVersion,
+    targetPackageRoot: target.packageRoot,
+    targetEntry: target.entry,
+    targetBuildId: target.buildId,
+    targetBundleVersion: target.bundleVersion,
+  }
+}
+
+/** The one-shot request latch and its decision order (status -> preflight -> stop). */
+export interface ClientReexecRequestOptions {
+  /** The CURRENT Client status; `undefined` before the handle is ready. */
+  status(): LocalClientStatus | undefined
+  prepare(status: LocalClientStatus): ClientReexecIntent
+  requestStop(code: number): void
+  emit(record: Record<string, unknown>): void
+  onAccepted?(intent: ClientReexecIntent): void
+  /** False once the ONE stop coordinator already owns shutdown. */
+  canRequest?(): boolean
+}
+
+export interface ClientReexecRequestHandler {
+  request(): void
+  readonly intent: ClientReexecIntent | undefined
+}
+
+/**
+ * The ONLY reexec request path. The first accepted request latches one intent
+ * and asks the existing stop coordinator for a normal exit; later requests are
+ * observable no-ops. A rejected preflight leaves the Client running and
+ * unlatched, so a later explicit request may retry a different target.
+ */
+export function createClientReexecRequestHandler(options: ClientReexecRequestOptions): ClientReexecRequestHandler {
+  let intent: ClientReexecIntent | undefined
+  return {
+    request(): void {
+      if (intent !== undefined) {
+        options.emit({ m4r: 'handoff-request-ignored', processRole: 'client', pid: process.pid, reason: 'already-requested' })
+        return
+      }
+      if (options.canRequest?.() === false) {
+        options.emit({ m4r: 'handoff-request-ignored', processRole: 'client', pid: process.pid, reason: 'stopping' })
+        return
+      }
+      const status = options.status()
+      if (status === undefined) {
+        options.emit({ m4r: 'handoff-request-ignored', processRole: 'client', pid: process.pid, reason: 'not-ready' })
+        return
+      }
+      let prepared: ClientReexecIntent
+      try {
+        prepared = options.prepare(status)
+      } catch (error) {
+        options.emit({
+          m4r: 'handoff-request-rejected',
+          processRole: 'client',
+          pid: process.pid,
+          error: failureMessage(error),
+        })
+        return
+      }
+      intent = prepared
+      options.onAccepted?.(prepared)
+      options.emit({
+        m4r: 'handoff-requested',
+        processRole: 'client',
+        pid: process.pid,
+        expectedHostInstanceId: prepared.expectedInstanceId,
+        ...(prepared.sessionId === undefined ? {} : { sessionId: prepared.sessionId }),
+        targetBuildId: prepared.targetBuildId,
+        targetBundleVersion: prepared.targetBundleVersion,
+      })
+      options.requestStop(0)
+    },
+    get intent(): ClientReexecIntent | undefined {
+      return intent
+    },
+  }
+}
+
+/** Build the environment of the ONE replacement Client child. */
+export function createClientReexecChildEnvironment(
+  intent: ClientReexecIntent,
+  source: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...source }
+  const injectedFailure = source.SPLIT_PROCESS_CLIENT_REEXEC_CHILD_FAILURE
+  for (const name of OLD_CLIENT_ENVIRONMENT) delete env[name]
+  // A handoff never creates a fresh Session through a preset.
+  delete env.SPLIT_PROCESS_CLIENT_PRESET
+  env.SPLIT_PROCESS_CLIENT_MODE = 'surface'
+  env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID = intent.expectedInstanceId
+  env.SPLIT_PROCESS_DSH_ANCHOR = intent.dshAnchor
+  env.SPLIT_PROCESS_PROFILE = intent.profile
+  if (intent.sessionId === undefined) delete env.SPLIT_PROCESS_CLIENT_SESSION
+  else env.SPLIT_PROCESS_CLIENT_SESSION = intent.sessionId
+  // Test-only child fault injection: only the replacement child receives the
+  // existing injection variable, never the old Client and never a later child.
+  if (injectedFailure !== undefined && injectedFailure !== '') env.SPLIT_PROCESS_CLIENT_FORCE_FAILURE = injectedFailure
+  return env
+}
+
+/** The real-exit result of the ONE replacement Client child. */
+export interface ClientReexecChildExit {
+  readonly code: number | null
+  readonly signal: NodeJS.Signals | null
+}
+
+/** Spawn the replacement Client on the SAME inherited terminal and await its exit. */
+async function spawnClientReexecChild(entry: string, env: NodeJS.ProcessEnv): Promise<ClientReexecChildExit> {
+  const child = spawn(process.execPath, [entry], {
+    cwd: process.cwd(),
+    env,
+    stdio: 'inherit',
+    detached: false,
+  })
+  return await new Promise<ClientReexecChildExit>((resolve, reject) => {
+    let settled = false
+    child.once('error', error => {
+      if (settled) return
+      settled = true
+      reject(error)
+    })
+    child.once('exit', (code, signal) => {
+      if (settled) return
+      settled = true
+      resolve({ code, signal })
+    })
+  })
+}
+
+function clientReexecExitCode(exit: ClientReexecChildExit): number {
+  if (exit.code !== null) return exit.code
+  if (exit.signal === null) return 1
+  const number = (osConstants.signals as Record<string, number | undefined>)[exit.signal]
+  return number === undefined ? 1 : 128 + number
+}
+
+/** The one Client shutdown tail: seat close strictly precedes any child spawn. */
+export interface ClientEntryShutdownOptions {
+  readonly seat: ProcessSeat
+  readonly reexec?: { readonly intent: ClientReexecIntent; readonly teardownSucceeded: boolean }
+  readonly emit: EntryRecordSink
+  readonly stderr: (line: string) => void
+  /** Narrow test seam; production spawns the real replacement process. */
+  readonly spawnChild?: (entry: string, env: NodeJS.ProcessEnv) => Promise<ClientReexecChildExit>
+}
+
+/**
+ * Finish the ONE Client process: close the kernel seat, and only after a fully
+ * successful teardown re-validate the replacement package and run the child.
+ * A failed teardown, seat close, target re-check or spawn never starts C1 and
+ * never touches the Host. Returns the replacement exit code when a handoff was
+ * requested, otherwise `undefined`.
+ */
+export async function finishClientEntryShutdown(options: ClientEntryShutdownOptions): Promise<number | undefined> {
+  let seatClosed = false
+  try {
+    await options.seat.close()
+    seatClosed = true
+  } catch (error) {
+    options.emit({
+      m4a0: 'cleanup-failure',
+      processRole: 'client',
+      phase: 'shutdown',
+      pid: process.pid,
+      step: 'client-seat',
+      error: failureMessage(error),
+    })
+  }
+  const reexec = options.reexec
+  if (reexec === undefined) return seatClosed ? undefined : 1
+  if (!seatClosed || !reexec.teardownSucceeded) {
+    options.emit({
+      m4r: 'handoff-failed',
+      processRole: 'client',
+      pid: process.pid,
+      phase: 'teardown',
+      expectedHostInstanceId: reexec.intent.expectedInstanceId,
+      error: seatClosed ? 'the Client teardown did not complete' : 'the Client seat did not close',
+    })
+    return 1
+  }
+  let target: ClientReexecTarget
+  try {
+    target = inspectClientReexecTarget(reexec.intent.targetPackageRoot, reexec.intent.dshVersion)
+  } catch (error) {
+    options.emit({
+      m4r: 'handoff-failed',
+      processRole: 'client',
+      pid: process.pid,
+      phase: 'target',
+      expectedHostInstanceId: reexec.intent.expectedInstanceId,
+      error: failureMessage(error),
+    })
+    options.stderr(handoffStartupFailureLine(error))
+    return 1
+  }
+  if (target.buildId !== reexec.intent.targetBuildId || target.entry !== reexec.intent.targetEntry) {
+    const changed = new Error('local client reexec: the replacement Client package changed between the preflight and the spawn')
+    options.emit({
+      m4r: 'handoff-failed',
+      processRole: 'client',
+      pid: process.pid,
+      phase: 'target',
+      expectedHostInstanceId: reexec.intent.expectedInstanceId,
+      error: changed.message,
+    })
+    options.stderr(handoffStartupFailureLine(changed))
+    return 1
+  }
+  const spawnChild = options.spawnChild ?? spawnClientReexecChild
+  let exit: ClientReexecChildExit
+  try {
+    exit = await spawnChild(target.entry, createClientReexecChildEnvironment(reexec.intent))
+  } catch (error) {
+    options.emit({
+      m4r: 'handoff-failed',
+      processRole: 'client',
+      pid: process.pid,
+      phase: 'spawn',
+      expectedHostInstanceId: reexec.intent.expectedInstanceId,
+      error: failureMessage(error),
+    })
+    options.stderr(handoffStartupFailureLine(error))
+    return 1
+  }
+  options.emit({
+    m4r: 'handoff-parent-exit',
+    processRole: 'client',
+    pid: process.pid,
+    code: exit.code,
+    signal: exit.signal,
+  })
+  return clientReexecExitCode(exit)
+}
+
+/** Read the one-shot handoff expectation; absent outside a replacement Client. */
+function expectedHostInstanceFromEnvironment(mode: LocalClientEntryMode): string | undefined {
+  const raw = process.env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID
+  if (raw === undefined || raw === '') return undefined
+  if (mode !== 'surface') {
+    throw new Error('local client entry: SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID requires surface mode')
+  }
+  if (!INSTANCE_ID_PATTERN.test(raw)) {
+    throw new Error('local client entry: SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID must be a Host instance UUID')
+  }
+  return raw
+}
+
+/**
+ * The internal reexec probe is one SIGUSR2 consumer; it may never share the
+ * process with the HMR, private-RPC or T34 qualification SIGUSR2 handlers, and
+ * a replacement Client may not also be a probe Client.
+ */
+function assertHandoffSignalExclusivity(mode: LocalClientEntryMode, expectedInstanceId: string | undefined): void {
+  const reexecProbe = process.env.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1'
+  const otherSignalMode = process.env.SPLIT_PROCESS_CLIENT_HMR_PROBE === '1'
+    || process.env.SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF === '1'
+    || (process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE ?? '') !== ''
+  if (!reexecProbe) {
+    if (expectedInstanceId !== undefined && otherSignalMode) {
+      throw new Error('local client entry: a handoff Client may not inherit another SIGUSR2 qualification mode')
+    }
+    return
+  }
+  if (mode !== 'surface') throw new Error('local client entry: the reexec probe requires surface mode')
+  if (otherSignalMode) {
+    throw new Error('local client entry: the reexec qualification signal is mutually exclusive with the HMR/private-RPC/T34 SIGUSR2 modes')
+  }
+  if (expectedInstanceId !== undefined) {
+    throw new Error('local client entry: the reexec probe and the handoff expectation are mutually exclusive')
+  }
+}
 
 /**
  * The ONE interaction startup gate entry: its async Loader plugin holds the
@@ -374,12 +811,17 @@ function observeQualificationSocket(
  * caller.
  */
 export async function runLocalClientEntry(options: LocalClientEntryOptions): Promise<void> {
+  // Handoff mode is validated before ANY process seat or Context exists: a
+  // contradictory environment is refused without touching the Client seat.
+  const expectedHostInstanceId = expectedHostInstanceFromEnvironment(options.mode)
+  assertHandoffSignalExclusivity(options.mode, expectedHostInstanceId)
   const hostModules = await loadOfficialClientHost(options.dshAnchor)
   const dshHome = hostModules.resolveDshHome()
   const packageRoot = installedPackageRootFromEntry(import.meta.url)
+  const profileDir = hostModules.resolveProfileDir(options.profile, dshHome)
   const scope = scopeFromInstalledProfile({
     dshHome,
-    profileDir: hostModules.resolveProfileDir(options.profile, dshHome),
+    profileDir,
     packageRoot,
     dshVersion: readInstalledDshVersion(options.dshAnchor),
   })
@@ -411,6 +853,12 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
   let interactionDelivery: SplitClientInteractionDeliveryOwner | undefined
   let peerSeat: PeerInteractionSeat | undefined
   let handle: LocalClientHandle | undefined
+  /** The ONE accepted one-shot handoff intent (never a second Client owner). */
+  let reexecIntent: ClientReexecIntent | undefined
+  /** The reexec request latch of the qualification-only SIGUSR2 probe. */
+  let reexecHandler: ClientReexecRequestHandler | undefined
+  /** Set only when the ORIGINAL stop chain released every Client resource. */
+  let reexecTeardownSucceeded = false
   /** The CURRENT revision's surface bridge behind the ONE root `appExit`. */
   let activeBridge: import('./local-client-surface.ts').LocalClientSurfaceBridge | undefined
   /** The ONE serial revision task slot shared by HMR and stop. */
@@ -545,6 +993,9 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         process.exitCode = 1
       } else {
         process.exitCode = code
+        // The handoff tail may start only after THIS coordinator released the
+        // root, official transport, Client seat and every owned object.
+        if (code === 0 && reexecIntent !== undefined) reexecTeardownSucceeded = true
       }
       // Pause the qualification control channel so its resumed stdin pipe no
       // longer keeps the process alive after disposal. The dispatcher's own
@@ -597,6 +1048,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       hostEntryPath: join(packageRoot, 'dist', 'local-host.mjs'),
       dshAnchor: options.dshAnchor,
       profile: options.profile,
+      ...(expectedHostInstanceId === undefined ? {} : { expectedInstanceId: expectedHostInstanceId }),
     })
     startupAbort.signal.throwIfAborted()
     emit({
@@ -878,9 +1330,10 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // is mutually exclusive with the T34/T36 SIGUSR2 qualification modes.
       if (process.env.SPLIT_PROCESS_CLIENT_HMR_PROBE === '1') {
         if (process.env.SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF === '1'
+          || process.env.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1'
           || (process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE !== undefined
             && process.env.SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE !== '')) {
-          throw new Error('local client entry: the HMR qualification signal is mutually exclusive with the T34/T36 SIGUSR2 modes')
+          throw new Error('local client entry: the HMR qualification signal is mutually exclusive with the T34/T36/reexec SIGUSR2 modes')
         }
         process.on('SIGUSR2', () => {
           if (handle === undefined) return
@@ -893,6 +1346,35 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
             return run.catch(error => stop(1, error))
           }, { diag })
         })
+      }
+      // Qualification-only Client reexec (M4 PR3, internal trigger only): the
+      // OLD Client captures the authoritative open Session, releases itself
+      // through the EXISTING stop coordinator, then the replacement Client is
+      // spawned after the seat closed. No public command/keybinding reaches it.
+      if (process.env.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1') {
+        const targetOverride = process.env.SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT
+        if (targetOverride !== undefined && targetOverride !== '' && !isAbsolute(targetOverride)) {
+          throw new Error('local client entry: SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT must be an absolute path')
+        }
+        reexecHandler = createClientReexecRequestHandler({
+          status: () => handle?.status,
+          prepare: status => prepareClientReexec({
+            status,
+            verifiedHostInstanceId: host.identity.instanceId,
+            profileDir,
+            dshAnchor: options.dshAnchor,
+            profile: options.profile,
+            dshVersion: scope.dshVersion,
+            ...(targetOverride === undefined || targetOverride === '' ? {} : { targetPackageRootOverride: targetOverride }),
+          }),
+          requestStop: () => {
+            runDetached('local client: reexec handoff', () => stop(0), { diag })
+          },
+          emit,
+          canRequest: () => stopping === undefined,
+          onAccepted: accepted => { reexecIntent = accepted },
+        })
+        process.on('SIGUSR2', () => { reexecHandler?.request() })
       }
       // A closed terminal (PTY HUP) is a normal Client exit: the physical
       // surface can no longer render or accept input. It joins the SAME
@@ -956,6 +1438,36 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       // mounting; never emit a ready state after stop was requested.
       await stop(1, terminalError)
       return
+    }
+    if (expectedHostInstanceId !== undefined) {
+      // A replacement Client may only claim success against the expected Host
+      // and the OFFICIAL current Session history open. `ready`/`sessionOpen`
+      // alone are not restore evidence.
+      const restoredHost = handle.status.host
+      if (restoredHost === undefined || restoredHost.instanceId !== expectedHostInstanceId) {
+        throw new LocalScopeError(
+          'HOST_IDENTITY_MISMATCH',
+          'local client entry: the handoff Client authenticated a different Host instance',
+        )
+      }
+      if (handle.status.transport !== 'connected') {
+        throw new Error('local client entry: the handoff Client has no connected official transport')
+      }
+      await handle.awaitHandoffOpen(surfaceFacts.sessionId, startupAbort.signal)
+      const restored = handle.status
+      emit({
+        m4r: 'handoff-restored',
+        processRole: 'client',
+        pid: process.pid,
+        expectedHostInstanceId,
+        hostInstanceId: restoredHost.instanceId,
+        ...(surfaceFacts.sessionId === undefined ? {} : { sessionId: surfaceFacts.sessionId }),
+        clientBuildId: scope.buildId,
+        transport: 'connected',
+        sessionOpen: restored.sessionOpen,
+        sessionHistoryOpen: surfaceFacts.sessionId !== undefined,
+        surfaceMounted: true,
+      })
     }
     emit({ m4a0: 'ready', ...traceStatus(handle.status) })
     compositionDone = true
@@ -1059,9 +1571,12 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       ...(primary.stack === undefined ? {} : { stack: primary.stack }),
       ...(primary.cause === undefined ? {} : { cause: primary.cause instanceof Error ? primary.cause.message : String(primary.cause) }),
     })
-    // Surface mode owns the tty and reports this pre-Context refusal as one
-    // human line. Every other startup failure keeps its existing record path.
-    if (options.mode === 'surface' && failure instanceof LocalScopeError && failure.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
+    // Surface mode owns the tty. A handoff Client reports ONE concise line for
+    // any restore failure (expected Host/Session/preflight); the live-Host
+    // protocol refusal keeps its existing actionable line.
+    if (options.mode === 'surface' && expectedHostInstanceId !== undefined) {
+      process.stderr.write(`${handoffStartupFailureLine(failure)}\n`)
+    } else if (options.mode === 'surface' && failure instanceof LocalScopeError && failure.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
       process.stderr.write(`${surfaceStartupFailureLine(failure)}\n`)
     }
     process.stdin.pause()
@@ -1081,24 +1596,24 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     if (timedOut || transportCleanupFailed) forceExitAfterCleanupFailure()
   } finally {
     process.stdin.pause()
+    // The ONE shutdown tail: the kernel Client seat is closed BEFORE any
+    // replacement Client can spawn. A reexec starts only for a fully successful
+    // teardown; its child inherits this process's terminal only after the old
+    // surface/root are gone.
+    const reexecExitCode = await finishClientEntryShutdown({
+      seat,
+      ...(reexecIntent === undefined
+        ? {}
+        : { reexec: { intent: reexecIntent, teardownSucceeded: reexecTeardownSucceeded } }),
+      emit,
+      stderr: line => { process.stderr.write(`${line}\n`) },
+    })
+    if (reexecExitCode !== undefined) process.exitCode = reexecExitCode
     try {
       recordSink?.close()
     } catch (error) {
       process.exitCode = 1
       process.stderr.write(`local client entry: closing the surface record sink failed: ${error instanceof Error ? error.message : String(error)}\n`)
-    }
-    try {
-      await seat.close()
-    } catch (error) {
-      emit({
-        m4a0: 'cleanup-failure',
-        processRole: 'client',
-        phase: 'shutdown',
-        pid: process.pid,
-        step: 'client-seat',
-        error: error instanceof Error ? error.message : String(error),
-      })
-      process.exitCode = 1
     }
   }
 }
@@ -1159,6 +1674,30 @@ export function surfaceStartupFailureLine(error: unknown): string {
 }
 
 /**
+ * The human-facing line for ONE replacement-Client handoff failure. It names
+ * the classified reason (expected Host absent/replaced/protocol, invalid
+ * replacement package, or Session history open) and says how to recover
+ * manually. Only fixed entry-owned messages are surfaced: an arbitrary
+ * startup/spawn error may carry a private path or PID and is replaced with a
+ * generic reason. No Cookie/token/launch URL ever enters this line.
+ */
+export function handoffStartupFailureLine(error: unknown): string {
+  let reason: string
+  if (error instanceof LocalScopeError) {
+    if (error.code === 'HOST_HANDOFF_UNAVAILABLE') reason = 'the expected Host is no longer available'
+    else if (error.code === 'HOST_IDENTITY_MISMATCH') reason = 'the live local Host is not the expected instance'
+    else if (error.code === 'HOST_PROTOCOL_INCOMPATIBLE') reason = 'the expected Host uses a different local protocol or DSH runtime'
+    else reason = 'the expected Host could not be authenticated'
+  } else if (error instanceof Error
+    && (error.message.startsWith('local client entry: ') || error.message.startsWith('local client reexec: '))) {
+    reason = error.message.slice(error.message.indexOf(': ') + 2)
+  } else {
+    reason = 'the replacement Client could not restore the expected Host and Session'
+  }
+  return `Client handoff failed: ${reason}. The Host was not stopped or replaced. Start a compatible Client manually to continue.`
+}
+
+/**
  * Read the internal Client mode. Absent/empty keeps the frozen B1
  * `qualification` contract; `surface` is the internal real-terminal mode. Any
  * other value fails closed (never a silent default).
@@ -1199,7 +1738,11 @@ if (import.meta.main) {
     if (process.env.SPLIT_PROCESS_CLIENT_MODE === 'surface') {
       // Surface mode owns the tty: a launcher/startup failure is a human line
       // on stderr, never a JSON record on the terminal.
-      process.stderr.write(`${surfaceStartupFailureLine(error)}\n`)
+      const handoff = process.env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID
+      const line = handoff === undefined || handoff === ''
+        ? surfaceStartupFailureLine(error)
+        : handoffStartupFailureLine(error)
+      process.stderr.write(`${line}\n`)
     } else {
       writeEntryRecord(record)
     }

@@ -28,7 +28,7 @@ import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import { Config as TuiConfigSchema } from '../../src/app/config/schema.ts'
-import { startLocalClient, SurfaceRevisionTasks } from '../../src/app/remote-process/client-bootstrap.ts'
+import { startLocalClient, observeHandoffOpen, SurfaceRevisionTasks } from '../../src/app/remote-process/client-bootstrap.ts'
 import { createLocalClientSurfaceBridge } from '../../src/app/remote-process/local-client-surface.ts'
 import type { LocalClientTransport } from '../../src/app/remote-process/local-transport.ts'
 import type { LocalInstanceRecord } from '../../src/app/remote-process/local-discovery.ts'
@@ -215,4 +215,166 @@ test('a failed surface revision task does not poison the serial slot', async () 
   await slot.run(async () => { ran = true })
   assert.equal(ran, true, 'a later revision task did not run after the failed one settled')
   await slot.drain()
+})
+
+/** Minimal live-source probe for ONE handoff restore proof. */
+class HandoffProbe {
+  transport: 'connected' | 'connecting' | 'disconnected' = 'connected'
+  generationId: number | undefined = 1
+  mounted = true
+  openState: 'cold' | 'loading' | 'open' | 'error' = 'open'
+  listed: string[] = []
+  owned: string | undefined
+  bindingObject: {
+    session: { getSnapshot(): { openState: string }; subscribe(listener: () => void): () => void }
+  } | undefined
+
+  private readonly listListeners = new Set<() => void>()
+  private readonly retainListeners = new Set<() => void>()
+  private readonly sessionListeners = new Set<() => void>()
+  private readonly generationListeners = new Set<() => void>()
+
+  constructor(sessionId?: string) {
+    if (sessionId !== undefined) {
+      this.listed = [sessionId]
+      this.owned = sessionId
+      this.mountBinding()
+    }
+  }
+
+  mountBinding(): void {
+    this.bindingObject = {
+      session: {
+        getSnapshot: (): { openState: string } => ({ openState: this.openState }),
+        subscribe: (listener: () => void): (() => void) => {
+          this.sessionListeners.add(listener)
+          return () => { this.sessionListeners.delete(listener) }
+        },
+      },
+    }
+  }
+
+  notify(kind: 'list' | 'retain' | 'session' | 'generation'): void {
+    const listeners = kind === 'list'
+      ? this.listListeners
+      : kind === 'retain'
+        ? this.retainListeners
+        : kind === 'session'
+          ? this.sessionListeners
+          : this.generationListeners
+    for (const listener of [...listeners]) listener()
+  }
+
+  readonly sources = {
+    sessions: {
+      list: {
+        getSnapshot: (): { ids: readonly string[] } => ({ ids: this.listed }),
+        subscribe: (listener: () => void): (() => void) => {
+          this.listListeners.add(listener)
+          return () => { this.listListeners.delete(listener) }
+        },
+      },
+      retainInfo: (id: string) => ({
+        getSnapshot: (): { retainedBy: { tuiMainView?: number } } => ({ retainedBy: { tuiMainView: this.owned === id ? 1 : 0 } }),
+        subscribe: (listener: () => void): (() => void) => {
+          this.retainListeners.add(listener)
+          return () => { this.retainListeners.delete(listener) }
+        },
+      }),
+      binding: (id: string) => this.listed.includes(id) ? this.bindingObject : undefined,
+    },
+    transport: {
+      status: () => ({
+        transport: this.transport,
+        ...(this.generationId === undefined ? {} : { generationId: this.generationId }),
+      }),
+      connection: {
+        generation: {
+          subscribe: (listener: () => void): (() => void) => {
+            this.generationListeners.add(listener)
+            return () => { this.generationListeners.delete(listener) }
+          },
+        },
+      },
+    },
+    surfaceMounted: () => this.mounted,
+  }
+}
+
+test('a handoff restore succeeds only from a current official Session history open', async () => {
+  // Sessionless: nothing was open and the proof must not create one.
+  {
+    const probe = new HandoffProbe()
+    await observeHandoffOpen(probe.sources)
+    probe.listed = ['s-1']
+    probe.owned = 's-1'
+    probe.mountBinding()
+    probe.notify('list')
+    await assert.rejects(observeHandoffOpen(probe.sources), /sessionless Client handoff opened a new Session/u)
+  }
+  // Session: cold/loading are not success; the official 'open' settlement is.
+  {
+    const probe = new HandoffProbe('s-1')
+    probe.openState = 'cold'
+    const pending = observeHandoffOpen(probe.sources, 's-1')
+    probe.openState = 'loading'
+    probe.notify('session')
+    probe.openState = 'open'
+    probe.notify('session')
+    await pending
+  }
+  // The official history open failure is terminal.
+  {
+    const probe = new HandoffProbe('s-1')
+    probe.openState = 'error'
+    await assert.rejects(observeHandoffOpen(probe.sources, 's-1'), /Session history open failed/u)
+  }
+  // Another Session becoming the visible owner is not the expected restore.
+  {
+    const probe = new HandoffProbe('s-1')
+    probe.openState = 'cold'
+    const pending = observeHandoffOpen(probe.sources, 's-1')
+    probe.listed = ['s-1', 's-2']
+    probe.owned = 's-2'
+    probe.notify('list')
+    await assert.rejects(pending, /opened a different Session/u)
+  }
+  // A transport generation rollover invalidates the proof.
+  {
+    const probe = new HandoffProbe('s-1')
+    probe.openState = 'cold'
+    const pending = observeHandoffOpen(probe.sources, 's-1')
+    probe.generationId = 2
+    probe.notify('generation')
+    await assert.rejects(pending, /transport generation changed/u)
+  }
+  // A same-id generation replacement is not the retained binding.
+  {
+    const probe = new HandoffProbe('s-1')
+    probe.openState = 'cold'
+    const pending = observeHandoffOpen(probe.sources, 's-1')
+    probe.mountBinding()
+    probe.openState = 'open'
+    probe.notify('session')
+    await assert.rejects(pending, /Session ownership changed/u)
+  }
+  // A sessionless proof needs a real mounted surface on a connected transport.
+  {
+    const unmounted = new HandoffProbe()
+    unmounted.mounted = false
+    await assert.rejects(observeHandoffOpen(unmounted.sources), /surface is not mounted/u)
+    const disconnected = new HandoffProbe('s-1')
+    disconnected.transport = 'connecting'
+    disconnected.generationId = undefined
+    await assert.rejects(observeHandoffOpen(disconnected.sources, 's-1'), /no connected official transport generation/u)
+  }
+  // Cancellation is never a success.
+  {
+    const probe = new HandoffProbe('s-1')
+    probe.openState = 'cold'
+    const controller = new AbortController()
+    const pending = observeHandoffOpen(probe.sources, 's-1', controller.signal)
+    controller.abort()
+    await assert.rejects(pending, /aborted/u)
+  }
 })

@@ -90,6 +90,12 @@ export interface EnsureLocalHostOptions {
   readonly dshAnchor: string
   /** Installed profile name. */
   readonly profile: string
+  /**
+   * Client-handoff expectation: this Client must attach to THIS authenticated
+   * Host instance and never spawn or replace a Host. The ordinary ensure path
+   * stays byte-for-byte unchanged when it is absent.
+   */
+  readonly expectedInstanceId?: string
 }
 
 /** Exact registry keys; unknown fields are rejected, not ignored. */
@@ -555,6 +561,26 @@ function spawnHostCandidate(options: EnsureLocalHostOptions): () => Error | unde
  */
 export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<VerifiedLocalHost> {
   const { scope } = options
+  if (options.expectedInstanceId !== undefined) {
+    // A Client handoff carries one already-authenticated Host identity. Any
+    // absent/dead/replaced candidate is a terminal refusal reached BEFORE the
+    // ordinary spawn path: a handoff never creates, replaces or kills a Host.
+    const record = readLocalRecord(scope)
+    if (record === undefined || inspectHostProcess(record) === 'dead') {
+      throw new LocalScopeError(
+        'HOST_HANDOFF_UNAVAILABLE',
+        'local discovery: the expected Host is no longer available for Client handoff',
+      )
+    }
+    if (record.instanceId !== options.expectedInstanceId) {
+      throw new LocalScopeError(
+        'HOST_IDENTITY_MISMATCH',
+        'local discovery: the live Host is not the expected handoff instance',
+      )
+    }
+    assertClientHostCompatible(record, scope)
+    return await authenticateLocalHost(record, scope)
+  }
   const existing = readLocalRecord(scope)
   if (existing !== undefined && inspectHostProcess(existing) === 'alive') {
     assertClientHostCompatible(existing, scope)

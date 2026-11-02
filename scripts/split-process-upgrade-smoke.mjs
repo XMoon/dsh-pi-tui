@@ -7,8 +7,14 @@
  *
  *   old tgz installed in the one canonical profile (Host A + Client A)
  *   new tgz installed side-by-side as a real package root (Client B candidate)
- *     only after Host A has admitted a Turn and Client A has exited
+ *     only after Host A has admitted a Turn and Client A is still live
  *   same DSH_HOME / profile / UID / DSH runtime for both builds
+ *
+ * U07 then reexecutes Client A onto the side-by-side build: the OLD Client A
+ * keeps its real PTY, releases every Client resource through its ONE stop
+ * coordinator, and a NEW OS PID loads the new `dist/local-client.mjs`, which
+ * re-authenticates the SAME Host A and reopens the SAME Session. The old PID
+ * remains only as the waiting parent that forwards the replacement exit code.
  *
  * Both packages name the same `dsh-pi-tui/local/1` wire protocol and the same
  * exact DSH runtime, but carry different package versions, bundles and
@@ -40,7 +46,7 @@
  */
 
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import {
   existsSync,
@@ -352,6 +358,16 @@ function scopeScratchDirs(scopeDir) {
     .map(entry => entry.name)
 }
 
+/** Every durable Host Session log under the isolated DSH home (sorted). */
+function sessionLogFiles(dshHome) {
+  const root = join(dshHome, 'sessions')
+  if (!existsSync(root)) return []
+  return readdirSync(root, { recursive: true })
+    .map(name => String(name))
+    .filter(name => name.endsWith('.jsonl.zstd'))
+    .sort()
+}
+
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'))
 }
@@ -487,6 +503,9 @@ async function main() {
   // not discover or rewrite the running old profile, while DSH's `profiles/**`
   // interception still applies to its installed Client build.
   const sideBuildDir = join(dshHome, 'profiles', 'split-upgrade-side-build')
+  // Known before the install exists: the old Client receives this absolute
+  // root as its qualification target and only reads it at the reexec trigger.
+  const sideBuildPackagePath = join(sideBuildDir, 'node_modules', EXPECTED_PACKAGE_NAME)
   const scratch = join(workRoot, 'scratch')
   for (const directory of [home, dshHome, harnessDir, scratch]) mkdirSync(directory, { recursive: true })
   writeFileSync(join(workRoot, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
@@ -583,6 +602,13 @@ async function main() {
     const clientA = new SurfaceEntryProcess(join(oldProfilePackage, 'dist', 'local-client.mjs'), {
       ...base,
       workDir: workRoot,
+      env: {
+        ...base.env,
+        // Qualification-only reexec trigger. The side-by-side target package
+        // does not exist yet: the Client reads it only at the SIGUSR2 request.
+        SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1',
+        SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT: sideBuildPackagePath,
+      },
     })
     clients.push(clientA)
     const clientAReady = await clientA.waitFor(record => record.m4a0 === 'ready', 'Client A ready', 240_000)
@@ -606,17 +632,12 @@ async function main() {
     )
     const clientAPid = clientA.records.find(record => record.m4a0 === 'ready')?.pid
     assert(Number.isInteger(clientAPid), 'Client A ready record has no business PID')
-    const clientAExit = await (async () => {
-      clientA.send('/exit\r')
-      return await clientA.waitForExit(60_000)
-    })()
-    assert(clientAExit.code === 0 && clientAExit.signal === null, `Client A exit was ${JSON.stringify(clientAExit)}`)
-    await clientA.dispose()
-    assert(alive(hostAReady.pid), 'Host A died when Client A exited')
-    assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore, 'Host A after Client A exit')
+    // Client A stays the live PTY Client until the side-by-side build exists
+    // and Host A is proven unchanged; U07 then reexecutes it in place.
+    assert(alive(hostAReady.pid), 'Host A died while Client A was attached')
+    assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore, 'Host A while Client A is attached')
     assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released before the upgrade attempt')
     evidence.work.clientAPid = clientAPid
-    evidence.work.workContinuedAfterClientExit = true
 
     // ── Install the NEW build side-by-side while Host A works ───────────────
     // The old Host and its admitted Turn already exist at this point, so this
@@ -686,12 +707,313 @@ async function main() {
     const oldCookieIdentity = await fetchStatus(`${oldOrigin}/api/pi-tui.local-host`, { headers: { cookie: oldCookie } })
     assert(oldCookieIdentity.status === 200, 'Host A did not accept its own minted Cookie')
 
+    // ── U07: real Client-only reexec onto the SAME Host A / Session S ───────
+    // Client A is still the live PTY Client. The old Client must capture the
+    // authoritative Session, release every Client resource through its ONE
+    // stop coordinator, and only then spawn the NEW build's real entry as a
+    // NEW OS PID. Host A, its Turn and its files must be untouched.
+    const newClientEntry = join(sideBuildPackage, 'dist', 'local-client.mjs')
+    const clientSeatName = `\0dsh-pi-tui-c-${hostABefore.scopeId.slice(0, 40)}`
+    const sessionLogsBeforeReexec = sessionLogFiles(dshHome)
+    assert(alive(clientAPid), 'Client A was not a live Client before the reexec handoff')
+    assert(alive(hostAReady.pid), 'Host A died before the reexec handoff')
+    assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released before the reexec handoff')
+    assert.equal(clientA.records.filter(record => record.m4b2s === 'client-closed').length, 0,
+      'Client A closed itself before the reexec request')
+    clientA.signalBusiness('SIGUSR2')
+    const reexecRequested = await clientA.waitFor(
+      record => record.m4r === 'handoff-requested' && record.pid === clientAPid,
+      'Client A accepted the reexec handoff request',
+      120_000,
+    )
+    assert(reexecRequested.sessionId === sessionId, 'the reexec request captured another Session')
+    assert(reexecRequested.expectedHostInstanceId === hostABefore.instanceId, 'the reexec request captured another Host')
+    assert(reexecRequested.targetBuildId === newBuildId, 'the reexec request captured another target build')
+    assert(reexecRequested.targetBundleVersion === newArtifact.manifest.version, 'the reexec request captured another target version')
+    const clientClosed = await clientA.waitFor(
+      record => record.m4b2s === 'client-closed' && record.pid === clientAPid,
+      'Client A released every owned Client resource',
+      120_000,
+    )
+    assert.equal(clientClosed.sessionOpen, false, 'Client A still reported an open Session after its release')
+    assert.equal(clientClosed.openSessionId, undefined, 'Client A still named an open Session after its release')
+    assert.equal(clientClosed.surfaceMounted, false, 'Client A still reported a mounted surface after its release')
+    assert.equal(clientClosed.activeWrappers, 0, 'Client A still owned an official transport wrapper after its release')
+    assert.equal(clientClosed.liveSockets, 0, 'Client A still owned a live mux socket after its release')
+    assert.deepEqual(clientClosed.owners, { typert: 0, connection: 0, remote: 0, fileUpload: 0, sessions: 0, jobs: 0 },
+      'Client A still owned Client services after its release')
+    const c1Started = await clientA.waitFor(
+      record => record.m4a0 === 'client-started' && record.pid !== clientAPid,
+      'the replacement Client started as a new OS process',
+      120_000,
+    )
+    const c1Pid = c1Started.pid
+    assert(Number.isInteger(c1Pid) && c1Pid !== clientAPid, 'the replacement Client did not get a new OS PID')
+    assert(alive(clientAPid), 'the old Client parent exited before its replacement finished')
+    const c1Auth = await clientA.waitFor(
+      record => record.m4a0 === 'host-authenticated' && record.pid === c1Pid,
+      'the replacement Client authenticated Host A',
+      180_000,
+    )
+    assertIdentityKept(c1Auth.host, hostABefore, 'replacement Client authenticated Host A')
+    assert(c1Auth.host.buildId === oldBuildId, 'the replacement Client authenticated another Host build')
+    const c1Restored = await clientA.waitFor(
+      record => record.m4r === 'handoff-restored' && record.pid === c1Pid,
+      'the replacement Client restored the original Session',
+      180_000,
+    )
+    assert.equal(c1Restored.expectedHostInstanceId, hostABefore.instanceId)
+    assert.equal(c1Restored.hostInstanceId, hostABefore.instanceId)
+    assert.equal(c1Restored.sessionId, sessionId)
+    assert.equal(c1Restored.sessionOpen, true)
+    assert.equal(c1Restored.sessionHistoryOpen, true)
+    assert.equal(c1Restored.surfaceMounted, true)
+    assert.equal(c1Restored.transport, 'connected')
+    assert.equal(c1Restored.clientBuildId, newBuildId, 'the replacement Client did not run the target build')
+    assert.notEqual(c1Restored.clientBuildId, oldBuildId, 'the replacement Client re-ran the old build')
+    const c1Ready = await clientA.waitFor(
+      record => record.m4a0 === 'ready' && record.pid === c1Pid,
+      'the replacement Client ready',
+      120_000,
+    )
+    assert.equal(c1Ready.transport, 'connected')
+    assert.equal(c1Ready.host?.instanceId, hostABefore.instanceId)
+    assert.equal(c1Ready.sessionOpen, true)
+    assert.equal(c1Ready.openSessionId, sessionId)
+    await clientA.waitForScreen('c2d-upgrade-hold', 'the replacement surface painted the admitted prompt', 120_000)
+    // While C1 runs, the OLD PID is only the waiting parent; C1 holds the ONE
+    // kernel Client seat and the old Client owns nothing.
+    assert.equal(await seatIsFree(clientSeatName), false, 'the replacement Client does not hold the Client seat')
+    assert(alive(hostAReady.pid), 'Host A died during the reexec handoff')
+    assert(readProcessStarttime(hostAReady.pid) === hostABefore.hostStarttime,
+      'Host A starttime changed during the reexec handoff')
+    assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore, 'Host A after the reexec handoff')
+    assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released by the reexec handoff')
+    assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore),
+      'the reexec handoff mutated the old registry')
+    assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore),
+      'the reexec handoff mutated the old launch material')
+    assert.deepEqual(sessionLogFiles(dshHome), sessionLogsBeforeReexec,
+      'the reexec handoff created a new Session log')
+    const promptsAfterReexec = (hostSessionEvents(dshHome, sessionId) ?? [])
+      .filter(event => event.type === 'user/message')
+    assert.equal(promptsAfterReexec.length, 1, 'the reexec handoff replayed or duplicated the admitted prompt')
+    assertNoSecret('replacement Client records', JSON.stringify(clientA.records), [oldToken, oldCookie])
+    assertNoSecret('replacement Client terminal', clientA.raw, [oldToken, oldCookie])
+    // The replacement Client is addressed through the SAME real terminal.
+    clientA.send('/exit\r')
+    const reexecExit = await clientA.waitForExit(120_000)
+    assert.equal(reexecExit.code, 0, `the replacement Client exit was ${JSON.stringify(reexecExit)}`)
+    assert.equal(reexecExit.signal, null)
+    assert(await waitGone(c1Pid), 'the replacement Client process did not exit')
+    assert(await waitGone(clientAPid), 'the old Client waiting parent did not exit')
+    assert(await seatIsFree(clientSeatName), 'the Client seat stayed owned after the replacement Client exited')
+    assert(alive(hostAReady.pid), 'Host A died when the replacement Client exited')
+    assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released when the replacement Client exited')
+    assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore, 'Host A after the replacement Client exit')
+    assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore),
+      'the replacement Client exit mutated the old registry')
+    assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore),
+      'the replacement Client exit mutated the old launch material')
+    await clientA.dispose()
+    evidence.work.workContinuedAfterClientExit = true
+    evidence.reexecHandoff = {
+      oldClientPid: clientAPid,
+      replacementClientPid: c1Pid,
+      newOsPid: c1Pid !== clientAPid,
+      oldParentWaitedDuringChild: true,
+      oldClientOwnersReleased: true,
+      oldClientSessionReferenceReleased: true,
+      clientSeatHeldByReplacement: true,
+      clientSeatReleasedAfterExit: true,
+      targetBundleVersion: newArtifact.manifest.version,
+      targetBuildId: newBuildId,
+      oldBuildId,
+      clientBuildChanged: newBuildId !== oldBuildId,
+      hostInstanceId: hostABefore.instanceId,
+      hostInstanceIdKept: true,
+      hostPidKept: true,
+      hostStarttimeKept: true,
+      hostBuildIdKept: c1Auth.host.buildId === oldBuildId,
+      sessionId,
+      sessionOpen: true,
+      sessionHistoryOpen: true,
+      surfacePromptVisible: true,
+      registryBytesUnchanged: true,
+      launchBytesUnchanged: true,
+      noNewSessionLog: true,
+      promptNotReplayed: true,
+      workStillRunning: true,
+      exitCode: reexecExit.code,
+      secretLeak: false,
+    }
+
+    // ── U07 negative 1: a wrong expected Host instance is refused pre-connect ─
+    const registryBeforeRefusal = readFileSync(join(scopeDir, 'instance.json'))
+    const launchBeforeRefusal = readFileSync(join(scopeDir, 'launch.json'))
+    const sessionLogsBeforeRefusal = sessionLogFiles(dshHome)
+    const wrongExpectation = new SurfaceEntryProcess(newClientEntry, {
+      ...base,
+      workDir: workRoot,
+      env: { ...base.env, SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID: randomUUID() },
+    })
+    clients.push(wrongExpectation)
+    const wrongExpectationExit = await wrongExpectation.waitForExit(120_000)
+    assert(wrongExpectationExit.code !== 0,
+      `a wrong expected Host instance exited ${JSON.stringify(wrongExpectationExit)}`)
+    assert(!wrongExpectation.records.some(record => record.m4a0 === 'ready'),
+      'a wrong expected Host instance published ready')
+    assert(!wrongExpectation.records.some(record => record.m4a0 === 'host-authenticated'),
+      'a wrong expected Host instance authenticated the live Host')
+    const wrongFailure = wrongExpectation.records.find(record => record.m4a0 === 'failure')
+    assert(wrongFailure?.code === 'HOST_IDENTITY_MISMATCH',
+      `the wrong expected Host instance failed as ${JSON.stringify(wrongFailure)}`)
+    const wrongVisible = `${wrongExpectation.raw}\n${wrongExpectation.stderr}`
+    const wrongFailureLines = wrongVisible.split('\n').filter(line => line.includes('Client handoff failed'))
+    assert.equal(wrongFailureLines.length, 1, `the wrong expected Host produced ${String(wrongFailureLines.length)} handoff failure lines`)
+    const wrongFailureLine = wrongFailureLines[0]
+    assert.match(wrongFailureLine, /Client handoff failed: the live local Host is not the expected instance\./u)
+    assert.match(wrongFailureLine, /The Host was not stopped or replaced\./u)
+    assert.match(wrongFailureLine, /Start a compatible Client manually to continue\./u)
+    assertNoSecret('wrong expected Host terminal', wrongVisible, [oldToken, oldCookie])
+    for (const privateValue of [scopeDir, sideBuildPackage, workRoot, String(hostABefore.hostPid)]) {
+      assert(!wrongFailureLine.includes(privateValue), `the wrong expected Host failure leaked ${JSON.stringify(privateValue)}`)
+    }
+    assert(alive(hostAReady.pid), 'Host A died on the wrong expected Host refusal')
+    assert(readProcessStarttime(hostAReady.pid) === hostABefore.hostStarttime,
+      'Host A starttime changed on the wrong expected Host refusal')
+    assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore,
+      'Host A after the wrong expected Host refusal')
+    assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released by the wrong expected Host refusal')
+    assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBeforeRefusal),
+      'the wrong expected Host refusal mutated the old registry')
+    assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBeforeRefusal),
+      'the wrong expected Host refusal mutated the old launch material')
+    assert.deepEqual(sessionLogFiles(dshHome), sessionLogsBeforeRefusal,
+      'the wrong expected Host refusal created a new Session log')
+    assert(await seatIsFree(clientSeatName), 'the wrong expected Host refusal did not release the Client seat')
+    await wrongExpectation.dispose()
+    evidence.reexecRefusals = {
+      wrongExpectedHost: {
+        exitCode: wrongExpectationExit.code,
+        errorCode: wrongFailure.code,
+        noReady: true,
+        noHostConnect: true,
+        hostKept: true,
+        registryBytesUnchanged: true,
+        launchBytesUnchanged: true,
+        noNewSession: true,
+        clientSeatReleased: true,
+        noPathPidOrSecret: true,
+      },
+    }
+
+    // ── U07 negative 2: the replacement child fails after a real reexec ─────
+    // The one-shot fault injection exists only in the OLD Client's environment
+    // and is passed to the CHILD, never applied to the old Client itself.
+    const clientA2 = new SurfaceEntryProcess(join(oldProfilePackage, 'dist', 'local-client.mjs'), {
+      ...base,
+      workDir: workRoot,
+      env: {
+        ...base.env,
+        SPLIT_PROCESS_CLIENT_SESSION: sessionId,
+        SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1',
+        SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT: sideBuildPackagePath,
+        SPLIT_PROCESS_CLIENT_REEXEC_CHILD_FAILURE: 'client-bootstrap',
+      },
+    })
+    clients.push(clientA2)
+    const clientA2Ready = await clientA2.waitFor(record => record.m4a0 === 'ready', 'second old Client ready', 240_000)
+    const clientA2Pid = clientA2Ready.pid
+    assert(Number.isInteger(clientA2Pid), 'the second old Client ready record has no business PID')
+    await clientA2.waitFor(
+      record => record.m4b2s === 'surface-status' && record.sessionOpen === true && record.openSessionId === sessionId,
+      'the second old Client opened the existing Session',
+      120_000,
+    )
+    const sessionLogsBeforeChildFailure = sessionLogFiles(dshHome)
+    clientA2.signalBusiness('SIGUSR2')
+    const reexecRequested2 = await clientA2.waitFor(
+      record => record.m4r === 'handoff-requested' && record.pid === clientA2Pid,
+      'the second old Client accepted the reexec request',
+      120_000,
+    )
+    assert.equal(reexecRequested2.sessionId, sessionId)
+    const clientClosed2 = await clientA2.waitFor(
+      record => record.m4b2s === 'client-closed' && record.pid === clientA2Pid,
+      'the second old Client released every owned Client resource',
+      120_000,
+    )
+    assert.equal(clientClosed2.sessionOpen, false)
+    assert.deepEqual(clientClosed2.owners, { typert: 0, connection: 0, remote: 0, fileUpload: 0, sessions: 0, jobs: 0 })
+    const childFailure = await clientA2.waitFor(
+      record => record.m4a0 === 'failure' && record.pid !== clientA2Pid,
+      'the replacement Client failed',
+      180_000,
+    )
+    assert.match(childFailure.error, /qualification forced client bootstrap failure/u)
+    assert(!clientA2.records.some(record => record.m4a0 === 'ready' && record.pid !== clientA2Pid),
+      'a failed replacement Client published ready')
+    const parentExit = await clientA2.waitFor(
+      record => record.m4r === 'handoff-parent-exit' && record.pid === clientA2Pid,
+      'the old Client parent reported the replacement exit',
+      120_000,
+    )
+    assert.equal(parentExit.code, 1, `the old Client parent reported ${JSON.stringify(parentExit)}`)
+    assert.equal(parentExit.signal, null)
+    const childFailureExit = await clientA2.waitForExit(120_000)
+    assert.equal(childFailureExit.code, 1, `the failed handoff exit was ${JSON.stringify(childFailureExit)}`)
+    assert.equal(childFailureExit.signal, null)
+    assert(await waitGone(childFailure.pid), 'the failed replacement Client process stayed alive')
+    assert(await waitGone(clientA2Pid), 'the old Client parent stayed alive after the failed child')
+    assert(await seatIsFree(clientSeatName), 'the failed handoff did not release the Client seat')
+    const childFailureVisible = `${clientA2.raw}\n${clientA2.stderr}`
+    const childFailureLines = childFailureVisible.split('\n').filter(line => line.includes('Client handoff failed'))
+    assert.equal(childFailureLines.length, 1, `the failed child produced ${String(childFailureLines.length)} handoff failure lines`)
+    assert.match(childFailureLines[0], /Client handoff failed: qualification forced client bootstrap failure\./u)
+    assert.match(childFailureLines[0], /Start a compatible Client manually to continue\./u)
+    assertNoSecret('failed replacement terminal', childFailureVisible, [oldToken, oldCookie])
+    assert(alive(hostAReady.pid), 'Host A died when the replacement Client failed')
+    assert(readProcessStarttime(hostAReady.pid) === hostABefore.hostStarttime,
+      'Host A starttime changed when the replacement Client failed')
+    assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore,
+      'Host A after the failed replacement Client')
+    assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released by the failed replacement Client')
+    assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore),
+      'the failed replacement Client mutated the old registry')
+    assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore),
+      'the failed replacement Client mutated the old launch material')
+    assert.deepEqual(sessionLogFiles(dshHome), sessionLogsBeforeChildFailure,
+      'the failed replacement Client created a new Session log')
+    const promptsAfterChildFailure = (hostSessionEvents(dshHome, sessionId) ?? [])
+      .filter(event => event.type === 'user/message')
+    assert.equal(promptsAfterChildFailure.length, 1, 'the failed replacement Client replayed the admitted prompt')
+    await clientA2.dispose()
+    evidence.reexecRefusals.childFailure = {
+      oldClientPid: clientA2Pid,
+      failedChildPid: childFailure.pid,
+      childFailureError: childFailure.error,
+      oldClientOwnersReleased: true,
+      parentExitCode: parentExit.code,
+      processExitCode: childFailureExit.code,
+      clientSeatReleased: true,
+      hostKept: true,
+      hostStarttimeKept: true,
+      noHostRestart: true,
+      registryBytesUnchanged: true,
+      launchBytesUnchanged: true,
+      noNewSession: true,
+      noReplay: true,
+      noAutoRecovery: true,
+      secretLeak: false,
+    }
+
     // ── U02: new Client B speaks v1 to the live old Host A ─────────────────
+
     // The new package has a different version, bundle and buildId but the same
     // local protocol and exact DSH runtime. It must authenticate the SAME Host
     // A, call the real official/private RPCs, and exit without touching Host
     // A, its Registry/Launch files or the admitted Turn.
-    const newClientEntry = join(sideBuildPackage, 'dist', 'local-client.mjs')
     const clientB = new EntryProcess('client', newClientEntry, base)
     clients.push(clientB)
     const clientBAuth = await clientB.waitFor(

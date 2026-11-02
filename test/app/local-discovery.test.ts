@@ -38,6 +38,7 @@ import {
   assertClientHostCompatible,
   assertHostPublicationIdentity,
   authenticateLocalHost,
+  ensureLocalHost,
   inspectHostProcess,
   readLaunchMaterial,
   readLocalRecord,
@@ -730,5 +731,134 @@ test('a self-consistent Host build is admitted while a registry/identity build d
   } finally {
     await new Promise<void>(resolve => server.close(() => resolve()))
     cleanup(value.root)
+  }
+})
+
+test('expected-instance handoff attaches only the exact authenticated Host and never spawns a Host', async t => {
+  const value = fixture(t)
+  let identity: LocalInstanceRecord | undefined
+  let connectRequests = 0
+  const server = createHttpServer((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    if (url.pathname === '/connect') {
+      connectRequests += 1
+      response.writeHead(302, {
+        location: '/api/remote.mux',
+        'cache-control': 'no-store',
+        'set-cookie': 'dsh_session=fixture-cookie; Path=/; HttpOnly',
+      })
+      response.end()
+      return
+    }
+    if (url.pathname === '/api/pi-tui.local-host') {
+      if (request.headers.cookie !== 'dsh_session=fixture-cookie' || identity === undefined) {
+        response.writeHead(401, { 'cache-control': 'no-store' })
+        response.end()
+        return
+      }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(`${JSON.stringify(identity)}\n`)
+      return
+    }
+    response.writeHead(404)
+    response.end()
+  })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const origin = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`
+    const scope = scopeFor(value)
+    const hostRecord = recordFor(scope, { origin })
+    const registryPath = join(scope.dir, 'instance.json')
+    const launchPath = join(scope.dir, 'launch.json')
+    const options = {
+      scope,
+      // Deliberately absent: a handoff expectation that spawned a Host would
+      // fail loudly instead of silently succeeding through the ordinary path.
+      hostEntryPath: join(value.packageRoot, 'dist', 'local-host.mjs'),
+      dshAnchor: join(value.root, 'missing-dsh', 'package.json'),
+      profile: 'pi-tui',
+    }
+    const writeHost = (record: LocalInstanceRecord): void => {
+      writeFileSync(registryPath, `${JSON.stringify(record)}\n`, { mode: 0o600 })
+      writeFileSync(launchPath, `${JSON.stringify({
+        schema: 1,
+        instanceId: record.instanceId,
+        connectUrl: `${record.origin}/connect?token=fixture-token`,
+      })}\n`, { mode: 0o600 })
+    }
+
+    // Positive: the expected live/authenticated Host is attached.
+    identity = hostRecord
+    writeHost(hostRecord)
+    const registryBefore = readFileSync(registryPath)
+    const launchBefore = readFileSync(launchPath)
+    const verified = await ensureLocalHost({ ...options, expectedInstanceId: hostRecord.instanceId })
+    assert.equal(verified.identity.instanceId, hostRecord.instanceId)
+    assert.equal(connectRequests, 1, 'the expected Host must authenticate through the official /connect')
+
+    // Negative: another healthy Host is present but is not the expected instance.
+    await assert.rejects(
+      ensureLocalHost({ ...options, expectedInstanceId: randomUUID() }),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
+    )
+    assert.equal(connectRequests, 1, 'an expected-instance mismatch must refuse BEFORE /connect')
+    assert.deepEqual(readFileSync(registryPath), registryBefore, 'a refused handoff rewrote the registry')
+    assert.deepEqual(readFileSync(launchPath), launchBefore, 'a refused handoff rewrote the launch material')
+
+    // Negative: no registry at all is a handoff refusal, never a Host spawn.
+    rmSync(registryPath)
+    await assert.rejects(
+      ensureLocalHost({ ...options, expectedInstanceId: hostRecord.instanceId }),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_HANDOFF_UNAVAILABLE',
+    )
+    assert.equal(connectRequests, 1, 'a missing expected Host must not authenticate another candidate')
+
+    // Negative: a dead expected Host is a refusal, never an automatic spawn.
+    const dead = recordFor(scope, { origin, hostPid: 999_999_999, hostStarttime: '1' })
+    writeHost(dead)
+    await assert.rejects(
+      ensureLocalHost({ ...options, expectedInstanceId: dead.instanceId }),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_HANDOFF_UNAVAILABLE',
+    )
+    assert.equal(connectRequests, 1, 'a dead expected Host must not authenticate anything')
+    assert.deepEqual(readFileSync(registryPath), Buffer.from(`${JSON.stringify(dead)}\n`),
+      'a refused handoff rewrote the dead registry record')
+
+    // Negative: authenticated echo differs from the registry for the expected instance.
+    identity = { ...hostRecord, buildId: 'd'.repeat(64) }
+    writeHost(hostRecord)
+    await assert.rejects(
+      ensureLocalHost({ ...options, expectedInstanceId: hostRecord.instanceId }),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
+    )
+    assert.equal(connectRequests, 2, 'the expected identity was authenticated before its echo mismatch')
+
+    // Negative: a protocol/DSH mismatch stays the existing refusal and no /connect happens.
+    identity = hostRecord
+    const foreign = { ...hostRecord, protocol: 'dsh-pi-tui/local/2' as typeof LOCAL_PROTOCOL }
+    writeHost(foreign)
+    await assert.rejects(
+      ensureLocalHost({ ...options, expectedInstanceId: foreign.instanceId }),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_PROTOCOL_INCOMPATIBLE',
+    )
+    assert.equal(connectRequests, 2, 'an incompatible expected Host must not authenticate')
+
+    // The ordinary ensure path is unchanged: a live Host is authenticated...
+    writeHost(hostRecord)
+    identity = hostRecord
+    const ordinary = await ensureLocalHost(options)
+    assert.equal(ordinary.identity.instanceId, hostRecord.instanceId)
+    assert.equal(connectRequests, 3)
+    // ...and a missing registry still enters the ORIGINAL spawn path.
+    rmSync(registryPath)
+    await assert.rejects(
+      ensureLocalHost(options),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_START_FAILED',
+    )
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
   }
 })

@@ -222,6 +222,15 @@ export interface LocalClientHandle {
    */
   replaceSurfaceForQualification(): Promise<void>
   /**
+   * One-shot Client-handoff restore proof. A Session-bearing handoff succeeds
+   * only when the CURRENT official `tuiMainView` generation holds that exact
+   * Session and its official history `openState` is `'open'`; a sessionless
+   * handoff succeeds only with a mounted sessionless surface on the connected
+   * transport. It creates no Session, retains no reference and never becomes a
+   * second Session truth source. Bounded; used once before `handoff-restored`.
+   */
+  awaitHandoffOpen(sessionId?: string, signal?: AbortSignal): Promise<void>
+  /**
    * Dispose the Client composition, then the official Client transport, then
    * the Client root. The caller still owns the process seat.
    */
@@ -350,14 +359,183 @@ interface SurfaceRevision {
   statusCleanup?: () => void
 }
 
-/** The official `tuiMainView` reference one mounted Domain graph holds. */
-function openSessionIdFor(domains: MountedRemoteClientDomains): string | undefined {
-  const snapshot = domains.sessions.list.getSnapshot()
-  for (const id of snapshot.ids) {
-    const info = domains.sessions.retainInfo(id).getSnapshot()
-    if ((info.retainedBy.tuiMainView ?? 0) > 0) return String(id)
+/**
+ * The live official sources ONE handoff restore proof observes. Structural so
+ * the proof never becomes a second Session owner: it only reads the catalog,
+ * the `tuiMainView` reference count and the already-retained binding.
+ */
+export interface HandoffOpenSessions<Id> {
+  readonly list: {
+    getSnapshot(): { readonly ids: readonly Id[] }
+    subscribe(listener: () => void): () => void
+  }
+  retainInfo(id: Id): {
+    getSnapshot(): { readonly retainedBy: { readonly tuiMainView?: number } }
+    subscribe(listener: () => void): () => void
+  }
+  binding(id: Id): {
+    readonly session: {
+      getSnapshot(): { readonly openState: string }
+      subscribe(listener: () => void): () => void
+    }
+  } | undefined
+}
+
+/** The current official `tuiMainView` Session id, derived from live sources. */
+function mainViewSessionId<Id>(sessions: HandoffOpenSessions<Id>): string | undefined {
+  for (const id of sessions.list.getSnapshot().ids) {
+    if ((sessions.retainInfo(id).getSnapshot().retainedBy.tuiMainView ?? 0) > 0) return String(id)
   }
   return undefined
+}
+
+/** The official `tuiMainView` reference one mounted Domain graph holds. */
+function openSessionIdFor(domains: MountedRemoteClientDomains): string | undefined {
+  return mainViewSessionId(domains.sessions)
+}
+
+/** Borrow the CURRENT official binding of one listed Session id (no retain). */
+function bindingOfListedSession<Id>(
+  sessions: HandoffOpenSessions<Id>,
+  sessionId: string,
+): ReturnType<HandoffOpenSessions<Id>['binding']> {
+  for (const id of sessions.list.getSnapshot().ids) {
+    if (String(id) === sessionId) return sessions.binding(id)
+  }
+  return undefined
+}
+
+/** Bound on one handoff restore observation (not a business timeout). */
+const HANDOFF_OPEN_TIMEOUT_MS = 30_000
+
+export interface HandoffOpenSources<Id> {
+  readonly sessions: HandoffOpenSessions<Id>
+  readonly transport: {
+    status(): { readonly transport: string; readonly generationId?: number }
+    readonly connection: { readonly generation: { subscribe(listener: () => void): () => void } }
+  }
+  /** Whether the ONE physical surface of THIS Client is mounted. */
+  surfaceMounted(): boolean
+}
+
+/**
+ * One-shot Client-handoff restore proof over the LIVE official sources.
+ *
+ * A Session-bearing handoff succeeds only when the current official
+ * `tuiMainView` owner still holds that exact Session and its official history
+ * state is terminal `'open'`; `cold`/`loading` keep waiting and `error` fails
+ * closed. A sessionless handoff succeeds only with a mounted sessionless
+ * surface on the connected transport and NEVER creates a Session. The initial
+ * transport generation is captured first: a rollover invalidates the proof.
+ * The observation is bounded and holds no reference and no long-lived state.
+ */
+export async function observeHandoffOpen<Id>(
+  sources: HandoffOpenSources<Id>,
+  sessionId?: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const initial = sources.transport.status()
+  if (initial.transport !== 'connected' || initial.generationId === undefined) {
+    throw new Error('local client entry: the handoff Client has no connected official transport generation')
+  }
+  const capturedGeneration = initial.generationId
+  await new Promise<void>((resolve, reject) => {
+    const unsubscribers: Array<() => void> = []
+    let settled = false
+    let retainSubscribed = false
+    /** The binding generation this proof first observed; it may never change. */
+    let observedBinding: object | undefined
+    let sessionUnsubscribe: (() => void) | undefined
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    const cleanup = (): void => {
+      if (deadline !== undefined) clearTimeout(deadline)
+      sessionUnsubscribe?.()
+      sessionUnsubscribe = undefined
+      for (const unsubscribe of unsubscribers.splice(0)) unsubscribe()
+      signal?.removeEventListener('abort', onAbort)
+    }
+    const settle = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      if (error === undefined) resolve()
+      else reject(error)
+    }
+    function onAbort(): void {
+      settle(new Error('local client entry: the handoff restore observation was aborted'))
+    }
+    const evaluate = (): void => {
+      if (settled) return
+      const current = sources.transport.status()
+      if (current.transport !== 'connected' || current.generationId !== capturedGeneration) {
+        settle(new Error('local client entry: the official transport generation changed during the handoff restore'))
+        return
+      }
+      if (sources.surfaceMounted() !== true) {
+        settle(new Error('local client entry: the handoff Client surface is not mounted'))
+        return
+      }
+      const open = mainViewSessionId(sources.sessions)
+      if (sessionId === undefined) {
+        if (open !== undefined) {
+          settle(new Error('local client entry: a sessionless Client handoff opened a new Session'))
+          return
+        }
+        settle()
+        return
+      }
+      if (!retainSubscribed) {
+        for (const id of sources.sessions.list.getSnapshot().ids) {
+          if (String(id) !== sessionId) continue
+          unsubscribers.push(sources.sessions.retainInfo(id).subscribe(evaluate))
+          retainSubscribed = true
+          break
+        }
+      }
+      if (open === undefined) return
+      if (open !== sessionId) {
+        settle(new Error('local client entry: the handoff Client opened a different Session'))
+        return
+      }
+      const binding = bindingOfListedSession(sources.sessions, sessionId)
+      if (binding === undefined) return
+      if (observedBinding === undefined) {
+        observedBinding = binding
+        sessionUnsubscribe = binding.session.subscribe(evaluate)
+      } else if (!Object.is(observedBinding, binding)) {
+        settle(new Error('local client entry: the handoff Session ownership changed during the restore'))
+        return
+      }
+      const snapshot = binding.session.getSnapshot()
+      if (snapshot.openState === 'open') {
+        // A generation replacement between the read and this proof is not a
+        // restore: refuse rather than reporting a stale binding.
+        if (mainViewSessionId(sources.sessions) !== sessionId
+          || !Object.is(bindingOfListedSession(sources.sessions, sessionId), observedBinding)) {
+          settle(new Error('local client entry: the handoff Session ownership changed during the restore'))
+          return
+        }
+        settle()
+        return
+      }
+      if (snapshot.openState === 'error') {
+        settle(new Error('local client entry: the official Session history open failed'))
+      }
+    }
+    // Attach every live source before the first evaluation so no transition
+    // between the initial read and the subscriptions is lost.
+    unsubscribers.push(sources.sessions.list.subscribe(evaluate))
+    unsubscribers.push(sources.transport.connection.generation.subscribe(evaluate))
+    if (signal?.aborted === true) {
+      onAbort()
+      return
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+    deadline = setTimeout(() => {
+      settle(new Error(`local client entry: the handoff Session open did not settle within ${String(HANDOFF_OPEN_TIMEOUT_MS / 1000)}s`))
+    }, HANDOFF_OPEN_TIMEOUT_MS)
+    evaluate()
+  })
 }
 
 /**
@@ -703,6 +881,14 @@ async function startSurfaceLocalClient(
     get status(): LocalClientStatus {
       return status()
     },
+    async awaitHandoffOpen(sessionId?: string, abort?: AbortSignal): Promise<void> {
+      if (disposed) throw new Error('local client entry: the surface revision owner is already disposed')
+      await observeHandoffOpen({
+        sessions: domains.sessions,
+        transport,
+        surfaceMounted: () => status().surfaceMounted === true,
+      }, sessionId, abort)
+    },
     async replaceSurfaceForQualification(): Promise<void> {
       await enqueueRevision(async () => {
         if (disposed) throw new Error('local client entry: the surface revision owner is already disposed')
@@ -862,6 +1048,9 @@ export async function startLocalClient(
     },
     async replaceSurfaceForQualification(): Promise<void> {
       throw new Error('local client entry: surface replacement requires the internal surface mode')
+    },
+    async awaitHandoffOpen(): Promise<void> {
+      throw new Error('local client entry: the handoff restore proof requires the internal surface mode')
     },
     async dispose(): Promise<void> {
       if (disposed) return
