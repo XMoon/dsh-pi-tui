@@ -144,6 +144,28 @@ const negotiatedKv = (h) => (caps(h)?.kinds ?? []).includes('kv')
 const kvGridsIn = (node) => nodesIn(node, 'sf-kv')
 const kvKeysIn = (node) => nodesIn(node, 'sf-kv-k')
 const kvValuesIn = (node) => nodesIn(node, 'sf-kv-v')
+/** Every node inside ONE captured subtree, in document order. */
+const subtreeOf = (node) => {
+  const out = []
+  const walk = (n) => {
+    out.push(n)
+    for (const child of n.children ?? []) walk(child)
+  }
+  if (node !== undefined) walk(node)
+  return out
+}
+/**
+ * The Reader-scoped text selectors.
+ *
+ * A Details claim is a claim about THIS reading, so it is answered inside the overlay
+ * body subtree only: the pane-wide `textStarting`/`textExactly`/`h.texts` selectors read
+ * the whole window, where Tern's own chrome (tab labels, side panels, other surfaces)
+ * can legitimately carry the same words or even the same `sf-md`/`sf-kv` markup.
+ */
+const textStartingIn = (root, prefix) => subtreeOf(root).find((node) => String(node.text ?? '').startsWith(prefix))
+const textExactlyIn = (root, text) => subtreeOf(root).find((node) => String(node.text ?? '') === text)
+const textsIn = (root) => subtreeOf(root).map((node) => String(node.text ?? '')).filter(Boolean)
+const markdownIn = (root) => subtreeOf(root).find((node) => hasClass(node, 'sf-md'))
 /** The client's own class tokens of ONE layout path segment (the element itself). */
 const segmentTokens = (path) => {
   const last = String(path).split('>').pop() ?? ''
@@ -380,7 +402,7 @@ const matrixCell = async (h, size) => {
   const opened = await openDetails(h)
   const details = h.snapshot()
   const body = overlayBody(details)
-  const backNode = details.nodes.find((node) => hasClass(node, 'sf-act') && h.descendantsText(node).includes('Back to presets'))
+  const backNode = nodesIn(body, 'sf-act').find((node) => h.descendantsText(node).includes('Back to presets'))
   h.check(`${cellKey}: the Details page is a lg overlay whose body and Back navigation row are on screen`,
     opened && overlayNode(details) !== undefined && hasClass(overlayNode(details), 'sz-lg')
     && body !== undefined && containedXY(details.chains, body)
@@ -588,26 +610,31 @@ export default async function (h) {
     JSON.stringify(spansRuns(identityKv(frame)?.items?.find((entry) => String(entry.k) === 'Scope')?.v))
     === JSON.stringify([['Use: ', 'muted'], ['next session only', ''], [' · Default: ', 'muted'], ['future new sessions', '']]),
     JSON.stringify(spansRuns(identityKv(frame)?.items?.find((entry) => String(entry.k) === 'Scope')?.v)))
+  // Every claim below is a claim about THIS reading, so it is answered inside the
+  // overlay body subtree — never over the whole window, where Tern's own chrome can
+  // legitimately carry the same words or the same `sf-md` markup.
+  const reader = overlayBody(snap)
   h.check('the page is READ-ONLY: no footer actions, ONE Back navigation row, ONE md body',
     (frame?.actions ?? undefined) === undefined && operationRows(snap).length === 1
     && frame?.back?.clickable === true
-    && markdownNode(snap) !== undefined,
-    JSON.stringify({ actions: frame?.actions, back: frame?.back, rows: operationRows(snap).length, md: markdownNode(snap) !== undefined }))
+    && markdownIn(reader) !== undefined
+    && subtreeOf(reader).filter((node) => hasClass(node, 'sf-md')).length === 1,
+    JSON.stringify({ actions: frame?.actions, back: frame?.back, rows: operationRows(snap).length, md: subtreeOf(reader).filter((node) => hasClass(node, 'sf-md')).length }))
   h.check('the official guide is INLINE on the same page: the pinned copy, complete, in order',
     (frame?.markdown?.text ?? '').startsWith(STANDARD_GUIDE[0])
     && (frame?.markdown?.text ?? '').endsWith(STANDARD_GUIDE.at(-1))
     && STANDARD_GUIDE.every((fragment) => (frame?.markdown?.text ?? '').includes(fragment)),
     `length=${frame?.markdown?.length} missing=${JSON.stringify(STANDARD_GUIDE.filter((f) => !(frame?.markdown?.text ?? '').includes(f)))}`)
   h.check('the client renders the Markdown as real headings and paragraphs, not raw markers',
-    textExactly(snap, 'Mode details') !== undefined && textExactly(snap, 'How to use') !== undefined
-    && textExactly(snap, 'How it works') !== undefined && textExactly(snap, 'Fix a bug') !== undefined
-    && !h.texts(snap).some((line) => line.includes('## ')),
-    h.texts(snap).slice(0, 16).join(' | '))
+    textExactlyIn(reader, 'Mode details') !== undefined && textExactlyIn(reader, 'How to use') !== undefined
+    && textExactlyIn(reader, 'How it works') !== undefined && textExactlyIn(reader, 'Fix a bug') !== undefined
+    && !textsIn(reader).some((line) => line.includes('## ')),
+    textsIn(reader).slice(0, 16).join(' | '))
   h.capture('details-guide-top-1280x800', 'the Details page: identity, description and the inline guide (Back pre-click)')
 
   // The Back NAVIGATION row: one REAL click, back to the catalogue (the row's own
   // onClick runs the SAME `back` intent the keyboard sends).
-  const backNode = snap.nodes.find((node) => hasClass(node, 'sf-act') && h.descendantsText(node).includes('Back to presets'))
+  const backNode = nodesIn(reader, 'sf-act').find((node) => h.descendantsText(node).includes('Back to presets'))
   const backClicked = backNode === undefined ? false : await h.click(snap.chains, backNode)
   await h.sleep(600)
   h.check('one REAL click on the Back row runs the SAME back intent and returns to the catalogue',
@@ -691,32 +718,35 @@ export default async function (h) {
   if (!guideOpened) h.log('GUIDE-OPEN-FAIL page=' + String(lastFrame(h)?.page))
   await h.resize(400, 600)
   const narrowBody = overlayBody(h.snapshot())
-  const narrowMd = markdownNode(h.snapshot())
+  const narrowMd = markdownIn(narrowBody)
   h.check(`at the 400x600 minimum the inline guide is TALLER than its viewport, so it must scroll`,
     guideOpened && narrowBody !== undefined && narrowMd !== undefined && rect(narrowMd)[3] > rect(narrowBody)[3],
     `opened=${guideOpened} page=${JSON.stringify(lastFrame(h)?.page)} md=${box(narrowMd)} body=${box(narrowBody)}`)
   // NEGATIVE CONTROL, measured before the scroll: the guide's tail line really sits
   // BELOW the body at this size, so a later "the tail is on screen" claim cannot pass
-  // vacuously on a document that already fit.
+  // vacuously on a document that already fit. Both the control and the claim look the
+  // line up INSIDE this reading's body, never across the whole window.
   const mdTailOffset = () => {
-    const tail = textStarting(h.snapshot(), 'Expected output: a summary with references')
     const body = overlayBody(h.snapshot())
+    const tail = textStartingIn(body, 'Expected output: a summary with references')
     if (tail === undefined || body === undefined) return undefined
     return Math.round((rect(tail)[1] + rect(tail)[3]) - (rect(body)[1] + rect(body)[3]))
   }
   const tailOffsetBefore = mdTailOffset()
   h.check('the negative control at 400x600: the guide tail starts far BELOW the body, so the scroll must matter',
     tailOffsetBefore !== undefined && tailOffsetBefore > 200, JSON.stringify({ tailOffsetBefore }))
-  const guided = await scrollUntilMoved(h, () => rect(markdownNode(h.snapshot()))[1], 'End')
+  const guided = await scrollUntilMoved(h, () => rect(markdownIn(overlayBody(h.snapshot())))[1], 'End')
   h.check('a real End key (retried across the documented stall) moves the CLIENT viewport to the tail',
     scrolls(h).some((op) => op.to === 'end') && guided.moved > 1,
     `moved=${guided.moved} tries=${guided.tries} scrolls=${JSON.stringify(scrolls(h).slice(-2))}`)
   h.measure('the Guide scroll stall observed (End)', JSON.stringify(guided))
   h.capture('guide-tail-400x600', 'the inline guide at the tail in the minimum pane')
   const tailSnap = h.snapshot()
-  const guideTail = textStarting(tailSnap, 'Expected output: a summary with references')
+  const tailBody = overlayBody(tailSnap)
+  const guideTail = textStartingIn(tailBody, 'Expected output: a summary with references')
   h.check('the tail of the guide is really on screen after the scroll',
-    guideTail !== undefined && containedXY(tailSnap.chains, guideTail),
+    guideTail !== undefined && containedXY(tailSnap.chains, guideTail)
+    && visibleSpan(tailSnap.chains, guideTail, 'y') > 8,
     `tail=${guideTail === undefined ? 'none' : `${String(guideTail.text).slice(0, 40)}@${box(guideTail)}`}`)
 
   // A Custom declaration that reuses a shipped id must NOT borrow the official guide.
@@ -727,12 +757,13 @@ export default async function (h) {
   await openDetails(h)
   snap = h.snapshot()
   frame = lastFrame(h)
+  const customReader = overlayBody(snap)
   h.check('a Custom declaration reusing a shipped id stays Custom with NO guide section',
     frame?.page === 'details' && kvFact(frame, 'ID') === 'minimal'
     && kvFact(frame, 'Type') === 'Custom' && kvFact(frame, 'Name') === 'My minimal'
-    && markdownNode(snap) === undefined
-    && h.texts(snap).every((line) => !line.includes('Mode details')),
-    JSON.stringify({ id: kvFact(frame, 'ID'), type: kvFact(frame, 'Type'), md: markdownNode(snap) !== undefined }))
+    && markdownIn(customReader) === undefined
+    && textsIn(customReader).every((line) => !line.includes('Mode details')),
+    JSON.stringify({ id: kvFact(frame, 'ID'), type: kvFact(frame, 'Type'), md: markdownIn(customReader) !== undefined }))
 
   // ------------------------- F2. the LONG-VALUE fixture (plan P07): the 180-glyph
   // unbroken id, the CRLF/CJK/emoji description and the long failure reason must be
@@ -746,12 +777,13 @@ export default async function (h) {
   const longOpened = longBrowsed && await openDetails(h)
   frame = lastFrame(h)
   snap = h.snapshot()
-  const idNode = textStarting(snap, 'no-space-')
-  const brokenNode = textStarting(snap, 'plugin "missing-tools" is not installed:')
-  const descriptionNode = textStarting(snap, 'Long description')
-  const lineControl = textExactly(snap, 'Custom')
+  const longReader = overlayBody(snap)
+  const idNode = textStartingIn(longReader, 'no-space-')
+  const brokenNode = textStartingIn(longReader, 'plugin "missing-tools" is not installed:')
+  const descriptionNode = textStartingIn(longReader, 'Long description')
+  const lineControl = textExactlyIn(longReader, 'Custom')
   const lineHeight = rect(lineControl)[3]
-  const longGrid = kvGridsIn(overlayBody(snap))[0]
+  const longGrid = kvGridsIn(longReader)[0]
   const longValueCells = kvValuesIn(longGrid)
   const idCell = longValueCells.find((node) => String(node.text ?? '').startsWith('no-space-'))
   h.check('the long-value fixture opens its Details page and renders the 180-glyph id, CJK/emoji description and failure reason COMPLETE',
@@ -799,8 +831,8 @@ export default async function (h) {
   // first: at the top, the description's bottom is far below the body's bottom.
   await h.resize(400, 600)
   const descAt = (snap) => {
-    const node = textStarting(snap, 'Long description')
     const body = overlayBody(snap)
+    const node = textStartingIn(body, 'Long description')
     if (node === undefined || body === undefined) return undefined
     return { nodeBottom: rect(node)[1] + rect(node)[3], bodyBottom: rect(body)[1] + rect(body)[3] }
   }
@@ -822,7 +854,7 @@ export default async function (h) {
   // Details tail FIRST (with the row's real geometry as the visibility evidence),
   // then prove Esc-at-tail returns to the catalogue keeping the target.
   const snapAtTail = h.snapshot()
-  const backAtTail = snapAtTail.nodes.find((node) => hasClass(node, 'sf-act') && h.descendantsText(node).includes('Back to presets'))
+  const backAtTail = nodesIn(overlayBody(snapAtTail), 'sf-act').find((node) => h.descendantsText(node).includes('Back to presets'))
   const bodyAtTail = overlayBody(snapAtTail)
   const backVisibleAtTail = backAtTail !== undefined
     && containedXY(snapAtTail.chains, backAtTail) && rect(backAtTail)[3] > 0
@@ -993,7 +1025,7 @@ export default async function (h) {
         && nodesIn(grid, 'sf-kv-v').every((node) => !String(node.text ?? '').includes('New-session default')),
         `labels=${kvLabels(gridFrame).join(',')} relation=${JSON.stringify(relationLine?.text)}`)
       h.check(`${appearance} ${cellKey}: the guide and the description stay OUTSIDE the grid subtree`,
-        markdownNode(gridSnap) === undefined || nodesIn(grid, 'sf-md').length === 0
+        markdownIn(body) === undefined || nodesIn(grid, 'sf-md').length === 0
         && (gridFrame?.texts ?? []).every((entry) => entry.key !== 'details-description'
           || String(entry.text) !== String(kvFact(gridFrame, 'Scope'))),
         `mdInGrid=${grid === undefined ? -1 : nodesIn(grid, 'sf-md').length}`)
@@ -1025,7 +1057,7 @@ export default async function (h) {
         grid: rect(grid), valueColumnX: Math.round(rect(values[0])?.[0] ?? -1),
         keys: keys.length, values: values.length,
         identityBottom: rect(grid)[1] + rect(grid)[3],
-        guideTop: markdownNode(gridSnap) === undefined ? null : rect(markdownNode(gridSnap))[1],
+        guideTop: markdownIn(body) === undefined ? null : rect(markdownIn(body))[1],
         body: rect(body), keyInk: keyColor, valueInk: valueColor,
       })
       await h.key('Escape', 700)
@@ -1067,16 +1099,16 @@ export default async function (h) {
   h.check('the load failure keeps its own label and ONE complete word-wrapped line, outside the grid',
     textOf(failureFrame, 'details-broken') === BROKEN_REASON
     && nodesIn(failureGrid ?? failureBody, 'sf-kv-v').every((node) => !String(node.text ?? '').includes('missing-tools'))
-    && h.texts(failureSnap).some((line) => line.includes('Failed to load'))
-    && textStarting(failureSnap, 'plugin "missing-tools" is not installed;') !== undefined,
+    && textsIn(failureBody).some((line) => line.includes('Failed to load'))
+    && textStartingIn(failureBody, 'plugin "missing-tools" is not installed;') !== undefined,
     `reason=${JSON.stringify(textOf(failureFrame, 'details-broken'))}`)
   h.check('a declaration that publishes no description states it in words and grows no fifth fact',
     textOf(failureFrame, 'details-description') === undefined
-    && h.texts(failureSnap).some((line) => line === 'No description provided.')
+    && textsIn(failureBody).some((line) => line === 'No description provided.')
     && kvLabels(failureFrame).length === 4,
     JSON.stringify({ description: textOf(failureFrame, 'details-description'), labels: kvLabels(failureFrame) }))
   h.check('a broken Custom declaration borrows no official guide',
-    markdownNode(failureSnap) === undefined && (failureFrame?.markdown === undefined),
+    markdownIn(failureBody) === undefined && (failureFrame?.markdown === undefined),
     JSON.stringify({ md: failureFrame?.markdown?.length ?? null }))
   h.capture('details-broken-1280x800', 'the broken declaration: four identity facts, the reason line, no description')
   const appliesBeforeFailure = applies(h).length
