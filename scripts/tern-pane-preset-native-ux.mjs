@@ -79,7 +79,6 @@ const sheetNode = (snap) => nodesWith(snap, 'pk-sheet')[0]
 const scrollNode = (snap) => nodesWith(snap, 'pk-scroll')[0]
 const barNode = (snap) => nodesWith(snap, 'pk-bar')[0]
 const overlayNode = (snap) => nodesWith(snap, 'sf-overlay')[0]
-const overlayBody = (snap) => nodesWith(snap, 'sf-ov-body')[0]
 const markdownNode = (snap) => nodesWith(snap, 'sf-md')[0]
 const buttons = (snap) => nodesWith(snap, 'pk-btn')
 const cardRows = (snap) => nodesWith(snap, 'pk-row').filter((node) => !hasClass(node, 'grp'))
@@ -169,24 +168,34 @@ const markdownIn = (root) => subtreeOf(root).find((node) => hasClass(node, 'sf-m
 /**
  * The reading's own subtree ANCHOR, checked rather than assumed.
  *
- * Every `…In(root)` selector below is handed `overlayBody(snap)`, which is itself a
- * pane-wide first match. So the subtree claim is only as honest as that anchor: the
- * pane must carry exactly ONE overlay, it must be the `lg` one, and its own title must
- * be the preset this reading describes. That is asserted per Details cell, which turns
- * "the body I scoped to is this reading's body" from an assumption into a measured fact.
+ * Every `…In(root)` selector below is handed `readerRoot(snap)`: the ONE `sf-ov-body`
+ * found INSIDE the pane's ONE `sf-overlay`, which must also carry `sz-lg` and be titled
+ * by the wire head of this reading. The root is therefore a descendant by construction,
+ * not a pane-wide first match an independent `sf-ov-body` could win, and the whole
+ * condition is asserted per Details cell instead of being assumed.
  */
 const readerAnchor = (snap) => {
   const overlays = snap.nodes.filter((node) => hasClass(node, 'sf-overlay'))
-  const bodies = snap.nodes.filter((node) => hasClass(node, 'sf-ov-body'))
-  const titles = subtreeOf(overlays[0]).filter((node) => hasClass(node, 'sf-ov-title')).map((node) => String(node.text ?? ''))
+  const overlay = overlays.length === 1 ? overlays[0] : undefined
+  // The body and the title are taken from INSIDE that unique overlay subtree, so the
+  // root a Reader claim is scoped to is a descendant by construction — never a
+  // pane-wide first match that an independent `sf-ov-body` could win.
+  const bodies = overlay === undefined ? [] : nodesIn(overlay, 'sf-ov-body')
+  const titles = overlay === undefined ? [] : nodesIn(overlay, 'sf-ov-title')
   return {
     overlays: overlays.length,
+    lg: overlay !== undefined && hasClass(overlay, 'sz-lg'),
     bodies: bodies.length,
-    lg: overlays.length === 1 && hasClass(overlays[0], 'sz-lg'),
-    title: titles.length === 1 ? titles[0] : undefined,
-    body: bodies[0],
+    title: titles.length === 1 ? String(titles[0].text ?? '') : undefined,
+    body: bodies.length === 1 ? bodies[0] : undefined,
   }
 }
+/** The ONE condition under which a Details claim may read its subtree at all. */
+const anchorIsReading = (anchor, head) => anchor.overlays === 1 && anchor.lg
+  && anchor.bodies === 1 && anchor.body !== undefined && anchor.title === head
+/** The validated Reader root of THIS snapshot, or `undefined`: every claim that depends
+ *  on it then fails closed instead of reading an unanchored subtree. */
+const readerRoot = (snap) => readerAnchor(snap).body
 /** The client's own class tokens of ONE layout path segment (the element itself). */
 const segmentTokens = (path) => {
   const last = String(path).split('>').pop() ?? ''
@@ -422,7 +431,7 @@ const matrixCell = async (h, size) => {
   // screen carries the Back navigation row and the identity block without scrolling.
   const opened = await openDetails(h)
   const details = h.snapshot()
-  const body = overlayBody(details)
+  const body = readerRoot(details)
   const backNode = nodesIn(body, 'sf-act').find((node) => h.descendantsText(node).includes('Back to presets'))
   h.check(`${cellKey}: the Details page is a lg overlay whose body and Back navigation row are on screen`,
     opened && overlayNode(details) !== undefined && hasClass(overlayNode(details), 'sz-lg')
@@ -480,7 +489,7 @@ const matrixCell = async (h, size) => {
   // the cell — that mistake made this very comparison vacuously false in run v8.
   const anchor = readerAnchor(details)
   h.check(`${cellKey}: the subtree every Reader claim is scoped to is THIS reading's own body`,
-    anchor.overlays === 1 && anchor.bodies === 1 && anchor.lg && anchor.title === kvFrame?.head,
+    anchorIsReading(anchor, kvFrame?.head),
     JSON.stringify({ overlays: anchor.overlays, bodies: anchor.bodies, lg: anchor.lg, paintedTitle: anchor.title, wireHead: kvFrame?.head }))
   const readerRows = nodesIn(body, 'sf-row')
   h.check(`${cellKey}: a reading page carries no picker and no footer (its ONE row is the Back navigation)`,
@@ -647,10 +656,10 @@ export default async function (h) {
   // Every claim below is a claim about THIS reading, so it is answered inside the
   // overlay body subtree — never over the whole window, where Tern's own chrome can
   // legitimately carry the same words or the same `sf-md` markup.
-  const reader = overlayBody(snap)
+  const reader = readerRoot(snap)
   const detailAnchor = readerAnchor(snap)
   h.check('the subtree the Details claims are scoped to is the body of THIS reading (one lg overlay, titled by the preset it describes)',
-    detailAnchor.overlays === 1 && detailAnchor.bodies === 1 && detailAnchor.lg && detailAnchor.title === frame?.head,
+    anchorIsReading(detailAnchor, frame?.head),
     JSON.stringify({ overlays: detailAnchor.overlays, bodies: detailAnchor.bodies, lg: detailAnchor.lg, paintedTitle: detailAnchor.title, wireHead: frame?.head }))
   const detailRows = nodesIn(reader, 'sf-row')
   h.check('the page is READ-ONLY: no footer actions, ONE Back navigation row, ONE md body',
@@ -757,7 +766,7 @@ export default async function (h) {
   const guideOpened = await openDetails(h)
   if (!guideOpened) h.log('GUIDE-OPEN-FAIL page=' + String(lastFrame(h)?.page))
   await h.resize(400, 600)
-  const narrowBody = overlayBody(h.snapshot())
+  const narrowBody = readerRoot(h.snapshot())
   const narrowMd = markdownIn(narrowBody)
   h.check(`at the 400x600 minimum the inline guide is TALLER than its viewport, so it must scroll`,
     guideOpened && narrowBody !== undefined && narrowMd !== undefined && rect(narrowMd)[3] > rect(narrowBody)[3],
@@ -767,7 +776,7 @@ export default async function (h) {
   // vacuously on a document that already fit. Both the control and the claim look the
   // line up INSIDE this reading's body, never across the whole window.
   const mdTailOffset = () => {
-    const body = overlayBody(h.snapshot())
+    const body = readerRoot(h.snapshot())
     const tail = textStartingIn(body, 'Expected output: a summary with references')
     if (tail === undefined || body === undefined) return undefined
     return Math.round((rect(tail)[1] + rect(tail)[3]) - (rect(body)[1] + rect(body)[3]))
@@ -775,14 +784,14 @@ export default async function (h) {
   const tailOffsetBefore = mdTailOffset()
   h.check('the negative control at 400x600: the guide tail starts far BELOW the body, so the scroll must matter',
     tailOffsetBefore !== undefined && tailOffsetBefore > 200, JSON.stringify({ tailOffsetBefore }))
-  const guided = await scrollUntilMoved(h, () => rect(markdownIn(overlayBody(h.snapshot())))[1], 'End')
+  const guided = await scrollUntilMoved(h, () => rect(markdownIn(readerRoot(h.snapshot())))[1], 'End')
   h.check('a real End key (retried across the documented stall) moves the CLIENT viewport to the tail',
     scrolls(h).some((op) => op.to === 'end') && guided.moved > 1,
     `moved=${guided.moved} tries=${guided.tries} scrolls=${JSON.stringify(scrolls(h).slice(-2))}`)
   h.measure('the Guide scroll stall observed (End)', JSON.stringify(guided))
   h.capture('guide-tail-400x600', 'the inline guide at the tail in the minimum pane')
   const tailSnap = h.snapshot()
-  const tailBody = overlayBody(tailSnap)
+  const tailBody = readerRoot(tailSnap)
   const guideTail = textStartingIn(tailBody, 'Expected output: a summary with references')
   h.check('the tail of the guide is really on screen after the scroll',
     guideTail !== undefined && containedXY(tailSnap.chains, guideTail)
@@ -797,7 +806,7 @@ export default async function (h) {
   await openDetails(h)
   snap = h.snapshot()
   frame = lastFrame(h)
-  const customReader = overlayBody(snap)
+  const customReader = readerRoot(snap)
   h.check('a Custom declaration reusing a shipped id stays Custom with NO guide section',
     frame?.page === 'details' && kvFact(frame, 'ID') === 'minimal'
     && kvFact(frame, 'Type') === 'Custom' && kvFact(frame, 'Name') === 'My minimal'
@@ -817,7 +826,7 @@ export default async function (h) {
   const longOpened = longBrowsed && await openDetails(h)
   frame = lastFrame(h)
   snap = h.snapshot()
-  const longReader = overlayBody(snap)
+  const longReader = readerRoot(snap)
   const idNode = textStartingIn(longReader, 'no-space-')
   const brokenNode = textStartingIn(longReader, 'plugin "missing-tools" is not installed:')
   const descriptionNode = textStartingIn(longReader, 'Long description')
@@ -854,9 +863,9 @@ export default async function (h) {
     `line=${lineHeight} idCell=${box(idCell)} id=${box(idNode)} description=${box(descriptionNode)} broken=${box(brokenNode)}`)
   h.check('the grid stays inside the Reader body with the long id and never overflows it horizontally',
     longGrid !== undefined && containedXY(snap.chains, longGrid)
-    && rect(longGrid)[0] + rect(longGrid)[2] <= rect(overlayBody(snap))[0] + rect(overlayBody(snap))[2] + 1
-    && longValueCells.length === 4 && kvGridsIn(overlayBody(snap)).length === 1,
-    `grid=${box(longGrid)} body=${box(overlayBody(snap))} values=${longValueCells.length}`)
+    && rect(longGrid)[0] + rect(longGrid)[2] <= rect(longReader)[0] + rect(longReader)[2] + 1
+    && longValueCells.length === 4 && kvGridsIn(longReader).length === 1,
+    `grid=${box(longGrid)} body=${box(longReader)} values=${longValueCells.length}`)
   h.measure('the long-value line counts (client-painted)', JSON.stringify({
     lineHeight,
     idLines: rect(idNode)[3] / lineHeight,
@@ -871,7 +880,7 @@ export default async function (h) {
   // first: at the top, the description's bottom is far below the body's bottom.
   await h.resize(400, 600)
   const descAt = (snap) => {
-    const body = overlayBody(snap)
+    const body = readerRoot(snap)
     const node = textStartingIn(body, 'Long description')
     if (node === undefined || body === undefined) return undefined
     return { nodeBottom: rect(node)[1] + rect(node)[3], bodyBottom: rect(body)[1] + rect(body)[3] }
@@ -894,8 +903,8 @@ export default async function (h) {
   // Details tail FIRST (with the row's real geometry as the visibility evidence),
   // then prove Esc-at-tail returns to the catalogue keeping the target.
   const snapAtTail = h.snapshot()
-  const backAtTail = nodesIn(overlayBody(snapAtTail), 'sf-act').find((node) => h.descendantsText(node).includes('Back to presets'))
-  const bodyAtTail = overlayBody(snapAtTail)
+  const backAtTail = nodesIn(readerRoot(snapAtTail), 'sf-act').find((node) => h.descendantsText(node).includes('Back to presets'))
+  const bodyAtTail = readerRoot(snapAtTail)
   const backVisibleAtTail = backAtTail !== undefined
     && containedXY(snapAtTail.chains, backAtTail) && rect(backAtTail)[3] > 0
   h.measure('the Back row at the tail (geometric visibility — expected out of view; Esc is the fixed path)',
@@ -1038,7 +1047,7 @@ export default async function (h) {
       const opened = await openDetails(h)
       const gridSnap = h.snapshot()
       const gridFrame = lastFrame(h)
-      const body = overlayBody(gridSnap)
+      const body = readerRoot(gridSnap)
       const grids = kvGridsIn(body)
       const grid = grids[0]
       const keys = kvKeysIn(grid)
@@ -1122,7 +1131,7 @@ export default async function (h) {
   const failureOpened = await openDetails(h)
   const failureSnap = h.snapshot()
   const failureFrame = lastFrame(h)
-  const failureBody = overlayBody(failureSnap)
+  const failureBody = readerRoot(failureSnap)
   const failureGrid = kvGridsIn(failureBody)[0]
   h.check('a broken declaration keeps BOTH writes refused with their reason before the reading opens',
     failureBrowsed && actionOf(beforeFailure, 'use')?.disabled === 'Preset failed to load'
