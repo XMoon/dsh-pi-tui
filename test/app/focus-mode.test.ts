@@ -5265,3 +5265,28 @@ test('a claimed subagent-settled Notice stays independently visible for every se
     assert.ok(collapsed.some(block => block.kind === 'activity'))
   }
 })
+
+test('a claimed same-turn Agent relay without any real Process stays visible in collapsed Focus', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 6000, 0),
+    ...workingAgentRelayEvents('relay-no-process-focus', 'NO_PROCESS_FOCUS_RELAY', 6001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('relay-no-process-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 6005, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 6006, 5),
+  ])
+  const messages = folder.messages()
+  const relay = messages.find(message => message.kind === 'system')
+  assert.ok(relay !== undefined && relay.kind === 'system')
+  assert.equal(relay.contextPresentation?.sameTurnNextStep, true, 'fixture: a durable same-turn claim')
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message', 'message'],
+    'fixture: no real Process exists, so no Work owner')
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.ok(collapsed.some(block => block.kind === 'message' && block.message === relay),
+    'without a real Work/Process owner the relay must fail open instead of disappearing')
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === relay).length, 1,
+    'expanded Focus renders the relay exactly once')
+})

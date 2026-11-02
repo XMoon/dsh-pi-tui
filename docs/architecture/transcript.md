@@ -550,8 +550,10 @@ class:
   never moved across that user.
 - Collapsed Focus also hides a foldable Snapshot-only turn (and a proven Working
   `tool-jobs` Notice or same-turn Agent relay with a Thought owner) inside its
-  real Thought; all remain recoverable there. Without an activity owner the rows
-  fail open.
+  real Thought; all remain recoverable there. A same-turn Agent relay
+  additionally requires a REAL Work (Process) owner: in a turn with no Process
+  run at all the relay stays independently visible (fail open) instead of
+  disappearing into an activity-only Thought.
 - **Userless (next-turn wakeup) turns:** there is no initial user to anchor the
   foundation. The leading run of NON-foldable Context — the wakeup Notice and
   any `instructions`/`catalog` — is the foundation; the first foldable
