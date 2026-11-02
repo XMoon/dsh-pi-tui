@@ -78,8 +78,6 @@ const pickerNode = (snap) => nodesWith(snap, 'sf-picker')[0]
 const sheetNode = (snap) => nodesWith(snap, 'pk-sheet')[0]
 const scrollNode = (snap) => nodesWith(snap, 'pk-scroll')[0]
 const barNode = (snap) => nodesWith(snap, 'pk-bar')[0]
-const overlayNode = (snap) => nodesWith(snap, 'sf-overlay')[0]
-const markdownNode = (snap) => nodesWith(snap, 'sf-md')[0]
 const buttons = (snap) => nodesWith(snap, 'pk-btn')
 const cardRows = (snap) => nodesWith(snap, 'pk-row').filter((node) => !hasClass(node, 'grp'))
 const groupRows = (snap) => nodesWith(snap, 'pk-row').filter((node) => hasClass(node, 'grp') && !hasClass(node, 'pk-sticky'))
@@ -183,6 +181,7 @@ const readerAnchor = (snap) => {
   const bodies = overlay === undefined ? [] : nodesIn(overlay, 'sf-ov-body')
   const titles = overlay === undefined ? [] : nodesIn(overlay, 'sf-ov-title')
   return {
+    overlay,
     overlays: overlays.length,
     lg: overlay !== undefined && hasClass(overlay, 'sz-lg'),
     bodies: bodies.length,
@@ -431,13 +430,16 @@ const matrixCell = async (h, size) => {
   // screen carries the Back navigation row and the identity block without scrolling.
   const opened = await openDetails(h)
   const details = h.snapshot()
-  const body = readerRoot(details)
+  // ONE anchor for this cell: the overlay, its body and its title all come from it, so
+  // no Details claim resolves its own subject with a separate pane-wide lookup.
+  const cellAnchor = readerAnchor(details)
+  const body = cellAnchor.body
   const backNode = nodesIn(body, 'sf-act').find((node) => h.descendantsText(node).includes('Back to presets'))
   h.check(`${cellKey}: the Details page is a lg overlay whose body and Back navigation row are on screen`,
-    opened && overlayNode(details) !== undefined && hasClass(overlayNode(details), 'sz-lg')
+    opened && cellAnchor.overlay !== undefined && hasClass(cellAnchor.overlay, 'sz-lg')
     && body !== undefined && containedXY(details.chains, body)
     && backNode !== undefined && containedXY(details.chains, backNode) && rect(backNode)[3] > 8,
-    `opened=${opened} overlay=${overlayNode(details) === undefined ? 'none' : classTokens(overlayNode(details)).join(' ')} body=${box(body)} back=${box(backNode)}`)
+    `opened=${opened} overlay=${classTokens(cellAnchor.overlay ?? {}).join(' ')} body=${box(body)} back=${box(backNode)}`)
   // Owner A4 amendment: the way back is the #301-proven native NAVIGATION row —
   // its label states the destination and the Esc twin, it is a real pointer
   // target, and NO el node and NO stylesheet exist anywhere on this layer.
@@ -487,10 +489,9 @@ const matrixCell = async (h, size) => {
   // The head is a property of the DETAILS frame, so it is read from the frame this
   // reading produced (`kvFrame`), never from the catalogue frame cached at the top of
   // the cell — that mistake made this very comparison vacuously false in run v8.
-  const anchor = readerAnchor(details)
   h.check(`${cellKey}: the subtree every Reader claim is scoped to is THIS reading's own body`,
-    anchorIsReading(anchor, kvFrame?.head),
-    JSON.stringify({ overlays: anchor.overlays, bodies: anchor.bodies, lg: anchor.lg, paintedTitle: anchor.title, wireHead: kvFrame?.head }))
+    anchorIsReading(cellAnchor, kvFrame?.head),
+    JSON.stringify({ overlays: cellAnchor.overlays, bodies: cellAnchor.bodies, lg: cellAnchor.lg, paintedTitle: cellAnchor.title, wireHead: kvFrame?.head }))
   const readerRows = nodesIn(body, 'sf-row')
   h.check(`${cellKey}: a reading page carries no picker and no footer (its ONE row is the Back navigation)`,
     pickerNode(h.snapshot()) === undefined && (lastFrame(h)?.actions ?? undefined) === undefined
@@ -636,10 +637,14 @@ export default async function (h) {
   await openDetails(h)
   snap = h.snapshot()
   frame = lastFrame(h)
+  // ONE anchor for this reading: the overlay, its body and its title all come from it,
+  // so no Details claim resolves its own subject with a separate pane-wide lookup.
+  const detailAnchor = readerAnchor(snap)
+  const reader = detailAnchor.body
   h.check('the Details page REPLACES the picker with a lg overlay headed by the preset it describes',
-    frame?.page === 'details' && overlayNode(snap) !== undefined && hasClass(overlayNode(snap), 'sz-lg')
+    frame?.page === 'details' && detailAnchor.overlay !== undefined && hasClass(detailAnchor.overlay, 'sz-lg')
     && frame?.head === 'Standard mode' && pickerNode(snap) === undefined,
-    `page=${JSON.stringify(frame?.page)} head=${JSON.stringify(frame?.head)} overlay=${overlayNode(snap) === undefined ? 'none' : classTokens(overlayNode(snap)).join(' ')}`)
+    `page=${JSON.stringify(frame?.page)} head=${JSON.stringify(frame?.head)} overlay=${classTokens(detailAnchor.overlay ?? {}).join(' ')}`)
   h.check('the identity block carries the COMPLETE Name/ID/Type/Scope as four ordered grid facts (the relationship block is asserted on the default row)',
     kvFact(frame, 'Name') === 'Standard mode' && kvFact(frame, 'ID') === 'standard'
     && kvFact(frame, 'Type') === 'Built-in'
@@ -653,11 +658,9 @@ export default async function (h) {
     JSON.stringify(spansRuns(identityKv(frame)?.items?.find((entry) => String(entry.k) === 'Scope')?.v))
     === JSON.stringify([['Use: ', 'muted'], ['next session only', ''], [' · Default: ', 'muted'], ['future new sessions', '']]),
     JSON.stringify(spansRuns(identityKv(frame)?.items?.find((entry) => String(entry.k) === 'Scope')?.v)))
-  // Every claim below is a claim about THIS reading, so it is answered inside the
-  // overlay body subtree — never over the whole window, where Tern's own chrome can
+  // Every claim about this reading is answered inside the overlay body subtree of the
+  // ONE anchored overlay — never over the whole window, where Tern's own chrome can
   // legitimately carry the same words or the same `sf-md` markup.
-  const reader = readerRoot(snap)
-  const detailAnchor = readerAnchor(snap)
   h.check('the subtree the Details claims are scoped to is the body of THIS reading (one lg overlay, titled by the preset it describes)',
     anchorIsReading(detailAnchor, frame?.head),
     JSON.stringify({ overlays: detailAnchor.overlays, bodies: detailAnchor.bodies, lg: detailAnchor.lg, paintedTitle: detailAnchor.title, wireHead: frame?.head }))
