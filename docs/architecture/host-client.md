@@ -175,6 +175,34 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   is `indeterminate` and the next Client reconciles it from the Host's durable
   log instead of retrying. The protocol guarantees only a reconnect to the same
   Host; a Host crash is not a graceful migration.
+- **Client-only reexec handoff.** Replacing the Client's own installed build
+  never replaces the Host. The old Client captures its authoritative live facts
+  (`connected` transport and current generation, mounted surface, the
+  authenticated Host `instanceId`, and the current `tuiMainView` Session id),
+  validates the replacement package resolved through the active official
+  profile (a real installed package root with the same exact DSH runtime pin and
+  a normal `dist/local-client.mjs`), and hands the SAME one-shot facts —
+  expected Host instance, current Session id when one is open, DSH anchor,
+  profile and target build fingerprint — to a replacement child process. It
+  releases runner, UI, Domain graph, official transport, Client root and then
+  the kernel Client seat through the existing ONE stop coordinator; only after
+  that complete release may the replacement entry be spawned on the inherited
+  terminal as a new PID (`stdio: inherit`, no detached daemon, no second
+  terminal owner). The old PID is only a waiting parent that forwards the
+  child's exit status and holds no Client Context, TTY reader, seat or business
+  object. The replacement re-authenticates the expected Host, which is
+  discovered with a no-spawn expectation (`HOST_HANDOFF_UNAVAILABLE` when the
+  expected instance is absent/dead, `HOST_IDENTITY_MISMATCH` when another live
+  instance owns the scope) and must reopen the same Session against the current
+  generation; success requires the official Session history `openState` to be
+  `'open'`, and a sessionless handoff must stay sessionless. Failure never
+  starts or replaces a Host, never replays an unacknowledged write and never
+  rolls back to the old build automatically: the replacement exits nonzero with
+  a concise manual-recovery line. No Cookie, token, SessionHandle, writer or UI
+  state crosses the handoff. The only trigger is an internal qualification
+  probe; a user-visible safe reload gate (editor draft, attachments, in-flight
+  answers) belongs to a later milestone.
+
 
 ### Local protocol and version evolution
 

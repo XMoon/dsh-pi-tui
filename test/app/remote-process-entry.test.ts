@@ -12,15 +12,27 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
-import { readFileSync } from 'node:fs'
+import test, { type TestContext } from 'node:test'
+import { mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { randomUUID } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../src/extensions.ts'
-import { startLocalClient } from '../../src/app/remote-process/client-bootstrap.ts'
+import { startLocalClient, type LocalClientStatus } from '../../src/app/remote-process/client-bootstrap.ts'
 import { createControlDispatcher } from '../../src/app/remote-process/entry-control.ts'
-import { stopLocalClient, surfaceStartupFailureLine } from '../../src/app/remote-process/local-client-entry.ts'
+import {
+  createClientReexecChildEnvironment,
+  createClientReexecRequestHandler,
+  finishClientEntryShutdown,
+  handoffStartupFailureLine,
+  inspectClientReexecTarget,
+  prepareClientReexec,
+  resolveProfileInstalledClientTarget,
+  stopLocalClient,
+  surfaceStartupFailureLine,
+  type ClientReexecIntent,
+} from '../../src/app/remote-process/local-client-entry.ts'
 import { LocalScopeError } from '../../src/app/remote-process/local-scope.ts'
 import { collectHostEntryStatus } from '../../src/app/remote-process/host-bootstrap.ts'
 import { finishHostFailureCleanup, HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
@@ -28,6 +40,7 @@ import {
   assertRemoteHostPrerequisites,
   REMOTE_HOST_PREREQUISITE_SERVICES,
 } from '../../src/app/remote/host-prerequisites.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 test('the Host-only overlay disables the TUI runner and the Client UI rows only', () => {
   // The value matters as much as the id: matching only `- id:` lets a broken
@@ -365,4 +378,454 @@ test('a surface startup protocol refusal states the code, preserved Host and exp
     surfaceStartupFailureLine(new LocalScopeError('HOST_BUILD_INCOMPATIBLE', 'local discovery: the Host cannot publish identity for another installed build')),
     'split client surface: local discovery: the Host cannot publish identity for another installed build',
   )
+})
+
+const REEXEC_HOST_INSTANCE = '00000000-0000-4000-8000-000000000000'
+
+const CONNECTED_STATUS: LocalClientStatus = {
+  processRole: 'client',
+  pid: 4242,
+  phase: 'client-local-ready',
+  transport: 'connected',
+  sessionOpen: true,
+  openSessionId: 'session-s',
+  surfaceMounted: true,
+  fiberOwner: 'client-root',
+  extensionService: { present: true },
+  startupFacts: {},
+  host: {
+    scopeId: 'a'.repeat(64),
+    instanceId: REEXEC_HOST_INSTANCE,
+    hostPid: 77,
+    hostStarttime: '123',
+    origin: 'http://127.0.0.1:40000',
+    protocol: 'dsh-pi-tui/local/1',
+    bundleVersion: '0.5.4',
+    dshVersion: '0.2.1-rc.4',
+    buildId: 'b'.repeat(64),
+  },
+}
+
+/** Write one minimal real replacement-package fixture. */
+function writePackage(root: string, options: { version?: string; dshVersion?: string; name?: string } = {}): void {
+  mkdirSync(join(root, 'dist'), { recursive: true, mode: 0o700 })
+  writeFileSync(join(root, 'package.json'), `${JSON.stringify({
+    name: options.name ?? '@xmoon76/dsh-pi-tui',
+    version: options.version ?? '0.5.4-pr3new.1',
+    devDependencies: { '@deepseek-ai/dsh-agent': options.dshVersion ?? '0.2.1-rc.4' },
+  })}\n`)
+  writeFileSync(join(root, 'dist', 'index.mjs'), 'export const value = 1\n')
+  writeFileSync(join(root, 'dist', 'local-client.mjs'), 'export {}\n')
+}
+
+function reexecFixture(t: TestContext): { readonly packageRoot: string; readonly intent: ClientReexecIntent } {
+  const root = testLifecycle(t).tempDir('dsh-pr3-reexec-')
+  const packageRoot = join(root, 'package')
+  writePackage(packageRoot)
+  const target = inspectClientReexecTarget(packageRoot, '0.2.1-rc.4')
+  return {
+    packageRoot,
+    intent: {
+      expectedInstanceId: REEXEC_HOST_INSTANCE,
+      sessionId: 'session-s',
+      dshAnchor: join(root, 'dsh', 'package.json'),
+      profile: 'pi-tui',
+      dshVersion: '0.2.1-rc.4',
+      targetPackageRoot: target.packageRoot,
+      targetEntry: target.entry,
+      targetBuildId: target.buildId,
+      targetBundleVersion: target.bundleVersion,
+    },
+  }
+}
+
+test('the reexec target must be a real package pinned to the same DSH runtime', t => {
+  const root = testLifecycle(t).tempDir('dsh-pr3-target-')
+  const packageRoot = join(root, 'package')
+  writePackage(packageRoot)
+  const target = inspectClientReexecTarget(packageRoot, '0.2.1-rc.4')
+  assert.equal(target.packageRoot, realpathSync(packageRoot))
+  assert.equal(target.entry, join(realpathSync(packageRoot), 'dist', 'local-client.mjs'))
+  assert.equal(target.bundleVersion, '0.5.4-pr3new.1')
+  assert.match(target.buildId, /^[0-9a-f]{64}$/u)
+
+  const wrongName = join(root, 'wrong-name')
+  writePackage(wrongName, { name: '@xmoon76/dsh-pi-tui-other' })
+  assert.throws(() => inspectClientReexecTarget(wrongName, '0.2.1-rc.4'), /not @xmoon76\/dsh-pi-tui/u)
+
+  const wrongPin = join(root, 'wrong-pin')
+  writePackage(wrongPin, { dshVersion: '0.2.1-rc.5' })
+  assert.throws(() => inspectClientReexecTarget(wrongPin, '0.2.1-rc.4'), /pinned to a different DSH runtime/u)
+
+  const missingEntry = join(root, 'missing-entry')
+  writePackage(missingEntry)
+  rmSync(join(missingEntry, 'dist', 'local-client.mjs'))
+  assert.throws(() => inspectClientReexecTarget(missingEntry, '0.2.1-rc.4'), /has no Client entry/u)
+
+  const symlinkedEntry = join(root, 'symlinked-entry')
+  writePackage(symlinkedEntry)
+  const outside = join(root, 'outside-entry.mjs')
+  writeFileSync(outside, 'export {}\n')
+  rmSync(join(symlinkedEntry, 'dist', 'local-client.mjs'))
+  symlinkSync(outside, join(symlinkedEntry, 'dist', 'local-client.mjs'))
+  assert.throws(() => inspectClientReexecTarget(symlinkedEntry, '0.2.1-rc.4'), /regular file owned by this process user/u)
+
+  assert.throws(() => inspectClientReexecTarget('relative/package', '0.2.1-rc.4'), /must be absolute/u)
+
+  // The production fingerprint is derived from the real payload, so a changed
+  // candidate cannot pass the preflight with a stale build identity.
+  writeFileSync(join(packageRoot, 'dist', 'index.mjs'), 'export const value = 2\n')
+  assert.notEqual(inspectClientReexecTarget(packageRoot, '0.2.1-rc.4').buildId, target.buildId)
+})
+
+test('the default reexec target resolves through the active official profile', t => {
+  const root = testLifecycle(t).tempDir('dsh-pr3-profile-')
+  const profileDir = join(root, 'profile')
+  mkdirSync(join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui'), { recursive: true, mode: 0o700 })
+  writeFileSync(join(profileDir, 'package.json'), '{"name":"fixture-profile","private":true}\n')
+  const packageRoot = join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
+  writePackage(packageRoot)
+  const target = resolveProfileInstalledClientTarget(profileDir, '0.2.1-rc.4')
+  assert.equal(target.packageRoot, realpathSync(packageRoot))
+  assert.equal(target.bundleVersion, '0.5.4-pr3new.1')
+
+  const emptyProfile = join(root, 'empty-profile')
+  mkdirSync(emptyProfile, { recursive: true, mode: 0o700 })
+  writeFileSync(join(emptyProfile, 'package.json'), '{"name":"empty-profile","private":true}\n')
+  assert.throws(
+    () => resolveProfileInstalledClientTarget(emptyProfile, '0.2.1-rc.4'),
+    /does not resolve the installed @xmoon76\/dsh-pi-tui/u,
+  )
+})
+
+test('the reexec preflight captures the authoritative Session and refuses an incoherent status', t => {
+  const fixture = reexecFixture(t)
+  const prepare = (status: LocalClientStatus, overrides: Partial<Parameters<typeof prepareClientReexec>[0]> = {}) =>
+    prepareClientReexec({
+      status,
+      verifiedHostInstanceId: REEXEC_HOST_INSTANCE,
+      profileDir: '/profile',
+      dshAnchor: fixture.intent.dshAnchor,
+      profile: 'pi-tui',
+      dshVersion: '0.2.1-rc.4',
+      targetPackageRootOverride: fixture.packageRoot,
+      ...overrides,
+    })
+  const intent = prepare(CONNECTED_STATUS)
+  assert.equal(intent.expectedInstanceId, REEXEC_HOST_INSTANCE)
+  assert.equal(intent.sessionId, 'session-s')
+  assert.equal(intent.targetBuildId, fixture.intent.targetBuildId)
+  assert.equal(intent.targetEntry, fixture.intent.targetEntry)
+
+  // A sessionless Client is a legal handoff and carries no Session.
+  const sessionless = prepare({ ...CONNECTED_STATUS, sessionOpen: false, openSessionId: undefined })
+  assert.equal(sessionless.sessionId, undefined)
+
+  assert.throws(() => prepare({ ...CONNECTED_STATUS, transport: 'disconnected' }), /transport is not connected/u)
+  assert.throws(() => prepare({ ...CONNECTED_STATUS, surfaceMounted: false }), /surface is not mounted/u)
+  assert.throws(() => prepare({ ...CONNECTED_STATUS, host: undefined }), /no authenticated Host identity/u)
+  assert.throws(
+    () => prepare(CONNECTED_STATUS, { verifiedHostInstanceId: randomUUID() }),
+    /not the authenticated Host instance/u,
+  )
+  assert.throws(
+    () => prepare({ ...CONNECTED_STATUS, openSessionId: undefined }),
+    /open Session has no authoritative id/u,
+  )
+})
+
+
+test('the reexec request latches one intent and keeps a refused Client running', t => {
+  const fixture = reexecFixture(t)
+  const records: Array<Record<string, unknown>> = []
+  let stops = 0
+  let prepareCalls = 0
+  const handler = createClientReexecRequestHandler({
+    status: () => CONNECTED_STATUS,
+    prepare: () => {
+      prepareCalls += 1
+      return fixture.intent
+    },
+    requestStop: () => { stops += 1 },
+    emit: record => { records.push(record) },
+  })
+  handler.request()
+  handler.request()
+  assert.equal(handler.intent, fixture.intent)
+  assert.equal(prepareCalls, 1, 'a duplicate probe rewrote the one intent')
+  assert.equal(stops, 1, 'a duplicate probe requested a second Client stop')
+  assert.equal(records.filter(record => record.m4r === 'handoff-requested').length, 1)
+  assert.equal(records.filter(record => record.m4r === 'handoff-request-ignored').length, 1)
+
+  // A Client that is not ready yet is an observable no-op, never a stop.
+  const notReadyRecords: Array<Record<string, unknown>> = []
+  const notReady = createClientReexecRequestHandler({
+    status: () => undefined,
+    prepare: () => { throw new Error('must not prepare before readiness') },
+    requestStop: () => { throw new Error('must not stop before readiness') },
+    emit: record => { notReadyRecords.push(record) },
+  })
+  notReady.request()
+  assert.equal(notReady.intent, undefined)
+  assert.equal(notReadyRecords.filter(record => record.m4r === 'handoff-request-ignored' && record.reason === 'not-ready').length, 1)
+
+  // A rejected preflight keeps the Client alive and unlatched; a later request
+  // may retry, and only the accepted request owns the stop.
+  const retryRecords: Array<Record<string, unknown>> = []
+  let retryStops = 0
+  let rejectFirst = true
+  const retry = createClientReexecRequestHandler({
+    status: () => CONNECTED_STATUS,
+    prepare: () => {
+      if (rejectFirst) {
+        rejectFirst = false
+        throw new Error('local client reexec: the target is invalid')
+      }
+      return fixture.intent
+    },
+    requestStop: () => { retryStops += 1 },
+    emit: record => { retryRecords.push(record) },
+  })
+  retry.request()
+  assert.equal(retry.intent, undefined)
+  assert.equal(retryStops, 0, 'a rejected preflight stopped the live Client')
+  assert.equal(retryRecords.filter(record => record.m4r === 'handoff-request-rejected').length, 1)
+  retry.request()
+  assert.equal(retry.intent, fixture.intent)
+  assert.equal(retryStops, 1)
+
+  // A request that races the ONE stop coordinator is an observable no-op: the
+  // Client is already releasing its resources and must not record a new intent.
+  const stoppingRecords: Array<Record<string, unknown>> = []
+  const stopping = createClientReexecRequestHandler({
+    status: () => CONNECTED_STATUS,
+    prepare: () => fixture.intent,
+    requestStop: () => { throw new Error('must not request a second stop') },
+    emit: record => { stoppingRecords.push(record) },
+    canRequest: () => false,
+  })
+  stopping.request()
+  assert.equal(stopping.intent, undefined)
+  assert.equal(stoppingRecords.filter(record => record.m4r === 'handoff-request-ignored' && record.reason === 'stopping').length, 1)
+})
+
+test('the replacement Client environment strips old qualification state and carries only handoff facts', t => {
+  const fixture = reexecFixture(t)
+  const env = createClientReexecChildEnvironment(fixture.intent, {
+    PATH: '/bin',
+    SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1',
+    SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT: '/side',
+    SPLIT_PROCESS_CLIENT_HMR_PROBE: '1',
+    SPLIT_PROCESS_CLIENT_HMR_FAIL: '1',
+    SPLIT_PROCESS_CLIENT_HMR_HOLD: 'surface@/hold',
+    SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF: '1',
+    SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE: '/hold',
+    SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY: 'surface@/hold',
+    SPLIT_PROCESS_CLIENT_HOLD_BEFORE_START: '/hold',
+    SPLIT_PROCESS_CLIENT_HOLD_STARTUP_GATE: '/hold',
+    SPLIT_PROCESS_CLIENT_FORCE_FAILURE: 'client-bootstrap',
+    SPLIT_PROCESS_CLIENT_FORCE_STARTUP_FATAL: '1',
+    SPLIT_PROCESS_CLIENT_FORCE_REFRESH_UNRESPONSIVE_ONCE: '1',
+    SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK: '1',
+    SPLIT_PROCESS_CLIENT_OMIT_COOKIE: '1',
+    SPLIT_PROCESS_CLIENT_PRESET: 'preset',
+    SPLIT_PROCESS_CLIENT_MODE: 'qualification',
+    SPLIT_PROCESS_CLIENT_SESSION: 'stale-session',
+    SPLIT_PROCESS_CLIENT_RECORD_FILE: '/record/surface.jsonl',
+    SPLIT_PROCESS_DSH_ANCHOR: '/dsh/package.json',
+    SPLIT_PROCESS_PROFILE: 'pi-tui',
+    SPLIT_PROCESS_CLIENT_REEXEC_CHILD_FAILURE: 'client-bootstrap',
+  })
+  for (const name of [
+    'SPLIT_PROCESS_CLIENT_REEXEC_PROBE',
+    'SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT',
+    'SPLIT_PROCESS_CLIENT_REEXEC_CHILD_FAILURE',
+    'SPLIT_PROCESS_CLIENT_HMR_PROBE',
+    'SPLIT_PROCESS_CLIENT_HMR_FAIL',
+    'SPLIT_PROCESS_CLIENT_HMR_HOLD',
+    'SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF',
+    'SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE',
+    'SPLIT_PROCESS_CLIENT_HOLD_ASSEMBLY',
+    'SPLIT_PROCESS_CLIENT_HOLD_BEFORE_START',
+    'SPLIT_PROCESS_CLIENT_HOLD_STARTUP_GATE',
+    'SPLIT_PROCESS_CLIENT_FORCE_STARTUP_FATAL',
+    'SPLIT_PROCESS_CLIENT_FORCE_REFRESH_UNRESPONSIVE_ONCE',
+    'SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK',
+    'SPLIT_PROCESS_CLIENT_OMIT_COOKIE',
+    'SPLIT_PROCESS_CLIENT_PRESET',
+  ]) {
+    assert.equal(env[name], undefined, `${name} leaked into the replacement Client`)
+  }
+  assert.equal(env.PATH, '/bin')
+  assert.equal(env.SPLIT_PROCESS_CLIENT_MODE, 'surface')
+  assert.equal(env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID, fixture.intent.expectedInstanceId)
+  assert.equal(env.SPLIT_PROCESS_CLIENT_SESSION, 'session-s')
+  assert.equal(env.SPLIT_PROCESS_CLIENT_RECORD_FILE, '/record/surface.jsonl')
+  assert.equal(env.SPLIT_PROCESS_DSH_ANCHOR, fixture.intent.dshAnchor)
+  assert.equal(env.SPLIT_PROCESS_PROFILE, 'pi-tui')
+  // The test-only child failure injection is delivered ONLY to this child.
+  assert.equal(env.SPLIT_PROCESS_CLIENT_FORCE_FAILURE, 'client-bootstrap')
+
+  const plain = createClientReexecChildEnvironment(
+    { ...fixture.intent, sessionId: undefined },
+    { SPLIT_PROCESS_CLIENT_SESSION: 'stale-session', SPLIT_PROCESS_CLIENT_FORCE_FAILURE: 'client-bootstrap' },
+  )
+  assert.equal(plain.SPLIT_PROCESS_CLIENT_FORCE_FAILURE, undefined, 'an old Client fault injection was inherited')
+  assert.equal(plain.SPLIT_PROCESS_CLIENT_SESSION, undefined, 'a stale Session intent was inherited')
+})
+
+test('the shutdown tail closes the seat before spawning and propagates the replacement exit', async t => {
+  const fixture = reexecFixture(t)
+  const order: string[] = []
+  const records: Array<Record<string, unknown>> = []
+  const code = await finishClientEntryShutdown({
+    seat: { close: async () => { order.push('seat-close') } },
+    reexec: { intent: fixture.intent, teardownSucceeded: true },
+    emit: record => { records.push(record) },
+    stderr: line => { order.push(`stderr:${line}`) },
+    spawnChild: async (entry, env) => {
+      order.push('spawn')
+      assert.equal(entry, fixture.intent.targetEntry)
+      assert.equal(env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID, fixture.intent.expectedInstanceId)
+      assert.equal(env.SPLIT_PROCESS_CLIENT_MODE, 'surface')
+      return { code: 7, signal: null }
+    },
+  })
+  assert.equal(code, 7)
+  assert.deepEqual(order, ['seat-close', 'spawn'], 'the replacement Client spawned before the seat closed')
+  assert.equal(records.filter(record => record.m4r === 'handoff-parent-exit').length, 1)
+
+  const signaled = await finishClientEntryShutdown({
+    seat: { close: async () => {} },
+    reexec: { intent: fixture.intent, teardownSucceeded: true },
+    emit: record => { records.push(record) },
+    stderr: () => {},
+    spawnChild: async () => ({ code: null, signal: 'SIGTERM' }),
+  })
+  assert.equal(signaled, 128 + 15, 'a signaled replacement Client must surface as a signal exit status')
+})
+
+test('a failed seat close or teardown never spawns a replacement Client', async t => {
+  const fixture = reexecFixture(t)
+  let spawned = 0
+  const records: Array<Record<string, unknown>> = []
+  const seatFailure = await finishClientEntryShutdown({
+    seat: { close: async () => { throw new Error('seat close exploded') } },
+    reexec: { intent: fixture.intent, teardownSucceeded: true },
+    emit: record => { records.push(record) },
+    stderr: () => {},
+    spawnChild: async () => { spawned += 1; return { code: 0, signal: null } },
+  })
+  assert.equal(seatFailure, 1)
+  assert.equal(spawned, 0, 'a failed seat close still spawned C1')
+  assert.equal(records.filter(record => record.m4a0 === 'cleanup-failure' && record.step === 'client-seat').length, 1)
+  assert.equal(records.filter(record => record.m4r === 'handoff-failed' && record.phase === 'teardown').length, 1)
+
+  const teardownFailure = await finishClientEntryShutdown({
+    seat: { close: async () => {} },
+    reexec: { intent: fixture.intent, teardownSucceeded: false },
+    emit: record => { records.push(record) },
+    stderr: () => {},
+    spawnChild: async () => { spawned += 1; return { code: 0, signal: null } },
+  })
+  assert.equal(teardownFailure, 1)
+  assert.equal(spawned, 0, 'an incomplete Client teardown still spawned C1')
+})
+
+test('a failed Client seat close stays a nonzero normal exit without a replacement', async () => {
+  const records: Array<Record<string, unknown>> = []
+  const code = await finishClientEntryShutdown({
+    seat: { close: async () => { throw new Error('seat close exploded') } },
+    emit: record => { records.push(record) },
+    stderr: () => {},
+  })
+  assert.equal(code, 1, 'a seat close failure must stay a nonzero exit even without a reexec')
+  assert.equal(records.filter(record => record.m4a0 === 'cleanup-failure' && record.step === 'client-seat').length, 1)
+})
+
+test('a replacement package that changed after the preflight is refused without spawning', async t => {
+  const fixture = reexecFixture(t)
+  let spawned = 0
+  const stderr: string[] = []
+  writeFileSync(join(fixture.packageRoot, 'dist', 'index.mjs'), 'export const value = 9\n')
+  const records: Array<Record<string, unknown>> = []
+  const code = await finishClientEntryShutdown({
+    seat: { close: async () => {} },
+    reexec: { intent: fixture.intent, teardownSucceeded: true },
+    emit: record => { records.push(record) },
+    stderr: line => { stderr.push(line) },
+    spawnChild: async () => { spawned += 1; return { code: 0, signal: null } },
+  })
+  assert.equal(code, 1)
+  assert.equal(spawned, 0, 'a changed target package was spawned')
+  assert.equal(records.filter(record => record.m4r === 'handoff-failed' && record.phase === 'target').length, 1)
+  assert.match(stderr.join('\n'), /changed between the preflight and the spawn/u)
+  assert.doesNotMatch(stderr.join('\n'), /\/home\/|\/tmp\/|\/proc\//u)
+})
+
+test('a failing spawn is visible, nonzero and leaves no second Client owner', async t => {
+  const fixture = reexecFixture(t)
+  const stderr: string[] = []
+  const records: Array<Record<string, unknown>> = []
+  const code = await finishClientEntryShutdown({
+    seat: { close: async () => {} },
+    reexec: { intent: fixture.intent, teardownSucceeded: true },
+    emit: record => { records.push(record) },
+    stderr: line => { stderr.push(line) },
+    spawnChild: async () => { throw new Error('spawn /private/place ENOENT') },
+  })
+  assert.equal(code, 1)
+  assert.equal(records.filter(record => record.m4r === 'handoff-failed' && record.phase === 'spawn').length, 1)
+  assert.match(stderr.join('\n'), /Start a compatible Client manually/u)
+  assert.doesNotMatch(stderr.join('\n'), /\/private\/place|ENOENT|\bpid\b|cookie|token/iu,
+    'the visible handoff failure leaked a private spawn detail')
+})
+
+test('a handoff failure line is concise, actionable and never leaks paths, PIDs or credentials', () => {
+  const unavailable = handoffStartupFailureLine(
+    new LocalScopeError('HOST_HANDOFF_UNAVAILABLE', 'local discovery: the expected Host is no longer available for Client handoff'),
+  )
+  assert.match(unavailable, /^Client handoff failed: the expected Host is no longer available\./u)
+  assert.match(unavailable, /The Host was not stopped or replaced\./u)
+  assert.match(unavailable, /Start a compatible Client manually to continue\./u)
+
+  const mismatch = handoffStartupFailureLine(
+    new LocalScopeError('HOST_IDENTITY_MISMATCH', 'local discovery: the live Host is not the expected handoff instance'),
+  )
+  assert.match(mismatch, /not the expected instance/u)
+
+  const protocol = handoffStartupFailureLine(
+    new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'local discovery: the live Host uses a different local protocol or DSH runtime'),
+  )
+  assert.match(protocol, /different local protocol or DSH runtime/u)
+
+  const session = handoffStartupFailureLine(new Error('local client entry: the official Session history open failed'))
+  assert.match(session, /official Session history open failed/u)
+
+  const arbitrary = handoffStartupFailureLine(new Error('spawn /home/private/profile/node ENOENT'))
+  assert.doesNotMatch(arbitrary, /\/home\/private|ENOENT|spawn/iu)
+  for (const line of [unavailable, mismatch, protocol, session, arbitrary]) {
+    assert.doesNotMatch(line, /cookie|connectUrl|token|\/proc\/|\bpid\b|\/home\/|\/tmp\//iu)
+  }
+})
+
+test('the reexec trigger is internal, singular and starts only after the ONE seat close', () => {
+  const source = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'src', 'app', 'remote-process', 'local-client-entry.ts'),
+    'utf8',
+  )
+  assert.match(source, /if \(process\.env\.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1'\)/u)
+  assert.match(source, /process\.on\('SIGUSR2', \(\) => \{ reexecHandler\?\.request\(\) \}\)/u)
+  assert.equal((source.match(/\bspawn\(process\.execPath/gu) ?? []).length, 1, 'the entry must own exactly one replacement spawn')
+  const finishSource = source.slice(
+    source.indexOf('export async function finishClientEntryShutdown'),
+    source.indexOf('function expectedHostInstanceFromEnvironment'),
+  )
+  assert.ok(finishSource.indexOf('await options.seat.close()') >= 0)
+  assert.ok(
+    finishSource.indexOf('await options.seat.close()') < finishSource.indexOf('await spawnChild('),
+    'the replacement Client must not spawn before the Client seat close',
+  )
+  assert.match(source, /expectedInstanceId: expectedHostInstanceId/u,
+    'the handoff Client must pass the expected instance into discovery')
 })

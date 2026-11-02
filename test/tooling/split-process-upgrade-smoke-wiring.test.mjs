@@ -120,3 +120,45 @@ test('both Client peer owners are real and every upgrade root is isolated', () =
     'the side-build must not copy the DSH family or a second Cordis')
   assert.match(source, /the side-by-side \$\{name\} resolves outside its own package/u)
 })
+
+test('the upgrade lane owns the real Client reexec handoff and its two live negatives', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const reexecIndex = source.indexOf("clientA.signalBusiness('SIGUSR2')")
+  assert.ok(reexecIndex > 0, 'the upgrade lane must trigger the real reexec probe')
+  // Client A stays the live PTY Client until the side-by-side build exists.
+  assert.match(source, /SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1'/u)
+  assert.match(source, /SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT: sideBuildPackagePath/u)
+  assert.match(source, /m4r === 'handoff-restored'/u)
+  assert.match(source, /clientClosed\.sessionOpen, false/u)
+  assert.match(source, /clientClosed\.owners/u)
+  assert.match(source, /c1Restored\.clientBuildId, newBuildId/u)
+  assert.match(source, /assert\.equal\(await seatIsFree\(clientSeatName\), false/u)
+  // The OLD Client exits only AFTER the replacement ran; the reexec is not
+  // another same-PID surface revision.
+  const oldClientExitIndex = source.indexOf("clientA.send('/exit\\r')")
+  assert.ok(oldClientExitIndex > reexecIndex, 'the old Client must exit only after the reexec handoff was driven')
+  assert.match(source, /newOsPid: c1Pid !== clientAPid/u)
+  assert.match(source, /oldParentWaitedDuringChild: true/u)
+  // Negative 1: a wrong expected Host never connects and never publishes ready.
+  assert.match(source, /SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID: randomUUID\(\)/u)
+  assert.match(source, /HOST_IDENTITY_MISMATCH/u)
+  assert.match(source, /noHostConnect: true/u)
+  assert.match(source, /noPathPidOrSecret: true/u)
+  // Negative 2: the fault is injected into the CHILD only.
+  assert.match(source, /SPLIT_PROCESS_CLIENT_REEXEC_CHILD_FAILURE: 'client-bootstrap'/u)
+  assert.match(source, /qualification forced client bootstrap failure/u)
+  assert.match(source, /noAutoRecovery: true/u)
+  assert.match(source, /noReplay: true/u)
+  // The original U02/U04 cross-build qualification and the durable Session
+  // release/U05/U06 ordering must remain AFTER the reexec section.
+  assert.ok(source.indexOf('qualification-host-foundation') > reexecIndex,
+    'U02 must still run after the reexec handoff')
+  assert.ok(source.indexOf('crossBuildSurface') > reexecIndex,
+    'U04 must still run after the reexec handoff')
+  assert.ok(source.indexOf("writeFileSync(releaseBarrier") > reexecIndex,
+    'the admitted Turn must still be released after the reexec handoff')
+  assert.ok(source.indexOf('SPLIT_UPGRADE_SMOKE_PASS') > reexecIndex)
+  // A real installed package is the only target: no copied/faked dist payload.
+  assert.doesNotMatch(source, /copyFileSync|cpSync/u)
+  assert.match(source, /function installSideBuild/u)
+})
