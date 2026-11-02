@@ -585,6 +585,39 @@ export async function finishClientEntryShutdown(options: ClientEntryShutdownOpti
   return clientReexecExitCode(exit)
 }
 
+/**
+ * The FINAL gate before a replacement Client publishes `handoff-restored`.
+ * It reads the LIVE status after the Session-open proof and refuses a Client
+ * whose official transport fatal, expected Host instance, connection or
+ * physical surface is no longer current. `status.host` is the composition's
+ * authenticated record (a static fact), so the meaningful currentness checks
+ * are the transport state/generation (the proof rejects a generation rollover)
+ * and this terminal-fatal gate.
+ */
+export function assertHandoffRestored(
+  status: LocalClientStatus,
+  expectedInstanceId: string,
+  terminalError?: unknown,
+): { readonly hostInstanceId: string } {
+  if (terminalError !== undefined) {
+    throw terminalError instanceof Error ? terminalError : new Error(String(terminalError))
+  }
+  const hostInstanceId = status.host?.instanceId
+  if (hostInstanceId !== expectedInstanceId) {
+    throw new LocalScopeError(
+      'HOST_IDENTITY_MISMATCH',
+      'local client entry: the handoff Client is no longer authenticated to the expected Host instance',
+    )
+  }
+  if (status.transport !== 'connected') {
+    throw new Error('local client entry: the handoff Client has no connected official transport')
+  }
+  if (status.surfaceMounted !== true) {
+    throw new Error('local client entry: the handoff Client surface is not mounted')
+  }
+  return { hostInstanceId }
+}
+
 /** Read the one-shot handoff expectation; absent outside a replacement Client. */
 export function expectedHostInstanceFromEnvironment(mode: LocalClientEntryMode): string | undefined {
   const raw = process.env.SPLIT_PROCESS_CLIENT_EXPECTED_INSTANCE_ID
@@ -1454,19 +1487,26 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         throw new Error('local client entry: the handoff Client has no connected official transport')
       }
       await handle.awaitHandoffOpen(surfaceFacts.sessionId, startupAbort.signal)
+      // A stop/signal or an official transport fatal may have landed during the
+      // open proof; never publish `handoff-restored` after either.
+      if (stopping !== undefined) {
+        await stopping
+        return
+      }
       const restored = handle.status
+      const restoredFacts = assertHandoffRestored(restored, expectedHostInstanceId, terminalError)
       emit({
         m4r: 'handoff-restored',
         processRole: 'client',
         pid: process.pid,
         expectedHostInstanceId,
-        hostInstanceId: restoredHost.instanceId,
+        hostInstanceId: restoredFacts.hostInstanceId,
         ...(surfaceFacts.sessionId === undefined ? {} : { sessionId: surfaceFacts.sessionId }),
         clientBuildId: scope.buildId,
-        transport: 'connected',
+        transport: restored.transport,
         sessionOpen: restored.sessionOpen,
         sessionHistoryOpen: surfaceFacts.sessionId !== undefined,
-        surfaceMounted: true,
+        surfaceMounted: restored.surfaceMounted,
       })
     }
     emit({ m4a0: 'ready', ...traceStatus(handle.status) })
