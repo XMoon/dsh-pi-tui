@@ -841,7 +841,7 @@ test('a handoff cancelled before spawn never spawns and reports one visible line
   const records: Array<Record<string, unknown>> = []
   const code = await finishClientEntryShutdown({
     seat: { close: async () => {} },
-    reexec: { intent: fixture.intent, teardownSucceeded: true, cancelled: true },
+    reexec: { intent: fixture.intent, teardownSucceeded: true, cancelled: () => true },
     emit: record => { records.push(record) },
     stderr: line => { stderr.push(line) },
     spawnChild: async () => { spawned += 1; return { code: 0, signal: null } },
@@ -854,6 +854,37 @@ test('a handoff cancelled before spawn never spawns and reports one visible line
   assert.match(stderr[0], /The Host was not stopped or replaced\./u)
   assert.match(stderr[0], /Start a compatible Client manually to continue\./u)
   assert.doesNotMatch(stderr[0], /\/home\/|\/tmp\/|\/proc\/|\bpid\b|cookie|token|connectUrl/iu)
+})
+
+test('a termination signal during the seat close race cancels before spawn', async t => {
+  const fixture = reexecFixture(t)
+  let spawned = 0
+  const stderr: string[] = []
+  const records: Array<Record<string, unknown>> = []
+  const cancelled = { value: false }
+  let releaseSeat!: () => void
+  const seatClose = new Promise<void>(resolve => { releaseSeat = resolve })
+  const pending = finishClientEntryShutdown({
+    seat: { close: async () => { await seatClose } },
+    reexec: {
+      intent: fixture.intent,
+      teardownSucceeded: true,
+      // The live latch must be read AFTER the awaited seat close.
+      cancelled: () => cancelled.value,
+    },
+    emit: record => { records.push(record) },
+    stderr: line => { stderr.push(line) },
+    spawnChild: async () => { spawned += 1; return { code: 0, signal: null } },
+  })
+  // The signal lands while seat.close() is still pending.
+  cancelled.value = true
+  releaseSeat()
+  const code = await pending
+  assert.equal(code, 1)
+  assert.equal(spawned, 0, 'a signal during the seat-close wait still spawned the replacement')
+  assert.equal(records.filter(record => record.m4r === 'handoff-failed' && record.phase === 'cancelled').length, 1)
+  assert.equal(stderr.length, 1, 'the cancelled handoff must print ONE visible line')
+  assert.match(stderr[0], /cancelled by a termination signal/u)
 })
 
 test('the spawned replacement child is exposed to the waiting parent exactly once', async t => {
