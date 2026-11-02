@@ -188,12 +188,13 @@ export function createAgentContextIdentity(deps: AgentContextIdentityDeps): Agen
     const demand: string[] = []
     for (const id of ids) {
       // Already-materialized official title (live/retained Session snapshot):
-      // the highest authority, read synchronously and never replayed.
-      let title = titles.get(id)
-      if (title === undefined) {
-        title = provenTitle(deps.reader.sessionStatus(id)?.title)
-        if (title !== undefined) titles.set(id, title)
-      }
+      // the highest authority. Read it on EVERY pass — a title that becomes
+      // available or changes after an async fallback must replace that value.
+      // An absent status/title stays UNKNOWN (the port conflates "no title"
+      // and a failed read), so it never clears a previously proven title.
+      const official = provenTitle(deps.reader.sessionStatus(id)?.title)
+      if (official !== undefined) titles.set(id, official)
+      const title = titles.get(id)
       if (title !== undefined) {
         next.set(id, title)
         continue
@@ -237,8 +238,9 @@ export function createAgentContextIdentity(deps: AgentContextIdentityDeps): Agen
         if (disposed || deps.isCleanedUp()) return
         if (epoch !== batchEpoch || !deps.isCurrentSubject(batchSubject)) return
         for (const [id, title] of resolved) {
-          // A title already read synchronously from the live projection is
-          // NEWER than this batch (started before it became materialized).
+          // A title already known from the live projection is at least as
+          // current as this batch; the resolve() below re-reads the live
+          // projection and lets it replace the batch value when available.
           if (!titles.has(id)) titles.set(id, title)
         }
         // A sender that appeared while this batch was in flight still needs

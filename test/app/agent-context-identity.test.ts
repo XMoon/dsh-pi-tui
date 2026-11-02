@@ -157,6 +157,43 @@ test('the already-materialized official title wins over the catalog label', () =
   assert.deepEqual(h.reader.listCalls, [], 'a proven title needs no list read')
 })
 
+test('a later official title update replaces the title already on screen', () => {
+  const h = harness()
+  h.reader.statusTitles.set('session-child-update', '第一次标题')
+  h.identity.observe([relayRow('session-child-update')], MAIN)
+  assert.equal(h.labels().get('session-child-update'), '第一次标题')
+  // The same live subject repaints after the official projection changed.
+  h.reader.statusTitles.set('session-child-update', '第二次标题')
+  h.identity.observe([relayRow('session-child-update')], MAIN)
+  assert.equal(h.labels().get('session-child-update'), '第二次标题',
+    'the cached title never suppresses the current materialized projection')
+  assert.ok(h.published.length >= 2, 'the replacement was actually republished')
+})
+
+test('an async fallback title yields to a later official title update', async () => {
+  const h = harness()
+  h.reader.listed.push(summary('session-child-async-update'))
+  h.reader.batchTitles.set('session-child-async-update', '异步标题')
+  h.identity.observe([relayRow('session-child-async-update')], MAIN)
+  await settle()
+  assert.equal(h.labels().get('session-child-async-update'), '异步标题', 'the batch fallback is shown first')
+  h.reader.statusTitles.set('session-child-async-update', '正式标题')
+  h.identity.observe([relayRow('session-child-async-update')], MAIN)
+  assert.equal(h.labels().get('session-child-async-update'), '正式标题',
+    'the materialized official projection replaces the older async fallback')
+})
+
+test('an absent status title is UNKNOWN and never clears a proven title', () => {
+  const h = harness()
+  h.reader.statusTitles.set('session-child-unknown', '已知标题')
+  h.identity.observe([relayRow('session-child-unknown')], MAIN)
+  assert.equal(h.labels().get('session-child-unknown'), '已知标题')
+  h.reader.statusTitles.delete('session-child-unknown')
+  h.identity.observe([relayRow('session-child-unknown')], MAIN)
+  assert.equal(h.labels().get('session-child-unknown'), '已知标题',
+    'absence conflates no-title and failed-read; it is not a confirmed removal')
+})
+
 test('the catalog label shows immediately and one projection batch resolves the title', async () => {
   const h = harness()
   h.catalog.set('session-child-2', 'Catalog Reviewer')
