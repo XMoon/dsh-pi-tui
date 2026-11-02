@@ -344,8 +344,21 @@ function imageRef(attachmentId: string, name: string, mediaType: ImageAttachment
   return { attachmentId, mediaType, bytes: bytes.byteLength, width: 120, height: 80, name }
 }
 
-/** One Assistant answer with one published SVG (the real sidecar path). */
-function assistantSvgVisual(svg: string): TranscriptFolder {
+/**
+ * One Assistant answer with one published SVG (the real sidecar path).
+ *
+ * The return also carries the EXACT raster identity the production figure hands
+ * to the loader — `src/tui/components/transcript/visual-figure.ts` builds its
+ * `SvgThumbnail` from `source.svg.digest` plus the option `svgAdmissionWidth`,
+ * which `src/tui-app.ts` passes through from `source.svgAdmissionWidth`. A
+ * diagnostic therefore never has to guess the variant key.
+ */
+function assistantSvgVisual(svg: string): {
+  readonly folder: TranscriptFolder
+  readonly digest: string
+  readonly admissionWidth: number
+} {
+  const admissionWidth = 64
   const fact = svgFactFromArgs({ title: 'Service topology', description: 'Gateway -> App', svg })
   const folder = new TranscriptFolder()
   folder.apply([{
@@ -388,7 +401,7 @@ function assistantSvgVisual(svg: string): TranscriptFolder {
       chart: undefined,
       svg: fact,
       svgSource: svg,
-      svgAdmissionWidth: 64,
+      svgAdmissionWidth: admissionWidth,
     },
   }
   setAssistantVisualPresentation(assistant, {
@@ -404,7 +417,106 @@ function assistantSvgVisual(svg: string): TranscriptFolder {
     content: undefined,
     assistantRevision: 0,
   }, [publication])
-  return folder
+  return { folder, digest: fact.digest, admissionWidth }
+}
+
+/**
+ * The failure-only read of the SVG raster chain on the native Zellij Screen
+ * path. It separates the boundaries that all looked like one generic
+ * "timed out waiting for the SVG thumbnail raster":
+ *
+ *   - `loader` — the real `SvgRasterLoader` variant state. `idle` means the
+ *     component never requested a raster; `loading` means the isolated
+ *     rasterizer child is still running; `error` carries its real reason (the
+ *     rasterizer is bounded at SVG_RASTER_TIMEOUT_MS and a failed variant is
+ *     never retried inside one cache lifetime); `ready` means the PNG exists.
+ *   - `graphics` / `recheck` — SIXEL admission facts AFTER the Screen handoff.
+ *     `startZellijSixelApp` proves `canPaint()` before the test goes
+ *     fullscreen, and a fullscreen handoff re-emits the bounded `CSI c`
+ *     re-check, so an admission that was true earlier may be pending or
+ *     revoked now.
+ *   - `dcsCount` / `viewportTail` — with `ready` and `canPaint()` true and no
+ *     DCS at the sink, the fault is downstream (component repaint, encoder,
+ *     Screen crop or sink), which the viewport text distinguishes
+ *     (`SVG image unavailable` / `Rendering SVG image…`).
+ *
+ * The variant key is read from the loader the fixture actually injects, never
+ * guessed, and `diagnose` runs only on failure and stays bounded.
+ */
+function svgRasterProbe(
+  terminal: ZellijSixelAppTerminal,
+  graphics: ZellijNegotiatedGraphics,
+  svgLoader: SvgRasterLoader,
+  variant: () => { readonly digest: string, readonly width: number },
+  rasterWidths: readonly number[],
+): {
+  state: () => ReturnType<SvgRasterLoader['get']>
+  protocol: () => ReturnType<ZellijNegotiatedGraphics['selectedProtocol']>
+  diagnose: () => Promise<string>
+} {
+  return {
+    state: () => {
+      const { digest, width } = variant()
+      return svgLoader.get(digest, width)
+    },
+    protocol: () => graphics.selectedProtocol(),
+    diagnose: async () => {
+      const { digest, width } = variant()
+      const state = svgLoader.get(digest, width)
+      const wire = terminal.writes.join('')
+      await terminal.waitForRender()
+      return JSON.stringify({
+        // The exact key the raster was requested under.
+        variant: { digest: digest.slice(0, 16), width },
+        loader: state.state === 'error'
+          ? { state: 'error', error: state.error.message }
+          : { state: state.state },
+        requestedWidths: rasterWidths.slice(-3),
+        graphics: { mode: graphics.mode, protocol: graphics.selectedProtocol(), canPaint: graphics.canPaint() },
+        recheck: { csiCInWindow: wire.includes('\x1b[c'), requeries: terminal.requeries },
+        dcsCount: paintedRasters(terminal).length,
+        viewportTail: terminal.getViewport().join('\n').slice(-400),
+      })
+    },
+  }
+}
+
+/**
+ * Wait for the next SVG raster DCS, but let a boundary that can no longer
+ * produce one settle the wait with its own reason. The plain `until` waits the
+ * whole 30 s budget on a raster that can never arrive:
+ *
+ *   - a rasterizer that exceeds its 3 s bound leaves a terminal `error` variant
+ *     that is never retried inside one cache lifetime;
+ *   - the Zellij SIXEL admission is one-way, so a `null` protocol after the
+ *     fullscreen `CSI c` re-check can never paint again.
+ *
+ * `ready` with `canPaint()` true and no DCS still uses the full budget and then
+ * reports the probe — a slow repaint is a real outcome this case must not turn
+ * into a fast failure.
+ */
+async function nextSvgRaster(
+  terminal: ZellijSixelAppTerminal,
+  before: number,
+  label: string,
+  probe: ReturnType<typeof svgRasterProbe>,
+): Promise<string> {
+  const deadline = Date.now() + 30_000
+  for (;;) {
+    const rasters = paintedRasters(terminal)
+    if (rasters.length > before) return rasters.at(-1)!
+    const current = probe.state()
+    if (current.state === 'error') {
+      assert.fail(`${label}: the SVG raster loader failed before any pixel was painted: ${current.error.message}; ${await probe.diagnose()}`)
+    }
+    if (probe.protocol() === null) {
+      assert.fail(`${label}: the Zellij SIXEL admission was revoked before any pixel was painted (loader: ${current.state}); ${await probe.diagnose()}`)
+    }
+    if (Date.now() > deadline) {
+      assert.fail(`timed out waiting for ${label} (loader: ${current.state}); ${await probe.diagnose()}`)
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
 }
 
 // ── Z01b/Z06b/Z08b: explicit preference and the strict WT auto filter ──────
@@ -684,16 +796,39 @@ test('ZE04: Draft JPEG/WebP and the transcript image Viewer keep their product p
 // ── ZE05: the Assistant SVG thumbnail and Viewer Preview ──────────────────
 
 test('ZE05: an Assistant SVG thumbnail and the SVG Viewer Preview paint through the same SIXEL owner', async (t) => {
-  const h = await startZellijSixelApp(t)
+  // The fixture's own rasterizer seam: the loader the app actually uses, with
+  // the real requested widths recorded. Nothing here replaces the native child —
+  // `rasterizeSvg` still runs, so the pixels this case asserts are real.
+  const rasterWidths: number[] = []
+  const svgLoader = new SvgRasterLoader(async (source, options) => {
+    rasterWidths.push(options.targetWidth)
+    return rasterizeSvg(source, options)
+  })
+  const h = await startZellijSixelApp(t, { svgLoader })
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
+  const visual = assistantSvgVisual(svg)
   h.app.setFullscreen(true)
   h.terminal.writes.length = 0
-  h.app.setTranscript(assistantSvgVisual(svg).messages())
+  h.app.setTranscript(visual.folder.messages())
   h.app.requestRender()
   await until(() => h.terminal.getViewport().join('\n').includes('Service topology'), 'the Assistant SVG card')
-  await until(() => paintedRasters(h.terminal).length > 0, 'the SVG thumbnail raster')
-  const thumbnail = decodeSixel(paintedRasters(h.terminal).at(-1)!)
+  const thumbnailDcs = await nextSvgRaster(
+    h.terminal,
+    0,
+    'the SVG thumbnail raster',
+    svgRasterProbe(
+      h.terminal,
+      h.graphics,
+      svgLoader,
+      () => ({ digest: visual.digest, width: visual.admissionWidth }),
+      rasterWidths,
+    ),
+  )
+  const thumbnail = decodeSixel(thumbnailDcs)
   assert.ok(thumbnail.width > 0 && thumbnail.height > 0)
+  // The watched variant key is the one production asked for, so a reported
+  // `idle` can only mean "never requested" and never a guessed width.
+  assert.equal(rasterWidths[0], visual.admissionWidth, 'the Assistant figure rasterized its admitted width')
 
   const handles = [...(h.app as unknown as {
     visualFigureHandles: Map<unknown, Map<string, unknown>>
@@ -701,8 +836,21 @@ test('ZE05: an Assistant SVG thumbnail and the SVG Viewer Preview paint through 
   assert.equal(handles.length, 1)
   h.terminal.writes.length = 0
   ;(h.app as unknown as { openSvgViewer(handle: unknown): void }).openSvgViewer(handles[0])
-  await until(() => paintedRasters(h.terminal).length > 0, 'the SVG Viewer Preview raster')
-  assert.ok(decodeSixel(paintedRasters(h.terminal).at(-1)!).width > 0)
+  // The Viewer owns a DIFFERENT display derivative of the same digest, so the
+  // probe follows the last variant the real consumer requested.
+  const viewerDcs = await nextSvgRaster(
+    h.terminal,
+    0,
+    'the SVG Viewer Preview raster',
+    svgRasterProbe(
+      h.terminal,
+      h.graphics,
+      svgLoader,
+      () => ({ digest: visual.digest, width: rasterWidths[rasterWidths.length - 1] ?? visual.admissionWidth }),
+      rasterWidths,
+    ),
+  )
+  assert.ok(decodeSixel(viewerDcs).width > 0)
 
   h.terminal.writes.length = 0
   h.terminal.sendInput('\t')
@@ -710,6 +858,54 @@ test('ZE05: an Assistant SVG thumbnail and the SVG Viewer Preview paint through 
   const sourceView = h.terminal.getViewport().join('\n')
   assert.ok(sourceView.includes('<svg') && sourceView.includes('<rect'), 'Source stays raw SVG text')
   assert.equal(paintedRasters(h.terminal).length, 0, 'the Source page paints no image')
+})
+
+// ── negative control: a raster failure must not degrade into the generic wait ──
+
+/**
+ * The guard for the diagnostic itself: `nextSvgRaster`'s loader-error branch is
+ * what keeps a terminal SVG raster failure out of the 30 s DCS budget. With that
+ * branch removed the same fixture fails with the generic
+ * "timed out waiting for the SVG thumbnail raster" after the whole budget (this
+ * was the measured P2 symptom), so the fast settle here is the load-bearing
+ * behaviour, not a decoration. The rasterizer is failed through the fixture's own
+ * injectable seam; the real `SvgRasterLoader` still owns the variant state.
+ * Provenance: this is the negative companion of the ZE05 Assistant SVG case.
+ */
+test('negative control: a terminal SVG raster failure settles the SIXEL DCS wait with its own reason', async (t) => {
+  const rasterFailure = new Error('SVG rasterization exceeded 3000 ms')
+  const svgLoader = new SvgRasterLoader(async () => { throw rasterFailure })
+  const h = await startZellijSixelApp(t, { svgLoader })
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
+  const visual = assistantSvgVisual(svg)
+  h.app.setFullscreen(true)
+  h.terminal.writes.length = 0
+  h.app.setTranscript(visual.folder.messages())
+  h.app.requestRender()
+  await until(() => h.terminal.getViewport().join('\n').includes('Service topology'), 'the Assistant SVG card')
+  const started = Date.now()
+  await assert.rejects(
+    () => nextSvgRaster(
+      h.terminal,
+      0,
+      'the SVG thumbnail raster',
+      svgRasterProbe(
+        h.terminal,
+        h.graphics,
+        svgLoader,
+        () => ({ digest: visual.digest, width: visual.admissionWidth }),
+        [],
+      ),
+    ),
+    (error: Error) => error.message.includes('the SVG raster loader failed before any pixel was painted')
+      && error.message.includes(rasterFailure.message)
+      && error.message.includes('"dcsCount":0'),
+    'the wait surfaces the loader error itself, not a generic DCS timeout',
+  )
+  assert.ok(Date.now() - started < 10_000,
+    'the loader error settles the wait immediately instead of consuming the 30 s raster budget')
+  assert.ok(h.terminal.getViewport().join('\n').includes('SVG image unavailable'),
+    'the product figure keeps its text fallback after the raster failure')
 })
 
 // ── ZE06: resize and Main↔Alt keep one owner and no stale worker ───────────
