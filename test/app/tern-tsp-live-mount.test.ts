@@ -979,7 +979,7 @@ test('non-key SDK events reach no business action while no modal seat is up', as
       noteUserInput: () => { calls.noteUserInput += 1 },
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
-      openModelPicker() {},
+      openModelPicker() {}, openModelQuick() {},
     })
     await settle()
     // INJECTED protocol events, not events this UI emits: the current TSP view
@@ -1060,7 +1060,7 @@ async function mountDiagnosed(tern: ScriptedTern) {
     noteUserInput: () => { business.noteUserInput += 1 },
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {},
+    openModelPicker() {}, openModelQuick() {},
   })
   return { renderer, diagnostics, notifications, business, fatals }
 }

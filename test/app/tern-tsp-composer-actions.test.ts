@@ -1,5 +1,6 @@
 /**
- * TSP-7 PR-C: the composer action row (Model / Effort / Send / Stop).
+ * TSP-7 PR-C/PR-G: the composer action row (the ONE combined Model·Effort
+ * trigger / Send / Stop).
  *
  * Every case mounts the PRODUCTION `mountTspRenderer` over the scripted pane
  * and asserts on the REAL reconciled wire tree plus the bound business
@@ -12,9 +13,10 @@
  *   enforce `disabled` on an `el` button — measured);
  * - Stop rides the EXISTING cancel intent and exists only while the committed
  *   snapshot says busy;
- * - Model/Effort forward to the ONE late-bound `/model` UI entry with the
- *   right hint, and only on the CURRENT seat (modal/picker/hydration/
- *   unbound/disposed each refuse);
+ * - the combined trigger forwards to the ONE late-bound `/model` quick entry,
+ *   and to the registered full entry where the pane cannot present the quick
+ *   menu — never a fabricated submission; only on the CURRENT seat
+ *   (modal/picker/hydration/unbound/disposed each refuse);
  * - the label width rule: short labels below 72 columns, bounded values at or
  *   above, never a fabricated `default`/`high`.
  *
@@ -88,15 +90,36 @@ function dockNode(pane: TspPane, key: string): WireNode | undefined {
 function composerButtons(pane: TspPane): Map<string, WireNode> {
   const out = new Map<string, WireNode>()
   for (const node of dockNodes(pane)) {
-    if (node.k !== 'el') continue
+    // Only real buttons: the quick menu's positioning container is an `el` div
+    // with a `composer-` key of its own.
+    if (node.k !== 'el' || node.p['tag'] !== 'button') continue
     const key = String(node.p['key'] ?? '')
-    // The keys carry the presentation-scope epoch (`composer-model-s<N>`);
+    // The keys carry the presentation-scope epoch (`composer-model-quick-s<N>`);
     // the product name is the prefix up to the epoch suffix.
     if (!key.startsWith('composer-')) continue
     const base = key.replace(/-s\d+(?:r\d+)?$/, '')
     out.set(base, node)
   }
   return out
+}
+
+/** The combined trigger's three keyed label parts, read from the LIVE node set
+ *  by their explicit keys: an appearance/disappearance of the effort part never
+ *  hides a part behind a stale add-time child list. A part the frame does not
+ *  paint reads `''`. */
+function triggerParts(pane: TspPane): { name: string; effort: string; chevron: string } {
+  const nodes = dockNodes(pane)
+  const part = (key: string): string => {
+    const node = nodes.find(candidate => String(candidate.p['key'] ?? '') === key)
+    return node === undefined ? '' : String(node.p['text'] ?? '')
+  }
+  return { name: part('model-name'), effort: part('model-effort'), chevron: part('model-chevron') }
+}
+
+/** The combined trigger's visible text. */
+function triggerText(pane: TspPane): string {
+  const parts = triggerParts(pane)
+  return `${parts.name}${parts.effort}${parts.chevron}`
 }
 
 /** The ONE Quiet Composer shell node (`dock.quiet-composer`). */
@@ -125,6 +148,8 @@ interface Mounted {
     readonly submits: Array<{ readonly text: string; readonly gesture: string }>
     readonly cancels: number
     readonly modelEntries: Array<'models' | 'effort'>
+    /** TSP-7 PR-G: every reach of the combined trigger's quick entry. */
+    readonly quickEntries: number[]
     readonly notes: number
     readonly notifications: string[]
   }
@@ -161,6 +186,7 @@ async function mountComposerActions(options: {
     submits: [] as Array<{ text: string; gesture: string }>,
     cancels: 0,
     modelEntries: [] as Array<'models' | 'effort'>,
+    quickEntries: [] as number[],
     notes: 0,
     notifications: [] as string[],
   }
@@ -174,6 +200,7 @@ async function mountComposerActions(options: {
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
     openModelPicker: entry => { calls.modelEntries.push(entry) },
+    openModelQuick: () => { calls.quickEntries.push(calls.quickEntries.length + 1) },
     modelPickerAvailable: () => options.modelPickerAvailable ?? true,
   })
   let current = snapshotFor({})
@@ -216,8 +243,10 @@ test('composer actions: the Quiet Composer shell mounts between the editor and t
   t.after(() => { void m.dispose() })
   const { pane } = m
   const buttons = composerButtons(pane)
-  assert.deepEqual([...buttons.keys()].sort(), ['composer-effort', 'composer-model', 'composer-permission', 'composer-send'],
-    'the idle shell carries Permission, Model, Effort and Send — Stop only exists while busy')
+  assert.deepEqual([...buttons.keys()].sort(), ['composer-model-quick', 'composer-permission', 'composer-send'],
+    'the idle shell carries Permission, the ONE combined Model·Effort trigger and Send — Stop only exists while busy')
+  assert.equal(buttons.has('composer-effort'), false,
+    'Q01: the separate Effort trigger is gone from the wire entirely')
   assert.ok(composerRow(pane), 'the ONE quiet-composer shell node is mounted')
   // The Shell wraps the controlled editor and the controls; the native footer
   // rows sit in their own footer group AFTER the shell.
@@ -350,14 +379,15 @@ test('composer actions: hostile model facts never reach the wire raw (labels AND
     },
   }))
   const buttons = composerButtons(pane)
-  const modelTitle = String(buttons.get('composer-model')?.p['title'] ?? '')
-  const effortTitle = String(buttons.get('composer-effort')?.p['title'] ?? '')
-  for (const title of [modelTitle, effortTitle]) {
+  const quickTitle = String(buttons.get('composer-model-quick')?.p['title'] ?? '')
+  assert.ok(buttons.has('composer-model-quick'), 'the combined trigger carries the tooltip')
+  for (const title of [quickTitle]) {
     assert.ok(!title.includes('YXR0YWNr'), 'no OSC payload in the tooltip')
     assert.ok(!title.includes('\u001b'), 'no raw ESC reaches the tooltip')
     assert.ok(!title.includes('\u000b') && !title.includes('\u0000'), 'no control byte reaches the tooltip')
   }
-  assert.ok(modelTitle.includes('name'), 'the readable part of the name survives')
+  assert.ok(quickTitle.includes('name'), 'the readable part of the name survives')
+  assert.ok(quickTitle.includes('high'), 'the tooltip carries the complete effort fact too')
 })
 
 test('composer actions: Send stays the ONLY submit path — a busy turn still allows queueing through it', async (t) => {
@@ -482,55 +512,100 @@ test('composer actions: a Stop click from the PREVIOUS run cannot cancel the nex
     'a same-run status commit does not remount the Stop button')
 })
 
-/* --------------------------------------------------------------- Model/Effort */
+/* ------------------------------------------- the combined Model·Effort trigger */
 
-test('composer actions: Model and Effort forward to the one late-bound entry with the right hint', async (t) => {
-  const m = await mountComposerActions({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'] })
+/** The kinds a pane needs to present the anchored quick menu at all: the
+ *  composer chrome (`el`), the native model panel (`picker`/`row`/`overlay`) and
+ *  a real native text field (`input`) for its search. */
+const QUICK_KINDS = ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el', 'picker', 'row', 'overlay', 'text', 'input']
+
+test('composer actions: the ONE combined trigger forwards to the registered quick entry, never to a submission', async (t) => {
+  const m = await mountComposerActions({ kinds: QUICK_KINDS })
   t.after(() => { void m.dispose() })
   const { pane, calls } = m
-  const buttons = composerButtons(pane)
-  click(pane, buttons.get('composer-model')!)
-  click(pane, buttons.get('composer-effort')!)
-  await waitUntil('both entries', () => calls.modelEntries.length === 2)
-  assert.deepEqual(calls.modelEntries, ['models', 'effort'])
-  assert.equal(m.renderer.composer.getDraft(), '', 'opening the picker never touches the draft')
+  const trigger = composerButtons(pane).get('composer-model-quick')
+  assert.ok(trigger, 'the combined trigger is the only model control on the row')
+  click(pane, trigger!)
+  await waitUntil('the quick entry ran', () => calls.quickEntries.length === 1)
+  assert.deepEqual(calls.modelEntries, [], 'a quick-capable pane never opens the full panel from the trigger')
+  assert.deepEqual(calls.submits, [], 'the trigger never submits the Composer draft')
+  assert.equal(m.renderer.composer.getDraft(), '', 'opening the menu never touches the draft')
 })
 
-test('composer actions: the labels follow the width rule and never fabricate a value', async (t) => {
-  const m = await mountComposerActions({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'] })
+test('composer actions: a pane without the native input kind keeps ONE working entry — the registered full panel', async (t) => {
+  const m = await mountComposerActions({ kinds: QUICK_KINDS.filter(kind => kind !== 'input') })
+  t.after(() => { void m.dispose() })
+  const { pane, calls } = m
+  const trigger = composerButtons(pane).get('composer-model-quick')
+  assert.ok(trigger)
+  assert.notEqual((trigger!.p['attrs'] as Record<string, unknown> | undefined)?.['aria-disabled'], 'true',
+    'the business entry exists, so the trigger is not disabled')
+  click(pane, trigger!)
+  await waitUntil('the full entry ran', () => calls.modelEntries.length === 1)
+  assert.deepEqual(calls.modelEntries, ['models'])
+  assert.deepEqual(calls.quickEntries, [], 'a pane that cannot present the search field never gets a fake quick menu')
+})
+
+test('composer actions: a Host-owned /model stays ONE forwarded entry and paints no fake menu', async (t) => {
+  const m = await mountComposerActions({ kinds: QUICK_KINDS, modelPickerAvailable: false })
+  t.after(() => { void m.dispose() })
+  const { pane, calls } = m
+  const trigger = composerButtons(pane).get('composer-model-quick')
+  assert.ok(trigger)
+  assert.equal((trigger!.p['attrs'] as Record<string, unknown> | undefined)?.['aria-disabled'], 'true',
+    'no real business entry => the trigger presents itself as not operable')
+  click(pane, trigger!)
+  await settle(200) // window: let the pane ack the frame before reading the wire
+  assert.deepEqual(calls.quickEntries, [],
+    'a pane with no registered quick entry never starts a quick read')
+  // ONE forward through the registered entry — the COMMAND SURFACE owns the
+  // refusal (proven end-to-end in tern-tsp-model-picker.test.ts); the renderer
+  // never opens a menu of its own and never pretends a write happened.
+  assert.deepEqual(calls.modelEntries, ['models'])
+  assert.equal(wireNodes(pane).some(node => String(node.p['key'] ?? '').startsWith('composer-quick-menu')), false,
+    'no quick menu is painted by the renderer')
+})
+
+test('composer actions: the old two-button route is gone — no Effort-only entry survives', async (t) => {
+  const m = await mountComposerActions({ kinds: QUICK_KINDS })
+  t.after(() => { void m.dispose() })
+  const { pane, calls } = m
+  // The retired `effort` entry has no control on the row any more, and nothing
+  // on the row dispatches it: ONE trigger, ONE quick entry.
+  click(pane, composerButtons(pane).get('composer-model-quick')!)
+  await waitUntil('the quick entry ran', () => calls.quickEntries.length === 1)
+  assert.equal(composerButtons(pane).has('composer-effort'), false)
+  assert.deepEqual(calls.modelEntries, [])
+  assert.equal(m.renderer.composer.getDraft(), '', 'opening the menu never touches the draft')
+})
+
+test('composer actions: the combined label follows the width rule and never fabricates a value', async (t) => {
+  const m = await mountComposerActions({ kinds: QUICK_KINDS })
   t.after(() => { void m.dispose() })
   const { pane } = m
-  const label = (node: WireNode | undefined): string => {
-    if (node === undefined) return ''
-    const text = node.p['text']
-    if (typeof text === 'string') return text
-    return String((node.c ?? []).map(child => String((child as unknown as WireNode).p?.['text'] ?? '')).join(''))
-  }
-  // No model fact: plain short labels, no invented `default`/`high`.
-  let buttons = composerButtons(pane)
-  assert.equal(label(buttons.get('composer-model')), 'Model ▾')
-  assert.equal(label(buttons.get('composer-effort')), 'Effort ▾')
-  // A configured model at the default 120 columns: the bounded values appear
-  // WITHOUT the legacy `Model ·` / `Effort ·` prefixes.
+  // No model fact: the short fallback, NO invented effort and no empty slot.
+  assert.equal(triggerText(pane), 'Model▾')
+  // A configured model with an effort: one button, model first, effort muted.
   await m.commitStatus(snapshotFor({
     model: { displayName: 'luna-fast', id: 'luna-fast', reasoningEffort: 'high' },
   }))
-  buttons = composerButtons(pane)
-  assert.equal(label(buttons.get('composer-model')), 'luna-fast ▾')
-  assert.equal(label(buttons.get('composer-effort')), 'high ▾')
+  assert.equal(triggerText(pane), 'luna-fast· high▾')
+  // A model with NO explicit effort: the effort half is absent, never invented.
+  await m.commitStatus(snapshotFor({ model: { displayName: 'luna-fast', id: 'luna-fast' } }))
+  assert.equal(triggerText(pane), 'luna-fast▾')
   // A very long display name is clamped by the shared middle clamp, never wrapped raw.
   await m.commitStatus(snapshotFor({
     model: { displayName: 'an-extremely-long-model-name-that-cannot-fit', id: 'x', reasoningEffort: 'high' },
   }))
-  buttons = composerButtons(pane)
-  const clamped = label(buttons.get('composer-model'))
-  assert.ok(clamped.endsWith(' ▾'), clamped)
+  const clamped = triggerText(pane)
+  assert.ok(clamped.endsWith('▾'), clamped)
   assert.ok(!clamped.includes('an-extremely-long-model-name-that-cannot-fit'),
     'the value is clamped, never painted whole')
+  assert.ok(clamped.includes('high'), 'the effort half survives a clamped model name')
 })
 
-test('composer actions: a narrow pane (cols < 72) keeps the short labels', async (t) => {
-  const m = await mountComposerActions({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'] })
+test('composer actions: a narrow pane truncates the model first and keeps the effort', async (t) => {
+  const m = await mountComposerActions({ kinds: QUICK_KINDS })
   t.after(() => { void m.dispose() })
   const { pane } = m
   await m.commitStatus(snapshotFor({
@@ -542,39 +617,34 @@ test('composer actions: a narrow pane (cols < 72) keeps the short labels', async
   await m.commitStatus(snapshotFor({
     model: { displayName: 'provider/very-long-deepseek-model-variant-with-reasoning', id: 'x', reasoningEffort: 'high' },
   }))
-  const buttons = composerButtons(pane)
-  const label = (node: WireNode | undefined): string => {
-    if (node === undefined) return ''
-    const text = node.p['text']
-    return typeof text === 'string' ? text : String((node.c ?? []).map(c => String((c as unknown as WireNode).p?.['text'] ?? '')).join(''))
-  }
-  const model = label(buttons.get('composer-model'))
-  assert.ok(model.endsWith(' ▾') && model.includes('…'), `the narrow pane truncates the model: ${model}`)
-  assert.ok(!model.includes('provider/very-long-deepseek-model-variant-with-reasoning'))
-  assert.equal(label(buttons.get('composer-effort')), 'H ▾', 'the effort degrades to the identifiable H')
+  const combined = triggerText(pane)
+  assert.ok(combined.includes('…'), `the narrow pane truncates the model: ${combined}`)
+  assert.ok(!combined.includes('provider/very-long-deepseek-model-variant-with-reasoning'))
+  assert.equal(triggerParts(pane).effort, '· H', 'the effort degrades to the identifiable H')
+  assert.equal(triggerParts(pane).chevron, '▾', 'the chevron keeps its own fixed slot')
   const effortLabels: Array<[string, string]> = [
-    ['low', 'L ▾'],
-    ['medium', 'M ▾'],
-    ['max', 'Max ▾'],
-    ['off', 'Off ▾'],
+    ['low', '· L'],
+    ['medium', '· M'],
+    ['max', '· Max'],
+    ['off', '· Off'],
   ]
   for (const [value, expected] of effortLabels) {
     await m.commitStatus(snapshotFor({
       model: { displayName: 'luna-fast', id: 'x', reasoningEffort: value },
     }))
     await waitUntil(`the narrow effort ${value} was painted`, () =>
-      label(composerButtons(pane).get('composer-effort')) === expected)
+      triggerParts(pane).effort === expected)
   }
   await m.commitStatus(snapshotFor({
     model: { displayName: 'luna-fast', id: 'x', reasoningEffort: 'custom-effort' },
   }))
   await waitUntil('the unknown effort was painted with a bounded label', () => {
-    const unknown = label(composerButtons(pane).get('composer-effort'))
-    return unknown !== 'H ▾' && unknown.endsWith(' ▾') && unknown.length <= 10
+    const effort = triggerParts(pane).effort
+    return effort !== '' && effort !== '· H' && effort.length <= 8
   })
-  const unknown = label(composerButtons(pane).get('composer-effort'))
-  assert.notEqual(unknown, 'H ▾', 'an unknown effort is never relabelled as High')
-  assert.ok(unknown.endsWith(' ▾') && unknown.length <= 10, `the unknown effort stays bounded: ${unknown}`)
+  const unknown = triggerParts(pane).effort
+  assert.notEqual(unknown, '· H', 'an unknown effort is never relabelled as High')
+  assert.ok(unknown.startsWith('· ') && unknown.length <= 8, `the unknown effort stays bounded: ${unknown}`)
 })
 
 /* ----------------------------------------------------------- seat admission */
@@ -606,7 +676,7 @@ test('composer actions: a click behind a modal seat, an open picker, hydration o
     },
   })
   await settle(150) // window: let the pane ack the frame before reading the wire
-  const behind = composerButtons(pane).get('composer-model')
+  const behind = composerButtons(pane).get('composer-model-quick')
   assert.ok(behind, 'the base row is still in the tree behind the picker layer')
   click(pane, behind!)
   await settle(200) // window: let the pane ack the frame before reading the wire
@@ -623,7 +693,7 @@ test('composer actions: a click behind a modal seat, an open picker, hydration o
     },
   }).close()
   await settle(150) // window: let the pane ack the frame before reading the wire
-  click(pane, composerButtons(pane).get('composer-model')!)
+  click(pane, composerButtons(pane).get('composer-model-quick')!)
   await waitUntil('the re-opened base click forwards', () => calls.modelEntries.length === 1)
 
   // 2) The HYDRATION window: the buttons are painted but inert, and the
@@ -634,7 +704,7 @@ test('composer actions: a click behind a modal seat, an open picker, hydration o
   await settle(120) // window: let the pane ack the frame before reading the wire
   const hydratingButtons = composerButtons(pane)
   const send = hydratingButtons.get('composer-send')
-  const modelDuringSwitch = hydratingButtons.get('composer-model')
+  const modelDuringSwitch = hydratingButtons.get('composer-model-quick')
   pane.key('typed during the window')
   await settle(80)
   click(pane, send!)
@@ -651,7 +721,7 @@ test('composer actions: a disposed renderer never acts on a late click', async (
   const m = await mountComposerActions({ kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el'] })
   const { pane, calls } = m
   const send = composerButtons(pane).get('composer-send')
-  const stopLike = composerButtons(pane).get('composer-model')
+  const stopLike = composerButtons(pane).get('composer-model-quick')
   await m.dispose()
   t.after(() => { void Promise.resolve() })
   // The disposed surface's wire nodes are gone from the pane; address the

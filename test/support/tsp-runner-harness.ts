@@ -88,11 +88,22 @@ export async function ownTspBoot(options: {
   readonly beforeMount?: (pane: TspPane) => void
   readonly modelPicker?: boolean
   readonly presetPicker?: boolean
+  /** TSP-7 PR-G: advertise the native `input` kind the composer quick menu
+   *  searches through (its pane capability gate is the real handshake). */
+  readonly modelQuick?: boolean
+  /** TSP-7 PR-G: advertise the `el` kind so the Quiet Composer chrome mounts
+   *  (the composer controls are what the quick menu anchors to). */
+  readonly composerActions?: boolean
   /** The existing Direct fixture's persistence boundary, never a second catalog. */
   readonly saveDefault?: (next: { provider: string; model: string; reasoningEffort?: string }) => Promise<unknown>
 }): Promise<OwnedTspRunner> {
   const { makeHarness, mountRunner, disposeContext } = await import('./runner-harness.ts')
-  const pane = installTspPane({ modelPicker: options.modelPicker, presetPicker: options.presetPicker })
+  const pane = installTspPane({
+    modelPicker: options.modelPicker,
+    presetPicker: options.presetPicker,
+    composerActions: options.composerActions,
+    modelQuick: options.modelQuick,
+  })
   options.beforeMount?.(pane)
   // The resume target: an explicit id wins; a STANDING SET has no single id, so
   // a suite that boots several sessions must name the one to resume.

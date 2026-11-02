@@ -58,7 +58,7 @@ test('production /model: a pane with the picker but without the Reader kinds sti
   assert.ok(session)
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
-  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {} })
+  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
   assert.equal(renderer.modelPresentation, undefined, 'the native model UI fails closed')
   assert.equal(picker(pane), undefined)
 })
@@ -441,7 +441,7 @@ async function mounted(
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {},
+    openModelPicker() {}, openModelQuick() {},
   })
   assert.ok(renderer.modelPresentation)
   const writes: unknown[] = []
@@ -1114,7 +1114,7 @@ test('native Model: proven refusal stays usable, uncertain settlement closes, su
   assert.ok(session)
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
-  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {} })
+  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
   assert.ok(renderer.modelPresentation)
   // The panel opens INSIDE the loop below, so the resize is delivered before any
   // handle exists. The catalogue owns the ONE write at every width.
@@ -1558,7 +1558,7 @@ test('official Direct Agent: native /model makes exactly one durable Session sel
  * here the CHAIN (same owner, same real directory, truthful absence, no
  * second write) is the assertion.
  */
-test('composer Model and Effort clicks reach the real command owner and writer', async (t) => {
+test('the combined composer trigger reaches the real command owner and writer', async (t) => {
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
     modelPicker: true,
@@ -1587,7 +1587,7 @@ test('composer Model and Effort clicks reach the real command owner and writer',
     await waitFor('real Agent turn', () => fixture.pane.output.text().includes('model-live-ok'))
     // ── The MODEL entry: click → the registered handler's own catalog read →
     //    the native picker hydrates from the REAL directory.
-    await clickComposerButton('composer-model')
+    await clickComposerButton('composer-model-quick')
     await waitFor('the real catalog hydrated the picker', () => props(fixture.pane).state === 'ready')
     assert.equal(props(fixture.pane).title, 'Switch model')
     assert.ok(((props(fixture.pane).items ?? []) as unknown[]).length >= 2,
@@ -1607,15 +1607,20 @@ test('composer Model and Effort clicks reach the real command owner and writer',
     assert.deepEqual(events[0]!.data, { provider: 'scripted', model: DIRECT_TSP_MODEL_TWO })
     await waitFor('committed closes the picker', () => picker(fixture.pane) === undefined)
 
-    // ── The EFFORT entry: click → the SAME owner re-reads; the real scripted
-    //    models advertise no effort metadata, so the truthful notice states
-    //    the absence — no fabricated value and no second write.
-    await clickComposerButton('composer-effort')
-    await waitFor('the effort entry re-opened the real picker', () => props(fixture.pane).state === 'ready')
+    // ── The retired EFFORT-only control: this pane negotiated no native input
+    //    kind, so the ONE combined trigger keeps its single other meaning — the
+    //    SAME registered owner and the SAME full panel it opened before. The real
+    //    scripted models advertise no effort metadata, so the catalogue paints no
+    //    Reasoning Effort strip at all: the absence is stated by the offered set,
+    //    never by a fabricated candidate.
+    const effortNodes = nodes(fixture.pane).filter(node => /composer-effort/.test(String(node.id)))
+    assert.deepEqual(effortNodes, [], 'no Effort-only composer control survives the merge')
+    await clickComposerButton('composer-model-quick')
+    await waitFor('the same owner re-opened the real picker', () => props(fixture.pane).state === 'ready')
     assert.equal(props(fixture.pane).title, 'Switch model')
-    assert.equal(props(fixture.pane).message, 'Reasoning effort is unavailable for this model',
-      'the real models advertise no efforts: the absence is stated, never guessed')
-    assert.equal(records.length, 1, 'the effort entry never writes either')
+    assert.equal(props(fixture.pane).strip, undefined,
+      'the real models advertise no efforts: no strip and no invented candidate')
+    assert.equal(records.length, 1, 'the second open never writes')
     for (let step = 0; step < 20 && picker(fixture.pane) !== undefined; step += 1) {
       fixture.pane.key('\u001b')
       await settle(30)
@@ -2561,7 +2566,7 @@ async function mountedEffortEntry(
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {},
+    openModelPicker() {}, openModelQuick() {},
   })
   const writes: unknown[] = []
   let retries = 0
@@ -2859,13 +2864,13 @@ test('a Host-owned /model registration leaves the composer UI opener unavailable
     // Click the Model button through the wire node id the dock really built.
     const { wireNodes } = await import('../support/tsp-picker-wire.ts')
     const nodes = wireNodes(fixture.pane)
-    const modelButton = nodes.find(node => node.k === 'el' && /\.composer-model-s\d+$/.test(String(node.id)))
-    assert.ok(modelButton, 'the composer Model button is on the wire (the row still paints)')
+    const quickTrigger = nodes.find(node => node.k === 'el' && /\.composer-model-quick-s\d+$/.test(String(node.id)))
+    assert.ok(quickTrigger, 'the combined composer trigger is on the wire (the row still paints)')
     const before = fixture.pane.output.text()
     fixture.pane.event({
       ev: 'action',
       sf: fixture.pane.frames().at(-1)!.sf,
-      id: modelButton!.id,
+      id: quickTrigger!.id,
       act: 'click',
     })
     await waitFor('the refusal notice', () =>
@@ -2894,15 +2899,15 @@ test('the composer UI entry obeys the native picker capability admission', async
     await waitFor('booted', () => fixture.pane.output.text().includes('dock.quiet-composer.composer'))
     // The row paints (el+styles negotiated)...
     const nodes = (await import('../support/tsp-picker-wire.ts')).wireNodes(fixture.pane)
-    const modelButton = nodes.find(node => node.k === 'el' && /\.composer-model-s\d+$/.test(String(node.id)))
-    assert.ok(modelButton, 'the composer row paints on the el+styles pane')
+    const quickTrigger = nodes.find(node => node.k === 'el' && /\.composer-model-quick-s\d+$/.test(String(node.id)))
+    assert.ok(quickTrigger, 'the composer row paints on the el+styles pane')
     // ...but the renderer's modelPresentation is undefined (picker kinds
     // missing), so the click must be refused with the SAME notice the typed
     // route shows — never the PiTui fallback, never a silent no-op.
     fixture.pane.event({
       ev: 'action',
       sf: fixture.pane.frames().at(-1)!.sf,
-      id: modelButton!.id,
+      id: quickTrigger!.id,
       act: 'click',
     })
     await waitFor('the capability refusal', () =>
@@ -3351,7 +3356,7 @@ test('native Model: a pane without the base picker kinds is still refused (kv ch
   t.after(() => renderer.dispose())
   renderer.bindInput({
     exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {},
-    listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {},
+    listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
   })
   assert.equal(renderer.modelPresentation, undefined, 'the missing BASE kinds still fail closed')
 })

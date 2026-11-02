@@ -410,6 +410,15 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
    *  (registered, not Host-owned). The footer affordance uses this real
    *  business-entry fact, never the painted button alone. */
   modelPickerAvailable(): boolean
+  /**
+   * TSP-7 PR-G: open the composer's anchored QUICK Model/Effort selector. It is
+   * the same registered `/model` command body as `openModelPicker`, presented
+   * by the mounted renderer's quick presenter; it is admitted only while that
+   * registration is live AND the mounted presenter really offers `openQuick`.
+   * A sessionless subject is NOT a refusal here: the command itself routes it
+   * to the full panel with its explicit `Save default`.
+   */
+  openModelQuick(): void
   /** Request one catalog refresh through the coordinator. */
   requestCatalogRefresh(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
   /** Whether the catalog coordinator is registered yet. */
@@ -538,6 +547,13 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * constructing a request of its own.
    */
   let modelPickerOpener: ((entry: 'models' | 'effort') => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
+
+  /**
+   * TSP-7 PR-G: the installed QUICK `/model` UI entry, captured with the same
+   * registration success as {@link modelPickerOpener}. `undefined` means the
+   * `/model` registration degraded, so no quick read or write may run.
+   */
+  let modelQuickOpener: (() => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
 
   /** Consume TUI-local command draft dispositions after DSH normalizes the
    * public CommandResult. A missing id is used only for a thrown command
@@ -779,6 +795,38 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
 
   const modelPickerAvailable = (): boolean => commandsRegistered && modelPickerOpener !== undefined
 
+  /**
+   * TSP-7 PR-G: the ONE quick `/model` UI entry. It admits through exactly the
+   * same registration fact as `openModelPicker` plus the mounted presenter's
+   * own `openQuick` availability, then forwards to the registered command's
+   * quick presentation. It never constructs a `ModelPickerRequest`, never
+   * touches a catalog and never decides full-vs-quick — the command makes that
+   * call on the Session subject it captured.
+   */
+  const openModelQuick = (): void => {
+    if (!commandsRegistered || modelQuickOpener === undefined) {
+      deps.notify('model selection is unavailable in this session (the /model command is not registered)', 'error')
+      return
+    }
+    // The TSP branch has no PiTui fallback presenter, so a mounted renderer that
+    // offers no quick presentation must be refused BEFORE the handler runs (the
+    // same fail-closed admission `openModelPicker` applies). A PiTui mount keeps
+    // its typed-presenter route; there the command itself states the refusal.
+    const presentation = deps.modelPresentation?.()
+    if (deps.app() === undefined && presentation?.openQuick === undefined) {
+      deps.notify("This command's UI is not available in TSP yet", 'error')
+      return
+    }
+    const opened = modelQuickOpener()
+    void opened.then((result) => { // allowlist: result observer — the command owns the task
+      if (result.kind === 'error' && typeof result.text === 'string' && result.text !== '') {
+        deps.notify(result.text, 'error')
+      }
+    }, (error: unknown) => { // allowlist: diagnostics observer, the command owns the task
+      deps.logError(`tui-runner: model quick UI entry failed: ${safeErrorMessage(error)}`)
+    })
+  }
+
   const registerCommands = (initial?: InitialCommandCatalog): void => {
     if (commandsRegistered) return
     commandsRegistered = true
@@ -835,6 +883,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // mean the registration degraded (a Host-claimed name): the surface then
       // refuses the composer control truthfully instead of guessing a route.
       modelPickerOpener = installed.openModelPicker
+      // TSP-7 PR-G: the QUICK entry rides the SAME registration fact —
+      // `registerTuiCommands` supplies both or neither.
+      modelQuickOpener = installed.openModelQuick
       takeCommandDraftDisposition = installed.takeCommandDraftDisposition
       // The coordinator's surface hooks point INTO the command surface;
       // the command runtime's refresh facades (and the switch/first-session
@@ -1323,6 +1374,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     withCommandDelivery: (delivery, run) => withCommandDelivery(delivery, run),
     openModelPicker,
     modelPickerAvailable,
+    openModelQuick,
     requestCatalogRefresh,
     catalogRefreshAvailable,
     isSkillInvocation,

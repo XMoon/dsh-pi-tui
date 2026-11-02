@@ -291,6 +291,9 @@ export interface DirectTspFixtureOptions {
   readonly modelPicker?: boolean
   /** Advertise the `el` kind so the native composer action row mounts. */
   readonly composerActions?: boolean
+  /** TSP-7 PR-G: advertise the native `input` kind the composer's quick
+   *  Model / Effort menu searches through. */
+  readonly modelQuick?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
   /**
@@ -427,6 +430,7 @@ export async function createDirectTspFixture(
         nativeImages: options.nativeImages,
         nativeChart: options.nativeChart,
         composerActions: options.composerActions,
+        modelQuick: options.modelQuick,
       })
   // OWNERSHIP, not success-contingency: scripted mode replaces the PROCESS tty
   // and clears five env vars; external-Tern and PiTui modes must leave the

@@ -247,7 +247,7 @@ async function mounted(
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {},
+    openModelPicker() {}, openModelQuick() {},
   })
   const applies: string[] = []
   const defaults: string[] = []

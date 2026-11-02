@@ -153,7 +153,7 @@ async function mount(
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {},
+    openModelPicker() {}, openModelQuick() {},
   })
   harness.renderer = renderer
   return harness

@@ -151,6 +151,13 @@ export function installTspPane(options: {
    *  `styles` is already in the base feature set): a pane without it can never
    *  carry the native composer buttons. */
   readonly composerActions?: boolean
+  /**
+   * TSP-7 PR-G: advertise the native `input` kind the composer's quick Model /
+   * Effort menu searches through. `el` + `styles` alone prove the trigger can
+   * paint; a pane without `input` can never carry the search field — exactly
+   * like the real client, where the capability belongs to the pane's own set.
+   */
+  readonly modelQuick?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
   /**
@@ -209,6 +216,7 @@ export function installTspPane(options: {
   const native = Array.from(new Set([
     ...(options.modelPicker === true ? ['picker', 'row', 'overlay', 'text', 'kv'] : []),
     ...(options.composerActions === true ? ['el'] : []),
+    ...(options.modelQuick === true ? ['input'] : []),
     ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md', 'kv'] : []),
     ...(options.sessionBrowser === true ? ['picker', 'row', 'overlay', 'text', 'kv'] : []),
     ...(options.workDetails === true ? ['row', 'text'] : []),

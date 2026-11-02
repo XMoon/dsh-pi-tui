@@ -5,15 +5,78 @@ the production defaults; TSP keeps the experimental opt-in described in
 [overview.md](./overview.md). This document owns the current TSP `/model`
 product contract and the single read/write owner.
 
-The Owner-frozen Model UX is TWO pages, both the model's own:
+The composer carries ONE combined Model / Reasoning Effort control, and the
+registered `/model` command carries TWO native presentations of the same
+directory:
 
-1. **Models** — the working catalogue.
-2. **Full details** — the read-only Reader.
+1. **Quick menu** — the anchored composer selector; a selection commits
+   immediately for a live Session.
+2. **Full panel** — the Owner-frozen TWO-page UX: **Models** (the working
+   catalogue) and **Full details** (the read-only Reader), with the explicit
+   `Switch` / `Save default` footer action.
 
-On the catalogue the user picks a model, changes its Reasoning Effort in the
+On the full catalogue the user picks a model, changes its Reasoning Effort in the
 catalogue's own native `strip`, and commits once from the explicitly labelled
 footer action. A row activation (`Enter`, or a click on the already-highlighted
 row) opens that model's Full details DIRECTLY, with no intermediate page.
+
+## Composer quick menu
+
+- The trigger is ONE button labelled from the committed Status projection: the
+  model name plus the effective Reasoning Effort. With no model it reads
+  `Model`; with no effort NO empty effort slot is reserved and no value
+  (`Default`/`High`/`Off`) is invented. The tooltip carries the complete
+  sanitized model and effort facts, never a truncated display value.
+- The menu belongs to the trigger's own positioning container and floats up from
+  it, right-aligned with the button. It MAY cover the editor's prompt area, and
+  it occupies no layout height: the Composer box, the caret and the transcript
+  scroll position do not move when it opens or closes.
+- Root order is fixed: `Model`, then `Reasoning Effort` — present only when the
+  current model really advertises candidates — then the independent, non-scrolling
+  footer `All models & details…`. Nothing else joins the root: no settings,
+  refresh or confirmation row.
+- The Model page is a searchable list in the directory's own provider order with
+  one row per `(provider, model)` pair, so the same model id advertised by two
+  providers stays two rows. Only the list body scrolls; Back, the native search
+  field and the footer stay fixed. The search is a display filter over the rows
+  the command read: it never changes the offered set, and a search that matches
+  nothing says so instead of selecting an invisible row.
+- The Effort page lists exactly the current model's advertised candidates, read
+  from the same directory DTO. The provider-default candidate submits an ABSENT
+  `reasoningEffort` field, never a sentinel string, and a model with no reasoning
+  metadata has no Effort page at all.
+- Choosing a row that differs from the committed value is one Session write,
+  committed through the same command owner as the full panel's footer action and
+  reported by the same semantic settlement. Choosing the committed model or the
+  committed effort is a dismissal with zero writes; a model switch never inherits
+  the previous model's effort — the payload comes from the target model's own
+  advertised candidates and declared default.
+- Before a Session exists the trigger opens the FULL panel with its explicit
+  `Save default`; the quick selector never offers an immediate global-default
+  write. The command decides this from the Session scope it captured, not the
+  renderer from a display snapshot.
+- While a write is in flight the menu shows only that pending state: no second
+  dispatch from a click, `Enter` or a double click, and `Esc` neither cancels the
+  dispatched write nor restates an older result. `committed`, `indeterminate` and
+  `superseded` dismiss the panel; `rejected`, `cancelled` and `unsupported`
+  restore the page the user was on. Only the command's own notices describe the
+  outcome, and the Composer label is re-projected from the authoritative Status —
+  never from what the menu was clicked on.
+- Keys belong to the menu while it is open: `↑`/`↓` move the candidate highlight,
+  `Enter` activates the highlighted row (it never sends the Composer draft),
+  `Tab`/`Shift+Tab` walk `Back → Search → Options → Full` (or
+  `Rows → Full` on the root), and typing edits only the menu's own query. The
+  draft and its UTF-16 caret are unchanged across the whole open/close cycle, and
+  closing returns the caret to the Composer. `Esc` clears a non-empty search
+  first, then returns subpage → root → closed, and is never an Agent cancel.
+  `Ctrl+C` revokes the menu's interaction identity and still reaches the original
+  cancel owner.
+- The quick menu is never expanded together with the Permission menu, and every
+  higher seat (the modal seat, the temporary Screen, the Work Hub, the Session
+  Browser, the Preset picker and the full Model panel) retires it synchronously
+  before it paints. Hydration, a new presentation scope and disposal revoke it
+  too, so no older read, click or write settlement can paint or act on the newer
+  subject.
 
 ## Catalogue
 
@@ -82,6 +145,14 @@ Do not use one broad "stable id" rule:
 - **Effort strip items:** the composite candidate id validates both the
   originating model and candidate, so a delayed chip click cannot draft a
   different model.
+- **Quick-menu container and search field:** the panel serial only, so a repaint
+  never remounts the scroller (losing the list position) or the search field
+  (losing the caret).
+- **Quick-menu action rows (options, Back, Full, Retry):** panel serial + frame
+  revision + paint token. A token from an older frame is not in the current view,
+  so the SDK drops a lagging click before the app sees it; the surviving intent is
+  then re-checked against the rows the current frame really offers, and a raw
+  provider/model identity never enters an HTML key.
 - **Keyboard Esc:** state-dependent by the Model product contract.
 
 Every action must re-check the current subject (panel/phase/target/revision)
@@ -89,12 +160,13 @@ before mutating. A stale action is refused, not applied to the current row.
 
 ## Writing
 
-The write path is exactly one explicit action (`Switch` for a live Session,
-`Save default` for the sessionless global default), committed through the
-existing Host/Client writer:
+The full panel's write path is exactly one explicit action (`Switch` for a live
+Session, `Save default` for the sessionless global default), committed through
+the existing Host/Client writer; the composer quick menu commits the same
+semantic operation directly for a live Session (see *Composer quick menu*).
 
-- Selecting a model or an effort only changes the draft/candidate; nothing is
-  written until the explicit footer action.
+- On the full catalogue, selecting a model or an effort only changes the
+  draft/candidate; nothing is written until the explicit footer action.
 - A live Session model selection is a Session WRITE: it dispatches inside the
   writer barrier; a transition that started first refuses it, a transition that
   starts after waits for it.
@@ -112,6 +184,8 @@ existing Host/Client writer:
 
 ## Keyboard
 
+Full panel:
+
 | Key | Effect |
 |---|---|
 | `↑`/`↓` | Move the catalogue highlight |
@@ -122,35 +196,55 @@ existing Host/Client writer:
 | `Enter` on the explicit footer action | Commit the one write |
 | `Esc` | Back from Full details; cancel the catalogue |
 
-A row activation never writes. `Enter` on a highlighted row opens the Reader;
-the write is only the labelled footer action.
+Composer quick menu:
+
+| Key | Effect |
+|---|---|
+| `↑`/`↓` | Move the current page's candidate highlight |
+| `Enter` | Activate the highlighted row (never send the draft) |
+| typing / Backspace / `←`/`→` | Edit the menu's own search field |
+| `Tab` / `Shift+Tab` | Move between the menu's regions |
+| `Esc` | Clear the search; then subpage → root → closed |
+| `Ctrl+C` | Revoke the menu and reach the original cancel owner |
+
+A full-panel row activation never writes: `Enter` on a highlighted row opens the
+Reader, and the write is only the labelled footer action. In the quick menu a
+selection IS the commit, for a live Session only.
 
 ## Loading, errors, retry
 
-- Loading paints the catalogue shell without fabricating rows.
-- A provider-failure row is an inert failure row, not a model.
+- Loading paints the catalogue shell without fabricating rows; the quick menu
+  states `Loading models…` and offers no directory-derived value.
+- A provider-failure row is an inert failure row, not a model; the quick menu
+  keeps the usable provider groups and states the failed provider beside them.
 - An empty catalogue is shown as no models; it is never filled from a
   hard-coded list.
 - A read failure paints an explicit Retry; the page stays usable and the draft
-  survives where applicable.
+  survives where applicable. One Retry is one request to the command's read
+  owner, never a second reader.
 - A resolved write outcome is reported by the dock notice on any page that
   cannot host a picker `message`; a read failure or write outcome on the Reader
   is its leading line.
 - Outcomes leave the picker on the page it was on, with its draft intact, and
   report through the dock notice; indeterminate outcomes close it with the
   original reconciliation notice.
-- Hydration/disposal retire the picker synchronously; receivers bound to a
-  previous panel serial and presentation revision are never routed again.
+- Hydration/disposal retire the picker and the quick menu synchronously;
+  receivers bound to a previous panel serial and presentation revision are never
+  routed again.
 
 ## Ownership and lifecycle
 
 `src/app/command/model-presentation.ts` is the narrow Client-local presentation
 contract carrying the open-time subject, apply/retry entries and the panel
-handle. `src/tui/commands/models.ts` is the singular read/write owner: it
+handle. Its optional quick variant is a PRESENTATION choice only: it receives the
+same request object, and `apply`, `retry`, `isCurrent` and `runOwned` stay the
+command's own. `src/tui/commands/models.ts` is the singular read/write owner: it
 captures Session scope, loads the directory once per read, brands effort ids,
 tracks default-save intentions and admits live selection through the existing
-writer. PiTui and TSP renderers share the same projection; neither owns a second
-catalogue/writer.
+writer — for the full panel and the quick menu alike, from one handler body. The
+quick menu is a temporary panel of the mounted renderer, not a fifth business
+presenter and not a second catalog, writer or subscriber. PiTui and TSP renderers
+share the same projection; neither owns a second catalogue/writer.
 
 ## Limits
 
@@ -167,17 +261,24 @@ catalogue/writer.
   incorrect selection or a duplicate write.
 - The +25%/+50% matrix and the exact sheet-density breakpoint are not claimed as
   passing.
+- The quick menu's own sizes are fixed CSS limits inside the trigger's anchor
+  (no measured re-layout, no geometry state machine). The verified pane sizes are
+  the documented product sizes below; a smaller window or a larger UI font is not
+  claimed as passing.
 
 ## Real-pane verification
 
-Reproducible run (headless Tern pane; not part of `pnpm test`/CI):
+Reproducible runs (headless Tern pane; not part of `pnpm test`/CI):
 
 ```sh
 node scripts/tern-pane-drive.mjs scripts/tern-pane-model-ux.mjs
+node scripts/tern-pane-drive.mjs scripts/tern-pane-composer-model-quick-ux.mjs
 ```
 
-The flow/subject scripts mount the PRODUCTION `TspModelPicker` over one official
-inline surface and send real input; containment claims go through the visibility
-oracle (`scripts/tern-pane-geometry.mjs`), never a node's own rect. See
+The flow/subject scripts mount the PRODUCTION presenter over one official inline
+surface and send real input; containment claims go through the visibility oracle
+(`scripts/tern-pane-geometry.mjs`), never a node's own rect. The quick-menu flow
+additionally asserts the anchor distance from the trigger and that the Composer
+and editor layout boxes do not change while the menu is open. See
 [the harness guide](../guides/tern-pane-testing.md) for run preconditions and
 evidence rules.

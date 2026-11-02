@@ -63,6 +63,8 @@ import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
 import { createTspInteractionSeat, NATIVE_APPROVAL_ROLE, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
 import { TspModelPicker } from './model-picker.ts'
+import { TspModelQuickMenu } from './model-quick-menu.ts'
+import type { QuickMenuIntent } from './model-quick-menu.ts'
 import { TspPresetPicker } from './preset-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
 import { nativeStatuslineRows, compileNativeFooterPresentation, type NativeFooterPresentation } from './statusline-view.ts'
@@ -238,6 +240,14 @@ export interface TspInputHandlers {
    * re-checks its own seat admission before forwarding.
    */
   openModelPicker(entry: 'models' | 'effort'): void
+  /**
+   * TSP-7 PR-G: open the composer's ONE combined Model/Effort control through
+   * the SAME registered `/model` command, in its quick presentation. The
+   * renderer never decides whether a Session exists: the registered command
+   * captures the formal `SessionScope` and routes a sessionless subject to the
+   * full panel with its explicit `Save default`.
+   */
+  openModelQuick(): void
   /** Whether the native `/model` picker business entry is actually installed
    *  (registered, not Host-owned). Optional only for old test fixtures; an
    *  absent fact falls back to the negotiated-kind check below. */
@@ -573,6 +583,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let hydrating = false
   let lastMain: Node | undefined
   let modelPicker: TspModelPicker | undefined
+  /** TSP-7 PR-G: the composer's anchored quick Model/Effort selector. A local
+   *  presentation panel of THIS renderer (never a fifth business Presenter and
+   *  never a second catalog/writer owner), retired with every higher seat. */
+  let modelQuick: TspModelQuickMenu | undefined
   let presetPicker: TspPresetPicker | undefined
   let sessionBrowser: TspSessionBrowser | undefined
   /** B3-A1: the internal native Work Hub presenter (same ONE layer). */
@@ -637,7 +651,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // B3-A2 §6.6: the temporary Screen may still be painted when an official
     // modal takes the LOGICAL seat. Retire it synchronously here, BEFORE the
     // form becomes visible/answerable; the close stays owned by this renderer.
-    beforeModalSeat: () => { retireWorkDetails('modal') },
+    // TSP-7 PR-G: the composer quick menu retires in the same step — a modal
+    // outranks it, and no quick frame may stay operable under a form.
+    beforeModalSeat: () => {
+      modelQuick?.retire()
+      retireWorkDetails('modal')
+    },
     // The native modal inputs: the base surface's OWN id (an event addressed at
     // another surface is foreign to this seat) plus the two negotiated
     // capability decisions taken above from the handshake. The seat never reads
@@ -683,6 +702,23 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     nativeKv: session.caps.kinds.includes('kv'),
   })
   modelPicker.resize(session.caps.cols, session.caps.cell.w)
+  modelQuick = new TspModelQuickMenu({
+    render: () => render(),
+    // The same seat admission every composer control uses: a modal, the
+    // temporary Screen, a higher presenter, the hydration window or an unbound
+    // renderer owns the input before this menu does.
+    canInteract: () => visualActionsAdmitted(),
+    // The ONE focus owner is `applyFocus`; this menu never calls `surface.focus`
+    // through a second path.
+    setFocus: () => applyFocus(true),
+    // The Full handoff runs through the registered `/model` UI entry — the same
+    // route the typed command and the old Model button used, never a string
+    // submitted through the Composer.
+    openFull: () => { composerModelClicked('models') },
+    // The ONE Surface owner performs the reveal of the row the keyboard moved
+    // onto, addressed by a wire id of the frame this presenter indexed.
+    reveal: (id) => { surface.reveal(id, 'nearest') },
+  })
   workHub = new TspWorkHub({
     surfaceId: surface.id,
     render: () => render(),
@@ -739,9 +775,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (generation !== presenterOpenGeneration) return inert
     return open()
   }
-  /** The three sibling presenters, in the fixed retirement order. */
+  /** The sibling retirement steps, in the fixed order. */
   const siblingRetirements = (...excluded: readonly ('model' | 'preset' | 'browser' | 'hub')[]): Array<() => void> => {
     const steps: Array<() => void> = []
+    // TSP-7 PR-G: the composer quick menu is the FIRST step in EVERY presenter
+    // open — including its own — so at most one of the two model presentations
+    // is ever operable and a Quick → Full handoff never leaves a clickable
+    // quick frame behind. It is a local `retire()`: no re-entrant callback.
+    steps.push(() => modelQuick?.retire())
     if (!excluded.includes('model')) steps.push(() => modelPicker?.retire())
     if (!excluded.includes('preset')) steps.push(() => presetPicker?.retire())
     if (!excluded.includes('browser')) steps.push(() => sessionBrowser?.retire())
@@ -765,6 +806,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       () => modelPicker!.presentation.open(request),
       // A superseded open never minted a panel; its handle is inert and the
       // command's own read owner checks `isDisposed()` before every read.
+      {
+        setLoading: () => {},
+        setDirectory: () => {},
+        setLoadError: () => {},
+        isDisposed: () => true,
+        close: () => {},
+      },
+    ),
+    // TSP-7 PR-G: the composer's quick presentation of the SAME request. It
+    // takes the seat exactly like the full picker: the sibling sweep (whose
+    // first step is this menu's own retirement) commits before the panel opens,
+    // and `presenterOpenGeneration` decides a re-entrant takeover.
+    openQuick: (request) => openExclusively(
+      siblingRetirements(),
+      () => modelQuick!.open(request),
       {
         setLoading: () => {},
         setDirectory: () => {},
@@ -1015,7 +1071,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             ? presetPicker.desiredFocusId() ?? null
             : modelPicker?.isOpen() === true
               ? modelPicker.desiredFocusId() ?? null
-              : composerFocusId
+              // TSP-7 PR-G: the composer quick menu is the LAST seat above the
+              // Composer. It claims the hardware caret only while its search
+              // field owns the keyboard (the real wire id of the node this frame
+              // built); everywhere else it is app-routed and asks for no caret,
+              // so the Composer's draft and caret stay untouched.
+              : modelQuick?.isOpen() === true
+                ? modelQuick.desiredFocusId() ?? null
+                : composerFocusId
     if (!force && desired === lastAppliedFocusId) return
     lastAppliedFocusId = desired
     composer.setFocused(desired === composerFocusId)
@@ -1387,6 +1450,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     })
     // The focus op is meaningful only for a node of a COMMITTED frame (the
     // SDK never validates it), so it always follows the render above.
+    // TSP-7 PR-G: so does the quick menu's id indexing — the ids it hands to
+    // `focus`/`reveal` are the ones of the frame the SDK just committed
+    // (resolved from the SDK's own id assignment, never a guessed path). A dock
+    // without the menu indexes nothing.
+    if (dockNode !== undefined && modelQuick?.isOpen() === true) modelQuick.indexFrame(dockNode)
     applyFocus(false)
     // B3-A2 §5.3: the base frame is the ONE point that reconciles the Reader
     // with the CURRENT row (the Hub already renders after `setItems`), so a
@@ -2163,6 +2231,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // TSP-7 PR-E: a new presentation scope invalidates any open Permission
       // menu expansion; the option keys themselves also carry the epoch.
       closePermissionMenu()
+      // TSP-7 PR-G: and with it the composer quick menu — its node keys carry
+      // the same scope, so an old subject's panel can never act on the new one.
+      modelQuick?.retire()
       scopePrefix = `s${scopeEpoch}-`
       scopeKeys = new TranscriptNodeKeys()
       // PR-C: the retired subject's image subscriptions go with it, and the
@@ -2277,6 +2348,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // revoke its expansion identity with the subject before any later frame
       // can paint a stale option target.
       closePermissionMenu()
+      // TSP-7 PR-G: same for the composer quick menu — retired BEFORE any
+      // retiring Presenter callback can run, so no old read, click or write
+      // settlement can paint or act on the incoming subject.
+      modelQuick?.retire()
       // B3-A2 §8.2: the Reader belongs to the OUTGOING subject, so it is
       // revoked FIRST — before any retiring Presenter callback can run — and
       // its close stays owned here. `resetSessionFacts()` deliberately does
@@ -2465,6 +2540,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     composerActionsSupported()
     && modelPickerCapable()
     && (boundHandlers?.modelPickerAvailable?.() ?? true)
+  /** The quick menu needs the composer chrome (`el` + `styles`), the real
+   *  `/model` business entry, AND a native text field for its search. A pane
+   *  without one of those gets the full panel instead of a fake control. */
+  const modelQuickCapable = (): boolean =>
+    modelPickerAvailable() && session.caps.kinds.includes('input')
   /** The three standard presets the Quiet Composer menu may offer, in the
    * Owner-frozen order. `auto`/custom presets stay available through
    * `/permission` and Shift+Tab but never enter this three-row menu. */
@@ -2593,6 +2673,59 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
   }
 
+  /** TSP-7 PR-G: the composer's ONE combined Model/Effort trigger click.
+   *
+   * It never inspects a display snapshot to decide what exists: a live Session
+   * and a sessionless subject are both routed through the SAME registered
+   * `/model` command, which captured the formal `SessionScope` and chooses the
+   * quick presentation or the full panel. A second click on the open menu closes
+   * it (a pure local dismissal: no read, no write, no notice). */
+  const composerModelQuickToggled = (): void => {
+    // ONE admission authority: the renderer refuses a seat it does not own, and
+    // the COMMAND SURFACE owns the business-entry/capability refusal (a
+    // Host-owned `/model` or a pane that cannot present the native UI is stated
+    // there, through the existing notice path — never guessed twice here).
+    if (!composerActionsAdmitted()) return
+    if (modelQuick?.isOpen() === true) {
+      modelQuick.retire()
+      render()
+      return
+    }
+    // Permission and the model quick menu are never both expanded.
+    if (closePermissionMenu()) render()
+    if (!modelQuickCapable()) {
+      // A pane that cannot present the quick menu still has the real registered
+      // full entry: the trigger keeps ONE meaning instead of going dead.
+      composerModelClicked('models')
+      return
+    }
+    const handlers = boundHandlers
+    if (handlers === undefined) return
+    try {
+      handlers.openModelQuick()
+    } catch (error) {
+      display.notify('model selection is unavailable in this session (the /model command is not registered)', 'error')
+      options.logError?.('tsp renderer: composer model quick entry refused', { error: errorText(error) })
+    }
+  }
+
+  /** TSP-7 PR-G: one interaction of the quick menu's CURRENT frame. Every
+   *  admission (seat, panel identity, frame revision, offered identity) is the
+   *  presenter's own; this route forwards exactly once. */
+  const composerQuickIntent = (intent: QuickMenuIntent): void => {
+    modelQuick?.handleIntent(intent)
+  }
+
+  /** TSP-7 PR-G: revoke the quick menu's interaction identity and repaint when it
+   *  was open. The presenter's own `retire()` is silent by contract (the sibling
+   *  sweep and the opening presenter own that frame); these are the callers that
+   *  own no other frame, so a revoked menu must never linger on screen. */
+  const retireQuickMenu = (): void => {
+    if (modelQuick?.isOpen() !== true) return
+    modelQuick.retire()
+    render()
+  }
+
   /** The Quiet Composer's narrow-pane threshold (measured: 400px pane is
    *  below this, the 637px GUI pane is above it). */
   const QUIET_COMPOSER_NARROW_COLS = 56
@@ -2650,6 +2783,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
     const options = permissionMenuOptions()
     if (options.length === 0) return
+    // TSP-7 PR-G: the two composer menus are never both expanded — the model
+    // quick menu is revoked synchronously before the permission frame paints.
+    retireQuickMenu()
     permissionMenuOpen = true
     permissionMenuEpoch += 1
     const selected = options.findIndex(option => option.selected)
@@ -2729,24 +2865,6 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return false
   }
 
-  /** The Quiet Composer's model/effort labels + title, with the frozen
-   *  narrow-pane degradation and external-fact sanitization. */
-  const quietComposerModelView = (): { label: string; title: string; interactive: boolean } => {
-    const model = presentedStatus?.composition.model
-    const cleanName = model?.displayName === undefined ? undefined : sanitizedPhysicalLine(model.displayName).trim()
-    const cleanEffort = model?.reasoningEffort === undefined ? undefined : sanitizedPhysicalLine(model.reasoningEffort).trim()
-    const narrow = session.caps.cols < QUIET_COMPOSER_NARROW_COLS
-    const value = cleanName === undefined || cleanName === ''
-      ? undefined
-      : clampMiddle(cleanName, narrow ? QUIET_COMPOSER_MODEL_NARROW_WIDTH : QUIET_COMPOSER_MODEL_WIDTH)
-    return {
-      label: `${value ?? 'Model'} ▾`,
-      title: model === undefined
-        ? 'Model — type /model to switch'
-        : `Model ${cleanName}${cleanEffort === undefined || cleanEffort === '' ? '' : ` · effort ${cleanEffort}`} — type /model to switch`,
-      interactive: boundHandlers !== undefined,
-    }
-  }
   /** The narrow-pane effort abbreviation: keep the REAL value's identity,
    *  never a guessed `H` for every non-High value. Unknown free-form values
    *  keep a bounded prefix instead of being relabelled. */
@@ -2760,16 +2878,37 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       default: return clampMiddle(value, 6)
     }
   }
-  const quietComposerEffortView = (): { label: string; title: string; interactive: boolean } => {
-    const effort = presentedStatus?.composition.model?.reasoningEffort
-    const clean = effort === undefined ? undefined : sanitizedPhysicalLine(effort).trim()
-    if (clean === undefined || clean === '') {
-      return { label: 'Effort ▾', title: 'Reasoning effort — type /model to change', interactive: boundHandlers !== undefined }
-    }
+
+  /** TSP-7 PR-G: the ONE combined trigger's display parts — the committed
+   *  Status model and effort, sanitized and bounded FOR DISPLAY ONLY. A truncated
+   *  label never becomes a write payload: the menu's rows and every submitted
+   *  identity come from the directory the registered command read. With no model
+   *  the slot reads `Model`; with no effort NO empty effort slot is invented. */
+  const quietComposerModelQuickView = (): {
+    readonly name: string
+    readonly effort: string | undefined
+    readonly title: string
+    readonly interactive: boolean
+  } => {
+    const model = presentedStatus?.composition.model
+    const cleanName = model?.displayName === undefined ? undefined : sanitizedPhysicalLine(model.displayName).trim()
+    const cleanEffort = model?.reasoningEffort === undefined ? undefined : sanitizedPhysicalLine(model.reasoningEffort).trim()
+    const narrow = session.caps.cols < QUIET_COMPOSER_NARROW_COLS
+    const name = cleanName === undefined || cleanName === ''
+      ? 'Model'
+      : clampMiddle(cleanName, narrow ? QUIET_COMPOSER_MODEL_NARROW_WIDTH : QUIET_COMPOSER_MODEL_WIDTH)
+    const effort = cleanEffort === undefined || cleanEffort === ''
+      ? undefined
+      : narrow ? narrowEffortLabel(cleanEffort) : clampMiddle(cleanEffort, 14)
+    const facts = [
+      ...(cleanName === undefined || cleanName === '' ? [] : [cleanName]),
+      ...(effort === undefined ? [] : [cleanEffort]),
+    ].join(' · ')
     return {
-      label: `${session.caps.cols < QUIET_COMPOSER_NARROW_COLS ? narrowEffortLabel(clean) : clampMiddle(clean, 14)} ▾`,
-      title: `Reasoning effort ${clean} — type /model to change`,
-      interactive: boundHandlers !== undefined,
+      name,
+      effort,
+      title: `${facts === '' ? 'Model' : facts} — model and reasoning effort`,
+      interactive: modelPickerAvailable(),
     }
   }
 
@@ -2779,12 +2918,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // A modal/Reader/picker/hydration frame invalidates an open menu before
     // it can paint a stale click target.
     if (permissionMenuOpen && !permissionMenuAdmitted()) closePermissionMenu()
+    // TSP-7 PR-G: the same rule for the quick menu — a frame that no longer
+    // admits composer input must not paint a clickable quick frame.
+    if (modelQuick?.isOpen() === true && !visualActionsAdmitted()) modelQuick.retire()
     const baseOptions = permissionMenuOptions()
     const index = Math.min(Math.max(0, permissionMenuIndex), Math.max(0, baseOptions.length - 1))
     permissionMenuIndex = index
     const options = baseOptions.map((option, optionIndex) => ({ ...option, highlighted: optionIndex === index }))
-    const model = quietComposerModelView()
-    const effort = quietComposerEffortView()
+    const modelQuickView = quietComposerModelQuickView()
     const renderScope = scopeEpoch
     return quietComposerView({
       editor,
@@ -2797,26 +2938,30 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         options,
         menuEpoch: permissionMenuEpoch,
       },
-      model,
-      effort,
+      modelQuick: {
+        name: modelQuickView.name,
+        effort: modelQuickView.effort,
+        title: modelQuickView.title,
+        interactive: modelQuickView.interactive,
+        expanded: modelQuick?.isOpen() === true,
+        panel: modelQuick?.renderState(),
+      },
       busy: presentedStatus?.activity.busy === true && !hydrating,
       sendable: composerDraftSubmittable(),
       onPermissionToggle: () => { composerPermissionToggled() },
       onPermissionChoose: (id, menuEpoch) => { permissionOptionChosen(renderScope, id, menuEpoch) },
-      onModel: () => {
-        if (closePermissionMenu()) render()
-        composerModelClicked('models')
-      },
-      onEffort: () => {
-        if (closePermissionMenu()) render()
-        composerModelClicked('effort')
-      },
+      onModelQuickToggle: () => { composerModelQuickToggled() },
+      onModelQuickIntent: (intent) => { composerQuickIntent(intent) },
       onSend: () => {
         if (closePermissionMenu()) render()
+        // TSP-7 PR-G: sending with the menu open dismisses the menu FIRST — the
+        // submission belongs to the Composer, not to a covered frame.
+        retireQuickMenu()
         composerSendClicked()
       },
       onStop: () => {
         if (closePermissionMenu()) render()
+        retireQuickMenu()
         composerStopClicked()
       },
     })
@@ -2945,6 +3090,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    fence as every other key applies).
     if (!fencedOut(key) && key.alt === true && key.ctrl !== true && key.meta !== true
       && key.shift !== true && key.name === 'q') {
+      // TSP-7 PR-G: the Alt+Q list takes the composer seat, so the quick menu is
+      // revoked synchronously before the list opens (never hidden-but-clickable).
+      retireQuickMenu()
       seat.openContinuedList(handlers)
       return false
     }
@@ -2956,6 +3104,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // Ctrl+C always belongs to the original cancel owner; the local menu
       // expansion is revoked without consuming the intent.
       if (closePermissionMenu()) render()
+      // TSP-7 PR-G: the same for the quick menu — its interaction identity goes
+      // first (with the frame that shows it), and the cancel intent still
+      // reaches its original owner unchanged.
+      retireQuickMenu()
       handlers.cancel()
       return false
     }
@@ -2963,6 +3115,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (sessionBrowser?.handleKey(key)) return false
     if (presetPicker?.handleKey(key)) return false
     if (modelPicker?.handleKey(key)) return false
+    // TSP-7 PR-G: the composer quick menu owns its keys after every higher seat
+    // and BEFORE the Permission menu and the original Escape/cancel route: a
+    // consumed key never reaches the Composer reducer, so Enter cannot send the
+    // draft and a stray letter cannot edit it.
+    if (modelQuick?.handleKey(key)) return false
     // TSP-7 PR-E: the Quiet Composer Permission menu sits AFTER every seat/
     // Reader/picker owner and BEFORE the original Escape cancel. Up/Down
     // cycle, Enter chooses, Escape closes ONLY the menu; any other key closes
@@ -3151,7 +3308,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           return false
         }
         if ((workHub?.isOpen() === true || sessionBrowser?.isOpen() === true
-          || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true)
+          || presetPicker?.isOpen() === true || modelPicker?.isOpen() === true
+          || modelQuick?.isOpen() === true)
           && input.event.ev === 'focus') applyFocus(true)
       }
       return false
@@ -3384,6 +3542,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           () => { workHub?.retire() },
           () => { sessionBrowser?.retire() },
           () => { modelPicker?.retire() },
+          // TSP-7 PR-G: the composer quick menu dies with the renderer; a late
+          // read or write settlement of a disposed mount owns no frame.
+          () => { modelQuick?.retire() },
           () => { presetPicker?.retire() },
         ])
       } catch (error) {

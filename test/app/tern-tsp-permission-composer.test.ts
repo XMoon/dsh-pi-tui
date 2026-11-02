@@ -19,6 +19,7 @@ interface Calls {
   selects: string[]
   cancels: number
   modelEntries: string[]
+  quickEntries: string[]
   permissionOptions: string[]
 }
 interface Mounted {
@@ -36,8 +37,14 @@ function permissionSnapshot(id: string, label = id, matched = true): StatusSnaps
 
 async function mountPermissionComposer(options: {
   readonly roster?: readonly string[]
+  /** TSP-7 PR-G: advertise the kinds the composer's combined Model·Effort
+   *  quick menu needs, so the two composer menus can be exercised together. */
+  readonly modelQuick?: boolean
 } = {}): Promise<Mounted> {
-  const pane = installTspPane({ composerActions: true })
+  const pane = installTspPane({
+    composerActions: true,
+    ...(options.modelQuick === true ? { modelPicker: true, modelQuick: true } : {}),
+  })
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session)
   const renderer = mountTspRenderer(session, {
@@ -49,6 +56,7 @@ async function mountPermissionComposer(options: {
     selects: [],
     cancels: 0,
     modelEntries: [],
+    quickEntries: [],
     permissionOptions: [],
   }
   const roster = options.roster ?? ['read-only', 'workspace-write', 'danger-full-access']
@@ -62,6 +70,7 @@ async function mountPermissionComposer(options: {
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
     openModelPicker: entry => { calls.modelEntries.push(entry) },
+    openModelQuick: () => { calls.quickEntries.push('quick') },
     permissionOptions: () => { calls.permissionOptions.push('read'); return roster },
     selectPermission: id => { calls.selects.push(id) },
   })
@@ -266,4 +275,43 @@ test('permission menu: a disposed renderer never dispatches a late option click'
   pane.event({ ev: 'action', sf: pane.frames().at(-1)!.sf, id: option!.id, act: 'click' })
   await settle(80)
   assert.deepEqual(m.calls.selects, [])
+})
+
+// TSP-7 PR-G: the two composer menus are mutually exclusive, and the quick
+// menu's keys never leak into the Permission menu's keyboard route.
+test('permission menu and the model quick menu are never both expanded', async (t) => {
+  const m = await mountPermissionComposer({ modelQuick: true })
+  t.after(() => { void m.dispose() })
+  const { pane, calls } = m
+
+  // Open the model quick menu through the renderer's own presentation seam —
+  // the same call the registered `/model` command makes for a live subject.
+  const presentation = m.renderer.modelPresentation
+  assert.ok(presentation?.openQuick, 'the pane negotiated the quick presentation')
+  presentation!.openQuick!({
+    subject: { sessionless: false },
+    entry: 'models',
+    isCurrent: () => true,
+    retry() {},
+    apply: () => 'committed',
+    runOwned: (_label, task, ownedOptions) => {
+      void Promise.resolve().then(task).then(ownedOptions.onResult, ownedOptions.onError)
+    },
+  })
+  await waitUntil('the quick menu mounted', () => buttonsOfKind(pane, '.composer-quick-menu').length > 0)
+  // Opening Permission revokes it in the same synchronous step.
+  click(pane, permissionTrigger(pane))
+  await waitUntil('the permission menu opened', () => permissionOptions(pane).length === 3)
+  assert.equal(buttonsOfKind(pane, '.composer-quick-menu').length, 0,
+    'the quick menu is retired before the permission frame paints')
+  // Escape closes only the open Permission menu; the Agent is never cancelled.
+  pane.key('\u001b')
+  await settle(80)
+  assert.equal(permissionOptions(pane).length, 0, 'the permission menu closed')
+  assert.equal(m.calls.cancels, 0, 'closing a composer menu is never an Agent cancel')
+  // Ctrl+C still reaches its original owner exactly once.
+  pane.key('\u0003')
+  await settle(80)
+  assert.equal(m.calls.cancels, 1, 'Ctrl+C reached the cancel owner')
+  assert.deepEqual(calls.selects, [], 'no permission write was dispatched by the menu keys')
 })
