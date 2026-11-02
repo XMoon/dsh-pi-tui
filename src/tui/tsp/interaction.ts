@@ -1486,12 +1486,16 @@ export function createTspInteractionSeat(options: TspInteractionSeatOptions): Ts
         key: 'next',
         text: 'Next',
         variant: 'primary',
-        // Enter is advertised ONLY where it really runs this button. On a page
-        // with choices Enter confirms the highlighted option (the frozen option
-        // semantics), so a ⏎ keycap here would promise a skip and deliver a
-        // selection. A page with no choices keeps it: there Enter commits the
-        // text, which is exactly what Next does.
-        keys: options.length > 0 ? undefined : ['⏎'],
+        // The keycap is advertised ONLY while Enter really runs this button, i.e.
+        // while the page IS editing: Enter then commits the text, exactly what
+        // Next does. Out of the edit — a choice page (Enter confirms the
+        // highlighted option) or a page whose edit was left with Esc (Enter only
+        // re-enters it) — the same key does something else, so the hint would lie.
+        // Omitted rather than set to `undefined`: the SDK's diff SKIPS an
+        // undefined-valued prop (so it cannot clear what an earlier frame sent)
+        // and sends `null` only for an ABSENT key — which is what removes the
+        // painted keycap.
+        ...(slot.editing === slot.tab ? { keys: ['⏎'] } : {}),
         actions: { click: FORM_NEXT_ACTION },
       }),
       ui.button({ key: 'cancel', text: 'Cancel', actions: { click: FORM_CANCEL_ACTION } }),

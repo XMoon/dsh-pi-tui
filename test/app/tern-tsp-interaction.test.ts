@@ -2487,3 +2487,73 @@ test('F7: clicking Next on an unanswered masked page with options skips the ques
     await harness.dispose()
   }
 })
+
+test('F7b: after Esc leaves the edit, Next no longer claims ⏎ (Enter re-enters the edit)', async () => {
+  const runtime = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const answers = runtime.renderer.interaction.askQuestions(
+      [question({ id: 'ft2', question: 'Anything else?' })], undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await waitFor(() => overlayAdds(runtime.ops()).length === 1, 'the free-text page opened')
+    const keysOf = () => wireNodes(runtime.pane)
+      .find(node => node.k === 'button' && node.id.endsWith('.next'))?.p.keys
+    assert.deepEqual(keysOf(), ['⏎'], 'while the field is the editor, Next really is ⏎')
+    runtime.pane.key('hello')
+    await waitFor(() => recorder.drafts.at(-1)?.answers[0]?.custom === 'hello', 'the text reached the draft')
+    assert.deepEqual(keysOf(), ['⏎'], 'still editing: the keycap still tells the truth')
+    // Esc leaves the EDIT (the frozen two-layer contract): the text survives, the
+    // page stays, and Enter now only re-enters the edit — so the keycap lies.
+    runtime.pane.key('\x1b')
+    await waitFor(() => lastOp(runtime.ops(), 'focus')?.[1] !== 'layer.modal-1.answer', 'Esc left the edit')
+    assert.equal(recorder.drafts.at(-1)?.answers[0]?.custom, 'hello', 'and kept the text')
+    // The SDK clears a dropped prop with `null` (an `undefined`-valued prop
+    // would be SKIPPED and leave the old keycap painted), so "no keycap" reads
+    // as null/absent on the wire — never as the earlier ['⏎'].
+    assert.ok(keysOf() === null || keysOf() === undefined,
+      `a page that is NOT editing does not advertise ⏎ for Next (Enter re-enters the edit): ${JSON.stringify(keysOf())}`)
+    // The claim is right: Enter re-enters the edit, it does not run Next.
+    runtime.pane.key('\r')
+    await waitFor(() => lastOp(runtime.ops(), 'focus')?.[1] === 'layer.modal-1.answer', 'Enter re-entered the edit')
+    assert.deepEqual(keysOf(), ['⏎'], 'and the keycap comes back with the editor')
+    assert.equal(recorder.drafts.at(-1)?.answers[0]?.custom, 'hello', 'nothing was submitted by that Enter')
+    // A second Enter (now editing) really commits and advances.
+    runtime.pane.key('\r')
+    await waitForButton(runtime.pane, '.submit')
+    runtime.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'ft2', selected: [], custom: 'hello' }])
+  } finally {
+    await runtime.dispose()
+  }
+})
+
+test('F7b: the same Esc→Enter rule holds on a MASKED free-text page', async () => {
+  const runtime = await mountNativeHarness()
+  const recorder = statusOf()
+  try {
+    const answers = runtime.renderer.interaction.askQuestions(
+      [question({ id: 'ms2', question: 'Token?', masked: true })], undefined, recorder.status, false)
+    void answers.catch(() => {})
+    await waitFor(() => overlayAdds(runtime.ops()).length === 1, 'the masked page opened')
+    const keysOf = () => wireNodes(runtime.pane)
+      .find(node => node.k === 'button' && node.id.endsWith('.next'))?.p.keys
+    runtime.pane.key('hunter2')
+    await waitFor(() => recorder.drafts.at(-1)?.answers[0]?.custom === 'hunter2', 'the secret reached the draft')
+    assert.deepEqual(keysOf(), ['⏎'], 'editing: Next is ⏎')
+    assert.equal(wireText(runtime.pane).includes('hunter2'), false, 'and the secret is never on the wire')
+    runtime.pane.key('\x1b')
+    await waitFor(() => lastOp(runtime.ops(), 'focus')?.[1] !== 'layer.modal-1.answer', 'Esc left the edit')
+    assert.ok(keysOf() === null || keysOf() === undefined,
+      `not editing: no false ⏎ (Enter would only re-enter the edit): ${JSON.stringify(keysOf())}`)
+    runtime.pane.key('\r')
+    await waitFor(() => lastOp(runtime.ops(), 'focus')?.[1] === 'layer.modal-1.answer', 'Enter re-entered the edit')
+    assert.deepEqual(keysOf(), ['⏎'], 'editing again: the keycap is honest again')
+    runtime.pane.key('\r')
+    await waitForButton(runtime.pane, '.submit')
+    runtime.pane.key('\r')
+    assert.deepEqual(await answers, [{ id: 'ms2', selected: [], custom: 'hunter2' }])
+    assert.equal(wireText(runtime.pane).includes('hunter2'), false, 'the secret still never reached the wire')
+  } finally {
+    await runtime.dispose()
+  }
+})
