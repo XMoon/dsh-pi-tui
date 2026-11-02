@@ -168,7 +168,7 @@ async function mountHarness(options: {
       harness.onReopen?.()
       return true
     },
-    openModelPicker() {},
+    openModelPicker() {}, openModelQuick() {},
   })
   harness.renderer = renderer
   return harness

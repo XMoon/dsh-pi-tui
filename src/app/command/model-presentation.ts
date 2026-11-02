@@ -75,5 +75,16 @@ export interface ModelPickerHandle {
 
 export interface ModelPresentation {
   open(request: ModelPickerRequest): ModelPickerHandle
+  /**
+   * The same directory and the same request, presented as the composer's
+   * anchored quick menu instead of the full catalogue. It is a PRESENTATION
+   * variant only: the command keeps the one read, the one writer, the subject
+   * and the currentness fences, and a quick selection is committed by the same
+   * `request.apply` the full panel's explicit footer action calls. Absent on a
+   * presenter that offers only the full panel (PiTui); the registered command
+   * then refuses a quick request instead of silently substituting another
+   * presentation.
+   */
+  openQuick?(request: ModelPickerRequest): ModelPickerHandle
   notify(message: string, kind?: 'info' | 'error'): void
 }

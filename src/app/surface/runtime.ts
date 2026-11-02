@@ -267,6 +267,13 @@ export interface SurfaceInputBinding {
    * a fabricated picker request. PiTui supplies no consumer.
    */
   openModelPicker(entry: 'models' | 'effort'): void
+  /**
+   * TSP-7 PR-G: open the composer's combined Model/Effort control's QUICK
+   * selector. The same late-bound route as `openModelPicker` over the SAME
+   * registered `/model` command; the command (not the renderer) decides
+   * whether the current subject gets the quick panel or the full one.
+   */
+  openModelQuick(): void
   /** Whether the native `/model` picker UI entry is actually installed
    *  (registered, not Host-owned) — the real business-entry fact. */
   modelPickerAvailable(): boolean
@@ -624,6 +631,12 @@ export interface SurfaceRuntimeOptions {
    * async owner.
    */
   readonly openModelPicker?: (entry: 'models' | 'effort') => void
+  /**
+   * TSP-7 PR-G: the LATE-BOUND quick `/model` UI entry the composer's combined
+   * Model/Effort control calls. Same assignment window, same loud placeholder
+   * contract and same owned-promise rule as {@link openModelPicker}.
+   */
+  readonly openModelQuick?: () => void
   /** PR-C/PR-F: whether the native `/model` picker UI entry is actually
    *  installed. The footer's model/reasoning fallback reads this fact, not
    *  the presence of a painted composer button. */
@@ -2791,6 +2804,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             const open = options.openModelPicker
             if (open === undefined) throw new Error('the model picker command entry is not wired in this composition')
             open(entry)
+          },
+          // TSP-7 PR-G: the late-bound quick `/model` UI entry, forwarded
+          // verbatim. Same loud-placeholder rule: an unwired composition must
+          // not leave the combined composer control dead.
+          openModelQuick: () => {
+            const open = options.openModelQuick
+            if (open === undefined) throw new Error('the model quick command entry is not wired in this composition')
+            open()
           },
           modelPickerAvailable: () => options.modelPickerAvailable?.() ?? false,
           // TSP-7 PR-E: the late-bound Permission UI seam. The catalog read

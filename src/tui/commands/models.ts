@@ -17,7 +17,11 @@ import type { SessionScope } from '../../app/session/scope.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { isCancellation, runOwned, type OwnedTaskOptions } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
-import type { ModelApplyOutcome, ModelPresentation } from '../../app/command/model-presentation.ts'
+import type {
+  ModelApplyOutcome,
+  ModelPickerRequest,
+  ModelPresentation,
+} from '../../app/command/model-presentation.ts'
 import type {
   PresetApplyOutcome,
   PresetDefaultOutcome,
@@ -88,6 +92,15 @@ export interface ModelCommandRegistrars {
    * scope, writer and outcome owner is the registered handler's own.
    */
   openModel(entry: 'models' | 'effort'): Promise<CommandResult>
+  /**
+   * TSP-7 PR-G: the composer's single combined Model/Effort control. It runs
+   * the SAME handler body as `openModel` — the same scope capture, the same
+   * directory reader, the same writer and the same presentation tokens — and
+   * only asks for the QUICK presentation of the panel. A sessionless subject
+   * is routed by THIS command to the full panel (the explicit `Save default`
+   * contract), never to a quick selector that would write a global default.
+   */
+  openModelQuick(): Promise<CommandResult>
 }
 
 /**
@@ -138,9 +151,14 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
   let presetSurfaceToken = 0
 
   /** The shared `/model` body: ONE handler closure per registration lifetime,
-   *  serving the registered command and the command-only UI entry (`openModel`)
-   *  — never two catalog readers or two writer owners. */
-  const openModel = (entry: 'models' | 'effort'): Promise<CommandResult> => (async (): Promise<CommandResult> => {
+   *  serving the registered command, the command-only UI entry (`openModel`)
+   *  and the quick UI entry (`openModelQuick`) — never two catalog readers or
+   *  two writer owners. `presentationMode` selects WHICH presenter renders the
+   *  one request; it is not a second command and never a second writer. */
+  const openModel = (
+    entry: 'models' | 'effort',
+    presentationMode: 'full' | 'quick' = 'full',
+  ): Promise<CommandResult> => (async (): Promise<CommandResult> => {
         const presentation = deps.modelPresentation ?? pituiModelPresentation(app)
         const models = runner.catalog.models
         if (!models.available()) return { kind: 'error', text: 'model service unavailable' }
@@ -281,21 +299,38 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           runner.updateWelcomeCard()
           return outcome.kind
         }
-        // A newer `/model` owns the SURFACE: bump the presentation token and
-        // mount the loading panel IMMEDIATELY. The directory read runs as owned
-        // background work, so the user gets instant feedback and may type a
-        // query while it loads.
-        const surfaceToken = ++modelSurfaceToken
         // The write subject is captured BEFORE the first read (v2 §4.1/UX-D15)
         // and is fixed for the panel's whole life: the read never re-derives the
         // subject from a later, possibly different Session.
         const subject = { sessionless: runner.currentSessionId === undefined }
+        // ONE decision, made by THIS command on the subject it captured: before
+        // a Session exists the quick selector would have nothing to write to, so
+        // a sessionless request gets the full panel with its explicit
+        // `Save default` — the product contract, not a capability fallback. A
+        // renderer without a quick presenter is a loud refusal, never a silent
+        // substitution of another presentation and never an accepted write.
+        const effectiveMode = subject.sessionless ? 'full' : presentationMode
+        if (effectiveMode === 'quick' && presentation.openQuick === undefined) {
+          return {
+            kind: 'error',
+            text: 'the quick model selector is not available in this session (the mounted renderer presents only the full /model panel)',
+          }
+        }
+        // A newer `/model` owns the SURFACE: bump the presentation token and
+        // mount the loading panel IMMEDIATELY. The directory read runs as owned
+        // background work, so the user gets instant feedback and may type a
+        // query while it loads. A quick → full handoff takes the SAME token, so
+        // the retired quick panel can never be hydrated or written back.
+        const surfaceToken = ++modelSurfaceToken
         // ONE directory-read owner for the FIRST read and every Retry. The
         // single `reading` latch is the read epoch: a retry while a read is in
         // flight is refused (RETRY LOADING admits no second read), and a
         // settled response can only belong to the latest token+scope read.
         let reading = false
-        const picker = presentation.open({
+        // ONE request object for BOTH presentations: the quick menu and the full
+        // catalogue share the same subject, entry hint, read owner, writer and
+        // currentness fence, so no quick path can grow a second authority.
+        const request: ModelPickerRequest = {
           subject,
           entry,
           isCurrent: () => surfaceToken === modelSurfaceToken && ownerCurrent(),
@@ -310,7 +345,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
           runOwned: <T>(label: string, task: () => T | Promise<T>, options: Omit<OwnedTaskOptions<T>, 'diag' | 'sessionId'>) => {
             runOwned(label, task, { ...options, diag: runner.diag, sessionId: () => runner.currentSessionId })
           },
-        })
+        }
+        const picker = effectiveMode === 'quick'
+          ? presentation.openQuick!(request)
+          : presentation.open(request)
         const closer = () => { if (surfaceToken === modelSurfaceToken) picker.close() }
         /** Read (or re-read) the directory through the original owner. Never a
          *  second catalog read: the same `loadDirectory`, scope, signal, token
@@ -389,9 +427,9 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
     registerOne({
       name: 'model',
       description: 'Switch the model (and reasoning effort) for this session; before a session exists, change the default when supported',
-      // The registered command and the command-only UI entry (`openModel`)
-      // share ONE body: the same scope capture, the same catalog reader, the
-      // same writer and the same presentation tokens.
+      // The registered command and the command-only UI entries (`openModel`,
+      // `openModelQuick`) share ONE body: the same scope capture, the same
+      // catalog reader, the same writer and the same presentation tokens.
       handler: () => openModel('models'),
     })
   }
@@ -903,5 +941,11 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
     })
   }
 
-  return { registerModel, registerYolo, registerPreset, openModel }
+  return {
+    registerModel,
+    registerYolo,
+    registerPreset,
+    openModel,
+    openModelQuick: () => openModel('models', 'quick'),
+  }
 }

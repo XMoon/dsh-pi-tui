@@ -989,6 +989,15 @@ export function registerTuiCommands(
    * command surface's own notice path.
    */
   openModelPicker?(entry: 'models' | 'effort'): Promise<CommandResult>
+  /**
+   * TSP-7 PR-G: the command-only QUICK entry over the SAME registered `/model`
+   * handler — the composer's combined Model/Effort control calls this. It
+   * forwards to `openModel('models','quick')`: one scope capture, one directory
+   * reader, one writer and one presentation token, and the handler itself
+   * decides the presentation from the Session subject it captured. Undefined
+   * under exactly the same degradation as `openModelPicker`.
+   */
+  openModelQuick?(): Promise<CommandResult>
 } {
   const { ctx, app } = runner
   // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal
@@ -2417,7 +2426,13 @@ export function registerTuiCommands(
     // bypassing the Host route.
     ...(registrationFailures.some(failure => failure.startsWith('/model:'))
       ? {}
-      : { openModelPicker: (entry: 'models' | 'effort'): Promise<CommandResult> => modelCommands.openModel(entry) }),
+      : {
+          openModelPicker: (entry: 'models' | 'effort'): Promise<CommandResult> => modelCommands.openModel(entry),
+          // TSP-7 PR-G: the quick presentation of the SAME registered handler,
+          // minted from the SAME registrar instance — no second command, no
+          // second catalog owner.
+          openModelQuick: (): Promise<CommandResult> => modelCommands.openModelQuick(),
+        }),
     takeCommandDraftDisposition: (commandId?: string): CommandDraftDisposition | undefined => {
       if (commandId !== undefined) {
         const disposition = commandDraftDispositions.get(commandId)

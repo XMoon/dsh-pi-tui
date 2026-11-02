@@ -635,6 +635,13 @@ export function applyRunnerWithRuntime(
      * the command itself uses; there is no second async owner here.
      */
     let openRegisteredModelPicker: ((entry: 'models' | 'effort') => void) | undefined
+    /**
+     * TSP-7 PR-G: the ONE late-bound QUICK `/model` UI entry, armed in exactly
+     * the same window as {@link openRegisteredModelPicker} and through the same
+     * `runOwned` seam. The composer's combined Model/Effort control is its only
+     * consumer; the registered command owns every read, write and notice.
+     */
+    let openRegisteredModelQuick: (() => void) | undefined
     /** PR-F: the real `/model` picker business-entry availability (registration,
      *  not just painted chrome); late-bound with the picker opener below. */
     let modelPickerAvailableOwner: (() => boolean) | undefined
@@ -675,6 +682,13 @@ export function applyRunnerWithRuntime(
       openModelPicker: entry => {
         if (openRegisteredModelPicker === undefined) throw new Error('model picker command not registered')
         openRegisteredModelPicker(entry)
+      },
+      // TSP-7 PR-G: the quick entry of the SAME registered `/model` command. A
+      // click before the assignment below reaches the loud placeholder, never a
+      // fabricated request.
+      openModelQuick: () => {
+        if (openRegisteredModelQuick === undefined) throw new Error('model picker command not registered')
+        openRegisteredModelQuick()
       },
       modelPickerAvailable: () => modelPickerAvailableOwner?.() ?? false,
       // TSP-7 PR-E: the LATE-BOUND narrow Permission UI seam (TSP only). A
@@ -3735,6 +3749,15 @@ export function applyRunnerWithRuntime(
     // promise); its own outcome paths already own every notice.
     openRegisteredModelPicker = entry => {
       runOwned('model picker UI entry', () => command.openModelPicker(entry), {
+        diag,
+        sessionId: () => ownership.currentSessionId(),
+      })
+    }
+    // TSP-7 PR-G: the quick entry rides the SAME registered command surface, the
+    // SAME owned-task wiring and the same arming window (before
+    // `bindRendererInput()` can deliver the first bound click).
+    openRegisteredModelQuick = () => {
+      runOwned('model quick UI entry', () => command.openModelQuick(), {
         diag,
         sessionId: () => ownership.currentSessionId(),
       })
