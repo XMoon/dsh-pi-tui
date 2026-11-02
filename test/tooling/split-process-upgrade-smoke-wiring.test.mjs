@@ -132,7 +132,7 @@ test('the upgrade lane owns the real Client reexec handoff and its two live nega
   assert.match(source, /clientClosed\.sessionOpen, false/u)
   assert.match(source, /clientClosed\.owners/u)
   assert.match(source, /c1Restored\.clientBuildId, newBuildId/u)
-  assert.match(source, /assert\.equal\(await seatIsFree\(clientSeatName\), false/u)
+  assert.match(source, /assertEqual\(await seatIsFree\(clientSeatName\), false/u)
   // The OLD Client exits only AFTER the replacement ran; the reexec is not
   // another same-PID surface revision.
   const oldClientExitIndex = source.indexOf("clientA.send('/exit\\r')")
