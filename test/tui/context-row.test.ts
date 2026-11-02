@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { visibleWidth } from '@xmoon76/pi-tui'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from '../../src/tui/components/transcript/context-row.ts'
+import { agentContextHeaderKind, agentContextSenderName } from '../../src/tui/components/transcript/agent-context-title.ts'
 import { color } from '../../src/tui/theme/runtime.ts'
 import type { TranscriptMessage } from '../../src/transcript.ts'
 
@@ -458,4 +459,49 @@ test('a multibyte sender name never breaks the header width contract', () => {
     }).render(width)
     for (const row of notice) assert.ok(visibleWidth(row) <= width, `notice width ${width} overflowed: ${JSON.stringify(visible(row))}`)
   }
+})
+
+test('a control-sequence or OSC sender label is sanitized before it reaches the header', () => {
+  const labels = new Map([[RELAY_SENDER, '\x1b[31m红队审核员\x1b[0m \x1b]8;;https://example.test\x1b\\链接\x1b]8;;\x1b\\']])
+  const name = agentContextSenderName(relayIdentityRow(), labels)
+  assert.equal(name, '红队审核员 链接', 'SGR and OSC sequences are removed; ordinary Unicode is kept')
+  assert.ok(!name!.includes('\x1b') && !name!.includes(']8;;') && !name!.includes('[31m'))
+  const rows = new RelayContextRow({
+    message: relayIdentityRow(), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+    senderDisplayName: name, geometry: { thresholdRows: 10, headRows: 4, tailRows: 3 },
+  }).render(80)
+  assert.ok(visible(rows[0]!).includes('Agent message · 红队审核员 链接'))
+  assert.ok(!visible(rows[0]!).includes(']8;;'), 'no raw OSC payload survives the header')
+})
+
+test('a Context row without a producer-declared form never gets an Agent identity title', () => {
+  const noForm = {
+    ...relayIdentityRow(),
+    contextPresentation: { sourceKind: 'agent-message' as const, senderSessionId: RELAY_SENDER, role: 'inject' as const },
+  }
+  assert.equal(agentContextHeaderKind(noForm), undefined)
+  assert.equal(agentContextSenderName(noForm, new Map([[RELAY_SENDER, 'ignored']])), undefined)
+  const rows = new RelayContextRow({
+    message: noForm, expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+    senderDisplayName: 'ignored', geometry: { thresholdRows: 10, headRows: 4, tailRows: 3 },
+  }).render(80)
+  assert.match(rows[0]!, new RegExp(`Agent message · ${RELAY_SENDER}`),
+    'an unknown form keeps the original raw-sender title')
+  assert.ok(!rows[0]!.includes('ignored'))
+})
+
+test('crossed source/form pairs never qualify as Agent identity rows', () => {
+  const settledWithRelayForm = {
+    kind: 'system' as const, turn: 0, text: 'body', label: 'subagent-settled', icon: 'context-notice' as const, context: true as const,
+    summary: 'summary',
+    contextPresentation: { form: 'relay' as const, sourceKind: 'subagent-settled', senderSessionId: RELAY_SENDER, role: 'inject' as const },
+  }
+  const relayWithNoticeForm = {
+    ...relayIdentityRow('body'),
+    contextPresentation: { form: 'notice' as const, sourceKind: 'agent-message', senderSessionId: RELAY_SENDER, role: 'inject' as const },
+  }
+  assert.equal(agentContextHeaderKind(settledWithRelayForm), undefined)
+  assert.equal(agentContextHeaderKind(relayWithNoticeForm), undefined)
+  assert.equal(agentContextSenderName(settledWithRelayForm, new Map()), undefined)
+  assert.equal(agentContextSenderName(relayWithNoticeForm, new Map()), undefined)
 })
