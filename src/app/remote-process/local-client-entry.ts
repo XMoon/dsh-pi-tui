@@ -524,8 +524,11 @@ export interface ClientEntryShutdownOptions {
   readonly reexec?: {
     readonly intent: ClientReexecIntent
     readonly teardownSucceeded: boolean
-    /** A termination signal arrived before the replacement child spawned. */
-    readonly cancelled?: boolean
+    /**
+     * Live pre-spawn cancellation latch. It is read AFTER the seat close, so a
+     * termination signal arriving while that close is pending is observed.
+     */
+    readonly cancelled?: () => boolean
   }
   readonly emit: EntryRecordSink
   readonly stderr: (line: string) => void
@@ -563,7 +566,7 @@ export async function finishClientEntryShutdown(options: ClientEntryShutdownOpti
   }
   const reexec = options.reexec
   if (reexec === undefined) return seatClosed ? undefined : 1
-  if (reexec.cancelled === true) {
+  if (reexec.cancelled?.() === true) {
     const reason = new Error('local client entry: the Client handoff was cancelled by a termination signal')
     options.emit({
       m4r: 'handoff-failed',
@@ -1717,7 +1720,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       seat,
       ...(reexecIntent === undefined
         ? {}
-        : { reexec: { intent: reexecIntent, teardownSucceeded: reexecTeardownSucceeded, cancelled: reexecCancelled } }),
+        : { reexec: { intent: reexecIntent, teardownSucceeded: reexecTeardownSucceeded, cancelled: () => reexecCancelled } }),
       emit,
       stderr: line => { process.stderr.write(`${line}\n`) },
       onChildSpawned: child => { reexecChild = child },
