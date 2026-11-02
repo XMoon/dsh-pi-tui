@@ -341,7 +341,36 @@ function copyProviderEntry(entry: ProviderCatalogEntry): ProviderCatalogEntry {
  * Invalidations only bump the counter (the snapshot stays readable as the
  * last-known display value); no unowned background promise is started.
  */
+/**
+ * The ONE accepted-write lifetime counter of the Remote configuration port.
+ * Every write sink (the settings mirror's `mutate` and the credential
+ * reference writes) brackets its accepted work; the Client reload safety gate
+ * reads the count so it can never retire the Client while a persisted
+ * configuration write is still in flight. Read-only calls never register.
+ */
+class RemoteConfigWriteLifetime {
+  private pending = 0
+
+  /** Register one accepted write; the returned release is idempotent. */
+  begin(): () => void {
+    this.pending += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.pending -= 1
+    }
+  }
+
+  hasUnsettledWrites(): boolean {
+    return this.pending > 0
+  }
+}
+
 class RemoteConfigMirror {
+  /** The accepted-write lifetime owner (the serialized chain below is
+   *  `writes`, its internal queue). */
+  private readonly writeLifetime: RemoteConfigWriteLifetime
   private readonly settings: RemoteSettingsRemotes
   private readonly llm: RemoteLlmRemotes & RemoteLlmDirectoryRemotes
   private readonly permissionPresets: RemotePermissionPresetRemotes
@@ -365,7 +394,8 @@ class RemoteConfigMirror {
    *  before construction finishes. */
   private constructed = false
 
-  constructor(source: RemoteConfigRuntimeSource, on: RemoteConfigEventsSource['$on']) {
+  constructor(source: RemoteConfigRuntimeSource, on: RemoteConfigEventsSource['$on'], writeLifetime: RemoteConfigWriteLifetime) {
+    this.writeLifetime = writeLifetime
     this.settings = source.remote.settings
     this.llm = source.remote.llm
     this.permissionPresets = source.remote.permissionPresets
@@ -657,67 +687,75 @@ class RemoteConfigMirror {
     baseRevision?: number,
     refreshFailure: 'reject' | 'record' = 'reject',
   ): Promise<void> {
-    await this.enqueueWrite(async () => {
-      await this.ensureCurrent()
-      const snapshot = this.lastKnown()
-      if (snapshot === undefined || !this.isCurrent()) {
-        // §9.1: a write against a backend that cannot vouch for its values
-        // fails IMMEDIATELY with an explicit reason — never a silent no-op and
-        // never an optimistic local success (the pre-flight refresh above
-        // already had its chance).
-        // §6.2: a degraded SETTINGS slice names the real settings failure
-        // (this write IS a settings write).
-        if (snapshot?.settingsFailure instanceof Error) {
-          throw new Error(`settings.describe failed: ${snapshot.settingsFailure.message}`)
+    // Accepted-work lifetime: registered SYNCHRONOUSLY by the caller's write
+    // (before the serialized queue), released only when the enqueued write
+    // reaches its terminal settlement (including the post-write refresh).
+    const endWrite = this.writeLifetime.begin()
+    try {
+      await this.enqueueWrite(async () => {
+        await this.ensureCurrent()
+        const snapshot = this.lastKnown()
+        if (snapshot === undefined || !this.isCurrent()) {
+          // §9.1: a write against a backend that cannot vouch for its values
+          // fails IMMEDIATELY with an explicit reason — never a silent no-op and
+          // never an optimistic local success (the pre-flight refresh above
+          // already had its chance).
+          // §6.2: a degraded SETTINGS slice names the real settings failure
+          // (this write IS a settings write).
+          if (snapshot?.settingsFailure instanceof Error) {
+            throw new Error(`settings.describe failed: ${snapshot.settingsFailure.message}`)
+          }
+          throw new Error(this.generation.getSnapshot() === undefined
+            ? 'the Remote configuration is unavailable on this connection; the change was not saved'
+            : snapshot === undefined
+              ? 'the Remote configuration has not been read yet; the change was not saved'
+              : 'the Remote configuration is not current; the change was not saved')
         }
-        throw new Error(this.generation.getSnapshot() === undefined
-          ? 'the Remote configuration is unavailable on this connection; the change was not saved'
-          : snapshot === undefined
-            ? 'the Remote configuration has not been read yet; the change was not saved'
-            : 'the Remote configuration is not current; the change was not saved')
-      }
-      // A genuinely empty diff is a no-op ONLY once the mirror is current:
-      // returning earlier would let a stale mirror report success for a
-      // document it computed from superseded values (§8.1/§9.1).
-      if (ops.length === 0) return
-      // A current mirror always carries committed settings namespaces (a
-      // missing slice reads `unavailable`, which the fence above refused):
-      // an absent namespace here is a real deployment fact, not a degraded
-      // read.
-      const descriptor = snapshot.namespaces?.get(ns)
-      if (descriptor === undefined) {
-        throw new Error(`settings namespace "${ns}" is not available in this deployment`)
-      }
-      const result = await settledResult(this.settings.mutate(ns, [...ops], baseRevision ?? descriptor.revision))
-      if (!result.ok) {
-        // A failed write RPC does NOT prove the Host refused it: the official
-        // controller applies the edit and then performs its OWN post-write describe,
-        // reporting a failure of that read as an error even though the write
-        // committed. The last-known snapshot may therefore already be behind a
-        // committed write, so it is marked non-current AND re-read here — a consumer
-        // then sees the committed value, the previous value (a real refusal) or an
-        // explicitly non-current authority, and never has to guess.
-        this.invalidate()
+        // A genuinely empty diff is a no-op ONLY once the mirror is current:
+        // returning earlier would let a stale mirror report success for a
+        // document it computed from superseded values (§8.1/§9.1).
+        if (ops.length === 0) return
+        // A current mirror always carries committed settings namespaces (a
+        // missing slice reads `unavailable`, which the fence above refused):
+        // an absent namespace here is a real deployment fact, not a degraded
+        // read.
+        const descriptor = snapshot.namespaces?.get(ns)
+        if (descriptor === undefined) {
+          throw new Error(`settings namespace "${ns}" is not available in this deployment`)
+        }
+        const result = await settledResult(this.settings.mutate(ns, [...ops], baseRevision ?? descriptor.revision))
+        if (!result.ok) {
+          // A failed write RPC does NOT prove the Host refused it: the official
+          // controller applies the edit and then performs its OWN post-write describe,
+          // reporting a failure of that read as an error even though the write
+          // committed. The last-known snapshot may therefore already be behind a
+          // committed write, so it is marked non-current AND re-read here — a consumer
+          // then sees the committed value, the previous value (a real refusal) or an
+          // explicitly non-current authority, and never has to guess.
+          this.invalidate()
+          try {
+            await this.describe()
+          } catch (error) {
+            this.recordFailure(error)
+          }
+          throw new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`)
+        }
+        // Authoritative refresh AFTER the official settlement. The write is already
+        // committed; a FAILED refresh is a currentness uncertainty, not a refusal —
+        // `readiness()` reports the real state in both of its failure modes.
+        if (refreshFailure === 'reject') {
+          await this.describe()
+          return
+        }
         try {
           await this.describe()
         } catch (error) {
           this.recordFailure(error)
         }
-        throw new Error(`settings.mutate(${ns}) failed: ${remoteFailureMessage(result.error)}`)
-      }
-      // Authoritative refresh AFTER the official settlement. The write is already
-      // committed; a FAILED refresh is a currentness uncertainty, not a refusal —
-      // `readiness()` reports the real state in both of its failure modes.
-      if (refreshFailure === 'reject') {
-        await this.describe()
-        return
-      }
-      try {
-        await this.describe()
-      } catch (error) {
-        this.recordFailure(error)
-      }
-    })
+      })
+    } finally {
+      endWrite()
+    }
   }
 
   /** Drop the cached snapshot (and any in-flight read's publication right). */
@@ -1235,6 +1273,7 @@ class RemoteCredentialConfig implements CredentialConfig {
   private readonly credentials: RemoteCredentialsRemotes
   private readonly generation: RemoteConnectionGenerationSource
   private readonly on: RemoteConfigEventsSource['$on']
+  private readonly writeLifetime: RemoteConfigWriteLifetime
   /** Every active listener subscription, so dispose() releases them once. */
   private readonly active = new Set<() => void>()
 
@@ -1242,10 +1281,12 @@ class RemoteCredentialConfig implements CredentialConfig {
     credentials: RemoteCredentialsRemotes,
     on: RemoteConfigEventsSource['$on'],
     generation: RemoteConnectionGenerationSource,
+    writeLifetime: RemoteConfigWriteLifetime,
   ) {
     this.credentials = credentials
     this.on = on
     this.generation = generation
+    this.writeLifetime = writeLifetime
   }
 
   available(): boolean {
@@ -1283,16 +1324,28 @@ class RemoteCredentialConfig implements CredentialConfig {
 
   async setReference(ref: string, secret: string): Promise<void> {
     this.requireDispatchableGeneration()
-    const result = await settledResult(this.credentials.set(ref, secret))
-    // DISPATCHED: the Host result is the settlement authority — never
-    // reclassified because the transport generation rolled over.
-    if (!result.ok) throw new Error(`credentials.set(${ref}) failed: ${remoteFailureMessage(result.error)}`)
+    // Accepted-work lifetime: a dispatched credential write is persisted Host
+    // configuration too, so the Client reload gate must observe it.
+    const endWrite = this.writeLifetime.begin()
+    try {
+      const result = await settledResult(this.credentials.set(ref, secret))
+      // DISPATCHED: the Host result is the settlement authority — never
+      // reclassified because the transport generation rolled over.
+      if (!result.ok) throw new Error(`credentials.set(${ref}) failed: ${remoteFailureMessage(result.error)}`)
+    } finally {
+      endWrite()
+    }
   }
 
   async unsetReference(ref: string): Promise<void> {
     this.requireDispatchableGeneration()
-    const result = await settledResult(this.credentials.unset(ref))
-    if (!result.ok) throw new Error(`credentials.unset(${ref}) failed: ${remoteFailureMessage(result.error)}`)
+    const endWrite = this.writeLifetime.begin()
+    try {
+      const result = await settledResult(this.credentials.unset(ref))
+      if (!result.ok) throw new Error(`credentials.unset(${ref}) failed: ${remoteFailureMessage(result.error)}`)
+    } finally {
+      endWrite()
+    }
   }
 
   async describeReference(ref: string): Promise<{ configured: boolean; source?: string }> {
@@ -1643,6 +1696,8 @@ export class RemoteConfigPort implements ConfigPort {
   private readonly mirror: RemoteConfigMirror
   private readonly tuiSettingsWrapper: RemoteTuiSettingsConfig
   private readonly credentialConfig: RemoteCredentialConfig
+  /** The ONE accepted-write lifetime of this port (settings + credentials). */
+  private readonly writes = new RemoteConfigWriteLifetime()
 
   readonly footerCommandTrust: FooterCommandTrust
   readonly footerCustomItems: FooterCustomItemsConfig
@@ -1676,7 +1731,7 @@ export class RemoteConfigPort implements ConfigPort {
       remote: source.remote,
       connection: source.connection,
     }
-    this.mirror = new RemoteConfigMirror(bound, on)
+    this.mirror = new RemoteConfigMirror(bound, on, this.writes)
     this.tuiSettingsWrapper = new RemoteTuiSettingsConfig(this.mirror)
     this.footerCommandTrust = new RemoteFooterCommandTrust(this.mirror)
     this.footerCustomItems = new RemoteFooterCustomItems(this.mirror)
@@ -1685,6 +1740,7 @@ export class RemoteConfigPort implements ConfigPort {
       bound.remote.credentials,
       on,
       source.connection.generation,
+      this.writes,
     )
     this.credentials = this.credentialConfig
     this.authorization = new RemoteAuthorizationConfig()
@@ -1717,6 +1773,11 @@ export class RemoteConfigPort implements ConfigPort {
   /** The truthfulness of the current snapshot. */
   readiness(): RemoteConfigReadiness {
     return this.mirror.readiness()
+  }
+
+  /** Whether an accepted persisted configuration write is still unsettled. */
+  hasUnsettledWrites(): boolean {
+    return this.writes.hasUnsettledWrites()
   }
 
   /** The semantic currentness signal (§9.1): the UI marks last-known values

@@ -145,6 +145,17 @@ export class DirectConfigPort implements ConfigPort {
     return 'ready'
   }
 
+  /**
+   * Direct settings writes settle inside THIS process's Host settings service
+   * (awaited by their handlers) and the Direct branch owns no Client OS
+   * retirement capability at all, so there is no Client-local persisted write
+   * lifetime to observe here. The split Client's Remote port owns the real
+   * registration.
+   */
+  hasUnsettledWrites(): boolean {
+    return false
+  }
+
   readonly tuiSettings: TuiSettingsConfig | undefined
   readonly footerCommandTrust: FooterCommandTrust
   readonly footerCustomItems: FooterCustomItemsConfig

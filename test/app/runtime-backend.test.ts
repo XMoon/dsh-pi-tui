@@ -100,6 +100,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
   }
   const config = {
     configReadiness: () => 'ready' as const,
+    hasUnsettledWrites: () => false,
     tuiSettings: undefined,
     footerCommandTrust: {
       userFooterMode: undefined,
