@@ -44,13 +44,28 @@ test('the upgrade smoke requires two different old/new artifact paths', () => {
   assert.throws(() => parseUpgradeArguments(['--old', '--new', 'new.tgz']), /--old requires a path/u)
 })
 
-test('the upgrade smoke refuses to treat one artifact as both builds', () => {
+test('the upgrade smoke proves cross-build compatibility instead of a build refusal', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   assert.match(source, /oldArtifact\.sha256 === newArtifact\.sha256/u)
   assert.match(source, /newBuildId !== oldBuildId/u)
-  assert.match(source, /HOST_BUILD_INCOMPATIBLE/u)
+  // U02 uses the real qualification control on the new Client and reads its
+  // structured RPC proof; it must not treat a build refusal as the outcome.
+  assert.match(source, /qualification-host-foundation/u)
+  assert.match(source, /host-rpc-proof/u)
+  assert.match(source, /assertIdentityKept\(clientBAuth\.host, hostABefore/u)
+  assert.match(source, /clientBAuth\.host\.buildId === oldBuildId/u)
+  // U04 must be the real PTY surface resuming the running old Session.
+  assert.match(source, /SurfaceEntryProcess/u)
+  assert.match(source, /SPLIT_PROCESS_CLIENT_SESSION: sessionId/u)
+  assert.match(source, /sessionOpen === true && record\.openSessionId === sessionId/u)
+  assert.match(source, /waitForScreen\('c2d-upgrade-hold'/u)
+  assert.match(source, /crossBuildClient/u)
+  assert.match(source, /crossBuildSurface/u)
+  assert.match(source, /cross-build-compatible/u)
   assert.match(source, /SPLIT_UPGRADE_SMOKE_PASS/u)
   assert.match(source, /SPLIT_UPGRADE_KEEP/u)
+  assert.doesNotMatch(source, /HOST_BUILD_INCOMPATIBLE/u,
+    'the upgrade lane must not present a cross-build refusal as its success path')
   // The lane must never derive the old artifact by mutating the new one.
   assert.doesNotMatch(source, /writeFileSync\(.*newArtifact\.path/u)
 })

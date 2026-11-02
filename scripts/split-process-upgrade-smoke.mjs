@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * M4-C2-D split-process installed-build upgrade safety qualification.
+ * Split-process cross-build Client/Host qualification with two real packages.
  *
  * This lane proves the real old-Host / new-Client transition with two genuine
  * packaged payloads:
@@ -8,15 +8,20 @@
  *   old tgz installed in the one canonical profile (Host A + Client A)
  *   new tgz installed side-by-side as a real package root (Client B candidate)
  *     only after Host A has admitted a Turn and Client A has exited
- *   same DSH_HOME / profile / UID / DSH rc.4 for both builds
+ *   same DSH_HOME / profile / UID / DSH runtime for both builds
  *
- * It then proves readLocalRecord -> /proc starttime -> assertBuildCompatible ->
- * HOST_BUILD_INCOMPATIBLE -> Client exit without spawning, killing, replacing
- * or mutating the live Host, while the old Host-owned Turn is still running.
- * Only after a separate explicit SIGTERM (mapped by the Host entry to its ONE
- * official `runProfile` shutdown owner) does the lane install the new payload
- * into the profile and proves a fresh Host identity plus durable Session
- * readback through the new Client.
+ * Both packages name the same `dsh-pi-tui/local/1` wire protocol and the same
+ * exact DSH runtime, but carry different package versions, bundles and
+ * buildIds. The new Client B must authenticate the SAME Host A, call the real
+ * official `session/list`, private PiFile RPC and private terminal-progress
+ * watch, and the new build's real PTY surface must open the SAME running
+ * Session. Neither Client may mutate Host A, its registry/launch files, or
+ * release its admitted Turn.
+ *
+ * Only after the turn completes and a separate explicit SIGTERM (mapped by the
+ * Host entry to its ONE official `runProfile` shutdown owner) does the lane
+ * install the new payload into the profile and prove a fresh Host identity plus
+ * durable Session readback.
  *
  * The side-by-side shape is deliberate: replacing a live profile package
  * payload in place is NOT a qualified hot-upgrade path. A local probe showed
@@ -24,7 +29,7 @@
  * alive when its on-disk payload was replaced under it. This lane therefore
  * qualifies the safe order — introduce the new build, stop the old Host
  * explicitly, then replace the installed profile — and leaves the running old
- * installation byte-for-byte intact during the mismatch.
+ * installation byte-for-byte intact while the cross-build Client attaches.
  *
  * Usage:
  *   pnpm smoke:split-upgrade -- --old <absolute-old.tgz> --new <absolute-new.tgz> [--evidence <file>]
@@ -374,10 +379,6 @@ function assertNoSecret(label, text, secrets) {
   }
 }
 
-function stripAnsi(text) {
-  return text.replace(/\x1b\[[0-9;]*m/gu, '')
-}
-
 async function fetchStatus(url, options = {}) {
   const response = await fetch(url, { redirect: 'manual', cache: 'no-store', ...options })
   return { status: response.status, setCookie: response.headers.get('set-cookie') ?? '' }
@@ -433,6 +434,9 @@ async function main() {
   const newArtifact = inspectArtifact(options.new, 'new')
   if (oldArtifact.sha256 === newArtifact.sha256) {
     throw new Error('split upgrade smoke: --old and --new must be different packaged bytes')
+  }
+  if (oldArtifact.manifest.version === newArtifact.manifest.version) {
+    throw new Error('split upgrade smoke: --old and --new must carry different package versions')
   }
   const targetDshVersion = npmDshVersion()
   const distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
@@ -588,6 +592,8 @@ async function main() {
     const scopeDir = scopeDirOf(dshHome, hostABefore.scopeId)
     const registryBefore = readFileSync(join(scopeDir, 'instance.json'))
     const launchBefore = readFileSync(join(scopeDir, 'launch.json'))
+    const registryBeforeSha256 = createHash('sha256').update(registryBefore).digest('hex')
+    const launchBeforeSha256 = createHash('sha256').update(launchBefore).digest('hex')
     const oldLaunch = readJson(join(scopeDir, 'launch.json'))
     const oldOrigin = new URL(oldLaunch.connectUrl).origin
     const oldToken = new URL(oldLaunch.connectUrl).searchParams.get('token')
@@ -601,46 +607,83 @@ async function main() {
     const oldCookieIdentity = await fetchStatus(`${oldOrigin}/api/pi-tui.local-host`, { headers: { cookie: oldCookie } })
     assert(oldCookieIdentity.status === 200, 'Host A did not accept its own minted Cookie')
 
-    // ── U02: new Client B (same scope, new build) refuses the live old Host ─
+    // ── U02: new Client B speaks v1 to the live old Host A ─────────────────
+    // The new package has a different version, bundle and buildId but the same
+    // local protocol and exact DSH runtime. It must authenticate the SAME Host
+    // A, call the real official/private RPCs, and exit without touching Host
+    // A, its Registry/Launch files or the admitted Turn.
     const newClientEntry = join(sideBuildPackage, 'dist', 'local-client.mjs')
     const clientB = new EntryProcess('client', newClientEntry, base)
     clients.push(clientB)
-    const clientBFailure = await clientB.waitFor(record => record.m4a0 === 'failure', 'new Client B refusal', 120_000)
-    assert(clientBFailure.code === 'HOST_BUILD_INCOMPATIBLE',
-      `new Client B expected HOST_BUILD_INCOMPATIBLE, got ${JSON.stringify(clientBFailure.code ?? clientBFailure.error)}`)
-    assert(clientBFailure.phase === 'startup', `new Client B failure phase was ${JSON.stringify(clientBFailure.phase)}`)
-    const clientBExit = await clientB.waitForExit(60_000)
-    assert(clientBExit.code === 1 && clientBExit.signal === null, `new Client B exit was ${JSON.stringify(clientBExit)}`)
-    for (const forbidden of ['ready', 'host-authenticated', 'transport-ready', 'context-ready']) {
-      assert(!clientB.records.some(record => record.m4a0 === forbidden), `new Client B emitted ${forbidden} before/after the refusal`)
+    const clientBAuth = await clientB.waitFor(
+      record => record.m4a0 === 'host-authenticated',
+      'new Client B authenticated Host A',
+      180_000,
+    )
+    assertIdentityKept(clientBAuth.host, hostABefore, 'new Client B authenticated Host A')
+    assert(clientBAuth.host.buildId === oldBuildId, 'new Client B authenticated a different Host build')
+    const clientBReady = await clientB.waitFor(record => record.m4a0 === 'ready', 'new Client B ready', 240_000)
+    assert(clientBReady.transport === 'connected', `new Client B transport was ${JSON.stringify(clientBReady.transport)}`)
+    assert(clientBReady.host?.instanceId === hostABefore.instanceId, 'new Client B ready record names another Host')
+    const crossBuildRpcRequestId = 'pr2-cross-build-rpc'
+    clientB.send({ op: 'qualification-host-foundation', requestId: crossBuildRpcRequestId })
+    const crossBuildRpc = await clientB.waitFor(
+      record => record.m4b2hf === 'host-rpc-proof' && record.requestId === crossBuildRpcRequestId,
+      'new Client B cross-build Host RPC proof',
+      180_000,
+    )
+    assert(crossBuildRpc.hostPid === hostABefore.hostPid, 'cross-build RPC proof names another Host PID')
+    assert(crossBuildRpc.hostInstanceId === hostABefore.instanceId, 'cross-build RPC proof names another Host instance')
+    assert(crossBuildRpc.clientPid === clientBReady.pid, 'cross-build RPC proof names another Client PID')
+    for (const field of ['officialSessionList', 'privateFileRpc', 'terminalSnapshot', 'cleaned']) {
+      assert(crossBuildRpc[field] === true, `cross-build RPC proof ${field} is not true`)
     }
-    assert(!clientB.records.some(record => record.m4b2s === 'qualification' && record.stage === 'domains-ready'),
-      'new Client B mounted Client Domains before the refusal')
-    assert(!clientB.records.some(record => record.m4b2s === 'surface-status'), 'new Client B reported a surface status')
-    evidence.refusal = {
-      code: clientBFailure.code,
-      exitCode: clientBExit.code,
-      readyEmitted: false,
-      hostAuthenticatedEmitted: false,
-      clientContextEmitted: false,
-      domainsReady: false,
-    }
-
-    // Old Host identity, registry and in-flight work are untouched.
-    assert(alive(hostAReady.pid), 'Host A died on the new Client refusal')
-    assert(readProcessStarttime(hostAReady.pid) === hostABefore.hostStarttime, 'Host A starttime changed after the refusal')
+    assert(alive(hostAReady.pid), 'Host A died while the new Client was connected')
+    assert(readProcessStarttime(hostAReady.pid) === hostABefore.hostStarttime,
+      'Host A starttime changed while the new Client was connected')
+    assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore, 'Host A after new Client B')
+    const crossBuildLiveness = (await hostStatus(hostA)).liveness
+    assert(crossBuildLiveness?.verdict === 'BLOCKED',
+      `Host A liveness was ${JSON.stringify(crossBuildLiveness?.verdict)} during the admitted Turn`)
+    assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released while the new Client was connected')
     assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore), 'new Client B mutated the old registry')
     assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore), 'new Client B mutated the old launch material')
-    const hostAAfterRefusal = safeIdentity((await hostStatus(hostA)).localHost)
-    assertIdentityKept(hostAAfterRefusal, hostABefore, 'Host A after new Client refusal')
-    const afterRefusalLiveness = (await hostStatus(hostA)).liveness
-    assert(afterRefusalLiveness?.verdict === 'BLOCKED', `Host A liveness was ${JSON.stringify(afterRefusalLiveness?.verdict)} during the admitted Turn`)
-    assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released by the new Client refusal')
-    evidence.refusal.hostIdentityKept = true
-    evidence.refusal.registryBytesUnchanged = true
-    evidence.refusal.launchBytesUnchanged = true
-    evidence.refusal.workStillRunning = true
-    evidence.refusal.livenessVerdict = afterRefusalLiveness.verdict
+    const clientBExit = await clientB.shutdown()
+    assert(clientBExit.code === 0 && clientBExit.signal === null, `new Client B exit was ${JSON.stringify(clientBExit)}`)
+    assert(!clientB.records.some(record => record.m4a0 === 'cleanup-failure'), 'new Client B reported a cleanup failure')
+    assert(await seatIsFree(`\0dsh-pi-tui-c-${hostABefore.scopeId.slice(0, 40)}`), 'new Client B did not release the Client seat')
+    assert(alive(hostAReady.pid), 'Host A died when the new Client exited')
+    assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore, 'Host A after new Client B exit')
+    assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore), 'new Client B exit mutated the old registry')
+    assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore), 'new Client B exit mutated the old launch material')
+    assertNoSecret('cross-build Client records', JSON.stringify(clientB.records), [oldToken, oldCookie])
+    assertNoSecret('cross-build Client stderr', clientB.stderr, [oldToken, oldCookie])
+    evidence.crossBuildClient = {
+      clientPid: clientBReady.pid,
+      hostPid: hostABefore.hostPid,
+      hostStarttimeKept: true,
+      hostInstanceIdKept: true,
+      hostBuildIdKept: hostABefore.buildId === oldBuildId,
+      clientBundleDifferent: newArtifact.manifest.version !== oldArtifact.manifest.version,
+      clientBuildIdDifferent: newBuildId !== oldBuildId,
+      protocol: 'dsh-pi-tui/local/1',
+      dshVersion: targetDshVersion,
+      transport: 'connected',
+      rpcRequestId: crossBuildRpcRequestId,
+      officialSessionList: true,
+      privateFileRpc: true,
+      terminalSnapshot: true,
+      cleaned: true,
+      registryBytesUnchanged: true,
+      registrySha256: registryBeforeSha256,
+      launchBytesUnchanged: true,
+      launchSha256: launchBeforeSha256,
+      hostAlive: true,
+      clientSeatReleased: true,
+      workStillRunning: true,
+      livenessVerdict: crossBuildLiveness.verdict,
+      secretLeak: false,
+    }
     evidence.hostA = {
       pid: hostABefore.hostPid,
       starttime: hostABefore.hostStarttime,
@@ -649,61 +692,88 @@ async function main() {
       scopeId: hostABefore.scopeId,
     }
 
-    // ── U04: the human-facing surface refusal is actionable and secret-free ─
-    const surfaceRefusal = new SurfaceEntryProcess(newClientEntry, { ...base, workDir: workRoot })
-    clients.push(surfaceRefusal)
-    const surfaceExit = await surfaceRefusal.waitForExit(120_000)
-    assert(surfaceExit.code === 1 && surfaceExit.signal === null, `surface refusal exit was ${JSON.stringify(surfaceExit)}`)
-    // A surface startup refusal is a terminal line, not a JSON record: wait
-    // for the pty output to arrive, then refresh the private record snapshot
-    // once more (the poll interval may have stopped at the close event).
-    let surfaceText = ''
-    const surfaceDeadline = Date.now() + 15_000
-    while (Date.now() < surfaceDeadline) {
-      surfaceRefusal.readRecords()
-      surfaceText = stripAnsi(`${surfaceRefusal.raw}\n${surfaceRefusal.stderr}`)
-      if (surfaceText.includes('HOST_BUILD_INCOMPATIBLE:')) break
-      await sleep(50)
-    }
-    assert(surfaceText.includes('HOST_BUILD_INCOMPATIBLE:'),
-      `the surface refusal did not print the stable code; tail=${JSON.stringify(surfaceText.slice(-1600))} records=${JSON.stringify(surfaceRefusal.records.slice(-4))}`)
-    assert(surfaceText.includes('has not been stopped or replaced'), 'the surface refusal did not say the old Host is preserved')
-    assert(surfaceText.includes('explicitly stop that Host through its normal operating-system shutdown signal'),
-      'the surface refusal did not require an explicit owner-verified stop')
-    assert(surfaceText.includes('Automatic upgrade and migration of in-memory work are not supported'),
-      'the surface refusal did not state that hot migration is unsupported')
-    assert(!surfaceRefusal.records.some(record => record.m4a0 === 'ready'), 'the surface refusal reported ready')
-    assert(!surfaceRefusal.records.some(record => record.m4b2s === 'surface-status' && record.surfaceMounted === true),
-      'the surface refusal mounted the real surface')
-    assertNoSecret('surface refusal output', surfaceText, [oldToken, oldCookie])
-    assert(!surfaceText.includes(dshHome), 'the surface refusal leaked the private DSH home')
-    assert(!surfaceText.includes(profileDir), 'the surface refusal leaked the private profile path')
-    await surfaceRefusal.dispose()
-    evidence.surfaceRefusal = {
-      exitCode: surfaceExit.code,
-      codeVisible: true,
-      oldHostPreservedText: true,
-      manualStopText: true,
-      noHotMigrationText: true,
-      surfaceReady: false,
+    // ── U04: the new build's REAL surface opens the running old Session ─────
+    // The qualification Client above proves the RPC path; this is the real PTY
+    // surface. It must open the SAME Session whose Turn is currently held,
+    // paint its admitted prompt, and exit without releasing the Turn or
+    // changing Host A's identity/files.
+    const crossBuildSurface = new SurfaceEntryProcess(newClientEntry, {
+      ...base,
+      workDir: workRoot,
+      env: { ...base.env, SPLIT_PROCESS_CLIENT_SESSION: sessionId },
+    })
+    clients.push(crossBuildSurface)
+    const crossBuildSurfaceReady = await crossBuildSurface.waitFor(
+      record => record.m4a0 === 'ready',
+      'cross-build surface ready',
+      240_000,
+    )
+    assert(crossBuildSurfaceReady.transport === 'connected',
+      `cross-build surface transport was ${JSON.stringify(crossBuildSurfaceReady.transport)}`)
+    const crossBuildSurfaceStatus = await crossBuildSurface.waitFor(
+      record => record.m4b2s === 'surface-status' && record.sessionOpen === true && record.openSessionId === sessionId,
+      'cross-build surface opened the running old Session',
+      180_000,
+    )
+    assert.equal(crossBuildSurfaceStatus.openSessionId, sessionId, 'cross-build surface opened another Session')
+    await crossBuildSurface.waitForScreen('c2d-upgrade-hold', 'cross-build surface painted the admitted prompt', 120_000)
+    assert(alive(hostAReady.pid), 'Host A died while the cross-build surface was attached')
+    assert(readProcessStarttime(hostAReady.pid) === hostABefore.hostStarttime,
+      'Host A starttime changed while the cross-build surface was attached')
+    assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore, 'Host A while the cross-build surface is attached')
+    assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released by the cross-build surface attach')
+    assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore), 'cross-build surface mutated the old registry')
+    assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore), 'cross-build surface mutated the old launch material')
+    const crossBuildSurfaceExit = await (async () => {
+      crossBuildSurface.send('/exit\r')
+      return await crossBuildSurface.waitForExit(60_000)
+    })()
+    assert(crossBuildSurfaceExit.code === 0 && crossBuildSurfaceExit.signal === null,
+      `cross-build surface exit was ${JSON.stringify(crossBuildSurfaceExit)}`)
+    await crossBuildSurface.dispose()
+    assert(alive(hostAReady.pid), 'Host A died when the cross-build surface exited')
+    assert(readProcessStarttime(hostAReady.pid) === hostABefore.hostStarttime,
+      'Host A starttime changed after the cross-build surface exit')
+    assertIdentityKept(safeIdentity((await hostStatus(hostA)).localHost), hostABefore, 'Host A after cross-build surface exit')
+    assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released by the cross-build surface exit')
+    assert(readFileSync(join(scopeDir, 'instance.json')).equals(registryBefore), 'cross-build surface exit mutated the old registry')
+    assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore), 'cross-build surface exit mutated the old launch material')
+    assertNoSecret('cross-build surface records', JSON.stringify(crossBuildSurface.records), [oldToken, oldCookie])
+    assertNoSecret('cross-build surface stderr', crossBuildSurface.stderr, [oldToken, oldCookie])
+    evidence.crossBuildSurface = {
+      clientPid: crossBuildSurfaceReady.pid,
+      sessionId,
+      sessionOpen: true,
+      openSessionIdKept: true,
+      promptVisible: true,
+      transport: 'connected',
+      hostPidKept: true,
+      hostStarttimeKept: true,
+      hostInstanceIdKept: true,
+      registryBytesUnchanged: true,
+      registrySha256: registryBeforeSha256,
+      launchBytesUnchanged: true,
+      launchSha256: launchBeforeSha256,
+      hostAlive: true,
+      workStillRunning: true,
       secretLeak: false,
     }
 
-    // ── The admitted work completes normally after both refusals ─────────────
+    // ── The admitted work completes normally after both cross-build attaches ─
     // The barrier only controls the test's stream timing; releasing it proves
     // the old Host was never stopped or replaced by either new-Client attempt.
     writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
     const released = await waitForC1WorkEvent(
       workRootPath,
       event => event.kind === 'long-turn-released' && event.sessionId === sessionId,
-      'Host A Turn completes after the refusals',
+      'Host A Turn completes after the cross-build attaches',
     )
     assert(released.sessionId === sessionId, 'Host A Turn completion names another Session')
-    await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'Host A turn/end after the refusals')
+    await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'Host A turn/end after the cross-build attaches')
     const durableEvents = hostSessionEvents(dshHome, sessionId) ?? []
     assert(durableEvents.some(event => event.type === 'user/message' && JSON.stringify(event).includes('c2d-upgrade-hold')),
       'the durable Session lost the admitted prompt')
-    evidence.work.completedAfterRefusal = true
+    evidence.work.completedAfterCrossBuild = true
 
     // ── U05: explicit owner-verified SIGTERM, one official shutdown ─────────
     // Production spawns the Host with stdin ignored. The qualification harness
@@ -826,8 +896,19 @@ async function main() {
         `the packaged artifact changed during the lane: ${basename(path)}`)
     }
     evidence.status = 'PASS'
+    evidence.verdict = 'cross-build-compatible'
+    evidence.compatibility = {
+      protocol: 'dsh-pi-tui/local/1',
+      dshVersion: targetDshVersion,
+      oldBuildId,
+      newBuildId,
+      differentBundleVersions: oldArtifact.manifest.version !== newArtifact.manifest.version,
+      differentBuildIds: oldBuildId !== newBuildId,
+      sameProtocol: true,
+      sameDshRuntime: true,
+    }
     process.stdout.write(`${JSON.stringify(evidence, null, 2)}\n`)
-    process.stdout.write('SPLIT_UPGRADE_SMOKE_PASS\n')
+    process.stdout.write('SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)\n')
     if (options.evidence !== undefined) {
       writeFileSync(options.evidence, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 })
     }

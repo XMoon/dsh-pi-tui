@@ -1,5 +1,5 @@
 /**
- * M4-B1 local Host discovery and official authentication.
+ * Local Host discovery and official authentication.
  *
  * The registry is an unauthenticated hint: it selects a candidate origin and
  * PID, while the only readiness proof is the official `/connect` launch-token
@@ -212,8 +212,18 @@ function parseRecord(value: unknown, scope: RecordScope): LocalInstanceRecord {
   }
 }
 
-/** Throw unless the candidate speaks this Client's exact protocol and build. */
-export function assertBuildCompatible(record: LocalInstanceRecord, scope: LocalScope): void {
+/** Can this Client speak the live Host's required local wire contract? */
+export function assertClientHostCompatible(record: LocalInstanceRecord, scope: LocalScope): void {
+  if (record.protocol !== LOCAL_PROTOCOL || record.dshVersion !== scope.dshVersion) {
+    throw new LocalScopeError(
+      'HOST_PROTOCOL_INCOMPATIBLE',
+      'local discovery: the live Host uses a different local protocol or DSH runtime',
+    )
+  }
+}
+
+/** Does this Host publish the exact installed identity of its OWN build? */
+export function assertHostPublicationIdentity(record: LocalInstanceRecord, scope: LocalScope): void {
   if (
     record.protocol !== LOCAL_PROTOCOL
     || record.bundleVersion !== scope.bundleVersion
@@ -222,7 +232,7 @@ export function assertBuildCompatible(record: LocalInstanceRecord, scope: LocalS
   ) {
     throw new LocalScopeError(
       'HOST_BUILD_INCOMPATIBLE',
-      'local discovery: the live Host was built from a different package payload or protocol',
+      'local discovery: the Host cannot publish identity for a different local protocol or installed build',
     )
   }
 }
@@ -547,7 +557,7 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
   const { scope } = options
   const existing = readLocalRecord(scope)
   if (existing !== undefined && inspectHostProcess(existing) === 'alive') {
-    assertBuildCompatible(existing, scope)
+    assertClientHostCompatible(existing, scope)
     return await authenticateLocalHost(existing, scope)
   }
 
@@ -560,7 +570,7 @@ export async function ensureLocalHost(options: EnsureLocalHostOptions): Promise<
     }
     const candidate = readLocalRecord(scope)
     if (candidate !== undefined && inspectHostProcess(candidate) === 'alive') {
-      assertBuildCompatible(candidate, scope)
+      assertClientHostCompatible(candidate, scope)
       return await authenticateLocalHost(candidate, scope)
     }
     await delay(REGISTRY_POLL_INTERVAL_MS)
@@ -592,7 +602,7 @@ function writePrivateJsonFile(path: string, value: unknown): void {
 /** Publish the one registry record; the Host calls this as its Ready commit. */
 export function writeLocalRecord(scope: LocalScope, record: LocalInstanceRecord): void {
   const parsed = parseRecord(record, scope)
-  assertBuildCompatible(parsed, scope)
+  assertHostPublicationIdentity(parsed, scope)
   writePrivateJsonFile(join(scope.dir, REGISTRY_FILE), parsed)
 }
 
@@ -603,7 +613,7 @@ export function writeLaunchMaterial(
   material: LocalLaunchMaterial,
 ): void {
   const parsed = parseRecord(record, scope)
-  assertBuildCompatible(parsed, scope)
+  assertHostPublicationIdentity(parsed, scope)
   if (material.schema !== 1 || material.instanceId !== parsed.instanceId) {
     throw new LocalScopeError('LOCAL_FILE_UNSAFE', 'local discovery: launch material does not name the published instance')
   }

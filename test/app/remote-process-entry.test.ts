@@ -241,7 +241,7 @@ test('the Client status is projected from the official state/generation at call 
     hostPid: 42,
     hostStarttime: '99',
     origin: 'http://127.0.0.1:41000',
-    protocol: 'm4-b1/1' as const,
+    protocol: 'dsh-pi-tui/local/1' as const,
     bundleVersion: '0.5.4',
     dshVersion: '0.2.1-rc.4',
     buildId: 'b'.repeat(64),
@@ -297,7 +297,7 @@ test('a disposing transport failure is primary and the Client root failure rides
     hostPid: 42,
     hostStarttime: '99',
     origin: 'http://127.0.0.1:41000',
-    protocol: 'm4-b1/1' as const,
+    protocol: 'dsh-pi-tui/local/1' as const,
     bundleVersion: '0.5.4',
     dshVersion: '0.2.1-rc.4',
     buildId: 'b'.repeat(64),
@@ -343,13 +343,15 @@ test('the B1 Client transport mounts exactly the three Node client halves and no
   assert.match(source, /streamBaseUrl: origin/u)
 })
 
-test('a surface startup build refusal states the code, preserved Host and explicit manual stop', () => {
+test('a surface startup protocol refusal states the code, preserved Host and explicit manual stop', () => {
   const line = surfaceStartupFailureLine(
-    new LocalScopeError('HOST_BUILD_INCOMPATIBLE', 'local discovery: the live Host was built from a different payload'),
+    new LocalScopeError('HOST_PROTOCOL_INCOMPATIBLE', 'local discovery: the live Host uses a different local protocol or DSH runtime'),
   )
-  assert.match(line, /^HOST_BUILD_INCOMPATIBLE: /u)
+  assert.match(line, /^HOST_PROTOCOL_INCOMPATIBLE: /u)
+  assert.match(line, /different local protocol or DSH runtime/u)
   assert.match(line, /has not been stopped or replaced/u)
   assert.match(line, /explicitly stop that Host through its normal operating-system shutdown signal/u)
+  assert.match(line, /start a compatible Host/u)
   assert.match(line, /Automatic upgrade and migration of in-memory work are not supported/u)
   // The refusal must not turn an unauthenticated registry candidate into a
   // displayed PID/kill target or leak the private launch material.
@@ -358,5 +360,9 @@ test('a surface startup build refusal states the code, preserved Host and explic
   assert.equal(
     surfaceStartupFailureLine(new LocalScopeError('HOST_UNRESPONSIVE', 'local discovery: identity route answered HTTP 503')),
     'split client surface: local discovery: identity route answered HTTP 503',
+  )
+  assert.equal(
+    surfaceStartupFailureLine(new LocalScopeError('HOST_BUILD_INCOMPATIBLE', 'local discovery: the Host cannot publish identity for another installed build')),
+    'split client surface: local discovery: the Host cannot publish identity for another installed build',
   )
 })

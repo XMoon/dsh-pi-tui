@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * M4-B1 Client-only process entry.
+ * Client-only split-process entry.
  *
  * The Client PID owns a real Cordis root and mounts only the Client-local
  * subtree plus the official Node Client transport. Its one scope is the
@@ -9,6 +9,12 @@
  * official `/connect` cookie, verifies the authenticated identity, and only
  * then installs the official three-layer transport on the same A0 Client
  * Context.
+ *
+ * Client admission compares the required local wire protocol and the exact
+ * DSH runtime version, not the package bundle/build fingerprint. A different
+ * installed build of the same protocol may attach; a protocol or DSH mismatch
+ * is refused before any Host work is touched and never stops or replaces the
+ * live Host.
  *
  * The launcher supplies the DSH installation anchor and profile name through
  * `SPLIT_PROCESS_DSH_ANCHOR` / `SPLIT_PROCESS_PROFILE` so this process can
@@ -1055,7 +1061,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
     })
     // Surface mode owns the tty and reports this pre-Context refusal as one
     // human line. Every other startup failure keeps its existing record path.
-    if (options.mode === 'surface' && failure instanceof LocalScopeError && failure.code === 'HOST_BUILD_INCOMPATIBLE') {
+    if (options.mode === 'surface' && failure instanceof LocalScopeError && failure.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
       process.stderr.write(`${surfaceStartupFailureLine(failure)}\n`)
     }
     process.stdin.pause()
@@ -1138,16 +1144,16 @@ async function waitForStartupHold(path: string, signal: AbortSignal): Promise<vo
 }
 
 /**
- * The human-facing surface line for one startup failure. The strict live-Host
- * build refusal gets a dedicated, actionable line that names the code, keeps
- * the old Host untouched, requires an explicit owner-verified OS stop and
- * says that automatic in-memory migration is unsupported. It never includes
- * the registry PID, the launch URL/token or a private profile path. Every
- * other startup failure keeps the existing diagnostic.
+ * The human-facing surface line for one startup failure. The live-Host
+ * protocol/DSH refusal gets a dedicated, actionable line that names the code,
+ * keeps the old Host untouched, requires an explicit owner-verified OS stop
+ * and says that automatic in-memory migration is unsupported. It never
+ * includes the registry PID, the launch URL/token or a private profile path.
+ * Every other startup failure keeps the existing diagnostic.
  */
 export function surfaceStartupFailureLine(error: unknown): string {
-  if (error instanceof LocalScopeError && error.code === 'HOST_BUILD_INCOMPATIBLE') {
-    return 'HOST_BUILD_INCOMPATIBLE: Another live local Host for this profile uses a different build or protocol. The Host has not been stopped or replaced. Finish or save your work in that Host, then explicitly stop that Host through its normal operating-system shutdown signal and retry. Automatic upgrade and migration of in-memory work are not supported.'
+  if (error instanceof LocalScopeError && error.code === 'HOST_PROTOCOL_INCOMPATIBLE') {
+    return 'HOST_PROTOCOL_INCOMPATIBLE: Another live local Host for this profile uses a different local protocol or DSH runtime. The Host has not been stopped or replaced. Finish or save your work in that Host, then explicitly stop that Host through its normal operating-system shutdown signal and start a compatible Host. Automatic upgrade and migration of in-memory work are not supported.'
   }
   return `split client surface: ${error instanceof Error ? error.message : String(error)}`
 }
