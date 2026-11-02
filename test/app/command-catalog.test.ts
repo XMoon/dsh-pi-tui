@@ -14,7 +14,9 @@ import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { isIndeterminateSkillWrite, registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
+import { isIndeterminateSkillWrite, registerTuiCommands, type ClientReloadCommandResult, type TuiCommandRunner } from '../../src/commands.ts'
+import { CLIENT_RELOAD_REFUSAL_NOTICES } from '../../src/tui/commands/utility.ts'
+import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../../src/index.ts'
 import { classifyCommandLine } from '../../src/domain/command/policy.ts'
@@ -89,6 +91,8 @@ function stubRunner(
     presetResolve?: () => Promise<{ id: string }>
     navigationStopAccepted?: boolean
     transitionThrows?: { readonly quiesced: boolean; readonly message: string }
+    /** M4 PR4: the injected process-owned `/reload-client` capability. */
+    requestClientReload?: () => ClientReloadCommandResult
   } = {},
 ): TuiCommandRunner {
   let displayPreset: 'focus' | 'compact' | 'full' = options.initialDisplayPreset ?? 'full'
@@ -234,6 +238,7 @@ function stubRunner(
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
+    ...(options.requestClientReload === undefined ? {} : { requestClientReload: options.requestClientReload }),
     extensions: undefined,
     exit: () => {},
   }
@@ -1797,11 +1802,11 @@ test('the built-in command decomposition preserves the exact primary set and reg
   // command, registered immediately after its primary. `/status` is the
   // `/settings` alias (C5).
   const ALIASES = new Set(['quit', 'status', 'statusline', 'resume', 'subagents', 'image', 'rename'])
-  // The 28 built-in primaries, in their frozen registration order.
+  // The 29 built-in primaries, in their frozen registration order.
   assert.deepEqual(
     services.registered.filter(name => !ALIASES.has(name)),
     [
-      'exit', 'settings', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
+      'exit', 'reload-client', 'settings', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
       'new', 'tasks', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'view-image',
       'export', 'transcript', 'deliverables', 'fork', 'rewind', 'login', 'logout', 'help', 'keybindings',
     ],
@@ -1809,6 +1814,7 @@ test('the built-in command decomposition preserves the exact primary set and reg
   // The raw sequence: every alias registers immediately after its primary.
   assert.deepEqual(services.registered, [
     'exit', 'quit',
+    'reload-client',
     'settings', 'status',
     'footer', 'statusline',
     'display', 'focus',
@@ -1891,4 +1897,88 @@ test('/new keeps the accepted-stop phase when a commit throw escapes the transac
   assert.match(beforeQuiesce.text ?? '', /turn stop requested \(not yet confirmed\)/,
     'a throw before the quiesce must not claim a stopped Turn')
   assert.doesNotMatch(beforeQuiesce.text ?? '', /old turn stopped \(cannot resume\)/)
+})
+
+// ── M4 PR4: `/reload-client` ────────────────────────────────────────────────
+
+test('M4 PR4 `/reload-client` is a bare reserved sessionless Client command with fixed notices', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const requests: ClientReloadCommandResult[] = []
+  let next: ClientReloadCommandResult = { kind: 'accepted' }
+  const runner = stubRunner(ctx, app, { agent: undefined }, undefined, {
+    requestClientReload: () => {
+      requests.push(next)
+      return next
+    },
+  })
+  registerTuiCommandsWithDirectSeams(runner)
+
+  // The LIVE Client registry owns the BARE token only (the official
+  // `matchEnter` semantics): an argued line is an ordinary submission and can
+  // never reach the reload handler.
+  assert.equal(runner.clientCommands.claimsLine({ name: 'reload-client', rawInput: '' }), true)
+  assert.equal(runner.clientCommands.claimsLine({ name: 'reload-client', rawInput: ' anything' }), false)
+  // The policy sets keep the name reserved/plugin-proof and sessionless: the
+  // reload must work before the first session and must never create one.
+  assert.equal(LOCAL_COMMANDS.has('reload-client'), true)
+  assert.equal(SESSIONLESS_COMMANDS.has('reload-client'), true)
+  // The production classifier routes the bare line to the Client command
+  // family (never the Host/ordinary-submission families).
+  assert.deepEqual(
+    classifyCommandLine({
+      hostOriginClaim: undefined,
+      tuiCommand: runner.clientCommands.claimsLine({ name: 'reload-client' }),
+      extensionCommand: false,
+      skillInvocation: false,
+    }),
+    { kind: 'client-command', source: 'tui' },
+  )
+  // The original `/reload` (catalog/settings refresh) stays a DISTINCT
+  // command — the new process reload never replaced it.
+  const reload = services.defs.find(definition => definition.name === 'reload')
+  const reloadClient = services.defs.find(definition => definition.name === 'reload-client')
+  assert.ok(reload?.handler !== undefined && reloadClient?.handler !== undefined)
+  assert.notEqual(reload.handler, reloadClient.handler)
+
+  const handler = reloadClient.handler as (invocation: { commandId: string }) => CommandResult
+  // Accepted: ONE success result, no duplicate notice — the new surface is the
+  // success evidence.
+  assert.deepEqual(handler({ commandId: 'cmd-reload-client' }), { kind: 'success' })
+  assert.equal(requests.length, 1)
+  // Every refusal maps to its ONE fixed notice and still returns `error`.
+  for (const [reason, text] of Object.entries(CLIENT_RELOAD_REFUSAL_NOTICES)) {
+    next = { kind: 'refused', reason: reason as keyof typeof CLIENT_RELOAD_REFUSAL_NOTICES }
+    assert.deepEqual(handler({ commandId: `cmd-${reason}` }), { kind: 'error', text },
+      `/${reason} must report its fixed notice`)
+  }
+  assert.equal(requests.length, 1 + Object.keys(CLIENT_RELOAD_REFUSAL_NOTICES).length)
+  app.stop()
+})
+
+test('M4 PR4 `/reload-client` on Direct (no process capability) is an explicit local refusal', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const runner = stubRunner(ctx, app, { agent: undefined })
+  registerTuiCommandsWithDirectSeams(runner)
+  const definition = services.defs.find(candidate => candidate.name === 'reload-client')
+  assert.ok(definition?.handler !== undefined)
+  const result = (definition.handler as (invocation: { commandId: string }) => CommandResult)({ commandId: 'cmd-direct' })
+  assert.deepEqual(result, {
+    kind: 'error',
+    text: 'Client reload is available only in the split Client.',
+  }, 'Direct answers the fixed unavailable refusal — no Host RPC, no model prompt, no restart')
+  app.stop()
 })

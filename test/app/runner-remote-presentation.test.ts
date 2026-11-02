@@ -71,7 +71,7 @@ import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
-import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
+import type { ClientReloadRequestResult, RemoteApplicationOverride, RunnerStartupSettlement } from '../../src/app/application-runtime.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { createRemoteApplicationRuntime } from '../../src/app/remote/runtime.ts'
 import { testPromptSerializer, waitFor } from '../support/remote-application-fixture.ts'
@@ -245,6 +245,10 @@ export async function mountRemoteRunner(
     nativeImages?: boolean
     /** Advertise the native chart kind when the TSP renderer is selected. */
     nativeChart?: boolean
+    /** M4 PR4: the split Client's internal process startup settlement (the
+     *  ONE process-owned manual-reload capability). Absent keeps the Direct
+     *  pending behavior. */
+    startupSettlement?: RunnerStartupSettlement
   } = {},
 ): Promise<RemoteRunnerFixture> {
   const presetId = options.presetId ?? 'm3-4-pr2-preset'
@@ -319,7 +323,12 @@ export async function mountRemoteRunner(
   life.defer(() => { TuiApp.prototype.start = originalStart })
   options.beforeRunnerMount?.(override.presentation)
   const runnerFiber = runnerCtx.plugin(pluginCtx => {
-    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never), override)
+    applyRunnerWithRuntime(
+      pluginCtx,
+      TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never),
+      override,
+      options.startupSettlement,
+    )
   })
   await runnerFiber
   // Let the startup composition settle (mount + initial hydration).
@@ -2851,5 +2860,86 @@ test('a Remote TSP /resume failure is visible once and an indeterminate outcome 
       'an indeterminate open is not restored as a retryable command')
   } finally {
     lifecycle.open = originalOpen
+  }
+})
+
+// ── M4 PR4: the manual Client reload across the real composition ────────────
+
+/** An LLM endpoint that counts REAL model requests (the negative witness). */
+class CountingLlmAdapter extends StubStreamingLlmAdapter {
+  streams = 0
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.streams += 1
+    yield* super.stream(options)
+  }
+}
+
+/**
+ * The `/reload-client` command must ride the REAL production chain:
+ * TuiApp input → the SubmissionController's existing line classifier → the
+ * live Client registry → the composition root's Client-local safety gate →
+ * the ONE process-owned capability injected through the internal startup
+ * settlement. This suite proves the accepted and refused process decisions are
+ * each reached EXACTLY once per bare command, that the fixed refusal notice is
+ * the ONE visible outcome, and that neither path becomes a model prompt. The
+ * Client-local safety reasons themselves are proven by the owner-level suites;
+ * the real PTY/install/reload process proof is the two-package upgrade smoke
+ * (U08).
+ */
+test('M4 PR4: the live /reload-client command reaches the ONE process capability with its fixed notice', async (t) => {
+  const life = testLifecycle(t)
+  const results: ClientReloadRequestResult[] = []
+  let next: ClientReloadRequestResult = { kind: 'accepted' }
+  const adapter = new CountingLlmAdapter()
+  const fixture = await mountRemoteRunner(life, {
+    llmAdapter: adapter,
+    // The argued-line control below is an ORDINARY submission (a real Host
+    // turn), so this suite mounts the production prompt serializer.
+    productionSerializer: true,
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      requestClientReload: () => {
+        results.push(next)
+        return next
+      },
+    },
+  })
+  try {
+    const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(request?: 'enter'): void }
+    await waitFor('sessionless Remote surface', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+    const refusalNotice = 'Client reload failed: the installed replacement Client is unavailable or incompatible.'
+
+    // 1. ACCEPTED: the live registry executes the bare command and the process
+    //    capability is called exactly ONCE — with no duplicate notice and no
+    //    model prompt.
+    app.setDraft('/reload-client')
+    app.submitDraft()
+    await waitFor('accepted reload request', () => results.length === 1, 20_000)
+    assert.deepEqual(results, [{ kind: 'accepted' }])
+    assert.equal(adapter.streams, 0, 'the reload command became a model prompt')
+    assert.doesNotMatch(fixture.vt.getViewport().join('\n'), /Client reload (blocked|failed|skipped)/u,
+      'an accepted request published a redundant notice')
+
+    // 2. REFUSED: the process decision's fixed notice is the ONE visible
+    //    outcome and the same surface keeps accepting commands.
+    next = { kind: 'refused', reason: 'target-invalid' }
+    app.setDraft('/reload-client')
+    app.submitDraft()
+    await waitFor('refused reload request', () => results.length === 2, 20_000)
+    await waitFor('refusal notice', () => fixture.vt.getViewport().join('\n').includes(refusalNotice), 20_000)
+    assert.equal(fixture.vt.getViewport().join('\n').split(refusalNotice).length - 1, 1,
+      'the refusal notice must be published exactly once')
+    assert.equal(adapter.streams, 0, 'a refused reload became a model prompt')
+
+    // 3. The ARGUED line is not an invocation: it never reaches the Client
+    //    registry's reload handler (or the process capability) — it follows the
+    //    ordinary submission route instead.
+    app.setDraft('/reload-client anything')
+    app.submitDraft()
+    await waitFor('argued line became an ordinary submission', () => adapter.streams === 1, 20_000)
+    assert.equal(results.length, 2, 'an argued /reload-client line reached the reload handler')
+  } finally {
+    await fixture.dispose()
   }
 })

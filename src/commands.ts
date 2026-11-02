@@ -41,6 +41,8 @@ import { TransitionInProgressError } from './app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
 import type { SessionSwitchOutcome } from './app/session/runtime.ts'
 import type { NavigationIntent } from './app/session/transition.ts'
+import type { ClientReloadProcessRefusal } from './app/application-runtime.ts'
+import type { ClientReloadRefusal } from './app/remote-process/client-reload-safety.ts'
 import type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
 import type { Component } from '@xmoon76/pi-tui'
 import type { EmbeddedPluginPage } from './tui/plugin-manager/workspace.ts'
@@ -74,7 +76,7 @@ import type { ClientCommandRegistry } from './app/command/client-command-registr
 import type { SubmissionComposerPort } from './app/submission/composer-port.ts'
 import { commandSummaryOf, type SurfaceCatalogSnapshot, type SurfaceCommandSummary } from './domain/catalog/surface.ts'
 import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } from './domain/catalog/skill.ts'
-import { registerExitCommand, registerHelpCommand } from './tui/commands/utility.ts'
+import { registerExitCommand, registerHelpCommand, registerReloadClientCommand } from './tui/commands/utility.ts'
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
 import { createModelCommands } from './tui/commands/models.ts'
 import type { ModelPresentation } from './app/command/model-presentation.ts'
@@ -271,9 +273,23 @@ export type PermissionPresetResult =
   | { readonly ownership: 'refused' }
   | { readonly ownership: OperationOwnership; readonly outcome: PermissionPresetOutcome }
 
+/**
+ * M4 PR4: the complete refusal vocabulary of ONE manual Client reload request:
+ * the Client-local safety reasons (read from the live owners in the same
+ * synchronous stack) plus the process preflight's own reasons.
+ */
+export type ClientReloadRefusalReason = ClientReloadRefusal | ClientReloadProcessRefusal
+
+/**
+ * M4 PR4: the synchronous result of ONE manual Client reload request, as the
+ * `/reload-client` handler receives it.
+ */
+export type ClientReloadCommandResult =
+  | { readonly kind: 'accepted' }
+  | { readonly kind: 'refused'; readonly reason: ClientReloadRefusalReason }
+
 /** Everything the TUI-owned commands read from the runner. */
-export interface TuiCommandRunner {
-  ctx: Context
+export interface TuiCommandRunner {  ctx: Context
   /** PR3-A: undefined while a non-PiTui renderer owns the terminal; the
    * boot-mandatory completions install skips, executions are input-gated. */
   app: TuiApp | undefined
@@ -441,6 +457,14 @@ export interface TuiCommandRunner {
    * disposal) — shared by Ctrl+C/Ctrl+D, /exit and /quit. Command handlers
    * must NEVER stop the app, flush or exit themselves. */
   requestExit(): void
+  /**
+   * M4 PR4: the split Client's ONE manual `/reload-client` entry. The
+   * composition root supplies the implementation, which performs the
+   * Client-local safety decision and (when safe) the process-owned reexec
+   * request in ONE synchronous stack. Absent outside a real split-Client
+   * surface mount: Direct answers the fixed "unavailable" refusal.
+   */
+  readonly requestClientReload?: () => ClientReloadCommandResult
   cwd: string
   /** The per-TUI draft image registry (image pipeline, plan M1). Shared by
    * the /image command, the clipboard intake and the submission path; the
@@ -1656,6 +1680,14 @@ export function registerTuiCommands(
     notify(text, 'info')
   }
   registerExitCommand({ runner, registerTuiCommand })
+  // M4 PR4: the manual split-Client reload, registered immediately after the
+  // exit pair at its frozen position. It is a bare Client-local command: no
+  // alias, no `input` schema, no keybinding and no Host RPC. The draft
+  // disposition is always `suppressed` — the refusals are reported by the
+  // handler's own notice and the command line must never be restored into the
+  // editor (that would also turn the next reload attempt into a draft-text
+  // refusal).
+  registerReloadClientCommand({ runner, registerTuiCommand, recordCommandDraftDisposition })
 
   const settingsCommands = createSettingsCommands({
     runner,

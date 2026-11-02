@@ -88,6 +88,12 @@ export const TSP_B2A_RESULT_NOTICE_COMMANDS: ReadonlySet<string> = new Set([
   // but its card-less error result still needs a visible owner.
   'sessions', 'resume', 'search',
   'logout',
+  // M4 PR4: `/reload-client` is NOT a TSP-supported builtin (the TSP renderer
+  // keeps its existing post-classification refusal), but its refusal/counter-
+  // example text must reach the user on the card-less PiTui split Client: the
+  // Remote Client command registry appends no result card. Membership here is
+  // notice ownership only — this set is never a routing authority.
+  'reload-client',
 ])
 
 /**

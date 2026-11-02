@@ -62,6 +62,7 @@ import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createCommandSurface, type CommandSurface } from './command/surface.ts'
 import { createArtifactSaveOwner } from './command/artifacts.ts'
 import { createUserShell } from './submission/user-shell.ts'
+import { clientReloadRefusal } from './remote-process/client-reload-safety.ts'
 import { preparePrompt } from './submission/prepared-prompt.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerChildSource, type ViewerRuntime } from './surface/viewer-runtime.ts'
@@ -2030,6 +2031,27 @@ export function applyRunnerWithRuntime(
       imageLimits: () => directImageLimits(),
       openRewindPicker: () => applicationEvents.openRewindPicker(),
       requestExit: () => requestExit(),
+      // M4 PR4: the ONE `/reload-client` implementation. The Client-local
+      // safety facts are read HERE — when the user handler runs, never at
+      // registration and never cached — and the process-owned request is
+      // invoked in the SAME synchronous stack (no await between the decision
+      // and the sink, so no new local input can slip in).
+      requestClientReload: () => {
+        const reason = clientReloadRefusal({
+          capable: startupSettlement?.requestClientReload !== undefined && remoteSources !== undefined,
+          ready: !cleanedUp && !lifecycleController.signal.aborted,
+          draftText: surface.composer.getDraft(),
+          stagedImageCount: draftImages.values().length,
+          stagedFileCount: draftFiles.values().length,
+          unsettledUserWrite: submission.hasUnsettledClientWrite(),
+          unsettledInteraction: surface.hasReloadBlockingInteraction(),
+          unsettledTransition: ownership.gate.pending
+            || ownership.barrier.inTransition
+            || sessionRuntime.hasPendingForks(),
+        })
+        if (reason !== undefined) return { kind: 'refused', reason }
+        return startupSettlement!.requestClientReload!()
+      },
       exit,
       // A5b-3: the narrow Direct seams the (command-owned) runtime binding
       // needs. They stay here because they read the in-process Host session log
@@ -2585,6 +2607,9 @@ export function applyRunnerWithRuntime(
         withWriter: (scope, task) => submissionRuntime.withWriter(scope, task),
         submitPrompt: (promptSubmission) => submissionRuntime.submitPrompt(promptSubmission),
         deferQueueRecall: (recall) => submissionRuntime.deferQueueRecall(recall),
+        // M4 PR4: the runtime's OWN accepted-write read (a write that bypasses
+        // the controller's FIFO still counts). Read at gesture time only.
+        hasUnsettledClientWrite: () => submissionRuntime.hasUnsettledClientWrite(),
       },
       command,
       backendKind: selectedRuntime.kind,
@@ -2637,7 +2662,7 @@ export function applyRunnerWithRuntime(
       },
       artifacts: { start: (name, agent) => artifacts.start(name, agent) },
       shell: {
-        run: (text, ackToken) => localShell.run(text, ackToken),
+        run: (text, ackToken, endWrite) => localShell.run(text, ackToken, endWrite),
         interrupt: () => localShell.interrupt(),
       },
       // PR3-B B2-5: the TSP renderer has no local-shell cards; the

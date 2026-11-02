@@ -155,10 +155,59 @@ test('the upgrade lane owns the real Client reexec handoff and its two live nega
     'U02 must still run after the reexec handoff')
   assert.ok(source.indexOf('crossBuildSurface') > reexecIndex,
     'U04 must still run after the reexec handoff')
-  assert.ok(source.indexOf("writeFileSync(releaseBarrier") > reexecIndex,
+  assert.ok(source.indexOf('writeFileSync(releaseBarrier', reexecIndex) > reexecIndex,
     'the admitted Turn must still be released after the reexec handoff')
   assert.ok(source.indexOf('SPLIT_UPGRADE_SMOKE_PASS') > reexecIndex)
   // A real installed package is the only target: no copied/faked dist payload.
   assert.doesNotMatch(source, /copyFileSync|cpSync/u)
   assert.match(source, /function installSideBuild/u)
+})
+
+test('M4 PR4 U08 drives the PRODUCTION /reload-client command through the real PTY', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const start = source.indexOf('async function runUserCommandReloadRound')
+  const end = source.indexOf('async function main()')
+  assert.ok(start > 0 && end > start, 'the U08 production-command round must exist')
+  const u08 = source.slice(start, end)
+
+  // A SECOND, fully isolated profile/home round: U07's round is untouched.
+  assert.match(u08, /const dshHome = join\(roundRoot, 'dsh-home'\)/u)
+  assert.match(u08, /isolatedEnvironment\(envWork, home, dshHome/u)
+  assert.match(u08, /extraIsolatedHomes\.push\(dshHome\)/u)
+
+  // The command is typed into the real PTY. No SIGUSR2 simulation, no
+  // qualification target override, and no copied/faked payload.
+  assert.match(u08, /send\('\/reload-client\\r'\)/u)
+  assert.doesNotMatch(u08, /SPLIT_PROCESS_CLIENT_REEXEC_PROBE|SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT/u)
+  assert.equal(u08.indexOf('signalBusiness('), -1, 'U08 must never simulate the user command with SIGUSR2')
+  assert.doesNotMatch(u08, /copyFileSync|cpSync/u)
+  assert.doesNotMatch(u08, /writeFileSync\([^)]*dist/u)
+  assert.doesNotMatch(u08, /writeFileSync\([^)]*(oldArtifact|newArtifact)\.path/u)
+
+  // The official in-place profile upgrade installs the NEW candidate; the
+  // command resolves the PROFILE package and the handoff restores the Host.
+  assert.match(u08, /installPlugin\(dsh, newArtifact\.path, harnessDir, env, false\)/u)
+  assert.match(u08, /assertProfileClientPeers\(profileDir, targetDshVersion, 'U08 upgraded profile install'\)/u)
+  assert.match(u08, /newBuildId, oldBuildId/u)
+  assert.match(u08, /reloadRequested\.targetBuildId, newBuildId/u)
+  assert.match(u08, /reloadRequested\.targetBundleVersion, newArtifact\.manifest\.version/u)
+  assert.match(u08, /replacementRestored\.clientBuildId, newBuildId/u)
+  assert.match(u08, /productionTargetResolvedFromProfile: true/u)
+  assert.match(u08, /qualificationTargetOverrideUsed: false/u)
+
+  // The three real PTY negatives keep the old/live surface and never stop it.
+  assert.match(u08, /Client reload skipped: this Client already runs the installed build/u)
+  assert.match(u08, /Client reload blocked: remove or submit the staged attachments first/u)
+  assert.match(u08, /Client reload failed: the installed replacement Client is unavailable or incompatible/u)
+  assert.match(u08, /'plugin', '--profile', 'pi-tui', 'remove', EXPECTED_PACKAGE_NAME/u)
+  assert.match(u08, /alreadyCurrentKeptOldSurface: true/u)
+  assert.match(u08, /attachmentsKeptOldSurface: true/u)
+  assert.match(u08, /targetInvalidKeptOldSurface: true/u)
+  assert.match(u08, /async function runUnavailableTargetRound/u)
+  assert.match(source, /runUnavailableTargetRound\(\{/u)
+  assert.match(u08, /installedTargetOfficiallyRemoved: true/u)
+  assert.match(u08, /targetInvalidRefused: true/u)
+  assert.match(u08, /turnHeldAcrossRefusal: true/u)
+  assert.match(u08, /handoffRequestedByUserCommand: true/u)
+  assert.match(u08, /promptNotReplayed: true/u)
 })

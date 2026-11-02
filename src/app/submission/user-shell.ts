@@ -101,8 +101,13 @@ export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
 
 /** The user-shell owner as the rest of the application consumes it. */
 export interface UserShellOwner {
-  /** Run one `!` / `!!` command. */
-  run(text: string, ackToken: number | undefined): void
+  /**
+   * Run one `!` / `!!` command.
+   * `endWrite` releases the gesture's accepted business-write lifetime; it is
+   * called EXACTLY once at this run's terminal settlement (including the
+   * context-mode `!` Session write), never on a timer.
+   */
+  run(text: string, ackToken: number | undefined, endWrite: () => void): void
   /** Abort the running Host user-shell run and interrupt the live Agent (Esc / cancel). */
   interrupt(): void
   /** Abort the run and remove every retained full-output temp file. */
@@ -202,11 +207,25 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
    * excluded-from-context escape hatch): zero SessionWriter.prompt, zero
    * context message, zero model visibility.
    */
-  const runUserShell = (text: string, ackToken: number | undefined): void => {
-    if (deps.isCleanedUp()) return
+  const runUserShell = (text: string, ackToken: number | undefined, endWrite: () => void): void => {
+    // The gesture's accepted business-write lifetime: exactly one release at
+    // this run's terminal settlement (M4 PR4 `/reload-client` safety).
+    let writeSettled = false
+    const settleWrite = (): void => {
+      if (writeSettled) return
+      writeSettled = true
+      endWrite()
+    }
+    if (deps.isCleanedUp()) {
+      settleWrite()
+      return
+    }
     const includeInContext = shellModeOf(text) === 'context'
     const command = shellCommandOf(text)
-    if (command === '') return
+    if (command === '') {
+      settleWrite()
+      return
+    }
     // NOTE: the context-mode submit ack is armed AT THE GESTURE in
     // dispatchUserInput (before ensureSession) — NEVER here, or the T0
     // baseline would rebase after the session create. `ackToken` scopes
@@ -270,6 +289,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
           source: { kind: 'user' },
         }),
         diag: deps.diag,
+        onSettled: settleWrite,
       })
     }
     // A settled latch: the card must settle EXACTLY once — the first
@@ -296,8 +316,10 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       // ensure-Session gesture), so its Submitting row must settle too.
       if (localSignal.aborted) {
         shellTerminalAck('shell run aborted')
+        settleWrite()
       }
       if (includeInContext && !localSignal.aborted) submitResult(result)
+      else settleWrite()
     }
     // The Host execution policy from the persisted preference (a policy
     // name, never a locality choice). An unavailable policy fails closed

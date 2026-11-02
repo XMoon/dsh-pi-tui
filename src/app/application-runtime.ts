@@ -322,6 +322,31 @@ export interface RemoteApplicationOverride {
 }
 
 /**
+ * The process-owned refusal vocabulary of ONE manual Client reload request
+ * (M4 PR4). It is separate from the Client-local safety refusals
+ * (`app/remote-process/client-reload-safety`): these are decided by the
+ * process entry's OWN preflight, which owns the live transport/Host status
+ * and the installed-package resolution.
+ *
+ * - `already-current`: the installed replacement build IS the running build;
+ * - `not-ready`: the process preflight (transport/surface/authenticated Host)
+ *   is not currently satisfied;
+ * - `target-invalid`: the installed replacement package is missing or
+ *   incompatible with this Host/DSH runtime;
+ * - `stopping`: this Client already owns ONE stop/reexec request.
+ */
+export type ClientReloadProcessRefusal =
+  | 'already-current'
+  | 'not-ready'
+  | 'target-invalid'
+  | 'stopping'
+
+/** The synchronous result of ONE process-owned Client reload request. */
+export type ClientReloadRequestResult =
+  | { readonly kind: 'accepted' }
+  | { readonly kind: 'refused'; readonly reason: ClientReloadProcessRefusal }
+
+/**
  * The internal startup-settlement seam for the split Client's ONE real
  * Surface composition (M4-B2-S §7.1). `applyRunnerWithRuntime` is synchronous
  * and starts an asynchronous runner root, so the caller cannot learn from its
@@ -341,6 +366,14 @@ export interface RemoteApplicationOverride {
 export interface RunnerStartupSettlement {
   surfaceReady(): void
   surfaceFailed(error: unknown): void
+  /**
+   * M4 PR4: the split Client's ONE process-owned manual-reload request. It
+   * returns the process preflight's synchronous decision; the caller
+   * (the `/reload-client` command handler) has already made the Client-local
+   * safety decision in the SAME synchronous stack. Absent on Direct and on
+   * every composition without a Client OS entry.
+   */
+  requestClientReload?(): ClientReloadRequestResult
 }
 
 /** The neutral Session-scoped facts face. */

@@ -205,9 +205,35 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   starts or replaces a Host, never replays an unacknowledged write and never
   rolls back to the old build automatically: the replacement exits nonzero with
   a concise manual-recovery line. No Cookie, token, SessionHandle, writer or UI
-  state crosses the handoff. The only trigger is an internal qualification
-  probe; a user-visible safe reload gate (editor draft, attachments, in-flight
-  answers) belongs to a later milestone.
+  state crosses the handoff.
+
+  The manual `/reload-client` command is the user-facing trigger of this SAME
+  chain. It is a bare Client-local command registered beside `/exit` (no
+  alias, argument schema, keybinding or Host RPC); `/reload` keeps its
+  catalog/settings refresh semantics. Outside a real split-Client surface
+  mount — Direct, or any composition without the Client OS entry — the command
+  answers a fixed availability refusal and never creates a Session, reaches a
+  Host RPC or becomes a model prompt. In a real split Client its handler makes
+  ONE synchronous Client-local safety decision from the live owners: the
+  Composer draft bytes (a whitespace-only draft counts), the real staged
+  image/file draft stores (a pinned occurrence the editor no longer references
+  still counts), unsettled accepted user writes (a submitted prompt or Host
+  command, a steer, a local shell run and its context-mode output write, a
+  queue mutation), Client-local Question/Approval input (a presented or queued
+  form, a saved continued draft, an answer still being delivered, a
+  refused-admission wait) and an in-flight Session navigation/transition. Only
+  when every fact is clear does that SAME call stack call the process-owned
+  one-shot request. A refusal publishes one fixed, actionable notice and keeps
+  the old Client, its editor/drafts and the Host entirely alive; there is no
+  forced override, queued retry or UI snapshot, and the user clears the state
+  and retries. The process preflight also refuses `already-current` when the
+  profile-installed package is the running build, and an unavailable or
+  incompatible installed target, without stopping the old Client. A granted
+  request keeps every guarantee above (the SAME stop coordinator, seat close,
+  spawn, no-spawn Host authentication and exact Session/generation fence), and
+  success publishes no duplicate notice: the replacement Surface reaching
+  `ready` is the evidence. The TSP renderer keeps its existing
+  post-classification refusal and adds no native reload UI.
 
 
 ### Local protocol and version evolution

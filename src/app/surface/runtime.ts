@@ -891,6 +891,15 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    */
   reconcileInteractionPresentation(): void
   /**
+   * M4 PR4: whether the interaction owner still holds UNSETTLED Client-local
+   * Question/Approval input (a live/queued modal, a continued form or its
+   * saved draft, a delivered answer, a refused-admission wait). It forwards the
+   * ONE interaction owner's own synchronous read — this surface keeps no second
+   * copy of that state. A Host-side pending question with no local input is not
+   * blocking: the replacement Client re-reads it from the Host.
+   */
+  hasReloadBlockingInteraction(): boolean
+  /**
    * PR3-B B3 (external review P2-B): the SYNCHRONOUS publication-commit half of
    * the same currentness policy. The runner calls it from the commit section,
    * immediately after the new owner is published and BEFORE any post-commit
@@ -2648,6 +2657,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     reconcileInteractionPresentation() {
       interaction.reconcilePublishedPresentation()
+    },
+    hasReloadBlockingInteraction() {
+      return interaction.hasReloadBlockingInput()
     },
     withdrawReplacedPresentation() {
       interaction.withdrawReplacedPresentation()
