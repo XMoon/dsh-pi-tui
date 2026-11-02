@@ -170,6 +170,22 @@ function describe(layer: Node | undefined, snapshot: SessionBrowserReadSnapshot 
             text: textContent(node.props?.['text'] ?? node.props?.['spans']),
           })
         }
+        // A negotiated Reader paints a group's facts as KV PAIRS, not text nodes, so
+        // the observer reads them from the PROPS of the same node the client drew:
+        // each pair becomes one record addressed by its own grid node and its `k`.
+        // This is an observation change only — the component still carries every fact
+        // exactly once, and no hidden text node is added to satisfy an old extractor.
+        if (node.kind === 'kv') {
+          const items = node.props?.['items']
+          if (Array.isArray(items)) {
+            for (const item of items as readonly Record<string, unknown>[]) {
+              entries.push({
+                key: `${nodeKey(node)}:${textContent(item['k'])}`,
+                text: textContent(item['v']),
+              })
+            }
+          }
+        }
         for (const child of node.children) visit(child)
       }
       visit(layer)
@@ -211,6 +227,9 @@ browser = new TspSessionBrowser({
     surface.scroll(id, to)
   },
   scrollSupported: session.caps.features.includes('scroll'),
+  // The REAL negotiated kind set of THIS pane (never a forced `true`): the
+  // recorded frames show the exact Reader this client's handshake earns.
+  nativeKv: session.caps.kinds.includes('kv'),
 })
 
 const observedPresentation: SessionBrowserPresentation = {

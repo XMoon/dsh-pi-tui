@@ -654,6 +654,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // for. The presenter names a wire id of the frame IT built; the SDK stays
     // here and is never handed to the business/Host side.
     nativeScroll: (id, to) => { surface.scroll(id, to) },
+    // The ONE handshake fact the read-only Reader needs to decide its short-fact
+    // layout. It is a display capability only: it never enters an admission list,
+    // and a pane without it keeps the plain-text facts.
+    nativeKv: session.caps.kinds.includes('kv'),
   })
   presetPicker = new TspPresetPicker({
     render: () => render(),
@@ -670,6 +674,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     notify: (text, kind) => display.notify(text, kind),
     nativeScroll: (id, to) => { surface.scroll(id, to) },
     scrollSupported: session.caps.features.includes('scroll'),
+    // The same single handshake fact as the Model Reader: a display capability,
+    // never an admission requirement.
+    nativeKv: session.caps.kinds.includes('kv'),
   })
   modelPicker.resize(session.caps.cols, session.caps.cell.w)
   workHub = new TspWorkHub({

@@ -117,6 +117,12 @@ const sourceHash = (h) => ['model-picker-view.ts', 'model-picker-state.ts', 'mod
 /** The plan §9 acceptance sizes: each gets `models-<w>x<h>` and `reader-<w>x<h>`. */
 const SECTION9 = new Set(['1280x800', '1000x640', '560x640', '400x600'])
 
+/** The labelled short facts the Reader grids on a pane that negotiated `kv`. The
+ *  words are the STATE module's own fact labels; `Default` also exists as the
+ *  client's session-tab name, which is why every claim about them is scoped to the
+ *  Reader's body subtree instead of the whole pane. */
+const LABEL_FACTS = ['Model', 'Provider', 'ID', 'Current', 'Default', 'Draft effort']
+
 /* ------------------------------------------------------- shared navigation */
 
 /** Walk Esc back to the catalogue, NEVER past it (Esc on the catalogue dismisses
@@ -284,6 +290,46 @@ const matrixCell = async (h, size) => {
   h.check(`${cellKey}: the Reader's configured facts join with the ONE separator ( · )`,
     textExactly(readerSnap, 'alpha · m-alpha · medium') !== undefined,
     `current=${JSON.stringify(String(textExactly(readerSnap, 'alpha · m-alpha · medium')?.text))}`)
+  // ------------------------------------------------ negotiated grid, REAL client
+  // The class tokens are the client's own (`sf-kv`, `sf-kv-k`, `sf-kv-v`), measured
+  // from a dump of THIS build's tree; a node in the tree is still not a visibility
+  // claim, so every geometry goes through the containment oracle.
+  const grids = h.classNodes(readerSnap, 'sf-kv')
+  const wireKv = lastFrame(h)?.readerKv ?? {}
+  const negotiatedKv = (caps(h)?.kinds ?? []).includes('kv')
+  h.check(`${cellKey}: the pane negotiated kv and the Reader painted exactly one grid per labelled group`,
+    negotiatedKv
+    && Object.keys(wireKv).sort().join(',') === 'configuration,identity'
+    && grids.length === 2,
+    `negotiated=${negotiatedKv} wire=[${Object.keys(wireKv).sort()}] painted=${grids.length}`)
+  h.check(`${cellKey}: both grids ask for the aligned layout, never inline`,
+    Object.values(wireKv).every((group) => group.layout === 'grid'),
+    JSON.stringify(Object.entries(wireKv).map(([id, group]) => `${id}=${group.layout}`)))
+  h.check(`${cellKey}: both grids and their labels/values are painted and contained in the Reader`,
+    grids.every((grid) => containedXY(readerSnap.chains, grid))
+    && ['Model', 'Provider', 'ID', 'Current', 'Default', 'Draft effort']
+      .every((label) => textUnder(readerSnap, label, 'sf-kv') !== undefined)
+    && textUnder(readerSnap, 'alpha · m-alpha · medium', 'sf-kv') !== undefined,
+    `boxes=${grids.map((node) => box(node)).join(' ')} contained=${grids.map((node) => containedXY(readerSnap.chains, node)).join(',')}`)
+  h.check(`${cellKey}: every value of a grid starts at ONE aligned value column`,
+    grids.every((grid) => {
+      const edges = subclass(grid, 'sf-kv-v').map((node) => Math.round(rect(node)[0]))
+      return edges.length > 0 && [...new Set(edges)].length === 1
+    }),
+    `value edges=${grids.map((grid) => [...new Set(subclass(grid, 'sf-kv-v').map((node) => Math.round(rect(node)[0])))].join('/')).join(' | ')}`)
+  // A gridded fact must not ALSO be painted as a plain text row behind its grid.
+  // The oracle is the Reader's OWN body subtree: counting the whole pane would
+  // collide with unrelated chrome that legitimately spells the same word (the
+  // client's own session-tab name painted `Default`).
+  const inReaderBody = (node) => (readerSnap.chains.get(node) ?? [])
+    .some((ancestor) => (ancestor.class ?? '').split(' ').includes('sf-ov-body'))
+  const readerLabels = readerSnap.nodes
+    .filter((node) => LABEL_FACTS.includes(String(node.text ?? '').trim()) && inReaderBody(node))
+    .map((node) => String(node.text ?? '').trim())
+  h.check(`${cellKey}: a gridded fact is painted ONCE inside the Reader — no hidden text copy behind the grid`,
+    h.classNodes(readerSnap, 'sf-ov-body').length === 1
+    && LABEL_FACTS.every((label) => readerLabels.filter((entry) => entry === label).length === 1),
+    `bodies=${h.classNodes(readerSnap, 'sf-ov-body').length} labels=${JSON.stringify(readerLabels)}`)
   if (SECTION9.has(cellKey)) h.capture(`reader-${cellKey}`, `the ${cellKey} Reader top`)
   await h.key('Escape', 900)
   h.check(`${cellKey}: Esc returns the Reader to the catalogue`,
@@ -595,7 +641,19 @@ export default async function (h) {
   snap = h.snapshot()
   const notice = textStarting(snap, 'catalog is unreachable')
   const identityHead = textExactly(snap, 'Identity')
-  const failedLineHeight = rect(textUnder(snap, 'Long Model', 'sf-ov-body'))[3]
+  // The one-line control is the Reader's OWN group head, not a fact value: measured
+  // on this client, an off-screen `sf-kv` SUBTREE is culled from the tree dump (its
+  // container keeps a full laid-out rect, its `sf-kv-k`/`sf-kv-v` children are gone),
+  // so a value node inside a grid is not a stable height reference at a scrolled
+  // position. The head is a one-line text node that survives, in the same body.
+  // The one-line control is the SAME `lineHeight` this reading measured at the top of
+  // this pane (a one-line value inside this very body, at 1280x800): line height is a
+  // property of the reading's font and size, not of the scroll position. Re-measuring
+  // a VALUE node here is not possible — measured on this client, an off-screen `sf-kv`
+  // SUBTREE drops its `sf-kv-k`/`sf-kv-v` children from the tree dump while its
+  // container keeps the full laid-out rect, so a gridded value is not a stable
+  // reference once the body is scrolled.
+  const failedLineHeight = lineHeight
   const failedLines = failedLineHeight > 0 ? rect(notice)[3] / failedLineHeight : 0
   h.check('the CRLF / LF / blank-line notice renders FOUR native lines while leading the Reader',
     controls(h).at(-1) === 'load-error' && notice !== undefined && identityHead !== undefined && containedX(snap.chains, notice)
@@ -832,6 +890,45 @@ export default async function (h) {
   h.measure('the captured theme', JSON.stringify(themeOf(h, bootShot)))
   h.measure('the catalogue label font', JSON.stringify(fontAt(h, bootShot, 'pk-label')))
   h.measure('the strip chip font', JSON.stringify(fontAt(h, bootShot, 'pk-schip')))
+  // ------------------------------- the pinned resolution x appearance grid (Model)
+  // The grid's readability is a property of the PAINT, so each plan resolution is
+  // captured in BOTH the client's resolved appearances and every claim is made
+  // against what the client really laid out — a wire `items` list proves the app sent
+  // the facts, it never proves the value column survived at 400px in light or dark.
+  for (const appearance of ['light', 'dark']) {
+    h.send('appearance', appearance)
+    const resolved = h.ctl('state').theme
+    h.check(`the client resolved the ${appearance} appearance for the Model Reader`,
+      resolved === appearance, `state.theme=${resolved}`)
+    for (const size of [{ w: 1280, h: 800 }, { w: 900, h: 700 }, { w: 400, h: 600 }, { w: 900, h: 360 }]) {
+      await h.resize(size.w, size.h)
+      await h.sleep(220)
+      const cellKey = `${size.w}x${size.h}`
+      await toCatalogue(h)
+      const opened = await enterReader(h)
+      const gridSnap = h.snapshot()
+      const painted = h.classNodes(gridSnap, 'sf-kv')
+      const wireKvCells = lastFrame(h)?.readerKv ?? {}
+      h.check(`${appearance} ${cellKey}: Enter opens the Reader and paints exactly the labelled groups as grids`,
+        opened && painted.length === 2
+        && Object.keys(wireKvCells).sort().join(',') === 'configuration,identity',
+        `opened=${opened} painted=${painted.length} wire=${JSON.stringify(Object.keys(wireKvCells))}`)
+      h.check(`${appearance} ${cellKey}: no grid is clipped horizontally and every value keeps its full column`,
+        painted.every((node) => containedX(gridSnap.chains, node) && rect(node)[2] > 0),
+        `boxes=${painted.map((node) => rect(node).map(Math.round).join(',')).join(' | ')}`)
+      h.check(`${appearance} ${cellKey}: every grid value arrives complete (no app-side ellipsis, no empty cell)`,
+        painted.every((grid) => {
+          const values = subclass(grid, 'sf-kv-v')
+          return values.length > 0 && values.every((node) => String(node.text ?? '').length > 0
+            && !String(node.text).includes('…'))
+        }),
+        `values=${painted.map((grid) => subclass(grid, 'sf-kv-v').map((node) => JSON.stringify(String(node.text ?? '').slice(0, 18))).join(',')).join(' | ')}`)
+      h.capture(`reader-grid-${cellKey}-${appearance}`, `the ${cellKey} Model Reader grids in the ${appearance} appearance`)
+      await h.key('Escape', 700)
+    }
+  }
+  h.send('appearance', 'light')
+
   h.measure('the Reader title font', JSON.stringify(fontAt(h, readerTopShot, 'sf-ov-title')))
   h.measure('every size\'s cols/cell.w as the subject received it', JSON.stringify(resizes(h)))
   h.measure('the per-size strip/list geometry', JSON.stringify(columnMetrics))

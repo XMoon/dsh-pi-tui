@@ -281,16 +281,54 @@ function forge(pane: TspPane, act: string, value?: string): void {
 }
 
 /** Every fact VALUE the mounted Reader carries, keyed by the stable key the view
- *  built it from (`reader-model`, `reader-fact-current`, …). */
+ *  built it from (`reader-description`, …) for its `ui.text` nodes, plus every `kv`
+ *  grid pair keyed `reader-kv-<group>:<label>`.
+ *
+ *  A negotiated Reader paints a labelled group's facts as KV PAIRS, which carry no
+ *  per-fact node id at all — the client derives each pair from the grid's own props.
+ *  Reading them back from those props is the ONLY honest observation: rebuilding a
+ *  hidden `ui.text` per fact so an old extractor keeps working would paint the page
+ *  twice and prove nothing about what the client really received. */
 function readerFacts(pane: TspPane): Map<string, string> {
   const out = new Map<string, string>()
   for (const node of nodes(pane)) {
-    if (node.k !== 'text') continue
-    const at = String(node.id).lastIndexOf('.reader-')
-    if (at < 0) continue
-    out.set(String(node.id).slice(at + 1), String(node.p.text ?? ''))
+    if (node.k === 'text') {
+      const at = String(node.id).lastIndexOf('.reader-')
+      if (at < 0) continue
+      out.set(String(node.id).slice(at + 1), String(node.p.text ?? ''))
+      continue
+    }
+    if (node.k !== 'kv') continue
+    const key = String(node.p.key ?? '')
+    const items = (node.p.items ?? []) as Array<{ readonly k?: unknown; readonly v?: unknown }>
+    if (!key.startsWith('reader-kv-')) continue
+    const group = key.slice('reader-kv-'.length)
+    for (const item of items) out.set(`${key}:${String(item.k)}`, String(item.v))
   }
   return out
+}
+
+/** The Reader's ONE grid for a group, read from the wire. Returns `undefined` when
+ *  the pane did not negotiate `kv` and the group therefore paints text rows. */
+function readerKv(pane: TspPane, groupId: string): { readonly layout: unknown; readonly pairs: readonly (readonly [string, string])[] } | undefined {
+  const node = layerNodes(pane).find((entry) => entry.k === 'kv' && String(entry.p.key) === `reader-kv-${groupId}`)
+  if (node === undefined) return undefined
+  const items = (node.p.items ?? []) as Array<{ readonly k?: unknown; readonly v?: unknown }>
+  return {
+    layout: node.p.layout,
+    pairs: items.map((item) => [String(item.k), String(item.v)] as const),
+  }
+}
+
+/** One grid fact's value, by its group and its own label. */
+function readerFact(pane: TspPane, groupId: string, label: string): string | undefined {
+  return readerKv(pane, groupId)?.pairs.find(([entry]) => entry === label)?.[1]
+}
+
+/** Whether any `kv` node reached the pane at all: a negative test asserts this is
+ *  false so "no kv" is a fact about the wire, not about one lookup. */
+function hasKvNode(pane: TspPane): boolean {
+  return nodes(pane).some((node) => node.k === 'kv')
 }
 
 /** The `[Enter]` key badge of one action bar entry, per pane. */
@@ -372,8 +410,20 @@ const twinEffortDirectory: ModelPickerDirectory = {
 }
 
 /** One mounted renderer over the scripted pane, with a write/retry spy. */
-async function mounted(t: { after(fn: () => unknown): void }, subject = { sessionless: true }) {
-  const pane = installTspPane({ modelPicker: true })
+/**
+ * Mount the native Model layer over ONE scripted pane.
+ *
+ * `paneOptions` is the pane's OWN advertised capability set: a case defaults to the
+ * native Model opt-in and a case that must prove the no-`kv` degradation passes its
+ * kinds verbatim, so `nativeKv` always arrives through the real handshake and never
+ * through a value the test forced on the View.
+ */
+async function mounted(
+  t: { after(fn: () => unknown): void },
+  subject = { sessionless: true },
+  paneOptions: Parameters<typeof installTspPane>[0] = { modelPicker: true },
+) {
+  const pane = installTspPane(paneOptions)
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session)
@@ -538,7 +588,7 @@ test('native Model: the catalogue browses, drafts in its own strip and writes on
   await walkList(pane, SAME_A)
   await enterDetails(pane)
   assert.equal(picker(pane), undefined, 'the Reader replaces the picker — no page in between')
-  assert.equal(readerValue(pane, 'reader-model'), 'Twin', 'and it describes the highlighted model')
+  assert.equal(readerFact(pane, 'identity', 'Model'), 'Twin', 'and it describes the highlighted model')
   assert.equal(m.writes.length, 0, 'opening the Reader never writes')
   await backFromDetails(pane)
   await waitUntil('back on the catalogue', () => onCatalogue(pane))
@@ -992,7 +1042,7 @@ test('native Model: `select` only highlights and `activate` opens the Reader of 
   await nextPickerFrame(pane)
   sendActivate(pane, SAME_B)
   await waitUntil('activate opens the Reader of B', () =>
-    inDetails(pane) && readerValue(pane, 'reader-model') === 'Twin')
+    inDetails(pane) && readerFact(pane, 'identity', 'Model') === 'Twin')
   assert.equal(m.writes.length, 0, 'opening the Reader never writes')
   await backFromDetails(pane)
   await waitUntil('back on the catalogue', () => onCatalogue(pane))
@@ -1484,7 +1534,7 @@ test('official Direct Agent: native /model makes exactly one durable Session sel
     // The Reader carries the COMPLETE value, wrapped by the client; the Current
     // fact is read from the Session the picker re-opened on.
     assert.equal(
-      readerValue(fixture.pane, 'reader-fact-current'),
+      readerFact(fixture.pane, 'configuration', 'Current'),
       `scripted · ${DIRECT_TSP_MODEL_TWO}`,
       'the Reader reads the new Current from the Session',
     )
@@ -2154,20 +2204,50 @@ test('native Model: every Details fact reaches the Reader COMPLETE and wraps by 
   await openDetails(m.pane)
   const facts = readerFacts(m.pane)
   // The Reader carries the directory's own value VERBATIM: nothing is
-  // ellipsized, re-flowed or re-derived, and a value with no break opportunity is
-  // wrapped by the CLIENT (`char`) instead of being pre-split by the presenter.
+  // ellipsized, re-flowed or re-derived. The labelled groups reach the pane as
+  // native grids, so the observation point is each grid's OWN `items` pairs, in the
+  // order the state module projected them; a value with no break opportunity is
+  // wrapped by the CLIENT, never pre-split by the presenter.
   // The model's NAME is the page's own title (the client ellipsizes a long one),
   // so the Identity group carries the complete name as its first fact.
   assert.equal(readerNode(m.pane)?.p.head, 'Budget Model', 'the page title is the model name')
-  assert.equal(facts.get('reader-model'), 'Budget Model', 'the model name')
-  assert.equal(facts.get('reader-provider'), `${longProvider} (p)`, 'provider and provider id')
-  assert.equal(facts.get('reader-id'), modelId, 'the model id')
-  assert.equal(facts.get('reader-fact-current'), `p · ${modelId} · high`, 'the live Current value')
-  assert.equal(facts.get('reader-fact-default'), `p · ${modelId} · high`, 'the persisted Default value')
-  assert.equal(facts.get('reader-description'), description, 'the description')
-  // The fixture's declared default id (`high`) is not one of its advertised ids,
-  // so the draft seeds from the first advertised choice.
-  assert.equal(facts.get('reader-draft'), 'Minimal', 'the draft effort')
+  const identity = readerKv(m.pane, 'identity')
+  assert.ok(identity, 'a pane that negotiated `kv` paints Identity as one grid')
+  assert.equal(identity.layout, 'grid', 'the grid is the aligned `grid` layout, not `inline`')
+  assert.deepEqual(
+    identity.pairs,
+    [
+      ['Model', 'Budget Model'],
+      ['Provider', `${longProvider} (p)`],
+      ['ID', modelId],
+    ],
+    'the Identity group is exactly its labelled facts, in order, COMPLETE',
+  )
+  const configuration = readerKv(m.pane, 'configuration')
+  assert.ok(configuration, 'the Configuration group is a grid too')
+  assert.equal(configuration.layout, 'grid', 'one grid per group, aligned')
+  assert.deepEqual(
+    configuration.pairs,
+    [
+      ['Current', `p · ${modelId} · high`],
+      ['Default', `p · ${modelId} · high`],
+      // The fixture's declared default id (`high`) is not one of its advertised ids,
+      // so the draft seeds from the first advertised choice.
+      ['Draft effort', 'Minimal'],
+    ],
+    'live Current, persisted Default and the draft effort stay separate complete values',
+  )
+  // The description is prose with NO label of its own: it stays one complete
+  // wrapped `ui.text` at every capability, never a grid row.
+  assert.equal(readerValue(m.pane, 'reader-description'), description, 'the description is a complete text node')
+  assert.equal(facts.get('reader-description'), description, 'and the text reader still finds it by its own key')
+  assert.equal(nodes(m.pane).find((node) => node.id.endsWith('.reader-description'))?.p.wrap, 'word', 'prose wraps by word')
+  // A grid value carries no app-side wrap or bound: the whole string is in `v` and
+  // the client owns the layout, which is what makes an unbroken run safe.
+  for (const [, value] of [...identity.pairs, ...configuration.pairs]) {
+    assert.ok(!/\u2026/u.test(value), 'no grid value is pre-ellipsized by the app')
+    assert.ok(!/[\n\r]/u.test(value), 'and no grid value is pre-split into lines')
+  }
   // The groups are the page's structure: Identity / Configuration / Description,
   // separated by a real rule and a spacer (a bare `section` head measured a
   // SMALLER gap between groups than inside one on the real client).
@@ -2185,12 +2265,19 @@ test('native Model: every Details fact reaches the Reader COMPLETE and wraps by 
     layerNodes(m.pane).filter((node) => node.k === 'spacer').length,
     'every group boundary is one rule plus one spacer',
   )
-  // The kind decides how a value with no break opportunity behaves: identifiers
-  // may break anywhere, prose must not break inside a word.
-  for (const key of ['reader-provider', 'reader-id', 'reader-fact-current', 'reader-fact-default', 'reader-draft']) {
-    assert.equal(nodes(m.pane).find((node) => node.id.endsWith(`.${key}`))?.p.wrap, 'char', `${key} wraps by char`)
-  }
-  assert.equal(nodes(m.pane).find((node) => node.id.endsWith('.reader-description'))?.p.wrap, 'word', 'prose wraps by word')
+  // ONE grid per labelled group and NO duplicate text fact: the page paints each
+  // short fact exactly once, so a KV group never keeps an invisible `ui.text` copy
+  // behind it for an old test extractor to find.
+  assert.deepEqual(
+    layerNodes(m.pane).filter((node) => node.k === 'kv').map((node) => String(node.p.key)),
+    ['reader-kv-identity', 'reader-kv-configuration'],
+    'each labelled group is exactly one grid node',
+  )
+  assert.equal(
+    nodes(m.pane).filter((node) => node.k === 'text' && /\.reader-(model|provider|id|fact-current|fact-default|draft)$/.test(node.id)).length,
+    0,
+    'a gridded fact is not painted a second time as text',
+  )
   // The write outcome is the Reader's own leading notice, complete there too.
   await backFromDetails(m.pane)
   await waitUntil('back on the catalogue', () => onCatalogue(m.pane))
@@ -2245,8 +2332,9 @@ test('native Model: an unbroken value reaches the Reader whole, to be wrapped by
   const m = await mounted(t, { sessionless: false })
   // The reviewer's counterexample: a picker row renders its `detail` on ONE
   // measured line and cannot break an unbroken run, so pre-split rows had to guess
-  // a per-row column bound. The Reader carries the run ONCE, with the client's own
-  // `char` wrapping, so no bound can clip it.
+  // a per-row column bound. The Reader carries the run ONCE and the client owns the
+  // wrap, so no app-side bound can clip it — inside a grid `v` exactly as inside a
+  // `ui.text`, because a KV item has no wrap prop to lose it with.
   const providerName = `${'W'.repeat(240)} tail`
   await resize(m.pane, 100)
   await m.ready(budgetDirectory({
@@ -2255,10 +2343,19 @@ test('native Model: an unbroken value reaches the Reader whole, to be wrapped by
     effortNames: ['Minimal', 'Low'],
   }))
   await openDetails(m.pane)
-  assert.equal(readerValue(m.pane, 'reader-provider'), `${providerName} (p)`, 'the unbroken run is complete')
-  const nodesOfProvider = nodes(m.pane).filter((node) => node.id.endsWith('.reader-provider'))
-  assert.equal(nodesOfProvider.length, 1, 'and it is ONE node, never a stack of continuation rows')
-  assert.equal(nodesOfProvider[0]?.p.wrap, 'char', 'the client is told it may break the run')
+  const identity = readerKv(m.pane, 'identity')
+  assert.ok(identity, 'the pane negotiated `kv`')
+  assert.equal(readerFact(m.pane, 'identity', 'Provider'), `${providerName} (p)`, 'the unbroken run is complete')
+  assert.equal(
+    identity.pairs.filter(([label]) => label === 'Provider').length,
+    1,
+    'and it is ONE pair, never a stack of continuation rows',
+  )
+  assert.equal(
+    nodes(m.pane).filter((node) => node.k === 'text' && node.id.endsWith('.reader-provider')).length,
+    0,
+    'the grid did not also paint a text copy that could disagree',
+  )
   m.handle.close()
 })
 
@@ -2354,7 +2451,7 @@ test('native Model: description wrapping never splits a grapheme or a column', a
   // The CJK model's own Reader, opened by activating its row.
   sendActivate(m.pane, SAME_B)
   await waitUntil('the CJK model Reader', () =>
-    inDetails(m.pane) && readerValue(m.pane, 'reader-model') === 'Twin')
+    inDetails(m.pane) && readerFact(m.pane, 'identity', 'Model') === 'Twin')
   assert.equal(readerValue(m.pane, 'reader-description'), cjk, 'the CJK description is reproduced exactly')
 })
 
@@ -2377,15 +2474,15 @@ test('native Model: Current and Default facts come from the directory, not the r
     return facts
   }
   const facts = await liveFacts()
-  assert.equal(facts.get('reader-fact-current'), 'a · same · high', `live Current fact: ${JSON.stringify([...facts])}`)
-  assert.equal(facts.get('reader-fact-default'), 'b · same · low', 'the persisted default keeps its own effort')
+  assert.equal(facts.get('reader-kv-configuration:Current'), 'a · same · high', `live Current fact: ${JSON.stringify([...facts])}`)
+  assert.equal(facts.get('reader-kv-configuration:Default'), 'b · same · low', 'the persisted default keeps its own effort')
   live.handle.close()
   const sessionless = await mounted(t)
   await sessionless.ready()
   await openDetails(sessionless.pane)
   const plainFacts = readerFacts(sessionless.pane)
-  assert.equal(plainFacts.has('reader-fact-current'), false, 'a sessionless panel never paints a Current fact')
-  assert.equal(plainFacts.get('reader-fact-default'), 'a · same · high')
+  assert.equal(plainFacts.has('reader-kv-configuration:Current'), false, 'a sessionless panel never paints a Current fact')
+  assert.equal(plainFacts.get('reader-kv-configuration:Default'), 'a · same · high')
 })
 
 test('native Model: a model without efforts paints no strip and invents no candidate', async (t) => {
@@ -2429,7 +2526,7 @@ test('native Model: a model without efforts paints no strip and invents no candi
   pane.key('\t')
   await waitUntil('the ring released the bar', () => !String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
   await enterDetails(pane)
-  assert.equal(readerValue(pane, 'reader-model'), 'Twin', 'the Reader still describes that model')
+  assert.equal(readerFact(pane, 'identity', 'Model'), 'Twin', 'the Reader still describes that model')
   assert.equal(m.writes.length, 0, 'and nothing wrote')
 })
 
@@ -2959,7 +3056,7 @@ test('native Model: the Reader survives a resize and Back returns to its real or
   await resize(pane, 100)
   await enterDetails(pane)
   const facts = readerFacts(pane)
-  const model = facts.get('reader-model')
+  const model = facts.get('reader-kv-identity:Model')
   await resize(pane, WIDE_COLS)
   await waitUntil('the Reader survives the resize', () =>
     inDetails(pane) && props(pane).title === undefined)
@@ -2970,7 +3067,7 @@ test('native Model: the Reader survives a resize and Back returns to its real or
   action(pane, 'back')
   await waitUntil('back on the list', () => onCatalogue(pane))
   await openDetails(pane)
-  assert.equal(readerValue(pane, 'reader-model'), model, 'the same model is still described')
+  assert.equal(readerFact(pane, 'identity', 'Model'), model, 'the same model is still described')
   await backToCatalogue(pane)
   m.handle.close()
 })
@@ -3178,4 +3275,83 @@ test('native Model: a Focus queued behind a stalled frame credit flushes only th
   assert.equal(inDetails(pane), false, 'the reopened catalogue is the current page')
   assert.deepEqual(writes, [], 'and none of this flush wrote anything')
   again.close()
+})
+
+test('native Model: a pane WITHOUT the kv kind still opens the complete text Reader', async (t) => {
+  // The degradation is a HANDSHAKE fact: this pane advertises exactly the base
+  // kinds the Model entry already required (`picker`/`row`/`overlay`) plus `text`
+  // for its fact rows, and NO `kv`. The command must still be admitted, the Reader
+  // must still carry every fact in its ORIGINAL text form, and nothing may become
+  // a write because the display capability is missing.
+  const m = await mounted(t, { sessionless: false }, {
+    kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'picker', 'row', 'overlay', 'text'],
+    features: ['flow', 'styles'],
+  })
+  await m.ready()
+  assert.ok(m.renderer.modelPresentation, 'the missing `kv` kind refuses no business entry')
+  await openDetails(m.pane)
+  assert.equal(hasKvNode(m.pane), false, 'not one `kv` node reached a pane that cannot draw one')
+  assert.equal(readerFact(m.pane, 'identity', 'Model'), undefined, 'and no grid is read as the fact source')
+  // The ORIGINAL per-fact text nodes, by the keys the view gives them, complete.
+  assert.equal(readerValue(m.pane, 'reader-model'), 'Twin', 'the model name is a text fact')
+  assert.equal(readerValue(m.pane, 'reader-provider'), 'A (a)', 'the provider fact is a text fact')
+  assert.equal(readerValue(m.pane, 'reader-id'), 'same', 'the id fact is a text fact')
+  assert.equal(readerValue(m.pane, 'reader-fact-default'), 'a · same · high', 'the Default fact is a text fact')
+  assert.equal(readerValue(m.pane, 'reader-description'), undefined, 'this fixture model carries no description')
+  assert.equal(
+    nodes(m.pane).filter((node) => node.k === 'text' && /\.reader-(model|provider|id|fact-default)$/.test(node.id)).length,
+    4,
+    'each fact is painted ONCE, as the text row this pane can show',
+  )
+  // Back still returns, and the read-only page still never writes.
+  assert.equal(m.writes.length, 0, 'a degraded Reader writes nothing either')
+  await backFromDetails(m.pane)
+  await waitUntil('Back returns to the catalogue', () => onCatalogue(m.pane))
+  m.handle.close()
+})
+
+test('native Model: a gridded fact keeps the SAME sanitizer as the text branch', async (t) => {
+  // The grid is a new LAYOUT for facts that already had a sanitizer contract, so the
+  // `kv` branch must not become a second, unsanitised path to the wire: control bytes
+  // the text branch already removed stay removed inside a `v`, and a CJK or unbroken
+  // run still arrives WHOLE.
+  const m = await mounted(t, { sessionless: false })
+  const hostile = 'Alpha\u001b]52;c;ZWN5aA==\u0007 Provider\u001b[31m\u0007'
+  const cjkId = 'model/完整可读-identifier'
+  await resize(m.pane, WIDE_COLS)
+  await m.ready(budgetDirectory({ providerName: hostile, modelId: cjkId, description: 'd' }))
+  await openDetails(m.pane)
+  const identity = readerKv(m.pane, 'identity')
+  assert.ok(identity, 'the pane negotiated `kv`')
+  const wire = JSON.stringify(nodes(m.pane))
+  assert.ok(!wire.includes('\u001b]52;'), 'no OSC-52 clipboard sequence reaches the wire')
+  assert.ok(!wire.includes('\u001b[31m'), 'no raw SGR reaches the wire')
+  assert.ok(!wire.includes('\u0007'), 'no raw BEL reaches the wire')
+  // The readable content survives: the sanitizer removes control bytes, never text.
+  const provider = readerFact(m.pane, 'identity', 'Provider')
+  assert.ok(provider?.includes('Alpha'), `the provider name survives: ${JSON.stringify(provider)}`)
+  assert.ok(provider?.includes('Provider'), 'including the text that followed the removed bytes')
+  assert.equal(readerFact(m.pane, 'identity', 'ID'), cjkId, 'a CJK/unbroken id is carried complete')
+  m.handle.close()
+})
+
+test('native Model: a pane without the base picker kinds is still refused (kv changed nothing)', async (t) => {
+  // The pre-existing fail-closed gate must not have been loosened by adding a
+  // display kind: without `picker`/`row`/`overlay` there is no native Model entry
+  // at all, whether or not `kv` is offered.
+  const pane = installTspPane({ kinds: ['col', 'text', 'kv'], features: ['flow'] })
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session)
+  const renderer = mountTspRenderer(session, {
+    copyVisual: async () => false,
+    requestExit() {},
+    onFatal: (e) => assert.fail(String(e)),
+  })
+  t.after(() => renderer.dispose())
+  renderer.bindInput({
+    exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {},
+    listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {},
+  })
+  assert.equal(renderer.modelPresentation, undefined, 'the missing BASE kinds still fail closed')
 })
