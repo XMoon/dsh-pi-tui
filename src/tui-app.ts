@@ -318,6 +318,7 @@ import { activityClockOf, resolveWorkLifetimes, type ActivityClock, type WorkLif
 import { ContextClusterComponent } from './tui/components/transcript/context-cluster.ts'
 import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './tui/transcript/context-structure.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from './tui/components/transcript/context-row.ts'
+import { agentContextSenderName, type SenderLabelLookup } from './tui/components/transcript/agent-context-title.ts'
 import { PendingContextComponent } from './tui/components/transcript/pending-context.ts'
 // TS8-E: the pending-input presentation DTOs are an application-facing
 // presentation contract owned by app/surface/pending-presentation.ts. TuiApp
@@ -641,6 +642,7 @@ type TranscriptRebuildReason =
   | 'resize'
   | 'renderer-registry'
   | 'theme-keymap'
+  | 'context-identity'
   | 'local-card'
   | 'other'
 
@@ -2386,6 +2388,16 @@ function samePendingTailRow(left: PendingTailRow, right: PendingTailRow): boolea
         : false)
 }
 
+/** Whether two sender-label snapshots denote the same resolved names. */
+function sameSenderLabels(left: SenderLabelLookup, right: SenderLabelLookup): boolean {
+  if (left === right) return true
+  if (left.size !== right.size) return false
+  for (const [id, name] of left) {
+    if (right.get(id) !== name) return false
+  }
+  return true
+}
+
 /** One cached component for a transcript message (stage J render cache). */
 interface MessageComponentEntry {
   component: Component
@@ -2505,6 +2517,10 @@ interface MessageComponentEntry {
   rendererId?: string
   /** M7: the renderer registry revision at build time. */
   rendererRevision?: number
+  /** The Agent Context sender display name the component was built with
+   * (kind 'system'): a title/catalog label landing must rebuild exactly the
+   * affected relay/settled cards, never the whole transcript. */
+  senderDisplayName?: string
 }
 
 interface ExitConfirmationTrigger {
@@ -8740,6 +8756,19 @@ export class TuiApp {
     this.transcriptWindowHint = window?.mode === 'history' && window.firstTurn !== undefined && window.lastTurn !== undefined
       ? `History · turn ${window.firstTurn}–${window.lastTurn}`
       : ''
+  }
+
+  /**
+   * Commit the CURRENT presentation subject's already-proven Agent-sender
+   * display names (the app/surface enrichment's read-only projection). The
+   * map participates in every relay/settled Context card's build identity, so
+   * replacing it rebuilds exactly the affected cards: a title landing never
+   * re-renders an unrelated transcript row, and an identical map is a no-op.
+   */
+  setContextSenderLabels(labels: SenderLabelLookup): void {
+    if (sameSenderLabels(this.contextSenderLabels, labels)) return
+    this.contextSenderLabels = labels
+    this.rebuildMessages('context-identity')
   }
 
   /**
@@ -15760,6 +15789,11 @@ export class TuiApp {
   /** Persistent components per transcript message (stage J cache). */
   private readonly messageComponents = new Map<TranscriptMessage, MessageComponentEntry>()
 
+  /** The already-proven Agent-sender display names of the CURRENT presentation
+   * subject (`senderSessionId` → name). Owned by the app/surface enrichment
+   * (`agent-context-identity.ts`); the renderer only reads it, and only the
+   * relay/settled Context cards consume it. */
+  private contextSenderLabels: SenderLabelLookup = new Map()
 
   /** M7: a renderer failure sink (the runner wires the extension
    * service's health ledger — round-1 finding 3: failures must be
@@ -18287,6 +18321,7 @@ export class TuiApp {
         entry.running = message.kind === 'thinking' ? message.running : undefined
         entry.label = message.kind === 'system' ? message.label : undefined
         entry.summary = message.kind === 'system' ? message.summary : undefined
+        entry.senderDisplayName = message.kind === 'system' ? this.contextSenderDisplayNameOf(message) : undefined
         break
       case 'tool':
         entry.status = message.status
@@ -18343,6 +18378,7 @@ export class TuiApp {
         return entry.text !== message.text || entry.running !== message.running
       case 'system':
         return entry.text !== message.text || entry.label !== message.label || entry.summary !== message.summary
+          || entry.senderDisplayName !== this.contextSenderDisplayNameOf(message)
       case 'tool':
         return entry.status !== message.status || entry.args !== message.args
           || entry.result !== message.result || entry.meta !== message.meta
@@ -18718,6 +18754,14 @@ export class TuiApp {
     return result
   }
 
+  /** The exact Agent Context display name for one row — undefined for every
+   * other row — resolved from the current subject's proven sender labels (the
+   * pure `agentContext-title` policy owns qualification and the safe short-id
+   * fallback). */
+  private contextSenderDisplayNameOf(message: TranscriptMessage): string | undefined {
+    return agentContextSenderName(message, this.contextSenderLabels)
+  }
+
   private renderMessage(message: TranscriptMessage, expanded: boolean, expandHint: ExpandHint, fullReveal: boolean, width: number): Component {
     if (message.kind === 'user') {
       // dsh-web parity: the user's own input is a floating BUBBLE (its
@@ -18827,7 +18871,13 @@ export class TuiApp {
       // keeps the existing Context-injection / section-marker presentation.
       if (isSurfacedContext(message)) {
         const kind = contextPresentationKind(message)
-        const rowOptions = { message, expanded, expandHint: this.expandHint(expandHint), iconStyle: this.iconStyle }
+        const rowOptions = {
+          message,
+          expanded,
+          expandHint: this.expandHint(expandHint),
+          iconStyle: this.iconStyle,
+          senderDisplayName: this.contextSenderDisplayNameOf(message),
+        }
         if (kind === 'notice') return new NoticeContextRow(rowOptions)
         if (kind === 'relay') {
           return new RelayContextRow({

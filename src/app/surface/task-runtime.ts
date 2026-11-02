@@ -202,6 +202,13 @@ export interface TaskRuntimeOptions {
    * still not discard a Status fact its owner already proved.
    */
   readonly publishActivity: (facts: DisplayActivityFacts) => void
+  /**
+   * A catalog row commit landed (the ONE `commitRows` entry, after the global
+   * rows were replaced). The Agent Context identity enrichment re-resolves the
+   * frame's readable sender names from these rows; this owner stays a label
+   * fact source and never learns about transcript presentation.
+   */
+  readonly onCatalogCommitted?: () => void
 }
 
 /** The Task Center / Job viewer owner `createSurfaceRuntime()` consumes. */
@@ -227,6 +234,10 @@ export interface TaskRuntime {
   refreshAgentRuntimeOnly(): void
   /** Whether one child id is a member of the cached descendant catalog. */
   hasTask(childId: string): boolean
+  /** The GLOBAL descendant rows of the last catalog commit (before any open
+   *  browser's dataset scope filtered them). The SAME committed array — never
+   *  a second catalog or a copied child roster. */
+  globalRows(): readonly TaskBrowserRow[]
   /** Reset the whole Task Center on a session-generation bump. */
   resetTasks(): void
   /** Open the Task Browser (the `/tasks` Full Task Center and the
@@ -634,6 +645,10 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     // not a modal browser is open (B4-A): an unopened browser is not a reason
     // to leave the live task window stale.
     publishQuickProjection()
+    // The GLOBAL descendant facts moved (new children/labels or a first
+    // catalog arrival): the surface's Agent Context identity enrichment
+    // re-resolves the current frame from THESE rows — never a second roster.
+    options.onCatalogCommitted?.()
     if (activeTaskBrowserMode === undefined) {
       // No browser open: only the select-path identity source is updated.
       return
@@ -1534,6 +1549,9 @@ export function createTaskRuntime(options: TaskRuntimeOptions): TaskRuntime {
     },
     hasTask(childId) {
       return taskRuntime?.has(childId) === true
+    },
+    globalRows() {
+      return taskBrowserGlobalRows
     },
     resetTasks() {
       // TSP-7 PR-B: the old session's summary leaves the Status projection with

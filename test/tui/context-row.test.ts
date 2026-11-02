@@ -337,3 +337,125 @@ test('the relay cache is per instance and per width: no cross-instance or global
   assert.notStrictEqual(expanded.render(60), collapsed.render(60), 'the two instances never share rows')
   assert.notStrictEqual(longRelayRow(false).render(60), collapsedRows, 'a new instance renders fresh rows (no global cache)')
 })
+
+// ── Agent Context readable identity (Context identity PR-A) ───────────────
+//
+// The two Agent-authored Context cards carry a durable `senderSessionId`.
+// PR-A shows an already-proven readable name (official Session title or
+// descendant Catalog label) in the HEADER ONLY: the DSH body text, the
+// producer summary and the expanded payload stay byte for byte.
+
+const RELAY_SENDER = 'session-8f23a19c-0d4e-4c55-9f6b-9a7c1e2d3f40'
+const RELAY_BODY = `Agent ${RELAY_SENDER} sent a message: 已完成审核，两处需要修复。`
+
+function relayIdentityRow(text = RELAY_BODY): SystemRow {
+  return {
+    kind: 'system', turn: 0, text, label: 'agent-message', icon: 'context-generic', context: true,
+    contextPresentation: { form: 'relay', sourceKind: 'agent-message', senderSessionId: RELAY_SENDER, role: 'inject' },
+  }
+}
+
+function settledIdentityRow(): SystemRow {
+  return {
+    kind: 'system', turn: 0, text: `Background subagent ${RELAY_SENDER} finished and will do no further work unless you send it more.\nIts closing message:\n审核完成`,
+    label: 'subagent-settled', icon: 'context-notice', context: true,
+    summary: `Background subagent ${RELAY_SENDER} finished and will do no further work unless you send it more.`,
+    contextPresentation: { form: 'notice', sourceKind: 'subagent-settled', senderSessionId: RELAY_SENDER, role: 'inject' },
+  }
+}
+
+test('a relay header uses the proven display name and never rewrites the DSH body', () => {
+  const rows = new RelayContextRow({
+    message: relayIdentityRow(), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+    senderDisplayName: '可复用性审核员', geometry: { thresholdRows: 10, headRows: 4, tailRows: 3 },
+  }).render(100)
+  assert.match(rows[0]!, /Agent message · 可复用性审核员/)
+  assert.ok(!rows[0]!.includes(RELAY_SENDER), 'the header identity is the readable name, not the UUID')
+  assert.equal(rows[1], color.text(`${BODY}${RELAY_BODY}`), 'the relay body keeps the raw DSH protocol prefix and payload')
+})
+
+test('an expanded relay restores the exact original DSH payload', () => {
+  const rows = new RelayContextRow({
+    message: relayIdentityRow(), expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji',
+    senderDisplayName: '可复用性审核员', geometry: { thresholdRows: 10, headRows: 4, tailRows: 3 },
+  }).render(120)
+  assert.match(rows[0]!, /Agent message · 可复用性审核员/)
+  assert.ok(rows[1]!.includes(RELAY_BODY), 'the expanded body is the same raw text')
+})
+
+test('a settled notice header uses the readable name and keeps the raw producer summary', () => {
+  const message = settledIdentityRow()
+  const rows = new NoticeContextRow({
+    message, expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji', senderDisplayName: '可复用性审核员',
+  }).render(300)
+  assert.match(rows[0]!, /Subagent settled · 可复用性审核员/)
+  assert.ok(!rows[0]!.includes('subagent-settled'), 'the bare source label is no longer the only identity')
+  assert.equal(rows[1], color.text(`${BODY}${message.summary}`), 'the DSH settlement summary is unchanged')
+  const expanded = new NoticeContextRow({
+    message, expanded: true, expandHint: 'ctrl+o', iconStyle: 'emoji', senderDisplayName: '可复用性审核员',
+  }).render(300)
+  for (const line of message.text.split('\n')) {
+    assert.ok(expanded.includes(color.textDim(`${BODY}${line}`)), `the exact DSH line: ${JSON.stringify(line)}`)
+  }
+  assert.ok(!expanded.join('\n').includes('success'), 'no invented outcome word')
+})
+
+test('only the exact source/form pair consumes the sender display name', () => {
+  const toolJobsNotice = {
+    kind: 'system' as const, turn: 0, text: 'payload', label: 'tool-jobs', icon: 'context-notice' as const, context: true as const,
+    summary: 'job finished',
+    contextPresentation: { form: 'notice' as const, sourceKind: 'tool-jobs', senderSessionId: RELAY_SENDER, role: 'inject' as const },
+  }
+  const noticeRows = new NoticeContextRow({
+    message: toolJobsNotice, expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji', senderDisplayName: '可复用性审核员',
+  }).render(80)
+  assert.match(noticeRows[0]!, /tool-jobs/, 'a non-settled Notice keeps its producer label')
+  assert.ok(!noticeRows[0]!.includes('Subagent settled'))
+
+  const foreignRelay = {
+    ...relayIdentityRow(),
+    contextPresentation: { form: 'relay' as const, sourceKind: 'foreign-producer', senderSessionId: RELAY_SENDER, role: 'inject' as const },
+  }
+  const relayRows = new RelayContextRow({
+    message: foreignRelay, expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+    senderDisplayName: '可复用性审核员', geometry: { thresholdRows: 10, headRows: 4, tailRows: 3 },
+  }).render(100)
+  assert.match(relayRows[0]!, new RegExp(`Agent message · ${RELAY_SENDER}`), 'a foreign relay keeps the raw sender it always showed')
+})
+
+test('an Agent row without a sender id keeps its original title', () => {
+  const noSender = {
+    kind: 'system' as const, turn: 0, text: 'body', label: 'subagent-settled', icon: 'context-notice' as const, context: true as const,
+    summary: 'summary',
+    contextPresentation: { form: 'notice' as const, sourceKind: 'subagent-settled', role: 'inject' as const },
+  }
+  const settled = new NoticeContextRow({
+    message: noSender, expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+  }).render(80)
+  assert.match(settled[0]!, /subagent-settled/)
+  const relay = {
+    kind: 'system' as const, turn: 0, text: 'body', label: 'agent-message', icon: 'context-generic' as const, context: true as const,
+    contextPresentation: { form: 'relay' as const, sourceKind: 'agent-message', role: 'inject' as const },
+  }
+  const rows = new RelayContextRow({
+    message: relay, expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+    geometry: { thresholdRows: 10, headRows: 4, tailRows: 3 },
+  }).render(80)
+  assert.match(rows[0]!, /Agent message/)
+  assert.ok(!rows[0]!.includes('ignored'), 'no name is attached when the sender identity is absent')
+})
+
+test('a multibyte sender name never breaks the header width contract', () => {
+  for (const width of [1, 2, 3, 8, 20]) {
+    const relay = new RelayContextRow({
+      message: relayIdentityRow('body'), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+      senderDisplayName: '可复用性审核员与通讯降噪验证', geometry: { thresholdRows: 1, headRows: 1, tailRows: 1 },
+    }).render(width)
+    for (const row of relay) assert.ok(visibleWidth(row) <= width, `relay width ${width} overflowed: ${JSON.stringify(visible(row))}`)
+    const notice = new NoticeContextRow({
+      message: settledIdentityRow(), expanded: false, expandHint: 'ctrl+o', iconStyle: 'emoji',
+      senderDisplayName: '可复用性审核员与通讯降噪验证',
+    }).render(width)
+    for (const row of notice) assert.ok(visibleWidth(row) <= width, `notice width ${width} overflowed: ${JSON.stringify(visible(row))}`)
+  }
+})

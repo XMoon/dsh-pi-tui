@@ -153,6 +153,7 @@ import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
 import { parseTerminalProgressMode, type TerminalProgressOutcome } from '../../domain/terminal-progress/settings.ts'
 import { createTerminalProgressInterval, type IntervalProgress } from '../../domain/terminal-progress/interval.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
+import type { SessionReader } from '../../runtime/session-reader-port.ts'
 // TS3 §31-§36: the surface's independent application-level owners. Each is
 // constructed exactly once here; none of them imports this aggregate's value
 // implementation (only its cross-owner facade types).
@@ -172,6 +173,11 @@ import {
   type TaskSurfaceRead,
   type TaskSurfaceSource,
 } from './task-runtime.ts'
+import {
+  createAgentContextIdentity,
+  type AgentContextIdentity,
+  type AgentContextIdentitySubject,
+} from './agent-context-identity.ts'
 import {
   createEventRouting,
   type MainProgressAuthority,
@@ -540,6 +546,14 @@ export interface SurfaceMountDeps {
   readonly imageFallbackColor: (text: string) => string
 }
 
+/** The composition's existing semantic Session read for the Agent Context
+ * identity enrichment (official titles + projection-batch lookups). The
+ * surface consumes this EXISTING port; no new Host/Direct coupling and no
+ * second read authority is introduced. */
+export interface AgentContextIdentitySource {
+  readonly sessionReader: SessionReader
+}
+
 /** The creation options: the early surface state + the Client-local sinks. */
 export interface SurfaceRuntimeOptions {
   /** The TUI package version rendered in the initial status snapshot. */
@@ -833,6 +847,15 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * and the selected-Job observation lifetime.
    */
   attachTasks(source: TaskSurfaceSource, deps: TaskSurfaceDeps): void
+  /**
+   * Acquire the Agent Context identity enrichment: the ONE short-lived owner
+   * of the CURRENT display subject's readable relay/settled sender names. It
+   * reads the existing `SessionReader` port and the Task Center's GLOBAL
+   * descendant rows; it never fetches during a paint, never polls and never
+   * writes a Session. A headless composition without a diagnostics channel
+   * attaches nothing (the cards keep their short-id fallback).
+   */
+  attachAgentContextIdentity(source: AgentContextIdentitySource): void
   /** The dock/roster feed (the original `refreshTasks`). */
   refreshTasks(): void
   /** A CATALOG refresh of the subagent half (re-lists descendants). */
@@ -1383,6 +1406,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     interval.turnEnd(turn, reasonKind)
   }
 
+  /**
+   * The Agent Context identity enrichment of the CURRENT display subject
+   * (`agent-context-identity.ts`). Created by
+   * {@link SurfaceRuntime.attachAgentContextIdentity}; it holds the only
+   * pending title batch and drops it on a subject switch or teardown.
+   */
+  let agentContextIdentity: AgentContextIdentity | undefined
+
   // The Task Center / Job viewer owner (TS3 §34) holds the ONE
   // `TaskBrowserRuntime`, the browser/viewer state and the catalog refresh gate.
   // Question attention crosses as an injected read/subscription only (the
@@ -1404,6 +1435,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // this is a plain forward reference in the same closure, never a second
     // writer: the surface stays the ONE `StatusStore.activity` publisher.
     publishActivity: facts => commitActivityFacts(facts),
+    // The GLOBAL descendant catalog rows moved: re-resolve the CURRENT
+    // Agent Context names from those exact rows (never a second roster).
+    onCatalogCommitted: () => agentContextIdentity?.catalogChanged(),
     attention: {
       rows: () => interaction.attentionRows(),
       reconcile: () => interaction.controller()?.reconcile(),
@@ -1771,6 +1805,18 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     const visualRows = target === undefined
       ? []
       : applyVisualPresentations(target, projection.messages, activities)
+    // The Agent Context identity of THIS captured subject (PiTui only):
+    // resolve the frame's proven sender names synchronously BEFORE the commit,
+    // so the very first painted relay/settled card already uses them, while a
+    // later title/label landing rebuilds only the affected cards.
+    if (agentContextIdentity !== undefined && app !== undefined) {
+      const viewedChildId = routing().viewedChildId()
+      agentContextIdentity.observe(projection.messages, {
+        subjectKind: viewedChildId === undefined ? 'main' : 'viewed-child',
+        subjectId: viewedChildId ?? routing().currentSessionId(),
+        sourceIdentity: projectionTokenFor(folder),
+      })
+    }
     displaySeam().setTranscript(projection.messages, activities, {
       ...controller.state(),
       firstTurn: projection.firstTurn,
@@ -2545,6 +2591,37 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     attachTasks(source, deps) {
       task.attachTasks(source, deps)
     },
+    attachAgentContextIdentity(source) {
+      if (agentContextIdentity !== undefined) {
+        throw new Error('the agent context identity enrichment is already attached')
+      }
+      // A headless composition without a diagnostics channel has no
+      // never-swallow sink for an unclassified read failure; the cards keep
+      // their truthfully short-id fallback instead of hiding an error.
+      if (options.diag === undefined) return
+      agentContextIdentity = createAgentContextIdentity({
+        reader: source.sessionReader,
+        catalogChildLabel: (childId) => {
+          for (const row of task.globalRows()) {
+            if (row.kind === 'subagent' && row.childId === childId) return row.label
+          }
+          return undefined
+        },
+        publish: (labels) => {
+          if (app !== undefined) app.setContextSenderLabels(labels)
+        },
+        isCurrentSubject: (captured: AgentContextIdentitySubject) => {
+          const viewedChildId = routing().viewedChildId()
+          const folder = viewedChildId === undefined ? routing().mainFolder() : routing().viewedChildFolder()
+          return captured.subjectKind === (viewedChildId === undefined ? 'main' : 'viewed-child')
+            && captured.subjectId === (viewedChildId ?? routing().currentSessionId())
+            && captured.sourceIdentity === projectionTokenFor(folder)
+        },
+        diag: options.diag,
+        sessionId: () => routing().currentSessionId(),
+        isCleanedUp: () => isCleanedUp(),
+      })
+    },
     refreshTasks() {
       task.refreshTasks()
     },
@@ -2809,6 +2886,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // surface detach. The process slot is NOT released here — TuiApp remains
       // its sole owner.
       runSyncDisposalSteps('surface runtime disposal', [
+        // Cancel the identity enrichment's pending title batch BEFORE the
+        // mounted app dies: a late batch must never publish into a dying
+        // renderer or relabel another subject.
+        () => agentContextIdentity?.dispose(),
         // Retire the running truth BEFORE the mounted app dies, WITHOUT
         // fabricating a settlement: the proven outcome survives, so the app's
         // final disposal can retain a `done`/`error` OSC 7501 record while a
