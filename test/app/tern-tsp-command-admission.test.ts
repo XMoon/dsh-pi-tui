@@ -261,12 +261,21 @@ test('a confirmed title write publishes its own notice only on the card-less TSP
   assert.equal(titleSuccessNoticeVisible({ pituiPresentation: true, backendKind: 'direct' }), false)
 })
 
-test('the card-less result-notice scope covers admitted builtins, the Browser family and /logout', () => {
+test('the card-less result-notice scope covers admitted builtins, the Browser family, /logout and the manual reload', () => {
   // The scope is derived from the ONE admission set (not a second routing list);
   // the conditionally admitted Browser family is included because it has no
   // command card on the card-less transport.
+  // M4 PR4: `/reload-client` is NOT TSP-admitted (its native process reload
+  // stays unsupported there), but on the card-less PiTui split Client the
+  // Remote Client command registry appends no result card, so its fixed
+  // refusals need THIS one visible owner. Membership is notice ownership only.
   assert.deepEqual([...TSP_B2A_RESULT_NOTICE_COMMANDS].sort(),
-    [...TSP_SUPPORTED_TUI_BUILTINS, 'sessions', 'resume', 'search', 'logout'].sort())
+    [...TSP_SUPPORTED_TUI_BUILTINS, 'sessions', 'resume', 'search', 'logout', 'reload-client'].sort())
+  assert.ok(!TSP_SUPPORTED_TUI_BUILTINS.has('reload-client'),
+    'the TSP renderer gains no native reload command')
+  assert.deepEqual(tspBuiltinAvailability(classify({ tuiCommand: true }), 'reload-client', {}, ''),
+    { kind: 'unsupported' },
+    'the TSP renderer keeps its existing post-classification reload refusal')
   for (const name of ['new', 'fork', 'title', 'rename', 'copy', 'yolo', 'sessions', 'resume', 'search', 'logout']) {
     assert.ok(TSP_B2A_RESULT_NOTICE_COMMANDS.has(name), `/${name} needs an owner on the card-less route`)
   }
