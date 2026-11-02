@@ -378,3 +378,48 @@ test('a handoff restore succeeds only from a current official Session history op
     await assert.rejects(pending, /aborted/u)
   }
 })
+
+test('a settled handoff proof is re-verified immediately before the success claim', async () => {
+  // A Connection rollover after the proof settles but before the claim is a
+  // refusal: the new generation has not proven the Session history itself.
+  {
+    const probe = new HandoffProbe('s-1')
+    const proof = await observeHandoffOpen(probe.sources, 's-1')
+    assert.equal(proof.generationId, 1)
+    assert.equal(proof.sessionId, 's-1')
+    proof.verify()
+    probe.generationId = 2
+    assert.throws(() => proof.verify(), /generation changed after the handoff restore proof/u)
+  }
+  // The same generation must still have the exact Session history open and
+  // the same official owner/binding.
+  {
+    const probe = new HandoffProbe('s-1')
+    const proof = await observeHandoffOpen(probe.sources, 's-1')
+    probe.openState = 'cold'
+    assert.throws(() => proof.verify(), /history is no longer open/u)
+    probe.openState = 'open'
+    probe.owned = undefined
+    assert.throws(() => proof.verify(), /no longer owns the restored Session/u)
+    probe.owned = 's-1'
+    probe.bindingObject = undefined
+    assert.throws(() => proof.verify(), /binding is no longer available/u)
+  }
+  // Sessionless: a Session that appears after the proof is a refusal.
+  {
+    const probe = new HandoffProbe()
+    const proof = await observeHandoffOpen(probe.sources)
+    assert.equal(proof.sessionId, undefined)
+    probe.listed = ['s-1']
+    probe.owned = 's-1'
+    probe.mountBinding()
+    assert.throws(() => proof.verify(), /Session opened after the sessionless handoff restore proof/u)
+  }
+  // A surface that retires after the proof is a refusal.
+  {
+    const probe = new HandoffProbe('s-1')
+    const proof = await observeHandoffOpen(probe.sources, 's-1')
+    probe.mounted = false
+    assert.throws(() => proof.verify(), /surface is no longer mounted/u)
+  }
+})

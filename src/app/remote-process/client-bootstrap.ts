@@ -229,7 +229,7 @@ export interface LocalClientHandle {
    * transport. It creates no Session, retains no reference and never becomes a
    * second Session truth source. Bounded; used once before `handoff-restored`.
    */
-  awaitHandoffOpen(sessionId?: string, signal?: AbortSignal): Promise<void>
+  awaitHandoffOpen(sessionId?: string, signal?: AbortSignal): Promise<HandoffRestoreProof>
   /**
    * Dispose the Client composition, then the official Client transport, then
    * the Client root. The caller still owns the process seat.
@@ -419,6 +419,51 @@ export interface HandoffOpenSources<Id> {
 }
 
 /**
+ * The exact generation and Session identity ONE handoff proof settled on.
+ * `verify()` is the synchronous final currentness fence: it re-reads the SAME
+ * live sources and refuses a rollover, a changed Session owner, a no-longer
+ * open history, a sessionless proof that has since gained a Session, or a
+ * retired physical surface. It holds no reference and no long-lived state.
+ */
+export interface HandoffRestoreProof {
+  readonly generationId: number
+  readonly sessionId?: string
+  verify(): void
+}
+
+/** Re-validate ONE settled handoff proof synchronously, before claiming success. */
+function verifyHandoffRestoreProof<Id>(
+  sources: HandoffOpenSources<Id>,
+  generationId: number,
+  sessionId: string | undefined,
+): void {
+  const current = sources.transport.status()
+  if (current.transport !== 'connected' || current.generationId !== generationId) {
+    throw new Error('local client entry: the official transport generation changed after the handoff restore proof')
+  }
+  if (sources.surfaceMounted() !== true) {
+    throw new Error('local client entry: the handoff Client surface is no longer mounted')
+  }
+  const open = mainViewSessionId(sources.sessions)
+  if (sessionId === undefined) {
+    if (open !== undefined) {
+      throw new Error('local client entry: a Session opened after the sessionless handoff restore proof')
+    }
+    return
+  }
+  if (open !== sessionId) {
+    throw new Error('local client entry: the handoff Client no longer owns the restored Session')
+  }
+  const binding = bindingOfListedSession(sources.sessions, sessionId)
+  if (binding === undefined) {
+    throw new Error('local client entry: the restored Session binding is no longer available')
+  }
+  if (binding.session.getSnapshot().openState !== 'open') {
+    throw new Error('local client entry: the official Session history is no longer open')
+  }
+}
+
+/**
  * One-shot Client-handoff restore proof over the LIVE official sources.
  *
  * A Session-bearing handoff succeeds only when the current official
@@ -427,19 +472,21 @@ export interface HandoffOpenSources<Id> {
  * closed. A sessionless handoff succeeds only with a mounted sessionless
  * surface on the connected transport and NEVER creates a Session. The initial
  * transport generation is captured first: a rollover invalidates the proof.
- * The observation is bounded and holds no reference and no long-lived state.
+ * The observation is bounded and holds no reference and no long-lived state;
+ * the returned proof must be verified synchronously immediately before the
+ * final `handoff-restored` claim.
  */
 export async function observeHandoffOpen<Id>(
   sources: HandoffOpenSources<Id>,
   sessionId?: string,
   signal?: AbortSignal,
-): Promise<void> {
+): Promise<HandoffRestoreProof> {
   const initial = sources.transport.status()
   if (initial.transport !== 'connected' || initial.generationId === undefined) {
     throw new Error('local client entry: the handoff Client has no connected official transport generation')
   }
   const capturedGeneration = initial.generationId
-  await new Promise<void>((resolve, reject) => {
+  return await new Promise<HandoffRestoreProof>((resolve, reject) => {
     const unsubscribers: Array<() => void> = []
     let settled = false
     let retainSubscribed = false
@@ -454,34 +501,43 @@ export async function observeHandoffOpen<Id>(
       for (const unsubscribe of unsubscribers.splice(0)) unsubscribe()
       signal?.removeEventListener('abort', onAbort)
     }
-    const settle = (error?: Error): void => {
+    const succeed = (): void => {
       if (settled) return
       settled = true
       cleanup()
-      if (error === undefined) resolve()
-      else reject(error)
+      resolve({
+        generationId: capturedGeneration,
+        ...(sessionId === undefined ? {} : { sessionId }),
+        verify: () => { verifyHandoffRestoreProof(sources, capturedGeneration, sessionId) },
+      })
+    }
+    const fail = (error: Error): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
     }
     function onAbort(): void {
-      settle(new Error('local client entry: the handoff restore observation was aborted'))
+      fail(new Error('local client entry: the handoff restore observation was aborted'))
     }
     const evaluate = (): void => {
       if (settled) return
       const current = sources.transport.status()
       if (current.transport !== 'connected' || current.generationId !== capturedGeneration) {
-        settle(new Error('local client entry: the official transport generation changed during the handoff restore'))
+        fail(new Error('local client entry: the official transport generation changed during the handoff restore'))
         return
       }
       if (sources.surfaceMounted() !== true) {
-        settle(new Error('local client entry: the handoff Client surface is not mounted'))
+        fail(new Error('local client entry: the handoff Client surface is not mounted'))
         return
       }
       const open = mainViewSessionId(sources.sessions)
       if (sessionId === undefined) {
         if (open !== undefined) {
-          settle(new Error('local client entry: a sessionless Client handoff opened a new Session'))
+          fail(new Error('local client entry: a sessionless Client handoff opened a new Session'))
           return
         }
-        settle()
+        succeed()
         return
       }
       if (!retainSubscribed) {
@@ -494,7 +550,7 @@ export async function observeHandoffOpen<Id>(
       }
       if (open === undefined) return
       if (open !== sessionId) {
-        settle(new Error('local client entry: the handoff Client opened a different Session'))
+        fail(new Error('local client entry: the handoff Client opened a different Session'))
         return
       }
       const binding = bindingOfListedSession(sources.sessions, sessionId)
@@ -503,7 +559,7 @@ export async function observeHandoffOpen<Id>(
         observedBinding = binding
         sessionUnsubscribe = binding.session.subscribe(evaluate)
       } else if (!Object.is(observedBinding, binding)) {
-        settle(new Error('local client entry: the handoff Session ownership changed during the restore'))
+        fail(new Error('local client entry: the handoff Session ownership changed during the restore'))
         return
       }
       const snapshot = binding.session.getSnapshot()
@@ -512,14 +568,14 @@ export async function observeHandoffOpen<Id>(
         // restore: refuse rather than reporting a stale binding.
         if (mainViewSessionId(sources.sessions) !== sessionId
           || !Object.is(bindingOfListedSession(sources.sessions, sessionId), observedBinding)) {
-          settle(new Error('local client entry: the handoff Session ownership changed during the restore'))
+          fail(new Error('local client entry: the handoff Session ownership changed during the restore'))
           return
         }
-        settle()
+        succeed()
         return
       }
       if (snapshot.openState === 'error') {
-        settle(new Error('local client entry: the official Session history open failed'))
+        fail(new Error('local client entry: the official Session history open failed'))
       }
     }
     // Attach every live source before the first evaluation so no transition
@@ -532,7 +588,7 @@ export async function observeHandoffOpen<Id>(
     }
     signal?.addEventListener('abort', onAbort, { once: true })
     deadline = setTimeout(() => {
-      settle(new Error(`local client entry: the handoff Session open did not settle within ${String(HANDOFF_OPEN_TIMEOUT_MS / 1000)}s`))
+      fail(new Error(`local client entry: the handoff Session open did not settle within ${String(HANDOFF_OPEN_TIMEOUT_MS / 1000)}s`))
     }, HANDOFF_OPEN_TIMEOUT_MS)
     evaluate()
   })
@@ -881,9 +937,9 @@ async function startSurfaceLocalClient(
     get status(): LocalClientStatus {
       return status()
     },
-    async awaitHandoffOpen(sessionId?: string, abort?: AbortSignal): Promise<void> {
+    async awaitHandoffOpen(sessionId?: string, abort?: AbortSignal): Promise<HandoffRestoreProof> {
       if (disposed) throw new Error('local client entry: the surface revision owner is already disposed')
-      await observeHandoffOpen({
+      return await observeHandoffOpen({
         sessions: domains.sessions,
         transport,
         surfaceMounted: () => status().surfaceMounted === true,
@@ -1049,7 +1105,7 @@ export async function startLocalClient(
     async replaceSurfaceForQualification(): Promise<void> {
       throw new Error('local client entry: surface replacement requires the internal surface mode')
     },
-    async awaitHandoffOpen(): Promise<void> {
+    async awaitHandoffOpen(): Promise<HandoffRestoreProof> {
       throw new Error('local client entry: the handoff restore proof requires the internal surface mode')
     },
     async dispose(): Promise<void> {
