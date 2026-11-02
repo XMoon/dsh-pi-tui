@@ -1201,3 +1201,124 @@ test('a message target crossing a non-text block keeps its search anchor', async
     'a legitimate message hit crossing a non-text block must keep its anchor; only hidden-marker-only hits are suppressed')
   app.stop()
 })
+
+
+// --- A folded same-turn Agent relay is searchable through its Work owner -----
+
+function relayEvent(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
+  return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+}
+
+/** A real Compact transcript: Process -> qualified same-turn Agent relay ->
+ * Process, so the relay is a Work member (never a standalone row). */
+function foldedRelayFolder(): { folder: TranscriptFolder; relay: TranscriptMessage } {
+  const relayMessage = {
+    id: MessageId('search-folded-relay'), role: 'user',
+    content: [{ type: 'text', text: 'FOLDED_RELAY_PAYLOAD with the needle inside' }],
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-search-child' },
+  }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    relayEvent('turn/start', { turn: 0 }, 0),
+    relayEvent('tool/call', { turn: 0, step: 0, callId: ToolCallId('search-relay-c1'), name: 'read', arguments: '{}' }, 1),
+    relayEvent('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('search-relay-r1'), role: 'tool', toolCallId: ToolCallId('search-relay-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('search-relay-c1') },
+      },
+    }, 2),
+    relayEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [relayMessage] }, 3),
+    relayEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    relayEvent('user/message', relayMessage, 5),
+    relayEvent('tool/call', { turn: 0, step: 1, callId: ToolCallId('search-relay-c2'), name: 'bash', arguments: '{}' }, 6),
+    relayEvent('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('search-relay-r2'), role: 'tool', toolCallId: ToolCallId('search-relay-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('search-relay-c2') },
+      },
+    }, 7),
+    relayEvent('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('search-relay-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 8),
+    relayEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
+  ])
+  const relay = folder.messages().find(message => message.kind === 'system' && message.text.includes('FOLDED_RELAY_PAYLOAD'))
+  assert.ok(relay !== undefined && relay.kind === 'system')
+  assert.equal(relay.contextPresentation?.sameTurnNextStep, true, 'fixture: the relay is a proven Work member')
+  return { folder, relay }
+}
+
+function startCompactApp(): { vt: VirtualTerminal; app: TuiApp } {
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'compact' },
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  return { vt, app }
+}
+
+test('search reveals a folded same-turn Agent relay through its Work owner and dismissal restores the fold', async () => {
+  const { folder, relay } = foldedRelayFolder()
+  const { vt, app } = startCompactApp()
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  assert.ok(!view().includes('FOLDED_RELAY_PAYLOAD'),
+    `precondition: the Work folds the relay while collapsed:\n${view()}`)
+
+  app.setTranscriptSearchTarget({
+    query: 'FOLDED_RELAY_PAYLOAD',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: relay,
+  })
+  assert.equal(app.transcriptSearchPresentationForTest()?.revealGranted, true,
+    'the folded relay resolves a Work reveal')
+  app.scrollToSearchTarget()
+  await vt.waitForRender()
+  assert.ok(view().includes('FOLDED_RELAY_PAYLOAD'),
+    `the reveal opens the owning Work and locates the relay body:\n${view()}`)
+
+  app.finishTranscriptSearchPresentation(new Set())
+  await vt.waitForRender()
+  assert.ok(!view().includes('FOLDED_RELAY_PAYLOAD'),
+    `dismissal restores the folded Work instead of permanently expanding the turn:\n${view()}`)
+  assert.ok(view().includes('Activity') || view().includes('Thought'),
+    'the Work/Activity header remains the collapsed presentation')
+  app.stop()
+})
+
+test('search reveals a relay folded inside a Focus Thought and dismissal restores the collapsed Thought', async () => {
+  const { folder, relay } = foldedRelayFolder()
+  const vt = new VirtualTerminal(120, 40)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
+    displayState: { preset: 'focus' },
+    deliveredFiles: deliveredFilesCapabilityStub,
+  })
+  app.start()
+  startedApps.add(app)
+  const view = (): string => vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+  app.setTranscript(folder.messages(), folder.turnActivities())
+  await vt.waitForRender()
+  assert.ok(!view().includes('FOLDED_RELAY_PAYLOAD'), `precondition: the Thought hides the relay:\n${view()}`)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0)
+
+  app.setTranscriptSearchTarget({
+    query: 'FOLDED_RELAY_PAYLOAD',
+    match: { id: 0, turn: 0, occurrence: 0, source: { kind: 'message' }, sourceOccurrence: 0 },
+    message: relay,
+  })
+  app.scrollToSearchTarget()
+  await vt.waitForRender()
+  assert.ok(view().includes('FOLDED_RELAY_PAYLOAD'), `the reveal opens the Thought and locates the relay:\n${view()}`)
+
+  app.finishTranscriptSearchPresentation(new Set())
+  await vt.waitForRender()
+  assert.ok(!view().includes('FOLDED_RELAY_PAYLOAD'), `dismissal restores the collapsed Thought:\n${view()}`)
+  assert.equal(app.focusExpandedTurnsForTest().size, 0, 'no permanent manual Thought expansion is left behind')
+  app.stop()
+})

@@ -20,7 +20,7 @@ import {
 } from '../../src/tui/transcript/context-structure.ts'
 import { contextPresentation, isTranscriptContextForm } from '../../src/domain/transcript/context-semantics.ts'
 import { projectCompact } from '../../src/tui/transcript/compact-projection.ts'
-import { clusterByMemberOf, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
+import { clusterByMemberOf, isWorkingAgentRelay, isWorkingToolJobsNotice, projectTranscriptStructure } from '../../src/tui/transcript/structure.ts'
 import { formatWorkHeaderLine, compactWorkBody, CompactWorkComponent } from '../../src/tui/components/transcript/compact-work.ts'
 import { summarizeWorkSpan } from '../../src/tui/transcript/work-summary.ts'
 import { compactActionPresentation } from '../../src/tui/components/transcript/compact-process-preview.ts'
@@ -929,4 +929,260 @@ test('a Working tool-jobs notice never bridges attention or interaction boundari
     ['work', 'message', 'work'],
     'a settled interaction stays a boundary after a qualified notice',
   )
+})
+
+
+// --- Working same-turn Agent relay follows Work (Context disclosure PR-B) ---
+
+/** One durable Working Agent relay delivery: next-step insert → same-turn
+ * claim → the folded `user/message` (the id is preserved through the chain). */
+function workingAgentRelayEvents(id: string, text: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-child-relay' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven same-turn Agent relay is carried by the same Work on the real fold', () => {
+  const events: SessionEvent[] = [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'relay-a', 1),
+    toolResultEvent(0, 'relay-a', 2),
+    ...workingAgentRelayEvents('working-relay', 'RELAY_BODY', 1003, 3),
+    toolCallEvent(0, 'relay-b', 6),
+    toolResultEvent(0, 'relay-b', 7),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('relay-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1008, 8),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1009, 9),
+  ]
+  const folder = new TranscriptFolder()
+  apply(folder, events)
+  const messages = folder.messages()
+  const relay = messages.find(message => message.kind === 'system' && message.contextPresentation?.form === 'relay')
+  assert.ok(relay !== undefined && relay.kind === 'system')
+  assert.equal(relay.contextPresentation?.sourceKind, 'agent-message')
+  assert.equal(relay.contextPresentation?.sameTurnNextStep, true,
+    'the fold records the durable same-turn next-step provenance')
+  assert.equal(isWorkingAgentRelay(relay), true)
+  const structure = projectTranscriptStructure(messages)
+  assert.deepEqual(structure.map(block => block.kind), ['work', 'message'])
+  const span = onlySpan(structure)
+  assert.deepEqual(span.members, [messages[0], relay, messages[2]],
+    'Process A -> qualified relay -> Process B is ONE Work in raw order')
+  const summary = summarizeWorkSpan(span)
+  assert.equal(summary.actionStats.total, 2, 'the relay adds no Action')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['work', 'assistant'],
+    'collapsed Compact hides the carried relay under the Work header')
+  const expanded = projectCompact(messages, {
+    expandedWorkOwners: new Set([span.owner]), expandedClusters: new Set(), forcedExpanded: new Set(),
+  })
+  assert.deepEqual(kindsOf(expanded), ['work', 'tool', 'system', 'tool', 'assistant'],
+    'expanding the Work restores every raw member exactly once')
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === relay).length, 1)
+  // Cold replay folds the SAME durable log to the same provenance.
+  const cold = new TranscriptFolder()
+  cold.hydrate(events)
+  const coldRelay = cold.messages().find(message => message.kind === 'system')
+  assert.ok(coldRelay !== undefined && coldRelay.kind === 'system')
+  assert.equal(coldRelay.contextPresentation?.sameTurnNextStep, true, 'rehydrate keeps the claim provenance')
+  assert.deepEqual(projectTranscriptStructure(cold.messages()).map(block => block.kind), ['work', 'message'])
+})
+
+test('a same-turn relay without a real Process fails open (no invented Activity)', () => {
+  const folder = new TranscriptFolder()
+  apply(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    ...workingAgentRelayEvents('relay-no-process', 'NO_PROCESS_RELAY', 1001, 1),
+    eventAt('assistant/message', {
+      turn: 0, step: 0,
+      message: { id: MessageId('no-process-final'), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1005, 4),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1006, 5),
+  ])
+  const messages = folder.messages()
+  const relay = messages.find(message => message.kind === 'system')
+  assert.ok(relay !== undefined && relay.kind === 'system')
+  assert.equal(relay.contextPresentation?.sameTurnNextStep, true)
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message', 'message'],
+    'Context + Conversation without Process stays a flat sequence')
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['system', 'assistant'],
+    'fail-open: the relay card is visible and no empty Work is minted')
+})
+
+test('a cross-turn, missing or cancelled next-step claim never qualifies a relay', () => {
+  // Cross-turn claim: inserted during turn 1, claimed in turn 2.
+  const crossMessage = {
+    id: MessageId('cross-relay'), role: 'user',
+    content: [{ type: 'text', text: 'CROSS_RELAY' }],
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-cross' },
+  }
+  const cross = new TranscriptFolder()
+  apply(cross, [
+    eventAt('turn/start', { turn: 1 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [crossMessage] }, 1001, 1),
+    eventAt('turn/end', { turn: 1, reason: { kind: 'completed' } }, 1002, 2),
+    eventAt('turn/start', { turn: 2 }, 2000, 3),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 2001, 4),
+    eventAt('user/message', crossMessage, 2002, 5),
+    toolCallEvent(2, 'cross-relay-a', 6),
+    toolResultEvent(2, 'cross-relay-a', 7),
+  ])
+  const crossRelay = cross.messages().find(message => message.kind === 'system')
+  assert.ok(crossRelay !== undefined && crossRelay.kind === 'system')
+  assert.equal(crossRelay.contextPresentation?.sameTurnNextStep, undefined)
+
+  // Missing splice: a plain relay-shaped producer message.
+  const missing = new TranscriptFolder()
+  apply(missing, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'missing-a', 1),
+    toolResultEvent(0, 'missing-a', 2),
+    eventAt('user/message', {
+      id: MessageId('missing-relay'), role: 'user',
+      content: [{ type: 'text', text: 'MISSING_RELAY' }],
+      source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-missing' },
+    }, 1003, 3),
+    toolCallEvent(0, 'missing-b', 4),
+    toolResultEvent(0, 'missing-b', 5),
+  ])
+  const missingRelay = missing.messages().find(message => message.kind === 'system')
+  assert.ok(missingRelay !== undefined && missingRelay.kind === 'system')
+  assert.equal(missingRelay.contextPresentation?.sameTurnNextStep, undefined)
+  assert.deepEqual(projectTranscriptStructure(missing.messages()).map(block => block.kind),
+    ['work', 'message', 'work'], 'an unqualified relay still splits the Work')
+
+  // Cancelled replacement: the removed identity is never claimed.
+  const cancelledMessage = {
+    id: MessageId('cancelled-relay'), role: 'user',
+    content: [{ type: 'text', text: 'CANCELLED_RELAY' }],
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-cancelled' },
+  }
+  const cancelled = new TranscriptFolder()
+  apply(cancelled, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [cancelledMessage] }, 1001, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' }, 1002, 2),
+    eventAt('user/message', cancelledMessage, 1003, 3),
+    toolCallEvent(0, 'cancelled-a', 4),
+    toolResultEvent(0, 'cancelled-a', 5),
+  ])
+  const cancelledRelay = cancelled.messages().find(message => message.kind === 'system')
+  assert.ok(cancelledRelay !== undefined && cancelledRelay.kind === 'system')
+  assert.equal(cancelledRelay.contextPresentation?.sameTurnNextStep, undefined,
+    'a cancelled replacement is not a delivery')
+})
+
+test('a next-step claim never qualifies a crossed or foreign source pair', () => {
+  const cases: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+    ['agent-message with notice form', { kind: 'agent-message', form: 'notice', senderSessionId: 'session-x' }],
+    ['subagent-settled notice', { kind: 'subagent-settled', form: 'notice', summary: 'settled', senderSessionId: 'session-x' }],
+    ['plugin relay form', { kind: 'plugin', form: 'relay', plugin: 'foreign' }],
+    ['recall form', { kind: 'session-reference', form: 'recall', references: [{ label: 'prior' }] }],
+  ]
+  for (const [label, source] of cases) {
+    const message = { id: MessageId(`claimed-${label}`), role: 'user', content: [{ type: 'text', text: label }], source }
+    const folder = new TranscriptFolder()
+    apply(folder, [
+      eventAt('turn/start', { turn: 0 }, 1000, 0),
+      toolCallEvent(0, `foreign-${label}-a`, 1),
+      toolResultEvent(0, `foreign-${label}-a`, 2),
+      eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 1003, 3),
+      eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1003.1, 4),
+      eventAt('user/message', message, 1003.2, 5),
+      toolCallEvent(0, `foreign-${label}-b`, 6),
+      toolResultEvent(0, `foreign-${label}-b`, 7),
+    ])
+    const row = folder.messages().find(candidate => candidate.kind === 'system')
+    assert.ok(row !== undefined && row.kind === 'system', label)
+    assert.equal(row.contextPresentation?.sameTurnNextStep, undefined,
+      `${label}: only the exact Working pairs qualify`)
+    assert.equal(isWorkingAgentRelay(row), false, label)
+    assert.deepEqual(projectTranscriptStructure(folder.messages()).map(block => block.kind),
+      ['work', 'message', 'work'], `${label}: the row stays an independent boundary`)
+  }
+})
+
+test('a proven relay never bridges a hard boundary or a second Work', () => {
+  const relayRow: TranscriptMessage = {
+    kind: 'system', turn: 0, text: 'BRIDGE_RELAY', label: 'agent-message', context: true,
+    contextPresentation: { form: 'relay', sourceKind: 'agent-message', senderSessionId: 'session-bridge', role: 'inject', sameTurnNextStep: true },
+  }
+  const question: TranscriptMessage = {
+    kind: 'tool', turn: 0, name: 'ask_user_question', args: '{}', result: 'ok', status: 'ok',
+  }
+  const otherNotice = contextRow(0, 'notice', 'other')
+  assert.deepEqual(
+    projectTranscriptStructure([thinking(0), tool(0), relayRow, question, tool(0)]).map(block => block.kind),
+    ['work', 'message', 'work'],
+    'a settled interaction stays a boundary after a qualified relay',
+  )
+  assert.deepEqual(
+    projectTranscriptStructure([thinking(0), tool(0), relayRow, otherNotice, tool(0)]).map(block => block.kind),
+    ['work', 'message', 'work'],
+    'an unqualified Context row still splits the Work',
+  )
+  assert.deepEqual(
+    projectTranscriptStructure([thinking(0), tool(0), relayRow, user(0, 'steer'), tool(0)]).map(block => block.kind),
+    ['work', 'message', 'work'],
+    'a same-turn steer is never crossed by a carried relay',
+  )
+})
+
+test('both proven delivery pairs share one Work without reordering', () => {
+  const folder = new TranscriptFolder()
+  apply(folder, [
+    eventAt('turn/start', { turn: 0 }, 1000, 0),
+    toolCallEvent(0, 'both-a', 1),
+    toolResultEvent(0, 'both-a', 2),
+    ...workingAgentRelayEvents('both-relay', 'BOTH_RELAY', 1003, 3),
+    ...workingToolJobsNoticeEvents('both-notice', 'BOTH_NOTICE', 1006, 6),
+    toolCallEvent(0, 'both-b', 9),
+    toolResultEvent(0, 'both-b', 10),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1011, 11),
+  ])
+  const messages = folder.messages()
+  const relay = messages.find(message => message.kind === 'system' && message.text.includes('BOTH_RELAY'))
+  const notice = messages.find(message => message.kind === 'system' && message.text.includes('BOTH_NOTICE'))
+  assert.ok(relay !== undefined && notice !== undefined)
+  const span = onlySpan(projectTranscriptStructure(messages))
+  assert.equal(summarizeWorkSpan(span).actionStats.total, 2, 'Context deliveries add no Action')
+  assert.deepEqual(span.members.filter(member => member === relay || member === notice), [relay, notice],
+    'raw delivery order is preserved inside the Work')
+})
+
+test('a next-turn wakeup relay stays independently visible in Compact', () => {
+  const wakeMessage = {
+    id: MessageId('compact-wake-relay'), role: 'user',
+    content: [{ type: 'text', text: 'COMPACT_WAKE_RELAY' }],
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-waker' },
+  }
+  const folder = new TranscriptFolder()
+  apply(folder, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeMessage] }, 900, 0),
+    eventAt('turn/start', { turn: 0 }, 1000, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, 1001, 2),
+    eventAt('user/message', wakeMessage, 1002, 3),
+    toolCallEvent(0, 'wake-relay-a', 4),
+    toolResultEvent(0, 'wake-relay-a', 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('wake-relay-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 1007, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 1008, 7),
+  ])
+  const messages = folder.messages()
+  const wake = messages.find(message => message.kind === 'system')
+  assert.ok(wake !== undefined && wake.kind === 'system')
+  assert.equal(wake.contextPresentation?.sameTurnNextStep, undefined)
+  assert.deepEqual(projectTranscriptStructure(messages).map(block => block.kind), ['message', 'work', 'message'])
+  assert.deepEqual(kindsOf(projectCompact(messages, noOptions)), ['system', 'work', 'assistant'],
+    'the wakeup relay is a standalone visible Context before the Work')
 })

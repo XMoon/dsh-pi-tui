@@ -17,11 +17,12 @@
  *
  * A Work span may CARRY a foldable Context row as a structural part without
  * making it Process: the row keeps its Context semantics, its source bytes and
- * its own disclosure, but no longer splits one turn's Activity/Thought. Two
+ * its own disclosure, but no longer splits one turn's Activity/Thought. Three
  * narrow forms qualify: a `form:'snapshot'` singleton / snapshot-only raw
- * cluster, and a `tool-jobs` Notice with durable same-turn `next-step`
- * delivery evidence. A mixed `instructions`/`catalog`/`snapshot` cluster and
- * every other Notice form stay independent Context boundaries.
+ * cluster, a `tool-jobs` Notice with durable same-turn `next-step` delivery
+ * evidence, and an `agent-message` relay with the same durable same-turn
+ * next-step evidence. A mixed `instructions`/`catalog`/`snapshot` cluster and
+ * every other Notice/relay form stay independent Context boundaries.
  *
  * The projector is a single forward pass plus the linear ambient-clustering
  * pass (O(n)); wrappers are freshly allocated each call, but their
@@ -165,16 +166,41 @@ export function isWorkingToolJobsNotice(
 }
 
 /**
+ * Whether one row is a same-turn delivered Agent relay (`agent-message` +
+ * `relay`) with durable next-step delivery evidence.
+ *
+ * This is the narrow sibling of {@link isWorkingToolJobsNotice}: the
+ * producer-declared `sourceKind === 'agent-message'` AND `form === 'relay'`
+ * are both required, plus the fold's presentation-only `sameTurnNextStep`
+ * flag derived from the durable `agent/inbox/spliced` insert/claim identity
+ * chain. A `next-turn` wakeup, a foreign/legacy log, a crossed source/form
+ * pair or a missing claim carries no flag and therefore stays an independent
+ * Context boundary.
+ */
+export function isWorkingAgentRelay(
+  message: TranscriptMessage,
+): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
+  if (!isSurfacedContext(message)) return false
+  const presentation = message.contextPresentation
+  return presentation !== undefined
+    && presentation.sameTurnNextStep === true
+    && presentation.sourceKind === 'agent-message'
+    && presentation.form === 'relay'
+}
+
+/**
  * The complete narrow display-layer eligibility: may this Context row be
  * carried by the same-turn Work/Thought instead of ending it? Only a foldable
- * Snapshot or a proven Working `tool-jobs` Notice qualifies; every other
- * surfaced Context remains a boundary.
+ * Snapshot, a proven Working `tool-jobs` Notice or a proven same-turn Agent
+ * relay qualifies; every other surfaced Context remains a boundary.
  */
 export function isFoldableWorkContext(
   message: TranscriptMessage,
   clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>,
 ): message is Extract<TranscriptMessage, { kind: 'system' }> & { context: true } {
-  return isFoldableSnapshotContext(message, clusterByMember) || isWorkingToolJobsNotice(message)
+  return isFoldableSnapshotContext(message, clusterByMember)
+    || isWorkingToolJobsNotice(message)
+    || isWorkingAgentRelay(message)
 }
 
 /**
