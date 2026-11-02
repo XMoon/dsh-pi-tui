@@ -584,8 +584,8 @@ test('the reexec request latches one intent and keeps a refused Client running',
   })
   // M4 PR4: BOTH the qualification probe and the public `/reload-client`
   // command reach this ONE handler; the result vocabulary is the command's.
-  const first = handler.request()
-  const duplicate = handler.request()
+  const first = handler.request('qualification')
+  const duplicate = handler.request('qualification')
   assert.deepEqual(first, { kind: 'accepted' })
   assert.deepEqual(duplicate, { kind: 'refused', reason: 'stopping' },
     'a duplicate request reports the ONE stop it already owns')
@@ -603,7 +603,7 @@ test('the reexec request latches one intent and keeps a refused Client running',
     requestStop: () => { throw new Error('must not stop before readiness') },
     emit: record => { notReadyRecords.push(record) },
   })
-  assert.deepEqual(notReady.request(), { kind: 'refused', reason: 'not-ready' })
+  assert.deepEqual(notReady.request('manual'), { kind: 'refused', reason: 'not-ready' })
   assert.equal(notReady.intent, undefined)
   assert.equal(notReadyRecords.filter(record => record.m4r === 'handoff-request-ignored' && record.reason === 'not-ready').length, 1)
 
@@ -624,12 +624,12 @@ test('the reexec request latches one intent and keeps a refused Client running',
     requestStop: () => { retryStops += 1 },
     emit: record => { retryRecords.push(record) },
   })
-  assert.deepEqual(retry.request(), { kind: 'refused', reason: 'target-invalid' },
+  assert.deepEqual(retry.request('manual'), { kind: 'refused', reason: 'target-invalid' },
     'an unclassified preflight failure is a replacement-package refusal')
   assert.equal(retry.intent, undefined)
   assert.equal(retryStops, 0, 'a rejected preflight stopped the live Client')
   assert.equal(retryRecords.filter(record => record.m4r === 'handoff-request-rejected').length, 1)
-  assert.deepEqual(retry.request(), { kind: 'accepted' })
+  assert.deepEqual(retry.request('manual'), { kind: 'accepted' })
   assert.equal(retry.intent, fixture.intent)
   assert.equal(retryStops, 1)
 
@@ -640,7 +640,7 @@ test('the reexec request latches one intent and keeps a refused Client running',
     requestStop: () => { throw new Error('the current build must not be swapped for itself') },
     emit: () => {},
   })
-  assert.deepEqual(current.request(), { kind: 'refused', reason: 'already-current' })
+  assert.deepEqual(current.request('manual'), { kind: 'refused', reason: 'already-current' })
   assert.equal(current.intent, undefined)
 
   // A request that races the ONE stop coordinator is an observable no-op: the
@@ -653,9 +653,49 @@ test('the reexec request latches one intent and keeps a refused Client running',
     emit: record => { stoppingRecords.push(record) },
     canRequest: () => false,
   })
-  assert.deepEqual(stopping.request(), { kind: 'refused', reason: 'stopping' })
+  assert.deepEqual(stopping.request('manual'), { kind: 'refused', reason: 'stopping' })
   assert.equal(stopping.intent, undefined)
   assert.equal(stoppingRecords.filter(record => record.m4r === 'handoff-request-ignored' && record.reason === 'stopping').length, 1)
+})
+
+test('the ONE reexec latch separates the manual command from the qualification source', t => {
+  const fixture = reexecFixture(t)
+  const sources: string[] = []
+  const records: Array<Record<string, unknown>> = []
+  let stops = 0
+  const handler = createClientReexecRequestHandler({
+    status: () => CONNECTED_STATUS,
+    prepare: (_status, source) => {
+      sources.push(source)
+      return fixture.intent
+    },
+    requestStop: () => { stops += 1 },
+    emit: record => { records.push(record) },
+  })
+  // Qualification first: the ONE latch is shared, so a later manual request
+  // owns no second stop.
+  assert.deepEqual(handler.request('qualification'), { kind: 'accepted' })
+  assert.deepEqual(handler.request('manual'), { kind: 'refused', reason: 'stopping' })
+  assert.deepEqual(sources, ['qualification'])
+  assert.equal(stops, 1)
+  assert.equal(records.find(record => record.m4r === 'handoff-requested')?.source, 'qualification',
+    'the accepted telemetry names the entry that asked')
+
+  // The reverse order behaves the same: the source changes TARGET RESOLUTION
+  // only, never the latch identity.
+  const reverseSources: string[] = []
+  const reverse = createClientReexecRequestHandler({
+    status: () => CONNECTED_STATUS,
+    prepare: (_status, source) => {
+      reverseSources.push(source)
+      return fixture.intent
+    },
+    requestStop: () => {},
+    emit: () => {},
+  })
+  assert.deepEqual(reverse.request('manual'), { kind: 'accepted' })
+  assert.deepEqual(reverse.request('qualification'), { kind: 'refused', reason: 'stopping' })
+  assert.deepEqual(reverseSources, ['manual'])
 })
 
 test('the replacement Client environment strips old qualification state and carries only handoff facts', t => {
@@ -1019,13 +1059,15 @@ test('the reexec trigger is internal, singular and starts only after the ONE sea
   // probe flag, but the ONE request handler of a real surface Client is
   // created for BOTH the probe and the public `/reload-client` capability.
   assert.match(source, /const reexecProbe = process\.env\.SPLIT_PROCESS_CLIENT_REEXEC_PROBE === '1'/u)
-  assert.match(source, /if \(reexecProbe\) process\.on\('SIGUSR2', \(\) => \{ reexecHandler\?\.request\(\) \}\)/u)
+  assert.match(source, /if \(reexecProbe\) process\.on\('SIGUSR2', \(\) => \{ reexecHandler\?\.request\('qualification'\) \}\)/u)
   assert.equal((source.match(/= createClientReexecRequestHandler\(/gu) ?? []).length, 1,
     'the surface Client must own exactly ONE reexec request handler')
   assert.match(source, /requestStop: \(\) => \{[\s\S]*?runDetached\('local client: reexec handoff', \(\) => stop\(0\)/u,
     'the accepted request must enter the EXISTING stop coordinator')
-  assert.match(source, /requestClientReload: \(\) => reexecHandler!\.request\(\)/u,
-    'the process capability must call the SAME handler — never a second request path')
+  assert.match(source, /requestClientReload: \(\) => reexecHandler!\.request\('manual'\)/u,
+    'the manual process capability must call the SAME handler with the manual source')
+  assert.match(source, /source === 'qualification' && reexecProbe && targetOverride/u,
+    'only the qualification source may use the side-by-side target override')
   // The side-by-side target override belongs to the qualification probe only:
   // the production command always resolves the installed profile package.
   assert.match(source,
