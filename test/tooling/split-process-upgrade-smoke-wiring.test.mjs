@@ -166,9 +166,14 @@ test('the upgrade lane owns the real Client reexec handoff and its two live nega
 test('M4 PR4 U08 drives the PRODUCTION /reload-client command through the real PTY', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const start = source.indexOf('async function runUserCommandReloadRound')
-  const end = source.indexOf('async function main()')
-  assert.ok(start > 0 && end > start, 'the U08 production-command round must exist')
-  const u08 = source.slice(start, end)
+  const targetInvalid = source.indexOf('async function runUnavailableTargetRound')
+  const isolation = source.indexOf('async function runReloadSourceIsolationRound')
+  assert.ok(start > 0 && targetInvalid > start && isolation > targetInvalid, 'the U08/U09 rounds must exist')
+  // The PRODUCTION positive/negative round: it must never set the qualification
+  // override or simulate the user command with SIGUSR2.
+  const u08 = source.slice(start, targetInvalid)
+  // The destructive removal negative lives in its OWN isolated round.
+  const targetInvalidRound = source.slice(targetInvalid, isolation)
 
   // A SECOND, fully isolated profile/home round: U07's round is untouched.
   assert.match(u08, /const dshHome = join\(roundRoot, 'dsh-home'\)/u)
@@ -194,20 +199,47 @@ test('M4 PR4 U08 drives the PRODUCTION /reload-client command through the real P
   assert.match(u08, /replacementRestored\.clientBuildId, newBuildId/u)
   assert.match(u08, /productionTargetResolvedFromProfile: true/u)
   assert.match(u08, /qualificationTargetOverrideUsed: false/u)
-
-  // The three real PTY negatives keep the old/live surface and never stop it.
-  assert.match(u08, /Client reload skipped: this Client already runs the installed build/u)
-  assert.match(u08, /Client reload blocked: remove or submit the staged attachments first/u)
-  assert.match(u08, /Client reload failed: the installed replacement Client is unavailable or incompatible/u)
-  assert.match(u08, /'plugin', '--profile', 'pi-tui', 'remove', EXPECTED_PACKAGE_NAME/u)
-  assert.match(u08, /alreadyCurrentKeptOldSurface: true/u)
-  assert.match(u08, /attachmentsKeptOldSurface: true/u)
-  assert.match(u08, /targetInvalidKeptOldSurface: true/u)
-  assert.match(u08, /async function runUnavailableTargetRound/u)
-  assert.match(source, /runUnavailableTargetRound\(\{/u)
-  assert.match(u08, /installedTargetOfficiallyRemoved: true/u)
-  assert.match(u08, /targetInvalidRefused: true/u)
-  assert.match(u08, /turnHeldAcrossRefusal: true/u)
   assert.match(u08, /handoffRequestedByUserCommand: true/u)
   assert.match(u08, /promptNotReplayed: true/u)
+
+  // The two real PTY negatives keep the old/live surface and never stop it.
+  assert.match(u08, /Client reload skipped: this Client already runs the installed build/u)
+  assert.match(u08, /Client reload blocked: remove or submit the staged attachments first/u)
+  assert.match(u08, /alreadyCurrentKeptOldSurface: true/u)
+  assert.match(u08, /attachmentsKeptOldSurface: true/u)
+
+  // Negative 3: the official removal round.
+  assert.match(targetInvalidRound, /'plugin', '--profile', 'pi-tui', 'remove', EXPECTED_PACKAGE_NAME/u)
+  assert.match(targetInvalidRound, /Client reload failed: the installed replacement Client is unavailable or incompatible/u)
+  assert.match(targetInvalidRound, /targetInvalidKeptOldSurface: true/u)
+  assert.match(targetInvalidRound, /installedTargetOfficiallyRemoved: true/u)
+  assert.match(targetInvalidRound, /targetInvalidRefused: true/u)
+  assert.match(targetInvalidRound, /turnHeldAcrossRefusal: true/u)
+  assert.match(source, /runUnavailableTargetRound\(\{/u)
+})
+
+test('M4 PR4 U09 proves the manual command ignores a live qualification target override', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const start = source.indexOf('async function runReloadSourceIsolationRound')
+  const end = source.indexOf('async function main()')
+  assert.ok(start > 0 && end > start, 'the U09 source-isolation round must exist')
+  const u09 = source.slice(start, end)
+  // The SAME qualification process owns BOTH entries: probe + side-by-side
+  // override AND the public manual command.
+  assert.match(u09, /SPLIT_PROCESS_CLIENT_REEXEC_PROBE: '1'/u)
+  assert.match(u09, /SPLIT_PROCESS_CLIENT_REEXEC_TARGET_PACKAGE_ROOT: sideNewPackage/u)
+  assert.match(u09, /send\('\/reload-client\\r'\)/u)
+  assert.match(u09, /signalBusiness\('SIGUSR2'\)/u)
+  // The manual command resolves the PROFILE (the running old build), so it is
+  // already-current; the qualification request uses the override build.
+  assert.match(u09, /Client reload skipped: this Client already runs the installed build/u)
+  assert.match(u09, /assertEqual\(client\.records\.filter\(record => record\.m4r === 'handoff-requested'\)\.length, 0/u)
+  assert.match(u09, /qualificationRequested\.source, 'qualification'/u)
+  assert.match(u09, /qualificationRequested\.targetBuildId, sideNewBuildId/u)
+  assert.match(u09, /replacementRestored\.clientBuildId, sideNewBuildId/u)
+  assert.match(u09, /manualResolvedProfileOnly: true/u)
+  assert.match(u09, /manualNeverReachedProcessStop: true/u)
+  assert.match(u09, /qualificationUsedOverride: true/u)
+  assert.match(u09, /sameProcessBothEntries: true/u)
+  assert.match(source, /runReloadSourceIsolationRound\(\{/u)
 })

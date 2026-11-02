@@ -384,11 +384,22 @@ export function prepareClientReexec(options: PrepareClientReexecOptions): Client
   }
 }
 
+/**
+ * Which entry raised ONE reexec request. The source is part of the request
+ * contract because it decides TARGET RESOLUTION: only the internal
+ * qualification probe may use the side-by-side package override; the user's
+ * manual `/reload-client` always resolves the ACTIVE PROFILE installation,
+ * even when both entries live in the same process.
+ */
+export type ClientReexecRequestSource = 'manual' | 'qualification'
+
 /** The one-shot request latch and its decision order (status -> preflight -> stop). */
 export interface ClientReexecRequestOptions {
   /** The CURRENT Client status; `undefined` before the handle is ready. */
   status(): LocalClientStatus | undefined
-  prepare(status: LocalClientStatus): ClientReexecIntent
+  /** Prepare the ONE intent for THIS source; only `qualification` may use the
+   *  side-by-side target override. */
+  prepare(status: LocalClientStatus, source: ClientReexecRequestSource): ClientReexecIntent
   requestStop(code: number): void
   emit(record: Record<string, unknown>): void
   onAccepted?(intent: ClientReexecIntent): void
@@ -398,11 +409,12 @@ export interface ClientReexecRequestOptions {
 
 export interface ClientReexecRequestHandler {
   /**
-   * The ONE synchronous request entry. It reports the process preflight's
-   * decision so a command handler can publish a fixed user notice; the
-   * qualification SIGUSR2 probe ignores the result.
+   * The ONE synchronous request entry. `source` is the calling entry's own
+   * identity and is forwarded to the preflight unchanged. It reports the
+   * process preflight's decision so a command handler can publish a fixed user
+   * notice; the qualification SIGUSR2 probe ignores the result.
    */
-  request(): ClientReloadRequestResult
+  request(source: ClientReexecRequestSource): ClientReloadRequestResult
   readonly intent: ClientReexecIntent | undefined
 }
 
@@ -410,12 +422,13 @@ export interface ClientReexecRequestHandler {
  * The ONLY reexec request path. The first accepted request latches one intent
  * and asks the existing stop coordinator for a normal exit; later requests are
  * observable no-ops. A rejected preflight leaves the Client running and
- * unlatched, so a later explicit request may retry a different target.
+ * unlatched, so a later explicit request may retry a different target. The ONE
+ * latch is shared by both sources; only the target resolution differs.
  */
 export function createClientReexecRequestHandler(options: ClientReexecRequestOptions): ClientReexecRequestHandler {
   let intent: ClientReexecIntent | undefined
   return {
-    request(): ClientReloadRequestResult {
+    request(source: ClientReexecRequestSource): ClientReloadRequestResult {
       if (intent !== undefined) {
         options.emit({ m4r: 'handoff-request-ignored', processRole: 'client', pid: process.pid, reason: 'already-requested' })
         return { kind: 'refused', reason: 'stopping' }
@@ -431,7 +444,7 @@ export function createClientReexecRequestHandler(options: ClientReexecRequestOpt
       }
       let prepared: ClientReexecIntent
       try {
-        prepared = options.prepare(status)
+        prepared = options.prepare(status, source)
       } catch (error) {
         options.emit({
           m4r: 'handoff-request-rejected',
@@ -450,6 +463,7 @@ export function createClientReexecRequestHandler(options: ClientReexecRequestOpt
         m4r: 'handoff-requested',
         processRole: 'client',
         pid: process.pid,
+        source,
         expectedHostInstanceId: prepared.expectedInstanceId,
         ...(prepared.sessionId === undefined ? {} : { sessionId: prepared.sessionId }),
         targetBuildId: prepared.targetBuildId,
@@ -1454,7 +1468,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
             // callback only drives the existing PR3 request latch/preflight.
             ...(reexecHandler === undefined
               ? {}
-              : { requestClientReload: () => reexecHandler!.request() }),
+              : { requestClientReload: () => reexecHandler!.request('manual') }),
           })
         })
         await runnerFiber
@@ -1510,7 +1524,11 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       }
       reexecHandler = createClientReexecRequestHandler({
         status: () => handle?.status,
-        prepare: status => prepareClientReexec({
+        // TARGET-SOURCE ISOLATION: the manual command always resolves the
+        // ACTIVE PROFILE installation. Only the internal qualification request
+        // (with its own probe flag) may use the side-by-side package override,
+        // even while both entries share this process and this ONE latch.
+        prepare: (status, source) => prepareClientReexec({
           status,
           verifiedHostInstanceId: host.identity.instanceId,
           profileDir,
@@ -1518,7 +1536,9 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
           profile: options.profile,
           dshVersion: scope.dshVersion,
           currentBuildId: scope.buildId,
-          ...(targetOverride === undefined || targetOverride === '' ? {} : { targetPackageRootOverride: targetOverride }),
+          ...(source === 'qualification' && reexecProbe && targetOverride !== undefined && targetOverride !== ''
+            ? { targetPackageRootOverride: targetOverride }
+            : {}),
         }),
         requestStop: () => {
           runDetached('local client: reexec handoff', () => stop(0), { diag })
@@ -1527,7 +1547,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
         canRequest: () => stopping === undefined,
         onAccepted: accepted => { reexecIntent = accepted },
       })
-      if (reexecProbe) process.on('SIGUSR2', () => { reexecHandler?.request() })
+      if (reexecProbe) process.on('SIGUSR2', () => { reexecHandler?.request('qualification') })
       // A closed terminal (PTY HUP) is a normal Client exit: the physical
       // surface can no longer render or accept input. It joins the SAME
       // idempotent stop path as Esc / `/exit` / SIGINT / SIGTERM.
