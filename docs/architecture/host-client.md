@@ -219,7 +219,9 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   image/file draft stores (a pinned occurrence the editor no longer references
   still counts), unsettled accepted user writes (a submitted prompt or Host
   command, a steer, a local shell run and its context-mode output write, a
-  queue mutation), Client-local Question/Approval input (a presented or queued
+  queue mutation, or a persisted configuration write registered by the config
+  port — settings, credentials, the preset default), Client-local
+  Question/Approval input (a presented or queued
   form, a saved continued draft, an answer still being delivered, a
   refused-admission wait) and an in-flight Session navigation/transition. Only
   when every fact is clear does that SAME call stack call the process-owned

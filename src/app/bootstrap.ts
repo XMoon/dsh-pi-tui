@@ -60,9 +60,9 @@ import { createApplicationEvents, type ApplicationEventsOwner } from './surface/
 import { createClientActions } from './surface/client-actions.ts'
 import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createCommandSurface, type CommandSurface } from './command/surface.ts'
+import { createClientReloadCommandRequest } from './command/client-reload.ts'
 import { createArtifactSaveOwner } from './command/artifacts.ts'
 import { createUserShell } from './submission/user-shell.ts'
-import { clientReloadRefusal } from './remote-process/client-reload-safety.ts'
 import { preparePrompt } from './submission/prepared-prompt.ts'
 import { createSubmissionController, type LocalCommandHandler } from './submission/controller.ts'
 import { createViewerRuntime, type ViewerChildSource, type ViewerRuntime } from './surface/viewer-runtime.ts'
@@ -2036,22 +2036,27 @@ export function applyRunnerWithRuntime(
       // registration and never cached — and the process-owned request is
       // invoked in the SAME synchronous stack (no await between the decision
       // and the sink, so no new local input can slip in).
-      requestClientReload: () => {
-        const reason = clientReloadRefusal({
-          capable: startupSettlement?.requestClientReload !== undefined && remoteSources !== undefined,
-          ready: !cleanedUp && !lifecycleController.signal.aborted,
-          draftText: surface.composer.getDraft(),
-          stagedImageCount: draftImages.values().length,
-          stagedFileCount: draftFiles.values().length,
-          unsettledUserWrite: submission.hasUnsettledClientWrite(),
-          unsettledInteraction: surface.hasReloadBlockingInteraction(),
-          unsettledTransition: ownership.gate.pending
+      requestClientReload: createClientReloadCommandRequest({
+        facts: {
+          capable: () => startupSettlement?.requestClientReload !== undefined && remoteSources !== undefined,
+          ready: () => !cleanedUp && !lifecycleController.signal.aborted,
+          draftText: () => surface.composer.getDraft(),
+          stagedImageCount: () => draftImages.values().length,
+          stagedFileCount: () => draftFiles.values().length,
+          // A persisted configuration write is accepted work too: the config
+          // port registers its own write sinks (Remote settings/credentials),
+          // so a sessionless `/preset default`, `/settings`, `/login`, … can
+          // never be cut off by a Client retirement.
+          hasUnsettledUserWrite: () =>
+            submission.hasUnsettledClientWrite() || backend.config.hasUnsettledWrites(),
+          hasUnsettledInteraction: () => surface.hasReloadBlockingInteraction(),
+          hasUnsettledTransition: () =>
+            ownership.gate.pending
             || ownership.barrier.inTransition
             || sessionRuntime.hasPendingForks(),
-        })
-        if (reason !== undefined) return { kind: 'refused', reason }
-        return startupSettlement!.requestClientReload!()
-      },
+        },
+        request: () => startupSettlement!.requestClientReload!(),
+      }),
       exit,
       // A5b-3: the narrow Direct seams the (command-owned) runtime binding
       // needs. They stay here because they read the in-process Host session log

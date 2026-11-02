@@ -121,6 +121,7 @@ function stubRunner(ctx: Context, app: TuiApp): TuiCommandRunner {
     },
     config: {
       configReadiness: () => 'ready' as const,
+      hasUnsettledWrites: () => false,
       tuiSettings: undefined,
       footerCommandTrust: {
         userFooterMode: undefined,
