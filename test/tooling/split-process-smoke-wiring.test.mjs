@@ -222,7 +222,7 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     'HOST_ALREADY_OWNED',
     'CLIENT_ALREADY_ACTIVE',
     'HOST_UNRESPONSIVE',
-    'HOST_BUILD_INCOMPATIBLE',
+    'HOST_PROTOCOL_INCOMPATIBLE',
     'HOST_AUTH_FAILED',
     'HOST_IDENTITY_MISMATCH',
   ]) {
@@ -266,4 +266,22 @@ test('every real Client-detach recovery case observes the pending source as UNKN
   assert.match(source, /event\.kind === 'has-live-client' && event\.value === value && event\.sequence > afterSequence/u)
   assert.match(source, /C1_HAS_LIVE_CLIENT_PROBE: '1'/u)
   assert.match(source, /C1_NON_ANSWERING_PEER_PROBE: nonAnsweringBarrier/u)
+})
+
+test('the payload-drift gate proves a loadable cross-build Client against the same live Host', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  // T17a must be a positive, non-destructive drift: append a harmless comment,
+  // prove the production fingerprint changed, connect the same Host, and
+  // restore the exact original bytes in finally.
+  assert.ok(
+    source.includes("appendFileSync(clientChunk, '\\n// harmless client build drift: protocol unchanged\\n')"),
+    'T17a must append only a harmless comment to the client chunk',
+  )
+  assert.match(source, /productionBuildId\(profilePackage, hostReady\.localHost\.dshVersion\)/u)
+  assert.match(source, /T17 drift Client authenticated the live Host/u)
+  assert.match(source, /assertClientHostFacts\(driftedAuth\.host, hostReady\.localHost/u)
+  assert.match(source, /assert\(driftReady\.transport === 'connected'/u)
+  assert.match(source, /writeFileSync\(clientChunk, clientChunkBytes\)/u)
+  assert.match(source, /T17 payload drift did not restore the installed client chunk/u)
+  assert.doesNotMatch(source, /T17 payload drift did not fail closed on the build identity/u)
 })

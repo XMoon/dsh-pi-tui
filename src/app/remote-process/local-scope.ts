@@ -1,10 +1,12 @@
 /**
- * M4-B1 local Host/Client scope, process seats and installed-build identity.
+ * Local Host/Client scope, process seats and installed-build identity.
  *
  * The ordinary DSH profile is the scope authority: this module derives a
  * stable id from the canonical profile directory and the current UID, then
- * owns the private run directory, the two Linux abstract-socket seats and the
- * installed-build fingerprint the Host and Client must agree on.
+ * owns the private run directory and the two Linux abstract-socket seats. The
+ * installed-build fingerprint remains the Host's own publication/identity
+ * material; `LOCAL_PROTOCOL` below is the Host/Client compatibility contract
+ * and is independent of package builds.
  *
  * The abstract sockets are admission primitives only. No business traffic
  * travels over them, and no PID file, registry record or `O_EXCL` marker can
@@ -20,8 +22,11 @@ import { Buffer } from 'node:buffer'
 import { basename, dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-/** The only B1 identity protocol string. */
-export const LOCAL_PROTOCOL = 'm4-b1/1'
+/**
+ * The required local Host/Client wire contract, independent of package builds.
+ * Both sides must name exactly this value and the same DSH runtime version.
+ */
+export const LOCAL_PROTOCOL = 'dsh-pi-tui/local/1'
 
 /** Private scope directory below the official DSH home. */
 const RUN_ROOT_NAME = 'run'
@@ -41,6 +46,7 @@ export type LocalScopeErrorCode =
   | 'LOCAL_FILE_UNSAFE'
   | 'HOST_ALREADY_OWNED'
   | 'CLIENT_ALREADY_ACTIVE'
+  | 'HOST_PROTOCOL_INCOMPATIBLE'
   | 'HOST_BUILD_INCOMPATIBLE'
   | 'HOST_IDENTITY_MISMATCH'
   | 'HOST_UNRESPONSIVE'
@@ -85,7 +91,10 @@ export interface LocalScope {
   readonly hostSocketName: string
   /** Linux abstract single-Client seat name. */
   readonly clientSeatSocketName: string
-  /** Installed-build fingerprint described below. */
+  /**
+   * Installed-build fingerprint described below. The Host publishes and the
+   * authenticated identity echoes it; Client admission does not compare it.
+   */
   readonly buildId: string
   /** Installed bundle version from the package manifest. */
   readonly bundleVersion: string
@@ -285,8 +294,10 @@ export function scopeFromInstalledProfile(facts: InstalledProfileFacts): LocalSc
   const dshHome = canonicalOwnedDirectory(facts.dshHome, uid, 'DSH home')
   const profileRealpath = canonicalOwnedDirectory(facts.profileDir, uid, 'profile directory')
   const bundleVersion = readBundleVersion(facts.packageRoot)
+  // Fixed hash domain: the scope id names one canonical profile + uid pair for
+  // the local protocol family. It is not a package-build compatibility key.
   const scopeId = createHash('sha256')
-    .update(`dsh-pi-tui/m4-b1\0${String(uid)}\0${profileRealpath}`)
+    .update(`dsh-pi-tui/local-scope/1\0${String(uid)}\0${profileRealpath}`)
     .digest('hex')
   const dir = ensureScopeDirectory(dshHome, scopeId, uid)
   return Object.freeze({

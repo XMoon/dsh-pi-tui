@@ -107,8 +107,12 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
 - **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
   canonicalized through `realpath` plus the current UID decide the scope. The
   private run directory is `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/`, created and
-  proved 0700. The same canonical profile directory shares one scope across
-  workspaces; the Client cwd is not a scope input.
+  proved 0700. `scopeId` is sha256 over the fixed domain
+  `dsh-pi-tui/local-scope/1`, the decimal UID and the canonical profile path;
+  that domain is part of the published scope algorithm and evolves separately
+  from the wire protocol below. The same canonical profile directory shares one
+  scope across workspaces and package builds; the Client cwd is not a scope
+  input.
 - **Single Host / single TUI seat.** The Host holds one abstract socket from
   before the profile Context exists until process termination; a second Host
   candidate loses `bind` and exits without building a Context, webserver, Agent
@@ -118,14 +122,16 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
 - **Identity is authenticated, never registry-only.** The registry
   (`instance.json`, 0600) is an unauthenticated hint containing the scope,
   canonical profile path, `instanceId`, Host PID, Linux `/proc/<pid>/stat`
-  starttime, loopback origin, protocol `m4-b1/1`, installed bundle/DSH versions
-  and the installed-build fingerprint. Readiness requires the official
-  `dsh-client-connection` `/connect` launch-token exchange (signed Cookie) and
-  the owner-only authenticated identity Fetch route
+  starttime, loopback origin, protocol `dsh-pi-tui/local/1`, installed
+  bundle/DSH versions and the installed-build fingerprint. Readiness requires
+  the official `dsh-client-connection` `/connect` launch-token exchange (signed
+  Cookie) and the owner-only authenticated identity Fetch route
   `/api/pi-tui.local-host`, with every identity field strictly equal to the
-  registry and the current kernel starttime. A different build or protocol is
+  registry and the current kernel starttime. A Client whose protocol or exact
+  DSH runtime differs is `HOST_PROTOCOL_INCOMPATIBLE` before authentication; a
+  Host that publishes a protocol or installed build other than its own is
   `HOST_BUILD_INCOMPATIBLE`; a mismatched authenticated identity is
-  `HOST_IDENTITY_MISMATCH`; neither replaces or kills the live Host.
+  `HOST_IDENTITY_MISMATCH`; none replaces or kills the live Host.
 - **Official carrier only.** The Host reuses the base `typert-gateway` row and
   mounts exactly one `dsh-client-connection` owner and one `dsh-api-remotes`
   forwarded-event source on the Host-only overlay. The Client installs the
@@ -155,8 +161,11 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   withdraws the identity route, then shuts down, then removes only files
   matching its own `instanceId`, then closes the kernel seat. A replaced Host's
   files are never deleted by another instance. A Client from a different
-  installed build is refused before authentication and leaves the live Host,
-  its work and its registry/launch files untouched.
+  installed build of the same protocol and DSH runtime is admitted through the
+  same authenticated carrier and leaves the live Host, its work and its
+  registry/launch files untouched. A Client whose protocol or DSH runtime
+  differs is refused before authentication, also leaving the live Host
+  untouched.
 - **Session boundary.** The Client derives `connecting | connected | disconnected`
   from the official Connection state and generation on every read and never
   copies it into a long-lived flag. `sessionOpen` is a LIVE projection of the
@@ -166,6 +175,35 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   is `indeterminate` and the next Client reconciles it from the Host's durable
   log instead of retrying. The protocol guarantees only a reconnect to the same
   Host; a Host crash is not a graceful migration.
+
+### Local protocol and version evolution
+
+`dsh-pi-tui/local/1` is the required Host/Client wire contract. It is
+independent of the `@xmoon76/dsh-pi-tui` package version and build fingerprint.
+Both sides must name exactly this protocol and the same DSH runtime version;
+the exact paired DSH version is owned by the package manifest, compatibility
+matrix and release data, not by this document.
+
+A v1 peer guarantees the required official Session, Turn, Job, Question and
+Approval semantics plus this package's current required private Remotes (file
+references and terminal progress). Optional read-only functionality may be
+added without a protocol bump only when its consumers degrade safely: losing it
+must not lose, rewrite or duplicate a business write, and a genuinely
+unregistered optional Remote is classified by the official
+`gateway/invocation-unavailable` answer, never by turning every network,
+authentication or service failure into "unsupported". A breaking change to a
+required wire API, or a new Client that cannot work without an RPC an old Host
+does not have, requires the next protocol version. Capability registries,
+version negotiation and probe-by-trial-write are not part of v1.
+
+Client admission and Host self-publication are different decisions: a Client
+compares only the protocol and exact DSH runtime, while the Host must publish
+its own exact protocol, bundle, DSH runtime and build fingerprint.
+Authentication then compares every identity field, including the Host buildId
+and bundle, against the registry, and generation currentness compares the same
+Host's full identity. A protocol or DSH mismatch never stops, replaces or
+mutates the live Host; the Client reports the refusal and in-memory work stays
+with the Host.
 
 ### Host composition and the built-in PiTui runtime
 

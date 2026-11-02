@@ -14,9 +14,9 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer } from 'node:net'
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test, { type TestContext } from 'node:test'
 import type { AddressInfo } from 'node:net'
@@ -35,7 +35,8 @@ import {
   type LocalScope,
 } from '../../src/app/remote-process/local-scope.ts'
 import {
-  assertBuildCompatible,
+  assertClientHostCompatible,
+  assertHostPublicationIdentity,
   authenticateLocalHost,
   inspectHostProcess,
   readLaunchMaterial,
@@ -110,12 +111,12 @@ async function closedPort(): Promise<number> {
   return port
 }
 
-test('one canonical profile yields one scope across DSH homes and symlinked spellings', t => {
+test('one canonical profile yields one scope across DSH homes, symlinked spellings and package builds', t => {
   const first = fixture(t)
-  const second = fixture(t)
+  const second = fixture(t, '0.5.5')
   try {
     // Both homes point at the same real profile directory; the scope id must
-    // follow the canonical profile, not the caller's DSH home or cwd.
+    // follow the canonical profile, not the caller's DSH home, cwd or build.
     const sharedProfile = join(first.root, 'shared-profile')
     mkdirSync(sharedProfile, { recursive: true, mode: 0o700 })
     const link = join(first.root, 'profile-link')
@@ -132,11 +133,27 @@ test('one canonical profile yields one scope across DSH homes and symlinked spel
       packageRoot: second.packageRoot,
       dshVersion: '0.2.1-rc.4',
     })
+    assert.notEqual(fromFirst.buildId, fromSecond.buildId, 'the two fixtures must carry different build fingerprints')
+    assert.notEqual(fromFirst.bundleVersion, fromSecond.bundleVersion, 'the two fixtures must carry different bundle versions')
     assert.equal(fromFirst.scopeId, fromSecond.scopeId)
     assert.equal(fromFirst.profileRealpath, fromSecond.profileRealpath)
     assert.notEqual(fromFirst.dir, fromSecond.dir)
-    assert.match(fromFirst.hostSocketName, /^\0dsh-pi-tui-h-[0-9a-f]{40}$/u)
-    assert.match(fromFirst.clientSeatSocketName, /^\0dsh-pi-tui-c-[0-9a-f]{40}$/u)
+
+    // The scope algorithm is anchored independently, not only to its shape.
+    const uid = process.getuid?.()
+    assert.equal(typeof uid, 'number', 'this suite requires a Linux uid')
+    const canonicalProfile = realpathSync(sharedProfile)
+    const expectedScopeId = createHash('sha256')
+      .update(`dsh-pi-tui/local-scope/1\0${String(uid)}\0${canonicalProfile}`)
+      .digest('hex')
+    assert.equal(fromFirst.scopeId, expectedScopeId)
+    assert.match(fromFirst.scopeId, /^[0-9a-f]{64}$/u)
+    assert.equal(fromFirst.hostSocketName, `\0dsh-pi-tui-h-${expectedScopeId.slice(0, 40)}`)
+    assert.equal(fromFirst.clientSeatSocketName, `\0dsh-pi-tui-c-${expectedScopeId.slice(0, 40)}`)
+    const unpublishedLegacyDomain = createHash('sha256')
+      .update(`dsh-pi-tui/m4-b1\0${String(uid)}\0${canonicalProfile}`)
+      .digest('hex')
+    assert.notEqual(fromFirst.scopeId, unpublishedLegacyDomain, 'the retired internal scope domain must not be live')
 
     const other = fixture(t)
     try {
@@ -269,7 +286,92 @@ test('the installed-build fingerprint changes with payload, bundle version and D
   }
 })
 
-test('registry token injection, wrong origin and a mismatched build are rejected', t => {
+test('Client admission accepts one protocol and DSH runtime across package builds', t => {
+  const value = fixture(t)
+  try {
+    const scope = scopeFor(value)
+    const record = recordFor(scope)
+    assert.doesNotThrow(() => assertClientHostCompatible(record, scope))
+    assert.doesNotThrow(() => assertClientHostCompatible(
+      { ...record, buildId: 'a'.repeat(64), bundleVersion: '9.9.9' },
+      scope,
+    ), 'a different installed build must not block Client admission')
+    assert.doesNotThrow(() => assertHostPublicationIdentity(record, scope))
+    for (const [field, changed] of [
+      ['protocol', { protocol: 'dsh-pi-tui/local/2' as typeof LOCAL_PROTOCOL }],
+      ['bundleVersion', { bundleVersion: '9.9.9' }],
+      ['dshVersion', { dshVersion: '0.2.1-rc.5' }],
+      ['buildId', { buildId: 'a'.repeat(64) }],
+    ] as const) {
+      assert.throws(
+        () => assertHostPublicationIdentity({ ...record, ...changed }, scope),
+        (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_BUILD_INCOMPATIBLE',
+        `Host publication accepted a mismatched ${field}`,
+      )
+    }
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('Client admission refuses another protocol, the retired protocol name and another DSH runtime', t => {
+  const value = fixture(t)
+  try {
+    const scope = scopeFor(value)
+    const record = recordFor(scope)
+    for (const [label, changed] of [
+      ['a future protocol major', { protocol: 'dsh-pi-tui/local/2' as typeof LOCAL_PROTOCOL }],
+      ['the retired internal protocol name', { protocol: 'm4-b1/1' as typeof LOCAL_PROTOCOL }],
+      ['another DSH runtime', { dshVersion: '0.2.1-rc.5' }],
+    ] as const) {
+      assert.throws(
+        () => assertClientHostCompatible({ ...record, ...changed }, scope),
+        (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_PROTOCOL_INCOMPATIBLE',
+        `${label} was admitted`,
+      )
+    }
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('Host publication rejects an identity that differs from its own installed build without rewriting files', t => {
+  const value = fixture(t)
+  try {
+    const scope = scopeFor(value)
+    const record = recordFor(scope)
+    writeLocalRecord(scope, record)
+    writeLaunchMaterial(scope, record, {
+      schema: 1,
+      instanceId: record.instanceId,
+      connectUrl: `${record.origin}/connect?token=fixture-token`,
+    })
+    const registryPath = join(scope.dir, 'instance.json')
+    const launchPath = join(scope.dir, 'launch.json')
+    const registryBefore = { bytes: readFileSync(registryPath), mode: lstatSync(registryPath).mode & 0o777 }
+    const launchBefore = { bytes: readFileSync(launchPath), mode: lstatSync(launchPath).mode & 0o777 }
+    assert.throws(
+      () => writeLocalRecord(scope, { ...record, buildId: 'a'.repeat(64) }),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_BUILD_INCOMPATIBLE',
+    )
+    assert.deepEqual(readFileSync(registryPath), registryBefore.bytes, 'a rejected publication rewrote the registry')
+    assert.equal(lstatSync(registryPath).mode & 0o777, registryBefore.mode, 'a rejected publication changed the registry mode')
+    assert.throws(
+      () => writeLaunchMaterial(scope, { ...record, bundleVersion: '9.9.9' }, {
+        schema: 1,
+        instanceId: record.instanceId,
+        connectUrl: `${record.origin}/connect?token=fixture-token`,
+      }),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_BUILD_INCOMPATIBLE',
+    )
+    assert.deepEqual(readFileSync(launchPath), launchBefore.bytes, 'a rejected publication rewrote the launch material')
+    assert.equal(lstatSync(launchPath).mode & 0o777, launchBefore.mode, 'a rejected publication changed the launch mode')
+  } finally {
+    cleanup(value.root)
+  }
+})
+
+test('registry token injection, wrong origin and a launch naming another instance are rejected', t => {
   const value = fixture(t)
   try {
     const scope = scopeFor(value)
@@ -285,14 +387,15 @@ test('registry token injection, wrong origin and a mismatched build are rejected
       () => readLocalRecord(scope),
       (error: unknown) => error instanceof LocalScopeError && error.code === 'LOCAL_FILE_UNSAFE',
     )
-    writeFileSync(registry, `${JSON.stringify(record)}\n`, { mode: 0o600 })
+    writeLocalRecord(scope, record)
+    writeFileSync(join(scope.dir, 'launch.json'), `${JSON.stringify({
+      schema: 1,
+      instanceId: randomUUID(),
+      connectUrl: `${record.origin}/connect?token=fixture-token`,
+    })}\n`, { mode: 0o600 })
     assert.throws(
-      () => assertBuildCompatible({ ...record, buildId: 'a'.repeat(64) }, scope),
-      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_BUILD_INCOMPATIBLE',
-    )
-    assert.throws(
-      () => assertBuildCompatible({ ...record, protocol: 'm4-b1/2' as typeof LOCAL_PROTOCOL }, scope),
-      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_BUILD_INCOMPATIBLE',
+      () => readLaunchMaterial(scope, record),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
     )
   } finally {
     cleanup(value.root)
@@ -564,6 +667,68 @@ test('an unreachable or rejecting /connect is an explicit refusal, not a ready H
       await new Promise<void>(resolve => rejecting.close(() => resolve()))
     }
   } finally {
+    cleanup(value.root)
+  }
+})
+
+test('a self-consistent Host build is admitted while a registry/identity build difference stays a mismatch', async t => {
+  const value = fixture(t)
+  let identity: LocalInstanceRecord | undefined
+  const server = createHttpServer((request, response) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1')
+    if (url.pathname === '/connect') {
+      response.writeHead(302, {
+        location: '/api/remote.mux',
+        'cache-control': 'no-store',
+        'set-cookie': 'dsh_session=fixture-cookie; Path=/; HttpOnly',
+      })
+      response.end()
+      return
+    }
+    if (url.pathname === '/api/pi-tui.local-host') {
+      if (request.headers.cookie !== 'dsh_session=fixture-cookie' || identity === undefined) {
+        response.writeHead(401, { 'cache-control': 'no-store' })
+        response.end()
+        return
+      }
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+      response.end(`${JSON.stringify(identity)}\n`)
+      return
+    }
+    response.writeHead(404)
+    response.end()
+  })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(0, '127.0.0.1', () => resolve())
+    })
+    const origin = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`
+    const scope = scopeFor(value)
+    // This file fixture plays the Host's registry: it may carry a build that
+    // differs from this Client's scope, but its authenticated echo must equal
+    // the registry field by field.
+    const hostRecord = recordFor(scope, { origin, buildId: 'c'.repeat(64), bundleVersion: '9.9.9' })
+    identity = hostRecord
+    assert.doesNotThrow(() => assertClientHostCompatible(hostRecord, scope))
+    writeFileSync(join(scope.dir, 'instance.json'), `${JSON.stringify(hostRecord)}\n`, { mode: 0o600 })
+    writeFileSync(join(scope.dir, 'launch.json'), `${JSON.stringify({
+      schema: 1,
+      instanceId: hostRecord.instanceId,
+      connectUrl: `${origin}/connect?token=fixture-token`,
+    })}\n`, { mode: 0o600 })
+    const verified = await authenticateLocalHost(hostRecord, scope)
+    assert.equal(verified.identity.buildId, hostRecord.buildId)
+    assert.equal(verified.identity.bundleVersion, hostRecord.bundleVersion)
+    assert.notEqual(verified.identity.buildId, scope.buildId, 'the Host echo must carry a different installed build')
+
+    identity = { ...hostRecord, buildId: 'd'.repeat(64) }
+    await assert.rejects(
+      authenticateLocalHost(hostRecord, scope),
+      (error: unknown) => error instanceof LocalScopeError && error.code === 'HOST_IDENTITY_MISMATCH',
+    )
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
     cleanup(value.root)
   }
 })

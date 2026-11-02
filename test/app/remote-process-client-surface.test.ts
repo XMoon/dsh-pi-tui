@@ -40,7 +40,7 @@ const HOST_RECORD = {
   hostPid: 1,
   hostStarttime: '1',
   origin: 'http://127.0.0.1:1',
-  protocol: 'm4-b1/1',
+  protocol: 'dsh-pi-tui/local/1',
   bundleVersion: '0.5.4',
   dshVersion: '0.2.1-rc.4',
   buildId: 'build',

@@ -16,7 +16,8 @@
  *   T09 a second Client is refused before it can spawn or steal a Host
  *   T10/T11/T12 Client normal exit, SIGKILL and SIGTERM leave the Host alive
  *   T13 a physical mux drop clears the generation and the same Host replaces it
- *   T14/T16/T17 forged registry, unresponsive Host, build/auth failures
+ *   T14/T16/T17 forged registry, unresponsive Host, protocol/identity/auth failures
+ *                and non-destructive installed-payload drift
  *   T15 a dead Host leaves only a stale candidate; a Client safely starts a new one
  *   T18 installed package shape and Direct `--help` remain unchanged
  *   T19 signal admission precedes publication; repeated same signals stay idempotent (no ready)
@@ -35,9 +36,10 @@
  * token, Cookie or connect URL).
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
+  appendFileSync,
   chmodSync,
   closeSync,
   existsSync,
@@ -730,6 +732,25 @@ function chunk(profilePackage, prefix) {
   return join(profilePackage, 'dist', file)
 }
 
+/** The production build fingerprint of one installed payload. */
+function productionBuildId(packageRoot, dshVersion) {
+  const moduleUrl = pathToFileURL(join(SCRIPT_DIR, '..', 'src', 'app', 'remote-process', 'local-scope.ts')).href
+  const code = `import { computeBuildId } from ${JSON.stringify(moduleUrl)}; process.stdout.write(computeBuildId(process.argv[1], process.argv[2]))`
+  const result = spawnSync(
+    process.execPath,
+    ['--import', 'tsx/esm', '--input-type=module', '-e', code, packageRoot, dshVersion],
+    { cwd: join(SCRIPT_DIR, '..'), env: process.env, encoding: 'utf8', timeout: 60_000 },
+  )
+  if (result.status !== 0) {
+    throw new Error(`the production build fingerprint could not be computed for ${packageRoot}: ${result.stderr || String(result.error ?? '')}`)
+  }
+  const value = result.stdout.trim()
+  if (!/^[0-9a-f]{64}$/u.test(value)) {
+    throw new Error(`the production build fingerprint is not 64 hex characters: ${JSON.stringify(value)}`)
+  }
+  return value
+}
+
 function readJson(path) {
   return JSON.parse(readFileSync(path, 'utf8'))
 }
@@ -918,6 +939,25 @@ async function waitGone(pid, timeoutMs = 15_000) {
     await sleep(50)
   }
   return !alive(pid)
+}
+
+/** Whether one Linux abstract-socket seat can be claimed again. */
+async function seatIsFree(name) {
+  return await new Promise((resolveSeat, rejectSeat) => {
+    const server = createNetServer()
+    let settled = false
+    server.once('error', error => {
+      if (settled) return
+      settled = true
+      if (error.code === 'EADDRINUSE') resolveSeat(false)
+      else rejectSeat(error)
+    })
+    server.listen(name, () => {
+      if (settled) return
+      settled = true
+      server.close(() => resolveSeat(true))
+    })
+  })
 }
 
 function assertNoSecret(label, text, secrets) {
@@ -1816,26 +1856,52 @@ async function main() {
     assert(alive(hostReady.pid), 'T12 Host died on Client SIGTERM')
     trace('t12', { sigterm: 'pass', ptyHup: 'NOT_RUN (Linux PTY limitation declared)' })
 
-    // T17a: installed-payload drift. The Client's build fingerprint comes from
-    // the actual dist; a renamed chunk is a different build and must not
-    // connect to the live Host. The live Host is preserved.
+    // T17a: non-destructive installed-payload drift. Appending a harmless
+    // comment changes the Client's recomputed build fingerprint while the
+    // module stays loadable and the local wire contract is unchanged. The new
+    // Client must authenticate to the SAME live Host; the Host identity,
+    // Registry/Launch bytes and its running work stay untouched. The chunk is
+    // restored byte-for-byte before T17b and every later gate runs.
     const clientChunk = chunk(profilePackage, 'client-bootstrap-')
-    renameSync(clientChunk, `${clientChunk}.missing`)
-    let driftExit
-    let driftRecords
+    const clientChunkBytes = readFileSync(clientChunk)
+    const undisturbedBuildId = productionBuildId(profilePackage, hostReady.localHost.dshVersion)
+    const driftRegistryBytes = readFileSync(registryPath)
+    const driftLaunchBytes = readFileSync(launchPath)
+    let driftClient
     try {
-      const driftClient = new EntryProcess('client', entries.client, base)
-      await driftClient.waitFor(record => record.m4a0 === 'failure', 'T17 payload drift', 60_000)
-      driftExit = await driftClient.waitForExit(30_000)
-      driftRecords = driftClient.records
+      appendFileSync(clientChunk, '\n// harmless client build drift: protocol unchanged\n')
+      const driftedBuildId = productionBuildId(profilePackage, hostReady.localHost.dshVersion)
+      assert(driftedBuildId !== undisturbedBuildId, 'T17 payload drift did not change the production build fingerprint')
+      assert(driftedBuildId !== hostReady.localHost.buildId, 'T17 payload drift did not differ from the live Host buildId')
+      driftClient = new EntryProcess('client', entries.client, base)
+      const driftedAuth = await driftClient.waitFor(
+        record => record.m4a0 === 'host-authenticated',
+        'T17 drift Client authenticated the live Host',
+        120_000,
+      )
+      assertClientHostFacts(driftedAuth.host, hostReady.localHost, 'T17 drift authenticated Host')
+      const driftReady = await driftClient.waitFor(record => record.m4a0 === 'ready', 'T17 drift Client ready', 240_000)
+      assert(driftReady.transport === 'connected', `T17 drift transport was ${JSON.stringify(driftReady.transport)}`)
+      const driftExit = await driftClient.shutdown()
+      assert(driftExit.code === 0 && driftExit.signal === null, `T17 drift Client exit was ${JSON.stringify(driftExit)}`)
+      assert(!driftClient.records.some(record => record.m4a0 === 'cleanup-failure'),
+        'T17 drift Client reported a cleanup failure')
+      assert(await seatIsFree(`\0dsh-pi-tui-c-${hostReady.localHost.scopeId.slice(0, 40)}`),
+        'T17 drift Client did not release the Client seat')
+      assert(alive(hostReady.pid), 'T17 payload drift killed the Host')
+      assert(readFileSync(registryPath).equals(driftRegistryBytes), 'T17 drift Client mutated the Host registry')
+      assert(readFileSync(launchPath).equals(driftLaunchBytes), 'T17 drift Client mutated the Host launch material')
+      trace('t17-payload-drift', {
+        buildIdChanged: true,
+        transport: 'connected',
+        hostInstanceId: driftedAuth.host.instanceId,
+        hostAlive: true,
+      })
     } finally {
-      renameSync(`${clientChunk}.missing`, clientChunk)
+      writeFileSync(clientChunk, clientChunkBytes)
+      assert(readFileSync(clientChunk).equals(clientChunkBytes), 'T17 payload drift did not restore the installed client chunk')
+      if (driftClient !== undefined && !driftClient.exited) driftClient.kill('SIGKILL')
     }
-    assert(driftExit.code === 1, `T17 payload drift exit was ${JSON.stringify(driftExit)}`)
-    assert(driftRecords.some(record => record.m4a0 === 'failure' && record.code === 'HOST_BUILD_INCOMPATIBLE'), 'T17 payload drift did not fail closed on the build identity')
-    assert(driftRecords.some(record => record.m4a0 === 'cleanup' && record.status === 'completed'), `T17 payload drift did not emit completed cleanup; records=${JSON.stringify(driftRecords.slice(-5))}`)
-    assert(alive(hostReady.pid), 'T17 payload drift killed the Host')
-    trace('t17-payload-drift', { code: 'HOST_BUILD_INCOMPATIBLE', hostAlive: true })
 
     // T17b: forced startup failure with an unchanged install. The internal
     // qualification flag exercises the same after-context reverse cleanup that
@@ -1867,6 +1933,10 @@ async function main() {
         exit = await client.waitForExit(30_000)
         assert(exit.code === 1, `${label}: exit was ${JSON.stringify(exit)}`)
         assert(failure.code === expectedCode, `${label}: expected ${expectedCode}, got ${JSON.stringify(failure.code ?? failure.error)}`)
+        assert(
+          !client.records.some(record => record.m4a0 === 'ready' || record.m4a0 === 'host-authenticated' || record.m4a0 === 'transport-ready'),
+          `${label}: a refused Client reached a business-ready record`,
+        )
       } finally {
         restore()
       }
@@ -1912,8 +1982,9 @@ async function main() {
     }
     trace('rejections-identity', { forgedInstanceId: 'HOST_IDENTITY_MISMATCH' })
 
-    // T16/T17: an alive-but-unresponsive PID, a build mismatch and a bad token
-    // are terminal refusals that never kill or replace the live Host.
+    // T16/T17: an alive-but-unresponsive PID, a protocol mismatch, a forged
+    // registry build identity and a bad token are terminal refusals that never
+    // kill or replace the live Host.
     const dummy = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })
     dummy.unref()
     trackedProcesses.set(dummy.pid, undefined)
@@ -1997,12 +2068,35 @@ async function main() {
       restoreFile(registryPath, registrySaved)
       restoreFile(launchPath, launchSaved)
     }
-    const incompatibleRegistry = { ...registry, buildId: 'a'.repeat(64) }
-    writeRawPrivate(registryPath, incompatibleRegistry)
+    const protocolIncompatibleRegistry = { ...registry, protocol: 'dsh-pi-tui/local/2' }
+    writeRawPrivate(registryPath, protocolIncompatibleRegistry)
+    writeRawPrivate(launchPath, launch)
+    const protocolIncompatibleRegistryBytes = readFileSync(registryPath)
+    const protocolIncompatibleLaunchBytes = readFileSync(launchPath)
+    try {
+      await expectClientFailure('T16 protocol incompatible', 'HOST_PROTOCOL_INCOMPATIBLE', () => {}, () => {})
+      assert(alive(hostReady.pid), 'T16 protocol mismatch killed the live Host')
+      assert(readFileSync(registryPath).equals(protocolIncompatibleRegistryBytes),
+        'T16 protocol mismatch mutated the registry')
+      assert(readFileSync(launchPath).equals(protocolIncompatibleLaunchBytes),
+        'T16 protocol mismatch mutated the launch material')
+      trace('t16-protocol-incompatible', { code: 'HOST_PROTOCOL_INCOMPATIBLE', hostAlive: true })
+    } finally {
+      restoreFile(registryPath, registrySaved)
+      restoreFile(launchPath, launchSaved)
+    }
+    // A forged registry buildId is no longer a Client admission gate: this
+    // candidate reaches the authenticated identity comparison, where the live
+    // Host's real echo differs from the registry and is a hard identity
+    // mismatch. That keeps buildId strict where it belongs (Host identity),
+    // not as a cross-build admission key.
+    const buildDriftRegistry = { ...registry, buildId: 'a'.repeat(64) }
+    writeRawPrivate(registryPath, buildDriftRegistry)
     writeRawPrivate(launchPath, launch)
     try {
-      await expectClientFailure('T16 build incompatible', 'HOST_BUILD_INCOMPATIBLE', () => {}, () => {})
-      assert(alive(hostReady.pid), 'T16 build mismatch killed the live Host')
+      await expectClientFailure('T16 registry build drift', 'HOST_IDENTITY_MISMATCH', () => {}, () => {})
+      assert(alive(hostReady.pid), 'T16 registry build drift killed the live Host')
+      trace('t16-registry-build-drift', { code: 'HOST_IDENTITY_MISMATCH', hostAlive: true })
     } finally {
       restoreFile(registryPath, registrySaved)
       restoreFile(launchPath, launchSaved)
@@ -2020,7 +2114,12 @@ async function main() {
       restoreFile(launchPath, launchSaved)
     }
     killTracked(dummy.pid, dummyStarttime, 'SIGKILL')
-    trace('rejections-host', { unresponsive: 'HOST_UNRESPONSIVE', buildIncompatible: 'HOST_BUILD_INCOMPATIBLE', authFailure: 'HOST_AUTH_FAILED' })
+    trace('rejections-host', {
+      unresponsive: 'HOST_UNRESPONSIVE',
+      protocolIncompatible: 'HOST_PROTOCOL_INCOMPATIBLE',
+      registryBuildDrift: 'HOST_IDENTITY_MISMATCH',
+      authFailure: 'HOST_AUTH_FAILED',
+    })
 
     // T15: a killed Host leaves a stale registry. The next Client may start a
     // new Host only through the kernel seat; the old token/Cookie do not carry.
