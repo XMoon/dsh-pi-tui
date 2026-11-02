@@ -723,38 +723,52 @@ test('a failed seat close or teardown never spawns a replacement Client', async 
   const fixture = reexecFixture(t)
   let spawned = 0
   const records: Array<Record<string, unknown>> = []
+  const stderr: string[] = []
   const seatFailure = await finishClientEntryShutdown({
     seat: { close: async () => { throw new Error('seat close exploded') } },
     reexec: { intent: fixture.intent, teardownSucceeded: true },
     emit: record => { records.push(record) },
-    stderr: () => {},
+    stderr: line => { stderr.push(line) },
     spawnChild: async () => { spawned += 1; return { code: 0, signal: null } },
   })
   assert.equal(seatFailure, 1)
   assert.equal(spawned, 0, 'a failed seat close still spawned C1')
   assert.equal(records.filter(record => record.m4a0 === 'cleanup-failure' && record.step === 'client-seat').length, 1)
   assert.equal(records.filter(record => record.m4r === 'handoff-failed' && record.phase === 'teardown').length, 1)
+  assert.equal(stderr.length, 1, 'a failed seat close must print ONE visible handoff failure line')
+  assert.match(stderr[0], /^Client handoff failed: the previous Client seat did not close\./u)
+  assert.match(stderr[0], /The Host was not stopped or replaced\./u)
+  assert.match(stderr[0], /Start a compatible Client manually to continue\./u)
+  assert.doesNotMatch(stderr[0], /\/home\/|\/tmp\/|\/proc\/|\bpid\b|cookie|token|connectUrl/iu,
+    'the teardown failure line leaked a private detail')
 
   const teardownFailure = await finishClientEntryShutdown({
     seat: { close: async () => {} },
     reexec: { intent: fixture.intent, teardownSucceeded: false },
     emit: record => { records.push(record) },
-    stderr: () => {},
+    stderr: line => { stderr.push(line) },
     spawnChild: async () => { spawned += 1; return { code: 0, signal: null } },
   })
   assert.equal(teardownFailure, 1)
   assert.equal(spawned, 0, 'an incomplete Client teardown still spawned C1')
+  assert.equal(stderr.length, 2, 'an incomplete teardown must print ONE visible handoff failure line')
+  assert.match(stderr[1], /^Client handoff failed: the previous Client teardown did not complete\./u)
+  assert.match(stderr[1], /Start a compatible Client manually to continue\./u)
+  assert.doesNotMatch(stderr[1], /\/home\/|\/tmp\/|\/proc\/|\bpid\b|cookie|token|connectUrl/iu,
+    'the teardown failure line leaked a private detail')
 })
 
 test('a failed Client seat close stays a nonzero normal exit without a replacement', async () => {
   const records: Array<Record<string, unknown>> = []
+  const stderr: string[] = []
   const code = await finishClientEntryShutdown({
     seat: { close: async () => { throw new Error('seat close exploded') } },
     emit: record => { records.push(record) },
-    stderr: () => {},
+    stderr: line => { stderr.push(line) },
   })
   assert.equal(code, 1, 'a seat close failure must stay a nonzero exit even without a reexec')
   assert.equal(records.filter(record => record.m4a0 === 'cleanup-failure' && record.step === 'client-seat').length, 1)
+  assert.deepEqual(stderr, [], 'a normal exit has no handoff failure claim to print')
 })
 
 test('a replacement package that changed after the preflight is refused without spawning', async t => {
@@ -889,7 +903,7 @@ test('the reexec trigger is internal, singular and starts only after the ONE sea
     'the replacement argv must carry only the real installed entry')
   // The handoff-restored claim is gated on the post-proof LIVE status, not on
   // the facts captured before the await.
-  const awaitProofIndex = source.indexOf('await handle.awaitHandoffOpen(')
+  const awaitProofIndex = source.indexOf('const proof = await handle.awaitHandoffOpen(')
   assert.ok(awaitProofIndex >= 0)
   const liveGateIndex = source.indexOf(
     'assertHandoffRestored(restored, expectedHostInstanceId, terminalError)',
@@ -900,6 +914,10 @@ test('the reexec trigger is internal, singular and starts only after the ONE sea
   const stopGateIndex = source.indexOf('if (stopping !== undefined)', awaitProofIndex)
   assert.ok(stopGateIndex > awaitProofIndex && stopGateIndex < liveGateIndex,
     'a stop that landed during the proof must be awaited before any restore claim')
+  const proofVerifyIndex = source.indexOf('proof.verify()', liveGateIndex)
+  const emitIndex = source.indexOf("m4r: 'handoff-restored'", liveGateIndex)
+  assert.ok(proofVerifyIndex > liveGateIndex && proofVerifyIndex < emitIndex,
+    'the exact generation/Session proof must be verified after the live gate and before the success claim')
   assert.doesNotMatch(source, /transport: 'connected',\n\s*sessionOpen: restored\.sessionOpen/u,
     'the handoff record must not hardcode a connected transport')
 })

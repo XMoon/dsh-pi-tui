@@ -521,14 +521,18 @@ export async function finishClientEntryShutdown(options: ClientEntryShutdownOpti
   const reexec = options.reexec
   if (reexec === undefined) return seatClosed ? undefined : 1
   if (!seatClosed || !reexec.teardownSucceeded) {
+    const reason = new Error(seatClosed
+      ? 'local client entry: the previous Client teardown did not complete'
+      : 'local client entry: the previous Client seat did not close')
     options.emit({
       m4r: 'handoff-failed',
       processRole: 'client',
       pid: process.pid,
       phase: 'teardown',
       expectedHostInstanceId: reexec.intent.expectedInstanceId,
-      error: seatClosed ? 'the Client teardown did not complete' : 'the Client seat did not close',
+      error: reason.message,
     })
+    options.stderr(handoffStartupFailureLine(reason))
     return 1
   }
   let target: ClientReexecTarget
@@ -1486,7 +1490,7 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       if (handle.status.transport !== 'connected') {
         throw new Error('local client entry: the handoff Client has no connected official transport')
       }
-      await handle.awaitHandoffOpen(surfaceFacts.sessionId, startupAbort.signal)
+      const proof = await handle.awaitHandoffOpen(surfaceFacts.sessionId, startupAbort.signal)
       // A stop/signal or an official transport fatal may have landed during the
       // open proof; never publish `handoff-restored` after either.
       if (stopping !== undefined) {
@@ -1495,6 +1499,9 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
       }
       const restored = handle.status
       const restoredFacts = assertHandoffRestored(restored, expectedHostInstanceId, terminalError)
+      // Final synchronous currentness fence over the generation/Session the
+      // proof settled on, immediately before the success claim.
+      proof.verify()
       emit({
         m4r: 'handoff-restored',
         processRole: 'client',
