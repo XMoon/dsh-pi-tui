@@ -108,7 +108,77 @@ const actionIds = (frame) => (frame?.actions ?? []).map((action) => String(actio
 const actionLabels = (frame) => (frame?.actions ?? []).map((action) => String(action.label ?? '')).join(' | ')
 const itemOf = (frame, id) => (frame?.items ?? []).find((item) => item.id === id)
 const textOf = (frame, key) => (frame?.texts ?? []).find((entry) => entry.key === key)?.text
+
+/* ------------------------------------------------------- the identity grid */
+
+/** One grid value as the text a reader sees. DISPLAY only — the style claim below reads
+ *  the runs, because a flattened string cannot prove a muted role survived the wire. */
+const spansText = (value) => {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    return value.map((run) => (typeof run === 'string' ? run : String(run?.t ?? ''))).join('')
+  }
+  return ''
+}
+/** The runs WITH their style tokens, exactly as the SDK sent them. */
+const spansRuns = (value) => {
+  if (typeof value === 'string') return [[value, '']]
+  if (!Array.isArray(value)) return []
+  return value.map((run) => (typeof run === 'string'
+    ? [run, '']
+    : [String(run?.t ?? ''), String(run?.s ?? '')]))
+}
+/** The frame's identity grid, as the production presenter really built it. */
+const identityKv = (frame) => frame?.identityKv
+const kvLabels = (frame) => (identityKv(frame)?.items ?? []).map((entry) => String(entry.k))
+const kvFacts = (frame) => Object.fromEntries(
+  (identityKv(frame)?.items ?? []).map((entry) => [String(entry.k), spansText(entry.v)]),
+)
+/** ONE fact of the grid by its own label, or `undefined` when the grid carries none. */
+const kvFact = (frame, label) => kvFacts(frame)[label]
+/** The identity grid is a HANDSHAKE outcome, read per run — never inferred from the
+ *  client's version label. */
+const negotiatedKv = (h) => (caps(h)?.kinds ?? []).includes('kv')
+/** The client's own grid subtree, ALWAYS scoped to a node (the Reader body), never to
+ *  the whole pane: Tern chrome legitimately contains other `sf-kv` markup. */
+const kvGridsIn = (node) => nodesIn(node, 'sf-kv')
+const kvKeysIn = (node) => nodesIn(node, 'sf-kv-k')
+const kvValuesIn = (node) => nodesIn(node, 'sf-kv-v')
+/** The client's own class tokens of ONE layout path segment (the element itself). */
+const segmentTokens = (path) => {
+  const last = String(path).split('>').pop() ?? ''
+  return last.split('.').slice(1)
+}
+/**
+ * The grid cells the capture REALLY painted inside the Reader body.
+ *
+ * The layout dump is the WHOLE pane, and Tern's own chrome may legitimately carry
+ * `sf-kv` markup of its own, so an ink claim is made only over the elements that sit
+ * under the overlay body AND whose OWN class token is the key/value cell — never over
+ * "the first path anywhere that contains the substring".
+ */
+const kvCells = (h, shotId, bodyClass = 'sf-ov-body') => {
+  const layout = JSON.parse(readFileSync(join(h.root, 'shots', 'serve', `${shotId}.layout.json`), 'utf8'))
+  const inReader = layout.elements.filter((entry) => String(entry.path)
+    .split('>')
+    .some((segment) => segmentTokens(segment).includes(bodyClass)))
+  return {
+    theme: layout.theme,
+    readerElements: inReader.length,
+    keys: inReader.filter((entry) => segmentTokens(entry.path).includes('sf-kv-k')),
+    values: inReader.filter((entry) => segmentTokens(entry.path).includes('sf-kv-v')),
+  }
+}
+/** One distinct painted colour of a cell set, or `undefined` when they do not agree. */
+const singleColor = (cells) => {
+  const colors = [...new Set(cells.map((entry) => String(entry.color ?? '')))]
+  return colors.length === 1 ? colors[0] : undefined
+}
+
 const groupHeads = (frame) => (frame?.order ?? []).filter((entry) => entry !== null && typeof entry === 'object')
+/** The subject's OWN broken-declaration reason (`tern-pane-preset-native-ux-subject.mts`
+ *  BROKEN), asserted complete on the wire and on the paint. */
+const BROKEN_REASON = 'plugin "missing-tools" is not installed; the declaration could not be composed'
 /** The pinned official Mode guide of `standard`, as `preset-guide-content.ts` carries it
  *  (source: deepseek-ai/deepseek-harness@d7432673 `packages/client/ui-agent-preset/src/
  *  client/guide-locales.ts`). A FRAGMENT LIST, so a truncated or reordered guide fails
@@ -325,11 +395,40 @@ const matrixCell = async (h, size) => {
   h.check(`${cellKey}: the Back row states the destination and its Esc twin (navigation, not a write)`,
     backLabelText.includes('← Back to presets') && backLabelText.includes('Esc'),
     `label=${JSON.stringify(backLabelText)}`)
+  // The identity facts: the WIRE carries one grid of exactly four ordered pairs, and the
+  // CLIENT lays that grid out at the top of this reading — asserted against its own
+  // `sf-kv` markup, scoped to the Reader body so no Tern chrome can impersonate it.
+  const kvFrame = lastFrame(h)
+  const grid = kvGridsIn(body)[0]
+  const valueCells = kvValuesIn(grid)
+  h.check(`${cellKey}: the Details wire carries exactly four ordered identity facts in one grid`,
+    negotiatedKv(h) && identityKv(kvFrame) !== undefined && identityKv(kvFrame).layout === 'grid'
+    && (identityKv(kvFrame)?.items ?? []).length === 4
+    && kvLabels(kvFrame).join(',') === 'Name,ID,Type,Scope'
+    && String(kvFact(kvFrame, 'Scope')).includes('Default: future new sessions'),
+    JSON.stringify({ kv: negotiatedKv(h), layout: identityKv(kvFrame)?.layout, labels: kvLabels(kvFrame), scope: kvFact(kvFrame, 'Scope') }))
   h.check(`${cellKey}: the Details first screen states the identity (Name/ID/Type/Scope) without scrolling`,
-    textOf(lastFrame(h), 'details-name') !== undefined && textOf(lastFrame(h), 'details-id') !== undefined
-    && textOf(lastFrame(h), 'details-type') !== undefined && textOf(lastFrame(h), 'details-scope') !== undefined
-    && String(textOf(lastFrame(h), 'details-scope')).includes('Default: future new sessions'),
-    JSON.stringify({ name: textOf(lastFrame(h), 'details-name'), id: textOf(lastFrame(h), 'details-id'), scope: textOf(lastFrame(h), 'details-scope') }))
+    grid !== undefined && containedXY(details.chains, grid)
+    && kvKeysIn(grid).map((node) => h.descendantsText(node)).join(',') === 'Name,ID,Type,Scope'
+    && valueCells.length === 4 && valueCells.every((node) => String(node.text ?? '').length > 0),
+    `grid=${box(grid)} keys=${kvKeysIn(grid).map((node) => JSON.stringify(h.descendantsText(node))).join(',')} values=${valueCells.map((node) => JSON.stringify(String(node.text ?? '').slice(0, 22))).join(',')}`)
+  h.check(`${cellKey}: the client paints ONE grid in this Reader, with four key cells and four value cells`,
+    kvGridsIn(body).length === 1 && kvKeysIn(grid).length === 4 && valueCells.length === 4
+    && textOf(kvFrame, 'details-name') === undefined && textOf(kvFrame, 'details-scope') === undefined,
+    `grids=${kvGridsIn(body).length} keys=${kvKeysIn(grid).length} values=${valueCells.length}`)
+  h.check(`${cellKey}: all four value cells start in ONE column and the grid stays inside the body`,
+    valueCells.length === 4
+    && new Set(valueCells.map((node) => Math.round(rect(node)[0]))).size === 1
+    && Math.round(rect(valueCells[0])[0]) > Math.round(rect(grid)[0])
+    && rect(grid)[2] > 0 && containedXY(details.chains, grid)
+    && rect(grid)[0] + rect(grid)[2] <= rect(body)[0] + rect(body)[2] + 1,
+    `valueX=${[...new Set(valueCells.map((node) => Math.round(rect(node)[0])))].join(',')} grid=${box(grid)} body=${box(body)}`)
+  h.measure(`${cellKey}: the identity grid geometry`, JSON.stringify({
+    grid: rect(grid),
+    valueColumnX: valueCells.map((node) => Math.round(rect(node)[0])),
+    gridHeight: rect(grid)[3],
+    legacyIdentityTextNodes: (kvFrame?.texts ?? []).filter((entry) => /^details-(name|id|type|scope)$/.test(entry.key)).length,
+  }))
   h.check(`${cellKey}: a reading page carries no picker and no footer (its ONE row is the Back navigation)`,
     pickerNode(h.snapshot()) === undefined && (lastFrame(h)?.actions ?? undefined) === undefined
     && operationRows(h.snapshot()).length === 1 && (lastFrame(h)?.back?.clickable === true),
@@ -354,6 +453,11 @@ export default async function (h) {
     ['picker', 'row', 'overlay', 'text', 'md'].every((kind) => (caps(h)?.kinds ?? []).includes(kind))
     && (caps(h)?.features ?? []).includes('scroll'),
     JSON.stringify({ kinds: caps(h)?.kinds, features: caps(h)?.features }))
+  // `kv` is a DISPLAY kind: it is read from THIS handshake (never inferred from the
+  // version label) and it decides which identity layout this lane must find.
+  h.check('the client really advertised `kv` in this handshake (measured, not inferred from its version)',
+    (caps(h)?.kinds ?? []).includes('kv'),
+    JSON.stringify({ ver: caps(h)?.ver, kinds: caps(h)?.kinds }))
 
   let snap = h.snapshot()
   let frame = lastFrame(h)
@@ -471,11 +575,19 @@ export default async function (h) {
     frame?.page === 'details' && overlayNode(snap) !== undefined && hasClass(overlayNode(snap), 'sz-lg')
     && frame?.head === 'Standard mode' && pickerNode(snap) === undefined,
     `page=${JSON.stringify(frame?.page)} head=${JSON.stringify(frame?.head)} overlay=${overlayNode(snap) === undefined ? 'none' : classTokens(overlayNode(snap)).join(' ')}`)
-  h.check('the identity block carries the COMPLETE Name/ID/Type/Scope (the relationship block is asserted on the default row)',
-    textOf(frame, 'details-name') === 'Standard mode' && textOf(frame, 'details-id') === 'standard'
-    && textOf(frame, 'details-type') === 'Built-in'
-    && String(textOf(frame, 'details-scope')) === 'Use: next session only · Default: future new sessions',
-    JSON.stringify(frame?.texts))
+  h.check('the identity block carries the COMPLETE Name/ID/Type/Scope as four ordered grid facts (the relationship block is asserted on the default row)',
+    kvFact(frame, 'Name') === 'Standard mode' && kvFact(frame, 'ID') === 'standard'
+    && kvFact(frame, 'Type') === 'Built-in'
+    && kvFact(frame, 'Scope') === 'Use: next session only · Default: future new sessions'
+    && kvLabels(frame).join(',') === 'Name,ID,Type,Scope',
+    JSON.stringify({ labels: kvLabels(frame), facts: kvFacts(frame) }))
+  // The Scope sentence is ONE fact with TWO roles: the prefixes stay muted, the values
+  // stay ordinary text. The claim is made on the wire RUN TOKENS, never on the flattened
+  // string, which cannot tell a role that survived from one that was dropped.
+  h.check('the Scope value keeps its styled runs on the wire (muted prefixes, plain values)',
+    JSON.stringify(spansRuns(identityKv(frame)?.items?.find((entry) => String(entry.k) === 'Scope')?.v))
+    === JSON.stringify([['Use: ', 'muted'], ['next session only', ''], [' · Default: ', 'muted'], ['future new sessions', '']]),
+    JSON.stringify(spansRuns(identityKv(frame)?.items?.find((entry) => String(entry.k) === 'Scope')?.v)))
   h.check('the page is READ-ONLY: no footer actions, ONE Back navigation row, ONE md body',
     (frame?.actions ?? undefined) === undefined && operationRows(snap).length === 1
     && frame?.back?.clickable === true
@@ -583,6 +695,18 @@ export default async function (h) {
   h.check(`at the 400x600 minimum the inline guide is TALLER than its viewport, so it must scroll`,
     guideOpened && narrowBody !== undefined && narrowMd !== undefined && rect(narrowMd)[3] > rect(narrowBody)[3],
     `opened=${guideOpened} page=${JSON.stringify(lastFrame(h)?.page)} md=${box(narrowMd)} body=${box(narrowBody)}`)
+  // NEGATIVE CONTROL, measured before the scroll: the guide's tail line really sits
+  // BELOW the body at this size, so a later "the tail is on screen" claim cannot pass
+  // vacuously on a document that already fit.
+  const mdTailOffset = () => {
+    const tail = textStarting(h.snapshot(), 'Expected output: a summary with references')
+    const body = overlayBody(h.snapshot())
+    if (tail === undefined || body === undefined) return undefined
+    return Math.round((rect(tail)[1] + rect(tail)[3]) - (rect(body)[1] + rect(body)[3]))
+  }
+  const tailOffsetBefore = mdTailOffset()
+  h.check('the negative control at 400x600: the guide tail starts far BELOW the body, so the scroll must matter',
+    tailOffsetBefore !== undefined && tailOffsetBefore > 200, JSON.stringify({ tailOffsetBefore }))
   const guided = await scrollUntilMoved(h, () => rect(markdownNode(h.snapshot()))[1], 'End')
   h.check('a real End key (retried across the documented stall) moves the CLIENT viewport to the tail',
     scrolls(h).some((op) => op.to === 'end') && guided.moved > 1,
@@ -604,11 +728,11 @@ export default async function (h) {
   snap = h.snapshot()
   frame = lastFrame(h)
   h.check('a Custom declaration reusing a shipped id stays Custom with NO guide section',
-    frame?.page === 'details' && textOf(frame, 'details-id') === 'minimal'
-    && textOf(frame, 'details-type') === 'Custom' && textOf(frame, 'details-name') === 'My minimal'
+    frame?.page === 'details' && kvFact(frame, 'ID') === 'minimal'
+    && kvFact(frame, 'Type') === 'Custom' && kvFact(frame, 'Name') === 'My minimal'
     && markdownNode(snap) === undefined
     && h.texts(snap).every((line) => !line.includes('Mode details')),
-    JSON.stringify({ id: textOf(frame, 'details-id'), type: textOf(frame, 'details-type'), md: markdownNode(snap) !== undefined }))
+    JSON.stringify({ id: kvFact(frame, 'ID'), type: kvFact(frame, 'Type'), md: markdownNode(snap) !== undefined }))
 
   // ------------------------- F2. the LONG-VALUE fixture (plan P07): the 180-glyph
   // unbroken id, the CRLF/CJK/emoji description and the long failure reason must be
@@ -627,21 +751,40 @@ export default async function (h) {
   const descriptionNode = textStarting(snap, 'Long description')
   const lineControl = textExactly(snap, 'Custom')
   const lineHeight = rect(lineControl)[3]
+  const longGrid = kvGridsIn(overlayBody(snap))[0]
+  const longValueCells = kvValuesIn(longGrid)
+  const idCell = longValueCells.find((node) => String(node.text ?? '').startsWith('no-space-'))
   h.check('the long-value fixture opens its Details page and renders the 180-glyph id, CJK/emoji description and failure reason COMPLETE',
-    longOpened && textOf(frame, 'details-id') === longId && String(textOf(frame, 'details-id')).length > 180
+    longOpened && kvFact(frame, 'ID') === longId && String(kvFact(frame, 'ID')).length > 180
+    && String(kvFact(frame, 'Name')) === 'A long custom preset'
+    && String(kvFact(frame, 'Type')) === 'Custom'
     && String(textOf(frame, 'details-description')).includes('中文描述')
     && String(textOf(frame, 'details-description')).includes('paragraph 11')
     && String(textOf(frame, 'details-broken')).endsWith('tail-of-the-reason'),
     JSON.stringify({
-      opened: longOpened, idLength: String(textOf(frame, 'details-id')).length,
+      opened: longOpened, idLength: String(kvFact(frame, 'ID')).length,
       descriptionLength: String(textOf(frame, 'details-description')).length,
       brokenLength: String(textOf(frame, 'details-broken')).length,
     }))
+  // The two claims are SEPARATE: the wire carried the whole 180-glyph id in ONE value
+  // (no app-side ellipsis, no pre-split into runs), and the CLIENT folded it inside the
+  // value column. A grid value is one run, never an array the app chopped up.
+  const rawIdValue = identityKv(frame)?.items?.find((entry) => String(entry.k) === 'ID')?.v
+  h.check('the long id reaches the grid as ONE complete value with no app-side ellipsis or pre-segmentation',
+    typeof rawIdValue === 'string' && rawIdValue === longId
+    && !rawIdValue.includes('…') && rawIdValue.length > 180,
+    JSON.stringify({ type: typeof rawIdValue, length: String(rawIdValue ?? '').length }))
   h.check('the client really WRAPS those values into many painted lines (P07: CJK/emoji/unbroken id)',
     idNode !== undefined && brokenNode !== undefined && descriptionNode !== undefined && lineHeight > 0
+    && idCell !== undefined && rect(idCell)[3] >= 2 * lineHeight
     && rect(idNode)[3] >= 2 * lineHeight && rect(descriptionNode)[3] >= 4 * lineHeight
     && rect(brokenNode)[3] >= 2 * lineHeight,
-    `line=${lineHeight} id=${box(idNode)} description=${box(descriptionNode)} broken=${box(brokenNode)}`)
+    `line=${lineHeight} idCell=${box(idCell)} id=${box(idNode)} description=${box(descriptionNode)} broken=${box(brokenNode)}`)
+  h.check('the grid stays inside the Reader body with the long id and never overflows it horizontally',
+    longGrid !== undefined && containedXY(snap.chains, longGrid)
+    && rect(longGrid)[0] + rect(longGrid)[2] <= rect(overlayBody(snap))[0] + rect(overlayBody(snap))[2] + 1
+    && longValueCells.length === 4 && kvGridsIn(overlayBody(snap)).length === 1,
+    `grid=${box(longGrid)} body=${box(overlayBody(snap))} values=${longValueCells.length}`)
   h.measure('the long-value line counts (client-painted)', JSON.stringify({
     lineHeight,
     idLines: rect(idNode)[3] / lineHeight,
@@ -799,6 +942,150 @@ export default async function (h) {
     // The VISIBLE statement of the same fact is that card's own native badge.
     && JSON.stringify(itemOf(sessionlessFrame, 'preset:cordis')?.badges) === JSON.stringify([{ text: 'Next session' }]),
     `current=${JSON.stringify(sessionlessFrame?.current)} badges=${JSON.stringify(itemOf(sessionlessFrame, 'preset:cordis')?.badges)}`)
+
+  // ------------------------- J. the pinned resolution × appearance grid (PR-B)
+  // The grid's whole claim is a PROPERTY OF THE PAINT, so every one of the plan's four
+  // sizes is captured in BOTH resolved appearances and asserted against what the client
+  // really laid out. `state.theme` is the proof of the appearance, never the file name.
+  await h.key('1', 900)
+  await h.waitFor('Agent presets')
+  const gridMetrics = []
+  for (const appearance of ['light', 'dark']) {
+    h.send('appearance', appearance)
+    const resolved = h.ctl('state').theme
+    h.check(`the client resolved the ${appearance} appearance (not just its capture label)`,
+      resolved === appearance, `state.theme=${resolved}`)
+    for (const size of [{ w: 1280, h: 800 }, { w: 900, h: 700 }, { w: 400, h: 600 }, { w: 900, h: 360 }]) {
+      await catalogue(h)
+      await h.resize(size.w, size.h)
+      await h.sleep(220)
+      const cellKey = `${size.w}x${size.h}`
+      // `ptc` is the recorded new-session default: the page then carries a REAL
+      // relationship line, a shipped guide and no failure, which is the densest case.
+      const browsed = await browseTo(h, 'preset:ptc')
+      const opened = await openDetails(h)
+      const gridSnap = h.snapshot()
+      const gridFrame = lastFrame(h)
+      const body = overlayBody(gridSnap)
+      const grids = kvGridsIn(body)
+      const grid = grids[0]
+      const keys = kvKeysIn(grid)
+      const values = kvValuesIn(grid)
+      h.check(`${appearance} ${cellKey}: Enter opens the Reader and paints EXACTLY ONE identity grid of four pairs`,
+        browsed && opened && negotiatedKv(h) && grids.length === 1 && grid !== undefined
+        && (gridFrame?.identityKv?.items ?? []).length === 4 && gridFrame?.identityKv?.layout === 'grid'
+        && keys.length === 4 && values.length === 4
+        && kvKeysIn(grid).map((node) => h.descendantsText(node)).join(',') === 'Name,ID,Type,Scope',
+        `browsed=${browsed} opened=${opened} grids=${grids.length} items=${(gridFrame?.identityKv?.items ?? []).length} keys=${keys.length} values=${values.length}`)
+      h.check(`${appearance} ${cellKey}: the four value cells share ONE aligned column and nothing is clipped horizontally`,
+        values.length === 4
+        && [...new Set(values.map((node) => Math.round(rect(node)[0])))].length === 1
+        && Math.round(rect(values[0])[0]) > Math.round(rect(grid)[0])
+        && rect(grid)[2] > 0 && containedXY(gridSnap.chains, grid)
+        && rect(grid)[0] + rect(grid)[2] <= rect(body)[0] + rect(body)[2] + 1,
+        `valueX=${[...new Set(values.map((node) => Math.round(rect(node)[0])))].join(',')} grid=${box(grid)} body=${box(body)}`)
+      // Nothing else was merged into the grid: the relationship line, the description and
+      // the Markdown guide stay the page's OWN nodes, outside the grid subtree.
+      const relationLine = (gridFrame?.texts ?? []).find((entry) => entry.key === 'relation-default')
+      h.check(`${appearance} ${cellKey}: the relationship fact stays a separate line and never a fifth pair`,
+        kvLabels(gridFrame).join(',') === 'Name,ID,Type,Scope'
+        && relationLine !== undefined && String(relationLine.text).includes('ptc')
+        && nodesIn(grid, 'sf-kv-v').every((node) => !String(node.text ?? '').includes('New-session default')),
+        `labels=${kvLabels(gridFrame).join(',')} relation=${JSON.stringify(relationLine?.text)}`)
+      h.check(`${appearance} ${cellKey}: the guide and the description stay OUTSIDE the grid subtree`,
+        markdownNode(gridSnap) === undefined || nodesIn(grid, 'sf-md').length === 0
+        && (gridFrame?.texts ?? []).every((entry) => entry.key !== 'details-description'
+          || String(entry.text) !== String(kvFact(gridFrame, 'Scope'))),
+        `mdInGrid=${grid === undefined ? -1 : nodesIn(grid, 'sf-md').length}`)
+      h.measure(`${appearance} ${cellKey}: the Scope runs on the wire, with their style tokens`,
+        JSON.stringify(spansRuns((gridFrame?.identityKv?.items ?? []).find((entry) => String(entry.k) === 'Scope')?.v)))
+      const shotId = h.capture(`details-grid-${cellKey}-${appearance}`,
+        `the ${cellKey} Details Reader identity grid in the ${appearance} appearance`)
+      // The ink claim is made over the Reader's OWN grid cells only (scoped by the
+      // overlay-body ancestor and by the element's own class token), and it requires the
+      // full 4+4 cell count: a chrome `sf-kv` elsewhere in the pane can neither
+      // impersonate the result nor stand in for a missing cell.
+      const cells = kvCells(h, shotId)
+      const keyColor = singleColor(cells.keys)
+      const valueColor = singleColor(cells.values)
+      h.check(`${appearance} ${cellKey}: the client paints this Reader's four key cells MUTED and its four value cells as text (two distinct inks)`,
+        cells.theme === appearance && cells.keys.length === 4 && cells.values.length === 4
+        && keyColor !== undefined && valueColor !== undefined && /^rgb\(/.test(valueColor)
+        && keyColor !== valueColor,
+        JSON.stringify({ theme: cells.theme, keys: cells.keys.length, values: cells.values.length, keyColor, valueColor, readerElements: cells.readerElements }))
+      h.measure(`${appearance} ${cellKey}: the grid's painted inks and value-column widths`,
+        JSON.stringify({
+          keyColor, valueColor,
+          keyBackgrounds: [...new Set(cells.keys.map((entry) => String(entry.backgroundColor ?? '')))],
+          valueWidths: cells.values.map((entry) => Math.round(entry.rect[2])),
+          valueHeights: cells.values.map((entry) => Math.round(entry.rect[3])),
+        }))
+      gridMetrics.push({
+        appearance, size: cellKey,
+        grid: rect(grid), valueColumnX: Math.round(rect(values[0])?.[0] ?? -1),
+        keys: keys.length, values: values.length,
+        identityBottom: rect(grid)[1] + rect(grid)[3],
+        guideTop: markdownNode(gridSnap) === undefined ? null : rect(markdownNode(gridSnap))[1],
+        body: rect(body), keyInk: keyColor, valueInk: valueColor,
+      })
+      await h.key('Escape', 700)
+    }
+  }
+  h.send('appearance', 'light')
+  h.measure('the PR-B resolution × appearance grid (identity block, guide reach and painted inks)',
+    JSON.stringify(gridMetrics))
+  h.check('every pinned size paints one grid whose four values share one column, in both appearances',
+    gridMetrics.length === 8 && gridMetrics.every((entry) => entry.keys === 4 && entry.values === 4
+      && entry.valueColumnX > 0 && entry.grid[2] > 0),
+    JSON.stringify(gridMetrics.map((entry) => `${entry.appearance} ${entry.size}@${entry.valueColumnX}`)))
+
+  // ------------------------- K. the broken declaration with NO description (B07 + B08)
+  // A failure row is the equivalence class where the grid must NOT absorb anything: it
+  // publishes no description, it owns a complete reason line, and both writes stay
+  // refused. Asserted on the client's own paint, not on a renderer field.
+  await catalogue(h)
+  await h.resize(1280, 800)
+  const failureBrowsed = await browseTo(h, 'preset:broken-preset')
+  const beforeFailure = lastFrame(h)
+  const failureOpened = await openDetails(h)
+  const failureSnap = h.snapshot()
+  const failureFrame = lastFrame(h)
+  const failureBody = overlayBody(failureSnap)
+  const failureGrid = kvGridsIn(failureBody)[0]
+  h.check('a broken declaration keeps BOTH writes refused with their reason before the reading opens',
+    failureBrowsed && actionOf(beforeFailure, 'use')?.disabled === 'Preset failed to load'
+    && actionOf(beforeFailure, 'set-default')?.disabled === 'Preset failed to load',
+    JSON.stringify({ use: actionOf(beforeFailure, 'use')?.disabled, def: actionOf(beforeFailure, 'set-default')?.disabled }))
+  h.check('the broken row still grids exactly the four identity facts, none of them a placeholder',
+    failureOpened && kvGridsIn(failureBody).length === 1
+    && kvLabels(failureFrame).join(',') === 'Name,ID,Type,Scope'
+    && (failureFrame?.identityKv?.items ?? []).length === 4
+    && kvValuesIn(failureGrid).length === 4
+    && kvValuesIn(failureGrid).every((node) => String(node.text ?? '').length > 0)
+    && kvFact(failureFrame, 'Type') === 'Custom',
+    JSON.stringify({ opened: failureOpened, labels: kvLabels(failureFrame), facts: kvFacts(failureFrame) }))
+  h.check('the load failure keeps its own label and ONE complete word-wrapped line, outside the grid',
+    textOf(failureFrame, 'details-broken') === BROKEN_REASON
+    && nodesIn(failureGrid ?? failureBody, 'sf-kv-v').every((node) => !String(node.text ?? '').includes('missing-tools'))
+    && h.texts(failureSnap).some((line) => line.includes('Failed to load'))
+    && textStarting(failureSnap, 'plugin "missing-tools" is not installed;') !== undefined,
+    `reason=${JSON.stringify(textOf(failureFrame, 'details-broken'))}`)
+  h.check('a declaration that publishes no description states it in words and grows no fifth fact',
+    textOf(failureFrame, 'details-description') === undefined
+    && h.texts(failureSnap).some((line) => line === 'No description provided.')
+    && kvLabels(failureFrame).length === 4,
+    JSON.stringify({ description: textOf(failureFrame, 'details-description'), labels: kvLabels(failureFrame) }))
+  h.check('a broken Custom declaration borrows no official guide',
+    markdownNode(failureSnap) === undefined && (failureFrame?.markdown === undefined),
+    JSON.stringify({ md: failureFrame?.markdown?.length ?? null }))
+  h.capture('details-broken-1280x800', 'the broken declaration: four identity facts, the reason line, no description')
+  const appliesBeforeFailure = applies(h).length
+  const defaultsBeforeFailure = defaults(h).length
+  await h.key('Escape', 800)
+  h.check('reading the failure wrote nothing and returned to the catalogue',
+    lastFrame(h)?.page === 'catalog' && applies(h).length === appliesBeforeFailure
+    && defaults(h).length === defaultsBeforeFailure,
+    `page=${JSON.stringify(lastFrame(h)?.page)} applies=${applies(h).length} defaults=${defaults(h).length}`)
 
   // ------------------------------------------- I. the stale footer-token control
   const appliesFinal = applies(h).length

@@ -202,14 +202,14 @@ export function installTspPane(options: {
   // The native-kind/feature sets are the pane's own advertised set, exactly like the
   // real client. Model, Preset and Session Browser opt-ins each add only their native
   // picker/Reader kinds; Preset adds `md` for its guide. Reader pages negotiate scroll.
-  // The two Details Readers add `kv` because those opt-ins are exactly the panes whose
+  // The three Details Readers add `kv` because those opt-ins are exactly the panes whose
   // Reader paints its labelled short facts as a grid; a case that must prove the
   // no-`kv` degradation passes `kinds` verbatim instead.
   // A case can override the advertised sets verbatim (fail-closed).
   const native = Array.from(new Set([
     ...(options.modelPicker === true ? ['picker', 'row', 'overlay', 'text', 'kv'] : []),
     ...(options.composerActions === true ? ['el'] : []),
-    ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md'] : []),
+    ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md', 'kv'] : []),
     ...(options.sessionBrowser === true ? ['picker', 'row', 'overlay', 'text', 'kv'] : []),
     ...(options.workDetails === true ? ['row', 'text'] : []),
     ...(options.nativeImages === true ? ['image'] : []),

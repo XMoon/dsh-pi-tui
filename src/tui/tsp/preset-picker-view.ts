@@ -64,6 +64,11 @@ import {
 } from './preset-picker-state.ts'
 
 export interface PresetPickerViewDeps {
+  /** Whether the pane negotiated the read-only `kv` kind. The Details page's four
+   *  identity facts become ONE grid when it did, and stay the original label-over-value
+   *  text lines when it did not. Display only: the facts, their order, their values and
+   *  every other node on the page are identical either way. */
+  readonly nativeKv: boolean
   /** Bind one intent to THIS frame's revision (admission lives in the presenter). */
   readonly bind: (intent: PresetPickerIntent) => () => void
 }
@@ -184,28 +189,66 @@ function detailsBackRow(panel: PresetPickerPanel, deps: PresetPickerViewDeps): N
 }
 
 /** The Details page's identity block: the complete values, wrapped by the client
- *  at the layout's real width — never pre-split. */
-function detailsIdentity(panel: PresetPickerPanel, row: NonNullable<ReturnType<typeof highlightedRow>>): Node[] {
+ *  at the layout's real width — never pre-split.
+ *
+ *  A pane that negotiated the read-only `kv` kind gets the FOUR facts as ONE native
+ *  grid: the client owns the two columns, so a narrow pane stops paying a separate
+ *  label line for every fact. A pane that did not gets the ORIGINAL eight text nodes,
+ *  in the original order, with the original keys, `wrap` and muted label role. The
+ *  choice is a layout for the same four facts and nothing else — the relationship
+ *  lines, the failure reason, the description and the guide are outside it, and no
+ *  branch keeps a hidden copy of what the other branch already painted. */
+function detailsIdentity(
+  panel: PresetPickerPanel,
+  row: NonNullable<ReturnType<typeof highlightedRow>>,
+  nativeKv: boolean,
+): Node[] {
   const relations = statusRelations(panel, row)
   return [
     ui.col(
       { key: `preset-details-identity-${readingScope(panel)}`, gap: 'xs' },
-      ui.text(span('Name', 'muted')),
-      ui.text({ key: 'details-name', text: sanitizeDisplayText(row.name), wrap: 'char' }),
-      ui.text(span('ID', 'muted')),
-      ui.text({ key: 'details-id', text: sanitizeDisplayText(row.id), wrap: 'char' }),
-      ui.text(span('Type', 'muted')),
-      ui.text({ key: 'details-type', text: row.builtIn ? 'Built-in' : 'Custom' }),
-      ui.text(span('Scope', 'muted')),
-      ui.text({
-        key: 'details-scope',
-        spans: [
-          span('Use: ', 'muted'),
-          span(panel.request.subject.sessionless ? 'next session only' : 'current blank session'),
-          span(' · Default: ', 'muted'),
-          span('future new sessions'),
-        ],
-      }),
+      ...(nativeKv
+        ? [
+            ui.kv({
+              key: `preset-details-kv-identity-${readingScope(panel)}`,
+              layout: 'grid',
+              items: [
+                { k: 'Name', v: sanitizeDisplayText(row.name) },
+                { k: 'ID', v: sanitizeDisplayText(row.id) },
+                { k: 'Type', v: row.builtIn ? 'Built-in' : 'Custom' },
+                {
+                  // ONE fact, ONE value: the `Use:`/`Default:` hierarchy is the scope
+                  // sentence the Owner froze, carried as styled runs, never split into
+                  // two grid rows or two labels.
+                  k: 'Scope',
+                  v: [
+                    span('Use: ', 'muted'),
+                    span(panel.request.subject.sessionless ? 'next session only' : 'current blank session'),
+                    span(' · Default: ', 'muted'),
+                    span('future new sessions'),
+                  ],
+                },
+              ],
+            }),
+          ]
+        : [
+            ui.text(span('Name', 'muted')),
+            ui.text({ key: 'details-name', text: sanitizeDisplayText(row.name), wrap: 'char' }),
+            ui.text(span('ID', 'muted')),
+            ui.text({ key: 'details-id', text: sanitizeDisplayText(row.id), wrap: 'char' }),
+            ui.text(span('Type', 'muted')),
+            ui.text({ key: 'details-type', text: row.builtIn ? 'Built-in' : 'Custom' }),
+            ui.text(span('Scope', 'muted')),
+            ui.text({
+              key: 'details-scope',
+              spans: [
+                span('Use: ', 'muted'),
+                span(panel.request.subject.sessionless ? 'next session only' : 'current blank session'),
+                span(' · Default: ', 'muted'),
+                span('future new sessions'),
+              ],
+            }),
+          ]),
       ...relations.flatMap((relation) => [
         ui.text({ key: relation.id, spans: [span(`${relation.label}: `, 'muted'), span(sanitizeDisplayText(relation.value))] }),
       ]),
@@ -246,7 +289,7 @@ function detailsOverlay(panel: PresetPickerPanel, deps: PresetPickerViewDeps): N
       ...(row === undefined
         ? [ui.text(span('No preset is selected.', 'muted'))]
         : [
-            ...detailsIdentity(panel, row),
+            ...detailsIdentity(panel, row, deps.nativeKv),
             // ONE rule + spacer at the boundary between the INERT facts and the
             // long reading content: the design language's counted separation device
             // (one rule per boundary, never flanking a text line).

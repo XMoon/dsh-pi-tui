@@ -88,6 +88,14 @@ complete description, the load-failure reason where relevant, and — for a
 shipped preset only — the official Mode guide inline. A user declaration never
 receives the official guide.
 
+The Details Reader paints the selected preset's Name, ID, Type and Scope as one
+native aligned `kv` grid when the pane advertises `kv`; otherwise it retains the
+original complete label-then-value text lines. Scope remains one fact with its
+`Use:` / `Default:` text hierarchy. Current/Next/Default relationships, any
+load-failure reason, the description and the shipped Mode guide stay separate
+and complete. Missing `kv` never hides the picker/reader or changes a write.
+The existing Back/scroll/reading-epoch contracts are unchanged.
+
 The way back is a native `ui.row({onClick})` navigation row bound to the same
 `back` intent as `Esc`. No stylesheet is used on this layer: the client paints
 no stylesheet border/background on an `el` button. The Back row is the first row
