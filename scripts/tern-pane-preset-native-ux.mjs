@@ -166,6 +166,27 @@ const textStartingIn = (root, prefix) => subtreeOf(root).find((node) => String(n
 const textExactlyIn = (root, text) => subtreeOf(root).find((node) => String(node.text ?? '') === text)
 const textsIn = (root) => subtreeOf(root).map((node) => String(node.text ?? '')).filter(Boolean)
 const markdownIn = (root) => subtreeOf(root).find((node) => hasClass(node, 'sf-md'))
+/**
+ * The reading's own subtree ANCHOR, checked rather than assumed.
+ *
+ * Every `…In(root)` selector below is handed `overlayBody(snap)`, which is itself a
+ * pane-wide first match. So the subtree claim is only as honest as that anchor: the
+ * pane must carry exactly ONE overlay, it must be the `lg` one, and its own title must
+ * be the preset this reading describes. That is asserted per Details cell, which turns
+ * "the body I scoped to is this reading's body" from an assumption into a measured fact.
+ */
+const readerAnchor = (snap) => {
+  const overlays = snap.nodes.filter((node) => hasClass(node, 'sf-overlay'))
+  const bodies = snap.nodes.filter((node) => hasClass(node, 'sf-ov-body'))
+  const titles = subtreeOf(overlays[0]).filter((node) => hasClass(node, 'sf-ov-title')).map((node) => String(node.text ?? ''))
+  return {
+    overlays: overlays.length,
+    bodies: bodies.length,
+    lg: overlays.length === 1 && hasClass(overlays[0], 'sz-lg'),
+    title: titles.length === 1 ? titles[0] : undefined,
+    body: bodies[0],
+  }
+}
 /** The client's own class tokens of ONE layout path segment (the element itself). */
 const segmentTokens = (path) => {
   const last = String(path).split('>').pop() ?? ''
@@ -451,10 +472,23 @@ const matrixCell = async (h, size) => {
     gridHeight: rect(grid)[3],
     legacyIdentityTextNodes: (kvFrame?.texts ?? []).filter((entry) => /^details-(name|id|type|scope)$/.test(entry.key)).length,
   }))
+  // The reading's own operation-row count, taken from the overlay body subtree, and the
+  // row IS the Back navigation: a chrome `sf-row` elsewhere in the pane can neither pad
+  // the count nor stand in for the reading's single navigable row.
+  // The head is a property of the DETAILS frame, so it is read from the frame this
+  // reading produced (`kvFrame`), never from the catalogue frame cached at the top of
+  // the cell — that mistake made this very comparison vacuously false in run v8.
+  const anchor = readerAnchor(details)
+  h.check(`${cellKey}: the subtree every Reader claim is scoped to is THIS reading's own body`,
+    anchor.overlays === 1 && anchor.bodies === 1 && anchor.lg && anchor.title === kvFrame?.head,
+    JSON.stringify({ overlays: anchor.overlays, bodies: anchor.bodies, lg: anchor.lg, paintedTitle: anchor.title, wireHead: kvFrame?.head }))
+  const readerRows = nodesIn(body, 'sf-row')
   h.check(`${cellKey}: a reading page carries no picker and no footer (its ONE row is the Back navigation)`,
     pickerNode(h.snapshot()) === undefined && (lastFrame(h)?.actions ?? undefined) === undefined
-    && operationRows(h.snapshot()).length === 1 && (lastFrame(h)?.back?.clickable === true),
-    `sf-picker=${nodesWith(h.snapshot(), 'sf-picker').length} actions=${JSON.stringify(lastFrame(h)?.actions)} back=${JSON.stringify(lastFrame(h)?.back)}`)
+    && readerRows.length === 1
+    && h.descendantsText(readerRows[0]).includes('Back to presets')
+    && (lastFrame(h)?.back?.clickable === true),
+    `sf-picker=${nodesWith(h.snapshot(), 'sf-picker').length} readerRows=${readerRows.length} paneRows=${operationRows(h.snapshot()).length} actions=${JSON.stringify(lastFrame(h)?.actions)} back=${JSON.stringify(lastFrame(h)?.back)}`)
   h.capture(`details-${cellKey}`, `the ${cellKey} Details page`)
   await catalogue(h)
   return { metrics: { panePx, sheetWidth: rect(sheet)[2], sheetHeight: rect(sheet)[3], cards: cards.length, cardWidth: cardW[0], rowHeight: rowHeights[0] } }
@@ -614,12 +648,18 @@ export default async function (h) {
   // overlay body subtree — never over the whole window, where Tern's own chrome can
   // legitimately carry the same words or the same `sf-md` markup.
   const reader = overlayBody(snap)
+  const detailAnchor = readerAnchor(snap)
+  h.check('the subtree the Details claims are scoped to is the body of THIS reading (one lg overlay, titled by the preset it describes)',
+    detailAnchor.overlays === 1 && detailAnchor.bodies === 1 && detailAnchor.lg && detailAnchor.title === frame?.head,
+    JSON.stringify({ overlays: detailAnchor.overlays, bodies: detailAnchor.bodies, lg: detailAnchor.lg, paintedTitle: detailAnchor.title, wireHead: frame?.head }))
+  const detailRows = nodesIn(reader, 'sf-row')
   h.check('the page is READ-ONLY: no footer actions, ONE Back navigation row, ONE md body',
-    (frame?.actions ?? undefined) === undefined && operationRows(snap).length === 1
+    (frame?.actions ?? undefined) === undefined && detailRows.length === 1
+    && h.descendantsText(detailRows[0]).includes('Back to presets')
     && frame?.back?.clickable === true
     && markdownIn(reader) !== undefined
     && subtreeOf(reader).filter((node) => hasClass(node, 'sf-md')).length === 1,
-    JSON.stringify({ actions: frame?.actions, back: frame?.back, rows: operationRows(snap).length, md: subtreeOf(reader).filter((node) => hasClass(node, 'sf-md')).length }))
+    JSON.stringify({ actions: frame?.actions, back: frame?.back, readerRows: detailRows.length, paneRows: operationRows(snap).length, md: subtreeOf(reader).filter((node) => hasClass(node, 'sf-md')).length }))
   h.check('the official guide is INLINE on the same page: the pinned copy, complete, in order',
     (frame?.markdown?.text ?? '').startsWith(STANDARD_GUIDE[0])
     && (frame?.markdown?.text ?? '').endsWith(STANDARD_GUIDE.at(-1))
