@@ -5088,3 +5088,180 @@ test('a userless next-turn wakeup turn folds the Snapshot and next-step notice i
   const activityIndex = expanded.findIndex(block => block.kind === 'activity')
   assert.ok(wakeIndex >= 0 && wakeIndex < activityIndex, 'the wakeup cause remains foundation when expanded')
 })
+
+// ── Working same-turn Agent relay follows the Thought (Context disclosure PR-B) ──
+
+/** One durable Working Agent relay delivery: next-step insert → same-turn
+ * claim → folded `user/message` (id preserved). */
+function workingAgentRelayEvents(id: string, text: string, time: number, seq: number): SessionEvent[] {
+  const message = {
+    id: MessageId(id), role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-child-relay' },
+  }
+  return [
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, time, seq),
+    eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, time + 0.1, seq + 1),
+    eventAt('user/message', message, time + 0.2, seq + 2),
+  ]
+}
+
+test('a proven same-turn Agent relay is hidden inside the collapsed Thought and restored once when expanded', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 5600, 0),
+    eventAt('user/message', {
+      id: MessageId('relay-focus-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, 5601, 1),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, 5602, 2),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('relay-focus-c1'), name: 'read', arguments: '{}' }, 5603, 3),
+    eventAt('tool/result', {
+      turn: 0, step: 0,
+      message: {
+        id: MessageId('relay-focus-r1'), role: 'tool', toolCallId: ToolCallId('relay-focus-c1'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('relay-focus-c1') },
+      },
+    }, 5604, 4),
+    ...workingAgentRelayEvents('relay-focus-notice', 'FOCUS_RELAY_BODY', 5605, 5),
+    eventAt('assistant/chunk', { turn: 0, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: 'second' } }, 5608, 8),
+    eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('relay-focus-c2'), name: 'bash', arguments: '{}' }, 5609, 9),
+    eventAt('tool/result', {
+      turn: 0, step: 1,
+      message: {
+        id: MessageId('relay-focus-r2'), role: 'tool', toolCallId: ToolCallId('relay-focus-c2'),
+        content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: ToolCallId('relay-focus-c2') },
+      },
+    }, 5610, 10),
+    eventAt('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('relay-focus-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 5611, 11),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5612, 12),
+  ])
+  const messages = folder.messages()
+  const relay = messages.find(message => message.kind === 'system' && message.text === 'FOCUS_RELAY_BODY')
+  assert.ok(relay !== undefined && relay.kind === 'system')
+  assert.equal(relay.contextPresentation?.sameTurnNextStep, true, 'fixture: durable Working provenance')
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant'])
+  assert.ok(!collapsed.some(block => block.kind === 'message' && block.message === relay),
+    'the carried relay is not a persistent row outside the Thought')
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.deepEqual(blockKinds(expanded), ['user', 'activity', 'thinking', 'tool', 'system', 'thinking', 'tool', 'assistant'])
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === relay).length, 1,
+    'expanded Focus restores the relay exactly once in raw order')
+  const relayIndex = expanded.findIndex(block => block.kind === 'message' && block.message === relay)
+  assert.ok(expanded[relayIndex - 1]?.kind === 'message' && expanded[relayIndex + 1]?.kind === 'message',
+    'the relay keeps its chronology between the two Process rows')
+})
+
+test('an opening proven same-turn relay joins the first Thought instead of the foundation', () => {
+  const folder = new TranscriptFolder()
+  applyMixed(folder, [
+    eventAt('turn/start', { turn: 0 }, 5700, 0),
+    eventAt('user/message', {
+      id: MessageId('relay-open-prompt'), role: 'user',
+      content: [{ type: 'text', text: 'go' }],
+      source: { kind: 'user' },
+    }, 5701, 1),
+    ...workingAgentRelayEvents('relay-open-notice', 'OPENING_RELAY_BODY', 5702, 2),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, 5705, 5),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('relay-open-c1'), name: 'read', arguments: '{}' }, 5706, 6),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('relay-open-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 5707, 7),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5708, 8),
+  ])
+  const messages = folder.messages()
+  const relay = messages.find(message => message.kind === 'system')
+  assert.ok(relay !== undefined)
+  assert.equal(focusThoughtLeadBoundary(messages), 1,
+    'the lead boundary stops after the user: the qualified relay is not foundation')
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['user', 'activity', 'assistant'])
+  const expanded = projectTools(messages, folder.turnActivities(), new Set([0]))
+  assert.equal(expanded.filter(block => block.kind === 'message' && block.message === relay).length, 1,
+    'the opening qualified relay is restored inside the expanded Thought exactly once')
+})
+
+test('a next-turn wakeup Agent relay stays visible before the Thought', () => {
+  const folder = new TranscriptFolder()
+  const wakeMessage = {
+    id: MessageId('relay-wake-message'), role: 'user',
+    content: [{ type: 'text', text: 'WAKEUP_RELAY_BODY' }],
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-waker' },
+  }
+  applyMixed(folder, [
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, inserted: [wakeMessage] }, 5800, 0),
+    eventAt('turn/start', { turn: 0 }, 5801, 1),
+    eventAt('agent/inbox/spliced', { target: 'next-turn', start: 0, removedCount: 1, inserted: [] }, 5802, 2),
+    eventAt('user/message', wakeMessage, 5803, 3),
+    eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'reasoning' } }, 5804, 4),
+    eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('relay-wake-c1'), name: 'read', arguments: '{}' }, 5805, 5),
+    eventAt('assistant/message', {
+      turn: 0, step: 1,
+      message: { id: MessageId('relay-wake-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 5806, 6),
+    eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5807, 7),
+  ])
+  const messages = folder.messages()
+  const wake = messages.find(message => message.kind === 'system')
+  assert.ok(wake !== undefined)
+  assert.equal(wake.contextPresentation?.sameTurnNextStep, undefined)
+  const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+  assert.deepEqual(blockKinds(collapsed), ['system', 'activity', 'assistant'],
+    'the wakeup relay stays a visible foundation row before the Thought')
+  const wakeIndex = collapsed.findIndex(block => block.kind === 'message' && block.message === wake)
+  const thoughtIndex = collapsed.findIndex(block => block.kind === 'activity')
+  assert.ok(wakeIndex >= 0 && wakeIndex < thoughtIndex)
+})
+
+test('a claimed subagent-settled Notice stays independently visible for every settlement outcome', () => {
+  const outcomes = [
+    'Background subagent child-x finished and will do no further work unless you send it more.',
+    'Background subagent child-x was stopped before it finished.',
+    'Background subagent child-x failed before it finished.',
+    'Background subagent child-x ran out of room before it finished.',
+    'Background subagent child-x declined the task.',
+  ]
+  for (const summary of outcomes) {
+    const settled = {
+      id: MessageId(`settled-${outcomes.indexOf(summary)}`), role: 'user',
+      content: [{ type: 'text', text: `SETTLED_BODY ${outcomes.indexOf(summary)}` }],
+      source: { kind: 'subagent-settled', form: 'notice', summary, senderSessionId: 'child-x' },
+    }
+    const folder = new TranscriptFolder()
+    applyMixed(folder, [
+      eventAt('turn/start', { turn: 0 }, 5900, 0),
+      eventAt('user/message', {
+        id: MessageId('settled-prompt'), role: 'user',
+        content: [{ type: 'text', text: 'go' }],
+        source: { kind: 'user' },
+      }, 5901, 1),
+      eventAt('assistant/chunk', { turn: 0, step: 0, chunk: { type: 'reasoning-delta', index: 0, text: 'first' } }, 5902, 2),
+      eventAt('tool/call', { turn: 0, step: 0, callId: ToolCallId('settled-c1'), name: 'read', arguments: '{}' }, 5903, 3),
+      eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [settled] }, 5904, 4),
+      eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 5904.1, 5),
+      eventAt('user/message', settled, 5904.2, 6),
+      eventAt('tool/call', { turn: 0, step: 1, callId: ToolCallId('settled-c2'), name: 'bash', arguments: '{}' }, 5905, 7),
+      eventAt('assistant/message', {
+        turn: 0, step: 2,
+        message: { id: MessageId('settled-final'), role: 'assistant', content: [{ type: 'text', text: 'done' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+      }, 5906, 8),
+      eventAt('turn/end', { turn: 0, reason: { kind: 'completed' } }, 5907, 9),
+    ])
+    const messages = folder.messages()
+    const notice = messages.find(message => message.kind === 'system')
+    assert.ok(notice !== undefined && notice.kind === 'system')
+    assert.equal(notice.contextPresentation?.sameTurnNextStep, undefined,
+      `outcome ${outcomes.indexOf(summary)}: a settlement Notice is never a Working delivery`)
+    assert.equal(notice.summary, summary, 'the raw DSH summary is preserved')
+    const collapsed = projectTools(messages, folder.turnActivities(), new Set())
+    assert.ok(collapsed.some(block => block.kind === 'message' && block.message === notice),
+      `outcome ${outcomes.indexOf(summary)}: the settlement stays visible while collapsed`)
+    assert.ok(collapsed.some(block => block.kind === 'activity'))
+  }
+})

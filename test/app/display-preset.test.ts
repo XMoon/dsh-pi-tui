@@ -3,6 +3,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { TuiApp } from '../../src/tui-app.ts'
+import { MessageId } from '@deepseek-ai/dsh-llm'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { TranscriptFolder } from '../../src/transcript.ts'
 import { FOCUS_MODE_PROMPT } from '../../src/domain/communication/focus.ts'
 import { installFocusPrompt, type SystemPromptLike } from '../../src/app/direct/system-prompt.ts'
 import { StatusStore } from '../../src/domain/status/store.ts'
@@ -137,4 +140,101 @@ test('TuiApp shares the canonical state and applies Compact without Focus behavi
   assert.equal(displayState.preset, 'compact', 're-applying the live preset is unchanged, not a reset')
   unsubscribe()
   app.dispose()
+})
+
+
+function presetEvent(type: string, data: Record<string, unknown>, seq: number): SessionEvent {
+  return { type, seq, time: 1_700_000_000_000 + seq, data } as SessionEvent
+}
+
+/** One real window whose relay carries durable same-turn delivery evidence. */
+function relayWindow(): TranscriptFolder {
+  const relayMessage = {
+    id: MessageId('preset-relay'), role: 'user',
+    content: [{ type: 'text', text: 'PRESET_RELAY_PAYLOAD' }],
+    source: { kind: 'agent-message', form: 'relay', senderSessionId: 'session-preset-child' },
+  }
+  const folder = new TranscriptFolder()
+  folder.apply([
+    presetEvent('turn/start', { turn: 0 }, 0),
+    presetEvent('tool/call', { turn: 0, step: 0, callId: 'preset-c1', name: 'read', arguments: '{}' }, 1),
+    presetEvent('tool/result', {
+      turn: 0, step: 0,
+      message: { id: MessageId('preset-r1'), role: 'tool', toolCallId: 'preset-c1', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'preset-c1' } },
+    }, 2),
+    presetEvent('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [relayMessage] }, 3),
+    presetEvent('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 4),
+    presetEvent('user/message', relayMessage, 5),
+    presetEvent('tool/call', { turn: 0, step: 1, callId: 'preset-c2', name: 'bash', arguments: '{}' }, 6),
+    presetEvent('tool/result', {
+      turn: 0, step: 1,
+      message: { id: MessageId('preset-r2'), role: 'tool', toolCallId: 'preset-c2', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool', callId: 'preset-c2' } },
+    }, 7),
+    presetEvent('assistant/message', {
+      turn: 0, step: 2,
+      message: { id: MessageId('preset-final'), role: 'assistant', content: [{ type: 'text', text: 'PRESET_FINAL_ANSWER' }], source: { kind: 'model', provider: 'p', model: 'm' } },
+    }, 8),
+    presetEvent('turn/end', { turn: 0, reason: { kind: 'completed' } }, 9),
+  ])
+  return folder
+}
+
+test('Compact and Focus fold the SAME proven relay while Full keeps the complete raw order', async () => {
+  const folder = relayWindow()
+  const before = folder.messages().map(message => message.kind)
+  const render = async (preset: DisplayState['preset']): Promise<{ view: string; vt: VirtualTerminal; app: TuiApp }> => {
+    const vt = new VirtualTerminal(120, 40)
+    const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { displayState: { preset } })
+    app.start()
+    app.setTranscript(folder.messages(), folder.turnActivities())
+    await vt.waitForRender()
+    return {
+      vt,
+      app,
+      view: vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n'),
+    }
+  }
+
+  const compact = await render('compact')
+  try {
+    assert.ok(!compact.view.includes('PRESET_RELAY_PAYLOAD'),
+      `Compact folds the proven relay under the Work:\n${compact.view}`)
+    compact.vt.sendInput('\x0f') // Ctrl+O: the regular transcript disclosure master
+    await compact.vt.waitForRender()
+    const expanded = compact.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+    assert.ok(expanded.includes('PRESET_RELAY_PAYLOAD'), `opening the Work restores the relay:\n${expanded}`)
+    assert.ok(expanded.indexOf('PRESET_RELAY_PAYLOAD') < expanded.indexOf('PRESET_FINAL_ANSWER'),
+      'the restored relay keeps its raw chronology before the final answer')
+  } finally {
+    compact.app.dispose()
+  }
+
+  const focus = await render('focus')
+  try {
+    assert.ok(!focus.view.includes('PRESET_RELAY_PAYLOAD'),
+      `Focus hides the proven relay inside the Thought:\n${focus.view}`)
+    assert.ok(/\d+ actions/.test(focus.view),
+      `the collapsed Thought header is the visible owner:\n${focus.view}`)
+    focus.vt.sendInput('\x0f')
+    await focus.vt.waitForRender()
+    const expanded = focus.vt.getViewport().map(line => line.replace(/\x1b\[[0-9;]*m/g, '')).join('\n')
+    assert.ok(expanded.includes('PRESET_RELAY_PAYLOAD'), `opening the Thought restores the relay:\n${expanded}`)
+    assert.ok(expanded.indexOf('PRESET_RELAY_PAYLOAD') < expanded.indexOf('PRESET_FINAL_ANSWER'),
+      'the restored relay keeps its raw chronology before the final answer')
+  } finally {
+    focus.app.dispose()
+  }
+
+  const full = await render('full')
+  try {
+    assert.ok(full.view.includes('PRESET_RELAY_PAYLOAD'), `Full keeps the relay card visible:\n${full.view}`)
+    assert.ok(full.view.includes('PRESET_FINAL_ANSWER'))
+    assert.ok(full.view.indexOf('PRESET_RELAY_PAYLOAD') < full.view.indexOf('PRESET_FINAL_ANSWER'),
+      'Full keeps the raw chronology')
+  } finally {
+    full.app.dispose()
+  }
+
+  assert.deepEqual(folder.messages().map(message => message.kind), before,
+    'the three presets consume the same untouched raw window')
 })
