@@ -285,3 +285,61 @@ test('the payload-drift gate proves a loadable cross-build Client against the sa
   assert.match(source, /T17 payload drift did not restore the installed client chunk/u)
   assert.doesNotMatch(source, /T17 payload drift did not fail closed on the build identity/u)
 })
+
+test('the Client peer set is installed into the profile that actually runs it', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  // The active profile owns the Client platform peer set, and every peer must
+  // be installed BEFORE the candidate bundle. The isolated harness is only the
+  // DSH CLI anchor: a harness devDependency is not a Client peer owner
+  // (issue #476). The published store declares its zustand/immer engine
+  // imports only as devDependencies, so the profile owns those exact pins too.
+  const profileStoreInstall = source.indexOf(
+    'installPlugin(dsh, `@deepseek-ai/dsh-client-store@${targetDshVersion}`, harnessDir, env, false)',
+  )
+  const zustandInstall = source.indexOf("installPlugin(dsh, 'zustand@4.5.7', harnessDir, env, false)")
+  const immerInstall = source.indexOf("installPlugin(dsh, 'immer@10.2.0', harnessDir, env, false)")
+  const candidateInstall = source.indexOf('installPlugin(dsh, tarball, harnessDir, env, false)')
+  assert.ok(profileStoreInstall >= 0, 'the Client store peer must be installed through the official profile CLI')
+  assert.ok(zustandInstall > profileStoreInstall, 'the store engine peer zustand must follow the store install')
+  assert.ok(immerInstall > zustandInstall, 'the store engine peer immer must follow the zustand install')
+  assert.ok(candidateInstall > immerInstall, 'every Client peer must be installed before the candidate bundle')
+  const harnessManifest = source.slice(
+    source.indexOf("name: 'dsh-split-process-harness'"),
+    source.indexOf('runPnpmInstall(harnessDir, env, distribution)'),
+  )
+  assert.doesNotMatch(harnessManifest, /dsh-client-store|zustand|immer/u,
+    'the isolated harness must not pretend to own the Client peer set')
+
+  // The work dir is a real OS temp root, and the checkout-ancestor escape is
+  // rejected explicitly instead of silently falling back to the project temp.
+  assert.match(source, /const workDir = [A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-process-'\)\)/u)
+  assert.match(source, /relative\(realpathSync\(PACKAGE_ROOT\), realpathSync\(workDir\)\)/u)
+  assert.match(source, /workDirFromCheckout\.startsWith\(`\.\.\$\{sep\}`\)/u)
+
+  // The peer install is proven from the real owner: manifest dependency,
+  // non-bundle activation, physical version and profile-anchored containment.
+  assert.match(source, /const clientPeers = \[\n\s*\['@deepseek-ai\/dsh-client-store', targetDshVersion\],\n\s*\['zustand', '4\.5\.7'\],\n\s*\['immer', '10\.2\.0'\],\n\s*\]/u)
+  assert.match(source, /profileManifest\.dependencies\?\.\[name\] === version/u)
+  assert.match(source, /!\s*\(profileManifest\.dsh\?\.profile\?\.bundles \?\? \[\]\)\.includes\(name\)/u)
+  assert.match(source, /profileManifest\.dsh\?\.profile\?\.bundles \?\? \[\]\)\.includes\('@xmoon76\/dsh-pi-tui'\)/u)
+  assert.match(source, /realpathSync\(join\(profileDir, 'node_modules', name\)\)/u)
+  assert.match(source, /readJson\(join\(peerDir, 'package\.json'\)\)\.version === version/u)
+  assert.match(source, /createRequire\(join\(profileDir, 'package\.json'\)\)\.resolve\(name\)/u)
+  assert.match(source, /peerRelative/u)
+
+  // The sandboxed background-Job scenarios keep their release barrier inside
+  // the session workspace (the installed profile): a workspace-write bwrap
+  // sandbox mounts an ephemeral /tmp, so a barrier under the smoke work dir
+  // would be invisible and the Job could never settle.
+  assert.match(source, /const c1JobWorkRoot = label => \{\n\s*const root = join\(profileDir, `c1-\$\{label\}`\)/u)
+  assert.match(source, /startC1Host\('job', 't47', \{\}, c1JobWorkRoot\('t47'\)\)/u)
+  assert.match(source, /startC1Host\('job', 't58', \{\}, c1JobWorkRoot\('t58'\)\)/u)
+
+  // The existing artifact-absence control and the cross-build drift gate must
+  // stay intact next to the peer install (the full inventory remains in the
+  // gate test above).
+  assert.match(source, /renameSync\(hostRuntimeArtifact, hostRuntimeAbsentPath\)/u)
+  assert.match(source, /reachableAncestorCopies/u)
+  assert.match(source, /packageScopeBarrier/u)
+  assert.ok(source.includes("appendFileSync(clientChunk, '\\n// harmless client build drift: protocol unchanged\\n')"))
+})
