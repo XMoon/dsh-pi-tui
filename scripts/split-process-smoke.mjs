@@ -3233,32 +3233,123 @@ async function main() {
         trace('c2a-unowned-job', { hostPid: ready.pid, jobId: created.jobId, runningVerdict: runningLiveness.verdict, settledJobsState: settledLiveness.sourceStates.jobs })
       }
 
-      // Host liveness: an armed Goal plus the REAL goal-round-driver's
-      // automatic reservation. The fixture creates only the official governing
-      // Goal; the driver owns the inbox round. The Host status must stay
-      // BLOCKED even while the Agent itself is idle.
+      // Host liveness: ONE real armed Goal is the only thing that keeps this
+      // Host from claiming quiescence. The automatic `goal-round-driver` row is
+      // disabled on this Host on purpose: it reserves a round the moment the
+      // Goal is armed, and with the fixture's instant scripted answer that
+      // round ends and the driver then blocks the Goal at `round-limit`. The
+      // armed state would then be a transient window whose Host status depends
+      // on when the read lands, so the driver's own reservation is qualified
+      // separately by the c2a-goal-round case below.
       {
-        const { host, ready, workRoot } = await startC1Host('goal', 'c2a-goal')
-        const { client } = await startC1Client('C2A goal C1')
-        const sessionId = await openC1Session(client, 'c2a goal prompt', 'C2A goal')
-        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-created', 'C2A goal created', 120_000)
-        assert(created.goalPhase === 'active' && created.activation === 'armed', `C2A goal was not armed: ${JSON.stringify(created)}`)
-        const round = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-round-observed', 'C2A goal round reserved', 120_000)
-        assert(round.goalId === created.goalId, 'C2A the reserved goal round names a different Goal')
-        assert(round.agentStatus === 'idle', `C2A the goal round was reserved while the Agent was ${JSON.stringify(round.agentStatus)}`)
+        const armedPatch = join(workDir, 'c2a-goal-armed.patch.yml')
+        const operations = parseYaml(readFileSync(c1Work.patchPath, 'utf8'))
+        operations.push({ id: 'goal-round-driver', disabled: true })
+        writeFileSync(armedPatch, JSON.stringify(operations, null, 2), { mode: 0o600 })
+        const { host, ready, workRoot } = await startC1Host('goal-armed', 'c2a-goal-armed', {
+          SPLIT_PROCESS_EXTRA_PATCH: armedPatch,
+        })
+        // The readiness record's Loader rows are the authority that the
+        // automatic driver really is OFF here: a disabled row stays listed with
+        // the `absent` state (a failed or transitional row would report a
+        // `state-N` fiber value), exactly one row may carry the id, and its
+        // name must be the official driver package.
+        const driverRows = ready.entries.filter(entry => entry.id === 'goal-round-driver')
+        assert(driverRows.length === 1
+            && driverRows[0].state === 'absent'
+            && driverRows[0].name === '@deepseek-ai/dsh-goal-round-driver',
+          `C2A the armed-Goal Host did not carry exactly one never-mounted goal-round-driver row: ${JSON.stringify(driverRows)}`)
+        // Only the driver is isolated: the Goal service row stays ACTIVE, so
+        // this Host still reads a real official Goal source.
+        assert(ready.entries.some(entry => entry.id === 'goal'
+            && entry.name === '@deepseek-ai/dsh-goal'
+            && entry.state === 'active'),
+          'C2A the armed-Goal Host lost the real Goal service row instead of only its round driver')
+        const { client } = await startC1Client('C2A goal-armed C1')
+        const sessionId = await openC1Session(client, 'c2a goal-armed prompt', 'C2A goal-armed')
+        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-created', 'C2A goal-armed goal created', 120_000)
+        assert(created.goalPhase === 'active' && created.activation === 'armed', `C2A goal-armed goal was not armed: ${JSON.stringify(created)}`)
         const goalLiveness = (await hostStatus(host)).liveness
         assert(goalLiveness?.verdict === 'BLOCKED', `C2A the armed Goal did not block: ${JSON.stringify(goalLiveness)}`)
         assert(goalLiveness.reasons?.includes('goal-armed'), 'C2A the armed Goal did not contribute goal-armed')
         assert(goalLiveness.sourceStates?.goal === 'ACTIVE', 'C2A the goal source is not ACTIVE')
+        // The Goal is the sole blocking source: the Agent itself is idle with
+        // an empty inbox, so neither of its live-work reasons may appear.
+        assert(goalLiveness.sourceStates?.agent !== 'ACTIVE', `C2A the Agent was ACTIVE beside the armed Goal: ${JSON.stringify(goalLiveness.sourceStates)}`)
+        assert(!goalLiveness.reasons?.includes('agent-running') && !goalLiveness.reasons?.includes('agent-inbox'),
+          `C2A the Agent contributed a blocking reason beside the armed Goal: ${JSON.stringify(goalLiveness.reasons)}`)
         // The C1 Host mounts one active test-only file-URL Loader row through
         // `c1Work.patchPath`. Reading the REAL `context.loader` must surface it
         // as an unqualified Host source; the reflect-store probe this replaced
         // silently missed every active Loader row on the real Host path.
         assert(goalLiveness.sourceStates?.other === 'UNKNOWN', 'C2A the active test-only Loader row was not observed through the real Loader')
         assert(goalLiveness.reasons?.includes('unqualified-host-source'), 'C2A the unqualified Host source reason is missing')
-        await exitC1Client(client, 'C2A goal C1')
+        // The create is the only Goal transition this Host could have made: no
+        // automatic round, so no pause/block/disarm inside the observation.
+        const armedMutations = readC1WorkEvents(workRoot).filter(event => event.kind === 'goal-changed')
+        assert(armedMutations.length === 1 && armedMutations[0].goalId === created.goalId && armedMutations[0].operation === 'create',
+          `C2A the isolated armed Goal moved out of the created state: ${JSON.stringify(armedMutations)}`)
+        await exitC1Client(client, 'C2A goal-armed C1')
         await stopC1Host(host)
-        trace('c2a-goal', { hostPid: ready.pid, sessionId, goalId: created.goalId, round: round.round, agentStatus: round.agentStatus, verdict: goalLiveness.verdict })
+        trace('c2a-goal-armed', {
+          hostPid: ready.pid,
+          sessionId,
+          goalId: created.goalId,
+          verdict: goalLiveness.verdict,
+          goalState: goalLiveness.sourceStates.goal,
+          agentState: goalLiveness.sourceStates.agent,
+        })
+      }
+
+      // The REAL `goal-round-driver` owns the automatic reservation: the
+      // fixture only creates the governing Goal through the official service
+      // and never queues the round itself. This case proves the reservation is
+      // a real Agent inbox round and that the one-round budget then ends the
+      // armed state. It reads no Host liveness, because with this driver
+      // mounted the armed Goal is transient by design; the stable armed-Goal
+      // liveness proof is the c2a-goal-armed case above.
+      {
+        const { host, ready, workRoot } = await startC1Host('goal-round', 'c2a-goal-round')
+        // Positive control for the armed case's row vocabulary: the same id,
+        // name and `active` state are what the real driver mounts when the
+        // overlay does not disable it.
+        const driverRows = ready.entries.filter(entry => entry.id === 'goal-round-driver')
+        assert(driverRows.length === 1
+            && driverRows[0].state === 'active'
+            && driverRows[0].name === '@deepseek-ai/dsh-goal-round-driver',
+          `C2A the goal-round Host did not mount exactly one active goal-round-driver row: ${JSON.stringify(driverRows)}`)
+        const { client } = await startC1Client('C2A goal-round C1')
+        const sessionId = await openC1Session(client, 'c2a goal-round prompt', 'C2A goal-round')
+        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-created', 'C2A goal-round goal created', 120_000)
+        assert(created.goalPhase === 'active' && created.activation === 'armed', `C2A goal-round goal was not armed: ${JSON.stringify(created)}`)
+        const round = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-round-observed', 'C2A goal round reserved', 120_000)
+        assert(round.goalId === created.goalId, 'C2A the reserved goal round names a different Goal')
+        assert(round.revision === created.revision, `C2A the reserved goal round names revision ${JSON.stringify(round.revision)}`)
+        assert(round.round === 1, `C2A the first automatic goal round was ${JSON.stringify(round.round)}`)
+        assert(round.agentStatus === 'idle', `C2A the goal round was reserved while the Agent was ${JSON.stringify(round.agentStatus)}`)
+        // The reservation is durable: the official loop admitted this exact
+        // round as a Session `user/message`, which is what consumes the budget.
+        const admitted = await waitForHostSessionEvent(dshHome, sessionId,
+          event => event.type === 'user/message' && event.data?.source?.kind === 'goal', 'C2A goal round admitted', 120_000)
+        assert(String(admitted.data.source.goalId) === created.goalId
+            && admitted.data.source.revision === created.revision
+            && admitted.data.source.round === round.round,
+          `C2A the durable goal round disagrees with the reservation: ${JSON.stringify(admitted.data.source)}`)
+        // Then the driver ends the armed state at the round limit instead of
+        // reserving another round: the recorded transition names the reason.
+        const blocked = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-changed' && event.operation === 'block', 'C2A goal round-limit block', 120_000)
+        assert(String(blocked.goalId) === created.goalId && blocked.blockCode === 'round-limit' && blocked.goalPhase === 'blocked' && blocked.activation === 'disarmed',
+          `C2A the Goal did not leave the armed state at its round limit: ${JSON.stringify(blocked)}`)
+        await exitC1Client(client, 'C2A goal-round C1')
+        await stopC1Host(host)
+        trace('c2a-goal-round', {
+          hostPid: ready.pid,
+          sessionId,
+          goalId: created.goalId,
+          round: round.round,
+          agentStatus: round.agentStatus,
+          blockCode: blocked.blockCode,
+        })
       }
 
       // Host liveness: Agent.runMaintenance() is really executing while the

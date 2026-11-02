@@ -14,8 +14,8 @@
  *
  * Scenario protocol (frozen):
  *   C1_SCENARIO = long-turn | foreground-tool | job | child | question |
- *                 approval-allow | approval-reject | goal | maintenance | schedule |
- *                 unowned-job
+ *                 approval-allow | approval-reject | goal-armed | goal-round |
+ *                 maintenance | schedule | unowned-job
  *   C1_WORK_ROOT = private 0700 directory under the isolated work dir
  *   C1_HOLD_<NAME> = absolute barrier file path the smoke releases
  *   C1_HAS_LIVE_CLIENT_PROBE = set to sample Gateway.hasLiveClient() transitions
@@ -40,7 +40,8 @@ const SCENARIOS = new Set([
   'approval-reject',
   // Host-liveness qualification scenarios. They only reach official Host
   // services (`goals`, `schedule`, `Agent.runMaintenance`) and record facts.
-  'goal',
+  'goal-armed',
+  'goal-round',
   'maintenance',
   'schedule',
   'unowned-job',
@@ -273,7 +274,7 @@ class C1Model extends LlmAdapter {
       return
     }
 
-    if (this.scenario === 'goal' || this.scenario === 'maintenance' || this.scenario === 'schedule' || this.scenario === 'unowned-job') {
+    if (this.scenario === 'goal-armed' || this.scenario === 'goal-round' || this.scenario === 'maintenance' || this.scenario === 'schedule' || this.scenario === 'unowned-job') {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: `${this.scenario} answer ${token}` }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: `${this.scenario} answer ${token}` } }
@@ -540,7 +541,7 @@ export function apply(ctx) {
   // M4-C2-A liveness scenarios: produce one official source fact only after
   // the first real turn, so the Agent is idle at the moment the fact exists.
   // Every step uses the official Host owner; the fixture only records.
-  if (scenario === 'goal' || scenario === 'maintenance' || scenario === 'schedule') {
+  if (scenario === 'goal-armed' || scenario === 'goal-round' || scenario === 'maintenance' || scenario === 'schedule') {
     let sawRunning = false
     let armed = false
     const afterFirstTurn = (callback) => {
@@ -555,7 +556,23 @@ export function apply(ctx) {
         setTimeout(() => { callback(agent) }, 0)
       })
     }
-    if (scenario === 'goal') {
+    if (scenario === 'goal-armed' || scenario === 'goal-round') {
+      // Every durable Goal transition is recorded as the official Host event,
+      // never as a value this fixture invents. The armed case needs the proof
+      // that nothing moved the Goal; the round case needs the automatic
+      // `round-limit` block that ends the armed state.
+      ctx.on('goal/changed', ({ agent, change }) => {
+        record('goal-changed', {
+          agentId: String(agent.id),
+          goalId: String(change?.ref?.id ?? ''),
+          revision: change?.goal?.revision ?? change?.ref?.revision,
+          operation: change?.operation,
+          goalPhase: change?.goal?.phase,
+          activation: change?.goal?.activation,
+          roundsStarted: change?.goal?.roundsStarted,
+          blockCode: change?.goal?.blockedReason?.code,
+        })
+      })
       // The REAL goal-round-driver owns the automatic reservation; this
       // fixture only creates the governing Goal record through the service.
       ctx.on('agent/inbox/inserted', ({ agent, message }) => {
