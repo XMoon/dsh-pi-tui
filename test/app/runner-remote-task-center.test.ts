@@ -858,7 +858,11 @@ test('a REAL delegated continuable child receives the viewer follow-up through t
   await waitFor('the task center rendered the real child row', () => viewport().includes(REAL_LABEL), 20_000)
   fixture.vt.sendInput('\r')
   await waitFor('the real child viewer mounted', () => app.getViewerGeneration() > generationBefore, 20_000)
-  await waitFor('the child transcript hydrated', () => viewport().includes(REAL_INITIAL_PROMPT), 20_000)
+  // The parent transcript now legitimately carries the child's readable title
+  // (PR-A), which may equal the child prompt text, so the prompt alone no
+  // longer proves the CHILD viewer hydrated. Wait for the viewer-only editor.
+  await waitFor('the child transcript hydrated', () =>
+    viewport().includes(REAL_INITIAL_PROMPT) && viewport().includes('Message '), 20_000)
   assert.equal(viewport().includes('Message '), true,
     `the direct continuable child viewer must expose the interactive editor:\n${viewport()}`)
   // The viewer owns the child's Client generation WITHOUT materializing a Host
