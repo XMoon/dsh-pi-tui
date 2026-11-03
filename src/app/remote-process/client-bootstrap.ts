@@ -918,16 +918,29 @@ async function startSurfaceLocalClient(
         //   scoped   -> the Host scanner for an explicit path scope
         //   home     -> ABSOLUTE Host paths
         type FileListAnswer = { readonly ok: boolean; readonly value?: { readonly kind?: unknown, readonly items?: readonly { readonly path?: unknown }[] } }
-        const answerItems = (answer: FileListAnswer): readonly { readonly path?: unknown }[] =>
-          answer.ok && answer.value?.kind === 'ok' ? answer.value.items ?? [] : []
+        /**
+         * A business `ok` answer with a REAL array, or `undefined` for anything
+         * else. A transport success whose business result is `unavailable` or an
+         * error must never be read as "the authority answered with an empty
+         * list": that is exactly the false-green this probe has to exclude.
+         */
+        const answerItems = (answer: FileListAnswer): readonly { readonly path?: unknown }[] | undefined =>
+          answer.ok && answer.value?.kind === 'ok' && Array.isArray(answer.value.items)
+            ? answer.value.items
+            : undefined
         const file = await remote.piTuiFileReferences.list(sessionId, 't36notes')
-        const bareItems = answerItems(file)
+        const bareItems = answerItems(file) ?? []
         const empty = await remote.piTuiFileReferences.list(sessionId, 't36-definitely-no-such-name')
         const emptyItems = answerItems(empty)
+        // The retired built-bundle smoke's discriminator, migrated: the OFFICIAL
+        // provider excludes `dist`, so the SAME file the scoped route finds must be
+        // invisible to the official bare route.
+        const officialExcludesDist = await remote.piTuiFileReferences.list(sessionId, 't36only')
+        const officialExcludesDistItems = answerItems(officialExcludesDist)
         const scoped = await remote.piTuiFileReferences.list(sessionId, 'dist/t36only')
-        const scopedItems = answerItems(scoped)
+        const scopedItems = answerItems(scoped) ?? []
         const homeQuery = await remote.piTuiFileReferences.list(sessionId, '~/')
-        const homeItems = answerItems(homeQuery)
+        const homeItems = answerItems(homeQuery) ?? []
         const watch = remote.piTuiTerminalProgress.watch(sessionId)
         const iterator = watch[Symbol.asyncIterator]()
         let terminalKind: unknown
@@ -946,8 +959,13 @@ async function startSurfaceLocalClient(
           // user text.
           bareOfficial: bareItems.some(item => item.path === 't36notes.md'),
           bareCount: bareItems.length,
-          officialEmpty: empty.ok === true && emptyItems.length === 0,
-          scopedOk: scoped.ok === true,
+          // BOTH halves must be a real `ok` answer with a real array: a business
+          // error or `unavailable` is not an empty authoritative result.
+          officialEmpty: emptyItems !== undefined && emptyItems.length === 0,
+          officialExcludesDist: officialExcludesDistItems !== undefined
+            && officialExcludesDistItems.length === 0,
+          officialExcludesDistKind: officialExcludesDist.ok ? officialExcludesDist.value?.kind : undefined,
+          scopedOk: scoped.ok === true && answerItems(scoped) !== undefined,
           // The scoped route materializes the candidate against the resolved
           // display base, so the accepted value may be scope-relative
           // (`dist/x`) or base-anchored (`/abs/.../dist/x`). The SINK is the file
