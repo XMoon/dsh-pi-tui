@@ -3364,7 +3364,7 @@ async function main() {
           }
           return 0
         })()
-        assert(liveCommit === 1, `T61 expected exactly ONE Host commit on the new generation, got ${String(liveCommit)}`)
+        assert(liveCommit >= 1, 'T61 the new generation never committed its write')
         // Ordering witness, not a timer: the new generation's turn ENDS after the
         // stale refusal, and the Host durable log still carries zero stale
         // writes — a dispatched superseded write would be ordered before it.
@@ -3377,9 +3377,23 @@ async function main() {
           120_000,
         )
         assert(liveTurnEnd !== undefined, 'T61 the new generation wrote no turn/end at all')
-        assert(hostUserTexts(hostSessionEvents(dshHome, sessionA) ?? [])
-          .filter(text => text === staleToken).length === 0,
-        'T61 the superseded write was dispatched or replayed')
+        // EXACTLY-ONCE is a property of the FINAL durable state, never of the first
+        // observation: a duplicate commit that lands after the first sighting would
+        // otherwise pass unnoticed. The whole Session log is re-read here, after the
+        // new Turn has ENDED, and every count is asserted on that read.
+        const finalEvents = hostSessionEvents(dshHome, sessionA) ?? []
+        const finalLive = hostUserTexts(finalEvents).filter(text => text === liveToken).length
+        assert(finalLive === 1,
+          `T61 the new generation committed ${String(finalLive)} times, expected exactly 1`)
+        const afterLive = finalEvents.slice(beforeLive)
+        const liveStarts = afterLive.filter(event => event.type === 'turn/start').length
+        const liveEnds = afterLive.filter(event => event.type === 'turn/end').length
+        assert(liveStarts === 1,
+          `T61 the new generation started ${String(liveStarts)} Turns, expected exactly 1`)
+        assert(liveEnds === 1,
+          `T61 the new generation ended ${String(liveEnds)} Turns, expected exactly 1`)
+        assert(hostUserTexts(finalEvents).filter(text => text === staleToken).length === 0,
+          'T61 the superseded write was dispatched or replayed')
         await parked.waitForScreen('stub answer', 'T61 new-generation answer')
         assert(alive(surfaceHostPid), 'T61 the Host died on the new-generation write')
         // The surface section predates the C1 helpers, so this case uses the
