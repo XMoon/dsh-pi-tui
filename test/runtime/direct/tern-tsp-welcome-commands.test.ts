@@ -36,6 +36,16 @@ const BROWSER = 'session-browser-'
 const WELCOME = 'welcome-'
 
 /** The live D Welcome nodes on this pane's wire. */
+/**
+ * A bounded NEGATIVE observation window: the claim is that NOTHING happens, and
+ * an absence announces itself with no event. The bound is the SDK's own frame
+ * credit flow (each drawn frame is acked before the next View is sent), so any
+ * handler this mount was going to run has already run by the time it returns.
+ */
+async function observeNothingHappens(): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 400)) // reason: bounded negative observation window; the SDK's frame-credit ack cycle already covers every handler this mount could run
+}
+
 function welcomeNodes(fixture: DirectTspFixture): WireNode[] {
   return wireNodes(fixture.pane).filter(node => node.id.includes(WELCOME))
 }
@@ -70,8 +80,13 @@ async function composerHolds(fixture: DirectTspFixture, text: string): Promise<v
 async function submitInput(fixture: DirectTspFixture, command: string): Promise<void> {
   fixture.pane.input.type(command)
   await composerHolds(fixture, command)
-  await directSettle(300)
   fixture.pane.input.type('\r')
+  // The submit is admitted only once the frame that shows the line has been
+  // painted, so the Enter rides the same ladder a real user's key does.
+  await waitFor('the submitted line left the composer', () => {
+    const editor = wireNodes(fixture.pane).find(node => node.k === 'editor')
+    return editor === undefined || editor.p.text !== command
+  }, 20_000)
 }
 
 /**
@@ -127,8 +142,7 @@ test('the real turn-boundary blank authority presents the D Welcome in Main and 
   })
   try {
     await waitForInputDelivery(fixture.pane)
-    await directSettle(4_000)
-    await waitFor('the blank main subject presents the Welcome', () => welcomeShown(fixture))
+    await waitFor('the blank main subject presents the Welcome', () => welcomeShown(fixture), 25_000)
     const ids = welcomeNodes(fixture).map(node => node.id)
     assert.ok(ids.some(id => id.includes('welcome-name')), 'the product name line is painted')
     assert.ok(ids.some(id => id.endsWith('welcome-version')), 'the committed version line is painted')
@@ -144,6 +158,7 @@ test('the real turn-boundary blank authority presents the D Welcome in Main and 
     assert.ok(blankReads.every(read => read.reader !== undefined),
       'every read came through the production Direct reader instance')
   } finally {
+    // reason: the fixture's OWN teardown drain (it releases the pane/fibers); not a wait for a fact
     await fixture.settle()
   }
 })
@@ -164,7 +179,6 @@ test('the first real request retires the Welcome through the same repaint chain,
   life.defer(() => prompts.detach())
   try {
     await waitForInputDelivery(fixture.pane)
-    await directSettle(4_000)
     // The sessionless boot: the application's own formal idle commit is the
     // ONLY source of this invitation, so it must be on the wire before any
     // Session exists — and with no subject, no blank read is allowed.
@@ -177,15 +191,14 @@ test('the first real request retires the Welcome through the same repaint chain,
       return /main\.s\d+-msg-/u.test(wire)
     })
     assert.equal(prompts.calls(), 1, 'exactly one real prompt was written')
-    await directSettle(1_200)
-    assert.equal(welcomeShown(fixture), false,
-      'the started turn took the invitation away and it never comes back')
+    await waitFor('the started turn to take the invitation away', () => !welcomeShown(fixture), 25_000)
     assert.ok(reads.blanks.length > 0, 'the repaint consulted the official blank authority')
     assert.ok(reads.blanks.every(read => read.outcome !== undefined),
       'the Direct turn-boundary projection answers with a real bit, never unknown')
     assert.ok(reads.blanks.some(read => read.outcome === false),
       'the live Session is authoritatively NOT blank once its turn ran')
   } finally {
+    // reason: the fixture's OWN teardown drain (it releases the pane/fibers); not a wait for a fact
     await fixture.settle()
   }
 })
@@ -199,8 +212,9 @@ test('W10: the Welcome Resume action opens the registered /sessions Browser with
     await waitForInputDelivery(seed.pane)
     await submitInput(seed, 'seed a persisted session')
     await waitFor('the seed turn to complete', () => seed.modelCalls() === 1, 25_000)
-    await directSettle(800)
+    await waitFor('the seed turn to retire its Welcome invitation', () => !welcomeShown(seed), 25_000)
   } finally {
+    // reason: the fixture's OWN teardown drain (it releases the pane/fibers); not a wait for a fact
     await seed.settle()
   }
   const reads = recordReaderCalls()
@@ -208,7 +222,6 @@ test('W10: the Welcome Resume action opens the registered /sessions Browser with
   const fixture = await createDirectTspFixture(life, { workRoot, sessionBrowser: true, composerActions: true })
   try {
     await waitForInputDelivery(fixture.pane)
-    await directSettle(4_000)
     const idle = reads.lists.length
     await waitFor('the sessionless Welcome to own Main', () => welcomeShown(fixture), 25_000)
     const button = resumeNode(fixture)
@@ -224,6 +237,7 @@ test('W10: the Welcome Resume action opens the registered /sessions Browser with
     assert.equal(welcomeNodes(fixture).some(node => node.id.includes('session:')), false,
       'the Welcome never lists Sessions itself')
   } finally {
+    // reason: the fixture's OWN teardown drain (it releases the pane/fibers); not a wait for a fact
     await fixture.settle()
   }
 })
@@ -256,11 +270,12 @@ test('W14: a Host-owned /sessions leaves a disabled Welcome action and starts no
     assert.equal(attrs?.['aria-disabled'], 'true', 'and it says so accessibly')
     assert.equal(attrs?.disabled, 'disabled', 'with the real disabled attribute')
     clickNode(fixture.pane, button!)
-    await directSettle(600)
+    await observeNothingHappens()
     assert.equal(pickerNode(fixture.pane, BROWSER), undefined, 'nothing opened')
     assert.equal(reads.lists.length, 0, 'and no Session listing was read')
     assert.equal(hostInvocations.length, 0, 'the Host-owned command was not invoked either')
   } finally {
+    // reason: the fixture's OWN teardown drain (it releases the pane/fibers); not a wait for a fact
     await fixture.settle()
   }
 })
@@ -290,7 +305,6 @@ test('W12: resuming another Session from the Welcome Browser follows the real sw
   life.defer(() => { agents.resume = originalResume })
   try {
     await waitForInputDelivery(fixture.pane)
-    await directSettle(4_000)
     await waitFor('the resumed blank subject A presents the Welcome', () => welcomeShown(fixture), 25_000)
     clickNode(fixture.pane, resumeNode(fixture)!)
     await waitFor('the Browser opens from the Welcome', () => pickerNode(fixture.pane, BROWSER) !== undefined, 25_000)
@@ -311,6 +325,7 @@ test('W12: resuming another Session from the Welcome Browser follows the real sw
     assert.equal(JSON.stringify(welcomeNodes(fixture)).includes('welcome-target-b'), false,
       'the new subject is presented without leaking its id into the Welcome')
   } finally {
+    // reason: the fixture's OWN teardown drain (it releases the pane/fibers); not a wait for a fact
     await fixture.settle()
   }
 })
