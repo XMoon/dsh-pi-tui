@@ -288,10 +288,17 @@ test('the lane setup shares the report and cleanup boundary with the run', () =>
   // Pin qualification must still happen BEFORE anything is created on disk.
   const guard = main.indexOf("requireExactSmokeDshPin('candidate'")
   const root = main.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-process-'\)\)/u)
-  const setupTry = main.indexOf('let isolatedScopeId', guard)
+  // Locate the REAL `try {` that owns the report and the cleanup, not a nearby
+  // declaration: the guard must fail if the setup is moved back outside it.
+  const setupTry = main.indexOf('try {', guard)
+  const distributionLoad = main.indexOf('distribution = loadDshDistribution(', guard)
   assert.ok(guard > 0 && root > guard, 'no setup may run before the input is qualified')
-  assert.ok(setupTry > 0 && setupTry < root,
-    'the setup must already be inside the try that owns the report and the cleanup')
+  assert.ok(setupTry > guard, 'the reporting/cleanup try must follow the pin qualification')
+  assert.ok(root > setupTry, 'the work root must be created INSIDE the reporting/cleanup try')
+  assert.ok(distributionLoad > setupTry,
+    'the distribution load must be inside the reporting/cleanup try, not before it')
+  assert.ok(main.indexOf('if (workDir === undefined) {', root) > 0,
+    'the finally must tolerate a root that never appeared')
   // The cleanup must tolerate a scene that never got created, and must remove a
   // root that was created before a later setup step failed.
   const finallyIndex = main.indexOf('} finally {', root)

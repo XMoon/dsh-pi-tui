@@ -506,10 +506,20 @@ const ASSERT_HELPER_FRAMES = /^(?:assert|assertEqual|assertNotEqual|assertDeepEq
  * one of the lanes this module serves; every other frame is skipped and, when
  * nothing trusted remains, the field is simply omitted (fail closed).
  */
-export const LANE_SOURCE_FILES = new Set([
+const LANE_SOURCE_LIST = Object.freeze([
   'split-process-smoke.mjs',
   'split-process-upgrade-smoke.mjs',
 ])
+/** The trust set as a live Set, kept private so no caller can widen it. */
+const LANE_SOURCES = new Set(LANE_SOURCE_LIST)
+
+/** The lane scripts whose assertion frames may become a locator (read-only). */
+export const LANE_SOURCE_FILES = Object.freeze(LANE_SOURCE_LIST)
+
+/** Whether `basename` belongs to the default trusted lane sources. */
+export function isLaneSourceFile(basename) {
+  return LANE_SOURCES.has(basename)
+}
 const STACK_FRAME = /^at (?:async )?(?:(?<fn>[A-Za-z0-9_$.<>| ]+?) \()?(?<path>[^\s()]+):(?<line>\d+):\d+\)?$/u
 const SAFE_BASENAME = /^[A-Za-z0-9._-]{1,64}\.mjs$/u
 
@@ -529,7 +539,7 @@ export class SplitSmokeAssertionError extends Error {
  * scripts). `holder` hides the error constructor's own frame.
  */
 export function laneAssertionSite(holder, sources) {
-  const trusted = sources ?? LANE_SOURCE_FILES
+  const trusted = sources ?? LANE_SOURCES
   const site = new Error()
   if (holder !== undefined) Error.captureStackTrace?.(site, holder)
   const frames = String(site.stack ?? '').split('\n').slice(1)
