@@ -1,5 +1,5 @@
 /**
- * S4-D2 B05/B07/B08 — Host-tool runtime qualification over the real rc.2
+ * B05/B07/B08 — Host-tool runtime qualification over the real rc.2
  * Optional bundle patches (see `optional-bundle-fixture.ts`).
  *
  * This file is established first by D2-1 with the B05 off→enable→restart→real
@@ -18,11 +18,11 @@ import { sanitizeDisplayText } from '../../src/tui/presentation/terminal-text.ts
 import {
   profileSelectsBundle,
   skippedInstallationReason,
-  startS4D2Host,
-  type S4D2BundleId,
+  startOptionalBundleHost,
+  type OptionalBundleId,
 } from '../support/optional-bundle-fixture.ts'
 
-const B05 = '@deepseek-ai/dsh-experimental-tool-worktree' satisfies S4D2BundleId
+const B05 = '@deepseek-ai/dsh-experimental-tool-worktree' satisfies OptionalBundleId
 
 const skip = skippedInstallationReason([B05])
 
@@ -35,9 +35,9 @@ function seedRepository(root: string): { project: string; baseCommit: string } {
   const project = join(root, 'work')
   mkdirSync(project, { recursive: true })
   git(project, 'init', '-q', '-b', 'main')
-  git(project, 'config', 'user.email', 's4-d2@example.invalid')
+  git(project, 'config', 'user.email', 'optional-bundle@example.invalid')
   git(project, 'config', 'user.name', 'S4 D2')
-  writeFileSync(join(project, 'README.md'), 'S4-D2 worktree fixture\n')
+  writeFileSync(join(project, 'README.md'), 'optional-bundle worktree fixture\n')
   git(project, 'add', 'README.md')
   git(project, 'commit', '-q', '-m', 'fixture base')
   return { project, baseCommit: git(project, 'rev-parse', 'HEAD') }
@@ -50,7 +50,7 @@ function resultText(result: { content?: readonly { type?: string; text?: string 
 }
 
 test('an official Optional bundle goes off→enable→restart-required→restart→real tool', { skip }, async t => {
-  let host = await startS4D2Host(t, { bundles: [] })
+  let host = await startOptionalBundleHost(t, { bundles: [] })
   const { project, baseCommit } = seedRepository(host.root)
   const sourceHead = git(project, 'rev-parse', 'HEAD')
   const sourceStatus = git(project, 'status', '--porcelain')
@@ -80,10 +80,10 @@ test('an official Optional bundle goes off→enable→restart-required→restart
 
     // REAL TOOL: create a branch/worktree from a local commit and observe the
     // OFFICIAL working-directory projection, not the tool result alone.
-    const agent = await restarted.createAgent(SessionId('s4-d2-b05'), { cwd: project })
+    const agent = await restarted.createAgent(SessionId('optional-bundle-b05'), { cwd: project })
     const result = await restarted.ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: ToolCallId('s4-d2-b05-call'),
+      callId: ToolCallId('optional-bundle-b05-call'),
       name: 'create_worktree',
       arguments: { name: 's4d2-worktree', from: baseCommit },
       agent,
@@ -113,7 +113,7 @@ test('an official Optional bundle goes off→enable→restart-required→restart
     // the Session's effective directory does not drift.
     const refused = await restarted.ctx.tools.execute({
       signal: new AbortController().signal,
-      callId: ToolCallId('s4-d2-b05-bad'),
+      callId: ToolCallId('optional-bundle-b05-bad'),
       name: 'create_worktree',
       arguments: { name: '../escape', from: baseCommit },
       agent,
@@ -148,13 +148,13 @@ test('an official Optional bundle goes off→enable→restart-required→restart
 
 // ── B07 persistent terminal ────────────────────────────────────────────────
 
-const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle' satisfies S4D2BundleId
-const B08 = '@deepseek-ai/dsh-experimental-session-search' satisfies S4D2BundleId
+const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle' satisfies OptionalBundleId
+const B08 = '@deepseek-ai/dsh-experimental-session-search' satisfies OptionalBundleId
 
 test('retained terminal process, output read, background job and restart cleanup', { skip: skippedInstallationReason([B07]) }, async t => {
-  let host = await startS4D2Host(t, { bundles: [B07] })
+  let host = await startOptionalBundleHost(t, { bundles: [B07] })
   const work = join(host.root, 'work')
-  const agent = await host.createAgent(SessionId('s4-d2-b07'), { cwd: work })
+  const agent = await host.createAgent(SessionId('optional-bundle-b07'), { cwd: work })
 
   const opened = await execute(host, 'terminal_open', agent, { type: 'shell', name: 'main', cwd: work })
   assert.notEqual(opened.isError, true, resultText(opened))
@@ -223,7 +223,7 @@ test('retained terminal process, output read, background job and restart cleanup
   // the old process tree was released with the old composition.
   const restarted = await host.restart()
   host = restarted
-  const second = await restarted.createAgent(SessionId('s4-d2-b07-after'), { cwd: work })
+  const second = await restarted.createAgent(SessionId('optional-bundle-b07-after'), { cwd: work })
   const empty = await execute(restarted, 'terminal_list', second, {})
   assert.match(resultText(empty), /no terminal sessions/i)
 
@@ -250,7 +250,7 @@ function markerChunks(text: string): StreamChunk[] {
 }
 
 test('lazy workspace-scoped session search, paging/no-hit and restart re-index', { skip: skippedInstallationReason([B08]) }, async t => {
-  const host = await startS4D2Host(t, { bundles: [B08] })
+  const host = await startOptionalBundleHost(t, { bundles: [B08] })
   const adapter = new MarkerAdapter()
   host.ctx.llm.registerAdapter(['marker'], adapter)
   const project = join(host.root, 'work')
@@ -262,17 +262,17 @@ test('lazy workspace-scoped session search, paging/no-hit and restart re-index',
     agent.followup(createUserMessage({ content: [{ type: 'text', text: `Please note ${marker} for later.` }], source: { kind: 'user' } }))
     await agent.whenIdle()
   }
-  await seed('s4-d2-b08-alpha', project, 'ALPHA_NEEDLE_PROJECT')
-  await seed('s4-d2-b08-beta', project, 'ALPHA_NEEDLE_PROJECT')
-  await seed('s4-d2-b08-secret', outside, 'SECRET_NEEDLE_PRIVATE')
+  await seed('optional-bundle-b08-alpha', project, 'ALPHA_NEEDLE_PROJECT')
+  await seed('optional-bundle-b08-beta', project, 'ALPHA_NEEDLE_PROJECT')
+  await seed('optional-bundle-b08-secret', outside, 'SECRET_NEEDLE_PRIVATE')
   await waitFor(async () => (await persistedSessionCount(host)) >= 3)
 
-  const caller = await host.createAgent(SessionId('s4-d2-b08-caller'), { provider: 'marker', model: 'marker-model', cwd: project })
+  const caller = await host.createAgent(SessionId('optional-bundle-b08-caller'), { provider: 'marker', model: 'marker-model', cwd: project })
   const hit = await execute(host, 'session_search', caller, { query: 'ALPHA_NEEDLE_PROJECT' })
   assert.notEqual(hit.isError, true, resultText(hit))
-  assert.match(resultText(hit), /s4-d2-b08-alpha/)
-  assert.match(resultText(hit), /s4-d2-b08-beta/)
-  assert.doesNotMatch(resultText(hit), /s4-d2-b08-secret/, 'a session outside the caller workspace is never returned')
+  assert.match(resultText(hit), /optional-bundle-b08-alpha/)
+  assert.match(resultText(hit), /optional-bundle-b08-beta/)
+  assert.doesNotMatch(resultText(hit), /optional-bundle-b08-secret/, 'a session outside the caller workspace is never returned')
   assert.doesNotMatch(resultText(hit), /SECRET_NEEDLE_PRIVATE/)
 
   const none = await execute(host, 'session_search', caller, { query: 'NO_SUCH_NEEDLE' })
@@ -280,22 +280,22 @@ test('lazy workspace-scoped session search, paging/no-hit and restart re-index',
   assert.match(resultText(none), /No prior session matches found/i)
 
   const event = await execute(host, 'session_event_search', caller, {
-    session_id: 's4-d2-b08-beta',
+    session_id: 'optional-bundle-b08-beta',
     query: 'ALPHA_NEEDLE_PROJECT',
   })
   assert.notEqual(event.isError, true, resultText(event))
   assert.match(resultText(event), /ALPHA_NEEDLE_PROJECT/)
-  assert.doesNotMatch(resultText(event), /s4-d2-b08-secret/)
+  assert.doesNotMatch(resultText(event), /optional-bundle-b08-secret/)
 
   // Bounded event-read window over the same authorized session (the Host
   // paginates/windows raw events; the TUI has no local search index).
   const window = await execute(host, 'session_event_read', caller, {
-    session_id: 's4-d2-b08-beta',
+    session_id: 'optional-bundle-b08-beta',
     seq: 0,
     after: 4,
   })
   assert.notEqual(window.isError, true, resultText(window))
-  assert.match(resultText(window), /s4-d2-b08-beta/)
+  assert.match(resultText(window), /optional-bundle-b08-beta/)
   assert.match(resultText(window), /Target event seq 0/u)
   const afterLines = resultText(window).split('\n').filter(line => line.startsWith('- seq '))
   assert.ok(afterLines.length > 0 && afterLines.length <= 4,
@@ -303,11 +303,11 @@ test('lazy workspace-scoped session search, paging/no-hit and restart re-index',
 
   // A restart rebuilds the lazy in-memory index from the persisted logs.
   const restarted = await host.restart()
-  const after = await restarted.createAgent(SessionId('s4-d2-b08-after'), { provider: 'marker', model: 'marker-model', cwd: project })
+  const after = await restarted.createAgent(SessionId('optional-bundle-b08-after'), { provider: 'marker', model: 'marker-model', cwd: project })
   const reindexed = await execute(restarted, 'session_search', after, { query: 'ALPHA_NEEDLE_PROJECT' })
   assert.notEqual(reindexed.isError, true, resultText(reindexed))
-  assert.match(resultText(reindexed), /s4-d2-b08-alpha/)
-  assert.doesNotMatch(resultText(reindexed), /s4-d2-b08-secret/)
+  assert.match(resultText(reindexed), /optional-bundle-b08-alpha/)
+  assert.doesNotMatch(resultText(reindexed), /optional-bundle-b08-secret/)
 })
 
 class MarkerAdapter extends LlmAdapter {
@@ -327,7 +327,7 @@ async function persistedSessionCount(host: { root: string }): Promise<number> {
   const { readdirSync } = await import('node:fs')
   try {
     return readdirSync(join(host.root, 'home', 'sessions'), { recursive: true, withFileTypes: true })
-      .filter(entry => entry.isDirectory() && entry.name.startsWith('s4-d2-b08-')).length
+      .filter(entry => entry.isDirectory() && entry.name.startsWith('optional-bundle-b08-')).length
   } catch {
     return 0
   }
@@ -349,7 +349,7 @@ function execute(
 ): Promise<{ isError?: boolean; content?: readonly { type?: string; text?: string }[] }> {
   return host.ctx.tools.execute({
     signal: new AbortController().signal,
-    callId: ToolCallId(`s4-d2-host-${++callCounter}`),
+    callId: ToolCallId(`optional-bundle-host-${++callCounter}`),
     name,
     arguments: args,
     agent,

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * S4-D2 Optional-bundle CLI smoke (implementation plan §4.1).
+ * Optional-bundle CLI smoke (implementation plan §4.1).
  *
  * Three explicit modes, never a fake pass:
  *
@@ -18,22 +18,22 @@
  * - `--native`: the explicit external Claude Code / Codex credential gate. It
  *   records the presence/absence of the official environment credentials and
  *   `EXTERNAL_UNVERIFIED`; the REAL native start lives behind the unit-test gate
- *   `DSH_PI_TUI_S4_D2_NATIVE=1` (`test/integration/native-subagents.test.ts`) under an
+ *   `DSH_PI_TUI_OPTIONAL_BUNDLE_NATIVE=1` (`test/integration/native-subagents.test.ts`) under an
  *   isolated HOME. This CLI never fabricates a native success.
  * - `--gate`: operator/CI gate mode. Exit nonzero whenever the provisioned
  *   fixture is BLOCKED instead of silently treating the offline inspection as a
  *   pass.
  * - `--provision`: install the official package set at this checkout's exact
- *   target into the fixture's `temp/s4-d2-bundles` tree (a local test artifact,
+ *   target into the fixture's `temp/optional-bundles` tree (a local test artifact,
  *   never a tracked dependency). This is the one-time setup the in-process
  *   fixture consumes.
  *
  * Usage:
- *   node scripts/dsh-s4-d2-bundles-smoke.mjs --provision
- *   node scripts/dsh-s4-d2-bundles-smoke.mjs --network --evidence /tmp/d2.json
- *   node scripts/dsh-s4-d2-bundles-smoke.mjs --native
+ *   node scripts/dsh-optional-bundles-smoke.mjs --provision
+ *   node scripts/dsh-optional-bundles-smoke.mjs --network --evidence /tmp/d2.json
+ *   node scripts/dsh-optional-bundles-smoke.mjs --native
  *
- * @module dsh-s4-d2-bundles-smoke
+ * @module dsh-optional-bundles-smoke
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -56,7 +56,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
  *  and the profile loop must match the same manifest the version bump edits. */
 const TARGET_VERSION = npmDshVersion()
 const PNPM_COMMAND = pnpmExecutable()
-const FIXTURE_CACHE = join(REPO_ROOT, 'temp', 's4-d2-bundles')
+const FIXTURE_CACHE = join(REPO_ROOT, 'temp', 'optional-bundles')
 const PROVISION_TIMEOUT_MS = 20 * 60_000
 
 const SHIPPED_OPTIONAL = [
@@ -173,7 +173,7 @@ function provisionFixtureCache(options) {
     if (name.startsWith('@deepseek-ai/') && dependencies[name] === undefined) dependencies[name] = version
   }
   writeFileSync(join(FIXTURE_CACHE, 'package.json'), `${JSON.stringify({
-    name: 's4-d2-optional-bundles',
+    name: 'optional-bundles-qualification',
     private: true,
     dependencies,
   }, null, 2)}\n`)
@@ -220,7 +220,7 @@ function dumpProfileTree(invocation, profile, harnessDir, env, phase) {
   if (dumped.status !== 0) fail(phase, `dsh --dump-config failed:\n${commandOutput(dumped)}`)
   const text = commandOutput(dumped)
   if (text.trim().length === 0) fail(phase, 'dsh --dump-config printed no tree')
-  if (process.env.S4_D2_KEEP === '1') {
+  if (process.env.OPTIONAL_BUNDLE_KEEP === '1') {
     writeFileSync(join(harnessDir, '..', `dump-${dumpCounter++}.yml`), text)
   }
   return text
@@ -228,7 +228,7 @@ function dumpProfileTree(invocation, profile, harnessDir, env, phase) {
 
 /** The REAL pinned-npm profile loop (requires --network). */
 function runNetworkLoop(bundle, evidence) {
-  const workDir = mkdtempSync(join(tmpdir(), 'dsh-s4-d2-smoke-'))
+  const workDir = mkdtempSync(join(tmpdir(), 'dsh-optional-bundles-'))
   const home = join(workDir, 'home')
   const dshHome = join(workDir, 'dsh-home')
   const harnessDir = join(workDir, 'harness')
@@ -237,7 +237,7 @@ function runNetworkLoop(bundle, evidence) {
   const env = isolatedEnvironment(workDir, home, dshHome, join(workDir, 'compat-evidence.json'))
   try {
     writeFileSync(join(harnessDir, 'package.json'), `${JSON.stringify({
-      name: 'dsh-s4-d2-smoke-harness',
+      name: 'dsh-optional-bundles-harness',
       private: true,
       type: 'module',
       dependencies: { '@deepseek-ai/dsh': targetDshVersion },
@@ -248,7 +248,7 @@ function runNetworkLoop(bundle, evidence) {
     if (version.status !== 0) fail('INFRA_INSTALL_FAILURE', `installed DSH --version failed:\n${commandOutput(version)}`)
     requireExactVersion('DSH', commandOutput(version).trim(), targetDshVersion)
 
-    const profile = 's4-d2-smoke'
+    const profile = 'optional-bundle-smoke'
     const profileDir = join(dshHome, 'profiles', profile)
     // pnpm 12 turns every undecided dependency build script into a hard failure.
     // The isolated profile records the same explicit decisions the repository
@@ -312,7 +312,7 @@ function runNetworkLoop(bundle, evidence) {
       officialCliAddRemove: true,
     }
   } finally {
-    if (process.env.S4_D2_KEEP === '1') {
+    if (process.env.OPTIONAL_BUNDLE_KEEP === '1') {
       console.error(`kept the optional-bundles qualification environment: ${workDir}`)
       writeFileSync(join(workDir, 'off.dump.yml'), evidence.network?.offDump ?? '')
       writeFileSync(join(workDir, 'on.dump.yml'), evidence.network?.onDump ?? '')
@@ -336,7 +336,7 @@ function runNativeGate(bundle, evidence) {
     credentialPresence,
     execution: 'not-run',
     reason: '--native records credential presence only. The real native start is gated by '
-      + 'DSH_PI_TUI_S4_D2_NATIVE=1 in test/integration/native-subagents.test.ts under an isolated HOME; '
+      + 'DSH_PI_TUI_OPTIONAL_BUNDLE_NATIVE=1 in test/integration/native-subagents.test.ts under an isolated HOME; '
       + 'without a real result the row stays EXTERNAL_UNVERIFIED. No system claude/codex CLI is substituted.',
   }
 }
@@ -353,7 +353,7 @@ function emit(evidence, options) {
 function main() {
   const options = parseArgs(process.argv.slice(2))
   const evidence = {
-    script: 'dsh-s4-d2-bundles-smoke',
+    script: 'dsh-optional-bundles-smoke',
     target: TARGET_VERSION,
     mode: options.provision ? 'provision' : options.network ? 'network' : 'offline',
     fixture: inspectFixtureInstallation(),
@@ -375,7 +375,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
   try {
     main()
   } catch (error) {
-    console.error(`DSH_S4_D2_SMOKE_FAILURE[${error?.phase ?? 'UNKNOWN'}]: ${error instanceof Error ? error.message : String(error)}`)
+    console.error(`DSH_OPTIONAL_BUNDLE_SMOKE_FAILURE[${error?.phase ?? 'UNKNOWN'}]: ${error instanceof Error ? error.message : String(error)}`)
     process.exitCode = 1
   }
 }

@@ -22,13 +22,13 @@ import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk }
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   skippedInstallationReason,
-  type S4D2BundleId,
+  type OptionalBundleId,
 } from '../support/optional-bundle-fixture.ts'
 import { startS4D3Application, type S4D3Application } from '../support/application-fixture.ts'
 
-const B09 = '@deepseek-ai/dsh-experimental-session-titles-bundle' satisfies S4D2BundleId
-const B10 = '@deepseek-ai/dsh-experimental-badge-skill-bundle' satisfies S4D2BundleId
-const B11 = '@deepseek-ai/dsh-experimental-ralph-bundle' satisfies S4D2BundleId
+const B09 = '@deepseek-ai/dsh-experimental-session-titles-bundle' satisfies OptionalBundleId
+const B10 = '@deepseek-ai/dsh-experimental-badge-skill-bundle' satisfies OptionalBundleId
+const B11 = '@deepseek-ai/dsh-experimental-ralph-bundle' satisfies OptionalBundleId
 
 function textChunks(text: string): StreamChunk[] {
   return [

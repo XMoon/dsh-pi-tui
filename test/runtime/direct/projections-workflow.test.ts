@@ -1,5 +1,5 @@
 /**
- * S4-D2 B09/B10/B11 — Session Titles, Badge Skill and Ralph over the real
+ * B09/B10/B11 — Session Titles, Badge Skill and Ralph over the real
  * rc.2 Optional bundle patches (implementation plan §5 D2-5).
  * @module @xmoon76/dsh-pi-tui/projections-workflow.test
  */
@@ -18,13 +18,13 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { readSurfaceCatalog } from '../../../src/runtime/direct/surface-catalog.ts'
 import {
   skippedInstallationReason,
-  startS4D2Host,
-  type S4D2BundleId,
+  startOptionalBundleHost,
+  type OptionalBundleId,
 } from '../../support/optional-bundle-fixture.ts'
 
-const B09 = '@deepseek-ai/dsh-experimental-session-titles-bundle' satisfies S4D2BundleId
-const B10 = '@deepseek-ai/dsh-experimental-badge-skill-bundle' satisfies S4D2BundleId
-const B11 = '@deepseek-ai/dsh-experimental-ralph-bundle' satisfies S4D2BundleId
+const B09 = '@deepseek-ai/dsh-experimental-session-titles-bundle' satisfies OptionalBundleId
+const B10 = '@deepseek-ai/dsh-experimental-badge-skill-bundle' satisfies OptionalBundleId
+const B11 = '@deepseek-ai/dsh-experimental-ralph-bundle' satisfies OptionalBundleId
 
 const skip09 = skippedInstallationReason([B09])
 const skip10 = skippedInstallationReason([B10])
@@ -98,7 +98,7 @@ async function waitFor(condition: () => boolean | Promise<boolean>, turns = 2000
 }
 
 test('Session Titles: real provider projection, manual precedence, late-title isolation and disable/restart', { skip: skip09 }, async t => {
-  const host = await startS4D2Host(t, { bundles: [B09] })
+  const host = await startOptionalBundleHost(t, { bundles: [B09] })
   const adapter = new ScriptedAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
   const titleService = host.ctx.get('sessionTitle') as {
@@ -115,7 +115,7 @@ test('Session Titles: real provider projection, manual precedence, late-title is
         : messages.includes('beta') ? 'Beta Project'
           : messages.includes('base provider') ? 'Base Provider Title'
             : 'Alpha Project'
-  const first = await host.createAgent(SessionId('s4-d2-b09-first'), { provider: 'scripted', model: 'review-model', cwd: work })
+  const first = await host.createAgent(SessionId('optional-bundle-b09-first'), { provider: 'scripted', model: 'review-model', cwd: work })
   await send(first, 'Design the alpha project')
   await waitFor(() => titleService.get(first.session)?.title === 'Alpha Project')
   const generated = titleService.get(first.session)!
@@ -137,12 +137,12 @@ test('Session Titles: real provider projection, manual precedence, late-title is
   // replacement session B.
   adapter.titleRequests.length = 0
   adapter.holdNextTitle = new Promise<void>(resolve => { adapter.releaseTitle = resolve })
-  const held = await host.createAgent(SessionId('s4-d2-b09-held'), { provider: 'scripted', model: 'review-model', cwd: work })
+  const held = await host.createAgent(SessionId('optional-bundle-b09-held'), { provider: 'scripted', model: 'review-model', cwd: work })
   await send(held, 'Hold this title request')
   await waitFor(() => adapter.titleRequests.some(messages => messages.includes('Hold this title request')))
   // The user title is pinned, but the held automatic request still runs; the
   // important fact is that the projection of B is untouched by A's late work.
-  const replacement = await host.createAgent(SessionId('s4-d2-b09-replacement'), { provider: 'scripted', model: 'review-model', cwd: work })
+  const replacement = await host.createAgent(SessionId('optional-bundle-b09-replacement'), { provider: 'scripted', model: 'review-model', cwd: work })
   await send(replacement, 'Design the replacement')
   await waitFor(() => titleService.get(replacement.session)?.title === 'Replacement Title')
   adapter.releaseTitle?.()
@@ -155,7 +155,7 @@ test('Session Titles: real provider projection, manual precedence, late-title is
   assert.equal(disabled.application, 'restart-required')
   const restarted = await host.restart()
   restarted.ctx.llm.registerAdapter(['scripted'], adapter)
-  const after = await restarted.createAgent(SessionId('s4-d2-b09-after'), { provider: 'scripted', model: 'review-model', cwd: work })
+  const after = await restarted.createAgent(SessionId('optional-bundle-b09-after'), { provider: 'scripted', model: 'review-model', cwd: work })
   await send(after, 'Design the base provider session')
   const restartedTitle = restarted.ctx.get('sessionTitle') as { get(session: unknown): { title: string; source: { provider?: string } } | undefined }
   await waitFor(() => restartedTitle.get(after.session)?.title === 'Base Provider Title')
@@ -164,7 +164,7 @@ test('Session Titles: real provider projection, manual precedence, late-title is
 })
 
 test('Badge Skill: real provider, skills-capable presets and no minimal skill tool', { skip: skip10 }, async t => {
-  let host = await startS4D2Host(t, { bundles: [B10], presets: true })
+  let host = await startOptionalBundleHost(t, { bundles: [B10], presets: true })
   const work = join(host.root, 'work')
   const skills = host.ctx.get('skills') as {
     list(options?: { cwd?: string; scope?: unknown }): Promise<readonly { name: string; provider: string }[]>
@@ -179,21 +179,21 @@ test('Badge Skill: real provider, skills-capable presets and no minimal skill to
   const body = await skills.get('dsh-badge')
   assert.ok(body !== undefined && body.content.length > 0, 'the real skill body is loadable')
 
-  const standard = await host.createAgent(SessionId('s4-d2-b10-standard'), { cwd: work })
+  const standard = await host.createAgent(SessionId('optional-bundle-b10-standard'), { cwd: work })
   await presets.select(standard, 'standard')
   assert.ok(host.hasTool('skill', standard), 'the skills-capable standard preset exposes the skill tool')
   const standardCatalog = await readSurfaceCatalog(standard as never, new AbortController().signal, host.ctx as never)
   assert.ok(standardCatalog.skills.some(skill => skill.name === 'dsh-badge'),
     'the existing /skill surface catalog reads the badge skill')
 
-  const ptc = await host.createAgent(SessionId('s4-d2-b10-ptc'), { cwd: work })
+  const ptc = await host.createAgent(SessionId('optional-bundle-b10-ptc'), { cwd: work })
   await presets.select(ptc, 'ptc')
   assert.ok(host.hasTool('skill', ptc), 'the skills-capable ptc preset exposes the skill tool')
   const ptcCatalog = await readSurfaceCatalog(ptc as never, new AbortController().signal, host.ctx as never)
   assert.ok(ptcCatalog.skills.some(skill => skill.name === 'dsh-badge'),
     'the ptc /skill surface catalog reads the badge skill')
 
-  const minimal = await host.createAgent(SessionId('s4-d2-b10-minimal'), { cwd: work })
+  const minimal = await host.createAgent(SessionId('optional-bundle-b10-minimal'), { cwd: work })
   await presets.select(minimal, 'minimal')
   assert.equal(host.hasTool('skill', minimal), false, 'minimal never gains a skill tool it does not declare')
   assert.equal(host.hasTool('skill', undefined), false, 'B10 is a provider, not a global model tool')
@@ -209,14 +209,14 @@ test('Badge Skill: real provider, skills-capable presets and no minimal skill to
 })
 
 test('Ralph: one real bounded round, workflow activity and cancelled-run cleanup', { skip: skip11 }, async t => {
-  const host = await startS4D2Host(t, { bundles: [B11] })
+  const host = await startOptionalBundleHost(t, { bundles: [B11] })
   const work = join(host.root, 'work')
   const adapter = new RalphAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
   const workflowEvents: string[] = []
   host.ctx.on('workflow/start' as never, (() => { workflowEvents.push('start') }) as never)
   host.ctx.on('workflow/end' as never, (() => { workflowEvents.push('end') }) as never)
-  const agent = await host.createAgent(SessionId('s4-d2-b11'), { provider: 'scripted', model: 'review-model', cwd: work })
+  const agent = await host.createAgent(SessionId('optional-bundle-b11'), { provider: 'scripted', model: 'review-model', cwd: work })
 
   const result = await executeTool(host, 'ralph', agent, { objective: 'Report one completed round', maxRounds: 1 }, new AbortController().signal)
   assert.notEqual(result.isError, true, resultText(result))
@@ -314,7 +314,7 @@ function executeTool(
 ): Promise<{ isError?: boolean; content?: readonly { type?: string; text?: string }[] }> {
   return host.ctx.tools.execute({
     signal,
-    callId: `s4-d2-${name}-${Date.now()}-${Math.random().toString(16).slice(2)}` as never,
+    callId: `optional-bundle-${name}-${Date.now()}-${Math.random().toString(16).slice(2)}` as never,
     name,
     arguments: args,
     agent,

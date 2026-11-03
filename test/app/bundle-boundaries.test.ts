@@ -264,7 +264,7 @@ test('the real rc.2 Host catalog paints all 14 bounded boundaries through the mo
 import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { startS4D3Application } from '../support/application-fixture.ts'
-import { skippedInstallationReason, type S4D2BundleId } from '../support/optional-bundle-fixture.ts'
+import { skippedInstallationReason, type OptionalBundleId } from '../support/optional-bundle-fixture.ts'
 
 type BoundaryScript =
   | { readonly kind: 'tool'; readonly name: string; readonly arguments: string; readonly callId: string }
@@ -319,8 +319,8 @@ function toolResultOf(agent: Agent, callId: string): string | undefined {
   return undefined
 }
 
-const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile' satisfies S4D2BundleId
-const B03 = '@deepseek-ai/dsh-experimental-auto-review' satisfies S4D2BundleId
+const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile' satisfies OptionalBundleId
+const B03 = '@deepseek-ai/dsh-experimental-auto-review' satisfies OptionalBundleId
 
 /** Pass-through mutation counter over the REAL plugin-manager service class
  *  (the prototype is shared by the restarted instance). Every call continues

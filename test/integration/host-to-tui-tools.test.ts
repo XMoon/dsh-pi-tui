@@ -24,13 +24,13 @@ import { createUserMessage, LlmAdapter, type GenerateOptions, type StreamChunk }
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import {
   skippedInstallationReason,
-  type S4D2BundleId,
+  type OptionalBundleId,
 } from '../support/optional-bundle-fixture.ts'
 import { startS4D3Application } from '../support/application-fixture.ts'
 
-const B05 = '@deepseek-ai/dsh-experimental-tool-worktree' satisfies S4D2BundleId
-const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle' satisfies S4D2BundleId
-const B08 = '@deepseek-ai/dsh-experimental-session-search' satisfies S4D2BundleId
+const B05 = '@deepseek-ai/dsh-experimental-tool-worktree' satisfies OptionalBundleId
+const B07 = '@deepseek-ai/dsh-experimental-terminal-bundle' satisfies OptionalBundleId
+const B08 = '@deepseek-ai/dsh-experimental-session-search' satisfies OptionalBundleId
 
 function git(cwd: string, ...args: readonly string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
@@ -165,7 +165,7 @@ test('the real create_worktree result and effective cwd reach the mounted TUI', 
   await second.whenIdle()
   await app.waitFor(() => app.view().includes('Fresh session ready.'), 'the fresh session answer')
   assert.notEqual(String(second.session.id), String(agent.session.id))
-  assert.match(footerLine(app.view()), /dsh-s4-d2-[^/]+\/work|s4d-pi-tui-wt\/s4-d3/u,
+  assert.match(footerLine(app.view()), /dsh-optional-bundle-[^/]+\/work|s4d-pi-tui-wt\/s4-d3/u,
     'the fresh session cwd is the launch project')
   assert.doesNotMatch(footerLine(app.view()), /s4d3-worktree/u, 'the old session cwd never leaks into the new one')
 

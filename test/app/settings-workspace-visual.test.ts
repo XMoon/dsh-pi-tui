@@ -130,7 +130,7 @@ interface HarnessOptions {
   tuiSettings?: { get(): TuiSettingsDoc; replace(doc: TuiSettingsDoc): unknown }
   /**
    * Build a minimal Plugin page when the Settings Plugins entry activates it
-   * (S4-D2 / D2-0): lets a visual case prove that a frame with no painted
+   * (the optional-bundle visual case): lets a visual case prove that a frame with no painted
    * affordance can never dispatch the entry.
    */
   pluginPage?: boolean
