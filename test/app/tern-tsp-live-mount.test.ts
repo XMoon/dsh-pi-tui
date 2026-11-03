@@ -237,7 +237,7 @@ interface Harness {
   exitRequested(): boolean
   /** PR-C (TSP-7): the handlers the input bind delivered (undefined pre-bind). */
   boundHandlers(): Parameters<TspRenderer['bindInput']>[0] | undefined
-  /** The mounted TSP renderer itself (undefined before the mount commits). */
+  /** The mounted TSP renderer itself; throws before the mount commits. */
   renderer(): TspRenderer
   dispose(): Promise<void>
 }
