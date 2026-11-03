@@ -414,7 +414,7 @@ function projectProcesses(handles) {
       if (known !== undefined) {
         known.exited = known.exited || summary.exited
         known.exitCode = summary.exitCode ?? known.exitCode
-        known.exitSignal = known.exitSignal ?? known.exitSignal
+        known.exitSignal = summary.exitSignal ?? known.exitSignal
         known.events = summary.events
         continue
       }
