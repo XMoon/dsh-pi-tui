@@ -405,7 +405,11 @@ async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs = 120_00
     if (event !== undefined) return event
     await sleep(25)
   }
-  throw new Error(`${label}: no C1 work proof matched within ${String(timeoutMs)}ms`)
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'WORK_PROOF_WAIT_TIMEOUT',
+    waitLabel: label,
+    elapsedMs: timeoutMs,
+  })
 }
 
 function c1WorkHadRelease(workRoot) {

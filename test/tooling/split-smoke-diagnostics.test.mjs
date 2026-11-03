@@ -48,6 +48,7 @@ import {
   SplitSmokeWaitError,
 } from '../../scripts/lib/split-smoke-diagnostics.mjs'
 import { waitForAcceptedHandoff, waitForReloadNotice, writeRequestedEvidence } from '../../scripts/split-process-upgrade-smoke.mjs'
+import { waitForAnyReady, waitForC1WorkEvent, waitForHostSessionEvent, waitForSurfaceStatus } from '../../scripts/split-process-smoke.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const UPGRADE_SCRIPT = join(ROOT, 'scripts', 'split-process-upgrade-smoke.mjs')
@@ -1057,4 +1058,71 @@ test('a setup failure is reported and leaves no half-created scene behind', (t) 
   assert.match(result.stderr, /SPLIT_PROCESS_SMOKE_FAILURE: INFRA_FAILURE$/mu)
   assert.ok(!/ENOENT|EACCES: |syscall|errno:/.test(result.stderr), `a system error text leaked:\n${result.stderr}`)
   assert.deepEqual(readdirSync(locked), [], 'no work root may survive the setup failure')
+})
+
+// ── Round 12: every bounded wait must classify itself ───────────────────────
+
+test('the fixture and session waits classify their timeout instead of INFRA_FAILURE', async (t) => {
+  // An empty work root: the wait can only time out, which is the point.
+  const life = testLifecycle(t)
+  const empty = life.tempDir('split-smoke-wait-')
+  mkdirSync(empty, { recursive: true })
+  const workProof = await rejection(() => waitForC1WorkEvent(empty, () => false, 'a fixture proof', 120))
+  assert.equal(workProof.category, 'WAIT_TIMEOUT')
+  assert.equal(workProof.code, 'WORK_PROOF_WAIT_TIMEOUT')
+  assert.equal(workProof.waitLabel, 'a fixture proof')
+  assert.equal(workProof.elapsedMs, 120)
+  const session = await rejection(() => waitForHostSessionEvent(empty, 'session-x', () => false, 'a Session event', 120))
+  assert.equal(session.category, 'WAIT_TIMEOUT')
+  assert.equal(session.code, 'SESSION_EVENT_WAIT_TIMEOUT')
+  assert.equal(session.waitLabel, 'a Session event')
+  assert.equal(session.elapsedMs, 120)
+})
+
+test('the surface-status wait classifies its timeout against the Client', async () => {
+  const client = { role: 'surface-client', records: [], exited: false }
+  const error = await rejection(() => waitForSurfaceStatus(client, () => false, 'a surface status', 120))
+  assert.equal(error.category, 'WAIT_TIMEOUT')
+  assert.equal(error.code, 'SURFACE_STATUS_WAIT_TIMEOUT')
+  assert.equal(error.processRole, 'surface-client')
+  assert.equal(error.waitLabel, 'a surface status')
+})
+
+test('the ready race separates an early exit from a timeout', async () => {
+  // Every contender already exited: that is PROCESS_EXITED, not a timeout.
+  const exited = [{
+    role: 'host-1',
+    exited: true,
+    records: [{ m4a0: 'failure', code: 'HOST_START_TIMEOUT' }],
+    exitResult: { code: 1, signal: null },
+  }]
+  const exitedError = await rejection(() => waitForAnyReady(exited, 'a ready contender', 5_000))
+  assert.equal(exitedError.category, 'PROCESS_EXITED')
+  assert.equal(exitedError.code, 'READY_RACE_EXITED')
+  assert.equal(exitedError.waitLabel, 'a ready contender')
+  assert.ok(Number.isInteger(exitedError.elapsedMs), 'the exit category still carries an elapsed time')
+  // A live-but-never-ready contender is a genuine timeout.
+  const live = [{ role: 'host-2', exited: false, records: [], exitResult: undefined }]
+  const timeoutError = await rejection(() => waitForAnyReady(live, 'a ready contender', 120))
+  assert.equal(timeoutError.category, 'WAIT_TIMEOUT')
+  assert.equal(timeoutError.code, 'READY_RACE_TIMEOUT')
+  assert.equal(timeoutError.elapsedMs, 120)
+})
+
+test('no bounded wait in either lane still throws a bare Error', () => {
+  // A bare Error is classified INFRA_FAILURE with no label, which turns a real
+  // wait timeout into an "infrastructure" report. Scanned per waiter FUNCTION so
+  // the artifact-preflight throws (which are legitimately INFRA_FAILURE) are not
+  // mistaken for waits.
+  for (const [name, file] of [['split-process', PROCESS_SCRIPT], ['split-upgrade', UPGRADE_SCRIPT]]) {
+    const source = readFileSync(file, 'utf8')
+    const waiters = [...source.matchAll(/^(?:export )?async function (wait\w+)\([\s\S]*?^\}/gmu)]
+    assert.ok(waiters.length >= 4, `${name} exposes fewer waits than expected: ${String(waiters.length)}`)
+    for (const [body, fn] of waiters.map(match => [match[0], match[1]])) {
+      // `waitForOutcome` only delegates to another (already classified) waiter.
+      if (fn === 'waitForOutcome') continue
+      const bare = body.match(/throw new Error\(/u)
+      assert.equal(bare, null, `${name}.${fn} still throws a bare Error from a bounded wait`)
+    }
+  }
 })

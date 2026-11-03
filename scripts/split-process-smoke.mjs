@@ -575,7 +575,7 @@ export class SurfaceEntryProcess {
   signalBusiness(signal) {
     const pid = this.records.find(record => record.m4a0 === 'ready')?.pid
       ?? this.records.find(record => record.m4a0 === 'client-started')?.pid
-    if (!Number.isInteger(pid)) throw new Error(`${this.role}: no business PID is known yet`)
+    assert(Number.isInteger(pid), `${this.role}: no business PID is known yet`)
     process.kill(pid, signal)
   }
 
@@ -764,14 +764,18 @@ function readC1WorkEvents(workRoot) {
 }
 
 /** Wait for one fixture proof matching the predicate. */
-async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs = 60_000) {
+export async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const event = readC1WorkEvents(workRoot).find(predicate)
     if (event !== undefined) return event
     await sleep(25)
   }
-  throw new Error(`${label}: no host-workload proof matched within ${String(timeoutMs)}ms; events=${JSON.stringify(readC1WorkEvents(workRoot).slice(-8))}`)
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'WORK_PROOF_WAIT_TIMEOUT',
+    waitLabel: label,
+    elapsedMs: timeoutMs,
+  })
 }
 
 /** Wait for one durable Host Session event matching the predicate. */
@@ -783,7 +787,11 @@ export async function waitForHostSessionEvent(dshHome, sessionId, predicate, lab
     if (event !== undefined) return event
     await sleep(50)
   }
-  throw new Error(`${label}: no durable Host Session event matched within ${String(timeoutMs)}ms; events=${JSON.stringify(hostSessionEvents(dshHome, sessionId)?.slice(-8))}`)
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'SESSION_EVENT_WAIT_TIMEOUT',
+    waitLabel: label,
+    elapsedMs: timeoutMs,
+  })
 }
 
 /** The last `surface-status` record of a surface Client (no stdin channel). */
@@ -792,30 +800,45 @@ function lastSurfaceStatus(client) {
 }
 
 /** Wait for a surface status matching the predicate. */
-async function waitForSurfaceStatus(client, predicate, label, timeoutMs = 120_000) {
+export async function waitForSurfaceStatus(client, predicate, label, timeoutMs = 120_000) {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const status = lastSurfaceStatus(client)
     if (status !== undefined && predicate(status)) return status
     await sleep(25)
   }
-  throw new Error(`${label}: no surface status matched; records=${JSON.stringify(client.records.slice(-6))}`)
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'SURFACE_STATUS_WAIT_TIMEOUT',
+    waitLabel: label,
+    processRole: client.role,
+    elapsedMs: timeoutMs,
+    process: client,
+  })
 }
 
 /** Wait for the first ready record among concurrent entries. */
-async function waitForAnyReady(processes, label, timeoutMs) {
-  const deadline = Date.now() + timeoutMs
+export async function waitForAnyReady(processes, label, timeoutMs) {
+  const started = Date.now()
+  const deadline = started + timeoutMs
   while (Date.now() < deadline) {
     for (const process of processes) {
       const record = process.records.find(candidate => candidate.m4a0 === 'ready')
       if (record !== undefined) return { process, record }
     }
     if (processes.every(process => process.exited)) {
-      throw new Error(`${label}: every contender exited without ready; ${JSON.stringify(processes.map(process => ({ role: process.role, exit: process.exitResult, records: process.records.slice(-2) })))}`)
+      throw new SplitSmokeWaitError('PROCESS_EXITED', {
+        code: 'READY_RACE_EXITED',
+        waitLabel: label,
+        elapsedMs: Date.now() - started,
+      })
     }
     await sleep(25)
   }
-  throw new Error(`${label}: no contender became ready within ${String(timeoutMs)}ms`)
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'READY_RACE_TIMEOUT',
+    waitLabel: label,
+    elapsedMs: timeoutMs,
+  })
 }
 
 async function waitForOutcome(process, label, timeoutMs = 120_000) {
@@ -990,7 +1013,11 @@ async function seatFree(name, timeoutMs = 5_000) {
     if (free) return
     await sleep(50)
   }
-  throw new Error(`abstract seat remained owned: ${name.slice(1)}`)
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'SEAT_RELEASE_TIMEOUT',
+    waitLabel: 'abstract seat release',
+    elapsedMs: timeoutMs,
+  })
 }
 
 /** Read a live process starttime and kill only the process that still matches it. */
@@ -1818,7 +1845,7 @@ async function main() {
       if (thirdMux.opened === false && thirdMux.status === 401) break
       if (thirdMux.opened === true) {
         await closeMux(thirdMux.socket, WebSocket)
-        throw new Error('T05 released Peer unexpectedly opened the mux again')
+        assert(false, 'T05 the released Peer opened the mux again')
       }
       await sleep(100)
     }
@@ -2457,7 +2484,12 @@ async function main() {
           }
         } catch { /* the registry is not committed yet */ }
         if (r1Host.exited) {
-          throw new Error(`T19 ${signal}: the Host exited before the registry commit; records=${JSON.stringify(r1Host.records.slice(-3))}; stderr=${r1Host.stderr.slice(-1500)}`)
+          throw new SplitSmokeWaitError('PROCESS_EXITED', {
+            code: 'REGISTRY_COMMIT_EXITED',
+            waitLabel: `T19 ${signal}: the Host must stay alive until its registry commit`,
+            processRole: r1Host.role,
+            process: r1Host,
+          })
         }
         await sleep(20)
       }
