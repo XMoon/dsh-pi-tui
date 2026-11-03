@@ -73,6 +73,7 @@ import {
   runPnpmInstall,
 } from './pi2dsh-compat-smoke.mjs'
 import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
+import { requireExactSmokeDshPin } from './lib/split-smoke-diagnostics.mjs'
 import { EntryProcess, SurfaceEntryProcess, hostSessionEvents, waitForHostSessionEvent, writeC1WorkFixture } from './split-process-smoke.mjs'
 
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
@@ -1233,6 +1234,11 @@ async function main() {
     throw new Error('split upgrade smoke: --old and --new must carry different package versions')
   }
   const targetDshVersion = npmDshVersion()
+  // Input qualification BEFORE any install (the same exact-pin rule the
+  // production Client reexec preflight applies): a differently pinned artifact
+  // is an invalid test pairing, not a product result to observe.
+  requireExactSmokeDshPin('old', oldArtifact.manifest, targetDshVersion)
+  requireExactSmokeDshPin('new', newArtifact.manifest, targetDshVersion)
   const distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
   const workRoot = mkdtempSync(join(tmpdir(), 'dsh-split-upgrade-'))
   const home = join(workRoot, 'home')

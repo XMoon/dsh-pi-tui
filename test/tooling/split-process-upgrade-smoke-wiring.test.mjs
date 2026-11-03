@@ -121,6 +121,28 @@ test('both Client peer owners are real and every upgrade root is isolated', () =
   assert.match(source, /the side-by-side \$\{name\} resolves outside its own package/u)
 })
 
+test('the upgrade lane qualifies BOTH artifact pins against the exact DSH runtime before any setup', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.match(source, /import \{ requireExactSmokeDshPin \} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u,
+    'the exact-pin rule is shared with the T lane, not restated per script')
+  const main = source.slice(source.indexOf('async function main()'))
+  const inspectOld = main.indexOf("inspectArtifact(options.old, 'old')")
+  const inspectNew = main.indexOf("inspectArtifact(options.new, 'new')")
+  const target = main.indexOf('npmDshVersion()')
+  const guardOld = main.indexOf("requireExactSmokeDshPin('old', oldArtifact.manifest, targetDshVersion)")
+  const guardNew = main.indexOf("requireExactSmokeDshPin('new', newArtifact.manifest, targetDshVersion)")
+  const distribution = main.indexOf('loadDshDistribution(')
+  const workRoot = main.indexOf("mkdtempSync(join(tmpdir(), 'dsh-split-upgrade-'))")
+  const install = main.indexOf('runPnpmInstall(harnessDir, env, distribution)')
+  assert.ok(
+    inspectOld >= 0 && inspectNew > inspectOld && target > inspectNew
+      && guardOld > target && guardNew > guardOld
+      && distribution > guardNew && workRoot > guardNew && install > workRoot,
+    'the pinned artifacts must be read and qualified BEFORE the distribution load, the work root and any install',
+  )
+  assert.ok(target >= 0, 'the target pin comes from npmDshVersion(), not from engines or a compat matrix')
+})
+
 test('the upgrade lane owns the real Client reexec handoff and its two live negatives', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const reexecIndex = source.indexOf("clientA.signalBusiness('SIGUSR2')")
