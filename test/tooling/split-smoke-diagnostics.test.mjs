@@ -24,6 +24,7 @@ import { chmodSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, 
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import ts from 'typescript'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { npmDshVersion } from '../../scripts/lib/dsh-distribution.mjs'
 import {
@@ -1062,24 +1063,57 @@ test('the report only accepts a locator from a trusted lane source', (t) => {
   assert.equal(report.assertion, undefined, 'an arbitrary error may not contribute a locator')
 })
 
-test('only ONE place in the shared module may read a raw .assertion property', () => {
-  // The producer rule has now been missed at three output paths (collector,
-  // pre-collector, summary). Instead of a third copy of the condition, the
-  // module is constrained: `publishedAssertionOf` is the single reader, and every
-  // consumer goes through it. This guard fails the moment a fourth path appears.
+test('the raw assertion property has exactly ONE reader in the shared module', () => {
+  // The producer rule has been missed at three output paths (collector,
+  // pre-collector, summary). The containment is structural: `publishedAssertionOf`
+  // is the only reader of an error's `assertion`, and every consumer goes through
+  // it. Parsed with the TypeScript AST so alias, destructure and bracket forms are
+  // covered, not just `error.assertion`.
   const source = readFileSync(LIB, 'utf8')
-  const reads = source.split('\n')
-    .map((line, index) => ({ line: line.trim(), number: index + 1 }))
-    // A READ of the property on an error-ish value; assignments and the
-    // validated `report.assertion`/`input.assertion` consumers are not reads of
-    // a possibly-forged property.
-    .filter(({ line }) => /(?:\.assertion\b)/u.test(line))
-    .filter(({ line }) => !/^(?:\/\/|\*)/u.test(line))
-    .filter(({ line }) => !/(?:this|report|input|extra)\.assertion/u.test(line))
-    .filter(({ line }) => !/^\*$|never read/i.test(line))
-  assert.deepEqual(reads.map(read => read.number), [source.split('\n')
-    .findIndex(line => line.includes('return error instanceof SplitSmokeAssertionError ? error.assertion')) + 1],
-  `the producer rule must have exactly one reader, found: ${JSON.stringify(reads)}`)
+  const file = ts.createSourceFile('diagnostics.mjs', source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.JS)
+  const insideReader = (node) => {
+    // Ascend to the nearest function declaration; the reader is the only allowed owner.
+    for (let cursor = node.parent; cursor !== undefined; cursor = cursor.parent) {
+      if (ts.isFunctionDeclaration(cursor) && cursor.name?.text === 'publishedAssertionOf') return true
+    }
+    return false
+  }
+  /** A consumer of an ALREADY-VALIDATED site, not a read of a raw error property. */
+  const isSafeObject = (node) => node.kind === ts.SyntaxKind.ThisKeyword
+    || (ts.isIdentifier(node) && ['report', 'input', 'extra'].includes(node.text))
+  /** A WRITE defines the property; only reads can leak a forged value. */
+  const isAssignmentTarget = (node) => ts.isBinaryExpression(node.parent)
+    && node.parent.left === node
+    && node.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+  const offenders = []
+  const visit = (node) => {
+    if (insideReader(node)) return
+    // error.assertion
+    if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.name) && node.name.text === 'assertion'
+      && !isSafeObject(node.expression) && !isAssignmentTarget(node)) {
+      offenders.push(`dot access at ${String(file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1)}`)
+    }
+    // error['assertion'] / error["assertion"]
+    if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)
+      && node.argumentExpression.text === 'assertion') {
+      offenders.push(`bracket access at ${String(file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1)}`)
+    }
+    // const { assertion } = error / const { assertion: site } = error
+    if (ts.isObjectBindingPattern(node)) {
+      for (const element of node.elements) {
+        const name = element.propertyName ?? element.name
+        if (ts.isIdentifier(name) && name.text === 'assertion') {
+          offenders.push(`destructure at ${String(file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1)}`)
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  assert.deepEqual(offenders, [],
+    `every assertion read must go through publishedAssertionOf; found: ${offenders.join(', ')}`)
+  // The reader itself must still exist, or the check above is trivially satisfied.
+  assert.match(source, /function publishedAssertionOf\(error\) \{/u)
 })
 
 test('a forged locator on a plain error never reaches the summary or the report', (t) => {
