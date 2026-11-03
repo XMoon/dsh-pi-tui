@@ -75,9 +75,13 @@ import {
 import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
 import {
   boundedErrorSummary,
+  classifyHandoffRejection,
+  classifyReloadNotices,
   createSmokeDiagnostics,
+  reloadNoticeTypeForText,
   requireExactSmokeDshPin,
   smokeArtifactIdentity,
+  SplitSmokeWaitError,
 } from './lib/split-smoke-diagnostics.mjs'
 import { EntryProcess, SurfaceEntryProcess, hostSessionEvents, waitForHostSessionEvent, writeC1WorkFixture } from './split-process-smoke.mjs'
 
@@ -560,12 +564,130 @@ async function waitForClearedComposer(client, needle, label, timeoutMs = 60_000)
       if (composer.includes('❯') && !composer.includes(needle)) return
     }
     if (client.exited) {
-      throw new Error(`${label}: the Client exited while its composer still showed ${JSON.stringify(needle)}; raw=${JSON.stringify(client.raw.slice(-1500))}`)
+      throw new SplitSmokeWaitError('PROCESS_EXITED', {
+        code: 'PROCESS_EXITED_BEFORE_COMPOSER',
+        waitLabel: label,
+        processRole: client.role,
+        process: client,
+      })
     }
     await sleep(50)
   }
-  const viewport = await client.viewport()
-  throw new Error(`${label}: timed out waiting for the composer to clear ${JSON.stringify(needle)}; viewport=${JSON.stringify(viewport)}`)
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'COMPOSER_CLEAR_TIMEOUT',
+    waitLabel: label,
+    processRole: client.role,
+    elapsedMs: timeoutMs,
+    process: client,
+  })
+}
+
+/**
+ * The two `/reload-client` waits, with ONE rule each about evidence.
+ *
+ * PASS always requires the REAL painted PTY notice (or, for an accepted
+ * request, the Client's own post-boundary telemetry). A known internal refusal
+ * that CANNOT lead to the expected notice ends the wait early with the actual
+ * classification — that is a fast FAIL, never a fast PASS: an `m4r` record that
+ * agrees with the expectation still has to be painted.
+ *
+ * `fromRecordIndex` must be captured BEFORE this action's command or signal is
+ * sent, so a refusal left by an earlier command can never be blamed on this one.
+ */
+const RELOAD_WAIT_MS = 120_000
+
+/** The internal `m4r` rejection classifications that still match one notice. */
+function rejectionMatchesNotice(expectedNotice, observed) {
+  if (observed === 'TARGET_INVALID_DSH_PIN_MISMATCH' || observed === 'TARGET_INVALID_UNCLASSIFIED') {
+    return expectedNotice === 'TARGET_INVALID'
+  }
+  if (observed === 'ALREADY_CURRENT') return expectedNotice === 'ALREADY_CURRENT'
+  return false
+}
+
+export async function waitForReloadNotice(client, expectedText, label, fromRecordIndex, timeoutMs = RELOAD_WAIT_MS) {
+  const expected = reloadNoticeTypeForText(expectedText)
+  const started = Date.now()
+  const fail = (category, code, observed) => new SplitSmokeWaitError(category, {
+    code,
+    waitLabel: label,
+    processRole: client.role,
+    elapsedMs: Date.now() - started,
+    expected,
+    observed,
+    process: client,
+  })
+  for (;;) {
+    const viewport = await client.viewport()
+    // 1. The painted frame is the only PASS authority.
+    if (viewport.join('\n').includes(expectedText)) return expected
+    // 2. A DIFFERENT fixed notice is already decisive.
+    const unexpected = classifyReloadNotices(viewport).find(type => type !== expected)
+    if (unexpected !== undefined) throw fail('UNEXPECTED_RELOAD_REFUSAL', 'PAINTED_NOTICE_MISMATCH', unexpected)
+    // 3. A refusal of this action that can never paint the expected notice ends
+    //    the wait now; an agreeing refusal still has to reach the screen.
+    for (const record of client.records.slice(fromRecordIndex)) {
+      if (record?.m4r !== 'handoff-request-rejected') continue
+      const observed = classifyHandoffRejection(record.error)
+      if (!rejectionMatchesNotice(expected, observed)) throw fail('UNEXPECTED_RELOAD_REFUSAL', 'PROCESS_REFUSED_RELOAD', observed)
+    }
+    // 4. A dead Client or an unreadable record file fails by its own category.
+    if (client.recordError !== undefined) throw fail('INFRA_FAILURE', 'RECORD_READ_FAILED')
+    if (client.exited) {
+      const unread = client.finalRecordRead(label)
+      if (unread !== undefined) throw unread
+      const painted = classifyReloadNotices(await client.viewport()).find(type => type !== expected)
+      if (painted !== undefined) throw fail('UNEXPECTED_RELOAD_REFUSAL', 'PAINTED_NOTICE_MISMATCH', painted)
+      throw fail('PROCESS_EXITED', 'PROCESS_EXITED_BEFORE_NOTICE')
+    }
+    if (Date.now() - started >= timeoutMs) throw fail('WAIT_TIMEOUT', 'NOTICE_WAIT_TIMEOUT')
+    await sleep(50)
+  }
+}
+
+/**
+ * The Client's own `handoff-request-ignored` reasons, projected onto the notice
+ * types the product would publish for the same decision (an already-latched or
+ * stopping Client refuses as `stopping`; an unready one as `not-ready`).
+ */
+const IGNORED_REASON_TYPES = Object.freeze({
+  'already-requested': 'STOPPING',
+  stopping: 'STOPPING',
+  'not-ready': 'NOT_READY',
+})
+
+export async function waitForAcceptedHandoff(client, pid, label, fromRecordIndex, timeoutMs = RELOAD_WAIT_MS) {
+  const started = Date.now()
+  const fail = (category, code, observed) => new SplitSmokeWaitError(category, {
+    code,
+    waitLabel: label,
+    processRole: client.role,
+    elapsedMs: Date.now() - started,
+    observed,
+    process: client,
+  })
+  for (;;) {
+    for (const record of client.records.slice(fromRecordIndex)) {
+      // Only THIS action's accepted request for THIS PID satisfies the wait.
+      if (record?.m4r === 'handoff-requested' && record.pid === pid) return record
+      if (record?.m4r === 'handoff-request-rejected') {
+        throw fail('UNEXPECTED_RELOAD_REFUSAL', 'PROCESS_REFUSED_RELOAD', classifyHandoffRejection(record.error))
+      }
+      if (record?.m4r === 'handoff-request-ignored') {
+        throw fail('UNEXPECTED_RELOAD_REFUSAL', 'PROCESS_IGNORED_RELOAD', IGNORED_REASON_TYPES[record.reason])
+      }
+    }
+    if (client.recordError !== undefined) throw fail('INFRA_FAILURE', 'RECORD_READ_FAILED')
+    if (client.exited) {
+      const unread = client.finalRecordRead(label)
+      if (unread !== undefined) throw unread
+      const late = client.records.slice(fromRecordIndex).find(record => record?.m4r === 'handoff-requested' && record.pid === pid)
+      if (late !== undefined) return late
+      throw fail('PROCESS_EXITED', 'PROCESS_EXITED_BEFORE_HANDOFF')
+    }
+    if (Date.now() - started >= timeoutMs) throw fail('WAIT_TIMEOUT', 'HANDOFF_WAIT_TIMEOUT')
+    await sleep(50)
+  }
 }
 
 /**
@@ -694,9 +816,12 @@ async function runUserCommandReloadRound(context) {
 
   // ── U08 negative 1: same installed build → already-current, no stop ──────
   checkpoint('U08/negative-already-current')
+  // The record boundary is captured BEFORE the command: a refusal left by an
+  // earlier action must never be attributed to this one.
+  const alreadyCurrentFrom = reloadOldClient.records.length
   reloadOldClient.send('/reload-client\r')
-  await reloadOldClient.waitForScreen('Client reload skipped: this Client already runs the installed build.',
-    'U08 already-current notice', 120_000)
+  await waitForReloadNotice(reloadOldClient, 'Client reload skipped: this Client already runs the installed build.',
+    'U08 already-current notice', alreadyCurrentFrom)
   await assertOldSurfaceKept('U08 already-current')
 
   // ── U08 negative 2: a staged, unreferenced image blocks the reload ───────
@@ -713,9 +838,10 @@ async function runUserCommandReloadRound(context) {
   // a draft-text refusal instead.
   reloadOldClient.send('\x7f'.repeat(200))
   await waitForClearedComposer(reloadOldClient, '[image #', 'U08 staged placeholder cleared')
+  const attachmentsFrom = reloadOldClient.records.length
   reloadOldClient.send('/reload-client\r')
-  await reloadOldClient.waitForScreen('Client reload blocked: remove or submit the staged attachments first.',
-    'U08 attachments refusal', 120_000)
+  await waitForReloadNotice(reloadOldClient, 'Client reload blocked: remove or submit the staged attachments first.',
+    'U08 attachments refusal', attachmentsFrom)
   await assertOldSurfaceKept('U08 attachments refusal')
 
   checkpoint('U08/upgrade-install')
@@ -764,11 +890,10 @@ async function runUserCommandReloadRound(context) {
   checkpoint('U08/positive-reexec')
   // ── U08 positive: the PRODUCTION `/reload-client` command drives the SAME
   //    PR3 reexec/handoff chain into the newly installed build ─────────────
+  const reloadRequestFrom = reloadClient.records.length
   reloadClient.send('/reload-client\r')
-  const reloadRequested = await reloadClient.waitFor(
-    record => record.m4r === 'handoff-requested' && record.pid === reloadClientPid,
-    'U08 production command accepted the reload',
-    120_000,
+  const reloadRequested = await waitForAcceptedHandoff(
+    reloadClient, reloadClientPid, 'U08 production command accepted the reload', reloadRequestFrom,
   )
   assertEqual(reloadRequested.sessionId, sessionId, 'U08 the command captured another Session')
   assertEqual(reloadRequested.expectedHostInstanceId, hostIdentity.instanceId, 'U08 the command captured another Host')
@@ -986,9 +1111,10 @@ async function runUnavailableTargetRound(context) {
   assert(!existsSync(join(profileDir, 'node_modules', EXPECTED_PACKAGE_NAME)),
     'U08 the official removal left the installed package behind')
   checkpoint('U08/negative-target-invalid')
+  const targetInvalidFrom = client.records.length
   client.send('/reload-client\r')
-  await client.waitForScreen('Client reload failed: the installed replacement Client is unavailable or incompatible.',
-    'U08 target-invalid notice', 120_000)
+  await waitForReloadNotice(client, 'Client reload failed: the installed replacement Client is unavailable or incompatible.',
+    'U08 target-invalid notice', targetInvalidFrom)
   assertEqual(client.records.filter(record => record.m4r === 'handoff-requested').length, 0,
     'U08 the target-invalid refusal reached the process stop sink')
   assert(alive(clientPid), 'U08 the target-invalid refusal killed the live Client')
@@ -1123,9 +1249,10 @@ async function runReloadSourceIsolationRound(context) {
   // resolve the PROFILE: the profile IS the running build, so this is the
   // already-current refusal. The qualification override would have been a
   // different (valid) build — a MANUAL stop here would prove the leak.
+  const manualReloadFrom = client.records.length
   client.send('/reload-client\r')
-  await client.waitForScreen('Client reload skipped: this Client already runs the installed build.',
-    'U09 manual already-current notice', 120_000)
+  await waitForReloadNotice(client, 'Client reload skipped: this Client already runs the installed build.',
+    'U09 manual already-current notice', manualReloadFrom)
   assertEqual(client.records.filter(record => record.m4r === 'handoff-requested').length, 0,
     'U09 the manual command used the qualification target override')
   assert(alive(clientPid), 'U09 the manual already-current refusal killed the Client')
@@ -1141,11 +1268,10 @@ async function runReloadSourceIsolationRound(context) {
   // In the SAME process, the qualification entry may use the override. This
   // proves both entries coexist on ONE latch and only the target resolution
   // differs.
+  const qualificationFrom = client.records.length
   client.signalBusiness('SIGUSR2')
-  const qualificationRequested = await client.waitFor(
-    record => record.m4r === 'handoff-requested' && record.pid === clientPid,
-    'U09 qualification accepted the reexec request',
-    120_000,
+  const qualificationRequested = await waitForAcceptedHandoff(
+    client, clientPid, 'U09 qualification accepted the reexec request', qualificationFrom,
   )
   assertEqual(qualificationRequested.source, 'qualification',
     'the qualification request did not name its source')
@@ -1381,7 +1507,8 @@ async function main() {
     hosts.push(hostA)
     const hostAReady = await hostA.waitFor(record => record.m4a0 === 'ready', 'Host A ready', 240_000)
     assert(hostAReady.localHost.buildId === oldBuildId, 'Host A did not publish the old production buildId')
-    assert(hostAReady.localHost.dshVersion === targetDshVersion, 'Host A DSH version is not the pinned rc.4')
+    assert(hostAReady.localHost.dshVersion === targetDshVersion,
+      `Host A DSH version is not the pinned runtime ${targetDshVersion}`)
     const hostABefore = safeIdentity(hostAReady.localHost)
 
     const clientA = new SurfaceEntryProcess(join(oldProfilePackage, 'dist', 'local-client.mjs'), {
@@ -1506,11 +1633,10 @@ async function main() {
     assert(!c1WorkHadRelease(workRootPath), 'Host A Turn was released before the reexec handoff')
     assertEqual(clientA.records.filter(record => record.m4b2s === 'client-closed').length, 0,
       'Client A closed itself before the reexec request')
+    const reexecRequestFrom = clientA.records.length
     clientA.signalBusiness('SIGUSR2')
-    const reexecRequested = await clientA.waitFor(
-      record => record.m4r === 'handoff-requested' && record.pid === clientAPid,
-      'Client A accepted the reexec handoff request',
-      120_000,
+    const reexecRequested = await waitForAcceptedHandoff(
+      clientA, clientAPid, 'Client A accepted the reexec handoff request', reexecRequestFrom,
     )
     assert(reexecRequested.sessionId === sessionId, 'the reexec request captured another Session')
     assert(reexecRequested.expectedHostInstanceId === hostABefore.instanceId, 'the reexec request captured another Host')
@@ -1764,6 +1890,7 @@ async function main() {
       120_000,
     )
     const sessionLogsBeforeChildFailure = sessionLogFiles(dshHome)
+    const childFailureRequestFrom = clientA2.records.length
     clientA2.signalBusiness('SIGUSR2')
     // The failed child ends the whole PTY process tree quickly. Wait for the
     // real exit first, then flush the complete record tail once (the shared
@@ -1772,11 +1899,11 @@ async function main() {
     clientA2.readRecords()
     assertEqual(childFailureExit.code, 1, `the failed handoff exit was ${JSON.stringify(childFailureExit)}`)
     assertEqual(childFailureExit.signal, null)
-    const reexecRequested2 = clientA2.records.find(
-      record => record.m4r === 'handoff-requested' && record.pid === clientA2Pid,
+    // The special fault injection stays the expectation: this only proves THIS
+    // action's request was accepted before the injected child failure.
+    const reexecRequested2 = await waitForAcceptedHandoff(
+      clientA2, clientA2Pid, 'the second old Client accepted the reexec request', childFailureRequestFrom,
     )
-    assert(reexecRequested2 !== undefined,
-      `the second old Client never accepted the reexec request; records=${JSON.stringify(clientA2.records.slice(-6))}`)
     assertEqual(reexecRequested2.sessionId, sessionId)
     const clientClosed2 = clientA2.records.find(
       record => record.m4b2s === 'client-closed' && record.pid === clientA2Pid,
