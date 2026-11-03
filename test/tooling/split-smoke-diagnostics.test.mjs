@@ -1321,33 +1321,67 @@ test('the ready race separates an early exit from a timeout', async () => {
   assert.ok(timeoutError.elapsedMs >= 120 && timeoutError.elapsedMs < 5_000)
 })
 
-test('a ready race that lost every contender still reports them', async () => {
-  // The close callback removes exited processes from the lane's live set, so a
-  // report built afterwards would show no process for the failure that involves
-  // all of them.
-  const contenders = Array.from({ length: 10 }, (_unused, index) => ({
-    role: `host-${String(index)}`,
-    exited: true,
-    records: [{ m4a0: 'failure', code: 'HOST_START_TIMEOUT' }],
-    exitResult: { code: 1, signal: null },
-  }))
-  const error = await rejection(() => waitForAnyReady(contenders, 'a ready contender', 50))
-  assert.equal(error.category, 'PROCESS_EXITED')
-  const report = projectFailureReport({
-    lane: 'split-process',
-    category: error.category,
-    reason: error.code,
-    waitLabel: error.waitLabel,
-    processes: error.processSummaries ?? [],
+test('a ready race that lost every contender reports EVERY one of them', async (t) => {
+  // The REAL T08 topology: sixteen processes whose role is `host` and which never
+  // publish `ready`. A projection that folds on `(role, pid)` would then merge all
+  // of them into a single summary — hiding fifteen failures.
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-ready-race-')
+  const previousTmp = process.env.TMPDIR
+  process.env.TMPDIR = privateTmp
+  t.after(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmp
   })
-  assert.ok(report.processes !== undefined, 'the exited contenders must survive into the report')
-  assert.equal(report.processes.length, 8, 'the projection still caps at 8 processes')
-  for (const handle of report.processes) {
+  const contenders = Array.from({ length: 10 }, (_unused, index) => ({
+    role: 'host',
+    exited: true,
+    // No `ready` record at all: the handle has NO discoverable PID.
+    records: [{ m4a0: 'failure', code: 'HOST_START_TIMEOUT' }],
+    // Distinguishable so a collapse is visible as a wrong count, not a coincidence.
+    exitResult: { code: 20 + index, signal: null },
+  }))
+  const error = await rejection(() => waitForAnyReady(contenders, 'T08 16-host race', 50))
+  assert.equal(error.category, 'PROCESS_EXITED')
+  // Go through the REAL reporting path, not the projection in isolation.
+  const diagnostics = createSmokeDiagnostics({
+    lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', marker: 'T',
+  })
+  const stderr = captureStderr(() => diagnostics.reportFailure(error))
+  const reportPath = stderr.match(/report: (\S+)/u)?.[1]
+  assert.ok(reportPath !== undefined, `the summary must print the report path:\n${stderr}`)
+  const written = JSON.parse(readFileSync(reportPath, 'utf8'))
+  assert.equal(written.processes.length, 8, 'the cap keeps 8 summaries, not 1')
+  const codes = written.processes.map(handle => handle.exitCode).sort((a, b) => a - b)
+  assert.deepEqual(codes, [22, 23, 24, 25, 26, 27, 28, 29],
+    `each kept summary must be a DIFFERENT process (last 8 of 20..29), got ${JSON.stringify(codes)}`)
+  for (const handle of written.processes) {
+    assert.equal(handle.role, 'host')
     assert.equal(handle.exited, true)
-    assert.equal(handle.exitCode, 1)
-    assert.deepEqual(handle.events, [{ m4a0: 'failure' }], 'only official event names, never records')
+    assert.equal(handle.pid, undefined, 'a contender that never published ready has no PID')
+    assert.deepEqual(handle.events, [{ m4a0: 'failure' }], 'only official event names')
   }
-  assert.ok(!JSON.stringify(report).includes('HOST_START_TIMEOUT'), 'the record payload stays out')
+  // Privacy: the record payload must not ride along with the summaries.
+  assert.ok(!readFileSync(reportPath, 'utf8').includes('HOST_START_TIMEOUT'))
+  assert.ok(!stderr.includes('HOST_START_TIMEOUT'))
+})
+
+test('the SAME handle passed twice is one process, with or without a PID', () => {
+  const withoutPid = { role: 'host', exited: true, records: [{ m4a0: 'failure' }], exitResult: { code: 3, signal: null } }
+  const once = projectFailureReport({ lane: 'split-process', processes: [withoutPid] })
+  const twice = projectFailureReport({ lane: 'split-process', processes: [withoutPid, withoutPid] })
+  assert.equal(once.processes.length, 1)
+  assert.equal(twice.processes.length, 1, 'the same handle must not be counted twice just for lacking a PID')
+  // Two DIFFERENT handles of the same role without a PID are two processes.
+  const sibling = { role: 'host', exited: true, records: [{ m4a0: 'failure' }], exitResult: { code: 4, signal: null } }
+  const both = projectFailureReport({ lane: 'split-process', processes: [withoutPid, sibling] })
+  assert.equal(both.processes.length, 2)
+  assert.deepEqual(both.processes.map(handle => handle.exitCode), [3, 4])
+  // A KNOWN pid still identifies the same process across two distinct wrappers.
+  const withPidA = { role: 'surface-client', exited: false, records: [{ m4a0: 'ready', pid: 4242 }] }
+  const withPidB = { role: 'surface-client', exited: true, records: [{ m4a0: 'ready', pid: 4242 }], exitResult: { code: 0, signal: null } }
+  const merged = projectFailureReport({ lane: 'split-process', processes: [withPidA, withPidB] })
+  assert.equal(merged.processes.length, 1, 'one PID is one process')
+  assert.equal(merged.processes[0].exited, true, 'the exit fact from either wrapper survives')
 })
 
 test('no bounded wait in either lane still throws a bare Error', () => {

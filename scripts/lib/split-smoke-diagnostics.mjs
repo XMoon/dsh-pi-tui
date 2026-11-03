@@ -384,22 +384,43 @@ function projectProcess(handle) {
   return summary.role === undefined ? undefined : summary
 }
 
-/** Owned processes → bounded summaries, merged by role+PID, capped. */
+/**
+ * Owned processes → bounded summaries, capped.
+ *
+ * Two handles collapse into one summary only when they are the same PROCESS:
+ * either the same object (the live list and an error's own snapshot can carry
+ * the same handle) or the same KNOWN `(role, pid)`. A missing PID is not an
+ * identity: the T08 race starts sixteen processes whose role is `"host"` and
+ * which never publish `ready`, so equality on `(role, undefined)` would report
+ * sixteen DIFFERENT processes as one — exactly the failure whose report needs
+ * them all.
+ */
 function projectProcesses(handles) {
   const summaries = []
+  const seenHandles = new Set()
+  const byIdentity = new Map()
   for (const handle of Array.isArray(handles) ? handles : []) {
+    const isObject = handle !== null && typeof handle === 'object'
+    if (isObject && seenHandles.has(handle)) continue
     const summary = projectProcess(handle)
     if (summary === undefined) continue
-    const known = summaries.find(entry => entry.role === summary.role && entry.pid === summary.pid)
-    // A live handle and the exiting snapshot of the SAME process never count twice.
-    if (known !== undefined) {
-      known.exited = known.exited || summary.exited
-      known.exitCode = summary.exitCode ?? known.exitCode
-      known.exitSignal = summary.exitSignal ?? known.exitSignal
-      known.events = summary.events
-      continue
+    if (isObject) seenHandles.add(handle)
+    // A PID is a real identity only when the process published one.
+    const identity = Number.isInteger(summary.pid)
+      ? `${String(summary.role)}\u0000${String(summary.pid)}`
+      : undefined
+    if (identity !== undefined) {
+      const known = byIdentity.get(identity)
+      if (known !== undefined) {
+        known.exited = known.exited || summary.exited
+        known.exitCode = summary.exitCode ?? known.exitCode
+        known.exitSignal = known.exitSignal ?? known.exitSignal
+        known.events = summary.events
+        continue
+      }
     }
     summaries.push(summary)
+    if (identity !== undefined) byIdentity.set(identity, summary)
   }
   return summaries.slice(-MAX_PROCESSES)
 }
