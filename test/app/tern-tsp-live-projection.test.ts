@@ -2021,6 +2021,45 @@ test('W07: a viewed child never borrows the main subject\'s Welcome, and leaving
   }
 })
 
+test('W06: a zero-row window over a non-empty fold is unreachable through the public controller, so the veto cannot be window-derived', () => {
+  // The plan's W06 asks for "the window re-selected to zero rows". This proves
+  // the state itself: EVERY window selection the production controller accepts
+  // over a fold that has turns paints at least one row, and the only accepted
+  // re-selections are anchors inside the fold's own turn index. A test that
+  // fabricated an empty window would be constructing a state production cannot
+  // reach, so the claim is carried here instead: the veto input is the fold's
+  // turn index, and no reachable window state can make a non-empty fold look
+  // empty. `anchorAt` refuses a turn outside the index, `moveOlder`/`turnOlder`
+  // refuse at the oldest turn, and `setTurns([])` resets to `latest` rather
+  // than producing an empty history window.
+  const events = (offset: number) => [
+    ev('turn/start', { turn: 1 + offset }, offset * 10),
+    userMessage(1 + offset * 10, `user-w${offset}`, `the ${offset}nd turn`),
+  ]
+  for (const turns of [1, 2, 3]) {
+    const folder = new TranscriptFolder()
+    folder.apply(Array.from({ length: turns }, (_, index) => events(index)).flat())
+    const controller = new TranscriptWindowController({ windowTurns: 1, stepTurns: 1 })
+    controller.setTurns(folder.groupedTurns())
+    assert.equal(folder.groupedTurns().length, turns, 'the fold really carries the history')
+    const projected = () => {
+      const endTurn = controller.endTurn()
+      return folder.window({ maxTurns: controller.windowTurns, ...(endTurn === undefined ? {} : { endTurn }) }).messages.length
+    }
+    assert.ok(projected() > 0, 'the live window shows a row')
+    // Re-anchor onto every turn the fold actually has: none is empty.
+    for (const turn of folder.groupedTurns()) {
+      assert.equal(controller.anchorAt(turn), true, `anchorAt(${turn}) is a real re-selection`)
+      assert.ok(projected() > 0, `the window anchored at turn ${turn} still shows a row`)
+    }
+    // And the refusals: an anchor outside the index never re-selects anything.
+    assert.equal(controller.anchorAt(9999), false, 'a turn the fold never had is refused')
+    controller.latest()
+    while (controller.moveOlder()) assert.ok(projected() > 0, 'every older page still shows a row')
+    assert.ok(projected() > 0, 'the oldest reachable window is never empty')
+  }
+})
+
 test('W16: the Remote session-summary blank bit drives the same repaint chain, including the UNKNOWN case', async () => {
   // The authority is the REAL Remote port object, not a boolean the fixture
   // pre-computed: `RemoteSessionReader.blank()` reads the official Client

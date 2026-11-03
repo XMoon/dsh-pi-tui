@@ -1503,6 +1503,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           whaleLines: welcomeWhalePlainLines(welcomeWhaleVariant),
           resumeAvailable: boundHandlers?.sessionBrowserAvailable() === true,
           nativeStyled: composerChromeSupported(),
+          // The `icon` KIND is negotiated separately from `el`+`styles`: a pane
+          // that never advertised it must not be sent an icon node.
+          nativeIcon: session.caps.kinds.includes('icon'),
           scopeKey: scopePrefix,
           onResume: welcomeResumeClicked,
         })
