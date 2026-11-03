@@ -39,8 +39,9 @@
 
 import { Image, imageFallback, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
+import type { ImageProtocolPreference } from '../../graphics/image-protocol-preference.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import type { ImageLoader } from '../../../client/media/image/loader.ts'
@@ -133,7 +134,9 @@ export class ImageThumbnail implements Component {
   /** The ONE managed graphics owner of this physical terminal (Image-7A/7B-A).
    *  When present, Kitty pixels are painted through the managed Core instead of
    *  the legacy fork `Image`; iTerm2 and every other terminal keep that path. */
-  private readonly graphics: KittyGraphics | undefined
+  private readonly graphics: ImageGraphics | undefined
+  /** The app's ONE startup image-protocol preference (never re-read per frame). */
+  private readonly imageProtocolPreference: ImageProtocolPreference | undefined
   /** True when `instance` is a managed component (it owns a Core handle). */
   private instanceManaged = false
   private instance: PixelBody | undefined
@@ -141,7 +144,7 @@ export class ImageThumbnail implements Component {
    * capability flip (Kitty ↔ iTerm2) or a raw/derived source switch must
    * rebuild it; reusing an instance across those renders stale cached lines
    * from the WRONG protocol (the fork caches by width, not by capability). */
-  private instanceKind: 'raw-kitty' | 'raw-iterm2' | 'preview-kitty' | undefined
+  private instanceKind: 'raw-kitty' | 'raw-iterm2' | 'preview-kitty' | 'raw-sixel' | 'preview-sixel' | undefined
   private cachedLines: string[] | undefined
   private cachedKey: string | undefined
   /** The control span the LAST painted info row actually carried, keyed by
@@ -169,7 +172,8 @@ export class ImageThumbnail implements Component {
     collapsedRef?: () => boolean,
     scope?: unknown,
     fullscreenCollapseControl?: () => boolean,
-    graphics?: KittyGraphics,
+    graphics?: ImageGraphics,
+    imageProtocolPreference?: ImageProtocolPreference,
   ) {
     // Explicit fields (Node strip-only mode rejects parameter properties).
     this.ref = ref
@@ -180,6 +184,7 @@ export class ImageThumbnail implements Component {
     this.scope = scope
     this.fullscreenCollapseControl = fullscreenCollapseControl
     this.graphics = graphics
+    this.imageProtocolPreference = imageProtocolPreference
     // Subscribe to THIS (scope, attachment)'s settles only: N thumbnails loading
     // in parallel never invalidate each other, and another presentation's settle
     // for the same content id never wakes this component (review finding 8 — no
@@ -292,7 +297,24 @@ export class ImageThumbnail implements Component {
    * `imageFallback` TEXT row, and that row is information, not an image body;
    * treating it as pixels would open a Viewer from a line of plain text.
    */
-  paintedImageBody(width: number): { rows: number; endCol: number } | undefined {
+  paintedImageBody(width: number): { rows: number; endCol: number; cropTopRows?: number } | undefined {
+    // A SIXEL occurrence's hit body is the LAST COMMITTED frame's footprint, which
+    // the owner keeps until the next `framePainted`: the component renders before
+    // the Screen materializes, so a component-local snapshot would always lag one
+    // frame (or clear on every render). (X072/X073.)
+    // Both SIXEL kinds read the LAST COMMITTED frame's footprint: the component
+    // render happens before the Screen materializes, so a component-local
+    // snapshot would lag one frame. `preview-sixel` is the derived PNG path for
+    // JPEG/WebP and must behave exactly like the direct PNG path here.
+    if (this.instanceKind === 'raw-sixel' || this.instanceKind === 'preview-sixel') {
+      const live = this.instance?.paintedBodyAt?.(width)
+      if (live === undefined) return undefined
+      return {
+        rows: live.rows,
+        endCol: live.columns,
+        ...(live.cropTopRows === undefined ? {} : { cropTopRows: live.cropTopRows }),
+      }
+    }
     const painted = this.paintedBody
     if (painted === undefined || painted.width !== width) return undefined
     return { rows: painted.rows, endCol: painted.endCol }
@@ -326,7 +348,18 @@ export class ImageThumbnail implements Component {
     // The EFFECTIVE protocol (not the fork's process-wide detection) drives the
     // cache: an admitted tmux virtual handle paints pixels where the fork still
     // reports none, and its revocation must miss every cached APC/PUA frame.
-    const protocol = effectiveImageProtocol(this.graphics)
+    const protocol = effectiveImageProtocol(this.graphics, this.imageProtocolPreference)
+    // A SIXEL raster settles OUTSIDE this frame cache: its readiness epoch and
+    // the verified background change the painted bytes asynchronously, and none
+    // of that is visible in a width/capability key. Caching it would freeze the
+    // first fallback forever (the owner's settle only asks for a repaint), so a
+    // SIXEL occurrence re-derives its frame every paint and the body component
+    // keeps the per-width cache. Every other protocol keeps this cache verbatim.
+    if (protocol === 'sixel') {
+      this.cachedLines = undefined
+      this.cachedKey = undefined
+      return this.renderLines(width)
+    }
     const control = this.controlWanted() ? 'ctl' : 'noctl'
     const key = `${width}:${protocol ?? 'none'}:${this.collapsed() ? 'collapsed' : 'expanded'}:${control}`
     if (this.cachedLines !== undefined && this.cachedKey === key) return this.cachedLines
@@ -360,11 +393,14 @@ export class ImageThumbnail implements Component {
     // unsupported terminal, a revoked tmux admission and every other fallback
     // keep the text row AND never trigger a pointless read of the full bytes
     // (§17.3, round-2 finding 4).
-    const protocol = effectiveImageProtocol(this.graphics)
+    const protocol = effectiveImageProtocol(this.graphics, this.imageProtocolPreference)
     if (protocol === null) {
       return this.infoOnly(width, this.infoLine())
     }
-    const previewCandidate = protocol === 'kitty'
+    // Kitty and Direct SIXEL both place PNG only, so a JPEG/WebP occurrence takes
+    // the SAME existing derived-PNG path (`getKittyThumbnail`/`loadKittyThumbnail`,
+    // EXIF-corrected). No second decode chain exists. (Image-8 / I8-2A.)
+    const previewCandidate = (protocol === 'kitty' || protocol === 'sixel')
       && (this.ref.mediaType === 'image/jpeg' || this.ref.mediaType === 'image/webp')
     // Cheap source-byte preflight BEFORE the attachment read (Image-6A §5.3):
     // an over-budget JPEG/WebP can never produce a preview, so no full read is
@@ -394,7 +430,7 @@ export class ImageThumbnail implements Component {
     }
     // Ready: the info line stays constant — only the image rows collapse
     // (the fullscreen click toggle, decided before the read above).
-    if (previewCandidate) return this.renderKittyPreview(width)
+    if (previewCandidate) return this.renderDerivedPreview(width)
     // A raster the protocol cannot display keeps its informational text row and
     // must never reach the Core: the managed component transmits the payload as
     // `f=100` (PNG), so handing it a GIF would paint a broken image instead of
@@ -414,7 +450,7 @@ export class ImageThumbnail implements Component {
       ))
       return [this.infoRow(width, this.infoLine()), truncateToWidth(fallback, width)]
     }
-    const instanceKind = protocol === 'kitty' ? 'raw-kitty' : 'raw-iterm2'
+    const instanceKind = protocol === 'kitty' ? 'raw-kitty' : protocol === 'sixel' ? 'raw-sixel' : 'raw-iterm2'
     const managed = this.graphics !== undefined
     if (this.instance === undefined || this.instanceKind !== instanceKind || this.instanceManaged !== managed) {
       this.releaseInstance()
@@ -456,6 +492,12 @@ export class ImageThumbnail implements Component {
       // The managed component reports the exact placement it just built; the
       // same answer covers the budget fallback (no pixels, no hit).
       this.paintedBody = { width, rows: managedBody.rows, endCol: managedBody.columns }
+    } else if (protocol === 'sixel') {
+      // A SIXEL raster carries no cell-width control to parse and the encoder
+      // reports its footprint through `paintedBodyAt` only. Without that answer
+      // this render painted no pixels (pending, transparent, budget fallback),
+      // so it must register NO body at all.
+      this.paintedBody = undefined
     } else if (imagePixelsSupported(protocol, this.ref.mediaType)) {
       // The hit must cover exactly the cells the image OCCUPIES, which is the
       // protocol's own placement width — NOT the `maxWidthCells` ceiling this
@@ -473,13 +515,13 @@ export class ImageThumbnail implements Component {
   }
 
   /**
-   * The Kitty JPEG/WebP body (Image-6A): the loader's derived PNG is the only
-   * pixel source. The derived dimensions drive placement; the info row and the
+   * The derived PNG body for a JPEG/WebP occurrence (Image-6A, extended to
+   * Direct SIXEL by I8-2A): the loader's derived PNG is the only pixel source. The derived dimensions drive placement; the info row and the
    * viewer target stay the ORIGINAL ref. Idle/loading/error preview states are
    * informational only and register no pixel body, so a not-ready occurrence
    * can never open the Viewer from a text row.
    */
-  private renderKittyPreview(width: number): string[] {
+  private renderDerivedPreview(width: number): string[] {
     const preview = this.loader.getKittyThumbnail(this.ref, this.scope)
     if (preview.state === 'idle') {
       this.loader.loadKittyThumbnail(this.ref, this.scope)
@@ -495,7 +537,8 @@ export class ImageThumbnail implements Component {
       return this.infoOnly(width, `${this.infoLine()} · ${reason}`)
     }
     const managed = this.graphics !== undefined
-    if (this.instance === undefined || this.instanceKind !== 'preview-kitty' || this.instanceManaged !== managed) {
+    const previewKind = effectiveImageProtocol(this.graphics, this.imageProtocolPreference) === 'sixel' ? 'preview-sixel' : 'preview-kitty'
+    if (this.instance === undefined || this.instanceKind !== previewKind || this.instanceManaged !== managed) {
       this.releaseInstance()
       this.instance = managed
         ? this.graphics!.image(
@@ -522,12 +565,14 @@ export class ImageThumbnail implements Component {
           { widthPx: preview.width, heightPx: preview.height },
         )
       this.instanceManaged = managed
-      this.instanceKind = 'preview-kitty'
+      this.instanceKind = previewKind
     }
     const body = this.instance.render(width)
     const managedBody = this.instance.paintedBodyAt?.(width)
     if (managedBody !== undefined) {
       this.paintedBody = { width, rows: managedBody.rows, endCol: managedBody.columns }
+    } else if (previewKind === 'preview-sixel') {
+      this.paintedBody = undefined
     } else {
       // The derived body is a REAL Kitty placement only when this render emitted
       // an anchored APC; a missing `c=` registers no hit.

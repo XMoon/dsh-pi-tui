@@ -151,6 +151,20 @@ const nodeKey = (node: Node): string => {
 }
 
 /**
+ * The frame's ONE Details identity grid, read from the node's OWN props.
+ *
+ * A `kv` carries no per-fact child node: the client derives each pair from the grid's
+ * props, so the props are the only honest observation of what really reached the pane.
+ * `items` is kept verbatim — a Scope value stays the styled runs the app sent, never a
+ * flattened string, because the run roles are part of the contract under test.
+ */
+interface ObservedKv {
+  readonly key: string
+  readonly layout: unknown
+  readonly items: ReadonlyArray<{ readonly k: unknown; readonly v: unknown }>
+}
+
+/**
  * The frame the presenter REALLY built, reduced to what the flow asserts. The node
  * KEYS are recorded verbatim (they are the app's own identity contract: the picker and
  * the layer carry the panel serial, a reading page carries the panel serial and the
@@ -162,6 +176,7 @@ const describe = (layer: Node) => {
   let overlay: Node | undefined
   let markdown: Node | undefined
   let backRow: Node | undefined
+  let identityKv: ObservedKv | undefined
   const texts: Array<{ key: string; text: string }> = []
   let readingBodyKey: string | undefined
   const visit = (node: Node | undefined): void => {
@@ -171,6 +186,15 @@ const describe = (layer: Node) => {
     if (node.kind === 'overlay' && overlay === undefined) overlay = node
     if (node.kind === 'md' && markdown === undefined) markdown = node
     if (node.kind === 'row' && key.startsWith('preset-details-back-') && backRow === undefined) backRow = node
+    // ONLY the app's own Details identity grid — never "the first kv of the frame", so
+    // a kv painted by anything outside this Reader can not be mistaken for it.
+    if (node.kind === 'kv' && identityKv === undefined && key.startsWith('preset-details-kv-identity-')) {
+      const props = (node.props ?? {}) as Record<string, unknown>
+      const pairs = Array.isArray(props['items'])
+        ? (props['items'] as readonly Record<string, unknown>[]).map((item) => ({ k: item['k'], v: item['v'] }))
+        : []
+      identityKv = { key, layout: props['layout'], items: pairs }
+    }
     if (node.kind === 'text' && (key.startsWith('details-') || key.startsWith('relation-') || key.startsWith('preset-details-back'))) {
       texts.push({ key, text: ownText(node) })
     }
@@ -225,6 +249,7 @@ const describe = (layer: Node) => {
       clickable: backProps['actions'] !== undefined,
     },
     readingBodyKey,
+    identityKv,
     texts,
     markdown: mdText === undefined ? undefined : { length: mdText.length, text: mdText },
   }
@@ -297,6 +322,9 @@ picker = new TspPresetPicker({
     note({ nativeScroll: { id, to } })
     surface.scroll(id, to)
   },
+  // The REAL negotiated kind set of THIS pane: the subject never forces the display
+  // capability, so the recorded frames show what this client really gets.
+  nativeKv: session.caps.kinds.includes('kv'),
 })
 
 const rosterOf = (): PresetPickerRoster => {

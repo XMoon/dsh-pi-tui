@@ -143,9 +143,12 @@ test('currentness identity comes from the ownership core, never from the Direct 
     'fork admission captures the navigation identity through the core')
   assert.ok(!forkAdmission.includes('agentNow('), 'fork admission must not read the Direct attachment')
 
-  // switch no-op (bound runtime)
-  const switchLocked = spanOf(sessionRuntimeSource, 'const switchSessionLocked = ', '// Draft cleanup happens ONLY after')
-  assert.ok(switchLocked.includes('if (core.currentSessionId() === sessionId) {'),
+  // switch no-op (bound runtime): it is decided BEFORE the navigation stop (a
+  // switch to the current Session replaces nothing and must not cancel its
+  // turn) and compares the CORE session id — never the Direct attachment, which
+  // the Remote branch does not even have.
+  const switchLocked = spanOf(sessionRuntimeSource, 'const switchSessionOutcome = (sessionId: string, expectedScope?: SessionScope)', 'const switchSession = async (')
+  assert.ok(switchLocked.includes('if (core.currentSessionId() !== sessionId) return undefined'),
     'the switch no-op compares the CORE session id')
   assert.ok(!switchLocked.includes('agentNow('), 'the switch no-op must not read the Direct attachment')
 
@@ -312,10 +315,10 @@ test('the admission fences use the ownership subject; only the param-agent fence
     2,
     'the two owner-token callbacks must resolve the captured token through the subject compare',
   )
-  // M3-4 PR3: the user-shell interrupt dropped the exact-Agent compare for
-  // the semantic SessionWriter.cancel under a live-scope admission (§27), so
-  // NO legacy sessionUnchanged fence may remain anywhere (the interrupt
-  // fences are generation-fenced now).
+  // M3-4 PR3 + the control admission: the user-shell interrupt dropped the
+  // exact-Agent compare for the session CONTROL cancel (exact-owner backend
+  // cancel under a live-scope admission, §27), so NO legacy sessionUnchanged
+  // fence may remain anywhere (the interrupt fences are generation-fenced now).
   const legacyFences = (indexSource.match(/sessionUnchanged\(/g) ?? []).length
     + (localShellSource.match(/sessionUnchanged\(/g) ?? []).length
   assert.equal(legacyFences, 0,

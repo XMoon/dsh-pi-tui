@@ -360,10 +360,23 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
       }
     }
     // The wait can outlive the navigation/Connection: release the generation
-    // exactly once and commit nothing. An aborted open is a client-local
-    // supersession, never a failed Host operation.
-    if (!Object.is(captured, this.generation.getSnapshot()) || isAborted(request.signal)) {
+    // exactly once and commit nothing. If the OFFICIAL open already reached
+    // `open`, the Host may have opened the target even though this Client lost
+    // currentness; report `opened + superseded` so the runtime classifies it
+    // indeterminate rather than a proven non-execution.
+    if (isAborted(request.signal) || !Object.is(captured, this.generation.getSnapshot())) {
+      // Check the OFFICIAL open state BEFORE treating an abort as a proven
+      // pre-open cancellation: ready may already have resolved with
+      // `openState:'open'`, in which case the Host may have opened the target
+      // and the operation is indeterminate, not a definite non-execution.
+      const stateAtLoss = owner.openState()
       owner.release()
+      if (stateAtLoss.openState === 'open') {
+        return {
+          ownership: 'superseded',
+          outcome: { kind: 'opened', handle: { session: { id: request.sessionId } } },
+        }
+      }
       return { ownership: 'superseded', outcome: { kind: 'cancelled' } }
     }
     const opened = owner.openState()

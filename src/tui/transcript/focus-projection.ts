@@ -8,11 +8,12 @@
  * its original foundation position before the Thought. Collapsed turns HIDE
  * process rows (a committed pre-steer answer is the explicit exception) and
  * expanded turns restore raw chronology with the final assistant held back.
- * A foldable Context row (producer-declared Snapshot, or a `tool-jobs` Notice
- * with durable same-turn next-step evidence) follows the same rule unless it
- * shares a raw-adjacent cluster with `instructions`/`catalog`: it joins the
- * Thought instead of becoming turn foundation, while a mixed ambient cluster
- * keeps its indivisible foundation position.
+ * A foldable Context row (producer-declared Snapshot, a `tool-jobs` Notice or
+ * an `agent-message` relay with durable same-turn next-step evidence) follows
+ * the same rule unless it shares a raw-adjacent cluster with
+ * `instructions`/`catalog`: it joins the Thought instead of becoming turn
+ * foundation, while a mixed ambient cluster keeps its indivisible foundation
+ * position.
  *
  * This module owns the pure policy only. The PiTui disclosure card, its width
  * formatting, its theme/icon chrome and its live duration provider live in
@@ -30,7 +31,9 @@ import { isSurfacedContext, isSurfacedInteractionTool } from '../../domain/trans
 import { clusterAdjacentAmbientContext, isNoticeContext, type ContextCluster } from './context-structure.ts'
 import {
   isFoldableWorkContext,
+  isWorkingAgentRelay,
   projectTranscriptStructure,
+  workByMemberOf,
   type TranscriptStructureBlock,
   type TranscriptWorkSpan,
 } from './structure.ts'
@@ -210,8 +213,8 @@ function focusActionStatsByTurn(messages: readonly TranscriptMessage[]): Map<num
  * renders an UNQUALIFIED durable mid-turn `form:'notice'` AFTER the Thought
  * (visible process feedback, never inside the hidden Action candidate set),
  * and hides ordinary Process inside the collapsed root. A proven Working
- * `tool-jobs` Notice follows the Thought instead (v2 exception). Expanded
- * Focus restores the exact raw chronology.
+ * `tool-jobs` Notice or same-turn Agent relay follows the Thought instead.
+ * Expanded Focus restores the exact raw chronology.
  */
 export function projectFocus(
   messages: readonly TranscriptMessage[],
@@ -313,10 +316,10 @@ export function projectFocus(
     // `form:'notice'` is the visible exception (see
     // {@link collapsedFocusRowDisposition}): it renders AFTER the Thought as
     // a post-thought row, never inside the hidden Action candidate set. A
-    // proven Working `tool-jobs` Notice is NOT an exception: it follows the
-    // Thought hidden set (v2). A committed pre-steer answer is the other
-    // exception: from that exact raw
-    // boundary onward, preserve the persistent rows and answer in chronology
+    // proven Working `tool-jobs` Notice or same-turn Agent relay is NOT an
+    // exception: it follows the Thought hidden set. A committed pre-steer
+    // answer is the other exception: from that exact raw boundary onward,
+    // preserve the persistent rows and answer in chronology
     // so the answer cannot be swallowed by the Thought or move when the
     // disclosure changes.
     //
@@ -328,6 +331,11 @@ export function projectFocus(
     const leadBoundary = focusThoughtLeadBoundary(group)
     const foldableSnapshots: CollapsedFoldableSnapshotScope = {
       clusterByMember: clusterAdjacentAmbientContext(group).byMember,
+      // Hiding a carried row is only sound when the SAME group's canonical
+      // structure gives it a real Work owner (a Process run). An activity
+      // created by `turn/start` alone is NOT an owner: without any Process the
+      // row has no recoverable Thought content and must fail open.
+      workByMember: workByMemberOf(projectTranscriptStructure(group)),
       thoughtOwned: activity !== undefined,
     }
     const firstCommittedIndex = group.findIndex(isCommittedAnswer)
@@ -459,24 +467,31 @@ function isFocusPersistentInputRow(message: TranscriptMessage): boolean {
  * stays BEFORE the Thought. Every other persistent input/context row keeps its
  * existing pre-Thought behavior, and ordinary Process stays hidden inside the
  * collapsed Thought (restored in raw chronology when the Thought opens). A
- * foldable Context row (Snapshot or a proven Working tool-jobs Notice) joins
- * that hidden set INSTEAD of the post-Thought rule above when a real Thought
- * owner exists; without one every row must fail open. The ORDINARY Notice
- * position decision reads the semantic `form`, raw adjacency and raw position,
- * never a producer name; the Working `tool-jobs` exception additionally
- * requires `sourceKind === 'tool-jobs'` AND `form === 'notice'` AND the durable
- * same-turn next-step claim. `Compact` and `Full` do not route through here.
+ * foldable Context row (Snapshot, a proven Working tool-jobs Notice or a
+ * proven same-turn Agent relay) joins that hidden set INSTEAD of the
+ * post-Thought rule above when a real Thought owner exists; without one every
+ * row must fail open. The ORDINARY Notice position decision reads the semantic
+ * `form`, raw adjacency and raw position, never a producer name; the Working
+ * exceptions additionally require their exact `sourceKind`/`form` pair AND the
+ * durable same-turn next-step claim. `Compact` and `Full` do not route through
+ * here.
  */
 type CollapsedFocusRowDisposition = 'pre-thought' | 'post-thought' | 'hidden'
 
-/** The foldable Context rows (Snapshot / proven Working tool-jobs Notice) a
- * collapsed Thought may carry instead of surfacing as turn foundation.
+/** The foldable Context rows (Snapshot / proven Working tool-jobs Notice or
+ * Agent relay) a collapsed Thought may carry instead of surfacing as turn
+ * foundation.
  * `thoughtOwned` is false where no Thought block will be emitted (a truncated
  * window without an activity) — the rows then fail open instead of disappearing.
+ * `workByMember` is the same group's canonical Work membership, used by the
+ * Agent-relay rule: a claimed relay is only carried when a REAL Process run
+ * owns it, so an activity-only turn (no Process at all) fails open. Snapshot
+ * and Working tool-jobs Notice keep their established activity-owner rule.
  * The Thought-lead boundary decides WHICH rows are foundation; anything at or
  * after it is Thought content. */
 interface CollapsedFoldableSnapshotScope {
   readonly clusterByMember: ReadonlyMap<TranscriptMessage, ContextCluster>
+  readonly workByMember: ReadonlyMap<TranscriptMessage, TranscriptWorkSpan>
   readonly thoughtOwned: boolean
 }
 
@@ -489,7 +504,11 @@ function collapsedFocusRowDisposition(
   if (!isFocusPersistentInputRow(message)) return 'hidden'
   if (foldableSnapshots.thoughtOwned
     && index >= leadBoundary
-    && isFoldableWorkContext(message, foldableSnapshots.clusterByMember)) return 'hidden'
+    && isFoldableWorkContext(message, foldableSnapshots.clusterByMember)
+    // A claimed Agent relay additionally needs its REAL Work (Process) owner:
+    // an activity-only turn has no Process for the relay to be recovered
+    // through, so hiding it there would lose the original Context.
+    && (!isWorkingAgentRelay(message) || foldableSnapshots.workByMember.has(message))) return 'hidden'
   if (index >= leadBoundary && isNoticeContext(message)) return 'post-thought'
   return 'pre-thought'
 }
@@ -523,10 +542,11 @@ function consecutiveTurnGroup(messages: readonly TranscriptMessage[], start: num
  * with no human user (an inject-woken / next-turn wakeup turn) starts at the
  * group beginning. In both cases the boundary then consumes leading surfaced
  * Context rows that are NOT foldable (the wakeup cause, `instructions`,
- * `catalog`, an unqualified notice). The first FOLDABLE Context row (Snapshot or
- * a proven Working tool-jobs Notice) ends the foundation and becomes Thought
- * content — so a next-turn wakeup notice stays visible while the Snapshot and
- * next-step notices that arrive during the work fold with it. A mixed
+ * `catalog`, an unqualified notice or relay). The first FOLDABLE Context row
+ * (Snapshot, a proven Working tool-jobs Notice or Agent relay) ends the
+ * foundation and becomes Thought content — so a next-turn wakeup notice stays
+ * visible while the Snapshot and same-turn deliveries that arrive during the
+ * work fold with it. A mixed
  * `instructions`/`catalog` + Snapshot cluster keeps its indivisible foundation
  * position. `llm/retry`/max-token orchestration rows are not surfaced Context,
  * so they never enter the prefix. Without steer metadata the first user remains

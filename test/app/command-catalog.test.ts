@@ -14,7 +14,9 @@ import { parseCommand } from '@deepseek-ai/dsh-commands'
 import { afterEach, test } from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { isIndeterminateSkillWrite, registerTuiCommands, type TuiCommandRunner } from '../../src/commands.ts'
+import { isIndeterminateSkillWrite, registerTuiCommands, type ClientReloadCommandResult, type TuiCommandRunner } from '../../src/commands.ts'
+import { CLIENT_RELOAD_REFUSAL_NOTICES } from '../../src/tui/commands/utility.ts'
+import type { CommandResult } from '@deepseek-ai/dsh-commands'
 import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss } from '../../src/index.ts'
 import { classifyCommandLine } from '../../src/domain/command/policy.ts'
@@ -80,13 +82,25 @@ function stubRunner(
     displayWrites?: ('focus' | 'compact' | 'full')[]
   },
   diag: ReturnType<typeof createDiag> = createDiag({ filePath: undefined, stderrLevel: 'off' }),
-  options: { transitionPending?: boolean; busyEnter?: string; generation?: () => number; initialDisplayPreset?: 'focus' | 'compact' | 'full' } = {},
+  options: {
+    transitionPending?: boolean
+    busyEnter?: string
+    generation?: () => number
+    initialDisplayPreset?: 'focus' | 'compact' | 'full'
+    /** `/new` settlement tests: the preset read and the transaction seams. */
+    presetResolve?: () => Promise<{ id: string }>
+    navigationStopAccepted?: boolean
+    transitionThrows?: { readonly quiesced: boolean; readonly message: string }
+    /** M4 PR4: the injected process-owned `/reload-client` capability. */
+    requestClientReload?: () => ClientReloadCommandResult
+  } = {},
 ): TuiCommandRunner {
   let displayPreset: 'focus' | 'compact' | 'full' = options.initialDisplayPreset ?? 'full'
   // The scope-bound skill facades delegate to this REAL catalog port (exactly
   // like the production provider).
   const catalog = new DirectCatalogPort(ctx as never, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined)
   return {
+    beginClientWrite: () => () => {},
     ctx,
     app,
     deliveredFilesSnapshot: () => undefined,
@@ -119,7 +133,9 @@ function stubRunner(
       turnOutline: () => undefined,
       sessionStatus: () => undefined,
     },
-    catalog,
+    catalog: options.presetResolve === undefined
+      ? catalog
+      : { ...catalog, presets: { ...catalog.presets, resolve: options.presetResolve } } as never,
     config: new DirectConfigPort(ctx as never, undefined, (sessionId) => state.agent?.session.id === sessionId ? state.agent : undefined),
     commandRegistry: ctx.get('commands') as import('../../src/commands.ts').CommandRegistryLike | undefined,
     clientCommands: createClientCommandRegistry(parseCommand),
@@ -165,7 +181,16 @@ function stubRunner(
     prepareDraftMessage: async (text) => ({ role: 'user', id: `u:${text}`, content: [{ type: 'text', text }], source: { kind: 'user' } }) as never,
     signal: new AbortController().signal,
     switchSession: async () => undefined,
-    transitionTo: async <T>(steps: { target?: { id: string; header?: { cwd?: string } }; prepare?: () => Promise<void> | void; create: () => Promise<T> }) => {
+    transitionTo: async <T>(steps: {
+      target?: { id: string; header?: { cwd?: string } }
+      prepare?: () => Promise<void> | void
+      onOldOwnerQuiesced?: () => void
+      create: () => Promise<T>
+    }) => {
+      if (options.transitionThrows !== undefined) {
+        if (options.transitionThrows.quiesced) steps.onOldOwnerQuiesced?.()
+        throw new Error(options.transitionThrows.message)
+      }
       await steps.prepare?.()
       return { ok: true, next: await steps.create() }
     },
@@ -196,7 +221,15 @@ function stubRunner(
     openTasksBrowser: () => {}, createPluginManagerPage: () => undefined,
     openRewindPicker: () => {},
     sessionTransitionPending: () => options.transitionPending ?? false,
-    withSessionTransition: async <T>(task: () => T | Promise<T>) => task(),
+    withSessionTransition: async <T>(
+      task: () => T | Promise<T>,
+      navigation?: { admission: { oldStopAccepted: boolean } },
+    ) => {
+      if (options.navigationStopAccepted === true && navigation !== undefined) {
+        navigation.admission.oldStopAccepted = true
+      }
+      return task()
+    },
     // The scope-bound writer admission IS the transition refusal now (A3-4):
     // a pending transition makes withWriter throw before the task runs.
     withWriter: async <T>(_scope: unknown, task: () => T | Promise<T>) => {
@@ -206,6 +239,7 @@ function stubRunner(
     withPromptAdmission: async <T>(_agent: unknown, _line: string, task: () => T | Promise<T>) => task(),
     enterView: async () => {},
     requestExit: () => {},
+    ...(options.requestClientReload === undefined ? {} : { requestClientReload: options.requestClientReload }),
     extensions: undefined,
     exit: () => {},
   }
@@ -1769,11 +1803,11 @@ test('the built-in command decomposition preserves the exact primary set and reg
   // command, registered immediately after its primary. `/status` is the
   // `/settings` alias (C5).
   const ALIASES = new Set(['quit', 'status', 'statusline', 'resume', 'subagents', 'image', 'rename'])
-  // The 28 built-in primaries, in their frozen registration order.
+  // The 29 built-in primaries, in their frozen registration order.
   assert.deepEqual(
     services.registered.filter(name => !ALIASES.has(name)),
     [
-      'exit', 'settings', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
+      'exit', 'reload-client', 'settings', 'footer', 'display', 'focus', 'sessions', 'skill', 'reload', 'model',
       'new', 'tasks', 'plugins', 'yolo', 'preset', 'search', 'title', 'copy', 'attach', 'view-image',
       'export', 'transcript', 'deliverables', 'fork', 'rewind', 'login', 'logout', 'help', 'keybindings',
     ],
@@ -1781,6 +1815,7 @@ test('the built-in command decomposition preserves the exact primary set and reg
   // The raw sequence: every alias registers immediately after its primary.
   assert.deepEqual(services.registered, [
     'exit', 'quit',
+    'reload-client',
     'settings', 'status',
     'footer', 'statusline',
     'display', 'focus',
@@ -1824,5 +1859,127 @@ test('the built-in command decomposition preserves the exact primary set and reg
     extensionCommand: false,
     skillInvocation: false,
   }).kind, 'host-command', 'a genuine Host claim still owns an argued /status line')
+  app.stop()
+})
+
+test('/new keeps the accepted-stop phase when a commit throw escapes the transaction', async () => {
+  // The transition's synchronous commit can throw AFTER the OLD-owner quiesce.
+  // The handler must keep the phase fact instead of letting the generic
+  // command path drop it: the stronger "stopped (cannot resume)" only when the
+  // quiesce callback fired; otherwise the weaker "requested, not confirmed".
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const run = async (quiesced: boolean): Promise<{ kind: string; text?: string }> => {
+    const runner = stubRunner(ctx, app, { agent: undefined }, undefined, {
+      presetResolve: async () => ({ id: 'test-preset' }),
+      navigationStopAccepted: true,
+      transitionThrows: { quiesced, message: 'commit seam exploded' },
+    })
+    registerTuiCommandsWithDirectSeams(runner)
+    const definition = services.defs.filter(candidate => candidate.name === 'new').at(-1)
+    assert.ok(definition?.handler !== undefined, 'the /new handler must be registered')
+    return (definition.handler as (invocation: never) => Promise<{ kind: string; text?: string }>)({
+      commandId: 'cmd-new', agent: undefined, rawInput: '', signal: new AbortController().signal,
+    } as never)
+  }
+  const afterQuiesce = await run(true)
+  assert.equal(afterQuiesce.kind, 'error')
+  assert.match(afterQuiesce.text ?? '', /commit seam exploded/)
+  assert.match(afterQuiesce.text ?? '', /old turn stopped \(cannot resume\)/,
+    'a commit throw after the quiesce keeps the stronger proven fact')
+  const beforeQuiesce = await run(false)
+  assert.equal(beforeQuiesce.kind, 'error')
+  assert.match(beforeQuiesce.text ?? '', /turn stop requested \(not yet confirmed\)/,
+    'a throw before the quiesce must not claim a stopped Turn')
+  assert.doesNotMatch(beforeQuiesce.text ?? '', /old turn stopped \(cannot resume\)/)
+})
+
+// ── M4 PR4: `/reload-client` ────────────────────────────────────────────────
+
+test('M4 PR4 `/reload-client` is a bare reserved sessionless Client command with fixed notices', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const requests: ClientReloadCommandResult[] = []
+  let next: ClientReloadCommandResult = { kind: 'accepted' }
+  const runner = stubRunner(ctx, app, { agent: undefined }, undefined, {
+    requestClientReload: () => {
+      requests.push(next)
+      return next
+    },
+  })
+  registerTuiCommandsWithDirectSeams(runner)
+
+  // The LIVE Client registry owns the BARE token only (the official
+  // `matchEnter` semantics): an argued line is an ordinary submission and can
+  // never reach the reload handler.
+  assert.equal(runner.clientCommands.claimsLine({ name: 'reload-client', rawInput: '' }), true)
+  assert.equal(runner.clientCommands.claimsLine({ name: 'reload-client', rawInput: ' anything' }), false)
+  // The policy sets keep the name reserved/plugin-proof and sessionless: the
+  // reload must work before the first session and must never create one.
+  assert.equal(LOCAL_COMMANDS.has('reload-client'), true)
+  assert.equal(SESSIONLESS_COMMANDS.has('reload-client'), true)
+  // The production classifier routes the bare line to the Client command
+  // family (never the Host/ordinary-submission families).
+  assert.deepEqual(
+    classifyCommandLine({
+      hostOriginClaim: undefined,
+      tuiCommand: runner.clientCommands.claimsLine({ name: 'reload-client' }),
+      extensionCommand: false,
+      skillInvocation: false,
+    }),
+    { kind: 'client-command', source: 'tui' },
+  )
+  // The original `/reload` (catalog/settings refresh) stays a DISTINCT
+  // command — the new process reload never replaced it.
+  const reload = services.defs.find(definition => definition.name === 'reload')
+  const reloadClient = services.defs.find(definition => definition.name === 'reload-client')
+  assert.ok(reload?.handler !== undefined && reloadClient?.handler !== undefined)
+  assert.notEqual(reload.handler, reloadClient.handler)
+
+  const handler = reloadClient.handler as (invocation: { commandId: string }) => CommandResult
+  // Accepted: ONE success result, no duplicate notice — the new surface is the
+  // success evidence.
+  assert.deepEqual(handler({ commandId: 'cmd-reload-client' }), { kind: 'success' })
+  assert.equal(requests.length, 1)
+  // Every refusal maps to its ONE fixed notice and still returns `error`.
+  for (const [reason, text] of Object.entries(CLIENT_RELOAD_REFUSAL_NOTICES)) {
+    next = { kind: 'refused', reason: reason as keyof typeof CLIENT_RELOAD_REFUSAL_NOTICES }
+    assert.deepEqual(handler({ commandId: `cmd-${reason}` }), { kind: 'error', text },
+      `/${reason} must report its fixed notice`)
+  }
+  assert.equal(requests.length, 1 + Object.keys(CLIENT_RELOAD_REFUSAL_NOTICES).length)
+  app.stop()
+})
+
+test('M4 PR4 `/reload-client` on Direct (no process capability) is an explicit local refusal', () => {
+  const ctx = new Context()
+  const vt = new VirtualTerminal(80, 24)
+  const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
+  app.start()
+  startedApps.add(app)
+  const services = fakeServices()
+  ctx.provide('commands', services.commands as never)
+  ctx.provide('skills', services.skills as never)
+  const runner = stubRunner(ctx, app, { agent: undefined })
+  registerTuiCommandsWithDirectSeams(runner)
+  const definition = services.defs.find(candidate => candidate.name === 'reload-client')
+  assert.ok(definition?.handler !== undefined)
+  const result = (definition.handler as (invocation: { commandId: string }) => CommandResult)({ commandId: 'cmd-direct' })
+  assert.deepEqual(result, {
+    kind: 'error',
+    text: 'Client reload is available only in the split Client.',
+  }, 'Direct answers the fixed unavailable refusal — no Host RPC, no model prompt, no restart')
   app.stop()
 })

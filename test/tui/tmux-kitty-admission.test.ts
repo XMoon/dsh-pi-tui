@@ -27,6 +27,9 @@ import {
   tmuxFeatureQueryWire,
 } from '../../src/tui/graphics/tmux-kitty-feature-probe.ts'
 import { createFakeTmuxCli, type FakeTmuxCli } from '../support/fake-tmux-cli.ts'
+import { createTmuxKittyGraphics } from '../../src/tui/graphics/tmux-image.ts'
+import { createTmuxSixelGraphics } from '../../src/tui/graphics/tmux-sixel.ts'
+import { VirtualTerminal } from '../support/virtual-terminal.ts'
 
 function admitted(cli: FakeTmuxCli): TmuxKittyIdentity {
   const identity = probeTmuxKittyIdentity(cli.env)
@@ -115,6 +118,7 @@ test('every environment gate rejects BEFORE any tmux command is spawned', (t) =>
     { name: 'protocol none', mutate: (env) => { env.PI_IMAGE_PROTOCOL = 'none' } },
     { name: 'protocol 0', mutate: (env) => { env.PI_IMAGE_PROTOCOL = '0' } },
     { name: 'protocol iterm2', mutate: (env) => { env.PI_IMAGE_PROTOCOL = 'iterm2' } },
+    { name: 'protocol sixel', mutate: (env) => { env.PI_IMAGE_PROTOCOL = 'sixel' } },
   ]
   for (const entry of cases) {
     const cli = createFakeTmuxCli(t)
@@ -125,6 +129,30 @@ test('every environment gate rejects BEFORE any tmux command is spawned', (t) =>
     } finally {
       cli.dispose()
     }
+  }
+
+  const invalidCli = createFakeTmuxCli(t)
+  try {
+    invalidCli.env.PI_IMAGE_PROTOCOL = 'sixelx'
+    assert.throws(() => probeTmuxKittyIdentity(invalidCli.env), /Invalid PI_IMAGE_PROTOCOL/u)
+    assert.deepEqual(invalidCli.calls(), [], 'an invalid value is rejected before any tmux query')
+  } finally {
+    invalidCli.dispose()
+  }
+})
+
+test('F4: live Kitty re-probes use the startup preference, not a later env mutation', (t) => {
+  const cli = createFakeTmuxCli(t)
+  try {
+    const identity = probeTmuxKittyIdentity(cli.env)
+    assert.ok(identity)
+    const admission = new TmuxKittyAdmission(identity, cli.env)
+    assert.equal(admission.isAllowed(true), true)
+    cli.env.PI_IMAGE_PROTOCOL = 'sixel'
+    assert.equal(admission.isAllowed(true), true,
+      'a startup auto preference must not be revoked by a later env mutation')
+  } finally {
+    cli.dispose()
   }
 })
 
@@ -665,4 +693,43 @@ test('StdinBuffer rebuilds a split U1 feature reply into one consumed sequence',
   assert.deepEqual(consumed, [probeReply(probe)], 'ordinary input still reaches the screen')
   buffer.destroy()
   probe.dispose()
+})
+
+test('the legacy tmux Kitty path still accepts a client with empty optional terminfo fields', (t) => {
+  const cli = createFakeTmuxCli(t)
+  cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\t\t\t0\n' })
+  try {
+    const identity = probeTmuxKittyIdentity(cli.env)
+    assert.ok(identity, 'the shared identity layer must preserve the old Kitty acceptance')
+    assert.equal(identity.clientTermtype, '')
+    assert.equal(identity.clientTermname, '')
+    assert.ok(createTmuxKittyGraphics(new VirtualTerminal(), {}, {
+      ...cli.env,
+      PI_TUI_TMUX_KITTY_PLACEHOLDERS: '1',
+    }), 'the explicit U1 assertion still reaches the virtual Kitty factory')
+  } finally {
+    cli.dispose()
+  }
+})
+
+test('native tmux SIXEL never displaces a trustworthy tmux Kitty U1 positive', (t) => {
+  const cli = createFakeTmuxCli(t)
+  cli.setArgvReply(['display-message', '-p', '-t', '%7', '#{sixel_support}'], { text: '1\n' })
+  cli.setReply('show-messages', { text: '  1: Sxl: (flag) true\n' })
+  try {
+    const kitty = createTmuxKittyGraphics(new VirtualTerminal(), {}, cli.env)
+    assert.ok(kitty, 'the known Kitty client still gets the existing virtual transport')
+    assert.equal(kitty.mode, 'tmux-virtual')
+    assert.equal(createTmuxSixelGraphics(new VirtualTerminal(), cli.env), undefined,
+      'the factory ordering leaves the known-U1 positive untouched')
+    kitty.dispose()
+
+    cli.setReply('list-clients', { text: 'main\t/dev/pts/12\twork\txterm-256color\txterm(1.0)\t0\n' })
+    const sixel = createTmuxSixelGraphics(new VirtualTerminal(), cli.env)
+    assert.ok(sixel, 'an unknown renderer with real Sxl selects native SIXEL')
+    assert.equal(sixel.mode, 'sixel')
+    sixel.dispose()
+  } finally {
+    cli.dispose()
+  }
 })

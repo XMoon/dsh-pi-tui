@@ -14,6 +14,7 @@ READMEs and release notes.
 | Published TUI identity, runtime peer ranges, `engines.dsh` floor | `package.json` (the packed manifest carries the same values) |
 | Current DSH target and recommended upgrade command, the historical/compatible DSH rows | `src/dsh-compat-matrix.json` (`current`, `matrix`, `floor`) |
 | Tracked development mode for a branch | `test/compat/dsh-mode.json` |
+| Project DSH CLI executable and version | `mise.toml` template + `mise.lock`; the exact version comes from the `@deepseek-ai/dsh-agent` devDependency |
 | Pinned source target for Source Mode | `test/compat/dsh-source.json` (repository + exact 40-character commit) |
 | Published pairing summary and installation commands | `README.md` / `README.en.md` |
 | Release-by-release history | `CHANGELOG.md` / `CHANGELOG.en.md` and GitHub Releases |
@@ -44,8 +45,11 @@ DSH/TUI pairing is evaluated with npm/node-semver rules plus the official
 
 ## Diagnosing a compatibility question
 
-1. Enter the checkout and run `pnpm dev:doctor`; repair with
-   `pnpm dev:bootstrap` only when it is not `READY`.
+1. Enter the checkout and run `mise run setup` for the npm-mode workspace; for
+   Source Mode use `mise run source:doctor` / `mise run source:bootstrap` (the
+   interactive source runbook is owned by
+   [development.md](./development.md#source-mode)). The project DSH CLI version
+   is the exact `@deepseek-ai/dsh-agent` devDependency selected by `mise`.
 2. Read `test/compat/dsh-mode.json` to learn whether this checkout is `npm` or
    `source` mode. npm Mode uses the exact DSH version declared by `package.json`
    and resolved by the frozen lockfile. Source Mode uses the pinned commit and
@@ -134,9 +138,14 @@ boundary, the source distribution checks) own that qualification.
 For local validation use the isolated driver rather than workspace symlinks:
 
 ```sh
-pnpm compat:dsh:source -- --dsh-dir "/path/to/deepseek-harness"
-pnpm compat:dsh:npm
+mise exec -- pnpm compat:dsh:source -- --dsh-dir "/path/to/deepseek-harness"
+mise exec -- pnpm compat:dsh:npm
 ```
+
+The interactive Source Mode flow (source doctor/bootstrap, source CLI, isolated
+profile) is a separate reusable procedure; see
+[development.md](./development.md#source-mode) and
+[development.md](./development.md#running-the-source-built-dsh-interactively).
 
 A dirty local DSH tree is allowed only with a visible reproducibility warning;
 CI requires a clean checkout. Source-only overrides and generated manifests are

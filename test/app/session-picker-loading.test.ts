@@ -29,6 +29,8 @@ import { DirectConfigPort } from '../../src/runtime/direct/config-direct.ts'
 import { DirectHostFilePort } from '../../src/runtime/direct/host-file-direct.ts'
 import type { SessionReader } from '../../src/runtime/session-reader-port.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import type { SessionSwitchOutcome } from '../../src/app/session/runtime.ts'
+import type { SessionBrowserPanelRequest, SessionBrowserPresentation, SessionBrowserReadSnapshot } from '../../src/app/command/session-browser-presentation.ts'
 
 
 /** Re-vendor lifecycle follow-up P3: every TuiApp constructed in this file
@@ -59,10 +61,16 @@ interface Harness {
   runResume: (rawInput: string) => Promise<unknown>
   view: () => string
   switched: string[]
+  switchScopes: Array<import('../../src/app/session/scope.ts').SessionScope | undefined>
 }
 
 /** Mount the command surface with an injectable sessionReader. */
-function harness(sessionReader: SessionReader, size: { readonly columns: number; readonly rows: number } = { columns: 80, rows: 24 }): Harness {
+function harness(
+  sessionReader: SessionReader,
+  size: { readonly columns: number; readonly rows: number } = { columns: 80, rows: 24 },
+  switchOutcome?: (id: string) => Promise<SessionSwitchOutcome>,
+  nativePresentation?: SessionBrowserPresentation,
+): Harness {
   const ctx = new Context()
   const vt = new VirtualTerminal(size.columns, size.rows)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -81,13 +89,16 @@ function harness(sessionReader: SessionReader, size: { readonly columns: number;
   ctx.provide('commands', commands as never)
   const state: { agent: Agent | undefined } = { agent: undefined }
   const switched: string[] = []
+  const switchScopes: Array<import('../../src/app/session/scope.ts').SessionScope | undefined> = []
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
     diag: createDiag({ filePath: undefined, stderrLevel: 'off' }),
     get defaultIntentOutcome() { return undefined },
     ...sessionScopeFacts(() => state.agent, () => 1),
+    ...(nativePresentation === undefined ? {} : { sessionBrowserPresentation: nativePresentation }),
     get currentSessionId() { return state.agent?.session.id },
     ensureSession: async () => {},
     get selected() { return { current: undefined, assembled: undefined, saveSelection: async () => {} } },
@@ -137,6 +148,11 @@ function harness(sessionReader: SessionReader, size: { readonly columns: number;
       switched.push(id)
       return undefined
     },
+    switchSessionOutcome: async (id: string, scope?: import('../../src/app/session/scope.ts').SessionScope): Promise<SessionSwitchOutcome> => {
+      switched.push(id)
+      switchScopes.push(scope)
+      return switchOutcome === undefined ? { kind: 'committed', sessionId: id } : switchOutcome(id)
+    },
     transitionTo: async <T>(steps: { create: () => Promise<T> }) => ({ ok: true, next: await steps.create() }),
     currentPreset: () => undefined,
     pendingPreset: undefined,
@@ -185,6 +201,7 @@ function harness(sessionReader: SessionReader, size: { readonly columns: number;
     runResume: (rawInput: string) => invoke(resumeDef!.handler, rawInput),
     view: () => vt.getViewport().join('\n'),
     switched,
+    switchScopes,
   }
 }
 
@@ -503,7 +520,178 @@ test('/resume <arg> with a unique match switches after exactly one listing', asy
   await h.runResume('target')
   await waitUntil(() => h.switched.length === 1)
   assert.deepEqual(h.switched, ['session-target'])
+  assert.ok(h.switchScopes[0] !== undefined,
+    'the typed /resume must pass the SYNCHRONOUSLY captured source scope, never an unscoped switch')
   assert.equal(listCalls, 1, 'the direct fast path resolves against the ONE shared input-first listing')
   await waitUntil(() => !h.view().includes('Current directory'), 3000)
   assert.deepEqual(h.switched, ['session-target'], 'no further switch may fire after the picker closes')
+})
+
+test('/resume <arg> does not report success until the tracked switch commits', async (t) => {
+  const rows = [
+    { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  let resolveSwitch!: (outcome: SessionSwitchOutcome) => void
+  const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => gate)
+  t.after(() => h.app.stop())
+
+  const result = h.runResume('target') as Promise<{ kind: string; text?: string }>
+  await waitUntil(() => h.switched.length === 1)
+  let settled = false
+  void result.then(() => { settled = true })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(settled, false, 'a matched picker close must not settle the command as success')
+  resolveSwitch({ kind: 'failed', message: 'session "session-target" is not available' })
+  assert.deepEqual(await result, { kind: 'error', text: 'session "session-target" is not available' })
+  assert.deepEqual(h.switched, ['session-target'], 'the tracked switch is dispatched exactly once')
+})
+
+test('native /resume awaits the tracked switch outcome, not the matched settlement', async (t) => {
+  const rows = [
+    { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  let resolveSwitch!: (outcome: SessionSwitchOutcome) => void
+  const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
+  const presentation: SessionBrowserPresentation = {
+    open: () => ({
+      isDisposed: () => false,
+      setSnapshot: () => {},
+      close: () => {},
+    }),
+    notify: () => {},
+  }
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => gate, presentation)
+  t.after(() => h.app.stop())
+
+  const result = h.runResume('target') as Promise<{ kind: string; text?: string }>
+  await waitUntil(() => h.switched.length === 1)
+  let settled = false
+  void result.then(() => { settled = true })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(settled, false, 'the native matched settlement must not settle the command as success')
+  resolveSwitch({ kind: 'indeterminate', message: 'the Session was opened but the local surface was superseded' })
+  assert.deepEqual(await result, {
+    kind: 'error',
+    text: 'the Session was opened but the local surface was superseded',
+  }, 'a Host-side open with lost local currentness is not reported as success')
+})
+
+test('a late native failure from a closed Browser never notifies the reopened context', async (t) => {
+  const rows = [
+    { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  let resolveSwitch!: (outcome: SessionSwitchOutcome) => void
+  const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
+  let request: SessionBrowserPanelRequest | undefined
+  let snapshot: SessionBrowserReadSnapshot | undefined
+  let opens = 0
+  const notices: string[] = []
+  const presentation: SessionBrowserPresentation = {
+    open: (next) => {
+      opens += 1
+      request = next
+      snapshot = undefined
+      return {
+        isDisposed: () => false,
+        setSnapshot: (value) => { snapshot = value },
+        close: () => {},
+      }
+    },
+    notify: (message) => { notices.push(message) },
+  }
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => gate, presentation)
+  t.after(() => h.app.stop())
+
+  await h.runSessions()
+  await waitUntil(() => snapshot?.rows.some(row => row.id === 'session-target') === true)
+  request!.onResumeIntent({ sessionId: 'session-target', currentSessionId: undefined, source: 'enter' })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  request!.onClose()
+  await h.runSessions()
+  assert.equal(opens, 2, 'the Browser was closed and reopened before the old switch settled')
+  resolveSwitch({ kind: 'failed', message: 'session open failed: lease held' })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.ok(!notices.some(message => message.includes('lease held')),
+    'the stale Browser operation must not paint its failure into the new context')
+})
+
+test('a native interactive resume failure on the still-current Browser is visible', async (t) => {
+  const rows = [
+    { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  let resolveSwitch!: (outcome: SessionSwitchOutcome) => void
+  const gate = new Promise<SessionSwitchOutcome>(resolve => { resolveSwitch = resolve })
+  let request: SessionBrowserPanelRequest | undefined
+  let snapshot: SessionBrowserReadSnapshot | undefined
+  const notices: string[] = []
+  const presentation: SessionBrowserPresentation = {
+    open: (next) => {
+      request = next
+      snapshot = undefined
+      return { isDisposed: () => false, setSnapshot: (value) => { snapshot = value }, close: () => {} }
+    },
+    notify: (message) => { notices.push(message) },
+  }
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => gate, presentation)
+  t.after(() => h.app.stop())
+  await h.runSessions()
+  await waitUntil(() => snapshot?.rows.some(row => row.id === 'session-other') === true)
+  request!.onResumeIntent({ sessionId: 'session-other', currentSessionId: undefined, source: 'enter' })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  resolveSwitch({ kind: 'failed', message: 'session open failed: lease held' })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.ok(notices.some(message => message.includes('lease held')),
+    'a failure on the still-current Browser must stay visible')
+})
+
+test('a cancelled PiTui direct switch settles the resume command instead of hanging', async (t) => {
+  const rows = [
+    { id: 'session-target', updatedAt: 20, cwd: '/ws', live: false },
+    { id: 'session-other', updatedAt: 10, cwd: '/ws', live: false },
+  ]
+  const h = harness({
+    list: async () => rows,
+    search: async () => ({ items: [], hasMore: false }),
+    projectionBatch: async () => new Map(),
+    blank: () => undefined, measureContext: () => undefined,
+    turnOutline: () => undefined,
+    sessionStatus: () => undefined,
+  }, undefined, () => Promise.reject(Object.assign(new Error('switch aborted'), { name: 'AbortError' })))
+  t.after(() => h.app.stop())
+  const result = h.runResume('target') as Promise<{ kind: string; text?: string }>
+  assert.deepEqual(await result, { kind: 'error', text: 'resume cancelled' },
+    'a cancelled switch must settle the awaiting resume rather than leave it pending')
 })

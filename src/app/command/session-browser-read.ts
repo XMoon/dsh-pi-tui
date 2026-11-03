@@ -37,6 +37,15 @@ export type SessionBrowserReadSettlement =
   | { readonly kind: 'refused'; readonly text: string }
   | { readonly kind: 'cancelled' }
 
+/** The FINAL outcome of an accepted resume intent, owned by the command
+ * operation that runs the real switch. The read owner only accepts the
+ * request (`matched`); it never treats acceptance as a committed switch. */
+export type SessionBrowserResumeSettlement =
+  | { readonly kind: 'switched'; readonly sessionId: string }
+  | { readonly kind: 'failed'; readonly text: string }
+  | { readonly kind: 'indeterminate'; readonly text: string }
+  | { readonly kind: 'cancelled' }
+
 export interface SessionBrowserOpenOptions {
   readonly initialQuery?: string
   readonly directMatch?: {
@@ -69,10 +78,19 @@ interface ActiveRead {
   searchError: string | undefined
   hasMore: boolean
   resumePending: boolean
+  readonly resumeSettlement: Promise<SessionBrowserResumeSettlement>
+  readonly resolveResume: (outcome: SessionBrowserResumeSettlement) => void
+  resumeRequested: boolean
+  resumeAttempt: number
+  resumeSettledAttempt: number
+  resumeHandleSettled: boolean
 }
 
 export interface SessionBrowserReadHandle {
   readonly settlement: Promise<SessionBrowserReadSettlement>
+  /** The command-owned FINAL switch result for an accepted resume intent;
+   * resolves `cancelled` when no resume was requested. */
+  readonly resumeSettlement: Promise<SessionBrowserResumeSettlement>
   close(): void
 }
 
@@ -87,8 +105,16 @@ export interface SessionBrowserReadOwnerOptions {
   readonly captureSubject: () => CapturedSessionBrowserSubject
   readonly diag: Diag
   readonly sessionId?: () => string | undefined
-  /** App-owned handoff to the one existing SessionRuntime switch entry. */
-  readonly onResumeIntent?: (intent: SessionBrowserResumeIntent, scope: SessionScope, settle: () => void) => void
+  /** App-owned handoff to the one existing SessionRuntime switch entry. The
+   * callback MUST call `settle` with the REAL final outcome; an accepted
+   * request is not a committed switch. `isCurrent` identifies the exact panel
+   * operation so a late failure can never notify a newer Browser context. */
+  readonly onResumeIntent?: (
+    intent: SessionBrowserResumeIntent,
+    scope: SessionScope,
+    settle: (outcome: SessionBrowserResumeSettlement) => void,
+    isCurrent: () => boolean,
+  ) => void
 }
 
 /** Build one read owner. It owns every list, projection and search generation for its panel. */
@@ -128,6 +154,13 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
     if (panel.disposed) return
     panel.disposed = true
     panel.settle({ kind: 'cancelled' })
+    // An accepted resume is owned by the command operation and must settle
+    // with the REAL switch outcome; only a panel that never requested a resume
+    // is cancelled here.
+    if (!panel.resumeRequested && !panel.resumeHandleSettled) {
+      panel.resumeHandleSettled = true
+      panel.resolveResume({ kind: 'cancelled' })
+    }
     if (panel.queryTimer !== undefined) clearTimeout(panel.queryTimer)
     panel.queryTimer = undefined
     panel.queryController?.abort()
@@ -307,14 +340,30 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       return false
     }
     panel.resumePending = true
+    panel.resumeRequested = true
+    // Each accepted intent is its own operation: a failed attempt must clear
+    // its pending state and allow a retry; a late older attempt must not settle
+    // the newer one.
+    const attempt = ++panel.resumeAttempt
+    const settle = (outcome: SessionBrowserResumeSettlement): void => {
+      if (panel.resumeAttempt !== attempt || panel.resumeSettledAttempt === attempt) return
+      panel.resumeSettledAttempt = attempt
+      if (!panel.resumeHandleSettled) {
+        panel.resumeHandleSettled = true
+        panel.resolveResume(outcome)
+      }
+      if (!panel.disposed) {
+        panel.resumePending = false
+        publish(panel)
+      }
+    }
     publish(panel)
     if (!isActive(panel)) return false
-    const settle = (): void => {
-      if (panel.disposed || !panel.resumePending) return
-      panel.resumePending = false
-      publish(panel)
+    try {
+      options.onResumeIntent(intent, panel.scope, settle, () => isActive(panel))
+    } catch (error) {
+      settle({ kind: 'failed', text: safeErrorMessage(error) })
     }
-    options.onResumeIntent(intent, panel.scope, settle)
     return true
   }
 
@@ -408,6 +457,8 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
       let resolveSettlement!: (result: SessionBrowserReadSettlement) => void
       let settlementResolved = false
       const settlement = new Promise<SessionBrowserReadSettlement>((resolve) => { resolveSettlement = resolve })
+      let resolveResume!: (outcome: SessionBrowserResumeSettlement) => void
+      const resumeSettlement = new Promise<SessionBrowserResumeSettlement>((resolve) => { resolveResume = resolve })
       const settle = (result: SessionBrowserReadSettlement): void => {
         if (settlementResolved) return
         settlementResolved = true
@@ -437,6 +488,12 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         searchError: undefined,
         hasMore: false,
         resumePending: false,
+        resumeSettlement,
+        resolveResume,
+        resumeRequested: false,
+        resumeAttempt: 0,
+        resumeSettledAttempt: 0,
+        resumeHandleSettled: false,
       }
       active = panel
       const presentationHandle = options.presentation.open({
@@ -449,7 +506,7 @@ export function createSessionBrowserReadOwner(options: SessionBrowserReadOwnerOp
         onClose: () => retire(panel, false),
       })
       panel.handle = presentationHandle
-      const handle: SessionBrowserReadHandle = { settlement, close: () => retire(panel, true) }
+      const handle: SessionBrowserReadHandle = { settlement, resumeSettlement, close: () => retire(panel, true) }
       if (!isActive(panel)) {
         if (!presentationHandle.isDisposed()) presentationHandle.close()
         return handle

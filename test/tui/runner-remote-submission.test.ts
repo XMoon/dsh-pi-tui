@@ -550,7 +550,14 @@ test('a submit inside a session transition is refused, keeps the draft and dispa
     presentationSource.presentationReader.read = originalRead
     releaseHydration?.()
   })
-  submitDraft(fixture, '/resume pr3-transition-b')
+  // PR-C: direct `/resume` now waits for its tracked settlement, so start the
+  // same transition through the Browser selection (a non-FIFO navigation)
+  // while keeping the hydration fence real.
+  submitDraft(fixture, '/sessions')
+  await waitFor('the Session Browser is open', () => fixture.vt.getViewport().join('\n').includes('sessions'), 15_000)
+  fixture.vt.sendInput('pr3-transition-b')
+  await waitFor('the target row is filtered', () => fixture.vt.getViewport().join('\n').includes('pr3-transition-b'), 15_000)
+  fixture.vt.sendInput('\r')
   await waitFor('the transition committed and parked its surface hydration', () => parked >= 1, 15_000)
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void; getDraft(): string }
   app.setDraft('fenced transition draft zeta')
@@ -688,6 +695,8 @@ test('remote cancel: a real cancel gesture stops the running official turn and P
   const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(request?: string): void }
   app.setDraft('queued survives cancel lambda')
   app.submitDraft('explicit-queue')
+  app.setDraft('queued second nu')
+  app.submitDraft('explicit-queue')
   const spliceOf = (marker: string): boolean => {
     const session = fixture.host.ctx.sessions.get(SessionId(mainId)) as unknown as {
       snapshotEvents(): Array<{ type: string; data: unknown }>
@@ -696,6 +705,7 @@ test('remote cancel: a real cancel gesture stops the running official turn and P
       && JSON.stringify(event.data).includes(marker))
   }
   await waitFor('queued occurrence spliced', () => spliceOf('queued survives cancel lambda'), 20_000)
+  await waitFor('second queued occurrence spliced', () => spliceOf('queued second nu'), 20_000)
   // The REAL cancel gesture: a single Esc while the agent is busy (the
   // surface routes it to events.onCancel — the same seam cancel-activity
   // drives).
@@ -738,6 +748,10 @@ test('remote cancel: a real cancel gesture stops the running official turn and P
   await waitFor('cancelled turn settled', () => {
     return hostUserRows(fixture, mainId).some(row => row.includes('cancel opener kappa'))
   }, 20_000)
+  const sessionForTurns = fixture.host.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): Array<{ type: string }>
+  }
+  const turnsBeforeWake = sessionForTurns.snapshotEvents().filter(event => event.type === 'turn/start').length
   submitDraft(fixture, 'wake after cancel mu')
   await waitFor('preserved occurrence delivered at the wake', () => {
     return hostUserRows(fixture, mainId).some(row => row.includes('queued survives cancel lambda'))
@@ -745,6 +759,20 @@ test('remote cancel: a real cancel gesture stops the running official turn and P
   await waitFor('wake prompt delivered', () => {
     return hostUserRows(fixture, mainId).some(row => row.includes('wake after cancel mu'))
   }, 20_000)
+  const rowsAfterWake = hostUserRows(fixture, mainId)
+  const first = rowsAfterWake.findIndex(row => row.includes('queued survives cancel lambda'))
+  const second = rowsAfterWake.findIndex(row => row.includes('queued second nu'))
+  assert.ok(first >= 0 && second >= 0, 'both preserved queued rows must be delivered')
+  assert.ok(first < second, 'the preserved queue must drain in FIFO order')
+  assert.equal(rowsAfterWake.filter(row => row.includes('queued survives cancel lambda')).length, 1,
+    'the first queued occurrence is consumed exactly once')
+  assert.equal(rowsAfterWake.filter(row => row.includes('queued second nu')).length, 1,
+    'the second queued occurrence is consumed exactly once')
+  const turnsAfterWake = sessionForTurns.snapshotEvents().filter(event => event.type === 'turn/start').length
+  // The wake delivers exactly the two preserved queued messages plus the real
+  // prompt; each delivered message starts one Turn and nothing else does.
+  assert.equal(turnsAfterWake - turnsBeforeWake, 3,
+    'the wake produces exactly one Turn per delivered message (no extra/synthetic Turn)')
 })
 
 test('image resend: a SECOND submission citing the recalled durable image re-delivers the authorized bytes (mounted durable-image resend)', async (t) => {

@@ -71,6 +71,8 @@ import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
 import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
 import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
+import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
+import * as performanceHost from '../../src/app/host/performance-host.ts'
 import { loadExperimentalRemoteRuntime } from '../../src/runtime/backend-loader.ts'
 import type { ExperimentalRemoteRuntime } from '../../src/app/remote/runtime.ts'
 import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../../src/app/remote/m3a-semantics.ts'
@@ -365,6 +367,10 @@ async function createHostFixture(
     // without it the `skills/list` Remote never registers. The official base
     // layer mounts this same row once.
     await ctx.plugin(WorkingDirectory)
+    // M4-B2-HF: the built-in PiTui Host Runtime owns the package contribution
+    // and both private Host services exactly once; Performance stays its own row.
+    await ctx.plugin(piTuiHostRuntime)
+    await ctx.plugin(performanceHost)
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })

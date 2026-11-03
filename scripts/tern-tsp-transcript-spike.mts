@@ -13,8 +13,9 @@
  *   node --import tsx/esm scripts/tern-tsp-transcript-spike.mts
  *
  * Press `n` to advance one replay step, `q` or Ctrl+C to close. Outside Tern
- * (or with `TERN_TSP=0`, inside tmux/screen/zellij) it prints an unsupported
- * note and exits without opening a surface.
+ * (or with `TERN_TSP=0`, inside screen/zellij) it prints an unsupported note
+ * and exits without opening a surface. Inside tmux the SDK only tries TSP for
+ * a pane it recognizes as Tern-drawn, and declines the rest the same way.
  * @module @xmoon76/dsh-pi-tui/scripts/tern-tsp-transcript-spike
  */
 

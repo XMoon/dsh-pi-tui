@@ -7,10 +7,10 @@
  *
  * It owns NO Cordis service, NO Typert registration and NO lifecycle policy —
  * the Cordis service, its Typert contribution registration and its disposal
- * remain with the Remote Host composition
- * (`app/remote/pi-tui-file-reference-host.ts`). The dependency direction is
- * therefore `app/remote/** -> runtime/remote/** -> runtime/direct/**`, never
- * `app/remote/** -> runtime/direct/**`.
+ * remain with the built-in PiTui Host Runtime
+ * (`app/host/features/file-reference.ts`). The dependency direction is
+ * therefore `app/host/features/** -> runtime/remote/** -> runtime/direct/**`,
+ * never `app/host/** -> runtime/direct/**`.
  *
  * The bridge lives in `runtime/remote/**` because that layer may consume the
  * Direct Host implementation; the composition layer may not.

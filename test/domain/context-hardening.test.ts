@@ -319,3 +319,35 @@ test('standalone Context rows obey the width contract across the full sweep', ()
     }
   }
 })
+
+
+/** Fold one injected-context source through the REAL next-step insert/claim
+ * chain (the durable Working-delivery provenance path). */
+function foldClaimedSource(source: unknown, text: string): TranscriptMessage | undefined {
+  const message = { id: MessageId('claimed-ctx'), role: 'user', content: [{ type: 'text', text }], source }
+  const folder = new TranscriptFolder()
+  folder.apply([eventAt('turn/start', { turn: 0 }, 1000, 0)])
+  folder.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, inserted: [message] }, 1001, 1)])
+  folder.apply([eventAt('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [] }, 1002, 2)])
+  folder.apply([eventAt('user/message', message, 1003, 3)])
+  return folder.messages().find(candidate => candidate.kind === 'system' && candidate.context === true)
+}
+
+test('the Working-delivery claim qualifies only the exact tool-jobs/notice and agent-message/relay pairs', () => {
+  const cases: ReadonlyArray<readonly [string, unknown, boolean]> = [
+    ['tool-jobs notice', { kind: 'tool-jobs', form: 'notice', summary: 'job completed' }, true],
+    ['agent-message relay', { kind: 'agent-message', form: 'relay', senderSessionId: 'child-1' }, true],
+    ['agent-message notice', { kind: 'agent-message', form: 'notice', senderSessionId: 'child-1' }, false],
+    ['subagent-settled notice', { kind: 'subagent-settled', form: 'notice', summary: 'settled', senderSessionId: 'child-1' }, false],
+    ['plugin relay', { kind: 'plugin', form: 'relay', plugin: 'foreign' }, false],
+    ['tool-jobs relay', { kind: 'tool-jobs', form: 'relay' }, false],
+    ['relay without sender', { kind: 'agent-message', form: 'relay' }, true],
+  ]
+  for (const [label, source, qualifies] of cases) {
+    const row = foldClaimedSource(source, `${label} body`)
+    assert.ok(row !== undefined && row.kind === 'system', label)
+    assert.equal(row.contextPresentation?.sameTurnNextStep === true, qualifies,
+      `${label}: the durable claim is not enough — the source/form pair decides`)
+    assert.equal(row.text, `${label} body`, `${label}: the payload is untouched`)
+  }
+})

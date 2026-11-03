@@ -45,6 +45,10 @@ export class TspModelPicker {
   /** The ONE Surface owner's native scroll op, addressed by a wire id of the
    *  frame this presenter built. The presenter never owns a Surface. */
   private readonly nativeScroll: (id: string, to: ScrollTo) => void
+  /** Whether the pane negotiated the read-only `kv` kind. The Reader's short
+   *  facts paint as one grid per group when it did, and as the plain labelled
+   *  text rows when it did not. A display fact only — it gates no command. */
+  private readonly nativeKv: boolean
   private panel: ModelPickerPanel | undefined
   private serial = 0
   /** The current frame's event targets: node id -> the revision it was built
@@ -64,11 +68,13 @@ export class TspModelPicker {
     canInteract(): boolean
     notify: ModelPresentation['notify']
     nativeScroll(id: string, to: ScrollTo): void
+    nativeKv: boolean
   }) {
     this.render = deps.render
     this.canInteract = deps.canInteract
     this.notify = deps.notify
     this.nativeScroll = deps.nativeScroll
+    this.nativeKv = deps.nativeKv
   }
 
   readonly presentation: ModelPresentation = {
@@ -145,6 +151,7 @@ export class TspModelPicker {
    *  draft whose value is still advertised, and never keep a highlight the new
    *  catalogue cannot reach. */
   private hydrate(panel: ModelPickerPanel, directory: ModelPickerDirectory): void {
+    const firstHydration = panel.directory === undefined
     const projection = projectModelDirectory(
       directory.directory,
       directory.current,
@@ -162,6 +169,23 @@ export class TspModelPicker {
     }
     panel.phase = 'ready'
     panel.notice = undefined
+    // PR-C (TSP-7): an `effort` opener lands the FIRST hydrated catalogue on
+    // its Reasoning Effort strip — the same editor the `models` entry reaches
+    // through Tab, never a second page or a second writer. It happens only on
+    // the FIRST successful read (a Retry/re-read never repeats it), and only
+    // when the configured/current row really advertises candidates: a model
+    // without effort metadata keeps the catalogue and states the reason in a
+    // notice instead of guessing a value. The panel's `normalize` (below)
+    // re-checks `stripOffered`, so a first read whose highlight carries no
+    // candidates simply stays on the list.
+    if (firstHydration && panel.request.entry === 'effort') {
+      const row = highlightedModel(panel)
+      if (row !== undefined && modelChoices(row).length > 0 && stripOffered(panel)) {
+        panel.zone = 'strip'
+      } else {
+        panel.notice = { text: 'Reasoning effort is unavailable for this model', tone: 'muted' }
+      }
+    }
     this.align(panel)
     this.change(panel)
   }
@@ -475,7 +499,9 @@ export class TspModelPicker {
       return true
     }
     if (event.ev !== 'action') return false
-    const intent = actionIntent(target.panel, event.act, event.value)
+    // 0.2.0 ActionEvent.value is Json; this picker's strip protocol is string-only.
+    const value = typeof event.value === 'string' ? event.value : undefined
+    const intent = actionIntent(target.panel, event.act, value)
     if (intent !== undefined) this.act(target.panel, target.revision, intent)
     return true
   }
@@ -492,6 +518,7 @@ export class TspModelPicker {
     const revision = panel.revision
     const layer = modelPickerLayer(panel, {
       paneWidth: this.cols * this.cellWidth,
+      nativeKv: this.nativeKv,
       bind: (intent) => () => this.act(panel, revision, intent),
     })
     // Every node in the model layer belongs to this panel, so an event whose

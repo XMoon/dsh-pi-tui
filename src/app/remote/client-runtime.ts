@@ -23,8 +23,12 @@
  * @module app/remote/client-runtime
  */
 
+import { realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { Context, type Fiber } from '@deepseek-ai/cordis'
+import type { TypertRemoteContribution } from '@deepseek-ai/dsh-typert-protocol'
+import * as clientStore from '@deepseek-ai/dsh-client-store'
 import type * as typertRegistryClient from '@deepseek-ai/dsh-typert-registry/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { IJobs } from '@deepseek-ai/dsh-api-job-controller/client'
@@ -84,6 +88,30 @@ type ModuleLoader = (registration: { id: string; factory: ModuleFactory }) => vo
 /** Expected registration ids, in dependency order. */
 const EXPECTED_REGISTRATION_IDS: readonly ClientBundleId[] = OFFICIAL_CLIENT_BUNDLES.map(bundle => bundle.id)
 
+/**
+ * The official web shell's platform static modules, which the browser-form
+ * `/client` bundles resolve through the Loader's `require` (the published web
+ * seed shares exactly these singletons). The Node Client shell is that shell:
+ * it supplies the installed Harness-family `@deepseek-ai/dsh-client-store`
+ * instance instead of relying on a transitive resolution from a bundle's own
+ * package graph. `@deepseek-ai/cordis` is imported directly by this module and
+ * therefore already resolves normally.
+ */
+const CLIENT_PLATFORM_MODULES: Readonly<Record<string, unknown>> = {
+  '@deepseek-ai/dsh-client-store': clientStore,
+}
+
+/** The loader's bare-dependency resolver: platform statics first, then the
+ *  CALLER's installation resolver. The real Client passes the DSH anchor
+ *  resolver so every non-platform dependency of a browser-form bundle also
+ *  resolves from the anchored installation, never from an unrelated source
+ *  tree. */
+function createPlatformRequire(fallback: (specifier: string) => unknown): (specifier: string) => unknown {
+  return specifier => Object.hasOwn(CLIENT_PLATFORM_MODULES, specifier)
+    ? CLIENT_PLATFORM_MODULES[specifier]
+    : fallback(specifier)
+}
+
 /** Process-wide single-flight capture; module code evaluates once per process. */
 let officialClientModulesPromise: Promise<OfficialClientModules> | undefined
 
@@ -123,14 +151,23 @@ export function loadOfficialClientModulesOnce(): Promise<OfficialClientModules> 
  * before its dependency-order capture; admit a directly imported Node bundle
  * for an id the loader did not register; report missing expected ids.
  */
-export function createScopedClientModuleLoader(expectedIds: readonly string[]): {
+export function createScopedClientModuleLoader(
+  expectedIds: readonly string[],
+  /**
+   * The bare-specifier resolver a captured bundle uses for its non-`/client`
+   * dependencies. Defaults to this module's own installation; an installed
+   * Client process passes the resolver anchored at its real DSH installation
+   * so no source-tree copy can participate.
+   */
+  requireFrom: (specifier: string) => unknown = createRequire(import.meta.url),
+): {
   load: ModuleLoader
   requireModule: (specifier: string) => unknown
   registeredIds(): readonly string[]
   acceptImported(id: string, module: unknown): void
   assertComplete(): void
 } {
-  const nodeRequire = createRequire(import.meta.url)
+  const nodeRequire = requireFrom
   const registrations = new Map<string, ModuleFactory>()
   const captured = new Map<string, unknown>()
 
@@ -251,7 +288,10 @@ export function installScopedModuleLoaderShim(load: ModuleLoader): () => void {
 }
 
 async function captureOfficialClientModules(): Promise<OfficialClientModules> {
-  const loader = createScopedClientModuleLoader(EXPECTED_REGISTRATION_IDS)
+  const loader = createScopedClientModuleLoader(
+    EXPECTED_REGISTRATION_IDS,
+    createPlatformRequire(createRequire(import.meta.url)),
+  )
 
   const restoreShim = installScopedModuleLoaderShim(loader.load)
   try {
@@ -307,6 +347,158 @@ const REMOTE_CONTRIBUTIONS = [
   workspaceFilesRemote,
 ] as const
 
+/**
+ * The exact generated `/remote` contribution specifiers in the SAME frozen
+ * order as {@link REMOTE_CONTRIBUTIONS}. A real installed Client process
+ * resolves THESE from its DSH installation anchor instead of consuming the
+ * statically imported source-tree copy; both channels produce the one table
+ * `mountRemoteClientDomains` mounts.
+ */
+const REMOTE_CONTRIBUTION_SPECIFIERS = [
+  '@deepseek-ai/dsh-api-session-controller/remote',
+  '@deepseek-ai/dsh-api-job-controller/remote',
+  '@deepseek-ai/dsh-commands/remote',
+  '@deepseek-ai/dsh-subagent/remote',
+  '@deepseek-ai/dsh-agent-preset-registry/remote',
+  '@deepseek-ai/dsh-plugin-manager/remote',
+  '@deepseek-ai/dsh-api-settings-controller/remote',
+  '@deepseek-ai/dsh-permission-presets/remote',
+  '@deepseek-ai/dsh-llm/remote',
+  '@deepseek-ai/dsh-client-file-upload/remote',
+  '@deepseek-ai/dsh-user-questions/remote',
+  '@deepseek-ai/dsh-api-workspace-files/remote',
+] as const
+
+/** The official Client-side modules and generated `/remote` contributions one
+ *  mount consumes, captured from ONE source (this process's modules for M3, or
+ *  the installed DSH anchor for the real split Client). */
+interface InstalledClientDomainModules {
+  readonly modules: OfficialClientModules
+  readonly contributions: readonly TypertRemoteContribution[]
+}
+
+/** Per-installation single-flight captures, keyed by the real anchor path. */
+const installedClientDomainModules = new Map<string, Promise<InstalledClientDomainModules>>()
+
+/** Capture the six official `/client` bundles through the installation anchor. */
+async function captureInstalledOfficialClientModules(requireFromAnchor: NodeJS.Require): Promise<OfficialClientModules> {
+  // The bundle FILES and their non-platform dependencies resolve from the
+  // installed DSH anchor. The browser-form bundles' platform statics come from
+  // the seed above; resolving the remaining deps from the anchor keeps the
+  // whole captured module graph on that installation.
+  const loader = createScopedClientModuleLoader(
+    EXPECTED_REGISTRATION_IDS,
+    createPlatformRequire(requireFromAnchor),
+  )
+  const restoreShim = installScopedModuleLoaderShim(loader.load)
+  try {
+    for (const bundle of OFFICIAL_CLIENT_BUNDLES) {
+      // `resolve` runs the published package's Node condition set: the three
+      // packages with an explicit node/browser split return their standalone
+      // Node entry, the other three return the loader-registered bundle.
+      const resolved = requireFromAnchor.resolve(bundle.specifier)
+      loader.acceptImported(bundle.id, await import(pathToFileURL(resolved).href))
+    }
+    loader.assertComplete()
+  } finally {
+    restoreShim()
+  }
+  const captured = new Map<string, unknown>()
+  for (const id of EXPECTED_REGISTRATION_IDS) captured.set(id, loader.requireModule(`${id}/client`))
+  return freezeOfficialClientModules(captured)
+}
+
+/**
+ * Capture ONE installed DSH generation's whole Client domain composition: the
+ * six official `/client` bundles and the generated `/remote` contributions,
+ * every specifier resolved from `dshAnchor`. A rejection stays cached (fail
+ * fast; a retry cannot succeed because ESM evaluates the bundles once).
+ */
+async function captureInstalledClientDomainModules(anchor: string): Promise<InstalledClientDomainModules> {
+  const requireFromAnchor = createRequire(anchor)
+  const modules = await captureInstalledOfficialClientModules(requireFromAnchor)
+  const contributions: TypertRemoteContribution[] = []
+  for (const specifier of REMOTE_CONTRIBUTION_SPECIFIERS) {
+    const namespace = await import(pathToFileURL(requireFromAnchor.resolve(specifier)).href) as { readonly default?: unknown }
+    const contribution = namespace.default
+    if (
+      typeof contribution !== 'object'
+      || contribution === null
+      || !Array.isArray((contribution as { readonly descriptors?: unknown }).descriptors)
+    ) {
+      throw new Error(`remote client domains: installed ${specifier} is not a generated Remote contribution`)
+    }
+    contributions.push(contribution as TypertRemoteContribution)
+  }
+  return { modules, contributions }
+}
+
+/** Load the Client domain composition from one installed DSH anchor (single-flight). */
+function loadInstalledClientDomainModules(dshAnchor: string): Promise<InstalledClientDomainModules> {
+  const anchor = realpathSync(dshAnchor)
+  let pending = installedClientDomainModules.get(anchor)
+  if (pending === undefined) {
+    pending = captureInstalledClientDomainModules(anchor)
+    installedClientDomainModules.set(anchor, pending)
+  }
+  return pending
+}
+
+/** The shared, Domain-only Client composition. Not exported from the package root. */
+export interface MountedRemoteClientDomains {
+  /** The caller's exact Context (`Object.is` holds; never disposed here). */
+  readonly context: Context
+  /** The caller's already-installed authenticated Connection. */
+  readonly connection: ConnectionHandle
+  readonly sessions: ISessions
+  readonly jobs: IJobs
+  readonly remote: ClientRemote
+  /** Release exactly the mounted Domains and `/remote` contributions, in
+   *  reverse order. Never disposes the Context, Connection or Gateway. */
+  dispose(): Promise<void>
+}
+
+/**
+ * The staged split-Client domain prerequisites: the generated `/remote`
+ * contributions, the private pi-tui contribution, the official fileUpload and
+ * Session Clients. This stage must be reachable BEFORE the official Gateway's
+ * first Connection generation exists, because:
+ *
+ * - the Session Client installs the official `typert.contexts` Agent resolver
+ *   the Gateway's forwarded-event dispatch needs; and
+ * - the root interaction delivery owner subscribes its two official `$on`
+ *   listeners only after the Session Client is mounted.
+ *
+ * The remaining Jobs Client and the Session-list readiness wait belong to
+ * {@link MountedRemoteClientDomainPrerequisites.complete}, which requires the
+ * first real generation. The M3 in-process path keeps the one-shot
+ * {@link mountRemoteClientDomains} wrapper.
+ */
+export interface MountedRemoteClientDomainPrerequisites {
+  readonly context: Context
+  readonly connection: ConnectionHandle
+  readonly remote: ClientRemote
+  readonly sessions: ISessions
+  /** Mount the Jobs Client and await the official initial readiness. */
+  complete(options?: { readonly signal?: AbortSignal }): Promise<MountedRemoteClientDomains>
+  /** Release every mounted prerequisite in reverse order (idempotent). */
+  dispose(): Promise<void>
+}
+
+export interface MountRemoteClientDomainsOptions {
+  /** The caller's ONE Client Context with typert/connection/remote installed. */
+  readonly context: Context
+  /**
+   * Installed `@deepseek-ai/dsh/package.json` anchor. The real split Client
+   * process MUST pass it: every official Client bundle and generated
+   * `/remote` descriptor is resolved from that installation. Absent = the M3
+   * in-process composition reuses this process's captured official modules.
+   */
+  readonly dshAnchor?: string
+  /** Lifecycle signal for the initial-readiness wait. */
+  readonly signal?: AbortSignal
+}
+
 /** The composed official Client runtime. Not exported from the package root. */
 export interface RemoteClientRuntime {
   readonly context: Context
@@ -347,13 +539,194 @@ export async function disposeRemoteContributions(
   return errors
 }
 
+/** One Domain graph's mutable ownership state shared by the staged handles. */
+interface RemoteClientDomainState {
+  readonly context: Context
+  readonly connection: ConnectionHandle
+  readonly remote: ClientRemote
+  sessions: ISessions
+  readonly contributionDisposers: Array<() => Promise<void> | void>
+  fileUploadFiber?: Fiber
+  sessionFiber?: Fiber
+  jobsFiber?: Fiber
+  completion?: Promise<MountedRemoteClientDomains>
+  disposed: boolean
+}
+
+/** Reverse-order Domain teardown. Contribution failures are isolated. */
+async function shutdownDomainState(state: RemoteClientDomainState): Promise<unknown[]> {
+  if (state.disposed) return []
+  state.disposed = true
+  for (const fiber of [state.jobsFiber, state.sessionFiber, state.fileUploadFiber]) {
+    await fiber?.dispose()
+  }
+  state.jobsFiber = undefined
+  state.sessionFiber = undefined
+  state.fileUploadFiber = undefined
+  const contributionErrors = await disposeRemoteContributions(state.contributionDisposers)
+  state.contributionDisposers.length = 0
+  return contributionErrors
+}
+
 /**
- * Compose one fresh official Client `Context` over the Host carrier:
- * typert -> Connection (explicit transport) -> Gateway -> the eleven explicit
- * `/remote` contributions -> the private pi-tui contribution (TS8-HF1) ->
- * fileUpload -> Sessions -> Jobs, then wait for initial readiness. On
- * construction failure the partial composition unwinds immediately; the
- * loader shim is never active during plugin execution.
+ * Mount the official Client Domain prerequisites on the caller's
+ * ALREADY-AUTHENTICATED Client `Context`: the twelve generated `/remote`
+ * contributions, the private pi-tui contribution, the official fileUpload
+ * Client, then the official Session Client (which registers the `agent`
+ * `typert.contexts` resolver). It deliberately does NOT wait for a Connection
+ * generation: the split Client must mount the Session resolver and its root
+ * interaction listeners before the official Gateway starts its event pump.
+ *
+ * Failure semantics: a construction failure unwinds exactly what this stage
+ * created, in reverse order; the original error stays primary and any cleanup
+ * failures ride its cause chain.
+ */
+export async function mountRemoteClientDomainPrerequisites(
+  options: MountRemoteClientDomainsOptions,
+): Promise<MountedRemoteClientDomainPrerequisites> {
+  const { context } = options
+  // The caller installed the one B1 transport graph. Reading it here is an
+  // assertion, never a mount: this function must not create a second
+  // Typert/Connection/Gateway.
+  const connection = context.get('connection') as unknown as ConnectionHandle | undefined
+  const remote = context.get('remote') as ClientRemote | undefined
+  if (context.get('typert') === undefined || connection === undefined || remote === undefined) {
+    throw new Error('remote client domains: the caller must install typert, the authenticated connection and the API gateway first')
+  }
+
+  const source = options.dshAnchor === undefined
+    ? { modules: await loadOfficialClientModulesOnce(), contributions: REMOTE_CONTRIBUTIONS as readonly TypertRemoteContribution[] }
+    : await loadInstalledClientDomainModules(options.dshAnchor)
+
+  const state: RemoteClientDomainState = {
+    context,
+    connection,
+    remote,
+    sessions: undefined as unknown as ISessions,
+    contributionDisposers: [],
+    disposed: false,
+  }
+
+  const unwind = async (error: unknown): Promise<never> => {
+    const cleanupErrors = await shutdownDomainState(state)
+    const failure = error instanceof Error ? error : new Error(String(error))
+    if (cleanupErrors.length > 0) {
+      const secondary = cleanupErrors.length === 1
+        ? cleanupErrors[0]
+        : new AggregateError(cleanupErrors, 'remote client domains: unwind disposal failures')
+      mergeCause(failure, secondary)
+    }
+    throw failure
+  }
+
+  try {
+    // The explicit generated `/remote` contributions in the frozen order.
+    for (const contribution of source.contributions) {
+      state.contributionDisposers.push(await remote.$mount(contribution))
+    }
+    // The private pi-tui contribution: mounted explicitly, AFTER the official
+    // generated contributions and deliberately kept separate from that list.
+    // It is the package's ONE contribution (rc.2 admits exactly one per
+    // package), carrying BOTH private descriptors — the
+    // `piTuiFileReferences` augmentation (the official `fileReferences`
+    // namespace stays mounted and authoritative for bare queries) and the
+    // `piTuiTerminalProgress` status stream.
+    state.contributionDisposers.push(await remote.$mount(PI_TUI_CLIENT_CONTRIBUTION))
+    // Domain Clients: fileUpload before Sessions is contractual (the Session
+    // Client injects `fileUpload`). Each fiber is assigned BEFORE it is
+    // awaited: a plugin whose startup rejects is still owned by the reverse
+    // teardown at its own position.
+    state.fileUploadFiber = context.plugin(source.modules.fileUpload)
+    await state.fileUploadFiber
+    state.sessionFiber = context.plugin(source.modules.session)
+    await state.sessionFiber
+    // The Client and Host packages augment the same Cordis `Context` service
+    // names, so the augmented property types resolve to the Direct Host faces
+    // inside this compilation. The services installed by the captured Client
+    // bundles are read through their own public Client faces instead.
+    state.sessions = context.get('sessions') as unknown as ISessions
+    if (state.sessions === undefined) throw new Error('remote client domains: the official Session Client did not install')
+  } catch (error) {
+    return await unwind(error)
+  }
+
+  return {
+    context,
+    connection,
+    remote,
+    sessions: state.sessions,
+    async complete(completeOptions = {}): Promise<MountedRemoteClientDomains> {
+      if (state.disposed) throw new Error('remote client domains: the prerequisites were already disposed')
+      state.completion ??= (async () => {
+        try {
+          state.jobsFiber = context.plugin(source.modules.jobs)
+          await state.jobsFiber
+          // Initial readiness is part of construction: a failure (an aborted
+          // lifecycle signal included) must unwind the whole partial
+          // composition. It runs before the Jobs service assertion so an
+          // already-aborted lifecycle keeps its abort classification.
+          await waitForInitialReadiness(connection, state.sessions, completeOptions.signal)
+          const jobs = context.get('jobs') as unknown as IJobs
+          if (jobs === undefined) throw new Error('remote client domains: the official Jobs Client did not install')
+          return {
+            context,
+            connection,
+            sessions: state.sessions,
+            jobs,
+            remote,
+            async dispose(): Promise<void> {
+              const cleanupErrors = await shutdownDomainState(state)
+              if (cleanupErrors.length === 0) return
+              const failure = cleanupErrors[0] instanceof Error
+                ? cleanupErrors[0]
+                : new Error(String(cleanupErrors[0]))
+              if (cleanupErrors.length > 1) {
+                mergeCause(failure, new AggregateError(cleanupErrors.slice(1), 'remote client domains: remaining disposal failures'))
+              }
+              throw failure
+            },
+          }
+        } catch (error) {
+          return await unwind(error)
+        }
+      })()
+      return await state.completion
+    },
+    async dispose(): Promise<void> {
+      const cleanupErrors = await shutdownDomainState(state)
+      if (cleanupErrors.length === 0) return
+      const failure = cleanupErrors[0] instanceof Error
+        ? cleanupErrors[0]
+        : new Error(String(cleanupErrors[0]))
+      if (cleanupErrors.length > 1) {
+        mergeCause(failure, new AggregateError(cleanupErrors.slice(1), 'remote client domains: remaining disposal failures'))
+      }
+      throw failure
+    },
+  }
+}
+
+/**
+ * Mount the official Client data plane on the caller's ALREADY-AUTHENTICATED
+ * Client `Context`: the full staged domain graph (prerequisites + Jobs) and
+ * the initial-readiness wait. This wrapper preserves the M3 in-process
+ * composition contract; the split Client uses the staged functions directly
+ * so its interaction owner exists before the Gateway starts.
+ */
+export async function mountRemoteClientDomains(
+  options: MountRemoteClientDomainsOptions,
+): Promise<MountedRemoteClientDomains> {
+  const prerequisites = await mountRemoteClientDomainPrerequisites(options)
+  return await prerequisites.complete(options.signal === undefined ? {} : { signal: options.signal })
+}
+
+/**
+ * Compose one fresh official Client `Context` over the M3 in-process carrier:
+ * typert -> Connection (explicit transport) -> Gateway -> the shared Domain
+ * mount ({@link mountRemoteClientDomains}, which owns the `/remote`
+ * contributions and the fileUpload -> Sessions -> Jobs plugins) -> initial
+ * readiness. On construction failure the partial composition unwinds
+ * immediately; the loader shim is never active during plugin execution.
  */
 export async function createRemoteClientRuntime(options: RemoteClientRuntimeOptions): Promise<RemoteClientRuntime> {
   const modules = await loadOfficialClientModulesOnce()
@@ -363,39 +736,34 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
   let typertFiber: Fiber | undefined
   let connectionFiber: Fiber | undefined
   let gatewayFiber: Fiber | undefined
-  let fileUploadFiber: Fiber | undefined
-  let sessionFiber: Fiber | undefined
-  let jobsFiber: Fiber | undefined
-  let services: { connection: ConnectionHandle; sessions: ISessions; jobs: IJobs } | undefined
-  const contributionDisposers: Array<() => Promise<void> | void> = []
+  let domains: MountedRemoteClientDomains | undefined
   let disposed = false
 
   /**
-   * The frozen §16 shutdown sequence: domain Clients (reverse), the explicit
-   * `/remote` contributions (reverse), Gateway/Connection/Typert (reverse),
-   * then the Client root. Unwinding a partial composition runs the SAME
-   * order over whatever subset exists: a fiber whose startup rejected is
-   * already assigned, so it unwinds at its own position; only stages that
-   * were never reached are skipped.
+   * The frozen §16 shutdown sequence: the shared Domain mount (Jobs -> Sessions
+   * -> fileUpload -> `/remote` contributions reverse), Gateway/Connection/
+   * Typert (reverse), then the Client root. Unwinding a partial composition
+   * runs the SAME order over whatever subset exists.
    *
-   * Contribution-disposer failures are isolated (collected, never allowed to
-   * truncate the remaining cleanup). Cordis contains unload-disposer failures
-   * inside `fiber.dispose()` (they are logged there, never propagated), so
-   * the fiber steps cannot reject.
+   * A Domain teardown failure is collected (never allowed to truncate the
+   * remaining cleanup). Cordis contains unload-disposer failures inside
+   * `fiber.dispose()` (they are logged there, never propagated), so the
+   * remaining fiber steps cannot reject.
    *
-   * @returns the collected contribution-disposer cleanup errors.
+   * @returns the collected cleanup errors.
    */
   const shutdown = async (): Promise<unknown[]> => {
-    for (const fiber of [jobsFiber, sessionFiber, fileUploadFiber]) {
-      await fiber?.dispose()
+    const errors: unknown[] = []
+    try {
+      await domains?.dispose()
+    } catch (error) {
+      errors.push(error)
     }
-    const contributionErrors = await disposeRemoteContributions(contributionDisposers)
-    contributionDisposers.length = 0
     for (const fiber of [gatewayFiber, connectionFiber, typertFiber]) {
       await fiber?.dispose()
     }
     await context.fiber.dispose()
-    return contributionErrors
+    return errors
   }
 
   const unwind = async (): Promise<unknown[]> => {
@@ -434,39 +802,8 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
     // 3. API Gateway.
     gatewayFiber = context.plugin(modules.gateway)
     await gatewayFiber
-    // 4. Explicit generated /remote contributions, in mount order.
-    for (const contribution of REMOTE_CONTRIBUTIONS) {
-      contributionDisposers.push(await context.remote.$mount(contribution))
-    }
-    // 4b. The private pi-tui contribution: mounted explicitly, AFTER the
-    //     official generated contributions and deliberately kept separate from
-    //     that list. It is the package's ONE contribution (rc.2 admits exactly
-    //     one per package), carrying BOTH private descriptors — the
-    //     `piTuiFileReferences` augmentation (the official `fileReferences`
-    //     namespace stays mounted and authoritative for bare queries) and the
-    //     `piTuiTerminalProgress` status stream.
-    contributionDisposers.push(await context.remote.$mount(PI_TUI_CLIENT_CONTRIBUTION))
-    // 5./6./7. Domain Clients - fileUpload before Sessions is contractual
-    // (the Session Client injects `fileUpload`).
-    fileUploadFiber = context.plugin(modules.fileUpload)
-    await fileUploadFiber
-    sessionFiber = context.plugin(modules.session)
-    await sessionFiber
-    jobsFiber = context.plugin(modules.jobs)
-    await jobsFiber
-
-    // The Client and Host packages augment the same Cordis `Context` service
-    // names, so the augmented property types resolve to the Direct Host faces
-    // inside this compilation. The services installed by the captured Client
-    // bundles are read through their own public Client faces instead.
-    services = {
-      connection: context.get('connection') as unknown as ConnectionHandle,
-      sessions: context.get('sessions') as unknown as ISessions,
-      jobs: context.get('jobs') as unknown as IJobs,
-    }
-    // Initial readiness is part of construction: a failure (an aborted
-    // lifecycle signal included) must unwind the whole partial composition.
-    await waitForInitialReadiness(services.connection, services.sessions, options.signal)
+    // 4. The ONE shared official Domain mount.
+    domains = await mountRemoteClientDomains({ context, ...(options.signal === undefined ? {} : { signal: options.signal }) })
   } catch (error) {
     // The original construction/readiness error stays the primary failure;
     // any cleanup failures ride its cause chain instead of masking it.
@@ -482,14 +819,14 @@ export async function createRemoteClientRuntime(options: RemoteClientRuntimeOpti
   }
   // The catch above always rethrows, so reaching here means construction
   // (including initial readiness) completed.
-  const { connection, sessions, jobs } = services!
+  const mounted = domains!
 
   const runtime: RemoteClientRuntime = {
     context,
-    connection,
-    sessions,
-    jobs,
-    remote: context.remote,
+    connection: mounted.connection,
+    sessions: mounted.sessions,
+    jobs: mounted.jobs,
+    remote: mounted.remote,
     async dispose(): Promise<void> {
       if (disposed) return
       disposed = true

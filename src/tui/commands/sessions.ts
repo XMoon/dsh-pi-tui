@@ -12,10 +12,12 @@
 import { scheduler } from 'node:timers/promises'
 import type { CommandInvocation, CommandResult } from '@deepseek-ai/dsh-commands'
 import type { PickerCategory, TuiApp } from '../../tui-app.ts'
-import { createSessionBrowserReadOwner, type SessionBrowserReadOwner, type SessionBrowserReadSettlement } from '../../app/command/session-browser-read.ts'
+import { createSessionBrowserReadOwner, type SessionBrowserReadOwner, type SessionBrowserReadSettlement, type SessionBrowserResumeSettlement } from '../../app/command/session-browser-read.ts'
 import type { SessionBrowserPresentation } from '../../app/command/session-browser-presentation.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type SessionScope } from '../../app/session/scope.ts'
+import { SessionNavigationStopError, type NavigationIntent } from '../../app/session/transition.ts'
+import type { SessionSwitchOutcome } from '../../app/session/runtime.ts'
 import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { LifecycleError } from '../../runtime/session-lifecycle-port.ts'
@@ -68,6 +70,7 @@ type SessionCommandRunner = Pick<
   | 'sessionWriter'
   | 'signal'
   | 'switchSession'
+  | 'switchSessionOutcome'
   | 'transitionTo'
   | 'withSessionTransition'
   | 'withWriter'
@@ -268,6 +271,19 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     })
   }
 
+  /** The tracked switch settlement used by `/resume`: `matched`/accepted is
+   * not success; only a committed target counts. Legacy narrow fakes without
+   * the tracked entry keep the old string result (undefined = committed). */
+  const switchSessionOutcome = (id: string, scope?: SessionScope): Promise<SessionSwitchOutcome> => {
+    if (runner.switchSessionOutcome !== undefined) return runner.switchSessionOutcome(id, scope)
+    return runner.switchSession(id, scope).then(
+      error => error === undefined
+        ? { kind: 'committed', sessionId: id } as const
+        : { kind: 'failed', message: error } as const,
+      error => ({ kind: 'failed', message: `session switch failed: ${safeErrorMessage(error)}` }) as const,
+    )
+  }
+
   // Shared /sessions + /resume + /search body — input-first (the official
   // /resume fix): the picker overlay opens IMMEDIATELY on a loading
   // placeholder and owns the input (Esc, arrows, search) while the Host
@@ -306,35 +322,60 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       },
       diag: runner.diag,
       sessionId: () => runner.currentSessionId,
-      onResumeIntent: (intent, scope, settle) => {
+      onResumeIntent: (intent, scope, settle, isCurrent) => {
         if (!runner.isSessionScopeCurrent(scope)
           || intent.currentSessionId !== scope.sessionId
           || intent.sessionId === scope.sessionId) {
-          settle()
+          settle({ kind: 'cancelled' })
           return
         }
-        runOwned('session browser resume', () => runner.switchSession(intent.sessionId, scope), {
+        const direct = intent.source === 'direct'
+        const fail = (text: string): void => {
+          // A closed/replaced INTERACTIVE panel must never paint its late
+          // failure into a new Browser context. A DIRECT /resume is a
+          // command-owned settlement (no global notice): its real outcome is
+          // returned to the originating command card even though the picker
+          // has already closed.
+          if (!direct && !isCurrent()) {
+            settle({ kind: 'cancelled' })
+            return
+          }
+          if (!direct) presentation.notify(sanitizeTerminalText(text), 'error')
+          settle({ kind: 'failed', text })
+        }
+        // The native Browser's `resumePending` is the non-terminal indicator;
+        // the command owner receives the real outcome below. Do not paint a
+        // transient notice from inside the read-owner callback: a native
+        // presentation may already be closed/replaced.
+        runOwned('session browser resume', () => switchSessionOutcome(intent.sessionId, scope), {
           diag: runner.diag,
           sessionId: () => intent.sessionId,
           isCancellation: () => runner.signal.aborted,
-          onResult: (error) => {
-            try {
-              if (error !== undefined && runner.isSessionScopeCurrent(scope)) {
-                presentation.notify(sanitizeTerminalText(error), 'error')
-              }
-            } finally {
-              settle()
+          onResult: (outcome) => {
+            switch (outcome.kind) {
+              case 'committed':
+                settle({ kind: 'switched', sessionId: intent.sessionId })
+                break
+              case 'already-current':
+              case 'failed':
+                fail(outcome.message)
+                break
+              case 'indeterminate':
+                if (direct) settle({ kind: 'indeterminate', text: outcome.message })
+                else fail(outcome.message)
+                break
+              case 'superseded':
+                if (direct) settle({ kind: 'failed', text: outcome.message })
+                else settle({ kind: 'cancelled' })
+                break
+              case 'cancelled':
+                settle({ kind: 'cancelled' })
+                break
             }
           },
-          onCancel: settle,
+          onCancel: () => settle({ kind: 'cancelled' }),
           onError: (error) => {
-            try {
-              if (runner.isSessionScopeCurrent(scope)) {
-                presentation.notify(`session switch failed: ${sanitizeTerminalText(safeErrorMessage(error))}`, 'error')
-              }
-            } finally {
-              settle()
-            }
+            fail(`session switch failed: ${sanitizeTerminalText(safeErrorMessage(error))}`)
           },
         })
       },
@@ -356,7 +397,7 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     readonly requireQuery?: boolean
   }
   const openNativeSessionBrowser = (
-    invocation: { rawInput: string },
+    invocation: { rawInput: string; commandId?: string },
     options: SessionPickerOpenOptions,
     presentation: SessionBrowserPresentation,
   ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
@@ -377,20 +418,36 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       ...(directMatch === undefined ? {} : { directMatch }),
     })
     if (directMatch === undefined) return Promise.resolve({ kind: 'success' })
-    return handle.settlement.then((result: SessionBrowserReadSettlement) => {
-      if (result.kind === 'matched' || result.kind === 'ready') return { kind: 'success' }
+    return handle.settlement.then(async (result: SessionBrowserReadSettlement) => {
+      if (result.kind === 'matched') {
+        const resume: SessionBrowserResumeSettlement = await handle.resumeSettlement
+        if (resume.kind === 'switched') return { kind: 'success' }
+        if (resume.kind === 'indeterminate') {
+          // A Host-side open may already have happened; the draft must not be
+          // restored as a plain retry intent.
+          recordCommandDraftDisposition(invocation.commandId, 'suppressed')
+          return { kind: 'error', text: resume.text }
+        }
+        return { kind: 'error', text: resume.kind === 'failed' ? resume.text : 'resume cancelled' }
+      }
+      if (result.kind === 'ready') return { kind: 'success' }
       if (result.kind === 'refused') return { kind: 'error', text: result.text }
       return { kind: 'error', text: 'resume cancelled' }
     })
   }
 
   const openSessionPicker = async (
-    invocation: { rawInput: string },
+    invocation: { rawInput: string; commandId?: string },
     options: SessionPickerOpenOptions,
   ): Promise<{ kind: 'success' } | { kind: 'error'; text: string }> => {
     if (options.requireQuery === true && invocation.rawInput.trim() === '') {
       return { kind: 'error', text: 'search needs a query' }
     }
+    // `/resume <arg>` captures its source generation SYNCHRONOUSLY, before the
+    // input-first listing await. A navigation that wins during the listing
+    // must leave this intent superseded — it must never fall back to an
+    // unscoped capture at gate time and stop the NEW owner.
+    const resumeScope = options.directMatchQuery === undefined ? undefined : runner.captureSessionScope()
     const presentation = runner.sessionBrowserPresentation
     if (presentation !== undefined) return openNativeSessionBrowser(invocation, options, presentation)
     // The current marker is the live session's id; before the first session
@@ -486,10 +543,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
      * (the switch has started before the handler returns). */
     type ListingOutcome =
       | { kind: 'switched' }
+      | { kind: 'indeterminate'; text: string }
       | { kind: 'picker' }
       | { kind: 'refused'; text: string }
       | { kind: 'cancelled' }
     let settleListing: ((outcome: ListingOutcome) => void) | undefined
+    let switchInFlight = false
     const listing = options.directMatchQuery === undefined
       ? undefined
       : new Promise<ListingOutcome>(resolve => { settleListing = resolve })
@@ -500,10 +559,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       settleListing = undefined
     }
     if (listing !== undefined) {
-      // Esc / any close settles the awaiting /resume <arg> handler; a real
-      // switch settles 'switched' BEFORE the abort so the listener cannot
-      // overwrite it.
-      controller.signal.addEventListener('abort', () => settleOnce({ kind: 'cancelled' }), { once: true })
+      // Esc / any close settles the awaiting /resume <arg> handler. A closed
+      // picker that is carrying a switch in flight must NOT be reported as a
+      // cancellation: the tracked switch result owns the final settlement.
+      controller.signal.addEventListener('abort', () => {
+        if (!switchInFlight) settleOnce({ kind: 'cancelled' })
+      }, { once: true })
     }
     // Content-search lifecycle (plan §9 + review P1/P2): local metadata
     // filtering is immediate; Host content search is a 250ms-debounced
@@ -710,8 +771,8 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
       }
       // `/resume <arg>` direct fast path, resolved against the ONE shared
       // listing (never a second one): a unique id/prefix match closes the
-      // picker and switches (the switch has STARTED before the awaiting
-      // handler returns — the old synchronous semantics); matching the
+      // picker and settles the command with the TRACKED switch outcome — the
+      // picker close itself is never success; matching the
       // CURRENT session surfaces the already-on notice; no match falls
       // through to the filtered picker with the argument preserved as the
       // live search query.
@@ -727,10 +788,22 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             picker.close()
             return
           }
-          settleOnce({ kind: 'switched' })
+          switchInFlight = true
           controller.abort()
           picker.close()
-          switchSession(match.id)
+          app.notify('switching session…', 'info')
+          runOwned('session switch', () => switchSessionOutcome(match.id, resumeScope), {
+            diag: runner.diag,
+            sessionId: () => match.id,
+            onResult: (outcome) => {
+              if (outcome.kind === 'committed') settleOnce({ kind: 'switched' })
+              else if (outcome.kind === 'cancelled') settleOnce({ kind: 'cancelled' })
+              else if (outcome.kind === 'indeterminate') settleOnce({ kind: 'indeterminate', text: outcome.message })
+              else settleOnce({ kind: 'refused', text: outcome.message })
+            },
+            onCancel: () => settleOnce({ kind: 'cancelled' }),
+            onError: (error) => settleOnce({ kind: 'refused', text: `session switch failed: ${safeErrorMessage(error)}` }),
+          })
           return
         }
         settleOnce({ kind: 'picker' })
@@ -804,6 +877,12 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     // stays interactive during the wait (Esc cancels). No match settles as
     // success with the filtered picker; a refusal returns the error text.
     const outcome = await listing
+    if (outcome.kind === 'indeterminate') {
+      // The Host may have opened the target; never restore `/resume ...` as a
+      // plain retry intent.
+      recordCommandDraftDisposition(invocation.commandId, 'suppressed')
+      return { kind: 'error', text: outcome.text }
+    }
     if (outcome.kind === 'refused') return { kind: 'error', text: outcome.text }
     if (outcome.kind === 'cancelled') return { kind: 'error', text: 'resume cancelled' }
     return { kind: 'success' }
@@ -932,89 +1011,149 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     })
   }
 
+  /**
+   * The SYNCHRONOUS `/new` single-flight marker. It is set in the handler's
+   * first synchronous step — BEFORE the scope capture's first await and
+   * before the transition gate — and released at the transaction's true
+   * terminal settlement (success, failure or supersession), so a failed
+   * `/new` can always be retried and a later settled `/new` starts normally.
+   * A second intent that arrives while one is in flight is refused BEFORE any
+   * Host dispatch: it never reuses the first result, never creates a second
+   * Session and never consumes the old drafts.
+   *
+   * This is deliberately NOT `gate.busy`: the transition gate also serializes
+   * `/preset`, session switches and fork adoption, which are legitimate
+   * concurrent operations and must not refuse a `/new` that is merely queued.
+   */
+  let freshSessionInFlight = false
+
   const registerNew = (): void => {
     registerOne({
       name: 'new',
       description: 'Start a fresh session in this workspace',
-      handler: () => runner.withSessionTransition(async () => {
-        // The unified transaction: the old session is flushed BEFORE the
-        // fresh session is created, the commit is synchronous, and a failure
-        // anywhere before the create leaves the current session untouched
-        // (no published child to roll back).
-        const sessionId = newSessionId()
-        // The concrete preset id is resolved ONCE and rides the create (a
-        // rejected create is NEVER retried — the old session stays current).
-        // The preset COMPOSITION (setup callback) is resolved inside the
-        // Direct session lifecycle from this id — the command surface only
-        // ever sees the identity (migration M1.11).
-        let resolved
+      handler: async () => {
+        if (freshSessionInFlight) {
+          return { kind: 'error', text: 'a fresh session is already starting' }
+        }
+        freshSessionInFlight = true
+        // The ORIGINAL session generation/navigation identity, captured
+        // SYNCHRONOUSLY: the navigation stop must address exactly the owner
+        // the user chose to leave, never a replacement published while this
+        // intent waited behind another transition. The runtime fills in
+        // `admission.oldStopAccepted` before the transaction body runs.
+        const navigation: NavigationIntent = {
+          scope: runner.captureSessionScope(),
+          admission: { oldStopAccepted: false },
+        }
+        // The quiesce callback is the ONLY proof that the old Turn reached
+        // idle. An accepted stop is just a REQUEST until then.
+        let oldOwnerQuiesced = false
+        const stopNote = (): string => {
+          if (!navigation.admission.oldStopAccepted) return ''
+          return oldOwnerQuiesced
+            ? '; old turn stopped (cannot resume)'
+            : '; turn stop requested (not yet confirmed)'
+        }
         try {
-          resolved = await runner.catalog.presets.resolve(runner.effectivePresetId, runner.signal)
-        } catch (error) {
-          // A lifecycle cancellation (exit/HMR) during the read aborts it: no
-          // create is dispatched, and the abort must not surface as an unhandled
-          // rejection. Any OTHER failure keeps its real diagnostic — never
-          // mislabeled as a cancellation.
-          if (runner.signal.aborted) {
-            return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}` }
-          }
-          return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}` }
-        }
-        // Coordinate with the newest sessionless `/model` global-default write
-        // BEFORE dispatching the create (v2 §0.8.3/§0.8.4): quiesce EVERY
-        // in-flight default write/correction so the Direct adapter captures the
-        // settled Host default. A failed latest intent is NOT seeded into the
-        // create — the fresh Session uses the actual Host default.
-        try {
-          await runner.awaitPendingDefaultWrite(signal)
-        } catch (error) {
-          // The lifetime signal aborted while waiting for the default write:
-          // no create is dispatched (the old session stays current).
-          return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}` }
-        }
-        const result = await runner.transitionTo({
-          target: { id: String(sessionId), header: { cwd } },
-          create: async () => {
-            // Re-wait immediately before dispatch: a newer sessionless /model may
-            // have started between the first wait and here, and the Direct
-            // adapter activates the Agent from the persisted Host default.
-            await runner.awaitPendingDefaultWrite(signal)
-            return runner.agents.create({
-              sessionId: String(sessionId),
-              // The semantic `agentPreset` is the SINGLE preset authority; the
-              // Direct adapter persists the actually composed preset into the
-              // durable header. Never duplicate it into generic meta.
-              cwd,
-              agentPreset: resolved.id,
+          return await runner.withSessionTransition(async () => {
+            // The unified transaction: the old session is flushed BEFORE the
+            // fresh session is created, the commit is synchronous, and a failure
+            // anywhere before the create leaves the current session untouched
+            // (no published child to roll back).
+            const sessionId = newSessionId()
+            // The concrete preset id is resolved ONCE and rides the create (a
+            // rejected create is NEVER retried — the old session stays current).
+            // The preset COMPOSITION (setup callback) is resolved inside the
+            // Direct session lifecycle from this id — the command surface only
+            // ever sees the identity (migration M1.11).
+            let resolved
+            try {
+              resolved = await runner.catalog.presets.resolve(runner.effectivePresetId, runner.signal)
+            } catch (error) {
+              // A lifecycle cancellation (exit/HMR) during the read aborts it: no
+              // create is dispatched, and the abort must not surface as an unhandled
+              // rejection. Any OTHER failure keeps its real diagnostic — never
+              // mislabeled as a cancellation.
+              if (runner.signal.aborted) {
+                return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote()}` }
+              }
+              return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}${stopNote()}` }
+            }
+            // Coordinate with the newest sessionless `/model` global-default write
+            // BEFORE dispatching the create (v2 §0.8.3/§0.8.4): quiesce EVERY
+            // in-flight default write/correction so the Direct adapter captures the
+            // settled Host default. A failed latest intent is NOT seeded into the
+            // create — the fresh Session uses the actual Host default.
+            try {
+              await runner.awaitPendingDefaultWrite(signal)
+            } catch (error) {
+              // The lifetime signal aborted while waiting for the default write:
+              // no create is dispatched (the old session stays current).
+              return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote()}` }
+            }
+            const result = await runner.transitionTo({
+              target: { id: String(sessionId), header: { cwd } },
+              onOldOwnerQuiesced: () => { oldOwnerQuiesced = true },
+              create: async () => {
+                // Re-wait immediately before dispatch: a newer sessionless /model may
+                // have started between the first wait and here, and the Direct
+                // adapter activates the Agent from the persisted Host default.
+                await runner.awaitPendingDefaultWrite(signal)
+                return runner.agents.create({
+                  sessionId: String(sessionId),
+                  // The semantic `agentPreset` is the SINGLE preset authority; the
+                  // Direct adapter persists the actually composed preset into the
+                  // durable header. Never duplicate it into generic meta.
+                  cwd,
+                  agentPreset: resolved.id,
+                })
+              },
             })
-          },
-        })
-        if (!result.ok) {
-          if (result.error instanceof LifecycleError) {
-            // Preserve the machine-readable cause (incl. a published identity for
-            // D2.4 reconciliation) even on the UI-silent superseded path.
-            runner.diag.warn('fresh session create did not own the surface', {
-              settlement: result.error.settlement,
-              ownership: result.error.ownership,
-              publishedSessionId: result.error.publishedSessionId,
-              requestedSessionId: result.error.requestedSessionId,
-            })
-            // A locally SUPERSEDED create emits no error notice and NO
-            // user-visible success text (§0.2.1): the surface moved, so this
-            // result owns nothing. The machine-readable cause (incl. any
-            // published id) is already recorded in the diagnostic above.
-            if (result.error.ownership === 'superseded') return { kind: 'success' }
+            if (!result.ok) {
+              if (result.error instanceof LifecycleError) {
+                // Preserve the machine-readable cause (incl. a published identity for
+                // D2.4 reconciliation) even on the UI-silent superseded path.
+                runner.diag.warn('fresh session create did not own the surface', {
+                  settlement: result.error.settlement,
+                  ownership: result.error.ownership,
+                  publishedSessionId: result.error.publishedSessionId,
+                  requestedSessionId: result.error.requestedSessionId,
+                })
+                // A locally SUPERSEDED create emits no error notice and NO
+                // user-visible success text (§0.2.1): the surface moved, so this
+                // result owns nothing. The machine-readable cause (incl. any
+                // published id) is already recorded in the diagnostic above.
+                if (result.error.ownership === 'superseded') return { kind: 'success' }
+              }
+              return { kind: 'error', text: `${result.message}${stopNote()}` }
+            }
+            // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
+            // drop the unpinned ones now, never before (a failed create keeps
+            // the current session and its drafts intact; in-flight submissions
+            // keep their pinned drafts — review finding 2).
+            runner.imageStore.clearUnpinned()
+            runner.fileStore?.clearUnpinned()
+            return { kind: 'success', text: 'started a fresh session' }
+          }, navigation)
+        } catch (error) {
+          if (error instanceof SessionNavigationStopError) {
+            // A stale capture is a locally SUPERSEDED navigation (another
+            // navigation already published): the surface moved, so this result
+            // owns nothing — silent, exactly like the superseded create path.
+            // A refused/unproven stop aborts BEFORE any child work; the message
+            // already states whether the old Turn may have been stopped.
+            if (error.settlement === 'stale') return { kind: 'success' }
+            return { kind: 'error', text: `fresh session creation failed: ${error.message}` }
           }
-          return { kind: 'error', text: result.message }
+          if (isCancellation(error)) throw error
+          // The transition can THROW after the quiesce (a synchronous commit
+          // seam): keep the phase fact in the user-visible failure instead of
+          // letting the generic command path drop it.
+          return { kind: 'error', text: `${safeErrorMessage(error)}${stopNote()}` }
+        } finally {
+          freshSessionInFlight = false
         }
-        // The transaction COMMITTED: staged drafts are per-TUI-run UI state —
-        // drop the unpinned ones now, never before (a failed create keeps
-        // the current session and its drafts intact; in-flight submissions
-        // keep their pinned drafts — review finding 2).
-        runner.imageStore.clearUnpinned()
-        runner.fileStore?.clearUnpinned()
-        return { kind: 'success', text: 'started a fresh session' }
-      }),
+      },
     })
   }
 

@@ -127,8 +127,10 @@ import { SvgRasterLoader } from '../../client/media/svg/raster-loader.ts'
 import { isolatedSvgRasterSupported, rasterizeSvg } from '../../client/media/svg/rasterize.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { StatusStore } from '../../domain/status/store.ts'
-import type { StatusPatch } from '../../domain/status/types.ts'
+import type { ActivityStatus, StatusPatch, StatusSnapshot, StatusSnapshotReader } from '../../domain/status/types.ts'
 import { initialStatusSnapshot } from '../../domain/status/snapshot.ts'
+import { deriveActivityStatus, type ActivityFacts } from '../../domain/status/derive-activity.ts'
+import { plainSectionEqual } from '../../domain/status/equal.ts'
 import { assistantPresentationRevision, assistantStepOf, type TranscriptFolder } from '../../domain/transcript/folder.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import { eligibleFinalAssistant } from '../../domain/transcript/final-assistant.ts'
@@ -151,6 +153,7 @@ import { createOpeningJournal, type OpeningJournal } from './opening-journal.ts'
 import { parseTerminalProgressMode, type TerminalProgressOutcome } from '../../domain/terminal-progress/settings.ts'
 import { createTerminalProgressInterval, type IntervalProgress } from '../../domain/terminal-progress/interval.ts'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
+import type { SessionReader } from '../../runtime/session-reader-port.ts'
 // TS3 §31-§36: the surface's independent application-level owners. Each is
 // constructed exactly once here; none of them imports this aggregate's value
 // implementation (only its cross-owner facade types).
@@ -171,12 +174,17 @@ import {
   type TaskSurfaceSource,
 } from './task-runtime.ts'
 import {
+  createAgentContextIdentity,
+  type AgentContextIdentity,
+  type AgentContextIdentitySubject,
+} from './agent-context-identity.ts'
+import {
   createEventRouting,
   type MainProgressAuthority,
   type RoutedSessionEvent,
   type SurfaceEventRoutingSource,
 } from './event-routing.ts'
-import type { SurfaceDisplaySeam } from './display-seam.ts'
+import type { DisplayStatusFacts, SurfaceDisplaySeam, DisplayActivityFacts } from './display-seam.ts'
 import { pituiDisplaySeam } from './display-seam-pitui.ts'
 import { pituiTaskCenterPresentation } from './task-presentation-pitui.ts'
 import type { TaskCenterPresentationPort } from './task-presentation-port.ts'
@@ -250,6 +258,30 @@ export interface SurfaceInputBinding {
    * never writes to a Host/port answer path.
    */
   reopenContinuedQuestion(sessionId: string, callId: string): boolean
+  /**
+   * PR-C (TSP-7): open the SAME registered `/model` picker the typed command
+   * runs, from the composer's high-frequency Model/Effort controls. The
+   * composition root late-binds this to the command surface's registered
+   * entry BEFORE the renderer input is bound, so a click before the binding
+   * (or on a mount whose registration failed) reaches a refused entry — never
+   * a fabricated picker request. PiTui supplies no consumer.
+   */
+  openModelPicker(entry: 'models' | 'effort'): void
+  /** Whether the native `/model` picker UI entry is actually installed
+   *  (registered, not Host-owned) — the real business-entry fact. */
+  modelPickerAvailable(): boolean
+  /**
+   * TSP-7 PR-E: the live standard-permission catalog for the Quiet Composer
+   * menu. A read-only projection of the SAME StatusRuntime authority the
+   * Shift+Tab cycle uses; the renderer builds labels/selection from it.
+   */
+  permissionOptions(): readonly string[]
+  /**
+   * TSP-7 PR-E: apply one explicitly chosen standard preset through the ONE
+   * StatusRuntime selection writer. The renderer never writes a permission
+   * itself and never keeps optimistic state.
+   */
+  selectPermission(id: string): void
 }
 
 /**
@@ -353,8 +385,12 @@ export interface SurfaceRendererMount {
    * renderer's first projection, so the renderer can present a durable image
    * attachment through the SAME loader and scope authority the PiTui branch
    * uses. A renderer that ignores the binding has no image capability.
+   *
+   * TSP-7 PR-A: `statusReader` is the read-only projection of the ONE store
+   * this surface created at `createSurfaceRuntime` — never the store itself, so
+   * no renderer gains an update/subscribe capability of its own.
    */
-  mount(binding: SurfaceImageBinding): {
+  mount(binding: SurfaceImageBinding, statusReader: StatusSnapshotReader): {
     /** The renderer-facing display seam implementation. */
     readonly display: SurfaceDisplaySeam
     /**
@@ -510,6 +546,14 @@ export interface SurfaceMountDeps {
   readonly imageFallbackColor: (text: string) => string
 }
 
+/** The composition's existing semantic Session read for the Agent Context
+ * identity enrichment (official titles + projection-batch lookups). The
+ * surface consumes this EXISTING port; no new Host/Direct coupling and no
+ * second read authority is introduced. */
+export interface AgentContextIdentitySource {
+  readonly sessionReader: SessionReader
+}
+
 /** The creation options: the early surface state + the Client-local sinks. */
 export interface SurfaceRuntimeOptions {
   /** The TUI package version rendered in the initial status snapshot. */
@@ -569,6 +613,32 @@ export interface SurfaceRuntimeOptions {
     readonly subjectKind: 'main' | 'viewed-child'
     readonly subjectId: string | undefined
   }) => VisualEventSnapshot | undefined
+  /**
+   * PR-C (TSP-7): the LATE-BOUND `/model` UI entry the composer's high-
+   * frequency controls call. The composition root assigns the real callback
+   * (the command surface's registered handler) AFTER `createSurfaceRuntime`
+   * returns and BEFORE the renderer input is bound; a click that outruns the
+   * assignment reaches the throwing placeholder, which the renderer reports
+   * through its own notice path. The promise the callback returns is owned by
+   * the command's own `runOwned` wiring — this seam never creates a second
+   * async owner.
+   */
+  readonly openModelPicker?: (entry: 'models' | 'effort') => void
+  /** PR-C/PR-F: whether the native `/model` picker UI entry is actually
+   *  installed. The footer's model/reasoning fallback reads this fact, not
+   *  the presence of a painted composer button. */
+  readonly modelPickerAvailable?: () => boolean
+  /**
+   * TSP-7 PR-E: the LATE-BOUND narrow Permission UI seam (TSP only). The
+   * composition root assigns the real StatusRuntime owner AFTER
+   * `createSurfaceRuntime` returns and BEFORE the renderer input is bound.
+   * `options()` is a read-only catalog read; `select()` is the SAME shared
+   * apply primitive the Shift+Tab cycle uses. PiTui supplies no consumer.
+   */
+  readonly permissionUi?: {
+    options(): readonly string[]
+    select(id: string): void
+  }
 }
 
 /**
@@ -777,6 +847,15 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * and the selected-Job observation lifetime.
    */
   attachTasks(source: TaskSurfaceSource, deps: TaskSurfaceDeps): void
+  /**
+   * Acquire the Agent Context identity enrichment: the ONE short-lived owner
+   * of the CURRENT display subject's readable relay/settled sender names. It
+   * reads the existing `SessionReader` port and the Task Center's GLOBAL
+   * descendant rows; it never fetches during a paint, never polls and never
+   * writes a Session. A headless composition without a diagnostics channel
+   * attaches nothing (the cards keep their short-id fallback).
+   */
+  attachAgentContextIdentity(source: AgentContextIdentitySource): void
   /** The dock/roster feed (the original `refreshTasks`). */
   refreshTasks(): void
   /** A CATALOG refresh of the subagent half (re-lists descendants). */
@@ -811,6 +890,15 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    * interaction owner is attached.
    */
   reconcileInteractionPresentation(): void
+  /**
+   * M4 PR4: whether the interaction owner still holds UNSETTLED Client-local
+   * Question/Approval input (a live/queued modal, a continued form or its
+   * saved draft, a delivered answer, a refused-admission wait). It forwards the
+   * ONE interaction owner's own synchronous read — this surface keeps no second
+   * copy of that state. A Host-side pending question with no local input is not
+   * blocking: the replacement Client re-reads it from the Host.
+   */
+  hasReloadBlockingInteraction(): boolean
   /**
    * PR3-B B3 (external review P2-B): the SYNCHRONOUS publication-commit half of
    * the same currentness policy. The runner calls it from the commit section,
@@ -942,6 +1030,45 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
   dispose(): void
 }
 
+/**
+ * TSP-7 PR-B: wrap the TSP renderer's display seam with a NARROW surface-side
+ * proxy over `commitStatusFacts`.
+ *
+ * The proxy registers ONLY the machine activity facts the surface's ONE
+ * activity projection consumes (`busy`, `working`, `compactionPhase`, and the
+ * todo count the display subject owns) and then calls the renderer's own commit
+ * verbatim — so the renderer's legacy banner keeps working exactly as PR-A left
+ * it, and the surface never becomes a second presenter.
+ *
+ * Every other member is forwarded by delegation and the capability getters stay
+ * DYNAMIC: a spread such as `{ ...seam }` would freeze `supportsTaskCenter` at
+ * mount time and break the negotiated capability contract.
+ */
+function tspActivityFactsProxy(
+  seam: SurfaceDisplaySeam,
+  commit: (facts: DisplayActivityFacts) => void,
+): SurfaceDisplaySeam {
+  // PROTOTYPE delegation, never a spread: the seam's capability flags are
+  // GETTERS (`supportsTaskCenter` is negotiated, `supportsModals` follows the
+  // input binding), and `{ ...seam }` would evaluate them once at mount time
+  // and freeze the results.
+  return Object.assign(Object.create(seam) as SurfaceDisplaySeam, {
+    commitStatusFacts(facts: DisplayStatusFacts): void {
+      const activity: DisplayActivityFacts = {
+        ...(facts.busy === undefined ? {} : { busy: facts.busy }),
+        ...(facts.working === undefined ? {} : { working: facts.working }),
+        ...(facts.compactionPhase === undefined ? {} : { compactionPhase: facts.compactionPhase }),
+        ...(facts.todos === undefined ? {} : { todoCount: facts.todos.length }),
+      }
+      seam.commitStatusFacts(facts)
+      // The registration runs AFTER the renderer's own commit, so the renderer's
+      // legacy banner text and the surface's store projection always describe the
+      // same fact batch — and the activity publish rides the same display commit.
+      if (Object.keys(activity).length > 0) commit(activity)
+    },
+  })
+}
+
 /** Create the surface owner; the status store and journal exist immediately. */
 export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: SurfaceRuntimeOptions): SurfaceRuntime<Event> {
   const status = new StatusStore(initialStatusSnapshot(options.tuiVersion))
@@ -1057,6 +1184,149 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   }
 
   /**
+   * TSP-7 PR-B: the ONE atomic display-subject commit (M3-5 PR1 §9.7), named so
+   * the surface's own activity projection and the status runtime publish through
+   * the identical path.
+   *
+   * OWNERSHIP (R2-2): the PiTui branch's ONE atomic commit lives INSIDE
+   * `TuiApp.commitDisplaySubject` (store patch + activity section + legacy
+   * projection published together). Committing the patch here as well would
+   * SPLIT that transaction into two publications (an observer would see the
+   * child view beside the parent activity/presentation). So the surface only
+   * supplies the store commit for a renderer that has no such chrome projection
+   * — the TSP mount — keeping exactly ONE store update per commit on BOTH
+   * branches.
+   */
+  const commitStatus = (
+    patch: StatusPatch,
+    legacyFacts: Partial<StatusData>,
+    presentation: DisplaySubjectPresentation | undefined,
+  ): void => {
+    // TSP-7 PR-B: a commit that REPLACES the display subject must re-derive the
+    // activity section in the SAME transaction — the surface is that section's
+    // writer on this branch, so publishing a `view=child` patch beside the
+    // parent's activity would be exactly the mixed snapshot the R2-2 atomicity
+    // rule forbids (a child must never borrow the main run phase or its work
+    // counts).
+    let effective = patch
+    if (app === undefined && display !== undefined && patch.view !== undefined) {
+      const next = deriveForSubject(patch.view.subject, presentation?.todos?.length)
+      if (next !== undefined) effective = { ...patch, activity: next }
+    }
+    if (app === undefined) status.update(effective)
+    displaySeam().commitDisplaySubject(effective, legacyFacts, presentation)
+  }
+
+  /**
+   * TSP-7 PR-B: derive the activity section for the display subject a commit is
+   * about to publish, from the SAME mirror {@link publishTspActivity} reads. It
+   * is scoped to the subject of THAT commit (never to the store's previous
+   * subject), so a child keeps only the facts its own authority answers.
+   *
+   * RFL-003: the mirror's `todoCount`/`queuedCount` are MAIN-session facts (the
+   * `commitStatusFacts({todos})` producers and the pending-input join belong to
+   * the main subject). A child's todo count comes from the SAME commit's child
+   * `presentation.todos` (the display-subject authority), and a child carries no
+   * queue projection at all — never the parent's numbers.
+   */
+  type DisplaySubject = StatusSnapshot['view']['subject']
+  const deriveForSubject = (
+    subject: DisplaySubject,
+    childTodoCount: number | undefined,
+  ): ActivityStatus | undefined => {
+    // `run-state`/`tasks` are MAIN-only (the builtins refuse a child subject), so
+    // the run phase and the work counts are MAIN-only too: a child never shows
+    // the parent's working/compaction/waiting state or its job/agent totals — it
+    // keeps only the facts the child's own authority answers (the display
+    // subject's todo list and its queued input).
+    const isMain = subject.kind === 'main'
+    return deriveActivityStatus(
+      {
+        working: isMain && tspActivityFacts.working === true,
+        compacting: isMain && tspActivityFacts.compactionPhase === 'summarizing',
+        applyingCompaction: isMain && tspActivityFacts.compactionPhase === 'applying',
+        approvalOpen: isMain && tspActivityFacts.approvalOpen === true,
+        questionOpen: isMain && tspActivityFacts.questionOpen === true,
+      },
+      isMain && tspActivityFacts.busy === true,
+      {
+        queuedCount: isMain ? tspActivityFacts.queuedCount ?? 0 : 0,
+        taskCount: isMain ? tspActivityFacts.taskCount ?? 0 : 0,
+        childAgentCount: isMain ? tspActivityFacts.childAgentCount ?? 0 : 0,
+        ...isMain && tspActivityFacts.taskTotalCount !== undefined
+          ? { taskTotalCount: tspActivityFacts.taskTotalCount }
+          : {},
+        ...isMain && tspActivityFacts.childAgentTotalCount !== undefined
+          ? { childAgentTotalCount: tspActivityFacts.childAgentTotalCount }
+          : {},
+        ...isMain && tspActivityFacts.failedTaskCount !== undefined
+          ? { failedTaskCount: tspActivityFacts.failedTaskCount }
+          : {},
+        ...isMain && tspActivityFacts.questionAttention !== undefined
+          ? { questionAttentionCount: tspActivityFacts.questionAttention }
+          : {},
+        todoCount: isMain ? tspActivityFacts.todoCount ?? 0 : childTodoCount ?? 0,
+      },
+    )
+  }
+
+  /**
+   * TSP-7 PR-B: the ONE activity projection of the TSP branch — the surface's
+   * single writer of `StatusStore.activity` on that branch.
+   *
+   * It reads only the mirrors above (facts the real owners already committed),
+   * derives through the SHARED `deriveActivityStatus()` (never a second
+   * precedence), and publishes through the SAME atomic display commit every
+   * other status section uses.
+   */
+  const publishTspActivity = (): void => {
+    if (app !== undefined || display === undefined || disposed || isCleanedUp()) return
+    const current = status.snapshot()
+    // RFL-003: while a CHILD is the display subject, the mirror's main-session
+    // todo/queue facts must not touch the child's activity (a main `todo/write`
+    // mid-view is not the child's fact). The child's own todo count is already
+    // IN the committed activity section — carried there by the view-switch
+    // commit from the child presentation — so a main-only fact change derives a
+    // content-equal child section and publishes nothing.
+    const subject = current.view.subject
+    const next = deriveForSubject(
+      subject,
+      subject.kind === 'subagent' ? current.activity.todoCount : undefined,
+    )
+    if (next === undefined) return
+    if (plainSectionEqual(current.activity, next)) return
+    commitStatus({ activity: next }, {}, undefined)
+  }
+
+  /**
+   * TSP-7 PR-B: the SURFACE's own machine-activity mirror for the branch that
+   * has no `TuiApp` (the PiTui app mints its own `activity` section inside
+   * `commitDisplaySubject`, so this state must never be read there).
+   *
+   * It is a NARROW PROJECTION, never a second owner: every field is a fact an
+   * existing authority already committed to this surface (the display seam's
+   * `busy/working/compactionPhase` writers, the Task Center's GLOBAL summary,
+   * the Question controller's parked count and its live foreground flows). No
+   * Host read, no catalog walk and no clock lives here.
+   *
+   * Field PRESENCE is the write authority: an absent field keeps the last
+   * committed value, so a title-only update can never clear `working`.
+   */
+  let tspActivityFacts: DisplayActivityFacts = {}
+
+  /**
+   * TSP-7 PR-B: register ONE partial activity fact and re-publish. Presence is
+   * the write authority (a `false`/`'idle'` really ENDS the fact it names; an
+   * absent field changes nothing), so an unrelated commit can never clear the
+   * run phase or the work counts.
+   */
+  const commitActivityFacts = (facts: DisplayActivityFacts): void => {
+    if (app !== undefined || display === undefined || disposed || isCleanedUp()) return
+    tspActivityFacts = { ...tspActivityFacts, ...facts }
+    publishTspActivity()
+  }
+
+  /**
    * PR3-A: the live display seam. Sub-owners that only commit display facts
    * read this; PiTui-only owners keep {@link mounted}.
    */
@@ -1145,6 +1415,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     interval.turnEnd(turn, reasonKind)
   }
 
+  /**
+   * The Agent Context identity enrichment of the CURRENT display subject
+   * (`agent-context-identity.ts`). Created by
+   * {@link SurfaceRuntime.attachAgentContextIdentity}; it holds the only
+   * pending title batch and drops it on a subject switch or teardown.
+   */
+  let agentContextIdentity: AgentContextIdentity | undefined
+
   // The Task Center / Job viewer owner (TS3 §34) holds the ONE
   // `TaskBrowserRuntime`, the browser/viewer state and the catalog refresh gate.
   // Question attention crosses as an injected read/subscription only (the
@@ -1161,6 +1439,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       return taskPresentation
     },
     isCleanedUp: () => isCleanedUp(),
+    // TSP-7 PR-B: the Task Center's read-only projection onto the surface's
+    // activity status. `commitActivityFacts` is defined above this owner, so
+    // this is a plain forward reference in the same closure, never a second
+    // writer: the surface stays the ONE `StatusStore.activity` publisher.
+    publishActivity: facts => commitActivityFacts(facts),
+    // The GLOBAL descendant catalog rows moved: re-resolve the CURRENT
+    // Agent Context names from those exact rows (never a second roster).
+    onCatalogCommitted: () => agentContextIdentity?.catalogChanged(),
     attention: {
       rows: () => interaction.attentionRows(),
       reconcile: () => interaction.controller()?.reconcile(),
@@ -1204,6 +1490,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     diag: () => task.diag(),
     isCleanedUp: () => isCleanedUp(),
     onAttentionChanged: () => task.refreshAttentionRows(),
+    // TSP-7 PR-B: this owner's modal/parked facts ride the surface's ONE
+    // activity projection (the surface stays the `StatusStore` writer).
+    publishActivity: facts => commitActivityFacts(facts),
   })
 
   // The application-level presentation event router (TS3 §36) owns the routing
@@ -1525,6 +1814,18 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     const visualRows = target === undefined
       ? []
       : applyVisualPresentations(target, projection.messages, activities)
+    // The Agent Context identity of THIS captured subject (PiTui only):
+    // resolve the frame's proven sender names synchronously BEFORE the commit,
+    // so the very first painted relay/settled card already uses them, while a
+    // later title/label landing rebuilds only the affected cards.
+    if (agentContextIdentity !== undefined && app !== undefined) {
+      const viewedChildId = routing().viewedChildId()
+      agentContextIdentity.observe(projection.messages, {
+        subjectKind: viewedChildId === undefined ? 'main' : 'viewed-child',
+        subjectId: viewedChildId ?? routing().currentSessionId(),
+        sourceIdentity: projectionTokenFor(folder),
+      })
+    }
     displaySeam().setTranscript(projection.messages, activities, {
       ...controller.state(),
       firstTurn: projection.firstTurn,
@@ -1658,12 +1959,19 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // never yank a reader out of history) and is PiTui-only chrome (the TSP
     // pane owns its scrolling).
     displaySeam().setPendingInputPresentation({ queued, tail, running })
+    // TSP-7 PR-B: the queued-input COUNT is taken from THIS join — the ONE
+    // authoritative pending-input presentation — so no second Queue/Inbox read
+    // exists. Only the OFFICIAL queued rows count (a local-only optimistic
+    // echo is filtered out), and `pending.running` is NOT the run phase: it is a
+    // pending-input display state, never `working` (§8.4).
+    commitActivityFacts({ queuedCount: queued.filter(item => item.local !== true).length })
     if (hasNewOwnInput) app?.scrollToBottom()
   }
   /** Clear the pending-input presentation + own-input memory (generation bump). */
   const resetPendingPresentation = (): void => {
     pendingOwnInputBySubject.clear()
     displaySeam().setPendingInputPresentation({ queued: [], tail: [], running: false })
+    commitActivityFacts({ queuedCount: 0 })
   }
 
   // ── A4-8 search/transcript presentation wiring (plan §17) ───────────────
@@ -1747,7 +2055,25 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     searchProfiler.stage('search.resolve-representatives')
   }
   const resetSubjectStatus = (): void => {
-    status.update({ access: {}, composition: {}, collaboration: { plan: { effective: false } } })
+    // TSP-7 PR-B: the ACTIVITY section is display-subject-scoped too (its
+    // run phase, work counts and parked Questions belong to the subject that
+    // produced them). On the TSP branch the surface is the section's writer, so
+    // the outgoing subject's activity mirror is dropped HERE — before any later
+    // refresh can re-sample it — and the new owner re-derives from its own
+    // authorities. The PiTui branch keeps its own `commitDisplaySubject`
+    // activity mint (R2-2): writing the section here as well would split that
+    // transaction into two publications.
+    if (app === undefined) tspActivityFacts = {}
+    status.update({
+      access: {},
+      composition: {},
+      collaboration: { plan: { effective: false } },
+      ...(app === undefined ? { activity: deriveActivityStatus(
+        { working: false, compacting: false, applyingCompaction: false, approvalOpen: false, questionOpen: false },
+        false,
+        { queuedCount: 0, taskCount: 0, childAgentCount: 0, todoCount: 0 },
+      ) } : {}),
+    })
   }
 
   const resetSearchPresentation = (options: { preserveCurrentReveal?: boolean; rebuild?: boolean } = {}): void => {
@@ -2212,21 +2538,25 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     // subject and the identity fence an already-open panel re-checks.
     deliveredFilesSnapshot,
     isDeliveredFilesSnapshotCurrent,
+    /**
+     * A4-4 (plan §13.1): the semantic derivation stays with the runner; the
+     * commit coordination is surface-owned. The three parts are ONE atomic
+     * display-subject commit (M3-5 PR1 §9.7).
+     *
+     * OWNERSHIP (R2-2): the PiTui branch's ONE atomic commit lives INSIDE
+     * `TuiApp.commitDisplaySubject` (store patch + activity section + legacy
+     * projection published together). Committing the patch here as well
+     * would SPLIT that transaction into two publications (an observer would
+     * see the child view beside the parent activity/presentation). So the
+     * surface only supplies the store commit for a renderer that has no such
+     * chrome projection — the TSP mount — keeping exactly ONE store update
+     * per commit on BOTH branches.
+     *
+     * TSP-7 PR-B: it is a named closure (not only the interface member) so the
+     * surface's own activity projection publishes through the SAME commit.
+     */
     commitStatus(patch, legacyFacts, presentation) {
-      // A4-4 (plan §13.1): the semantic derivation stays with the runner; the
-      // commit coordination is surface-owned. The three parts are ONE atomic
-      // display-subject commit (M3-5 PR1 §9.7).
-      //
-      // OWNERSHIP (R2-2): the PiTui branch's ONE atomic commit lives INSIDE
-      // `TuiApp.commitDisplaySubject` (store patch + activity section + legacy
-      // projection published together). Committing the patch here as well
-      // would SPLIT that transaction into two publications (an observer would
-      // see the child view beside the parent activity/presentation). So the
-      // surface only supplies the store commit for a renderer that has no such
-      // chrome projection — the TSP mount — keeping exactly ONE store update
-      // per commit on BOTH branches.
-      if (app === undefined) status.update(patch)
-      displaySeam().commitDisplaySubject(patch, legacyFacts, presentation)
+      commitStatus(patch, legacyFacts, presentation)
     },
     setNotificationMode(mode) {
       notification.setMode(mode)
@@ -2270,6 +2600,37 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     attachTasks(source, deps) {
       task.attachTasks(source, deps)
     },
+    attachAgentContextIdentity(source) {
+      if (agentContextIdentity !== undefined) {
+        throw new Error('the agent context identity enrichment is already attached')
+      }
+      // A headless composition without a diagnostics channel has no
+      // never-swallow sink for an unclassified read failure; the cards keep
+      // their truthfully short-id fallback instead of hiding an error.
+      if (options.diag === undefined) return
+      agentContextIdentity = createAgentContextIdentity({
+        reader: source.sessionReader,
+        catalogChildLabel: (childId) => {
+          for (const row of task.globalRows()) {
+            if (row.kind === 'subagent' && row.childId === childId) return row.label
+          }
+          return undefined
+        },
+        publish: (labels) => {
+          if (app !== undefined) app.setContextSenderLabels(labels)
+        },
+        isCurrentSubject: (captured: AgentContextIdentitySubject) => {
+          const viewedChildId = routing().viewedChildId()
+          const folder = viewedChildId === undefined ? routing().mainFolder() : routing().viewedChildFolder()
+          return captured.subjectKind === (viewedChildId === undefined ? 'main' : 'viewed-child')
+            && captured.subjectId === (viewedChildId ?? routing().currentSessionId())
+            && captured.sourceIdentity === projectionTokenFor(folder)
+        },
+        diag: options.diag,
+        sessionId: () => routing().currentSessionId(),
+        isCleanedUp: () => isCleanedUp(),
+      })
+    },
     refreshTasks() {
       task.refreshTasks()
     },
@@ -2296,6 +2657,9 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     },
     reconcileInteractionPresentation() {
       interaction.reconcilePublishedPresentation()
+    },
+    hasReloadBlockingInteraction() {
+      return interaction.hasReloadBlockingInput()
     },
     withdrawReplacedPresentation() {
       interaction.withdrawReplacedPresentation()
@@ -2366,8 +2730,23 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         // store: the draft lifecycle stays with the application owner.
         const preview = deps.draftImagePreviewSource
         const draftImages = createSurfaceDraftImageProjection(() => composerPort, preview)
-        const mounted = deps.renderer.mount({ imageLoader, imageScope: deps.imageScope, draftImages })
-        display = mounted.display
+        // TSP-7 PR-A: the mount receives the READ-ONLY projection of the ONE
+        // store (`status`), never the store itself — the surface stays the sole
+        // writer and the renderer can only sample an already-committed snapshot.
+        const mounted = deps.renderer.mount(
+          { imageLoader, imageScope: deps.imageScope, draftImages },
+          { snapshot: () => status.snapshot() },
+        )
+        // TSP-7 PR-B: the TSP branch's seam is the renderer's own, wrapped by a
+        // NARROW surface-side proxy over `commitStatusFacts` only. The proxy
+        // registers the machine facts the surface's ONE activity projection needs
+        // and then calls the renderer's own commit verbatim — the renderer keeps
+        // every other member, and its capability getters stay DYNAMIC (a spread
+        // such as `{ ...mounted.display }` would freeze `supportsTaskCenter`).
+        //
+        // This is the single narrow coordination point the plan asks for: no
+        // second DSH event subscription, no Host read, and no second writer.
+        display = tspActivityFactsProxy(mounted.display, commitActivityFacts)
         taskPresentation = mounted.taskPresentation
         composerPort = mounted.composer
         modelPresentation = mounted.modelPresentation
@@ -2404,6 +2783,25 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           listContinuedQuestions: () => interaction.attentionRows(),
           reopenContinuedQuestion: (sessionId, callId) =>
             interaction.controller()?.reopen(sessionId, callId) ?? false,
+          // PR-C (TSP-7): the late-bound `/model` UI entry, forwarded verbatim
+          // to the renderer. A composition that supplied no entry leaves a
+          // loud placeholder: the renderer's composer buttons are the only
+          // consumers, and a silent no-op would paint a dead control.
+          openModelPicker: entry => {
+            const open = options.openModelPicker
+            if (open === undefined) throw new Error('the model picker command entry is not wired in this composition')
+            open(entry)
+          },
+          modelPickerAvailable: () => options.modelPickerAvailable?.() ?? false,
+          // TSP-7 PR-E: the late-bound Permission UI seam. The catalog read
+          // returns empty when no owner is composed; the action refuses loudly
+          // so a click on an unwired composition can never look like a write.
+          permissionOptions: () => options.permissionUi?.options() ?? [],
+          selectPermission: id => {
+            const permissionUi = options.permissionUi
+            if (permissionUi === undefined) throw new Error('permission UI owner is not composed')
+            permissionUi.select(id)
+          },
         }
         inputBindTarget = mounted
         return
@@ -2500,6 +2898,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // surface detach. The process slot is NOT released here — TuiApp remains
       // its sole owner.
       runSyncDisposalSteps('surface runtime disposal', [
+        // Cancel the identity enrichment's pending title batch BEFORE the
+        // mounted app dies: a late batch must never publish into a dying
+        // renderer or relabel another subject.
+        () => agentContextIdentity?.dispose(),
         // Retire the running truth BEFORE the mounted app dies, WITHOUT
         // fabricating a settlement: the proven outcome survives, so the app's
         // final disposal can retain a `done`/`error` OSC 7501 record while a

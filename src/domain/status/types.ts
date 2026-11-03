@@ -202,6 +202,17 @@ export type StatusPatch = {
   readonly [K in keyof StatusSnapshot]?: StatusSnapshot[K]
 }
 
+/**
+ * TSP-7 PR-A: the read-only projection of the ONE `StatusStore`, handed to a
+ * renderer mount at its single binding point. It carries NO update and NO
+ * subscribe authority — a renderer that receives it can only observe the
+ * snapshot the surface already committed. Callers pass a wrapper object,
+ * never the `StatusStore` itself cast down.
+ */
+export interface StatusSnapshotReader {
+  snapshot(): StatusSnapshot
+}
+
 /** The empty baseline: every optional fact absent, counts zeroed. */
 export function emptyStatusSnapshot(): StatusSnapshot {
   return {

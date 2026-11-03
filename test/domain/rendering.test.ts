@@ -3964,6 +3964,32 @@ test('BulletedComponent keeps a live child with reference-stable output', () => 
   assert.ok(narrow.slice(1).every(line => line.startsWith('  ')), `continuation must indent:\n${narrow}`)
 })
 
+test('a SIXEL candidate token on a continuation row is not indented', () => {
+  // The Screen resolves an occurrence token by EXACT line lookup; the bullet's
+  // text indent would make that lookup miss and leak the marker to the terminal.
+  const token = '\u2063SIXC:abc:1\u2063'
+  const bullet = new BulletedComponent(new Text(`description\n${token}`, 0, 0), '❯ ')
+  const lines = bullet.render(20)
+  assert.ok(lines[0]!.startsWith('❯ description'), lines.join('\n'))
+  assert.equal(lines[1]!.trimEnd(), token, 'the device token keeps its bytes without the bullet indent')
+  assert.ok(!lines[1]!.startsWith(' '), 'the exact-line lookup sees no leading indent')
+})
+
+test('BulletedComponent keeps the bullet on an empty first row but empties continuation blanks', () => {
+  // An empty leading child row must still carry the owner bullet; changing it
+  // to '' would silently drop the marker. Only continuation blanks are kept
+  // truly empty so the Screen's SIXEL top-crop scan can traverse them.
+  const leading = new BulletedComponent({ render: () => ['', 'body'] } as never, '❯ ')
+  const leadingLines = leading.render(20)
+  assert.equal(leadingLines[0], '❯ ', `the first empty row keeps the bullet:\n${leadingLines.join('\n')}`)
+  assert.equal(leadingLines[1]!.trimEnd(), '  body', 'the continuation still indents under the bullet')
+
+  const blanks = new BulletedComponent({ render: () => ['head', '', 'tail'] } as never, '❯ ')
+  const lines = blanks.render(20)
+  assert.equal(lines[1], '', 'a continuation blank row stays exactly empty for the crop scan')
+  assert.equal(lines[2]!.trimEnd(), '  tail', 'the text after the blank still indents')
+})
+
 test('assistant markdown tables reflow on terminal resize', async () => {
   const { vt, app } = startApp(80)
   const table = [

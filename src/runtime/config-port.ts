@@ -787,6 +787,16 @@ export interface ConfigPort {
    *  must mark the values non-current and refuse writes with an explicit
    *  reason instead of presenting last-known values as authoritative. */
   configReadiness(): ConfigReadiness
+  /**
+   * Whether a configuration WRITE this port already accepted has not reached a
+   * trustworthy terminal settlement. Each adapter registers its OWN write
+   * sinks here (the Remote settings mirror and credential references); a
+   * read-only command never registers, so a settings/preset refresh does not
+   * block. The Client reload safety gate reads this synchronously: retiring the
+   * Client while a persisted configuration write is in flight could lose the
+   * write's final result.
+   */
+  hasUnsettledWrites(): boolean
   /** The TUI settings document (theme/footer/...). */
   readonly tuiSettings: TuiSettingsConfig | undefined
   /** The M5 footer-command trust read (USER-layer only). */

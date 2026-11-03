@@ -152,6 +152,19 @@ src/app/bootstrap/**   may import SIBLING helpers; never app/bootstrap.ts
 every other module     may import neither the facade nor the zone
 ```
 
+There is exactly ONE dynamic exception, and it is a separate OS composition
+root rather than an ordinary owner: the internal split Client's
+`src/app/remote-process/local-client-entry.ts` lazily imports the facade with
+one `await import('../bootstrap.ts')` expression, after the official
+`PluginPackages` resolution is live, and calls `applyRunnerWithRuntime` with
+its own Context, `appExit`, transport and mounted Client domains. The
+architecture gate asserts the owner identity, the facade-only target, the
+single-expression budget and the `PluginPackages`-first ordering. That Client
+root never shares a Context, plugin service object or Host service instance
+with the Direct `src/index.ts` root; its `applyRunnerWithRuntime` startup
+settlement (`surfaceReady` / `surfaceFailed`) is the only mount-readiness seam
+the Direct entry does not pass.
+
 ## Mounted surface ownership
 
 `src/app/surface/runtime.ts` is the ONE aggregate `createSurfaceRuntime()`

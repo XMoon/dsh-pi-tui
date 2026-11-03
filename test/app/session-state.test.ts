@@ -166,6 +166,7 @@ function stubRunner(
   const defaultIntent = new DefaultIntentTracker<ModelSelection>()
   const owner = new DirectModelSelectionOwner({ currentSelection: () => ({ provider: 'p', model: 'default-model' }) })
   return {
+    beginClientWrite: () => () => {},
     ctx,
     app,
     deliveredFilesSnapshot: () => undefined,

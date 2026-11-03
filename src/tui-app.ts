@@ -243,10 +243,15 @@ import { VisualAssistantBody, VisualAssistantDisposalFrame } from './tui/compone
 import type { VisualFigureOptions } from './tui/components/transcript/visual-figure.ts'
 import {
   createNativeKittyGraphics,
+  type ImageGraphics,
   type KittyGraphics,
 } from './tui/graphics/native-image.ts'
+import { createDirectSixelGraphics, type DirectSixelScreenPort, type SixelScreenObservation } from './tui/graphics/sixel-image.ts'
+import { createTmuxSixelGraphics, isTmuxSixelTerminal } from './tui/graphics/tmux-sixel.ts'
 import { createTmuxKittyGraphics } from './tui/graphics/tmux-image.ts'
-import { createZellijKittyGraphics } from './tui/graphics/zellij-image.ts'
+import { createZellijNegotiatedGraphics } from './tui/graphics/zellij-sixel.ts'
+import { effectiveImageProtocol } from './tui/graphics/image-capability.ts'
+import { imageProtocolPreference, type ImageProtocolPreference } from './tui/graphics/image-protocol-preference.ts'
 import { TmuxGraphicsRevokedError } from './tui/graphics/kitty-terminal.ts'
 import { SvgThumbnail } from './tui/components/media/svg-thumbnail.ts'
 import { MAX_IMAGE_ROWS } from './tui/components/media/image-thumbnail.ts'
@@ -313,6 +318,7 @@ import { activityClockOf, resolveWorkLifetimes, type ActivityClock, type WorkLif
 import { ContextClusterComponent } from './tui/components/transcript/context-cluster.ts'
 import { clusterAdjacentAmbientContext, contextPresentationKind, type ContextCluster } from './tui/transcript/context-structure.ts'
 import { NoticeContextRow, RecallContextRow, RelayContextRow } from './tui/components/transcript/context-row.ts'
+import { agentContextSenderName, type SenderLabelLookup } from './tui/components/transcript/agent-context-title.ts'
 import { PendingContextComponent } from './tui/components/transcript/pending-context.ts'
 // TS8-E: the pending-input presentation DTOs are an application-facing
 // presentation contract owned by app/surface/pending-presentation.ts. TuiApp
@@ -636,6 +642,7 @@ type TranscriptRebuildReason =
   | 'resize'
   | 'renderer-registry'
   | 'theme-keymap'
+  | 'context-identity'
   | 'local-card'
   | 'other'
 
@@ -2381,6 +2388,16 @@ function samePendingTailRow(left: PendingTailRow, right: PendingTailRow): boolea
         : false)
 }
 
+/** Whether two sender-label snapshots denote the same resolved names. */
+function sameSenderLabels(left: SenderLabelLookup, right: SenderLabelLookup): boolean {
+  if (left === right) return true
+  if (left.size !== right.size) return false
+  for (const [id, name] of left) {
+    if (right.get(id) !== name) return false
+  }
+  return true
+}
+
 /** One cached component for a transcript message (stage J render cache). */
 interface MessageComponentEntry {
   component: Component
@@ -2500,6 +2517,10 @@ interface MessageComponentEntry {
   rendererId?: string
   /** M7: the renderer registry revision at build time. */
   rendererRevision?: number
+  /** The Agent Context sender display name the component was built with
+   * (kind 'system'): a title/catalog label landing must rebuild exactly the
+   * affected relay/settled cards, never the whole transcript. */
+  senderDisplayName?: string
 }
 
 interface ExitConfirmationTrigger {
@@ -2675,8 +2696,10 @@ type TranscriptVisualHit = {
      *  band and left the painted pixels inert. */
     readonly startRow: number
     readonly endRow: number
-    /** Entry-relative first/last+1 column of the REAL pixels (the Assistant
-     *  bullet indent is part of the painted left boundary). */
+    /** Entry-relative first/last+1 column of the REAL pixels. Kitty placements
+     *  begin under the Assistant bullet indent; a Direct SIXEL DCS is
+     *  positioned by the Screen at column 1, so the figure reports startCol 0
+     *  and the host must not add the indent. */
     readonly startCol: number
     readonly endCol: number
   }
@@ -2861,26 +2884,77 @@ interface ScopeSettlement {
   readonly text: string
 }
 
+/** The ONE SIXEL-backed trust port projection: Direct SIXEL or Zellij. */
+function sixelScreenPortOf(graphics: ImageGraphics | undefined): DirectSixelScreenPort | undefined {
+  if (graphics === undefined) return undefined
+  if (graphics.mode === 'sixel') return graphics.screen
+  if (graphics.mode === 'zellij-negotiated') return graphics.sixelScreen
+  return undefined
+}
+
 export class TuiApp {
   private readonly terminal: Terminal
   /**
-   * The ONE managed Kitty graphics owner of this physical terminal
-   * (Image-7A native / Image-7B-A tmux virtual). `undefined` on every terminal
-   * that admitted neither transport: those consumers keep the legacy fork
+   * The ONE managed graphics owner of this physical terminal (Image-7A native /
+   * Image-7B-A tmux virtual / Image-8 Direct SIXEL / Image-8 I8-5 Zellij
+   * negotiated). `undefined` on every
+   * terminal that admitted no transport: those consumers keep the legacy fork
    * `Image`/text path.
    */
-  private readonly graphics: KittyGraphics | undefined
+  private readonly graphics: ImageGraphics | undefined
+  /** The ONE startup protocol preference every media consumer reuses. */
+  private readonly imageProtocolPreference: ImageProtocolPreference
   /**
    * The image protocol every Alt Screen must use for this app's managed Native
    * route. A Zellij live `OK` can admit the Kitty transport while the fork's
    * static capability is still `null`/`iterm2`; the Alt screen's clear/redraw
    * and release strategy must follow the MANAGED transport, while whether
-   * pixels may be painted stays `graphics.canPaint()`. `undefined` keeps the
-   * fork's existing static capability (including legacy iTerm2 and the tmux
-   * virtual path).
+   * pixels may be painted stays `graphics.canPaint()`. A negotiated Zellij
+   * screen is constructed with `'kitty'` lifecycle semantics while pending
+   * (no pixels can paint yet), and switches to `'sixel'` only when SIXEL was
+   * already selected before construction. `undefined` keeps the fork's
+   * existing static capability (including legacy iTerm2 and tmux virtual).
    */
-  private get altScreenImageProtocol(): ImageProtocol | undefined {
-    return this.graphics?.mode === 'native' ? 'kitty' : undefined
+  private get altScreenImageProtocol(): ImageProtocol | 'sixel' | undefined {
+    if (this.graphics === undefined) return undefined
+    if (this.graphics.mode === 'sixel') return 'sixel'
+    if (this.graphics.mode === 'zellij-negotiated') {
+      // A screen constructed BEFORE the negotiation settles must keep the
+      // legacy Kitty cleanup protocol: no pixels can paint while pending, and
+      // a later Kitty selection would otherwise lose its placement cleanup.
+      // Once SIXEL is actually selected, new screens use SIXEL semantics.
+      return this.graphics.selectedProtocol() === 'sixel' ? 'sixel' : 'kitty'
+    }
+    return this.graphics.mode === 'native' ? 'kitty' : undefined
+  }
+
+  /**
+   * Point the Direct SIXEL readiness projection at the screen that owns the
+   * terminal NOW (Image-8 / I8-2A).
+   *
+   * A screen swap is the only place the three verified facts can become stale
+   * (a new screen parses its own `CSI 6;h;w t`, owns its own OSC 11 probe, and
+   * has its own clip); a resize re-samples because the device-pixel cell size
+   * can change with the font. Nothing here queries from a render.
+   */
+  private syncSixelObservation(): void {
+    const graphics = this.graphics
+    if (graphics === undefined || (graphics.mode !== 'sixel' && graphics.mode !== 'zellij-negotiated')) return
+    if (!this.terminalPresentationActive) {
+      // The app does not own the physical terminal right now (suspended for
+      // $EDITOR, a workspace transition, or stopped): a readiness query written
+      // by a screen nobody started would be answered into the OTHER owner's
+      // input chain and never reach us. Detach instead, so the resume re-binds
+      // and re-observes from scratch. (RFL-015.)
+      graphics.observeScreen(undefined, this.terminal.columns, this.terminal.rows)
+      return
+    }
+    // The screen that OWNS the terminal answers the facts: a leased Job/Settings
+    // workspace replaces the return surface for the whole lease, so binding the
+    // stopped return screen would query a screen nobody reads from.
+    const screen: SixelScreenObservation =
+      this.workspaceLease?.screen ?? this.jobWorkspace?.screen ?? this.fullscreen ?? this.tui
+    graphics.observeScreen(screen, this.terminal.columns, this.terminal.rows)
   }
   /** The extension surface host (M2), when the runner attached one. */
   private readonly extensionHost: SurfaceHost | undefined
@@ -4272,25 +4346,85 @@ export class TuiApp {
     // The managed graphics handle is created ONCE per physical terminal, from
     // the real terminal the screens will write through, and both screens plus
     // every first-party graphics consumer share the SAME facade/Core. The
-    // native transport is preferred; a Ghostty-host Zellij pane gets its own
-    // live-query admission; only then does the strict tmux virtual factory get
-    // its own chance. Every factory fails closed, so a terminal that admits
-    // none keeps `getCapabilities()` untouched and every consumer keeps its
-    // legacy `Image`/text path.
-    const graphics = createNativeKittyGraphics(resizeAware)
-      ?? createZellijKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
-      ?? createTmuxKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
+    // startup `PI_IMAGE_PROTOCOL` preference chooses the candidate ORDER
+    // exclusively; each candidate still applies its own real admission, and an
+    // explicit preference never becomes a fabricated capability. Invalid
+    // configuration throws here, before any graphics owner exists.
+    //
+    // auto:    Native Kitty -> ONE Zellij negotiated -> native tmux SIXEL ->
+    //          tmux virtual Kitty -> Direct SIXEL (the existing order).
+    // kitty:   Native Kitty -> Zellij negotiated -> tmux virtual Kitty.
+    // sixel:   Zellij negotiated -> native tmux SIXEL -> Direct SIXEL, and the
+    //          Zellij handle sends no Kitty probe.
+    // iterm2:  no managed handle; a Direct terminal keeps the legacy path.
+    // none:    no managed handle and every consumer paints text.
+    this.imageProtocolPreference = imageProtocolPreference(process.env)
+    let graphics: ImageGraphics | undefined
+    switch (this.imageProtocolPreference) {
+      case 'none':
+      case 'iterm2':
+        break
+      case 'kitty':
+        graphics = createNativeKittyGraphics(resizeAware)
+          ?? createZellijNegotiatedGraphics(
+            resizeAware,
+            process.env,
+            () => this.requestRender(),
+            () => this.settleThumbnailRender(),
+          )
+          ?? createTmuxKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
+        break
+      case 'sixel':
+        graphics = createZellijNegotiatedGraphics(
+          resizeAware,
+          process.env,
+          () => this.requestRender(),
+          () => this.settleThumbnailRender(),
+        )
+          ?? createTmuxSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
+          ?? createDirectSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
+        break
+      case 'auto':
+        graphics = createNativeKittyGraphics(resizeAware)
+          // ONE Zellij candidate handle decides Kitty > SIXEL > text from the
+          // live pane answers. It must come before both tmux and every other
+          // SIXEL factory so two Zellij writers can never compete.
+          ?? createZellijNegotiatedGraphics(
+            resizeAware,
+            process.env,
+            () => this.requestRender(),
+            () => this.settleThumbnailRender(),
+          )
+          // Native tmux SIXEL owns the pane's own DCS before the tmux virtual
+          // Kitty factory gets a chance: a real Sxl client outranks a pending
+          // U1 probe, while a live known-U1 Kitty/Ghostty facility keeps its
+          // fixed precedence inside the factory (which then returns undefined).
+          ?? createTmuxSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
+          ?? createTmuxKittyGraphics(resizeAware, {}, process.env, () => this.requestRender())
+          // Direct SIXEL is the LAST candidate and never a fallback: a managed
+          // Kitty handle keeps precedence even while its own admission is
+          // pending/denied, and a statically excluded topology returns no
+          // handle at all (no DA1 subscription, no encoder, no output).
+          // The SIXEL owner's settle is a PIXEL settle: it changes the body
+          // height of the cards that own the raster, so it goes through the
+          // SAME seam the loader settles use (mark the fullscreen row map
+          // dirty, then repaint).
+          ?? createDirectSixelGraphics(resizeAware, process.env, () => this.settleThumbnailRender())
+        break
+    }
     this.graphics = graphics
     this.terminal = graphics?.terminal ?? resizeAware
     // A revoked tmux admission refuses a whole managed physical batch from
     // inside `Terminal.write()` (the fork screens call it from a render timer,
     // where a throw would become an uncaughtException and kill the process).
-    // This boundary converts exactly that refusal into one safe text frame:
-    // the admission is already latched revoked, so every consumer's next render
-    // sees `effectiveImageProtocol() === null` and repaints text instead of
+    // This boundary covers the virtual Kitty facade and the native tmux SIXEL
+    // write gate; both throw the same precise `TmuxGraphicsRevokedError`, which
+    // it converts into one safe text frame: the admission is already latched
+    // revoked, so every consumer's next render sees
+    // `effectiveImageProtocol() === null` and repaints text instead of
     // placeholders. The refused batch itself wrote nothing managed, and any
     // OTHER write error keeps propagating unchanged.
-    if (graphics?.mode === 'tmux-virtual') {
+    if (graphics?.mode === 'tmux-virtual' || (graphics?.mode === 'sixel' && isTmuxSixelTerminal(graphics.terminal))) {
       const virtual = graphics.terminal as Terminal & { write: (data: string) => void }
       const facadeWrite = virtual.write.bind(virtual)
       virtual.write = (data: string): void => {
@@ -4541,7 +4675,12 @@ export class TuiApp {
       focusSeatOwner: () => this.focusSeatOwner(),
     })
 
-    this.tui = new TuiMainScreen(this.terminal)
+    this.tui = new TuiMainScreen(
+      this.terminal,
+      undefined,
+      undefined,
+      sixelScreenPortOf(this.graphics),
+    )
     // The host default editor is the TuiEditor subclass: kimi parity for
     // `@dir/` mention completion (Tab-accepting a directory reopens the
     // dropdown at its children; Esc closes it without re-triggering). Its
@@ -4952,6 +5091,7 @@ export class TuiApp {
       // Image-6B: a settled JPEG/WebP derivation must repaint the mounted
       // surface; the component owns no screen and never paints by itself.
       requestRender: () => this.requestRender(),
+      imageProtocolPreference: this.imageProtocolPreference,
       ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
     }, this.imageTheme ?? { fallbackColor: text => color.textDim(text) })
     // The working row sits between the todo panel and the editor seat so it
@@ -5203,6 +5343,13 @@ export class TuiApp {
     // The suspend stopped the active screen (clearing OSC 9;4 + its
     // keepalive): restore a still-desired busy state (plan §7/§12.7).
     this.enterTerminalPresentation()
+    // A screen that was STOPPED owned no terminal, so the SIXEL readiness
+    // projection must be re-bound and re-observed here: the suspend also released
+    // the OSC 11 observation, and a resize processed while $EDITOR held the tty
+    // invalidated the cell facts. The scheme fan-out is the same ownership seam
+    // every other handoff uses. (RFL-015.)
+    this.refreshSchemeRegistrations()
+    if (this.graphics?.mode === 'sixel' || this.graphics?.mode === 'zellij-negotiated') this.graphics.resample()
     // The suspend released the observation that screen owned; the resumed SAME screen
     // re-samples once when the latest intent still follows the terminal (the shared
     // hand-off completion point).
@@ -8020,6 +8167,7 @@ export class TuiApp {
       // expanded individually, exactly like a web disclosure row.
       const alt = new TuiAltScreen(this.terminal, undefined, undefined, {
         imageProtocolOverride: this.altScreenImageProtocol,
+        ...(sixelScreenPortOf(this.graphics) === undefined ? {} : { sixelScreen: sixelScreenPortOf(this.graphics) }),
         // The fullscreen mouse-wheel step (Client preference): the fork
         // reads it at construction, so a change while fullscreen is
         // active applies on the next re-entry.
@@ -8223,8 +8371,9 @@ export class TuiApp {
       this.projectSeatOccupant()
       alt.setFocus(this.seatFallbackComponent() ?? this.seatEditor().component)
       this.fullscreen = alt
-      // The alt screen now owns the terminal input handler: scheme reports
-      // arrive THERE, so re-register the fan-out on both screens.
+      // The alt screen owns the terminal now: re-register the scheme fan-out —
+      // which also re-binds the SIXEL readiness projection to THIS screen, so no
+      // pixel is painted with facts sampled for the previous one. (RFL-011.)
       this.refreshSchemeRegistrations()
     } else {
       this.leaveTerminalPresentation()
@@ -8607,6 +8756,19 @@ export class TuiApp {
     this.transcriptWindowHint = window?.mode === 'history' && window.firstTurn !== undefined && window.lastTurn !== undefined
       ? `History · turn ${window.firstTurn}–${window.lastTurn}`
       : ''
+  }
+
+  /**
+   * Commit the CURRENT presentation subject's already-proven Agent-sender
+   * display names (the app/surface enrichment's read-only projection). The
+   * map participates in every relay/settled Context card's build identity, so
+   * replacing it rebuilds exactly the affected cards: a title landing never
+   * re-renders an unrelated transcript row, and an identical map is a no-op.
+   */
+  setContextSenderLabels(labels: SenderLabelLookup): void {
+    if (sameSenderLabels(this.contextSenderLabels, labels)) return
+    this.contextSenderLabels = labels
+    this.rebuildMessages('context-identity')
   }
 
   /**
@@ -12127,7 +12289,7 @@ export class TuiApp {
         // PIXELS: a protocol-unsupported raster format paints the fork's text
         // fallback, which stays informational and clickable nowhere.
         const body = component.paintedImageBody(width)
-        const bodyStart = rowOffset + 1
+        const bodyStart = rowOffset + 1 + (body?.cropTopRows ?? 0)
         hits.push({
           occurrence,
           infoRow: rowOffset,
@@ -12255,7 +12417,10 @@ export class TuiApp {
    * `ImageThumbnail` render-request wiring MUST go through here. */
   private settleThumbnailRender(): void {
     this.fullscreenRowsDirty = true
-    this.requestRender()
+    // A pixel settle changes an image body's painted geometry. On the
+    // fullscreen surface the scroll view can otherwise consider the frame
+    // unchanged, so force the repaint that publishes the new row map/hits.
+    this.requestRender(this.fullscreen !== undefined)
   }
 
   /**
@@ -12287,6 +12452,7 @@ export class TuiApp {
       // The `[-]`/`[+]` control is a FULLSCREEN info-row affordance only.
       () => this.fullscreen !== undefined,
       this.graphics,
+      this.imageProtocolPreference,
     )
     const source = thumbnail.viewerSource
     const occurrence: TranscriptImageOccurrence = {
@@ -12795,6 +12961,42 @@ export class TuiApp {
    * and scroll state are re-read fresh on EVERY commit. Contract:
    * docs/architecture/transcript.md ("Fullscreen geometry-epoch snapshot reuse"). The snapshot
    * keeps STABLE values only. */
+  /** Re-project image/visual hit descriptors after a committed SIXEL frame.
+   *  Only messages that actually own image or published-visual occurrences are
+   *  re-read (their components are cached); transcript heights/layout and every
+   *  non-image block stay untouched. */
+  private refreshCommittedPixelHitRows(): void {
+    const width = this.transcriptRenderWidth()
+    let changed = false
+    const entries = this.messageRows.map(entry => {
+      if (entry.message === undefined) return entry
+      if (entry.attachments.length === 0 && entry.visuals.length === 0) return entry
+      const block = this.mountedTranscriptBlocks.find(candidate =>
+        candidate.block.kind === 'message' && candidate.block.message === entry.message)
+      if (block === undefined) return entry
+      const attachments = this.attachmentHitsOf(block.component, width, entry.message)
+      const visuals = this.visualHitsOf(entry.message, width)
+      changed = true
+      return { ...entry, attachments, visuals }
+    })
+    if (!changed) return
+    this.messageRows = entries
+    const snapshot = this.fullscreenPaintSnapshot
+    if (snapshot === undefined || snapshot.rows.length !== entries.length) return
+    this.fullscreenPaintSnapshot = {
+      ...snapshot,
+      rows: snapshot.rows.map((row, index) => {
+        const entry = entries[index]!
+        if (entry.height !== row.height) return row
+        return {
+          ...row,
+          ...(entry.attachments.length === 0 ? {} : { imageHits: this.fullscreenImageRowHits(entry) }),
+          ...(entry.visuals.length === 0 ? {} : { visualHits: this.fullscreenVisualRowHits(entry) }),
+        }
+      }),
+    }
+  }
+
   private commitFullscreenPaintSnapshot(): void {
     const snapshotStart = this.scrollProfiler.enabled ? performance.now() : 0
     const previousSnapshot = this.fullscreenPaintSnapshot
@@ -12868,6 +13070,7 @@ export class TuiApp {
       rows,
       viewerBack: this.paintedViewerBack(paintedHeight(this.header), paintedHeight(this.viewerSubjectBar)),
     }
+    if (effectiveImageProtocol(this.graphics, this.imageProtocolPreference) === 'sixel') this.refreshCommittedPixelHitRows()
     if (this.scrollProfiler.enabled && this.scrollFramePending) {
       const now = performance.now()
       this.scrollProfiler.emit({
@@ -13806,6 +14009,10 @@ export class TuiApp {
    */
   private handleFullscreenPress(x: number, y: number): void {
     this.clearFullscreenPointerGestures()
+    // A pixel body that was painted after the last snapshot commit changes the
+    // row-hit map without any chrome change. Re-commit the row geometry before
+    // resolving this press, so the press-time identity is the one the user
+    // actually clicked instead of a stale inert row.
     // Image UX PR1: the composer preview band is pinned chrome above the
     // editor. A modal owner or a capturing overlay consumes it as inert
     // (never a hidden draft edit); only the last-painted `×` cell starts a
@@ -15582,6 +15789,11 @@ export class TuiApp {
   /** Persistent components per transcript message (stage J cache). */
   private readonly messageComponents = new Map<TranscriptMessage, MessageComponentEntry>()
 
+  /** The already-proven Agent-sender display names of the CURRENT presentation
+   * subject (`senderSessionId` → name). Owned by the app/surface enrichment
+   * (`agent-context-identity.ts`); the renderer only reads it, and only the
+   * relay/settled Context cards consume it. */
+  private contextSenderLabels: SenderLabelLookup = new Map()
 
   /** M7: a renderer failure sink (the runner wires the extension
    * service's health ledger — round-1 finding 3: failures must be
@@ -18109,6 +18321,7 @@ export class TuiApp {
         entry.running = message.kind === 'thinking' ? message.running : undefined
         entry.label = message.kind === 'system' ? message.label : undefined
         entry.summary = message.kind === 'system' ? message.summary : undefined
+        entry.senderDisplayName = message.kind === 'system' ? this.contextSenderDisplayNameOf(message) : undefined
         break
       case 'tool':
         entry.status = message.status
@@ -18165,6 +18378,7 @@ export class TuiApp {
         return entry.text !== message.text || entry.running !== message.running
       case 'system':
         return entry.text !== message.text || entry.label !== message.label || entry.summary !== message.summary
+          || entry.senderDisplayName !== this.contextSenderDisplayNameOf(message)
       case 'tool':
         return entry.status !== message.status || entry.args !== message.args
           || entry.result !== message.result || entry.meta !== message.meta
@@ -18420,6 +18634,7 @@ export class TuiApp {
       selected: () => this.isVisualSelected(message, piece.ref),
       paint: text => color.textDim(text),
       requestRender: () => this.settleThumbnailRender(),
+      imageProtocolPreference: this.imageProtocolPreference,
       onCopy: () => this.copyVisualPayload(handle),
       ...(isSvg ? { onView: () => this.openSvgViewer(handle) } : {}),
       ...(isSvg && this.svgRasterLoader !== undefined && this.imageTheme !== undefined
@@ -18498,8 +18713,11 @@ export class TuiApp {
               thumbnailBody: {
                 startRow: painted.thumbnailBody.startRow,
                 endRow: painted.thumbnailBody.endRow,
-                startCol: record.indent,
-                endCol: painted.thumbnailBody.endCol + record.indent,
+                // Kitty paints under the bullet indent; Direct SIXEL states its
+                // own figure-relative left edge because the Screen owns the DCS
+                // position (column 1).
+                startCol: painted.thumbnailBody.startCol ?? record.indent,
+                endCol: painted.thumbnailBody.endCol + (painted.thumbnailBody.startCol ?? record.indent),
               },
             }),
       })
@@ -18534,6 +18752,14 @@ export class TuiApp {
       workspaceRoot: this.displayWorkspaceRoot(),
     }))
     return result
+  }
+
+  /** The exact Agent Context display name for one row — undefined for every
+   * other row — resolved from the current subject's proven sender labels (the
+   * pure `agentContext-title` policy owns qualification and the safe short-id
+   * fallback). */
+  private contextSenderDisplayNameOf(message: TranscriptMessage): string | undefined {
+    return agentContextSenderName(message, this.contextSenderLabels)
   }
 
   private renderMessage(message: TranscriptMessage, expanded: boolean, expandHint: ExpandHint, fullReveal: boolean, width: number): Component {
@@ -18645,7 +18871,13 @@ export class TuiApp {
       // keeps the existing Context-injection / section-marker presentation.
       if (isSurfacedContext(message)) {
         const kind = contextPresentationKind(message)
-        const rowOptions = { message, expanded, expandHint: this.expandHint(expandHint), iconStyle: this.iconStyle }
+        const rowOptions = {
+          message,
+          expanded,
+          expandHint: this.expandHint(expandHint),
+          iconStyle: this.iconStyle,
+          senderDisplayName: this.contextSenderDisplayNameOf(message),
+        }
         if (kind === 'notice') return new NoticeContextRow(rowOptions)
         if (kind === 'relay') {
           return new RelayContextRow({
@@ -19688,6 +19920,7 @@ export class TuiApp {
         () => this.settleThumbnailRender(),
         undefined,
         this.graphics,
+        this.imageProtocolPreference,
       ))
     }
     if (explicitlyExpanded) {
@@ -19750,6 +19983,7 @@ export class TuiApp {
             () => this.settleThumbnailRender(),
             MAX_IMAGE_ROWS + 1,
             this.graphics,
+            this.imageProtocolPreference,
           )
           thumbnailRows = thumbnail.render(width).length
         }
@@ -20448,6 +20682,11 @@ export class TuiApp {
       // contract (the right-gutter resize matrix). The latch skips the
       // first geometry pass (nothing built yet); the rebuild re-enters
       // requestRender, where the latch is already updated, so no loop.
+      if (widthChanged || heightChanged) {
+        // A device-pixel cell size can change with the font/zoom, so the SIXEL
+        // readiness projection re-asks the active screen at the new geometry.
+        this.syncSixelObservation()
+      }
       if (widthChanged) {
         this.lastTranscriptWidth = width
         if (this.messageRows.length > 0) this.rebuildMessages()
@@ -21492,7 +21731,7 @@ export class TuiApp {
       const scope = hasLocalRows ? 'accepted' : 'all'
       const steerHint = this.queueRunning
         ? `${(this.keybindings.keyHint('app.input.steer') || 'the steer key').toLowerCase()} to steer ${scope}`
-        : 'queued until the current task resumes'
+        : 'waiting for the next prompt — send a message to continue'
       const hint = this.viewerMode === undefined
         ? `${steerHint} · ${(this.keybindings.keyHint('app.input.dequeue') || 'the recall key').toLowerCase()} to recall ${scope}`
         : steerHint
@@ -24225,6 +24464,7 @@ export class TuiApp {
     })
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       imageProtocolOverride: this.altScreenImageProtocol,
+      ...(sixelScreenPortOf(this.graphics) === undefined ? {} : { sixelScreen: sixelScreenPortOf(this.graphics) }),
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,
@@ -24529,6 +24769,7 @@ export class TuiApp {
     const token: object = {}
     const screen = new TuiAltScreen(this.terminal, undefined, undefined, {
       imageProtocolOverride: this.altScreenImageProtocol,
+      ...(sixelScreenPortOf(this.graphics) === undefined ? {} : { sixelScreen: sixelScreenPortOf(this.graphics) }),
       deferViewportListener: true,
       copySelection: this.copySelection,
       wheelScrollLines: this.wheelScrollLines,
@@ -24841,6 +25082,7 @@ export class TuiApp {
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
       ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
+      imageProtocolPreference: this.imageProtocolPreference,
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates,
       // Currentness at SELECTION time: a candidate that left the mounted
@@ -24884,6 +25126,7 @@ export class TuiApp {
       requestRender: () => this.requestRender(),
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
       ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
+      imageProtocolPreference: this.imageProtocolPreference,
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates: [],
       resolve: () => undefined,
@@ -25088,6 +25331,7 @@ export class TuiApp {
       ...(this.imageLoader === undefined ? {} : { loader: this.imageLoader }),
       ...(this.svgRasterLoader === undefined ? {} : { svgLoader: this.svgRasterLoader }),
       ...(this.graphics === undefined ? {} : { graphics: this.graphics }),
+      imageProtocolPreference: this.imageProtocolPreference,
       theme: this.imageTheme ?? { fallbackColor: (text: string) => text },
       candidates: [],
       resolve: () => undefined,
@@ -25526,6 +25770,12 @@ export class TuiApp {
 
   /** (Re)register the scheme-report fan-out on every screen. */
   private refreshSchemeRegistrations(): void {
+    // Every caller of this function has just changed WHICH screen owns the
+    // terminal (start, fullscreen enter/exit, a workspace lease opening or
+    // closing, a resume). The SIXEL readiness projection must follow the same
+    // ownership, or a restored screen keeps a projection sampled for a screen
+    // that no longer exists. (RFL-011.)
+    this.syncSixelObservation()
     for (const dispose of this.schemeDisposers) dispose()
     this.schemeDisposers = []
     const screens: Array<TuiMainScreen | TuiAltScreen> = [this.tui]
@@ -25536,6 +25786,11 @@ export class TuiApp {
     if (this.workspaceLease !== undefined) screens.push(this.workspaceLease.screen)
     for (const screen of screens) {
       this.schemeDisposers.push(screen.onTerminalColorSchemeChange((scheme) => {
+        // A scheme report means the terminal's REAL background may have changed,
+        // so the Direct SIXEL owner re-observes it before the next raster is
+        // composited: a semi-transparent picture must never keep blending over the
+        // previous background. (No SIXEL handle: nothing to do.)
+        (this.graphics?.mode === 'sixel' || this.graphics?.mode === 'zellij-negotiated') && this.graphics.resample()
         for (const listener of [...this.terminalSchemeListeners]) listener(scheme)
       }))
     }

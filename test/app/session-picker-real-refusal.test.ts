@@ -27,7 +27,8 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import { Context } from '@deepseek-ai/cordis'
@@ -108,7 +109,29 @@ const SIZES = [
 ] as const
 
 for (const { columns, rows, cardVisible, fragments } of SIZES) test(`the REAL Session Picker excludes an unlistable log and surfaces a refused body at ${columns}x${rows}`, async t => {
+  // The 44x20 case also runs under a LONG PARENTHESIZED temp root: the
+  // official persistence error appends an unescaped path, so a legal ')' in a
+  // storage directory must not truncate the raw-log suffix removal and leave a
+  // path fragment that scrolls the Session card out.
+  const previousTmp = process.env.TMPDIR
   const life = testLifecycle(t)
+  // A UNIQUE lifecycle-owned root (never a fixed shared path): two test
+  // processes must not share a temp directory, or one process's cleanup could
+  // delete the other's real Session artifacts. The prefix keeps the legal
+  // parentheses; the long subdirectory keeps the path shape that the raw-log
+  // suffix budget must survive.
+  const usesParenthesizedRoot = columns === 44 && rows === 20
+  if (usesParenthesizedRoot) {
+    const parenthesizedRoot = life.tempDir('dsh-prb(archive)-')
+    const longRoot = join(parenthesizedRoot, 'dsh-pi-tui-test-run-bZMkpP-' + 'x'.repeat(150))
+    mkdirSync(longRoot, { recursive: true })
+    process.env.TMPDIR = longRoot
+  }
+  life.defer(() => {
+    if (!usesParenthesizedRoot) return
+    if (previousTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmp
+  })
   const root = life.tempDir('dsh-s2b-real-picker-')
   const home = life.tempDir('dsh-s2b-real-picker-home-')
   const previousHome = process.env.DSH_HOME
@@ -280,11 +303,14 @@ for (const { columns, rows, cardVisible, fragments } of SIZES) test(`the REAL Se
   for (const line of vt.getViewport()) {
     assert.ok(visibleWidth(line) <= columns, `no refused frame row overflows ${columns} cells: ${JSON.stringify(line)}`)
   }
-  // The production notice slot carries the official refusal verbatim (the
-  // narrow-width assertion cannot rely on the painted line alone).
+  // The production notice slot carries the official refusal body (the raw
+  // diagnostic log path is logged separately, never part of the narrow-width
+  // card-visibility contract).
   const noticeText = currentNoticeText()
   assert.ok(noticeText !== undefined && noticeText.includes(UNKNOWN_EVENT) && noticeText.includes('unknown to this harness'),
     `the refusal notice is the official message, got: ${String(noticeText)}`)
+  assert.ok(noticeText !== undefined && noticeText.includes('old turn stopped (cannot resume)'),
+    `the notice preserves the old-turn stopped fact, got: ${String(noticeText)}`)
   for (const fragment of fragments) {
     assert.ok(after.includes(fragment),
       `the painted refusal carries "${fragment}" at ${columns} columns:\n${after}`)

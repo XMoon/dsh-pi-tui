@@ -83,6 +83,8 @@ import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
+import * as performanceHost from '../../src/app/host/performance-host.ts'
 import type { RemotePromptSerializer } from '../../src/runtime/remote/session-writer-remote.ts'
 import { testLifecycle, type TestLifecycle } from './temp-lifecycle.ts'
 
@@ -441,6 +443,11 @@ export async function createRemoteApplicationHostFixture(
     // `@`-file reference provider injects the directory owner: both require
     // the real `workingDirectory` service (the same row dsh-base mounts once).
     await ctx.plugin(WorkingDirectory)
+    // M4-B2-HF: the built-in PiTui Host Runtime owns the package contribution
+    // and both private Host services exactly once; Performance remains its own
+    // independent row. `createRemoteHostRuntime()` only verifies their gates.
+    await ctx.plugin(piTuiHostRuntime)
+    await ctx.plugin(performanceHost)
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })

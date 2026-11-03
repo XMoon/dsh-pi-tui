@@ -115,6 +115,7 @@ function setupSettings(options: { gitAttribution?: string; failWrite?: boolean }
     return typeof text === 'function' ? text({}) : text
   }
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,

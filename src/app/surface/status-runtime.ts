@@ -235,6 +235,22 @@ export interface StatusRuntime {
    *  the footer). No automatic retry after an ambiguous outcome.
    */
   cyclePermission(): void
+  /**
+   * TSP-7 PR-E: the permission preset catalog as a NEW readonly array for
+   * the Quiet Composer menu. Reads the SAME injected authority bundle as
+   * `cyclePermission`; an absent bundle returns an empty catalog. Never a
+   * second store and never a mutable view of the port's table.
+   */
+  permissionOptions(): readonly string[]
+  /**
+   * TSP-7 PR-E: apply one explicitly chosen standard preset (Read Only /
+   * Workspace Write / Full Access) through the SAME authority bundle the
+   * Shift+Tab cycle uses. The entry rejects ids outside the three standard
+   * presets and ids absent from the live catalog; the shared apply primitive
+   * itself accepts any catalog preset because `cyclePermission` must keep
+   * cycling `auto`/custom entries.
+   */
+  selectPermission(id: string): void
   /** Mark the cached context measurement dirty (model-visible events only). */
   markContextDirty(): void
   /** Measure through the semantic reader and repaint cheaply. */
@@ -905,6 +921,89 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
    * with a red warning only on the no-approval preset (plain switches notify in
    * the dim info style) and an immediate footer refresh.
    */
+  /** The three standard preset ids the Quiet Composer menu may select. */
+  const SELECTABLE_PERMISSION_PRESETS: ReadonlySet<string> = new Set([
+    'read-only',
+    'workspace-write',
+    'danger-full-access',
+  ])
+
+  /**
+   * The ONE permission-apply primitive shared by the Shift+Tab cycle and the
+   * Quiet Composer menu. It captures the live Session scope and the Remote
+   * transport token in the SAME synchronous step, requires the id to belong
+   * to the live catalog (any catalog id — the cycle keeps traversing
+   * `auto`/custom), skips a no-op current selection, and runs exactly ONE
+   * owned apply. Post-await success/notice handling is identical for both
+   * callers; the label only attributes diagnostics.
+   */
+  const applySelectedPermission = (
+    authority: NonNullable<StatusRuntimeDeps['permissionCycle']>,
+    id: string,
+    label: 'permission cycle' | 'permission select',
+  ): void => {
+    // SYNC admission: the scope must be current BEFORE any read/write. The
+    // transport token is captured in the SAME synchronous step (§6.3): a
+    // same-id binding rollover during the apply must read stale, so the old
+    // gesture never notifies/repaints the replacement surface.
+    const scope = authority.captureLiveScope()
+    if (scope === undefined) return
+    const transportToken = authority.captureTransportToken()
+    const names = authority.presetNames()
+    if (!names.includes(id)) return
+    const current = authority.currentPermission()
+    if (id === current) return
+    // The gesture is an OWNED async operation (docs/architecture/failure-model.md): one
+    // runOwned settlement, never a bare discard. Every terminal branch
+    // re-checks BOTH owner identities after the await: the scope (a TUI
+    // owner commit) AND the transport token (a Connection/binding rollover
+    // WITHOUT a TUI owner commit).
+    runOwned(label, async () => {
+      const outcome = await authority.apply(scope.sessionId, id)
+      if (deps.isCleanedUp()) return
+      // A stale owner repaints NOTHING for the replacement session
+      // (§15.6): the write may have committed on the OLD session.
+      if (!authority.isScopeCurrent(scope)) return
+      if (!authority.isTransportTokenCurrent(transportToken)) return
+      if (outcome.kind === 'unavailable') {
+        deps.surface.display.notify(outcome.cause === 'commands'
+          ? 'permission switch unavailable (commands service)'
+          : 'permission switch unavailable (presets not composed)', 'error')
+        return
+      }
+      if (outcome.kind === 'indeterminate') {
+        // §6.3/§15.6: the write was dispatched but its settle is
+        // unobservable — report it truthfully, never as a known failure,
+        // and NEVER retry automatically (an ambiguous dispatch must not
+        // duplicate). The pushed projection repaints the committed value
+        // if the switch landed.
+        deps.surface.display.notify(
+          `permission switch to ${id} was dispatched but the result is unknown — check the current permission in the Composer or with /permission before relying on it`,
+          'error',
+        )
+        return
+      }
+      // APPLIED: do NOT install id as committed locally — the pushed
+      // permissions projection repaints the footer (§D7). The notice is
+      // the gesture's own feedback, never a committed-value claim.
+      deps.surface.display.notify(id === 'danger-full-access'
+        ? `⚠ ${id} — no approvals`
+        : `permission: ${id}`,
+      id === 'danger-full-access' ? 'error' : 'info')
+    }, {
+      diag: deps.diag,
+      sessionId: () => scope.sessionId,
+      // A rejected apply is reported truthfully and never retried
+      // automatically (§6.3 — an ambiguous dispatch must not duplicate).
+      onError: (error) => {
+        if (deps.isCleanedUp()) return
+        if (!authority.isScopeCurrent(scope)) return
+        if (!authority.isTransportTokenCurrent(transportToken)) return
+        deps.surface.display.notify(`permission switch failed: ${safeErrorMessage(error)}`, 'error')
+      },
+    })
+  }
+
   const cyclePermission = (): void => {
     // §6.3: the cycle is an owned async operation over the PR4 authority
     // bundle when the composition provides it; the Direct-only legacy path
@@ -913,68 +1012,13 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     // write carrier).
     if (deps.permissionCycle !== undefined) {
       const authority = deps.permissionCycle
-      // SYNC admission: the scope must be current BEFORE any read/write. The
-      // transport token is captured in the SAME synchronous step (§6.3): a
-      // same-id binding rollover during the apply must read stale, so the
-      // old gesture never notifies/repaints the replacement surface.
-      const scope = authority.captureLiveScope()
-      if (scope === undefined) return
-      const transportToken = authority.captureTransportToken()
       const names = authority.presetNames()
       if (names.length === 0) return
       const current = authority.currentPermission()
       const index = current === undefined ? -1 : names.indexOf(current)
       const next = names[(index + 1) % names.length] ?? names[0]
       if (next === undefined || next === current) return
-      // The gesture is an OWNED async operation (docs/architecture/failure-model.md): one
-      // runOwned settlement, never a bare discard. Every terminal branch
-      // re-checks BOTH owner identities after the await: the scope (a TUI
-      // owner commit) AND the transport token (a Connection/binding
-      // rollover WITHOUT a TUI owner commit).
-      runOwned('permission cycle', async () => {
-        const outcome = await authority.apply(scope.sessionId, next)
-        if (deps.isCleanedUp()) return
-        // A stale owner repaints NOTHING for the replacement session
-        // (§15.6): the write may have committed on the OLD session.
-        if (!authority.isScopeCurrent(scope)) return
-        if (!authority.isTransportTokenCurrent(transportToken)) return
-        if (outcome.kind === 'unavailable') {
-          deps.surface.display.notify(outcome.cause === 'commands'
-            ? 'permission switch unavailable (commands service)'
-            : 'permission switch unavailable (presets not composed)', 'error')
-          return
-        }
-        if (outcome.kind === 'indeterminate') {
-          // §6.3/§15.6: the write was dispatched but its settle is
-          // unobservable — report it truthfully, never as a known failure,
-          // and NEVER retry automatically (an ambiguous dispatch must not
-          // duplicate). The pushed projection repaints the committed value
-          // if the switch landed.
-          deps.surface.display.notify(
-            `permission switch to ${next} was dispatched but the result is unknown — check the footer before relying on it`,
-            'error',
-          )
-          return
-        }
-        // APPLIED: do NOT install next as committed locally — the pushed
-        // permissions projection repaints the footer (§D7). The notice is
-        // the gesture's own feedback, never a committed-value claim.
-        deps.surface.display.notify(next === 'danger-full-access'
-          ? `⚠ ${next} — no approvals`
-          : `permission: ${next}`,
-        next === 'danger-full-access' ? 'error' : 'info')
-      }, {
-        diag: deps.diag,
-        sessionId: () => scope.sessionId,
-        // A rejected apply is reported truthfully and never retried
-        // automatically (§6.3 — an ambiguous dispatch must not duplicate).
-        onError: (error) => {
-          if (deps.isCleanedUp()) return
-          if (!authority.isScopeCurrent(scope)) return
-          if (!authority.isTransportTokenCurrent(transportToken)) return
-          deps.surface.display.notify(`permission switch failed: ${safeErrorMessage(error)}`, 'error')
-        },
-      })
+      applySelectedPermission(authority, next, 'permission cycle')
       return
     }
     // Direct-only legacy path (no PR4 bundle on this composition).
@@ -995,6 +1039,26 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     next === 'danger-full-access' ? 'error' : 'info')
     refreshStatusCheap()
   }
+
+  /**
+   * TSP-7 PR-E: apply one explicitly selected standard permission preset
+   * through the SAME authority bundle (and the same apply primitive) as the
+   * Shift+Tab cycle. The entry accepts ONLY the three standard menu ids and
+   * only when the live catalog contains them; a no-op or invalid click never
+   * dispatches. The shared primitive still accepts any catalog id so the
+   * cycle's `auto`/custom traversal is unchanged.
+   */
+  const selectPermission = (id: string): void => {
+    const authority = deps.permissionCycle
+    if (authority === undefined) return
+    if (!SELECTABLE_PERMISSION_PRESETS.has(id)) return
+    if (!authority.presetNames().includes(id)) return
+    if (authority.currentPermission() === id) return
+    applySelectedPermission(authority, id, 'permission select')
+  }
+
+  /** The live preset catalog for the Quiet Composer menu (a new array). */
+  const permissionOptions = (): readonly string[] => [...(deps.permissionCycle?.presetNames() ?? [])]
 
   // PR D2: the explicit, event-driven context measurement path. Call
   // sites FIRST mark the cache dirty (markContextDirty — only
@@ -1091,6 +1155,8 @@ export function createStatusRuntime(deps: StatusRuntimeDeps): StatusRuntime {
     refreshTerminalCwd,
     refresh: refreshStatusCheap,
     cyclePermission,
+    permissionOptions,
+    selectPermission,
     markContextDirty,
     refreshContextMeasurement,
     forceContextMeasurement,

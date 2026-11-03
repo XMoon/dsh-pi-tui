@@ -111,6 +111,7 @@ export const Config: z<Config> = z.object({
         prefix: z.string(),
         suffix: z.string(),
         importance: z.number(),
+        hideInTsp: z.boolean(),
       })),
       right: z.array(z.object({
         id: z.string(),
@@ -119,6 +120,7 @@ export const Config: z<Config> = z.object({
         prefix: z.string(),
         suffix: z.string(),
         importance: z.number(),
+        hideInTsp: z.boolean(),
       })),
       separator: z.object({
         text: z.string(),

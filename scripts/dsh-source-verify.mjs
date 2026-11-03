@@ -12,7 +12,6 @@
  * @module dsh-source-verify
  */
 
-import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, rmdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -98,18 +97,6 @@ function copyRepository(destination) {
       return !segments.some(segment => ignored.has(segment)) && !/^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(basename(source))
     },
   })
-}
-
-function attachGitMetadata(workspace) {
-  try {
-    const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], {
-      cwd: PACKAGE_ROOT,
-      encoding: 'utf8',
-    }).trim()
-    if (gitDir !== '') writeFileSync(join(workspace, '.git'), `gitdir: ${gitDir}\n`, 'utf8')
-  } catch {
-    // A source checkout without Git metadata can still run the other gates.
-  }
 }
 
 export function candidateTarball(workspace) {
@@ -326,7 +313,6 @@ async function main() {
     rootOwner = temporaryWorkspaceOwner(root)
     const workspace = join(root, 'workspace')
     copyRepository(workspace)
-    attachGitMetadata(workspace)
     await run(process.execPath, [
       join(workspace, 'scripts', 'prepare-dsh-test-environment.mjs'),
       '--mode', 'source',
@@ -340,15 +326,11 @@ async function main() {
       ['vendored pi-tui typecheck', ['typecheck:fork']],
       ['vendored pi-tui tests', ['test:fork']],
       ['TUI build', ['build']],
-      // The PRODUCT suite runs inside `prepack` (the packaging safety gate
-      // must stay self-contained), so running `test:bundle` here would run
-      // the whole product suite TWICE against the same workspace and the same
-      // dependency graph. The TOOLING suite is not part of `prepack`, so it
-      // still needs its own run here.
-      //
-      // `typecheck:bundle` is part of `prepack` too, so it runs there
-      // exactly once — an explicit run here would repeat it against the
-      // same workspace and the same dependency graph.
+      // The build above is the ONLY build. The remaining explicit steps match
+      // `pack:release` minus clean/build, because this workspace already holds
+      // that build; `pack:artifact` itself must never build or test.
+      ['TUI bundle typecheck', ['typecheck:bundle']],
+      ['TUI product tests', ['test:product']],
       ['TUI tooling tests', ['test:tooling']],
       ['tmux terminal tooling tests', ['test:tmux']],
       // `gate:pi-surface-compat` is the re-vendor HARD GATE. It overlaps the
@@ -356,7 +338,8 @@ async function main() {
       // kept: a re-vendor contract must not depend on the product suite's
       // discovery staying unchanged.
       ['Pi surface compatibility gate', ['gate:pi-surface-compat']],
-      ['TUI candidate build and pack', ['pack:release']],
+      ['TUI candidate pack', ['pack:artifact']],
+      ['TUI packed-artifact smokes', ['smoke:release']],
     ]) await run(PNPM_COMMAND, args, workspace, label, sourcePnpmEnv)
 
     const candidate = candidateTarball(workspace)
@@ -365,9 +348,9 @@ async function main() {
       distributionPaths: [distributionDir],
       scanArchive: false,
     })
-    // pack:release keeps the postpack smoke offline, but Source Mode's
-    // compatibility driver must also prove the packed candidate can be
-    // installed in a clean project with the local DSH tarball closure.
+    // smoke:release keeps the eight packed-artifact smokes offline in Source
+    // Mode, but the compatibility driver must also prove the packed candidate
+    // can be installed in a clean project with the local DSH tarball closure.
     const sourceFreshSmokeEnv = { ...sourcePnpmEnv, TARBALL_SMOKE_SKIP_INSTALL: '0' }
     await run(process.execPath, [
       join(workspace, 'scripts', 'tarball-smoke.mjs'),

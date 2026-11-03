@@ -16,6 +16,7 @@ import { SvgRasterLoader } from '../../src/client/media/svg/raster-loader.ts'
 import { ImageWorkspacePanel } from '../../src/tui/components/media/image-workspace.ts'
 import { SvgViewerPanel, type SvgViewerSource } from '../../src/tui/components/media/svg-viewer.ts'
 import { admitSvg } from '../../src/domain/visual/svg-admission.ts'
+import type { ImageGraphics } from '../../src/tui/graphics/native-image.ts'
 
 const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
 
@@ -106,6 +107,7 @@ function panelOf(options: {
   readonly columns?: number
   readonly onClose?: () => void
   readonly requestRender?: () => void
+  readonly graphics?: ImageGraphics
 } = {}): SvgViewerPanel {
   const rows = options.rows ?? 40
   return new SvgViewerPanel({
@@ -116,6 +118,7 @@ function panelOf(options: {
     ...(options.loader === undefined ? {} : { loader: options.loader }),
     theme: { fallbackColor: (text: string) => text },
     onClose: options.onClose ?? (() => {}),
+    ...(options.graphics === undefined ? {} : { graphics: options.graphics }),
   })
 }
 
@@ -515,6 +518,129 @@ test('a hostile model-supplied SVG title is sanitized in EVERY width branch, inc
     const wide = stripSgr(panel.render(80)[0]!)
     assert.ok(wide.includes('Service') && wide.includes('Injected'), wide)
     panel.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+// ── Image-8 / I8-2B: Direct SIXEL preview ─────────────────────────────────
+
+const SVG_VIEWER_SIXEL_DCS = '\x1bP0;1;q"1;1;1920;960#0;2;100;0;0~\x1b\\'
+
+function sixelViewerGraphics(calls: Array<{ readonly maxWidthCells: number; readonly maxHeightCells: number }> = []): {
+  graphics: ImageGraphics
+  disposals: () => number
+} {
+  let disposals = 0
+  return {
+    graphics: {
+      mode: 'sixel',
+      canPaint: () => true,
+      image: (_source: unknown, options: { maxWidthCells: number; maxHeightCells?: number }) => {
+        calls.push({ maxWidthCells: options.maxWidthCells, maxHeightCells: options.maxHeightCells ?? 0 })
+        return {
+          render: () => [SVG_VIEWER_SIXEL_DCS, '', ''],
+          invalidate: () => {},
+          paintedBodyAt: (width: number) => ({ width, columns: 8, rows: 3 }),
+          dispose: () => { disposals += 1 },
+        }
+      },
+      terminal: {} as never,
+      screen: {} as never,
+      observeScreen: () => {},
+      resample: () => {},
+      dispose: () => {},
+    } as unknown as ImageGraphics,
+    disposals: () => disposals,
+  }
+}
+
+test('a Direct SIXEL viewer paints the grant variant, keeps Source/Copy, and reuses the placement', async () => {
+  capabilities(null)
+  try {
+    const recorder = pendingLoader()
+    const calls: Array<{ maxWidthCells: number; maxHeightCells: number }> = []
+    const { graphics, disposals } = sixelViewerGraphics(calls)
+    let copies = 0
+    const panel = panelOf({
+      loader: recorder.loader,
+      columns: 120,
+      rows: 40,
+      graphics,
+      source: sourceOf({ onCopy: () => { copies += 1 } }),
+    })
+    panel.setMaxRows(40)
+    const loading = panel.render(120)
+    assert.ok(loading.slice(1, -1).join('\n').includes('Rendering preview'), 'the Preview states its pending raster')
+    assert.deepEqual(recorder.calls.map(call => call.width), [1920], 'the Viewer requests its own exact grant variant')
+    await recorder.settleAll()
+    await drain()
+    const preview = panel.render(120)
+    assert.ok(preview.slice(1, -1).some(line => line.includes(SVG_VIEWER_SIXEL_DCS)),
+      'the SIXEL command is placed in the Preview body')
+    assert.ok(!preview.join('\n').includes('\x1b_G'), 'no Kitty APC is emitted')
+    assert.deepEqual(calls.map(call => [call.maxWidthCells, call.maxHeightCells]), [[120, 38]],
+      'the managed placement receives the real content grant')
+    // Source through the real page device: no image DCS in the Source body.
+    const title = stripSgr(preview[0]!)
+    const sourceCol = title.indexOf('Source')
+    panel.onCellPress(sourceCol, 0)
+    panel.onCellClick(sourceCol, 0)
+    const sourcePage = panel.render(120)
+    assert.ok(stripSgr(sourcePage[0]!).includes('[Source]'), 'the pointer device switched pages')
+    assert.ok(!sourcePage.join('\n').includes(SVG_VIEWER_SIXEL_DCS), 'Source paints no image command')
+    assert.ok(stripSgr(sourcePage.slice(1, -1).join('\n')).includes('<svg'), 'Source shows the admitted XML')
+    // C copies the raw source from either page.
+    panel.handleInput('c')
+    assert.equal(copies, 1)
+    // Back to Preview reuses the exact local placement (no new raster request).
+    panel.handleInput('\t')
+    const again = panel.render(120)
+    assert.ok(again.slice(1, -1).some(line => line.includes(SVG_VIEWER_SIXEL_DCS)))
+    assert.deepEqual(recorder.calls.map(call => call.width), [1920], 'switching pages never starts another variant')
+    panel.dispose()
+    assert.ok(disposals() > 0, 'dispose releases the managed occurrence')
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('iTerm2 keeps the SVG Preview unavailable and starts no raster', () => {
+  capabilities('iterm2')
+  try {
+    const recorder = pendingLoader()
+    const panel = panelOf({ loader: recorder.loader, rows: 24 })
+    panel.setMaxRows(24)
+    const lines = panel.render(80)
+    assert.ok(lines.slice(1, -1).join('\n').includes('Preview unavailable'))
+    assert.equal(recorder.calls.length, 0, 'the excluded protocol reads/encodes nothing')
+    // Source stays fully usable.
+    panel.handleInput('\t')
+    assert.ok(stripSgr(panel.render(80).slice(1, -1).join('\n')).includes('<svg'))
+    panel.dispose()
+    recorder.loader.dispose()
+  } finally {
+    resetCapabilitiesCache()
+  }
+})
+
+test('a SIXEL viewer disposed before the variant settles never repaints or keeps an occurrence', async () => {
+  capabilities(null)
+  try {
+    const recorder = pendingLoader()
+    const { graphics } = sixelViewerGraphics()
+    let renders = 0
+    const panel = panelOf({ loader: recorder.loader, graphics, requestRender: () => { renders += 1 } })
+    panel.setMaxRows(40)
+    panel.render(120)
+    assert.equal(recorder.activeCount(), 1)
+    panel.dispose()
+    assert.equal(recorder.activeCount(), 0, 'the cancelled variant child is gone')
+    await recorder.settleAll()
+    await drain()
+    assert.equal(renders, 0, 'a late settle never wakes the closed viewer')
+    recorder.loader.dispose()
   } finally {
     resetCapabilitiesCache()
   }

@@ -1,7 +1,7 @@
 /** Real Tern headless qualification for the production Session Browser Presenter and Resume affordance. */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { containedXY, rect } from './tern-pane-geometry.mjs'
+import { containedX, containedXY, rect } from './tern-pane-geometry.mjs'
 
 const records = (h) => readFileSync(join(h.root, 'events.jsonl'), 'utf8')
   .split('\n').filter(Boolean).map((line) => JSON.parse(line))
@@ -241,6 +241,75 @@ export default async function (h) {
     (frame?.texts ?? []).some((entry) => String(entry.text).includes('session-long'))
     && (frame?.texts ?? []).some((entry) => String(entry.text).includes('END-OF-DETAILS-TAIL')),
     `textCount=${frame?.texts?.length}`)
+  // ---- the negotiated grid, on the REAL 400px client ----
+  // `frame.texts` now also reads a grid PAIR from the node the client drew (the
+  // subject's own observer), so a fact that lives inside a `kv` is evidence here
+  // instead of an absent text node the component never built.
+  const texts = frame?.texts ?? []
+  const gridEntries = texts.filter((entry) => String(entry.key ?? '').includes('session-browser-kv-'))
+  const groupOf = (entry) => {
+    const key = String(entry.key)
+    const at = key.indexOf('session-browser-kv-')
+    return key.slice(at + 'session-browser-kv-'.length, key.indexOf(':', at))
+  }
+  const negotiatedKv = (caps(h)?.kinds ?? []).includes('kv')
+  const grids = h.classNodes(snap, 'sf-kv')
+  const boxish = (node) => (node === undefined ? 'none' : rect(node).map((v) => Math.round(v)).join(','))
+  const subclassOf = (node, name) => {
+    const out = []
+    const walk = (entry) => {
+      if ((entry.class ?? '').split(' ').includes(name)) out.push(entry)
+      for (const child of entry.children ?? []) walk(child)
+    }
+    if (node !== undefined) walk(node)
+    return out
+  }
+  // The client's own one-line height, read from the Back row this Reader really paints.
+  const backRow = h.classNodes(snap, 'sf-t-accent').find((node) => h.descendantsText(node).includes('Back'))
+  const LINE = rect(backRow)[3]
+  h.check('the pane negotiated kv and the real client painted exactly the four fact groups as grids',
+    negotiatedKv && grids.length === 4
+    && [...new Set(gridEntries.map(groupOf))].join(',') === 'identity,activity,relationship,configuration',
+    `negotiated=${negotiatedKv} painted sf-kv=${grids.length} wire=${JSON.stringify([...new Set(gridEntries.map(groupOf))])}`)
+  // A 440px-tall pane cannot CONTAIN a grid vertically: the Identity grid is 385px
+  // here because the long title wraps inside its own value column, and the whole page
+  // is far taller than the viewport. The honest claims are therefore (a) nothing is
+  // clipped HORIZONTALLY — the value column keeps its full width at 400px, which is
+  // exactly what the grid is for, and (b) a long value folds instead of being cut.
+  h.check('the grid labels and values are painted as aligned cells, not one concatenated line',
+    grids.every((grid) => {
+      const keys = subclassOf(grid, 'sf-kv-k')
+      const values = subclassOf(grid, 'sf-kv-v')
+      return keys.length > 0 && values.length === keys.length
+        && [...new Set(values.map((node) => Math.round(rect(node)[0])))].length === 1
+    }),
+    `cells=${grids.map((grid) => `${subclassOf(grid, 'sf-kv-k').length}/${subclassOf(grid, 'sf-kv-v').length}`).join(',')}`)
+  h.check('every grid keeps its full width without horizontal clipping in the 400px Reader',
+    grids.length === 4 && grids.every((node) => containedX(snap.chains, node) && rect(node)[2] > 0),
+    `grids=${grids.length} boxes=${grids.map(boxish).join(' | ')}`)
+  const bodyBox = rect(body)
+  h.check('all four groups share ONE grid column, no wider than the body that holds them',
+    grids.length === 4 && grids.every((node) => rect(node)[2] > 0 && rect(node)[2] <= bodyBox[2])
+    && [...new Set(grids.map((node) => Math.round(rect(node)[2])))].length === 1,
+    // The client owns its own content padding (measured 364px body vs 328px grid), so
+    // the claim is a SINGLE app-independent column width, not equality with the body.
+    `body=${Math.round(bodyBox[2])} grids=${grids.map((node) => Math.round(rect(node)[2])).join(',')}`)
+  const foldedValues = (grid) => subclassOf(grid, 'sf-kv-v').filter((node) => rect(node)[3] > 1.5 * LINE)
+  h.check('the long title and the unbroken session id FOLD inside the value column instead of being cut',
+    LINE > 0 && grids.slice(0, 1).every((grid) => foldedValues(grid).length >= 1)
+    && grids[0] !== undefined && rect(grids[0])[3] > 4 * LINE,
+    `line=${Math.round(LINE)} identity=${boxish(grids[0])} folded=${grids.map((grid) => foldedValues(grid).length).join(',')}`)
+  h.check('the excerpt is NOT a grid: its label and its full text stay separate text nodes',
+    !gridEntries.some((entry) => groupOf(entry) === 'excerpt')
+    && texts.some((entry) => String(entry.text) === 'Matching content'
+      && !String(entry.key ?? '').includes('session-browser-kv-'))
+    && texts.some((entry) => String(entry.text).includes('END-OF-DETAILS-TAIL')
+      && !String(entry.key ?? '').includes('session-browser-kv-')),
+    `excerpt=${JSON.stringify(texts.filter((entry) => String(entry.text).includes('Matching content')).map((entry) => entry.key))}`)
+  h.check('an unbroken session id and a full ISO stamp arrive COMPLETE inside their grid value',
+    gridEntries.some((entry) => String(entry.text) === 'session-long')
+    && gridEntries.some((entry) => /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(String(entry.text))),
+    `gridValues=${gridEntries.length}`)
   h.capture('session-browser-details-top-400x440', 'long Details Reader before End-to-tail scroll')
 
   const beforeTail = tailPosition(h)
@@ -263,6 +332,13 @@ export default async function (h) {
     scrollRecords.length > 0 && scrollRecords.at(-1).to === 'end'
     && String(scrollRecords.at(-1).id).endsWith(String(frame?.readerBodyKey)),
     JSON.stringify({ body: frame?.readerBodyKey, scroll: scrollRecords.at(-1) }))
+  // The LAST group must be reachable at the tail: a grid that could not be scrolled
+  // to would be a reading regression, which is exactly what the short-pane lane is for.
+  const tailSnap = h.snapshot()
+  const tailGrids = h.classNodes(tailSnap, 'sf-kv')
+  h.check('the scroll to the tail keeps every grid laid out at full width (nothing collapses)',
+    tailGrids.length === 4 && tailGrids.every((node) => rect(node)[2] > 0),
+    `grids=${tailGrids.length} boxes=${tailGrids.map(boxish).join(' | ')}`)
   h.capture('session-browser-details-tail-400x440', 'Details at the actual end tail in the short Reader viewport')
 
   await h.key('Escape', 900)
@@ -310,6 +386,38 @@ export default async function (h) {
     narrowDetailsText.some((text) => text.includes('Migration required')),
     JSON.stringify(narrowDetailsText.filter((text) => text.includes('Migration'))))
   h.capture('session-browser-migration-details-400x600', 'Details of the migration-required Session at 400x600')
+
+  // ------------------------------------------- the pinned resolution x appearance grid
+  // The grid's readability is a PROPERTY OF THE PAINT, so the wire and the node rect
+  // are not enough: each plan resolution is captured in BOTH the client's resolved
+  // appearances, and each claim is made against what the client really laid out.
+  const APPEARANCES = ['light', 'dark']
+  const GRID_SIZES = [{ w: 1280, h: 800 }, { w: 900, h: 700 }, { w: 400, h: 600 }, { w: 900, h: 360 }]
+  for (const appearance of APPEARANCES) {
+    h.send('appearance', appearance)
+    const resolved = h.ctl('state').theme
+    h.check(`the client resolved the ${appearance} appearance for the Details grid`,
+      resolved === appearance, `state.theme=${resolved}`)
+    for (const size of GRID_SIZES) {
+      await h.resize(size.w, size.h)
+      await h.sleep(220)
+      const gridSnap = h.snapshot()
+      const painted = h.classNodes(gridSnap, 'sf-kv')
+      const cells = painted.map((grid) => subclassOf(grid, 'sf-kv-k').length)
+      h.check(`${appearance} ${size.w}x${size.h}: the four fact grids are laid out with their full cell count`,
+        painted.length === 4 && cells.join(',') === '4,2,1,1'
+        && painted.every((grid) => rect(grid)[2] > 0),
+        `grids=${painted.length} cells=${cells.join(',')} boxes=${painted.map(boxish).join(' | ')}`)
+      h.check(`${appearance} ${size.w}x${size.h}: no grid is clipped horizontally and the migration state value stays whole`,
+        painted.every((grid) => containedX(gridSnap.chains, grid))
+        && (lastFrame(h)?.texts ?? []).some((entry) => String(entry.text).includes('Migration required')
+          && String(entry.key ?? '').includes('session-browser-kv-identity')),
+        `boxes=${painted.map(boxish).join(' | ')}`)
+      h.capture(`session-browser-details-grid-${size.w}x${size.h}-${appearance}`,
+        `Session Details grids at ${size.w}x${size.h} in the ${appearance} appearance`)
+    }
+  }
+  h.send('appearance', 'light')
 
   h.measure('run totals', JSON.stringify({
     frames: frames(h).length,

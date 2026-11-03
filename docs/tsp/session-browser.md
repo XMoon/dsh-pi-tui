@@ -76,6 +76,16 @@ production default; TSP keeps the experimental opt-in described in
 - Details is one read-only native Overlay Reader. Back or Esc returns to the same
   Picker and retains query/scope/selection. Each reading owns a distinct Reader/
   body/scroll identity; no Resume action is offered from Details.
+- Details presents the Identity, Activity, Lineage and Configuration groups in
+  reading order. Where the pane negotiated the `kv` kind each of those groups is
+  one aligned grid; where it did not, the same facts are the original muted-label
+  line over the complete value line. The layout is a display choice only: the fact
+  set, order, fallback wording and `State` value are identical either way, a value
+  reaches the client complete (the client owns any wrapping), and the absence of
+  `kv` never removes a fact, refuses the Reader or changes any other behavior.
+- A Host search excerpt is not a grid row at any capability: it keeps its
+  `Host search excerpt · <source>` head, its `Matching content` label and one
+  complete wrapped text value. With no excerpt the group does not exist.
 - The Picker progressively enriches the first 20 listed rows, then batches the
   remaining rows in groups of 50 after yielding. A query is sent to the Host
   after a 250 ms debounce; an equivalent canonical query does not restart it.
@@ -133,10 +143,17 @@ production default; TSP keeps the experimental opt-in described in
   and pending latch. Browser events and native typed direct matches are admitted
   only for this read's listed main rows; typed direct matching is suppressed
   when the user changed the query during listing. Both routes carry the captured
-  `SessionScope`; `SessionRuntime.switchSession(target, expectedScope)` checks
-  that exact owner/generation again inside the existing transition gate before
-  navigation side effects. It never opens a nested gate or trusts a Session ID,
-  `Picker.current`, `selected` or a `live` badge as currentness authority.
+  `SessionScope`; `SessionRuntime.switchSessionOutcome(target, expectedScope)`
+  checks that exact owner/generation again inside the existing transition gate
+  before navigation side effects, and its SETTLED outcome is what the command
+  owner reports. An accepted `requestResume` intent and a closed panel are not
+  switch success: only a `committed` outcome settles the command as switched,
+  while `superseded`, `cancelled`, `failed` and `indeterminate` stay distinct
+  (an `indeterminate` outcome is never restored or retried automatically). The
+  legacy `switchSession(target, expectedScope)` projection remains for callers
+  that only consume an error string. It never opens a nested gate or trusts a
+  Session ID, `Picker.current`, `selected` or a `live` badge as currentness
+  authority.
 - Flush, lifecycle open, publication, old-owner retirement, hydration, catalog
   refresh and reporting remain owned by the existing Session runtime. An
   open/refusal failure leaves the old owner current, keeps the Browser retryable,

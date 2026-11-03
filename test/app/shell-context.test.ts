@@ -170,6 +170,7 @@ test('submitShell: a session switch while the Host command RAN skips the result 
     writer: { prompt: async () => { written.push(1); return { kind: 'committed' as const, value: undefined } } },
     createMessage: (text: string) => ({ text }),
     diag: { debug: () => {}, warn: () => {}, error: () => {}, info: () => {} } as never,
+    onSettled: () => {},
   })
   await new Promise(resolve => setTimeout(resolve, 50))
   assert.equal(written.length, 0, 'the result is NEVER submitted into the replacement session')

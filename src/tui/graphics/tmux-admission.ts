@@ -20,6 +20,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
+import { imageProtocolPreference, type ImageProtocolPreference } from './image-protocol-preference.ts'
 
 /**
  * The environment variable that gates the tmux virtual backend. Leaving it unset
@@ -47,7 +48,7 @@ const PROBE_MAX_OUTPUT_BYTES = 64 * 1024
 const PROBE_CACHE_TTL_MS = 250
 
 /** The immutable identity of the ONE ordinary display tmux client a handle may use. */
-export interface TmuxKittyIdentity {
+export interface TmuxDisplayIdentity {
   readonly paneId: string
   readonly sessionName: string
   readonly clientName: string
@@ -56,12 +57,15 @@ export interface TmuxKittyIdentity {
   readonly clientTermtype: string
 }
 
-function nonEmpty(value: string | undefined): value is string {
+/** The tmux Kitty handle keeps the historical name for the same identity shape. */
+export interface TmuxKittyIdentity extends TmuxDisplayIdentity {}
+
+export function nonEmpty(value: string | undefined): value is string {
   return value !== undefined && value !== ''
 }
 
 /** One `list-clients` record that is an ordinary display terminal. */
-interface TmuxDisplayClient {
+export interface TmuxDisplayClient {
   readonly name: string
   readonly tty: string
   readonly session: string
@@ -76,7 +80,7 @@ interface TmuxDisplayClient {
  * Any other value, a missing column or a malformed record fails the whole
  * report closed; a control connection is never inferred from its name or TTY.
  */
-function parseDisplayClients(report: string): TmuxDisplayClient[] | undefined {
+export function parseTmuxDisplayClients(report: string): TmuxDisplayClient[] | undefined {
   const displayClients: TmuxDisplayClient[] = []
   // `list-clients` terminates every record with exactly one newline. Remove
   // that one command terminator only: any extra blank/whitespace record must
@@ -100,15 +104,14 @@ function parseDisplayClients(report: string): TmuxDisplayClient[] | undefined {
  * They are necessary but never sufficient: the real server query below is what
  * decides the live binding.
  */
-function environmentAdmits(env: NodeJS.ProcessEnv): boolean {
+function environmentAdmits(env: NodeJS.ProcessEnv, preference: ImageProtocolPreference): boolean {
   const optIn = env[TMUX_KITTY_IMAGES_ENV]
   if (optIn !== undefined && optIn !== '1') return false
   if (!nonEmpty(env.TMUX) || !nonEmpty(env.TMUX_PANE)) return false
   if (env.ZELLIJ !== undefined || env.STY !== undefined) return false
   if (!(env.TERM ?? '').startsWith('tmux')) return false
   if (env.TERM_PROGRAM === 'herdr') return false
-  const protocol = (env.PI_IMAGE_PROTOCOL ?? '').toLowerCase()
-  if (protocol === 'none' || protocol === '0' || protocol === 'iterm2') return false
+  if (preference === 'none' || preference === 'iterm2') return false
   return true
 }
 
@@ -120,7 +123,7 @@ function environmentAdmits(env: NodeJS.ProcessEnv): boolean {
  * positional columns must not let whitespace normalization hide a malformed
  * record, while single-value queries may trim their own command terminator.
  */
-function runTmux(args: readonly string[], env: NodeJS.ProcessEnv): string | undefined {
+export function runTmux(args: readonly string[], env: NodeJS.ProcessEnv): string | undefined {
   try {
     return execFileSync('tmux', args, {
       encoding: 'utf8',
@@ -164,13 +167,25 @@ export function tmuxKittyHasKnownUnicodePlaceholders(identity: TmuxKittyIdentity
 }
 
 /**
- * Whether the live tmux client reports another terminal multiplexer as its
- * terminal. A nested tmux/screen client is a transport boundary, not an
- * unknown terminal to hand to a feature probe: the inner server's DCS would
- * have to cross another multiplexer whose forwarding/lifecycle contract this
- * backend does not implement. Any other unknown renderer may still probe.
+ * The environment facts that identify a real tmux pane without guessing any
+ * client capability. Empty multiplexer markers are not sessions; a nested
+ * `screen`/`tmux`/Zellij/Herdr topology is outside every tmux transport family.
  */
-function isMultiplexerClient(identity: TmuxKittyIdentity): boolean {
+export function tmuxPaneEnvironmentAdmits(env: NodeJS.ProcessEnv): boolean {
+  if (!nonEmpty(env.TMUX) || !nonEmpty(env.TMUX_PANE)) return false
+  if ((env.ZELLIJ ?? '') !== '') return false
+  if ((env.STY ?? '') !== '') return false
+  if (!(env.TERM ?? '').startsWith('tmux')) return false
+  if (env.TERM_PROGRAM === 'herdr') return false
+  return true
+}
+
+/**
+ * Whether the upstream terminal behind a tmux client is another multiplexer.
+ * The identity fields are the live server report, never an inherited
+ * `TERM_PROGRAM`/`KITTY_WINDOW_ID`.
+ */
+export function isNestedTmuxClient(identity: TmuxDisplayIdentity): boolean {
   const termname = identity.clientTermname.toLowerCase()
   const program = clientProgramName(identity.clientTermtype)
   return termname.startsWith('tmux')
@@ -179,13 +194,60 @@ function isMultiplexerClient(identity: TmuxKittyIdentity): boolean {
     || program === 'screen'
 }
 
-function sameIdentity(left: TmuxKittyIdentity, right: TmuxKittyIdentity): boolean {
+export function sameTmuxDisplayIdentity(left: TmuxDisplayIdentity, right: TmuxDisplayIdentity): boolean {
   return left.paneId === right.paneId
     && left.sessionName === right.sessionName
     && left.clientName === right.clientName
     && left.clientTty === right.clientTty
     && left.clientTermname === right.clientTermname
     && left.clientTermtype === right.clientTermtype
+}
+
+/**
+ * Probe the ONE ordinary display client of this tmux server and return the
+ * immutable pane/session/client binding. This is the shared server half of
+ * every tmux transport: the caller decides which additional capability facts
+ * (Kitty passthrough, native SIXEL) its own protocol needs.
+ *
+ * The whole `list-clients` report must parse as strict six-column records;
+ * exactly one `client_control_mode=0` client with a non-empty name/tty, whose
+ * session is this pane's, is admitted. Control Mode clients are excluded from
+ * the display count; any other state fails closed. A nested tmux/screen client
+ * is rejected because its own DCS/APC lifetime is a different transport.
+ */
+export function probeTmuxDisplayIdentity(env: NodeJS.ProcessEnv = process.env): TmuxDisplayIdentity | undefined {
+  if (!tmuxPaneEnvironmentAdmits(env)) return undefined
+  const paneId = env.TMUX_PANE
+  if (paneId === undefined) return undefined
+
+  const sessionName = runTmux(['display-message', '-p', '-t', paneId, '#{session_name}'], env)?.trim()
+  if (!nonEmpty(sessionName)) return undefined
+
+  const report = runTmux([
+    'list-clients',
+    '-F',
+    '#{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}\t#{client_control_mode}',
+  ], env)
+  if (!nonEmpty(report)) return undefined
+  const displayClients = parseTmuxDisplayClients(report)
+  if (displayClients === undefined || displayClients.length !== 1) return undefined
+  const client = displayClients[0]!
+  if (
+    !nonEmpty(client.name)
+    || !nonEmpty(client.tty)
+  ) return undefined
+  if (client.session !== sessionName) return undefined
+  const identity: TmuxDisplayIdentity = {
+    paneId,
+    sessionName,
+    clientName: client.name,
+    clientTty: client.tty,
+    clientTermname: client.termname,
+    clientTermtype: client.termtype,
+  }
+  if (isNestedTmuxClient(identity)) return undefined
+
+  return identity
 }
 
 /**
@@ -210,39 +272,24 @@ function sameIdentity(left: TmuxKittyIdentity, right: TmuxKittyIdentity): boolea
  * tmux/screen instance IS rejected: nested multiplexers remain outside this
  * transport contract.
  */
-export function probeTmuxKittyIdentity(env: NodeJS.ProcessEnv = process.env): TmuxKittyIdentity | undefined {
-  if (!environmentAdmits(env)) return undefined
+export function probeTmuxKittyIdentity(
+  env: NodeJS.ProcessEnv = process.env,
+  preference: ImageProtocolPreference = imageProtocolPreference(env),
+): TmuxKittyIdentity | undefined {
+  // The explicit SIXEL preference must deny ONLY the Kitty transport. It is a
+  // separate check in the Kitty-specific entry: the shared display-identity
+  // probe and the native SIXEL admission must keep working unchanged. The
+  // preference is the caller's startup snapshot; live re-probes must pass the
+  // same value rather than re-reading a mutable environment.
+  if (preference === 'sixel') return undefined
+  if (!environmentAdmits(env, preference)) return undefined
   const paneId = env.TMUX_PANE
   if (paneId === undefined) return undefined
 
   const passthrough = runTmux(['show-options', '-Apqv', '-t', paneId, 'allow-passthrough'], env)?.trim()
   if (passthrough !== 'all') return undefined
 
-  const sessionName = runTmux(['display-message', '-p', '-t', paneId, '#{session_name}'], env)?.trim()
-  if (!nonEmpty(sessionName)) return undefined
-
-  const report = runTmux([
-    'list-clients',
-    '-F',
-    '#{client_name}\t#{client_tty}\t#{client_session}\t#{client_termname}\t#{client_termtype}\t#{client_control_mode}',
-  ], env)
-  if (!nonEmpty(report)) return undefined
-  const displayClients = parseDisplayClients(report)
-  if (displayClients === undefined || displayClients.length !== 1) return undefined
-  const client = displayClients[0]!
-  if (!nonEmpty(client.name) || !nonEmpty(client.tty)) return undefined
-  if (client.session !== sessionName) return undefined
-  const identity = {
-    paneId,
-    sessionName,
-    clientName: client.name,
-    clientTty: client.tty,
-    clientTermname: client.termname,
-    clientTermtype: client.termtype,
-  }
-  if (isMultiplexerClient(identity)) return undefined
-
-  return identity
+  return probeTmuxDisplayIdentity(env)
 }
 
 /**
@@ -267,6 +314,7 @@ export class TmuxKittyAdmission {
   private readonly env: NodeJS.ProcessEnv
   private readonly placeholderAllowed: (() => boolean) | undefined
   private readonly placeholderDenied: (() => boolean) | undefined
+  private readonly preference: ImageProtocolPreference
   private revoked = false
   private hasProbed = false
   private lastProbeAt = 0
@@ -277,11 +325,13 @@ export class TmuxKittyAdmission {
     env: NodeJS.ProcessEnv = process.env,
     placeholderAllowed?: () => boolean,
     placeholderDenied?: () => boolean,
+    preference: ImageProtocolPreference = imageProtocolPreference(env),
   ) {
     this.initial = initial
     this.env = env
     this.placeholderAllowed = placeholderAllowed
     this.placeholderDenied = placeholderDenied
+    this.preference = preference
   }
 
   isAllowed(force = false): boolean {
@@ -309,8 +359,8 @@ export class TmuxKittyAdmission {
     if (!force && this.hasProbed && now - this.lastProbeAt < PROBE_CACHE_TTL_MS) {
       return this.lastProbeAllowed
     }
-    const probed = probeTmuxKittyIdentity(this.env)
-    const allowed = probed !== undefined && sameIdentity(probed, this.initial)
+    const probed = probeTmuxKittyIdentity(this.env, this.preference)
+    const allowed = probed !== undefined && sameTmuxDisplayIdentity(probed, this.initial)
     this.hasProbed = true
     this.lastProbeAt = now
     this.lastProbeAllowed = allowed

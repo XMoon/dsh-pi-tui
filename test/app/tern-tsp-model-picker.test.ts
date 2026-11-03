@@ -58,7 +58,7 @@ test('production /model: a pane with the picker but without the Reader kinds sti
   assert.ok(session)
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
-  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
+  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {} })
   assert.equal(renderer.modelPresentation, undefined, 'the native model UI fails closed')
   assert.equal(picker(pane), undefined)
 })
@@ -281,16 +281,54 @@ function forge(pane: TspPane, act: string, value?: string): void {
 }
 
 /** Every fact VALUE the mounted Reader carries, keyed by the stable key the view
- *  built it from (`reader-model`, `reader-fact-current`, …). */
+ *  built it from (`reader-description`, …) for its `ui.text` nodes, plus every `kv`
+ *  grid pair keyed `reader-kv-<group>:<label>`.
+ *
+ *  A negotiated Reader paints a labelled group's facts as KV PAIRS, which carry no
+ *  per-fact node id at all — the client derives each pair from the grid's own props.
+ *  Reading them back from those props is the ONLY honest observation: rebuilding a
+ *  hidden `ui.text` per fact so an old extractor keeps working would paint the page
+ *  twice and prove nothing about what the client really received. */
 function readerFacts(pane: TspPane): Map<string, string> {
   const out = new Map<string, string>()
   for (const node of nodes(pane)) {
-    if (node.k !== 'text') continue
-    const at = String(node.id).lastIndexOf('.reader-')
-    if (at < 0) continue
-    out.set(String(node.id).slice(at + 1), String(node.p.text ?? ''))
+    if (node.k === 'text') {
+      const at = String(node.id).lastIndexOf('.reader-')
+      if (at < 0) continue
+      out.set(String(node.id).slice(at + 1), String(node.p.text ?? ''))
+      continue
+    }
+    if (node.k !== 'kv') continue
+    const key = String(node.p.key ?? '')
+    const items = (node.p.items ?? []) as Array<{ readonly k?: unknown; readonly v?: unknown }>
+    if (!key.startsWith('reader-kv-')) continue
+    const group = key.slice('reader-kv-'.length)
+    for (const item of items) out.set(`${key}:${String(item.k)}`, String(item.v))
   }
   return out
+}
+
+/** The Reader's ONE grid for a group, read from the wire. Returns `undefined` when
+ *  the pane did not negotiate `kv` and the group therefore paints text rows. */
+function readerKv(pane: TspPane, groupId: string): { readonly layout: unknown; readonly pairs: readonly (readonly [string, string])[] } | undefined {
+  const node = layerNodes(pane).find((entry) => entry.k === 'kv' && String(entry.p.key) === `reader-kv-${groupId}`)
+  if (node === undefined) return undefined
+  const items = (node.p.items ?? []) as Array<{ readonly k?: unknown; readonly v?: unknown }>
+  return {
+    layout: node.p.layout,
+    pairs: items.map((item) => [String(item.k), String(item.v)] as const),
+  }
+}
+
+/** One grid fact's value, by its group and its own label. */
+function readerFact(pane: TspPane, groupId: string, label: string): string | undefined {
+  return readerKv(pane, groupId)?.pairs.find(([entry]) => entry === label)?.[1]
+}
+
+/** Whether any `kv` node reached the pane at all: a negative test asserts this is
+ *  false so "no kv" is a fact about the wire, not about one lookup. */
+function hasKvNode(pane: TspPane): boolean {
+  return nodes(pane).some((node) => node.k === 'kv')
 }
 
 /** The `[Enter]` key badge of one action bar entry, per pane. */
@@ -372,8 +410,20 @@ const twinEffortDirectory: ModelPickerDirectory = {
 }
 
 /** One mounted renderer over the scripted pane, with a write/retry spy. */
-async function mounted(t: { after(fn: () => unknown): void }, subject = { sessionless: true }) {
-  const pane = installTspPane({ modelPicker: true })
+/**
+ * Mount the native Model layer over ONE scripted pane.
+ *
+ * `paneOptions` is the pane's OWN advertised capability set: a case defaults to the
+ * native Model opt-in and a case that must prove the no-`kv` degradation passes its
+ * kinds verbatim, so `nativeKv` always arrives through the real handshake and never
+ * through a value the test forced on the View.
+ */
+async function mounted(
+  t: { after(fn: () => unknown): void },
+  subject = { sessionless: true },
+  paneOptions: Parameters<typeof installTspPane>[0] = { modelPicker: true },
+) {
+  const pane = installTspPane(paneOptions)
   t.after(() => pane.restore())
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session)
@@ -391,6 +441,7 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
+    openModelPicker() {},
   })
   assert.ok(renderer.modelPresentation)
   const writes: unknown[] = []
@@ -399,6 +450,7 @@ async function mounted(t: { after(fn: () => unknown): void }, subject = { sessio
   let retries = 0
   const handle = renderer.modelPresentation.open({
     subject,
+    entry: 'models',
     isCurrent: () => true,
     retry: () => {
       retries += 1
@@ -536,7 +588,7 @@ test('native Model: the catalogue browses, drafts in its own strip and writes on
   await walkList(pane, SAME_A)
   await enterDetails(pane)
   assert.equal(picker(pane), undefined, 'the Reader replaces the picker — no page in between')
-  assert.equal(readerValue(pane, 'reader-model'), 'Twin', 'and it describes the highlighted model')
+  assert.equal(readerFact(pane, 'identity', 'Model'), 'Twin', 'and it describes the highlighted model')
   assert.equal(m.writes.length, 0, 'opening the Reader never writes')
   await backFromDetails(pane)
   await waitUntil('back on the catalogue', () => onCatalogue(pane))
@@ -726,6 +778,52 @@ test('native Model: the catalogue owns its Reasoning Effort strip and it only dr
   await enterDetails(pane)
   assert.equal(props(pane).strip ?? undefined, undefined, 'the read-only Reader carries no strip of its own')
   assert.equal(m.writes.length, 1)
+  m.handle.close()
+})
+
+test('native Model: a non-string `strip` value takes no draft and no write, while a string still drafts', async (t) => {
+  // SDK 0.2.0 widened `ActionEvent.value` to `Json`. This page's strip channel names
+  // ONE candidate id, so the boundary is the event itself: anything that is not a
+  // string never reaches the draft, the page or the write. The bar's own actions do
+  // not read `value`, so a JSON payload must not cost them their existing admission.
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  const onId = (): string | undefined =>
+    ((props(pane).strip as { items?: Array<Record<string, unknown>> } | undefined)?.items ?? [])
+      .find((item) => item.on === true)?.id as string | undefined
+  // The bar's ids carry the panel REVISION (`base#revision`, `actionBase()`), so the
+  // painted token says exactly how many admitted intents this page has processed.
+  const token = (): number => Number(String(actionOf(pane, 'apply')?.id).split('#')[1])
+  const low = stripId(pane, 'low')
+  const node = picker(pane)!.id
+  const tokenBefore = token()
+  // The strip-shaped values a `Json` field can now carry, all addressed at the REAL
+  // mounted node: none of them names a candidate this page offers.
+  for (const value of [{ col: low, dir: 'asc' }, [low], 2, true, null, ''] as const) {
+    pane.event({ ev: 'action', sf: pane.frames().at(-1)!.sf, id: node, act: 'strip', value })
+  }
+  // NO fixed window: the SDK reads this pane's events through ONE ordered queue, so
+  // waiting for a LEGAL strip value that follows the batch proves every refusal above
+  // it was already dispatched — and the revision token then proves how many of them
+  // were ADMITTED (exactly the sentinel, never a JSON payload).
+  action(pane, 'strip', low)
+  await waitUntil('the legal strip value drafted Low, so the refusals above it were processed', () => onId() === low)
+  assert.equal(token(), tokenBefore + 1,
+    `the six JSON-shaped values advanced the page ${token() - tokenBefore - 1} time(s) beyond the one legal draft`)
+  assert.deepEqual(m.writes, [], 'and none of them starts a write')
+  assert.equal(picker(pane)!.id, node, 'and none of them re-mounts the picker node')
+
+  // `close` is the panel's dismissal authority and ignores `value` entirely: the
+  // narrowing must not turn a JSON payload into a rejection.
+  pane.event({
+    ev: 'action',
+    sf: pane.frames().at(-1)!.sf,
+    id: picker(pane)!.id,
+    act: 'close',
+    value: { reason: 'backdrop' },
+  })
+  await waitUntil('a JSON-valued close still dismisses the panel', () => picker(pane) === undefined)
   m.handle.close()
 })
 
@@ -944,7 +1042,7 @@ test('native Model: `select` only highlights and `activate` opens the Reader of 
   await nextPickerFrame(pane)
   sendActivate(pane, SAME_B)
   await waitUntil('activate opens the Reader of B', () =>
-    inDetails(pane) && readerValue(pane, 'reader-model') === 'Twin')
+    inDetails(pane) && readerFact(pane, 'identity', 'Model') === 'Twin')
   assert.equal(m.writes.length, 0, 'opening the Reader never writes')
   await backFromDetails(pane)
   await waitUntil('back on the catalogue', () => onCatalogue(pane))
@@ -1016,7 +1114,7 @@ test('native Model: proven refusal stays usable, uncertain settlement closes, su
   assert.ok(session)
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
-  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false })
+  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {} })
   assert.ok(renderer.modelPresentation)
   // The panel opens INSIDE the loop below, so the resize is delivered before any
   // handle exists. The catalogue owns the ONE write at every width.
@@ -1026,6 +1124,7 @@ test('native Model: proven refusal stays usable, uncertain settlement closes, su
     let resolve!: (outcome: ModelApplyOutcome) => void
     const handle = renderer.modelPresentation.open({
       subject: { sessionless: false },
+      entry: 'models',
       isCurrent: () => true,
       retry: () => assert.fail('no read failure in this scenario'),
       apply: () => new Promise<ModelApplyOutcome>((r) => {
@@ -1435,13 +1534,94 @@ test('official Direct Agent: native /model makes exactly one durable Session sel
     // The Reader carries the COMPLETE value, wrapped by the client; the Current
     // fact is read from the Session the picker re-opened on.
     assert.equal(
-      readerValue(fixture.pane, 'reader-fact-current'),
+      readerFact(fixture.pane, 'configuration', 'Current'),
       `scripted · ${DIRECT_TSP_MODEL_TWO}`,
       'the Reader reads the new Current from the Session',
     )
     fixture.pane.key('\u001b')
     fixture.pane.key('\u001b')
     assert.equal(fixture.modelCalls(), 1, 'picking a model does not dispatch a prompt')
+  } finally {
+    DirectModelCatalog.prototype.selectSessionModel = original
+    await fixture.settle()
+  }
+})
+
+/**
+ * PR-C (TSP-7): the composer Model/Effort buttons drive the REAL production
+ * chain over the official Direct composition — the registered `/model`
+ * command owner, the real `DirectModelCatalog` directory read, the native
+ * picker and the ONE durable Session selection writer — from the wire click
+ * to the settled `model/selection` append. The `effort` entry additionally
+ * lands the first hydrated catalogue on the current row's Reasoning Effort
+ * strip with effort-bearing fixtures (covered by the effort-entry suite);
+ * here the CHAIN (same owner, same real directory, truthful absence, no
+ * second write) is the assertion.
+ */
+test('composer Model and Effort clicks reach the real command owner and writer', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    modelPicker: true,
+    composerActions: true,
+    deltas: ['model-live-ok'],
+  })
+  const original = DirectModelCatalog.prototype.selectSessionModel
+  const records: Array<{ sessionId: string; selection: unknown }> = []
+  DirectModelCatalog.prototype.selectSessionModel = async function (...args) {
+    const result = await original.apply(this, args)
+    records.push({ sessionId: args[0], selection: args[1] })
+    return result
+  }
+  t.after(() => {
+    DirectModelCatalog.prototype.selectSessionModel = original
+  })
+  const clickComposerButton = async (key: string): Promise<void> => {
+    // The composer keys carry the presentation-scope epoch (composer-*-s<N>).
+    const button = nodes(fixture.pane).find(node => node.k === 'el' && new RegExp(`\\.${key}-s\\d+$`).test(String(node.id)))
+    assert.ok(button, `the composer ${key} button is on the wire`)
+    fixture.pane.event({ ev: 'action', sf: fixture.pane.frames().at(-1)!.sf, id: button!.id, act: 'click' })
+  }
+  try {
+    await waitFor('booted', () => fixture.pane.output.text().includes('dock.quiet-composer.composer'))
+    fixture.pane.key('create live session\r')
+    await waitFor('real Agent turn', () => fixture.pane.output.text().includes('model-live-ok'))
+    // ── The MODEL entry: click → the registered handler's own catalog read →
+    //    the native picker hydrates from the REAL directory.
+    await clickComposerButton('composer-model')
+    await waitFor('the real catalog hydrated the picker', () => props(fixture.pane).state === 'ready')
+    assert.equal(props(fixture.pane).title, 'Switch model')
+    assert.ok(((props(fixture.pane).items ?? []) as unknown[]).length >= 2,
+      'the REAL advertised models are listed (the scripted directory)')
+    assert.equal(records.length, 0, 'opening through the button never writes')
+    // Select the other real model and commit through the picker's ONE write.
+    browse(fixture.pane, JSON.stringify(['scripted', DIRECT_TSP_MODEL_TWO]))
+    await waitFor('second model highlighted', () =>
+      props(fixture.pane).selected === JSON.stringify(['scripted', DIRECT_TSP_MODEL_TWO]))
+    fixture.pane.key('\u001b[Z')
+    fixture.pane.key('\r')
+    await waitFor('the real writer settled', () => records.length === 1)
+    const agent = fixture.ctx.agents.get(records[0]!.sessionId as never)
+    assert.ok(agent, 'the write targeted the REAL live session')
+    const events = agent!.session.snapshotEvents().filter((e) => e.type === 'model/selection')
+    assert.equal(events.length, 1, 'exactly ONE durable selection append')
+    assert.deepEqual(events[0]!.data, { provider: 'scripted', model: DIRECT_TSP_MODEL_TWO })
+    await waitFor('committed closes the picker', () => picker(fixture.pane) === undefined)
+
+    // ── The EFFORT entry: click → the SAME owner re-reads; the real scripted
+    //    models advertise no effort metadata, so the truthful notice states
+    //    the absence — no fabricated value and no second write.
+    await clickComposerButton('composer-effort')
+    await waitFor('the effort entry re-opened the real picker', () => props(fixture.pane).state === 'ready')
+    assert.equal(props(fixture.pane).title, 'Switch model')
+    assert.equal(props(fixture.pane).message, 'Reasoning effort is unavailable for this model',
+      'the real models advertise no efforts: the absence is stated, never guessed')
+    assert.equal(records.length, 1, 'the effort entry never writes either')
+    for (let step = 0; step < 20 && picker(fixture.pane) !== undefined; step += 1) {
+      fixture.pane.key('\u001b')
+      await settle(30)
+    }
+    assert.equal(picker(fixture.pane), undefined, 'the picker closed')
+    assert.equal(fixture.modelCalls(), 1, 'the whole chain dispatched no extra prompt')
   } finally {
     DirectModelCatalog.prototype.selectSessionModel = original
     await fixture.settle()
@@ -2024,20 +2204,50 @@ test('native Model: every Details fact reaches the Reader COMPLETE and wraps by 
   await openDetails(m.pane)
   const facts = readerFacts(m.pane)
   // The Reader carries the directory's own value VERBATIM: nothing is
-  // ellipsized, re-flowed or re-derived, and a value with no break opportunity is
-  // wrapped by the CLIENT (`char`) instead of being pre-split by the presenter.
+  // ellipsized, re-flowed or re-derived. The labelled groups reach the pane as
+  // native grids, so the observation point is each grid's OWN `items` pairs, in the
+  // order the state module projected them; a value with no break opportunity is
+  // wrapped by the CLIENT, never pre-split by the presenter.
   // The model's NAME is the page's own title (the client ellipsizes a long one),
   // so the Identity group carries the complete name as its first fact.
   assert.equal(readerNode(m.pane)?.p.head, 'Budget Model', 'the page title is the model name')
-  assert.equal(facts.get('reader-model'), 'Budget Model', 'the model name')
-  assert.equal(facts.get('reader-provider'), `${longProvider} (p)`, 'provider and provider id')
-  assert.equal(facts.get('reader-id'), modelId, 'the model id')
-  assert.equal(facts.get('reader-fact-current'), `p · ${modelId} · high`, 'the live Current value')
-  assert.equal(facts.get('reader-fact-default'), `p · ${modelId} · high`, 'the persisted Default value')
-  assert.equal(facts.get('reader-description'), description, 'the description')
-  // The fixture's declared default id (`high`) is not one of its advertised ids,
-  // so the draft seeds from the first advertised choice.
-  assert.equal(facts.get('reader-draft'), 'Minimal', 'the draft effort')
+  const identity = readerKv(m.pane, 'identity')
+  assert.ok(identity, 'a pane that negotiated `kv` paints Identity as one grid')
+  assert.equal(identity.layout, 'grid', 'the grid is the aligned `grid` layout, not `inline`')
+  assert.deepEqual(
+    identity.pairs,
+    [
+      ['Model', 'Budget Model'],
+      ['Provider', `${longProvider} (p)`],
+      ['ID', modelId],
+    ],
+    'the Identity group is exactly its labelled facts, in order, COMPLETE',
+  )
+  const configuration = readerKv(m.pane, 'configuration')
+  assert.ok(configuration, 'the Configuration group is a grid too')
+  assert.equal(configuration.layout, 'grid', 'one grid per group, aligned')
+  assert.deepEqual(
+    configuration.pairs,
+    [
+      ['Current', `p · ${modelId} · high`],
+      ['Default', `p · ${modelId} · high`],
+      // The fixture's declared default id (`high`) is not one of its advertised ids,
+      // so the draft seeds from the first advertised choice.
+      ['Draft effort', 'Minimal'],
+    ],
+    'live Current, persisted Default and the draft effort stay separate complete values',
+  )
+  // The description is prose with NO label of its own: it stays one complete
+  // wrapped `ui.text` at every capability, never a grid row.
+  assert.equal(readerValue(m.pane, 'reader-description'), description, 'the description is a complete text node')
+  assert.equal(facts.get('reader-description'), description, 'and the text reader still finds it by its own key')
+  assert.equal(nodes(m.pane).find((node) => node.id.endsWith('.reader-description'))?.p.wrap, 'word', 'prose wraps by word')
+  // A grid value carries no app-side wrap or bound: the whole string is in `v` and
+  // the client owns the layout, which is what makes an unbroken run safe.
+  for (const [, value] of [...identity.pairs, ...configuration.pairs]) {
+    assert.ok(!/\u2026/u.test(value), 'no grid value is pre-ellipsized by the app')
+    assert.ok(!/[\n\r]/u.test(value), 'and no grid value is pre-split into lines')
+  }
   // The groups are the page's structure: Identity / Configuration / Description,
   // separated by a real rule and a spacer (a bare `section` head measured a
   // SMALLER gap between groups than inside one on the real client).
@@ -2055,12 +2265,19 @@ test('native Model: every Details fact reaches the Reader COMPLETE and wraps by 
     layerNodes(m.pane).filter((node) => node.k === 'spacer').length,
     'every group boundary is one rule plus one spacer',
   )
-  // The kind decides how a value with no break opportunity behaves: identifiers
-  // may break anywhere, prose must not break inside a word.
-  for (const key of ['reader-provider', 'reader-id', 'reader-fact-current', 'reader-fact-default', 'reader-draft']) {
-    assert.equal(nodes(m.pane).find((node) => node.id.endsWith(`.${key}`))?.p.wrap, 'char', `${key} wraps by char`)
-  }
-  assert.equal(nodes(m.pane).find((node) => node.id.endsWith('.reader-description'))?.p.wrap, 'word', 'prose wraps by word')
+  // ONE grid per labelled group and NO duplicate text fact: the page paints each
+  // short fact exactly once, so a KV group never keeps an invisible `ui.text` copy
+  // behind it for an old test extractor to find.
+  assert.deepEqual(
+    layerNodes(m.pane).filter((node) => node.k === 'kv').map((node) => String(node.p.key)),
+    ['reader-kv-identity', 'reader-kv-configuration'],
+    'each labelled group is exactly one grid node',
+  )
+  assert.equal(
+    nodes(m.pane).filter((node) => node.k === 'text' && /\.reader-(model|provider|id|fact-current|fact-default|draft)$/.test(node.id)).length,
+    0,
+    'a gridded fact is not painted a second time as text',
+  )
   // The write outcome is the Reader's own leading notice, complete there too.
   await backFromDetails(m.pane)
   await waitUntil('back on the catalogue', () => onCatalogue(m.pane))
@@ -2115,8 +2332,9 @@ test('native Model: an unbroken value reaches the Reader whole, to be wrapped by
   const m = await mounted(t, { sessionless: false })
   // The reviewer's counterexample: a picker row renders its `detail` on ONE
   // measured line and cannot break an unbroken run, so pre-split rows had to guess
-  // a per-row column bound. The Reader carries the run ONCE, with the client's own
-  // `char` wrapping, so no bound can clip it.
+  // a per-row column bound. The Reader carries the run ONCE and the client owns the
+  // wrap, so no app-side bound can clip it — inside a grid `v` exactly as inside a
+  // `ui.text`, because a KV item has no wrap prop to lose it with.
   const providerName = `${'W'.repeat(240)} tail`
   await resize(m.pane, 100)
   await m.ready(budgetDirectory({
@@ -2125,10 +2343,19 @@ test('native Model: an unbroken value reaches the Reader whole, to be wrapped by
     effortNames: ['Minimal', 'Low'],
   }))
   await openDetails(m.pane)
-  assert.equal(readerValue(m.pane, 'reader-provider'), `${providerName} (p)`, 'the unbroken run is complete')
-  const nodesOfProvider = nodes(m.pane).filter((node) => node.id.endsWith('.reader-provider'))
-  assert.equal(nodesOfProvider.length, 1, 'and it is ONE node, never a stack of continuation rows')
-  assert.equal(nodesOfProvider[0]?.p.wrap, 'char', 'the client is told it may break the run')
+  const identity = readerKv(m.pane, 'identity')
+  assert.ok(identity, 'the pane negotiated `kv`')
+  assert.equal(readerFact(m.pane, 'identity', 'Provider'), `${providerName} (p)`, 'the unbroken run is complete')
+  assert.equal(
+    identity.pairs.filter(([label]) => label === 'Provider').length,
+    1,
+    'and it is ONE pair, never a stack of continuation rows',
+  )
+  assert.equal(
+    nodes(m.pane).filter((node) => node.k === 'text' && node.id.endsWith('.reader-provider')).length,
+    0,
+    'the grid did not also paint a text copy that could disagree',
+  )
   m.handle.close()
 })
 
@@ -2224,7 +2451,7 @@ test('native Model: description wrapping never splits a grapheme or a column', a
   // The CJK model's own Reader, opened by activating its row.
   sendActivate(m.pane, SAME_B)
   await waitUntil('the CJK model Reader', () =>
-    inDetails(m.pane) && readerValue(m.pane, 'reader-model') === 'Twin')
+    inDetails(m.pane) && readerFact(m.pane, 'identity', 'Model') === 'Twin')
   assert.equal(readerValue(m.pane, 'reader-description'), cjk, 'the CJK description is reproduced exactly')
 })
 
@@ -2247,15 +2474,15 @@ test('native Model: Current and Default facts come from the directory, not the r
     return facts
   }
   const facts = await liveFacts()
-  assert.equal(facts.get('reader-fact-current'), 'a · same · high', `live Current fact: ${JSON.stringify([...facts])}`)
-  assert.equal(facts.get('reader-fact-default'), 'b · same · low', 'the persisted default keeps its own effort')
+  assert.equal(facts.get('reader-kv-configuration:Current'), 'a · same · high', `live Current fact: ${JSON.stringify([...facts])}`)
+  assert.equal(facts.get('reader-kv-configuration:Default'), 'b · same · low', 'the persisted default keeps its own effort')
   live.handle.close()
   const sessionless = await mounted(t)
   await sessionless.ready()
   await openDetails(sessionless.pane)
   const plainFacts = readerFacts(sessionless.pane)
-  assert.equal(plainFacts.has('reader-fact-current'), false, 'a sessionless panel never paints a Current fact')
-  assert.equal(plainFacts.get('reader-fact-default'), 'a · same · high')
+  assert.equal(plainFacts.has('reader-kv-configuration:Current'), false, 'a sessionless panel never paints a Current fact')
+  assert.equal(plainFacts.get('reader-kv-configuration:Default'), 'a · same · high')
 })
 
 test('native Model: a model without efforts paints no strip and invents no candidate', async (t) => {
@@ -2299,8 +2526,185 @@ test('native Model: a model without efforts paints no strip and invents no candi
   pane.key('\t')
   await waitUntil('the ring released the bar', () => !String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
   await enterDetails(pane)
-  assert.equal(readerValue(pane, 'reader-model'), 'Twin', 'the Reader still describes that model')
+  assert.equal(readerFact(pane, 'identity', 'Model'), 'Twin', 'the Reader still describes that model')
   assert.equal(m.writes.length, 0, 'and nothing wrote')
+})
+
+/* ------------------------------------------------- PR-C: the effort entry hint */
+
+/**
+ * The PR-C composer control's `entry: 'effort'` is a PRESENTATION-only first
+ * focus: the FIRST hydrated catalogue lands on the configured row's strip
+ * (never a second page, never a write), a Retry/re-read never repeats the
+ * relocation, and a model without effort metadata keeps the catalogue with an
+ * explicit notice instead of guessing a value.
+ */
+async function mountedEffortEntry(
+  t: { after(fn: () => unknown): void },
+  subject = { sessionless: false },
+) {
+  const pane = installTspPane({ modelPicker: true })
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session)
+  const renderer = mountTspRenderer(session, { copyVisual: async () => false,
+    requestExit() {},
+    onFatal: (e) => assert.fail(String(e)),
+  })
+  t.after(() => renderer.dispose())
+  renderer.bindInput({
+    exit() {},
+    cancel() {},
+    submit() {},
+    steer() {},
+    pasteMedia: () => {},
+    noteUserInput() {},
+    listContinuedQuestions: () => [],
+    reopenContinuedQuestion: () => false,
+    openModelPicker() {},
+  })
+  const writes: unknown[] = []
+  let retries = 0
+  const handle = renderer.modelPresentation!.open({
+    subject,
+    entry: 'effort',
+    isCurrent: () => true,
+    retry: () => { retries += 1 },
+    apply: (selection: unknown) => {
+      writes.push(selection)
+      return 'committed'
+    },
+    runOwned: (label, task, options) =>
+      runOwned(label, task, { ...options, diag: { debug() {}, warn() {}, error() {} } as never }),
+  })
+  sendResize(pane, 100)
+  await settle(20)
+  return {
+    pane,
+    renderer,
+    handle,
+    writes,
+    retries: () => retries,
+    ready: async (d: ModelPickerDirectory = directory) => {
+      handle.setLoading()
+      handle.setDirectory(d)
+      await waitUntil('native picker ready', () => props(pane).state === 'ready')
+    },
+  }
+}
+
+test('native Model effort entry: the first hydrated catalogue lands on the current row\'s strip', async (t) => {
+  const m = await mountedEffortEntry(t)
+  await m.ready()
+  const { pane } = m
+  // The relocation happens only AFTER the first authoritative read settles:
+  // the loading panel keeps the plain list focus and nothing is guessed.
+  assert.equal(props(pane).focus, 'strip', 'the strip owns the keyboard from the first ready frame')
+  assert.equal(props(pane).selected, SAME_A, 'the configured/current row is the highlighted one')
+  assert.equal(stripOn(pane), 'high', 'the strip paints the directory-advertised draft, never a guessed value')
+  assert.equal(m.writes.length, 0, 'an entry focus never writes')
+  assert.equal(props(pane).message ?? undefined, undefined, 'a successful relocation carries no notice')
+  // The keyboard is live in the strip zone: a strip arrow edits the LOCAL
+  // draft of the same model (high → low with the base fixture's ring),
+  // exactly like a Tab into the strip would.
+  pane.key('\u001b[D')
+  await waitUntil('the strip arrow moved the draft', () => stripOn(pane) === 'low')
+  assert.equal(m.writes.length, 0)
+  // The ONE write stays the explicit footer action.
+  pane.key('\t')
+  await waitUntil('primary focused', () => String(actionOf(pane, 'apply')?.label).endsWith('[Enter]'))
+  pane.key('\r')
+  await waitUntil('one admitted write', () => m.writes.length === 1)
+  assert.deepEqual(m.writes, [{ provider: 'a', model: 'same', reasoningEffort: 'low' }])
+})
+
+test('native Model effort entry: no effort metadata keeps the catalogue and states the reason', async (t) => {
+  const m = await mountedEffortEntry(t)
+  // The CURRENT model advertises no candidates (provider B's plain model), so
+  // the strip cannot be offered: the panel stays a normal catalogue and the
+  // notice says why — no invented `medium`, no second page.
+  const plainCurrent: ModelPickerDirectory = {
+    current: { provider: 'b', model: 'same' },
+    directory: {
+      default: { provider: 'a', model: 'same', reasoningEffort: 'high' },
+      routableProviders: ['a', 'b'],
+      groups: [
+        {
+          id: 'a',
+          name: 'A',
+          models: [{ id: 'same', name: 'Twin', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } }],
+        },
+        { id: 'b', name: 'B', models: [{ id: 'same', name: 'Twin' }] },
+      ],
+      failures: [],
+    },
+  }
+  await m.ready(plainCurrent)
+  const { pane } = m
+  assert.equal(props(pane).focus, 'list', 'the plain catalogue keeps the keyboard on the list')
+  assert.equal(props(pane).message, 'Reasoning effort is unavailable for this model',
+    'the absence is stated in words, never guessed')
+  assert.equal(props(pane).selected, SAME_B, 'the current row is highlighted as usual')
+  assert.equal(m.writes.length, 0)
+  // The user can still reach the effort of ANOTHER model the normal way: the
+  // notice changed nothing about the page's own ring.
+  browse(pane, SAME_A)
+  await waitUntil('the effort-bearing model is highlighted', () => props(pane).selected === SAME_A)
+  pane.key('\t')
+  await waitUntil('the strip is reachable', () => props(pane).focus === 'strip')
+  assert.notEqual(stripOn(pane), undefined, 'the strip is painted for the effort-bearing model')
+})
+
+test('native Model effort entry: a Retry/re-read never repeats the relocation', async (t) => {
+  const m = await mountedEffortEntry(t)
+  await m.ready()
+  const { pane } = m
+  assert.equal(props(pane).focus, 'strip', 'the first hydration relocated to the strip')
+  // The user moves the keyboard to the LIST (their own edit of the zone), then
+  // a failed read + Retry re-hydrates the SAME panel: the relocation is a
+  // FIRST-hydration fact only, so the user's zone survives.
+  pane.key('\t')
+  await waitUntil('the ring moved to the action bar', () => focusCue(pane, 'apply'))
+  pane.key('\t')
+  await waitUntil('the ring returned to the list', () => props(pane).focus === 'list')
+  m.handle.setLoadError('read failed')
+  await waitUntil('the failed read state', () => props(pane).state === 'error')
+  // The failed read's bar is the ONE operable region; its Retry action re-reads
+  // through the command's own read owner (the retry spy), and the re-hydrated
+  // panel keeps the LIST zone the user chose. The retry entry carries the
+  // current frame's revision token, exactly as the rendered bar does.
+  const retryId = String(actionOf(pane, 'retry')?.id ?? 'retry')
+  action(pane, retryId)
+  await waitUntil('the retry reached the read owner', () => m.retries() === 1)
+  await m.ready()
+  assert.equal(props(pane).focus, 'list',
+    'the re-read keeps the zone the user left the panel in (no repeated relocation)')
+  assert.equal(m.writes.length, 0)
+})
+
+test('native Model effort entry: a superseded panel never relocates a newer one', async (t) => {
+  // A NEW open (the newer `/model` surface token) replaces the panel ON THE
+  // SAME renderer — exactly the production shape (`presentation.open` retires
+  // the previous panel). The retired handle's late `setDirectory` is inert
+  // (isDisposed), so no cross-panel zone write can reach the newer panel.
+  const m = await mountedEffortEntry(t)
+  const retired = m.handle
+  const second = m.renderer.modelPresentation!.open({
+    subject: { sessionless: false },
+    entry: 'effort',
+    isCurrent: () => true,
+    retry() {},
+    apply: () => 'committed',
+    runOwned: (label, task, options) =>
+      runOwned(label, task, { ...options, diag: { debug() {}, warn() {}, error() {} } as never }),
+  })
+  retired.setDirectory(directory)
+  second.setLoading()
+  second.setDirectory(directory)
+  await waitUntil('the newer panel hydrated', () => props(m.pane).state === 'ready')
+  assert.equal(props(m.pane).focus, 'strip', 'the second panel relocated on its own first hydration')
+  assert.equal(m.writes.length, 0)
+  assert.equal(retired.isDisposed(), true)
 })
 
 test('native Model: a provider called `all` and a scope-shaped effort id stay unambiguous', async (t) => {
@@ -2433,7 +2837,80 @@ test('official Host same-name /model keeps the original Host route even with nat
     assert.deepEqual(calls, [''], 'the Host receives the original parsed argument string')
     assert.equal(picker(fixture.pane), undefined)
   } finally {
-    await fixture.settle()
+    await fixture.settle() // window: bounded teardown settle for the real Direct composition fixture
+  }
+})
+
+test('a Host-owned /model registration leaves the composer UI opener unavailable', async (t) => {
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    modelPicker: true,
+    composerActions: true,
+    hostCommands: [
+      { name: 'model', description: 'Host owns model', handler: () => undefined },
+    ],
+  })
+  try {
+    await waitFor('booted', () => fixture.pane.output.text().includes('dock.quiet-composer.composer'))
+    // The composer action row still paints (the pane is capable), but its
+    // Model/Effort buttons must be dead: the Host-owned name degraded the
+    // TUI registration, so the UI entry does not exist and the click is
+    // refused WITHOUT reading the TUI catalog or opening a picker.
+    // Click the Model button through the wire node id the dock really built.
+    const { wireNodes } = await import('../support/tsp-picker-wire.ts')
+    const nodes = wireNodes(fixture.pane)
+    const modelButton = nodes.find(node => node.k === 'el' && /\.composer-model-s\d+$/.test(String(node.id)))
+    assert.ok(modelButton, 'the composer Model button is on the wire (the row still paints)')
+    const before = fixture.pane.output.text()
+    fixture.pane.event({
+      ev: 'action',
+      sf: fixture.pane.frames().at(-1)!.sf,
+      id: modelButton!.id,
+      act: 'click',
+    })
+    await waitFor('the refusal notice', () =>
+      fixture.pane.output.text().includes('model selection is unavailable'))
+    assert.equal(picker(fixture.pane), undefined, 'no TUI picker opened')
+    assert.ok(fixture.pane.output.text().length >= before.length, 'no catalog read replaced the dock')
+    // The Host sink is untouched too: the UI entry never dispatched anything.
+    assert.equal(fixture.modelCalls(), 0)
+  } finally {
+    await fixture.settle() // window: bounded teardown settle for the real Direct composition fixture
+  }
+})
+
+test('the composer UI entry obeys the native picker capability admission', async (t) => {
+  // The external review's gap: a pane that CAN draw the action row (`el` +
+  // `styles`) but CANNOT present the native picker (no `picker`/`row`/
+  // `overlay` kinds) used to run the handler anyway — whose PiTui fallback
+  // presenter has no `TuiApp` on the TSP branch. The UI entry must refuse
+  // through the SAME capability fact the typed `/model` route uses.
+  const life = testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    composerActions: true,
+    // NO modelPicker: the pane advertises el+styles but not the picker kinds.
+  })
+  try {
+    await waitFor('booted', () => fixture.pane.output.text().includes('dock.quiet-composer.composer'))
+    // The row paints (el+styles negotiated)...
+    const nodes = (await import('../support/tsp-picker-wire.ts')).wireNodes(fixture.pane)
+    const modelButton = nodes.find(node => node.k === 'el' && /\.composer-model-s\d+$/.test(String(node.id)))
+    assert.ok(modelButton, 'the composer row paints on the el+styles pane')
+    // ...but the renderer's modelPresentation is undefined (picker kinds
+    // missing), so the click must be refused with the SAME notice the typed
+    // route shows — never the PiTui fallback, never a silent no-op.
+    fixture.pane.event({
+      ev: 'action',
+      sf: fixture.pane.frames().at(-1)!.sf,
+      id: modelButton!.id,
+      act: 'click',
+    })
+    await waitFor('the capability refusal', () =>
+      fixture.pane.output.text().includes("This command's UI is not available in TSP yet"))
+    assert.equal(picker(fixture.pane), undefined, 'no picker opened (none can be presented)')
+    assert.equal(fixture.modelCalls(), 0, 'and no model request was dispatched')
+  } finally {
+    await fixture.settle() // window: bounded teardown settle for the real Direct composition fixture
   }
 })
 
@@ -2579,7 +3056,7 @@ test('native Model: the Reader survives a resize and Back returns to its real or
   await resize(pane, 100)
   await enterDetails(pane)
   const facts = readerFacts(pane)
-  const model = facts.get('reader-model')
+  const model = facts.get('reader-kv-identity:Model')
   await resize(pane, WIDE_COLS)
   await waitUntil('the Reader survives the resize', () =>
     inDetails(pane) && props(pane).title === undefined)
@@ -2590,7 +3067,7 @@ test('native Model: the Reader survives a resize and Back returns to its real or
   action(pane, 'back')
   await waitUntil('back on the list', () => onCatalogue(pane))
   await openDetails(pane)
-  assert.equal(readerValue(pane, 'reader-model'), model, 'the same model is still described')
+  assert.equal(readerFact(pane, 'identity', 'Model'), model, 'the same model is still described')
   await backToCatalogue(pane)
   m.handle.close()
 })
@@ -2720,4 +3197,161 @@ test('native Model: the Reader keeps its own view keys through a running or fail
   // browse and every write.
   assert.equal(props(pane).query, '', 'and it did not turn the key into a search edit')
   m.handle.close()
+})
+
+test('native Model: a Focus queued behind a stalled frame credit flushes only the newest one', async (t) => {
+  // SDK 0.2.0 drops an already-queued `focus` op when a newer `Surface.focus()`
+  // arrives: a Focus still waiting for a frame credit may name a node of a View
+  // the client never received. The application keeps doing exactly what it did
+  // before — it decides the seat and calls `surface.focus(desired)` once, with no
+  // app-side queue and no second keyboard seat — so what this case qualifies is
+  // the pair: the newest queued Focus is the one that reaches the wire, and the
+  // stale hand-back to the composer never does. The pane's credits are the SDK's
+  // own advertised two, never changed by the test.
+  const m = await mounted(t)
+  await m.ready()
+  const { pane } = m
+  /** The `['focus', id]` ops the SDK really SENT, in order: a queued op is not wire yet. */
+  const sentFocus = (): Array<string | null> =>
+    pane.frames().flatMap(frame => frame.ops
+      .filter(op => op[0] === 'focus')
+      .map(op => (op[1] === null ? null : String(op[1]))))
+  const openCaret = sentFocus().at(-1)
+  assert.equal(typeof openCaret, 'string', 'the open picker put the caret somewhere')
+  assert.notEqual(openCaret, 'dock.composer', 'and that place is not the composer')
+
+  t.after(() => pane.releaseAcks())
+  pane.holdAcks()
+  // Spend the two credits as OBSERVED commits, one wait per credit: a frame the
+  // pane draws while the acks are held is RECORDED and not acked, so
+  // `unackedFrames()` is the authoritative fact that both credits are gone — no
+  // fixed window stands in for the credit boundary.
+  for (const next of [twinEffortDirectory, directory]) {
+    const before = pane.frameCount()
+    m.handle.setDirectory(next)
+    await waitUntil('a real frame spends one pane credit', () => pane.frameCount() > before)
+  }
+  assert.equal(pane.unackedFrames().length, 2, 'both advertised credits are held un-acked')
+  const stalled = pane.frameCount()
+  // One more View change with no credit left. Nothing can send it: the ONLY
+  // producer of an ack in this fixture is `releaseAcks()`, which this case holds
+  // until the flush below, so "the frame count cannot move" is a structural
+  // consequence of the stalled credit rather than a window we happened to wait in.
+  m.handle.setDirectory(twinEffortDirectory)
+  const beforeQueue = sentFocus()
+
+  // The two caret changes are SYNCHRONOUS dispatches: `handle.close()`, `open()`
+  // and `setDirectory()` run `render()` and then `applyFocus()` inside the same
+  // call (`session.ts`: the focus op always follows `surface.render`), so both
+  // `surface.focus()` calls are already in the SDK's queue by the time they
+  // return. The assertions below therefore observe the queue's SILENCE on the
+  // wire, not the absence of a dispatch.
+  m.handle.close()
+  const writes: unknown[] = []
+  const again = m.renderer.modelPresentation!.open({
+    subject: { sessionless: true },
+    entry: 'models',
+    isCurrent: () => true,
+    retry: () => {},
+    apply: (selection: unknown) => { writes.push(selection); return 'committed' },
+    runOwned: (label, task, options) =>
+      runOwned(label, task, { ...options, diag: { debug() {}, warn() {}, error() {} } as never }),
+  })
+  again.setLoading()
+  again.setDirectory(directory)
+  assert.deepEqual(sentFocus(), beforeQueue,
+    'neither caret change reached the wire while the credit was blocked')
+  assert.equal(pane.frameCount(), stalled, 'and no frame was sent behind the stall either')
+
+  pane.releaseAcks()
+  await waitUntil('the flush writes the frame that carries the queued ops', () => sentFocus().length > beforeQueue.length)
+  // One recorded frame is one complete APC message, so everything it queued is
+  // already readable at this point: a stale Focus would have landed in the SAME
+  // flush frame (that is exactly what the SDK-level mutation witness shows).
+  const flushed = sentFocus().slice(beforeQueue.length)
+  assert.deepEqual(flushed, [openCaret],
+    `the flush carries ONE Focus, the current seat's, never the stale composer hand-back: ${JSON.stringify(flushed)}`)
+  assert.equal(picker(pane) !== undefined, true, 'and the page that Focus names is really painted')
+  assert.equal(inDetails(pane), false, 'the reopened catalogue is the current page')
+  assert.deepEqual(writes, [], 'and none of this flush wrote anything')
+  again.close()
+})
+
+test('native Model: a pane WITHOUT the kv kind still opens the complete text Reader', async (t) => {
+  // The degradation is a HANDSHAKE fact: this pane advertises exactly the base
+  // kinds the Model entry already required (`picker`/`row`/`overlay`) plus `text`
+  // for its fact rows, and NO `kv`. The command must still be admitted, the Reader
+  // must still carry every fact in its ORIGINAL text form, and nothing may become
+  // a write because the display capability is missing.
+  const m = await mounted(t, { sessionless: false }, {
+    kinds: ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'picker', 'row', 'overlay', 'text'],
+    features: ['flow', 'styles'],
+  })
+  await m.ready()
+  assert.ok(m.renderer.modelPresentation, 'the missing `kv` kind refuses no business entry')
+  await openDetails(m.pane)
+  assert.equal(hasKvNode(m.pane), false, 'not one `kv` node reached a pane that cannot draw one')
+  assert.equal(readerFact(m.pane, 'identity', 'Model'), undefined, 'and no grid is read as the fact source')
+  // The ORIGINAL per-fact text nodes, by the keys the view gives them, complete.
+  assert.equal(readerValue(m.pane, 'reader-model'), 'Twin', 'the model name is a text fact')
+  assert.equal(readerValue(m.pane, 'reader-provider'), 'A (a)', 'the provider fact is a text fact')
+  assert.equal(readerValue(m.pane, 'reader-id'), 'same', 'the id fact is a text fact')
+  assert.equal(readerValue(m.pane, 'reader-fact-default'), 'a · same · high', 'the Default fact is a text fact')
+  assert.equal(readerValue(m.pane, 'reader-description'), undefined, 'this fixture model carries no description')
+  assert.equal(
+    nodes(m.pane).filter((node) => node.k === 'text' && /\.reader-(model|provider|id|fact-default)$/.test(node.id)).length,
+    4,
+    'each fact is painted ONCE, as the text row this pane can show',
+  )
+  // Back still returns, and the read-only page still never writes.
+  assert.equal(m.writes.length, 0, 'a degraded Reader writes nothing either')
+  await backFromDetails(m.pane)
+  await waitUntil('Back returns to the catalogue', () => onCatalogue(m.pane))
+  m.handle.close()
+})
+
+test('native Model: a gridded fact keeps the SAME sanitizer as the text branch', async (t) => {
+  // The grid is a new LAYOUT for facts that already had a sanitizer contract, so the
+  // `kv` branch must not become a second, unsanitised path to the wire: control bytes
+  // the text branch already removed stay removed inside a `v`, and a CJK or unbroken
+  // run still arrives WHOLE.
+  const m = await mounted(t, { sessionless: false })
+  const hostile = 'Alpha\u001b]52;c;ZWN5aA==\u0007 Provider\u001b[31m\u0007'
+  const cjkId = 'model/完整可读-identifier'
+  await resize(m.pane, WIDE_COLS)
+  await m.ready(budgetDirectory({ providerName: hostile, modelId: cjkId, description: 'd' }))
+  await openDetails(m.pane)
+  const identity = readerKv(m.pane, 'identity')
+  assert.ok(identity, 'the pane negotiated `kv`')
+  const wire = JSON.stringify(nodes(m.pane))
+  assert.ok(!wire.includes('\u001b]52;'), 'no OSC-52 clipboard sequence reaches the wire')
+  assert.ok(!wire.includes('\u001b[31m'), 'no raw SGR reaches the wire')
+  assert.ok(!wire.includes('\u0007'), 'no raw BEL reaches the wire')
+  // The readable content survives: the sanitizer removes control bytes, never text.
+  const provider = readerFact(m.pane, 'identity', 'Provider')
+  assert.ok(provider?.includes('Alpha'), `the provider name survives: ${JSON.stringify(provider)}`)
+  assert.ok(provider?.includes('Provider'), 'including the text that followed the removed bytes')
+  assert.equal(readerFact(m.pane, 'identity', 'ID'), cjkId, 'a CJK/unbroken id is carried complete')
+  m.handle.close()
+})
+
+test('native Model: a pane without the base picker kinds is still refused (kv changed nothing)', async (t) => {
+  // The pre-existing fail-closed gate must not have been loosened by adding a
+  // display kind: without `picker`/`row`/`overlay` there is no native Model entry
+  // at all, whether or not `kv` is offered.
+  const pane = installTspPane({ kinds: ['col', 'text', 'kv'], features: ['flow'] })
+  t.after(() => pane.restore())
+  const session = await connect({ timeout: 500, exitHooks: false })
+  assert.ok(session)
+  const renderer = mountTspRenderer(session, {
+    copyVisual: async () => false,
+    requestExit() {},
+    onFatal: (e) => assert.fail(String(e)),
+  })
+  t.after(() => renderer.dispose())
+  renderer.bindInput({
+    exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {},
+    listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {},
+  })
+  assert.equal(renderer.modelPresentation, undefined, 'the missing BASE kinds still fail closed')
 })

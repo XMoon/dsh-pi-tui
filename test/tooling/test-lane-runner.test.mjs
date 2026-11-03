@@ -279,10 +279,11 @@ test('a malformed concurrency is a FAILURE, not a silent default', () => {
   assert.throws(() => parseConcurrency(['--test-concurrency=-1']), /whole number/u)
 })
 
-test('the lane child never inherits the developer terminal identity', () => {
+test('the lane child never inherits the developer terminal identity or ambient module paths', () => {
   const sanitized = sanitizeTestEnvironment({
     PATH: '/bin',
     HOME: '/home/dev',
+    NODE_PATH: '/home/dev/.local/share/mise/installs/npm-deepseek-ai-dsh/0.2.1-rc.5/node_modules/.mise/node_modules',
     TERM_PROGRAM: 'tern',
     TERM_PROGRAM_VERSION: '0.9.5',
     KITTY_WINDOW_ID: '3',
@@ -307,7 +308,7 @@ test('the lane child never inherits the developer terminal identity', () => {
     PI_TUI_TMUX_KITTY_PLACEHOLDERS: '1',
   })
   assert.deepEqual(sanitized, { PATH: '/bin', HOME: '/home/dev' },
-    'only the developer terminal identity is removed; ordinary environment stays')
+    'only the developer terminal identity and ambient module paths are removed; ordinary environment stays')
   assert.deepEqual(sanitizeTestEnvironment({ PATH: '/bin' }), { PATH: '/bin' })
 })
 

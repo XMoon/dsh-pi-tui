@@ -178,6 +178,12 @@ export const SCOPED_STRING_ALLOWLIST: ReadonlyArray<{ readonly file: string; rea
   // definition the handler and the derived labels consume.
   { file: 'src/tui/keybindings/hints.ts', line: "select: 'alt+v'," },
   { file: 'src/tui/keybindings/hints.ts', line: "copy: 'alt+c'," },
+  // (8c) The TSP composer action row's FIXED keyboard-equivalent labels
+  // (TSP-7 PR-C): Send/Stop reuse the composer's existing fixed keys (Enter,
+  // Ctrl+C — raw SDK key stream, no keymap action, no remap), and the labels
+  // live in the key-label authority the renderer imports.
+  { file: 'src/tui/keybindings/hints.ts', line: "export const TSP_COMPOSER_SEND_LABEL = 'Enter'" },
+  { file: 'src/tui/keybindings/hints.ts', line: "export const TSP_COMPOSER_STOP_LABEL = 'Ctrl+C'" },
   // (9) The History editor-seat tenant's FIXED labels (B3-A, same category as
   // (8)): the seat is a per-surface component contract, so its panel may not
   // hard-code the chords and they cannot come from `keyHint` — no keymap action

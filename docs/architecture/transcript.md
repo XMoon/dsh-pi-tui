@@ -86,12 +86,13 @@ projectTranscriptStructure()
 - `isTranscriptWorkMember()` is the single Process membership authority; the live
   Preparing ownership consumes the SAME predicate, so a settled surfaced
   interaction (question / Plan review) closes the trailing run everywhere.
-  A same-turn `form:'snapshot'` Context row or a proven Working `tool-jobs`
-  Notice may be CARRIED by a Work span, but carriage is the separate display
-  predicate `isFoldableWorkContext()` (`isFoldableSnapshotContext()` for
-  Snapshots; source-form + the durable same-turn next-step claim flag for
-  `tool-jobs`). It never becomes Process, never changes this predicate, and
-  never enters Action/timing aggregates.
+  A same-turn `form:'snapshot'` Context row, a proven Working `tool-jobs`
+  Notice or a proven same-turn `agent-message` relay may be CARRIED by a Work
+  span, but carriage is the separate display predicate
+  `isFoldableWorkContext()` (`isFoldableSnapshotContext()` for Snapshots;
+  exact source-form pair + the durable same-turn next-step claim flag for
+  `tool-jobs`/`notice` and `agent-message`/`relay`). It never becomes Process,
+  never changes this predicate, and never enters Action/timing aggregates.
 - `clusterAdjacentAmbientContext()` remains the single cluster membership
   authority, computed from raw adjacency before any row is hidden. A
   snapshot-only cluster can be nested inside a Work span as one structural
@@ -241,12 +242,13 @@ Compact:  User · Work(A)      · Assistant A · Work(B)      · Notice · Work(
   Attention rows always end the current span and stay visible at their
   chronological position.
 - Every surfaced Context presentation is a Work boundary **except a foldable
-  Snapshot or a proven Working `tool-jobs` Notice** (Owner decision):
-  a `form:'snapshot'` singleton, a snapshot-only raw-adjacent cluster, or a
-  `tool-jobs`/`notice` row with the durable same-turn `next-step` claim flag is
-  carried by the same-turn Work instead of splitting it. A mixed
+  Snapshot, a proven Working `tool-jobs` Notice or a proven same-turn
+  `agent-message` relay** (Owner decision): a `form:'snapshot'` singleton, a
+  snapshot-only raw-adjacent cluster, or a `tool-jobs`/`notice` /
+  `agent-message`/`relay` row with the durable same-turn `next-step` claim flag
+  is carried by the same-turn Work instead of splitting it. A mixed
   `instructions`/`catalog` + `snapshot` cluster, an unqualified/foreign
-  `notice`, `relay`, `recall` and every unknown form remain boundaries. The
+  `notice`/`relay`, `recall` and every unknown form remain boundaries. The
   carried Context keeps its own row/cluster disclosure inside the expanded
   Work; a collapsed Work shows neither its header nor its body. Context never
   contributes an Action, ActionStats entry or wall-clock timing to the span.
@@ -438,41 +440,44 @@ the same-turn Work?":
   authority is introduced: this is a presentation-only refinement of the
   existing Owner-accepted three-preset contract.
 
-### Working `tool-jobs` Notice follows Work
+### Working same-turn delivery follows Work
 
-One non-Snapshot Context row has the same narrow carriage: a producer-declared
-`kind:'tool-jobs'` / `form:'notice'` completion Notice that the agent inbox
-delivered through **`next-step` during the same still-working turn**. This is
-a deliberately narrow exception, never a generic notice rule:
+Two non-Snapshot Context rows have the same narrow carriage: a producer-declared
+`kind:'tool-jobs'` / `form:'notice'` completion Notice, or a producer-declared
+`kind:'agent-message'` / `form:'relay'` message, that the agent inbox delivered
+through **`next-step` during the same still-working turn**. This is a
+deliberately narrow exception, never a generic notice/relay rule:
 
-- Qualification requires ALL of: surfaced Context + `sourceKind ===
-  'tool-jobs'` + `form === 'notice'` + the fold's presentation-only
-  `contextPresentation.sameTurnNextStep` flag. That flag is derived by the
-  `TranscriptFolder` from the durable `agent/inbox/spliced` insert/claim
-  identity chain (the same message id inserted into `next-step`, claimed, then
-  materialized as `user/message` in the SAME turn) — never from
-  `Agent.status`, the summary/header text, the TUI Working indicator or visual
+- Qualification requires ALL of: surfaced Context + the EXACT source/form pair
+  (`tool-jobs`/`notice` or `agent-message`/`relay`) + the fold's
+  presentation-only `contextPresentation.sameTurnNextStep` flag. That flag is
+  derived by the `TranscriptFolder` from the durable `agent/inbox/spliced`
+  insert/claim identity chain (the same message id inserted into `next-step`,
+  claimed, then materialized as `user/message` in the SAME turn) — never from
+  `Agent.status`, the summary/body text, the TUI Working indicator or visual
   adjacency.
 - A `next-turn` idle wakeup, a next-step message claimed in a DIFFERENT turn,
-  a foreign/legacy log, a missing claim, or any other producer (including
-  `subagent-settled`, relay/recall/unknown and future producers) keeps the
-  existing independent Context behavior: the notice explains why the agent was
-  woken and must stay visible.
-- The qualified Notice is carried by the same-turn Work exactly like a
-  Snapshot singleton (it can appear at the start, middle or end; it never joins
+  a foreign/legacy log, a missing claim, a crossed source/form pair, or any
+  other producer (including `subagent-settled` and every recall/unknown/future
+  producer) keeps the existing independent Context behavior: the delivery
+  explains why the agent was woken and must stay visible.
+- The qualified row is carried by the same-turn Work exactly like a Snapshot
+  singleton (it can appear at the start, middle or end; it never joins
   `ContextCluster`, which still accepts only raw-adjacent ambient rows). A Work
   still requires at least one real Process row; a Process-free segment keeps
-  the original Notice card and never mints an Activity.
+  the original card (Notice or Agent message) and never mints an Activity.
 - It stays Context: no Action, ActionStats or span timing contribution. Its
-  own Notice card header/summary/body disclosure and search reachability are
-  preserved.
+  own card identity/header/body disclosure and search reachability are
+  preserved (the Agent relay keeps the readable identity contract while it is
+  folded).
 - Preset behavior matches the Snapshot carriage: Full keeps the raw chronology
   and card; Compact folds it under the Activity and restores the card when the
-  Work opens; Focus collapsed hides a qualified mid-turn Notice inside the
-  real Thought (the opening user guard still applies: a Notice before the first
-  non-steer user, and every `next-turn` wakeup, stays foundation), and expanded
-  Focus restores it once in raw order. An unqualified Notice keeps the existing
-  pre/post-Thought rule.
+  Work opens; Focus collapsed hides a qualified mid-turn delivery inside the
+  real Thought (the opening user guard still applies: a delivery before the
+  first non-steer user, and every `next-turn` wakeup, stays foundation), and
+  expanded Focus restores it once in raw order. An unqualified Notice or relay
+  keeps the existing pre/post-Thought rule; a `subagent-settled` Notice is
+  never qualified and therefore always stays independently visible.
 - The durable claim flag is presentation-only (`sameTurnNextStep` on
   `TranscriptContextPresentation`); it is never written back to the Session
   source, message, model input or Host/Remote wire. Search/click/Ctrl+O,
@@ -535,22 +540,29 @@ class:
 - An opening ambient burst (the initial user plus the immediately following
   surfaced Context rows) stays above the Thought in both Focus states; a
   mid-turn Context row/cluster returns to its chronological position when the
-  Thought is expanded. **Exception:** a foldable Context row
-  (Snapshot or proven Working `tool-jobs` Notice) after the initial user stops
-  the foundation boundary and follows the Thought instead (hidden while
+  Thought is expanded. **Exception:** a foldable Context row (Snapshot, a
+  proven Working `tool-jobs` Notice or a proven same-turn `agent-message`
+  relay) after the initial user stops the foundation boundary and follows the
+  Thought instead (hidden while
   collapsed, restored once in raw order when expanded); a mixed
   `instructions`/`catalog` + `snapshot` cluster keeps the foundation position as
   one indivisible unit. A Context row that truly precedes the initial user is
   never moved across that user.
 - Collapsed Focus also hides a foldable Snapshot-only turn (and a proven Working
-  `tool-jobs` Notice with a Thought owner) inside its real Thought; both remain
-  recoverable there. Without an activity owner the rows fail open.
+  `tool-jobs` Notice or same-turn Agent relay with a Thought owner) inside its
+  real Thought; all remain recoverable there. A same-turn Agent relay
+  additionally requires a REAL Work (Process) owner: the row must be a member
+  of a canonical Work span, so a Process elsewhere in the same turn is not
+  enough when a hard boundary separates the relay from it. Without that owner
+  the relay stays independently visible (fail open) instead of disappearing
+  into an activity-only Thought.
 - **Userless (next-turn wakeup) turns:** there is no initial user to anchor the
   foundation. The leading run of NON-foldable Context — the wakeup Notice and
-  any `instructions`/`catalog` — is the foundation; the first foldable Snapshot
-  or proven Working `tool-jobs` Notice starts Thought content. The wakeup cause
-  therefore stays visible while later internal Snapshot / next-step notices
-  fold, and expanded Focus restores them once in raw order.
+  any `instructions`/`catalog` — is the foundation; the first foldable
+  Snapshot, proven Working `tool-jobs` Notice or same-turn Agent relay starts
+  Thought content. The wakeup cause therefore stays visible while later
+  internal Snapshot / next-step deliveries fold, and expanded Focus restores
+  them once in raw order.
 - Collapsed Focus distinguishes CAUSAL INPUT from MID-TURN PROCESS FEEDBACK by
   the producer-declared `form` and raw position, never by source kind: a
   mid-turn `form:'notice'` (a background job or subagent settling while the
@@ -558,22 +570,24 @@ class:
   (visible process feedback, never hidden inside
   the collapsed Thought and never a candidate for its Action slot); a notice
   inside the turn's opening foundation (the `thoughtLeadBoundary()` area) stays
-  BEFORE the Thought because it explains why the turn started; a mid-turn relay
-  stays visible because it is external Agent-authored input. **v2 exception:** a
-  `tool-jobs` Notice with the durable same-turn `next-step` claim flag follows
-  the Thought instead (hidden while collapsed, restored once in raw order);
-  `next-turn` wakeups and every unqualified/foreign notice keep this existing
-  post-Thought or foundation rule. Expanded Focus restores every notice at its
-  exact raw position. Compact keeps every UNQUALIFIED notice standalone (a
-  qualified Working `tool-jobs` Notice folds into its Activity), and Full keeps
-  the full chronology for every notice.
+  BEFORE the Thought because it explains why the turn started; an UNQUALIFIED
+  mid-turn relay stays visible because it is external Agent-authored input.
+  **Working-delivery exception:** a `tool-jobs`/`notice` or
+  `agent-message`/`relay` row with the durable same-turn `next-step` claim flag
+  follows the Thought instead (hidden while collapsed, restored once in raw
+  order); `next-turn` wakeups and every unqualified/foreign notice or relay
+  keep this existing post-Thought or foundation rule. Expanded Focus restores
+  every notice/relay at its exact raw position. Compact keeps every UNQUALIFIED
+  notice/relay standalone (a qualified Working delivery folds into its
+  Activity), and Full keeps the full chronology for every notice/relay.
 - A search hit inside an UNQUALIFIED mid-turn notice needs no Focus-root
   reveal and no special forced-visible path: the row is already visible outside
   the Thought, so ordinary search addresses it like any other surfaced Context
   card. A match inside the folded Notice payload still opens through the row's
-  own ordinary message disclosure. A QUALIFIED Working `tool-jobs` Notice
-  follows the Work/Thought ancestry instead (the Work/Thought reveal opens it,
-  then its own card disclosure shows the payload).
+  own ordinary message disclosure. A QUALIFIED Working delivery (tool-jobs
+  Notice or same-turn Agent relay) follows the Work/Thought ancestry instead
+  (the Work/Thought reveal opens it, then its own card disclosure shows the
+  payload).
 - Full keeps the original transcript chronology, with ambient clusters
   substituted in place.
 - Context never enters the Focus Think/Tool/Message slots or the tool counts.
@@ -899,8 +913,9 @@ These guarantees hold under bad input, long sessions and rapid live updates:
   mutation re-resolves the current container path instead of a stale identity;
   and an UNQUALIFIED mid-turn notice is already visible outside the collapsed
   Thought, so search reaches it through the ordinary row/message disclosure
-  paths. A proven Working `tool-jobs` Notice is hidden with the Work/Thought
-  and resolves through that ancestor path instead.
+  paths. A proven Working same-turn delivery (`tool-jobs` Notice or Agent
+  relay) is hidden with the Work/Thought and resolves through that ancestor
+  path instead.
 - **Width / grapheme.** Every transcript row family (Work, pending Preparing rows,
   Context cluster, notice, relay, recall) obeys the framebuffer width contract
   at the current width for ASCII, CJK, emoji, combining marks, ZWJ emoji and
@@ -1045,7 +1060,8 @@ row: a chart keeps the exact `ChartBody` values and appends `Copy Data`
 admitted thumbnail and appends `View` / `Copy SVG` (the raw admitted source).
 `src/tui/components/transcript/visual-figure.ts` owns that row and reports the
 cells it ACTUALLY painted; it holds no Session, no keymap and no clipboard. The
-figure's action cells and the thumbnail's real Kitty pixel body are the only
+figure's action cells and the thumbnail's real committed pixel body (a Kitty
+placement or a Direct SIXEL footprint) are the only
 operable cells on those rows — the title, description and a loading/error row
 are inert, and a click inside the figure never folds the Assistant card. The
 fullscreen `onCellPress`/`onCellClick` owner records the painted owner, row,
@@ -1084,8 +1100,12 @@ unsubscribed variant (`releaseUnused`) — a thumbnail variant other rows still
 watch is never dropped. The target width is derived from the real content grant
 (columns, rows and the admitted viewBox ratio inside the existing 2048px /
 4M-pixel budget), never from a fixed size and never by upscaling the thumbnail.
-Preview pixels stay Kitty-only; without that protocol the page says
-`Preview unavailable` while Source and Copy remain fully usable.
+Preview pixels render on Kitty and on Direct SIXEL once the terminal's own
+live DA1, cell-size and background facts admit it; iTerm2 remains intentionally
+outside the Viewer/SVG pixel scope. Without a usable protocol the page says
+`Preview unavailable` while Source and Copy remain fully usable. A Direct SIXEL
+thumbnail's clickable body is the Screen-committed footprint read at hit time,
+never the component's render-time candidate.
 
 ### Display `/copy` for consumed visual markers
 
@@ -1246,8 +1266,8 @@ independent occurrences with independent fold state.
   from the thumbnail's `40×12` limits. States are distinguishable: `Loading…`,
   `Read failed: <sanitized reason>`, `Preview unavailable` (no protocol, an
   empty payload, an unsupported MIME, or a protocol this surface does not
-  support), each with the real name/dimensions/media type/bytes. On a Kitty
-  surface a JPEG/WebP occurrence instead paints the SAME scoped 6A derivative
+  support), each with the real name/dimensions/media type/bytes. On a Kitty or
+  Direct SIXEL surface a JPEG/WebP occurrence instead paints the SAME scoped 6A derivative
   described below: a READY derivative is used immediately (even when the raw
   read has been evicted), and only when none exists yet is the authorized raw
   read requested first. Pending/failed derivatives read `Loading…` /
@@ -1281,7 +1301,8 @@ independent occurrences with independent fold state.
   dimensions. Idle/loading/failed preview states
   paint informational rows only (a bounded `Preview unavailable`), a collapsed
   occurrence starts no conversion, and a body hit exists only when that frame
-  actually emitted the Kitty placement. PNG, iTerm2 (original OSC 1337) and GIF
+  actually emitted the Kitty placement or, on Direct SIXEL, only after the
+  Screen committed the occurrence's raster footprint. PNG, iTerm2 (original OSC 1337) and GIF
   (text fallback) keep their existing paths. The VIEWER consumes the SAME
   scoped derivative instead of staying PNG-only: a JPEG/WebP body click (or a
   `/view-image` selection) paints that PNG while the title/metadata keep the
@@ -1295,14 +1316,15 @@ independent occurrences with independent fold state.
   a read. A candidate selected after the mounted window changed is refused with
   `the image left the current transcript window` and the workspace closes; a
   stale scope is never authorized against the replacement session.
-- **Protocol scope (PR2).** The leased AltScreen renders real pixels through the
-  Kitty protocol only. The pinned AltScreen disables the iTerm2 image
-  capability and its cursor-up framing is outside the fork's ANSI width layer,
-  so the iTerm2 workspace shows the metadata plus `Preview unavailable`; native
-  iTerm2 workspace pixels are deferred to separate renderer/protocol work.
-  Transcript thumbnails keep their per-surface capability behavior; on Kitty
-  both their JPEG/WebP bodies and the Viewer use the SAME bounded derivative
-  above.
+- **Protocol scope.** The leased AltScreen renders real pixels
+  through Kitty and through Direct SIXEL after the terminal's own live DA1,
+  cell-size and background observations admit it. The pinned AltScreen disables
+  the iTerm2 image capability and its cursor-up framing is outside the fork's
+  ANSI width layer, so the iTerm2 workspace shows the metadata plus
+  `Preview unavailable`; native iTerm2 workspace pixels are deferred to
+  separate renderer/protocol work. Transcript thumbnails keep their per-surface
+  capability behavior; on Kitty and Direct SIXEL both their JPEG/WebP bodies
+  and the Viewer use the SAME bounded derivative above.
 
 Authority: `TuiApp` (occurrence projection, last-painted hit classifier, leased
 image workspace), `ImageThumbnail` (info/control/body geometry),

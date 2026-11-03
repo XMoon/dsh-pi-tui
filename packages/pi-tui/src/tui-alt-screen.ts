@@ -30,6 +30,7 @@ import {
 	type ImageProtocol,
 	isImageLine,
 	setCapabilities,
+	type SixelScreenPort,
 	type TerminalCapabilities,
 } from "./terminal-image.ts";
 import {
@@ -187,7 +188,15 @@ export interface TuiAltScreenOptions {
 	 * capability cache is never changed by this option; the existing iTerm2
 	 * suppression/restore lifecycle still applies. (dsh-pi-tui divergence X070.)
 	 */
-	imageProtocolOverride?: ImageProtocol;
+	imageProtocolOverride?: ImageProtocol | "sixel";
+	/**
+	 * The Client-local SIXEL trust port (X072). Present only when a Direct SIXEL
+	 * graphics owner exists for this app: this screen then recognises the owner's
+	 * registered rasters, paints their anchors last, and re-encodes a visible crop
+	 * instead of ever cutting a DCS string. Absent means every existing protocol
+	 * path is untouched.
+	 */
+	sixelScreen?: SixelScreenPort;
 	/** Style a non-current transcript search match. */
 	searchMatchStyle?: (text: string) => string;
 	/** Style the current transcript search match. */
@@ -297,11 +306,19 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly implicitScrollView: ScrollView;
 	private readonly flashes: AltScreenFlashContainer;
 	private altScreenActive = false;
-	private imageProtocol: ImageProtocol = null;
+	private imageProtocol: ImageProtocol | "sixel" = null;
 	/** Per-instance protocol selection; never mutates the process-wide cache. */
-	private readonly imageProtocolOverride?: ImageProtocol;
+	private readonly imageProtocolOverride?: ImageProtocol | "sixel";
 	private savedCapabilities?: TerminalCapabilities;
 	private readonly uploadedKittyImages = new Map<number, CachedKittyImage>();
+	/**
+	 * Per-row trusted SIXEL block height of the LAST painted frame (X074).
+	 *
+	 * Cached instead of re-derived from the line: the previous anchor is a
+	 * registered DCS only while its owner lives, and a disposed raster must still
+	 * have its whole footprint erased.
+	 */
+	private previousSixelRows: number[] = [];
 	private selectionAnchor?: SelectionPoint;
 	private selectionFocus?: SelectionPoint;
 	private selectionGranularity: SelectionGranularity = "character";
@@ -374,7 +391,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		logDirectory?: string,
 		options: TuiAltScreenOptions = {},
 	) {
-		super(terminal, showHardwareCursor, logDirectory);
+		super(terminal, showHardwareCursor, logDirectory, options.sixelScreen);
 		this.implicitDocument = {
 			render: (width) => super.render(width),
 			handleMouse: (event) => super.handleMouse(event),
@@ -599,9 +616,21 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.terminal.write(`${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`);
 		} else {
 			const width = Math.max(1, this.terminal.columns);
-			const documentLines = this.render(width).map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
+			const documentLines = this.render(width)
+				.map((line) => line.replace(OSC133_ZONE_PREFIX, ""))
+				// A component emits an inert candidate marker, never a DCS: the stopped
+				// alt screen must replay its safe text, not the internal identity.
+				.map((line) => this.sixelScreen?.candidate(line)?.fallback ?? line);
 			this.lastDocument = this.applyLineResets(documentLines.map((line) => line.replaceAll(CURSOR_MARKER, ""))).map(
-				(line) => (isImageLine(line) || visibleWidth(line) <= width ? line : sliceByColumn(line, 0, width, true)),
+				(line) =>
+					// A SIXEL raster belongs to the alt screen that just ended: replaying
+					// its DCS as main-screen history text would paint a stale image over
+					// the restored content. (X074.)
+					this.sixelFootprint(line) !== undefined
+						? ""
+						: isImageLine(line) || visibleWidth(line) <= width
+							? line
+							: sliceByColumn(line, 0, width, true),
 			);
 			let buffer = `${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}${DISABLE_AUTOWRAP}`;
 			for (let row = 0; row < this.lastDocument.length; row++) {
@@ -673,9 +702,80 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	protected override resetRenderState(): void {
 		this.previousScreen = [];
+		this.previousSixelRows = [];
 		this.previousScreenWidth = 0;
 		this.previousScreenHeight = 0;
 		this.currentLayout = undefined;
+	}
+
+	/**
+	 * Per-row trusted SIXEL block heights for this frame, dropping any block a
+	 * visible overlay paints over (X074).
+	 *
+	 * The raster is ONE command covering its whole footprint and it is written
+	 * LAST, so a per-row decision would either cover the overlay text or leave
+	 * half a picture. Such a block yields this frame; its identity row above stays
+	 * on screen and the block returns when the overlay is gone (the anchor line
+	 * changes, so the next frame re-enters the changed range).
+	 */
+	/**
+	 * Report this frame's physical SIXEL set after the write (X074).
+	 *
+	 * `sixelDemands` is the final layout's visible set; a block that materialized
+	 * is retained with its exact DCS (emitted only when this frame really wrote
+	 * that row), while a granted-but-unready block has no DCS and simply keeps
+	 * its grant for the owner to task the lane.
+	 */
+	private commitSixelFrame(
+		frame: LayoutFrame,
+		screen: readonly string[],
+		changedRows: readonly boolean[],
+		repainted: boolean,
+	): void {
+		const port = this.sixelScreen;
+		if (port === undefined) return;
+		const retained: Array<{ row: number; line: string; dcs: string; cropTopRows: number; visibleRows: number; emitted: boolean }> = [];
+		for (const demand of frame.sixelDemands) {
+			const row = demand.physicalRow;
+			const line = screen[row] ?? "";
+			const footprint = port.footprint(line);
+			if (footprint === undefined) continue;
+			retained.push({
+				row,
+				line: demand.line,
+				dcs: line,
+				cropTopRows: demand.cropTopRows,
+				visibleRows: footprint.rows,
+				emitted: repainted || changedRows[row] !== false,
+			});
+		}
+		retained.sort((left, right) => right.row - left.row);
+		port.framePainted(
+			this,
+			retained.map(({ line, dcs, cropTopRows, visibleRows, emitted }) => ({ line, dcs, cropTopRows, visibleRows, emitted })),
+		);
+	}
+
+	private prepareSixelRows(screen: string[]): number[] {
+		const rows = new Array<number>(screen.length).fill(0);
+		let any = false;
+		for (let row = 0; row < screen.length; row++) {
+			const footprint = this.sixelFootprint(screen[row] ?? "");
+			if (footprint === undefined) continue;
+			rows[row] = footprint.rows;
+			any = true;
+		}
+		if (!any) return rows;
+		if (this.hasOverlayEntries) {
+			for (let row = 0; row < rows.length; row++) {
+				const height = rows[row] ?? 0;
+				if (height === 0) continue;
+				if (!this.linesCoveredByOverlay(row, row + height - 1, screen.length)) continue;
+				screen[row] = "";
+				rows[row] = 0;
+			}
+		}
+		return rows;
 	}
 
 	scrollBy(lines: number): void {
@@ -805,7 +905,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 
 		const shouldRevealSelection = search.selectionMode !== "retain";
-		const result = search.index.search(lines, search.query);
+		// A trusted SIXEL anchor is a device command, not searchable text: indexing
+		// its bytes would report matches on a row with no visible text and reveal a
+		// viewport that cannot show them. The row is kept (as empty) so every other
+		// row's index and every match's row stay aligned. (X074.)
+		const isEmptyImageRow = (line: string): boolean =>
+			this.sixelFootprint(line) !== undefined || this.sixelScreen?.candidate(line) !== undefined;
+		const corpus = lines.some(isEmptyImageRow)
+			? lines.map((line) => (isEmptyImageRow(line) ? "" : line))
+			: lines;
+		const result = search.index.search(corpus, search.query);
 		const matches = result.matches;
 		search.matches = matches;
 		if (!result.changed && search.selectionMode === "retain") return false;
@@ -2161,6 +2270,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const lines: string[] = [];
 		for (let row = selection.start.row; row <= selection.end.row; row++) {
 			const line = sourceLines[row] ?? "";
+			// A trusted SIXEL anchor is a device command, not transcript text: it is
+			// never parsed for its cells and never copied. (X074.)
+			if (this.isRenderableImageLine(line)) {
+				lines.push("");
+				continue;
+			}
 			const columns = this.getSelectionColumns(line, row, selection);
 			const sliced = stripTerminalSequences(
 				sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),
@@ -2295,7 +2410,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const result = [...screen];
 		for (const [row, ranges] of rangesByRow) {
 			let line = result[row] ?? "";
-			if (isImageLine(line)) continue;
+			// A trusted SIXEL anchor is a device command: slicing it to wrap a match
+			// would emit an unterminated DCS. (X074.)
+			if (this.isRenderableImageLine(line)) continue;
 			const lineWidth = visibleWidth(line);
 			for (const range of ranges.sort((a, b) => b.startCol - a.startCol)) {
 				const startCol = Math.min(range.startCol, lineWidth);
@@ -2375,7 +2492,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				row > maxRow ||
 				row < screenSelection.start.row ||
 				row > screenSelection.end.row ||
-				isImageLine(line)
+				// A trusted SIXEL anchor is never selected/copied AND never re-wrapped
+				// into an unterminated DCS. (X074.)
+				this.isRenderableImageLine(line)
 			) {
 				return line;
 			}
@@ -2408,7 +2527,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const clip = box?.clip;
 		if (!clip || clip.width <= 0 || clip.height <= 0) return screen;
 		const row = clip.y + clip.height - 1;
-		if (row >= screen.length || isImageLine(screen[row] ?? "")) return screen;
+		if (row >= screen.length || this.isRenderableImageLine(screen[row] ?? "")) return screen;
 		const scrollbarColumn = box ? getScrollbarGeometry(box)?.column : undefined;
 		const label = truncateToWidth(this.scrollToEndIndicator(), clip.width, "");
 		const labelWidth = visibleWidth(label);
@@ -2433,6 +2552,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const line = flashLines[row]!;
 			const flashWidth = visibleWidth(line);
 			if (flashWidth === 0) continue;
+			// A trusted SIXEL anchor owns the whole row: compositing would slice the
+			// command, so the flash yields that row this frame. (X074.)
+			if (this.isRenderableImageLine(result[row] ?? "")) continue;
 			result[row] = compositeTuiLine(result[row] ?? "", line, width - flashWidth, flashWidth, width);
 		}
 		return result;
@@ -2443,9 +2565,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const width = Math.max(1, this.terminal.columns);
 		const height = Math.max(1, this.terminal.rows);
 		const root = this.layoutRoot ?? this.implicitScrollView;
-		let nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
+		let nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender(), this.sixelScreen);
 		if (this.refreshSearch(nextLayout)) {
-			nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
+			nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender(), this.sixelScreen);
+		}
+		// The final layout is the visibility authority: grant residency to what it
+		// really shows, and recompose ONCE when the grant set changed. (X074.)
+		if (this.sixelScreen !== undefined) {
+			if (this.sixelScreen.reconcileVisible(this, nextLayout.sixelDemands)) {
+				nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender(), this.sixelScreen);
+			}
 		}
 		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 		screen = this.applySearchHighlights(screen, nextLayout);
@@ -2463,9 +2592,29 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.applySelection(screen, nextLayout);
 		screen = this.compositeFlashes(screen, width, height);
 
+		// The trusted SIXEL blocks of THIS frame, after overlay coverage yielded
+		// (X074). Computed before the line resets because an anchor DCS must never
+		// be normalized, and because a dropped block is plain blank content.
+		const sixelRows = this.prepareSixelRows(screen);
+		// A block that yielded to an overlay/scrollbar paints no pixels: its demand
+		// must not keep a residency slot. The paint already dropped it; reconcile the
+		// filtered set so the owner revokes the grant for the NEXT frame.
+		if (this.sixelScreen !== undefined) {
+			// Only an overlay/scrollbar that actually covers the block removes its
+			// demand; a merely PENDING block (no raster yet) must keep its grant so
+			// the owner can encode it.
+			const paintedDemands = nextLayout.sixelDemands.filter(
+				(demand) =>
+					!this.linesCoveredByOverlay(demand.physicalRow, demand.physicalRow + demand.visibleRows - 1, screen.length),
+			);
+			if (paintedDemands.length !== nextLayout.sixelDemands.length) {
+				this.sixelScreen.reconcileVisible(this, paintedDemands);
+			}
+		}
+
 		const cursorPos = this.extractCursorPosition(screen, height);
 		screen = this.applyLineResets(screen).map((line) => {
-			if (isImageLine(line) || visibleWidth(line) <= width) return line;
+			if (this.isRenderableImageLine(line) || visibleWidth(line) <= width) return line;
 			return sliceByColumn(line, 0, width, true);
 		});
 
@@ -2473,7 +2622,22 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.previousScreen.length === 0 || this.previousScreenWidth !== width || this.previousScreenHeight !== height;
 		const changedRows = screen.map((line, row) => line !== this.previousScreen[row]);
 		const imageAnchorsNeedRedraw = screen.some(
-			(line, row) => changedRows[row] && (isImageLine(line) || isImageLine(this.previousScreen[row] ?? "")),
+			(line, row) =>
+				changedRows[row] &&
+				(this.isRenderableImageLine(line) || this.isRenderableImageLine(this.previousScreen[row] ?? "")),
+		);
+		// A SIXEL raster is ONE command: a write on ANY row it covers destroys the
+		// pixels there, so a changed row inside an old or new block forces the
+		// whole block to be cleared and repainted (X074).
+		const sixelCoveredRows = new Set<number>();
+		for (const declared of [this.previousSixelRows, sixelRows]) {
+			for (let row = 0; row < declared.length; row++) {
+				const rows = declared[row] ?? 0;
+				for (let offset = 0; offset < rows; offset++) sixelCoveredRows.add(row + offset);
+			}
+		}
+		const sixelNeedRedraw = changedRows.some(
+			(changed, row) => changed && (sixelCoveredRows.has(row) || (sixelRows[row] ?? 0) > 0),
 		);
 		const isWezTerm = Boolean(process.env.WEZTERM_PANE) || process.env.TERM_PROGRAM?.toLowerCase() === "wezterm";
 		const imageCellsNeedRedraw =
@@ -2532,9 +2696,39 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				buffer += `\x1b[${row + 1};1H${preparedKittyScreen.lines[row] ?? ""}`;
 			}
 		} else {
+			// Clear every row an OLD or NEW trusted SIXEL block covers before any
+			// text lands on it: `CSI 2K` erases the raster cells of exactly that
+			// row (a real Windows Terminal observation, not an inference), and the
+			// anchor-only clear leaves pixels behind. (X074.)
+			if (sixelNeedRedraw) {
+				for (const row of [...sixelCoveredRows].sort((left, right) => left - right)) {
+					if (row < 0 || row >= height) continue;
+					buffer += `\x1b[${row + 1};1H\x1b[2K`;
+				}
+			}
 			for (let row = 0; row < height; row++) {
-				if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
+				// A row the SIXEL clear pass erased has lost whatever text it carried,
+				// even when the new frame's text is byte-identical to the old one: it
+				// must be written again before the raster. Skipping it here would leave
+				// a blank hole where unchanged text (a scrollbar cell, a border) used to
+				// be. (X074.)
+				const clearedBySixel = sixelNeedRedraw && sixelCoveredRows.has(row);
+				if (!fullRedraw && !imagesNeedRedraw && !clearedBySixel && screen[row] === this.previousScreen[row]) continue;
+				// An anchor is a device command, not cell text: text (border,
+				// overlay, scrollbar, search highlight) is written first, and the
+				// command follows in the pass below.
+				if ((sixelRows[row] ?? 0) > 0) continue;
 				buffer += `\x1b[${row + 1};1H\x1b[2K${preparedKittyScreen.lines[row] ?? ""}`;
+			}
+			// ONE DCS per visible, uncovered block, at its own absolute row and only
+			// after every text write of this frame. Sixel and Kitty are mutually
+			// exclusive protocol modes, so this pass never mixes with
+			// `drawKittyImagesLast`.
+			if (fullRedraw || sixelNeedRedraw) {
+				for (let row = 0; row < height; row++) {
+					if ((sixelRows[row] ?? 0) === 0) continue;
+					buffer += `\x1b[${row + 1};1H${screen[row]}`;
+				}
 			}
 		}
 
@@ -2546,8 +2740,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		buffer += END_SYNCHRONIZED_OUTPUT;
 		this.terminal.write(buffer);
+		this.commitSixelFrame(nextLayout, screen, changedRows, fullRedraw || sixelNeedRedraw);
 
 		this.previousScreen = screen;
+		this.previousSixelRows = sixelRows;
 		this.previousScreenWidth = width;
 		this.previousScreenHeight = height;
 		this.currentLayout = nextLayout;

@@ -25,6 +25,10 @@ import {
 	registerKittyImageMetadata,
 	resetCapabilitiesCache,
 	setCapabilities,
+	type SixelScreenFootprint,
+	type SixelFrameRaster,
+		type SixelScreenPort,
+		type SixelVisibleCandidate,
 } from "../src/terminal-image.ts";
 import type { TuiMouseEvent } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
@@ -4449,6 +4453,445 @@ describe("TuiAltScreen overlay text selection (X068)", () => {
 				assert.ok(!wire.includes("\x1b[2J"), "explicit null keeps the text-only branch");
 				tui.stop();
 				assert.strictEqual(getCapabilities().images, "kitty", "the process capability is untouched");
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+	});
+
+	describe("trusted SIXEL screen port (X074)", () => {
+		/** A complete DCS the port below is the only thing that may recognize. */
+		const raster = (id: string): string => `\x1bP0;1;q"1;1;40;36#0;2;100;0;0${id}\x1b\\`;
+
+		class RecordingSixelPort implements SixelScreenPort {
+			readonly rasters = new Map<string, SixelScreenFootprint>();
+
+			register(dcs: string, footprint: SixelScreenFootprint): string {
+				this.rasters.set(dcs, footprint);
+				return dcs;
+			}
+
+			footprint(line: string): SixelScreenFootprint | undefined {
+				return this.rasters.get(line);
+			}
+
+			crop(line: string, _cropTopRows: number, _visibleRows: number): string | undefined {
+				return line;
+			}
+			candidate(_line: string): undefined {
+				return undefined;
+			}
+
+			reconcileVisible(_screen: object, _demands: readonly SixelVisibleCandidate[]): boolean {
+				return false;
+			}
+
+			materialize(_line: string, _cropTopRows: number, _visibleRows: number): string | undefined {
+				return undefined;
+			}
+
+			framePainted(_screen: object, _retained: readonly SixelFrameRaster[]): void {}
+		}
+
+		class Block {
+			dcs: string | undefined;
+
+			render(): string[] {
+				return this.dcs === undefined ? ["image", "text"] : ["image", this.dcs, "", ""];
+			}
+
+			invalidate(): void {}
+		}
+
+		function wire(terminal: RecordingTerminal): string {
+			return terminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => (event.type === "write" ? event.data : ""))
+				.join("");
+		}
+
+		it("writes every text row of the frame before the ONE raster", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				const block = new Block();
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+
+				block.dcs = port.register(raster("A"), { columns: 4, rows: 3 });
+				terminal.events.length = 0;
+				tui.renderNow();
+				await terminal.waitForRender();
+				const output = wire(terminal);
+				const anchorAt = output.indexOf(block.dcs);
+				const textAt = output.indexOf("image");
+				assert.ok(anchorAt >= 0, "the raster is painted");
+				assert.ok(textAt >= 0, "the text row is repainted");
+				assert.ok(textAt < anchorAt, "text first, pixels last");
+				assert.ok(!output.includes("\x1b_G"), "no Kitty placement is emitted for a SIXEL frame");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("clears every old footprint row before the replacement text", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				const block = new Block();
+				block.dcs = port.register(raster("B"), { columns: 4, rows: 3 });
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+
+				const before = terminal.getViewport().map((line) => line.trimEnd());
+				assert.deepStrictEqual(before.slice(0, 3), ["image", "", ""], "the block reserves three rows");
+
+				block.dcs = undefined;
+				terminal.events.length = 0;
+				tui.renderNow();
+				await terminal.waitForRender();
+				const output = wire(terminal);
+				assert.ok(!output.includes(raster("B")), "the retired raster is not repainted");
+				const clears = (output.match(/\x1b\[3;1H\x1b\[2K/g) ?? []).length;
+				assert.ok(clears >= 1, "the third (body) row is cleared by its own absolute row write");
+				assert.deepStrictEqual(
+					terminal.getViewport().map((line) => line.trimEnd()).slice(0, 3),
+					["image", "text", ""],
+					"no ghost row survives",
+				);
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("yields the block to a visible overlay and restores it afterwards", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				const block = new Block();
+				const dcs = port.register(raster("C"), { columns: 4, rows: 3 });
+				block.dcs = dcs;
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+				assert.ok(wire(terminal).includes(dcs), "the block paints while nothing covers it");
+
+				const overlay = { render: () => ["MODAL"], invalidate: () => {} };
+				const handle = tui.showOverlay(overlay, { row: 1, col: 0, width: 10 });
+				terminal.events.length = 0;
+				tui.renderNow();
+				await terminal.waitForRender();
+				assert.ok(!wire(terminal).includes(dcs), "an overlay over the block wins the whole block");
+				assert.ok(wire(terminal).includes("MODAL"), "the overlay itself is painted");
+
+				tui.hideOverlay(handle);
+				terminal.events.length = 0;
+				tui.renderNow();
+				await terminal.waitForRender();
+				assert.ok(wire(terminal).includes(dcs), "the block returns when the overlay is gone");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("never slices a DCS wider than the terminal at the width clamp", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(20, 6);
+				const port = new RecordingSixelPort();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				// The DCS is ~300 visible characters wide in this 20-column screen; a
+				// plain text clamp would cut the terminator off.
+				const dcs = port.register(`${raster("PAD")}${"#0!40~".repeat(40)}`, { columns: 4, rows: 1 });
+				const block: Component = { render: () => [dcs], invalidate: () => {} };
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+
+				const firstFrame = wire(terminal);
+				assert.ok(firstFrame.includes(dcs), "the whole command, including its ST, reaches the terminal");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("yields the anchor row to the jump-to-end indicator instead of wrapping the DCS", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 4);
+				const port = new RecordingSixelPort();
+				const dcs = port.register(raster("IND"), { columns: 4, rows: 1 });
+				const scroll = new ScrollView(
+					{
+						render: () => ["one", "two", "three", "four", "five", "six", dcs],
+						invalidate: () => {},
+					},
+					{ follow: "end", primary: true },
+				);
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+					scrollToEndIndicator: () => "Jump",
+				});
+				tui.setLayoutRoot(scroll);
+				tui.start();
+				await terminal.waitForRender();
+				// Leave the end so the anchor is off screen, then come back: the frame
+				// that re-shows it is the one where the indicator would land on it.
+				scroll.scrollTo(1, { disableFollow: true });
+				await terminal.waitForRender();
+				terminal.events.length = 0;
+				scroll.scrollTo(3, { disableFollow: true });
+				tui.renderNow();
+				await terminal.waitForRender();
+
+				const text = wire(terminal);
+				assert.ok(text.includes(dcs), "the command is painted again, intact");
+				assert.ok(!text.includes("Jump"), "the indicator yields the row rather than splicing the command");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("a selection across a block never wraps its DCS and never copies it", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 10);
+				const port = new RecordingSixelPort();
+				const dcs = port.register(raster("SEL"), { columns: 4, rows: 1 });
+				let copied: string | undefined;
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+					copySelection: async (text) => {
+						copied = text;
+					},
+				});
+				const block: Component = {
+					render: () => ["top", dcs, "bottom", "more"],
+					invalidate: () => {},
+				};
+				tui.addChild(block);
+				tui.installViewportListener();
+				tui.start();
+				await terminal.waitForRender();
+				const initialWire = wire(terminal);
+				assert.ok(initialWire.includes(dcs), "the command was painted intact before the gesture");
+
+				// Press on the row above the raster and drag past it: the range spans the
+				// anchor, which a plain text pass would highlight (and splice).
+				terminal.events.length = 0;
+				terminal.sendInput("\x1b[<0;2;1M");
+				terminal.sendInput("\x1b[<32;2;4M");
+				terminal.sendInput("\x1b[<0;2;4m");
+				await terminal.waitForRender();
+
+				const selectionFrame = wire(terminal);
+				assert.strictEqual(
+					selectionFrame.includes("\x1bP"),
+					false,
+					"the selection pass leaves the anchor row untouched (a splice would re-emit a fragment)",
+				);
+				if (copied !== undefined) {
+					assert.strictEqual(copied.includes("\x1bP"), false, "the copied text never contains the command");
+					assert.strictEqual(copied.includes(dcs), false);
+				}
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("rewrites every row the SIXEL clear pass erased, even unchanged text (E3)", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const dcs = port.register(raster("A"), { columns: 4, rows: 3 });
+				let secondRow = "kept-1";
+				// The anchor declares a three-row footprint; rows 2 and 3 carry text. A
+				// scrollbar cell or a border inside the block has exactly this shape.
+				const block: Component = {
+					render: () => [dcs, secondRow, "kept-2"],
+					invalidate: () => {},
+				};
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+				assert.deepStrictEqual(
+					terminal.getViewport().slice(0, 3).map((line) => line.trimEnd()),
+					["", "kept-1", "kept-2"],
+					"the first frame paints the command and the text rows",
+				);
+
+				// Only row 2 changes. The anchor line is untouched, so the alt screen does
+				// NOT take a full text pass (`imagesNeedRedraw` is false); the clear pass
+				// still erases the whole footprint, so row 3 must be written again.
+				secondRow = "kept-1x";
+				terminal.events.length = 0;
+				tui.renderNow();
+				await terminal.waitForRender();
+				assert.deepStrictEqual(
+					terminal.getViewport().slice(0, 3).map((line) => line.trimEnd()),
+					["", "kept-1x", "kept-2"],
+					"the unchanged row inside the cleared footprint is redrawn",
+				);
+				assert.ok(wire(terminal).includes("kept-2"), "row 3 was written in this frame");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("never indexes a trusted DCS, so a command substring finds nothing", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(60, 6);
+				const port = new RecordingSixelPort();
+				const dcs = port.register(raster("SEARCH"), { columns: 4, rows: 1 });
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				tui.addChild({ render: () => ["needle above", dcs, "needle below"], invalidate: () => {} });
+				tui.start();
+				await terminal.waitForRender();
+
+				// Positive control: the visible text is searchable.
+				terminal.sendInput("\x1b[102;6u");
+				terminal.sendInput("needle");
+				await terminal.waitForRender();
+				assert.ok(terminal.getViewport().some((line) => line.includes("1/2")), "the visible text is indexed");
+
+				// A DCS substring must NOT match: `ESC P` is not a recognized ANSI
+				// sequence, so the raw bytes would otherwise be in the corpus.
+				terminal.sendInput("\x1b[102;6u");
+				terminal.sendInput("80;36");
+				await terminal.waitForRender();
+				const viewport = terminal.getViewport();
+				assert.ok(!viewport.some((line) => /\d+\/\d+/.test(line)), `no match counter for a command substring: ${JSON.stringify(viewport)}`);
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		/** The LAST synchronized frame only: an earlier write in the same action
+		 *  must not satisfy a later frame that dropped the raster. */
+		function lastFrame(terminal: RecordingTerminal): string {
+			const all = wire(terminal);
+			const start = all.lastIndexOf("\x1b[?2026h");
+			return start === -1 ? all : all.slice(start);
+		}
+
+		it("auto scrollbar hover does not retire a trusted SIXEL block", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const dcs = port.register(raster("H"), { columns: 4, rows: 3 });
+				const scroll = new ScrollView(
+					{
+						render: () => ["header", dcs, "", "", "tail-1", "tail-2", "tail-3", "tail-4", "tail-5", "tail-6"],
+						invalidate: () => {},
+					},
+					{ primary: true, follow: "none", scrollbar: "auto", scrollbarHideDelayMs: 20 },
+				);
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				tui.setLayoutRoot(scroll);
+				tui.start();
+				await terminal.waitForRender();
+				assert.ok(wire(terminal).includes(dcs), "the initial frame paints the trusted raster");
+				const fakeDcs = "\x1bP0;1;q\"1;1;40;6#0;2;100;0;0FAKE\x1b\\";
+				assert.strictEqual(port.footprint(fakeDcs), undefined, "an unregistered lookalike is never a trusted footprint");
+
+				// A real SGR hover on the rightmost track column really shows the
+				// transient auto scrollbar; the raster must not be retired.
+				terminal.events.length = 0;
+				terminal.sendInput("\x1b[<35;40;3M");
+				await terminal.waitForRender();
+				assert.strictEqual(scroll.isScrollbarActive, true, "the auto scrollbar is hovered");
+				assert.strictEqual(scroll.isScrollbarVisible, true, "the transient auto scrollbar is visible");
+				assert.ok(lastFrame(terminal).includes(dcs), "hovering the scrollbar keeps the full trusted DCS in the latest frame");
+
+				// A real press + drag + release on the bar may scroll the viewport, but
+				// must not corrupt or fabricate the raster.
+				terminal.events.length = 0;
+				terminal.sendInput("\x1b[<0;40;2M");
+				terminal.sendInput("\x1b[<32;40;4M");
+				await terminal.waitForRender();
+				terminal.sendInput("\x1b[<0;40;4m");
+				await terminal.waitForRender();
+				assert.ok(scroll.scrollTop >= 0, "the drag keeps a valid scroll position");
+				assert.ok(lastFrame(terminal).includes(dcs), "the still-visible block is repainted after the drag");
+
+				// Leaving the track hides the transient bar; the image survives.
+				terminal.events.length = 0;
+				terminal.sendInput("\x1b[<35;10;3M");
+				// reason: the ScrollView auto-hide contract under test is 20 ms.
+				await new Promise((resolve) => setTimeout(resolve, 40));
+				await terminal.waitForRender();
+				assert.strictEqual(scroll.isScrollbarVisible, false, "the transient bar auto-hid");
+				assert.ok(lastFrame(terminal).includes(dcs), "the raster survives the bar's auto hide");
+				tui.stop();
+			} finally {
+				resetCapabilitiesCache();
+			}
+		});
+
+		it("never replays a SIXEL DCS into the main screen's restored document", async () => {
+			setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+			try {
+				const terminal = new RecordingTerminal(40, 8);
+				const port = new RecordingSixelPort();
+				const tui = new TuiAltScreen(terminal, undefined, undefined, {
+					imageProtocolOverride: "sixel",
+					sixelScreen: port,
+				});
+				const block = new Block();
+				const dcs = port.register(raster("D"), { columns: 4, rows: 3 });
+				block.dcs = dcs;
+				tui.addChild(block);
+				tui.start();
+				await terminal.waitForRender();
+
+				terminal.events.length = 0;
+				tui.stop();
+				const leftAltScreen = wire(terminal);
+				assert.ok(!leftAltScreen.includes(dcs), "the alt screen's exit projection drops the raster");
+				assert.ok(leftAltScreen.includes("image"), "its identity row is still restored as text");
 			} finally {
 				resetCapabilitiesCache();
 			}

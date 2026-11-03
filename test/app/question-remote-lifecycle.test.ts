@@ -517,6 +517,11 @@ test('the timed claim, timeout and continued late answer drive the REAL TSP seat
     onFatal: () => {},
     notify: () => {},
     setSettledQuestionAnswersLookup: () => {},
+    // The shared seat interface's three modal inputs: these unit seats are
+    // built without a pane, so they exercise the legacy (non-native) branch.
+    surfaceId: 's1',
+    nativeQuestions: false,
+    nativeApproval: false,
   })
   const key = (name: string, extra: Partial<{ text: string; ctrl: boolean; alt: boolean; shift: boolean; meta: boolean }> = {}) =>
     ({ name, ctrl: false, alt: false, shift: false, meta: false, ...extra })
@@ -589,4 +594,64 @@ test('the timed claim, timeout and continued late answer drive the REAL TSP seat
     controller.dispose()
     seat.dispose()
   }
+})
+
+/**
+ * M4 PR4: the Client reload safety read. It must observe the controller's OWN
+ * local input state — never the Host's pending-question fact and never a
+ * second cache: a live foreground flow, a mounted continued form, or a
+ * continued entry keeping a draft blocks the Client from retiring; a cold
+ * parked question (no local form, no local draft) does not.
+ */
+test('the question controller reports reload-blocking input only while it owns local input', async () => {
+  // 1. An idle controller owns nothing.
+  const idle = harness()
+  idle.attach()
+  assert.equal(idle.controller.hasReloadBlockingInput(), false)
+  idle.controller.dispose()
+
+  // 2. A live foreground flow blocks until it settles.
+  const live = harness()
+  live.attach()
+  const pendingLive = live.live({ sessionId: 'session-a', callId: 'call-live', timed: false, questions: QUESTIONS })
+  await Promise.resolve(); await Promise.resolve()
+  assert.equal(live.controller.hasReloadBlockingInput(), true, 'a presented live flow is local input')
+  live.submit([{ id: 'q1', selected: ['a'] }])
+  await pendingLive
+  await Promise.resolve()
+  assert.equal(live.controller.hasReloadBlockingInput(), false, 'the settled flow owns no local input')
+  live.controller.dispose()
+
+  // 3. A cold parked continued question holds no local input; the mounted
+  //    form and its accepted answer DO until the delivery removes the entry.
+  let releaseAnswer!: () => void
+  const answering = harness({
+    answerContinued: async () => {
+      await new Promise<void>((resolve) => { releaseAnswer = resolve })
+      return 'queued'
+    },
+  })
+  answering.attach()
+  answering.setSnapshot({
+    sessionId: 'session-a',
+    active: [{ callId: 'call-cont', sessionId: 'session-a', questions: [{ id: 'q1', question: 'Pick one', options: [{ label: 'a' }] }], state: 'continued' }],
+    settled: [],
+    queuedReplyCallIds: new Set(),
+  })
+  answering.notifyChange()
+  assert.equal(answering.controller.hasReloadBlockingInput(), false,
+    'a cold parked question is Host-held; the Client owns no unsent local input')
+  assert.equal(answering.controller.reopen('session-a', 'call-cont'), true)
+  await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+  assert.equal(answering.asks.length, 1, 'the continued form mounted')
+  assert.equal(answering.controller.hasReloadBlockingInput(), true, 'a mounted continued form is local input')
+  answering.submit([{ id: 'q1', selected: ['a'] }])
+  await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+  assert.equal(answering.controller.hasReloadBlockingInput(), true,
+    'an accepted answer still being delivered is unsettled local input')
+  releaseAnswer()
+  await new Promise<void>((resolve) => { setTimeout(resolve, 20) })
+  assert.equal(answering.controller.hasReloadBlockingInput(), false,
+    'the delivered answer removed the entry and its local input')
+  answering.controller.dispose()
 })

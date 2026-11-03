@@ -28,6 +28,7 @@ import {
   type Key,
   type Op,
   type Renderable,
+  type RunTmux,
   type SessionInput,
   type TermInput,
   type TermOutput,
@@ -613,6 +614,161 @@ test('a tty that never answers the handshake fails closed and restores raw mode'
   assert.equal(session, null, 'no hello reply means unsupported, not a live session')
   assert.deepEqual(terminal.input.raw, [true, false], 'raw mode is entered and restored')
   assert.equal(terminal.input.isRaw, false)
+})
+
+// ── The conditional tmux branch: the SDK's own admission, observed through its
+//    injected `runTmux` seam. The real `tmux` CLI is never executed here, and no
+//    case claims a physical Tern pane: these are SCRIPTED facts. ──────────────
+
+/** The pane id `TMUX_PANE` carries in every case below. */
+const TMUX_PANE = '%1'
+/** A live tmux server: `TMUX` is the socket/pid/server triple tmux exports. */
+const TMUX_INSIDE = '/tmp/tmux-1000/default,1234,0'
+/** The exact command vectors the SDK is documented to run, in its order. */
+const TMUX_WATCH = ['show-options', '-qv', '@tern-tsp']
+const TMUX_TITLES_OFF = ['set-option', '-p', '-t', TMUX_PANE, 'allow-set-title', 'off']
+const TMUX_TITLES_RESTORED = ['set-option', '-pu', '-t', TMUX_PANE, 'allow-set-title']
+
+/**
+ * A scripted tmux pane. It answers the SDK's `hello` QUERY (inside tmux the SDK
+ * sends no DA1 request: tmux answers that one itself, so only the reply or the
+ * timeout decides), and it records instead of executing every `tmux` command.
+ */
+class ScriptedTmuxPane {
+  readonly input = new FakeInput()
+  readonly output = new FakeOutput()
+  /** Every `tmux` argument vector the SDK asked for, in the order it asked. */
+  readonly tmuxCalls: string[][] = []
+  /** What `show-options -qv @tern-tsp` answers: non-blank = Tern draws this pane. */
+  private readonly watch: string | null
+  /** How turning `allow-set-title` off answers: `null` is a failed command,
+   *  `reject` a runner that throws (the SDK treats both as failure). */
+  private readonly title: 'ok' | 'null' | 'reject'
+  /** Whether the pane answers the hello query at all. */
+  private readonly replies: boolean
+
+  constructor(script: {
+    readonly watch?: string | null
+    readonly title?: 'ok' | 'null' | 'reject'
+    readonly replies?: boolean
+  } = {}) {
+    this.watch = script.watch === undefined ? '1\n' : script.watch
+    this.title = script.title ?? 'ok'
+    this.replies = script.replies ?? true
+    this.output.onWrite = text => {
+      if (!text.includes('"q":"hello"')) return
+      if (this.replies) setTimeout(() => this.input.type(tspReply('r', HELLO)), 1)
+    }
+  }
+
+  /** The SDK's `tmux` seam, injected through `ConnectOptions.runTmux`. */
+  runTmux: RunTmux = args => {
+    const call = [...args]
+    this.tmuxCalls.push(call)
+    if (call[0] === 'show-options') return Promise.resolve(this.watch)
+    if (call[0] === 'set-option' && call.includes('off')) {
+      if (this.title === 'reject') return Promise.reject(new Error('tmux: unknown option'))
+      return Promise.resolve(this.title === 'ok' ? '' : null)
+    }
+    return Promise.resolve('')
+  }
+}
+
+function connectInTmux(pane: ScriptedTmuxPane, env: Readonly<Record<string, string>>, timeout = 500) {
+  return connect({
+    env: { TMUX: TMUX_INSIDE, ...env },
+    input: pane.input,
+    output: pane.output,
+    exitHooks: false,
+    timeout,
+    runTmux: pane.runTmux,
+  })
+}
+
+test('inside tmux without a pane id the SDK declines before it asks tmux anything', async () => {
+  const pane = new ScriptedTmuxPane()
+  // Only `TMUX` — no `TMUX_PANE`: the SDK cannot address a pane, so it must not
+  // even run the watch probe, take the tty or start a handshake.
+  const session = await connectInTmux(pane, { TMUX: TMUX_INSIDE })
+  assert.equal(session, null, 'a tmux environment without a pane is unsupported')
+  assert.deepEqual(pane.tmuxCalls, [], 'no `tmux` command ran at all')
+  assert.deepEqual(pane.input.raw, [], 'the tty was never taken')
+  assert.equal(pane.output.text(), '', 'and nothing was written: no hello query, no DA1 probe')
+})
+
+test('a tmux pane that is not marked Tern-drawn declines without touching the tty or its options', async () => {
+  for (const watch of ['', '\n', '  ', null]) {
+    const pane = new ScriptedTmuxPane({ watch })
+    const session = await connectInTmux(pane, { TMUX_PANE })
+    assert.equal(session, null, `@tern-tsp answering ${JSON.stringify(watch)} means Tern does not draw here`)
+    assert.deepEqual(pane.tmuxCalls, [TMUX_WATCH], 'the watch probe is the only command it runs')
+    assert.deepEqual(pane.input.raw, [], 'the tty is never taken')
+    assert.equal(pane.output.text(), '', 'and no hello query or DA1 probe goes out')
+  }
+})
+
+test('a Tern-drawn tmux pane handshakes with no DA1 probe and gets its title updates back once', async () => {
+  const pane = new ScriptedTmuxPane()
+  const session = await connectInTmux(pane, { TMUX_PANE })
+  assert.ok(session, 'a watched pane is a live TSP session')
+
+  const written = pane.output.text()
+  assert.match(written, /\u001b_tsp;q;\{"q":"hello","v":\[1\]/,
+    'the hello query went out, still on protocol version 1')
+  assert.equal(written.includes('}\u001b\\'), true, 'and the query is a closed APC frame')
+  assert.equal(written.includes('\u001b[c'), false, 'tmux answers DA1 itself, so the SDK never asks')
+  assert.deepEqual(pane.tmuxCalls, [TMUX_WATCH, TMUX_TITLES_OFF], 'watch, then turn the title off')
+  assert.deepEqual(pane.input.raw, [true], 'raw mode is taken exactly once')
+
+  await session.close()
+  await session.close()
+  assert.deepEqual(pane.tmuxCalls.slice(2), [TMUX_TITLES_RESTORED],
+    'the second close reuses the same closing, so the restore runs once')
+  assert.equal(pane.tmuxCalls.filter(call => call.at(-1) === 'off').length, 1, 'title off ran once')
+  assert.equal(pane.tmuxCalls.filter(call => call[1] === '-pu').length, 1, 'and the restore once')
+  assert.deepEqual(pane.input.raw, [true, false], 'the tty is handed back')
+  assert.equal(pane.input.isRaw, false)
+})
+
+test('a watched tmux pane whose title cannot be turned off yields no session and keeps no ownership', async () => {
+  for (const title of ['null', 'reject'] as const) {
+    const pane = new ScriptedTmuxPane({ title })
+    const session = await connectInTmux(pane, { TMUX_PANE })
+    assert.equal(session, null, `a failed \`allow-set-title off\` (${title}) is not a live session`)
+    assert.deepEqual(pane.tmuxCalls, [TMUX_WATCH, TMUX_TITLES_OFF],
+      'it never claims to have restored a title it never turned off')
+    assert.equal(pane.output.text().includes('"q":"hello"'), false, 'no hello query went out')
+    assert.deepEqual(pane.input.raw, [true, false], 'the tty it did take is handed back')
+  }
+})
+
+test('a watched tmux pane that never answers the hello query declines, restores the title and the tty', async () => {
+  const pane = new ScriptedTmuxPane({ replies: false })
+  const session = await connectInTmux(pane, { TMUX_PANE }, 20)
+  assert.equal(session, null, 'the protocol timeout decides, not a guess')
+  assert.match(pane.output.text(), /"q":"hello"/, 'the query really went out')
+  assert.deepEqual(pane.tmuxCalls, [TMUX_WATCH, TMUX_TITLES_OFF, TMUX_TITLES_RESTORED],
+    'off then back on: no tmux side effect survives the declined connect')
+  assert.deepEqual(pane.input.raw, [true, false], 'and the tty is handed back')
+})
+
+test('outside tmux the SDK still probes DA1, connects on the reply and runs no tmux command', async () => {
+  // The non-tmux admission is the pre-existing one and must stay intact: hello
+  // PLUS the DA1 probe, and the conditional tmux branch never runs.
+  const pane = new ScriptedTmuxPane()
+  const session = await connect({
+    env: {},
+    input: pane.input,
+    output: pane.output,
+    exitHooks: false,
+    timeout: 500,
+    runTmux: pane.runTmux,
+  })
+  assert.ok(session, 'a hello reply outside tmux is still a live session')
+  assert.equal(pane.output.text().includes('\u001b[c'), true, 'the DA1 probe is still sent')
+  assert.deepEqual(pane.tmuxCalls, [], 'and no `tmux` command runs without TMUX')
+  await session.close()
+  assert.deepEqual(pane.input.raw, [true, false], 'the tty is handed back')
 })
 
 test('the real SDK, a scripted Tern tty and the spike compose end to end', async () => {

@@ -17,7 +17,12 @@
  * frame. The loader's cache stays owned by the loader — `dispose()` only
  * releases this panel's subscription and its local `Image` instance.
  *
- * KITTY JPEG/WEBP (Image-6B): a Kitty surface cannot place JPEG/WebP bytes
+ * PIXELS: Kitty and Direct SIXEL both place PNG payloads through the ONE
+ * managed `ImageGraphics` owner (Image-8 / I8-2B); iTerm2 keeps the intentional
+ * workspace restriction and paints `Preview unavailable`. SIXEL readiness is
+ * the owner's live `canPaint()` answer, never a process-wide capability.
+ *
+ * KITTY/SIXEL JPEG/WEBP (Image-6B): neither transport can place JPEG/WebP bytes
  * directly, so this panel paints the SAME scoped 6A derived PNG the transcript
  * thumbnail already uses — one loader, one derivative, no second decoder or
  * cache. A READY derivative is used immediately even when the raw read has
@@ -29,8 +34,9 @@
 
 import { Image, imageFallback, matchesKey, truncateToWidth, visibleWidth } from '@xmoon76/pi-tui'
 import type { Component } from '@xmoon76/pi-tui'
-import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
+import type { ImageProtocolPreference } from '../../graphics/image-protocol-preference.ts'
 import { formatBytes } from '../../../domain/media/format.ts'
 import { imagePixelsSupported, type ImageAttachmentRefLike } from '../../../domain/media/types.ts'
 import { MAX_KITTY_THUMBNAIL_SOURCE_BYTES } from '../../../client/media/image/kitty-thumbnail.ts'
@@ -68,10 +74,12 @@ export interface ImageViewerInput {
   readonly closeHint?: ImageViewerCloseHint
   /**
    * The ONE managed graphics owner of this physical terminal (Image-7A). The
-   * Viewer paints Kitty pixels through the Core when it is admitted; iTerm2 and
-   * every other surface keep the legacy `Image` path.
+   * Viewer paints Kitty or Direct SIXEL pixels through the Core when it is
+   * admitted; iTerm2 and every other surface keep the legacy `Image` path.
    */
-  readonly graphics?: KittyGraphics
+  readonly graphics?: ImageGraphics
+  /** The app's ONE startup image-protocol preference. */
+  readonly imageProtocolPreference?: ImageProtocolPreference
 }
 
 /** One read-only rendered attachment, sized to the frame's content grant. */
@@ -93,10 +101,12 @@ export class ImageViewerPanel implements Component {
   private instance: PixelBody | undefined
   /** Whether `instance` is a managed component (it owns a Core handle). */
   private instanceManaged = false
-  private readonly graphics: KittyGraphics | undefined
+  private readonly graphics: ImageGraphics | undefined
+  /** The app's ONE startup image-protocol preference. */
+  private readonly imageProtocolPreference: ImageProtocolPreference | undefined
   /** The exact inputs the local instance was built for. */
   private instanceAttachmentId: string | undefined
-  private instanceProtocol: 'kitty' | 'iterm2' | undefined
+  private instanceProtocol: 'kitty' | 'sixel' | undefined
   private instanceKind: 'raw' | 'derived' | undefined
   private instanceWidth: number | undefined
   private instanceBodyRows: number | undefined
@@ -114,6 +124,7 @@ export class ImageViewerPanel implements Component {
     this.onClose = input.onClose
     this.closeHint = input.closeHint === 'back' ? 'Esc back' : 'Esc close'
     this.graphics = input.graphics
+    this.imageProtocolPreference = input.imageProtocolPreference
     // Subscribe ONCE to THIS (scope, attachment)'s settles only: another
     // presentation's settle for the same content id must not wake this panel.
     // The callback only invalidates the local paint and schedules one frame.
@@ -217,32 +228,33 @@ export class ImageViewerPanel implements Component {
   private bodyLines(width: number, bodyRows: number): string[] {
     if (bodyRows <= 0) return []
     if (this.loader === undefined) return [this.failedStatus(width, 'Preview unavailable')]
-    const protocol = effectiveImageProtocol(this.graphics)
+    const protocol = effectiveImageProtocol(this.graphics, this.imageProtocolPreference)
     if (protocol === null) {
       // No paintable protocol on THIS frame (unsupported terminal or a revoked
       // managed admission): never start a pointless full-bytes read.
       return [this.failedStatus(width, 'Preview unavailable')]
     }
-    if (protocol !== 'kitty') {
-      // Image UX PR2 Owner decision: the leased workspace shows real pixels
-      // through the Kitty protocol only. The pinned AltScreen deliberately
-      // disables the iTerm2 capability (its inline framing uses CSI `A`,
-      // which the fork's ANSI width layer does not parse); native iTerm2
-      // pixels are deferred to separate fork/protocol work. Metadata stays
-      // visible and the state is truthful.
+    if (protocol !== 'kitty' && protocol !== 'sixel') {
+      // iTerm2 retains the intentional workspace restriction: the leased
+      // AltScreen disables its inline framing (cursor-up sequences the fork's
+      // ANSI width layer does not parse), so native iTerm2 pixels remain
+      // deferred to separate fork/protocol work. Metadata stays visible and
+      // the state is truthful.
       return [this.failedStatus(width, 'Preview unavailable')]
     }
     if (this.ref.mediaType === 'image/jpeg' || this.ref.mediaType === 'image/webp') {
-      // Image-6B: Kitty places PNG payloads only, so JPEG/WebP reuse the SAME
-      // scoped 6A derivative the transcript thumbnail already derives. Never a
-      // second decoder, cache or re-read of the original bytes.
-      return this.derivedBodyLines(width, bodyRows)
+      // Image-6B: neither Kitty nor SIXEL places JPEG/WebP bytes directly, so
+      // JPEG/WebP reuse the SAME scoped 6A derivative the transcript thumbnail
+      // already derives. Never a second decoder, cache or re-read of the
+      // original bytes.
+      return this.derivedBodyLines(width, bodyRows, protocol)
     }
     if (!imagePixelsSupported(protocol, this.ref.mediaType)) {
       // The shared protocol/MIME admission still rejects every other raster
-      // (GIF): Kitty accepts PNG only and this repo installs no transcoder, so
-      // any other format would build an Image that silently degrades to a text
-      // fallback. JPEG/WebP never reach this check (they take the 6A branch).
+      // (GIF): both kitty and sixel accept PNG only and this repo installs no
+      // transcoder, so any other format would build an Image that silently
+      // degrades to a text fallback. JPEG/WebP never reach this check (they
+      // take the 6A branch).
       return [this.failedStatus(width, 'Preview unavailable')]
     }
     const state = this.loader.get(this.ref, this.scope)
@@ -264,7 +276,7 @@ export class ImageViewerPanel implements Component {
       kind: 'raw',
       widthPx: this.ref.width,
       heightPx: this.ref.height,
-    })
+    }, protocol)
   }
 
   /**
@@ -281,7 +293,7 @@ export class ImageViewerPanel implements Component {
    * the one bounded `Preview unavailable` status row, with the failure word in
    * the `error` ink (design-language role 16).
    */
-  private derivedBodyLines(width: number, bodyRows: number): string[] {
+  private derivedBodyLines(width: number, bodyRows: number, protocol: 'kitty' | 'sixel'): string[] {
     if (this.loader === undefined) return [this.failedStatus(width, 'Preview unavailable')]
     // Same 20 MiB source ceiling as the 6A thumbnail; checked from the durable
     // metadata before the raw read so the Viewer never reads bytes it cannot
@@ -296,7 +308,7 @@ export class ImageViewerPanel implements Component {
         kind: 'derived',
         widthPx: preview.width,
         heightPx: preview.height,
-      })
+      }, protocol)
     }
     if (preview.state === 'loading') return [this.status(width, 'Loading…')]
     if (preview.state === 'error') return [this.failedStatus(width, 'Preview unavailable')]
@@ -332,8 +344,8 @@ export class ImageViewerPanel implements Component {
   }
 
   /** Render one resolved PNG payload at `width` and clip the rows to the grant. */
-  private imageLines(width: number, bodyRows: number, pixel: ResolvedPixelSource): string[] {
-    const image = this.imageFor(width, bodyRows, pixel)
+  private imageLines(width: number, bodyRows: number, pixel: ResolvedPixelSource, protocol: 'kitty' | 'sixel'): string[] {
+    const image = this.imageFor(width, bodyRows, pixel, protocol)
     return image.render(width).slice(0, bodyRows)
   }
 
@@ -344,11 +356,11 @@ export class ImageViewerPanel implements Component {
    * base64 string and the payload's pixel dimensions. Any change rebuilds
    * instead of rendering stale cached lines from the wrong protocol/source.
    */
-  private imageFor(width: number, bodyRows: number, pixel: ResolvedPixelSource): PixelBody {
+  private imageFor(width: number, bodyRows: number, pixel: ResolvedPixelSource, protocol: 'kitty' | 'sixel'): PixelBody {
     const native = this.graphics !== undefined
     if (this.instance === undefined
       || this.instanceAttachmentId !== this.ref.attachmentId
-      || this.instanceProtocol !== 'kitty'
+      || this.instanceProtocol !== protocol
       || this.instanceKind !== pixel.kind
       || this.instanceManaged !== native
       || this.instanceWidth !== width
@@ -388,7 +400,7 @@ export class ImageViewerPanel implements Component {
         )
       this.instanceManaged = native
       this.instanceAttachmentId = this.ref.attachmentId
-      this.instanceProtocol = 'kitty'
+      this.instanceProtocol = protocol
       this.instanceKind = pixel.kind
       this.instanceWidth = width
       this.instanceBodyRows = bodyRows

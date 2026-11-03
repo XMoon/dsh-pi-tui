@@ -3,7 +3,10 @@
 This document owns the long-lived Host/Client boundary: locality, the semantic
 port contract, Direct/Remote equivalence, currentness/identity rules and the
 qualification tiers. Direct remains the production backend; Remote is the
-experimental in-process official wire with no public selector.
+experimental in-process official wire with no public selector. An internal,
+Linux-only split-process entry (`dist/local-host.mjs` / `dist/local-client.mjs`)
+qualifies the same npm package over an authenticated loopback HTTP/WebSocket
+carrier; it is not a package export, bin, backend selector or Session surface.
 
 The current Host-coupling allowlist is
 `scripts/client-boundary-baseline.json`, enforced by
@@ -65,9 +68,11 @@ Host service resolution belongs to:
 
 `src/app/host/**` is the bundle's permanent Host plane: it registers with
 explicit `inject` and `ctx.reflect.get`, and consumers read only semantic DTOs or
-port values. The Remote graph is ONE `RemoteHostRuntime` + ONE official Client
-Context + ONE semantic assembly + ONE owner registry, reached only through the
-single dynamic edge `src/runtime/backend-loader.ts` →
+port values. `src/app/host/pi-tui-host-runtime.ts` is the ONE built-in Host
+Runtime Loader row; `src/app/host/features/**` are its two internal business
+modules, not independent plugins. The Remote graph is ONE `RemoteHostRuntime` +
+ONE official Client Context + ONE semantic assembly + ONE owner registry,
+reached only through the single dynamic edge `src/runtime/backend-loader.ts` →
 `src/app/remote/runtime.ts`. Base/profile-owned Host services are reused, never
 remounted; optional generated Remotes are mounted by their feature Client owner
 without duplicating core namespace or authority.
@@ -90,6 +95,331 @@ Must-not:
 Generated Client/Remote objects must keep their identity and prototype
 accessors; a fixture must reproduce production prerequisites without adding a
 second Host service or runtime graph.
+
+## Split-process local Host transport
+
+The internal split-process entry is two OS processes from ONE installed npm
+package. It is Linux-only, Linux abstract AF_UNIX sockets are its only process
+admission authority, and the non-Linux entry fails before writing runtime files
+with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
+`hasLiveClient()` result may stand in for that kernel ownership.
+
+- **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
+  canonicalized through `realpath` plus the current UID decide the scope. The
+  private run directory is `<DSH_HOME>/run/dsh-pi-tui/<scopeId>/`, created and
+  proved 0700. `scopeId` is sha256 over the fixed domain
+  `dsh-pi-tui/local-scope/1`, the decimal UID and the canonical profile path;
+  that domain is part of the published scope algorithm and evolves separately
+  from the wire protocol below. The same canonical profile directory shares one
+  scope across workspaces and package builds; the Client cwd is not a scope
+  input.
+- **Single Host / single TUI seat.** The Host holds one abstract socket from
+  before the profile Context exists until process termination; a second Host
+  candidate loses `bind` and exits without building a Context, webserver, Agent
+  or Session. The Client holds a second abstract socket for its lifetime; a
+  second Client fails `CLIENT_ALREADY_ACTIVE` before spawning or touching a
+  Host. Kernel release on process death is the only stale-seat recovery.
+- **Identity is authenticated, never registry-only.** The registry
+  (`instance.json`, 0600) is an unauthenticated hint containing the scope,
+  canonical profile path, `instanceId`, Host PID, Linux `/proc/<pid>/stat`
+  starttime, loopback origin, protocol `dsh-pi-tui/local/1`, installed
+  bundle/DSH versions and the installed-build fingerprint. Readiness requires
+  the official `dsh-client-connection` `/connect` launch-token exchange (signed
+  Cookie) and the owner-only authenticated identity Fetch route
+  `/api/pi-tui.local-host`, with every identity field strictly equal to the
+  registry and the current kernel starttime. A Client whose protocol or exact
+  DSH runtime differs is `HOST_PROTOCOL_INCOMPATIBLE` before authentication; a
+  Host that publishes a protocol or installed build other than its own is
+  `HOST_BUILD_INCOMPATIBLE`; a mismatched authenticated identity is
+  `HOST_IDENTITY_MISMATCH`; none replaces or kills the live Host.
+- **Official carrier only.** The Host reuses the base `typert-gateway` row and
+  mounts exactly one `dsh-client-connection` owner and one `dsh-api-remotes`
+  forwarded-event source on the Host-only overlay. The Client installs the
+  official Node `typert-registry`, `client-connection` and `api-gateway` halves
+  on the single A0 Client Context with a Cookie-bearing
+  `fetch`/`createWebSocket` and `streamBaseUrl`. `ownsHost`, in-process
+  RPC/openStream bridges, custom Bearer/Basic auth and any second business RPC
+  are prohibited. The only private route is the read-only GET identity route
+  behind the official `/api` admission; it carries no Session, write,
+  shutdown, approval or version-switch operation.
+- **Secret boundary.** The launch token lives only in the Host process and its
+  0600 `launch.json` (atomic same-directory rename); the Client keeps its own
+  Cookie in memory only. Neither token, Cookie nor `connectUrl` may appear in
+  the registry, stdout/stderr, logs, argv or environment. The registry and
+  launch files are 0600, the run directory 0700, and unsafe ownership, modes or
+  symlinks fail closed.
+- **Lifecycle.** A Client exit, crash or HUP disposes only the Client subtree,
+  official transport, Client root and Client seat. It never calls a Host
+  shutdown. A Host starts on demand for one profile scope and then remains
+  resident independent of Client attachment or idle time: only an explicit
+  official stop (the Host entry admits `SIGTERM`/`SIGINT` into its one
+  `runProfile` shutdown owner) or a real process/system failure ends it. There
+  is no automatic idle expiry or orphan-interaction timeout, and a pending
+  Question/Approval remains with the official Host authority until a legal
+  answer, business settlement, explicit stop or process failure. The Host's
+  official `runProfile` shutdown owner is the only Host stop; its cleanup first
+  withdraws the identity route, then shuts down, then removes only files
+  matching its own `instanceId`, then closes the kernel seat. A replaced Host's
+  files are never deleted by another instance. A Client from a different
+  installed build of the same protocol and DSH runtime is admitted through the
+  same authenticated carrier and leaves the live Host, its work and its
+  registry/launch files untouched. A Client whose protocol or DSH runtime
+  differs is refused before authentication, also leaving the live Host
+  untouched.
+- **Session boundary.** The Client derives `connecting | connected | disconnected`
+  from the official Connection state and generation on every read and never
+  copies it into a long-lived flag. `sessionOpen` is a LIVE projection of the
+  official `tuiMainView` reference count on the current Session — never the
+  launch `--session` intent, the Domain mount or a cached boolean. No business
+  mutation is replayed across a transport reconnect; a write whose ACK was lost
+  is `indeterminate` and the next Client reconciles it from the Host's durable
+  log instead of retrying. The protocol guarantees only a reconnect to the same
+  Host; a Host crash is not a graceful migration.
+- **Client-only reexec handoff.** Replacing the Client's own installed build
+  never replaces the Host. The old Client captures its authoritative live facts
+  (`connected` transport and current generation, mounted surface, the
+  authenticated Host `instanceId`, and the current `tuiMainView` Session id),
+  validates the replacement package resolved through the active official
+  profile (a real installed package root with the same exact DSH runtime pin and
+  a normal `dist/local-client.mjs`), and hands the SAME one-shot facts —
+  expected Host instance, current Session id when one is open, DSH anchor,
+  profile and target build fingerprint — to a replacement child process. It
+  releases runner, UI, Domain graph, official transport, Client root and then
+  the kernel Client seat through the existing ONE stop coordinator; only after
+  that complete release may the replacement entry be spawned on the inherited
+  terminal as a new PID (`stdio: inherit`, no detached daemon, no second
+  terminal owner). The old PID is only a waiting parent that forwards the
+  child's exit status and holds no Client Context, TTY reader, seat or business
+  object; a termination signal addressed to that PID is forwarded to the
+  replacement child, and a signal arriving after the handoff was accepted but
+  before the child spawned cancels the handoff without spawning. The
+  replacement re-authenticates the expected Host, which is discovered with a
+  no-spawn expectation (`HOST_HANDOFF_UNAVAILABLE` when the expected instance
+  is absent/dead, `HOST_IDENTITY_MISMATCH` when another live instance owns the
+  scope) and must reopen the same Session against the current generation;
+  success requires the official Session history `openState` to be `'open'`, and
+  a sessionless handoff must stay sessionless. Sessionless means the official
+  `tuiMainView` authority owns no Session: another reference source (gateway,
+  controller operation or child view) may legitimately retain a binding without
+  making the TUI non-sessionless. Failure never
+  starts or replaces a Host, never replays an unacknowledged write and never
+  rolls back to the old build automatically: the replacement exits nonzero with
+  a concise manual-recovery line. No Cookie, token, SessionHandle, writer or UI
+  state crosses the handoff.
+
+  The manual `/reload-client` command is the user-facing trigger of this SAME
+  chain. It is a bare Client-local command registered beside `/exit` (no
+  alias, argument schema, keybinding or Host RPC); `/reload` keeps its
+  catalog/settings refresh semantics. Outside a real split-Client surface
+  mount — Direct, or any composition without the Client OS entry — the command
+  answers a fixed availability refusal and never creates a Session, reaches a
+  Host RPC or becomes a model prompt. In a real split Client its handler makes
+  ONE synchronous Client-local safety decision from the live owners: the
+  Composer draft bytes (a whitespace-only draft counts), the real staged
+  image/file draft stores (a pinned occurrence the editor no longer references
+  still counts), unsettled accepted user writes (a submitted prompt or Host
+  command, a steer, a local shell run and its context-mode output write, a
+  queue mutation, a persisted configuration write registered by the config
+  port — settings, credentials, the preset default — and the accepted action
+  owner that may perform one: the local command, the picker-detached skill
+  delivery and the rewind selection (whose pre-fork read runs before the fork
+  owner exists), including their asynchronous preparation; explicitly
+  read-only local commands and `/reload-client` itself never count),
+  Client-local Question/Approval input (a presented or queued form, a saved
+  continued draft, an answer still being delivered, a refused-admission wait)
+  and an in-flight Session navigation/transition. Only
+  when every fact is clear does that SAME call stack call the process-owned
+  one-shot request. A refusal publishes one fixed, actionable notice and keeps
+  the old Client, its editor/drafts and the Host entirely alive; there is no
+  forced override, queued retry or UI snapshot, and the user clears the state
+  and retries. The process preflight also refuses `already-current` when the
+  profile-installed package is the running build, and an unavailable or
+  incompatible installed target, without stopping the old Client. A granted
+  request keeps every guarantee above (the SAME stop coordinator, seat close,
+  spawn, no-spawn Host authentication and exact Session/generation fence), and
+  success publishes no duplicate notice: the replacement Surface reaching
+  `ready` is the evidence. The TSP renderer keeps its existing
+  post-classification refusal and adds no native reload UI.
+
+
+### Local protocol and version evolution
+
+`dsh-pi-tui/local/1` is the required Host/Client wire contract. It is
+independent of the `@xmoon76/dsh-pi-tui` package version and build fingerprint.
+Both sides must name exactly this protocol and the same DSH runtime version;
+the exact paired DSH version is owned by the package manifest, compatibility
+matrix and release data, not by this document.
+
+A v1 peer guarantees the required official Session, Turn, Job, Question and
+Approval semantics plus this package's current required private Remotes (file
+references and terminal progress). Optional read-only functionality may be
+added without a protocol bump only when its consumers degrade safely: losing it
+must not lose, rewrite or duplicate a business write, and a genuinely
+unregistered optional Remote is classified by the official
+`gateway/invocation-unavailable` answer, never by turning every network,
+authentication or service failure into "unsupported". A breaking change to a
+required wire API, or a new Client that cannot work without an RPC an old Host
+does not have, requires the next protocol version. Capability registries,
+version negotiation and probe-by-trial-write are not part of v1.
+
+Client admission and Host self-publication are different decisions: a Client
+compares only the protocol and exact DSH runtime, while the Host must publish
+its own exact protocol, bundle, DSH runtime and build fingerprint.
+Authentication then compares every identity field, including the Host buildId
+and bundle, against the registry, and generation currentness compares the same
+Host's full identity. A protocol or DSH mismatch never stops, replaces or
+mutates the live Host; the Client reports the refusal and in-memory work stays
+with the Host.
+
+### Host composition and the built-in PiTui runtime
+
+The Host Profile's Loader is the only Host composition authority: one
+`runProfile()` creates the Host Context, and every Host service row is owned by
+that Loader. The Host-only overlay disables the TUI surface rows, keeps the B1
+Connection and API-remotes rows, and adds exactly the official Session-serving
+rows plus ONE built-in `@xmoon76/dsh-pi-tui/host-runtime` row. That built-in row
+owns the package's ONE private Typert contribution and its two private business
+services (`piTuiFileReferences`, `piTuiTerminalProgress`); the feature modules
+are not independent Loader rows, configurable plugins or package subpaths. The
+row publishes `piTuiHostReady` only after both service bindings are live.
+
+The Host execution graph does not depend on the mutable `tui-startup` provider.
+The Host-only overlay overrides the existing `webserver` and `workspace-files`
+rows with `inject: []` and removes `tuiStartup` from the eight Host-only
+execution rows, which keep only their real service dependencies
+(`split-host-connection`, `split-host-file-upload`,
+`split-host-session-stats`, `split-host-turn-outline`,
+`split-host-session-controller`, `split-host-settings-controller`,
+`split-host-session-log-download`, `split-host-pi-tui-runtime`). A variable
+Startup module lifetime therefore cannot own — and dispose with itself — the
+Session, Agent, Connection and attachment ownership established for accepted
+work; the row lifetimes stay with the single DSH Loader. The `tui-startup` row
+itself remains mounted for the consumers that genuinely need its parsed startup
+facts and keeps following the official HMR lifecycle, so this contract is
+scoped to the listed execution rows and does not claim that every Host plugin,
+service or setting survives an arbitrary reload.
+
+`performance-host` remains an independent Host projection row, and
+`visual-tools` remains an independent Loader row; neither is absorbed into the
+built-in runtime. `src/app/remote/host-runtime.ts` is only the legacy in-process
+test composition for the old L5 fixtures: it mounts its own additive official
+rows and verifies the built-in runtime's readiness gates, but it never mounts
+the private contribution/services or the Performance projection and is not the
+production Host graph.
+
+The Host-only readiness audit requires every official Session-serving row and
+the built-in row to be ACTIVE, checks the official and private Typert
+`serviceKey`/`namespace` bindings, and requires both `piTuiHostReady` and
+`piTuiPerformanceReady` before it publishes the authenticated B1 identity. A
+missing row, artifact, binding or readiness gate fails Host startup before any
+identity is published.
+
+### Host liveness observation
+
+The Host-only entry installs exactly one internal, read-only
+`HostActivityObserver` (`src/app/remote-process/host-activity.ts`) after the
+readiness audit and before it publishes Ready. The observer owns no DSH
+business object and never drives, stops or replaces Host work. Every internal
+status response carries a fresh `HostActivitySnapshot` with a three-state
+verdict, per-source states, diagnostic reasons and a volatile observation
+epoch. `BLOCKED` reports positively observed current work or a future keepalive
+obligation; `UNKNOWN` is the fail-closed answer for an unreadable, unloading or
+unexcluded source; `OBSERVED_QUIESCENT` describes only the covered sources in
+that transient window and is never a shutdown authorization, admission fence or
+reusable lifecycle decision. Sources the installed DSH runtime cannot enumerate
+remain `UNKNOWN`; only explicitly qualified passive Loader rows are treated as
+idle, while any other active row (an official autonomous service, a
+third-party plugin or a future row) fails closed as an unqualified Host source.
+The epoch invalidates overlapping reads but is not an atomic barrier.
+
+### Client composition, Session references and the real surface
+
+The split Client keeps ONE Cordis root and ONE official
+Typert/Connection/Gateway graph. Its Domain plane is mounted in two stages by
+one owner: `mountRemoteClientDomainPrerequisites()` mounts the generated
+`/remote` contributions, the package's ONE private contribution, the official
+fileUpload Client and the official Session Client (including its `agent` scope
+resolver) BEFORE the Gateway's first generation; `complete()` then mounts the
+Jobs Client and awaits the official initial readiness. The M3 in-process path
+keeps the one-call `mountRemoteClientDomains()` wrapper. These functions never
+create or dispose the Context, Connection or Gateway. The official Client bundles and generated `/remote`
+descriptors are resolved from the installed DSH anchor. The Client shell also
+supplies the official web seed's platform static `@deepseek-ai/dsh-client-store`
+from the installed Harness family (its declared DSH peer); the browser-form
+`/client` bundles' `require` therefore resolves the SAME singleton the web shell
+shares, while `@deepseek-ai/cordis` resolves as a normal import. No source-tree
+descriptor may mix with that installation.
+
+Above the Domains, the Client mounts exactly one Client UI subtree (extension
+host + first-party builtins), one split application runtime (Backend + the ONE
+shared owner registry + presentation bundle) and one real runner fiber. The
+runner adopts the pre-built Remote selection by identity; the Client bootstrap
+never constructs a second Backend, owner registry or presentation graph. A
+mounted Session is committed to the visible surface only through the official
+`retain()` reference, `ready` AND `openState === 'open'`; `ready` alone is not
+an open history.
+
+Disposal is one reverse chain, owned by `LocalClientHandle.dispose()`: runner
+surface (TUI state + the owned `tuiMainView` reference + session retirement +
+the selected presentation/backend adapters) -> Client UI subtree -> the SAME
+memoized presentation/backend adapter release -> the root interaction delivery
+owner -> the borrowed B1 transport -> the root Domain plane -> the Client root. The runner may trigger the memoized adapter release during its
+own teardown; the bootstrap's later call never unmounts a second time. A Client
+exit, SIGTERM/SIGKILL, terminal EOF or surface teardown never calls the Host's
+shutdown, cancels a Host Agent, or releases a Host Session on the UI's behalf.
+
+The internal surface mode gives the tty to PiTui and routes structured
+telemetry to a private 0600 JSONL file; the frozen B1 stdin/stdout JSON control
+channel remains the qualification mode only, and JSON records never share the
+real terminal. A surface-mode Client is the shell for the official web-form
+Client bundles, so it supplies exactly the platform statics those bundles
+require; it does not add a second transport, session RPC or Host service.
+
+### Client detach, pending interactions and Client-only surface revisions
+
+Detaching a Client (clean exit, SIGKILL, transport loss or surface teardown)
+never terminates Host work that the Host already accepted. The Host's exact
+Agent, Turn, Tool, Job and Child objects keep their own Host lifetimes; a new
+Client attaches through the official authenticated Session reference and reads
+the durable Session log plus the live event stream. Only an explicit human
+Stop/navigation action sends the Host Agent cancel; a Client detach is a
+release of the Client's `tuiMainView` reference and transport, never a Host
+cancel in disguise.
+
+The Host Gateway's pending forwarded events are the ONE recovery channel for a
+Question or Approval that was waiting when the Client left. A Client surface
+teardown must not settle a Host-owned forwarded request: it drops its local
+presentation without sending an answer, cancellation or `next` that would
+permanently settle the Host event. A Client whose official answerer is already
+attached may answer a re-delivered event id / call id once; the Host pending
+map clears only on the Host's own settlement. A settled, cancelled or replaced
+request is never resurrected from an old Client's painted card.
+
+The DSH Client event pump starts with the Connection generation. Official Web
+uses the existing Loader readiness gate (`loader.await().then(start)`) to mount
+its plugin graph before starting the Gateway. A split Client composition must
+order its interaction owner before the event pump can consume Host-pending
+forwarded events; a fresh Client must not delegate a pending forwarded event
+before that owner is attached. Use the official Loader readiness contract for
+that ordering. A private PiTui pending store, permanent pending promise or
+Gateway monkey-patch is not a substitute for this composition contract.
+
+A Remote Client may resume a Session whose Host Turn is still running, because
+a pending Question or Approval is exactly such a Turn. Its startup therefore
+does not wait for Host idle before mounting the surface: the official live
+binding is hydrated and the mounted interaction owner settles the pending
+event. Direct keeps its in-process pre-mount idle wait.
+
+The internal split mode also supports one Client-only surface revision
+replacement on the SAME Client PID, Client Context and B1 transport: the
+current runner, Client UI subtree and memoized application adapters are retired
+in reverse order; the root Domain plane, root interaction delivery owner and B1
+transport stay alive; then a fresh revision is mounted and must reach a real
+TTY-ready state before it is reported mounted. A pending Host Question or
+Approval survives that revision change and is handed to the new surface
+exactly once. Host `runProfile`, Agent, Job and service fibers are untouched. Revision identity and status are
+qualification observations only; they grant no Host authority, and no second
+runner may ever hold the tty at the same time.
 
 ## Direct/Remote semantic equivalence
 
@@ -335,7 +665,7 @@ Exactly ONE adapter owns the main-Agent terminal outcome on each branch:
   `turn/start`/`turn/end` in `src/app/surface/event-routing.ts`.
 - **Remote** hands the outcome to this bundle's OWN Host composition
   (`mainProgressAuthority: 'host-snapshot'`):
-  `src/app/remote/terminal-progress-host.ts` observes durable turn boundaries
+  `src/app/host/features/terminal-progress.ts` observes durable turn boundaries
   and live Agent status edges in true synchronous order, fences them by the
   exact live Agent object and the exact `agent.session` object, classifies with
   the shared `src/domain/terminal-progress/interval.ts` fold, and serves one
@@ -408,3 +738,8 @@ Rules:
   implementation files.
 - Never present a Host-only suite as a TUI PASS, a skipped/mode-gated CI step as
   passed, or a lane green on a different snapshot.
+- The Linux split-process lane (`smoke:split-process`, driven from an installed
+  npm tarball) is a distribution-boundary proof outside L1–L6. It proves OS
+  process admission, the official authenticated loopback carrier and the
+  `sessionOpen=false` boundary; it is not a TUI Session or Direct/Remote parity
+  proof.

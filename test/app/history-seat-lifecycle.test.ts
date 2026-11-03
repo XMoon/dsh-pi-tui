@@ -321,6 +321,8 @@ function buildSessionFixture(life: TestLifecycle, options: {
 
   const retirement: SessionOwnerRetirement = {
     whenIdleOrAbort: async () => false,
+    cancel: async () => ({ kind: 'committed', value: undefined }),
+    cancelForNavigation: async () => ({ kind: 'committed' as const }),
     flush: async () => {},
     preCancel: () => {},
     retire: async () => ({ failures: [], durabilityFailure: undefined }),
@@ -370,6 +372,7 @@ function buildSessionFixture(life: TestLifecycle, options: {
     lifecycleSignal: new AbortController().signal,
     surface,
     isScopeCurrent: scope => sessionScope.isCurrent(scope),
+    captureScope: () => sessionScope.capture(),
     diag: fakeDiag,
   })
 

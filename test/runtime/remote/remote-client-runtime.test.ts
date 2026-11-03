@@ -51,6 +51,8 @@ import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import { JobId, type JobHandle } from '@deepseek-ai/dsh-jobs'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import * as piTuiHostRuntime from '../../../src/app/host/pi-tui-host-runtime.ts'
+import * as performanceHost from '../../../src/app/host/performance-host.ts'
 import { loadExperimentalRemoteRuntime } from '../../../src/runtime/backend-loader.ts'
 import { RemoteJobObservationPort } from '../../../src/runtime/remote/job-observation-remote.ts'
 import type { JobObservedSnapshot } from '../../../src/runtime/job-observation-port.ts'
@@ -200,6 +202,10 @@ async function createHostFixture(
     // `@`-file reference provider injects the directory owner: both require
     // the real `workingDirectory` service (the same row dsh-base mounts once).
     await ctx.plugin(WorkingDirectory)
+    // M4-B2-HF: the built-in PiTui Host Runtime owns the package contribution
+    // and both private Host services exactly once; Performance stays its own row.
+    await ctx.plugin(piTuiHostRuntime)
+    await ctx.plugin(performanceHost)
     await ctx.plugin(Storage)
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })

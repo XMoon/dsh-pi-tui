@@ -225,11 +225,6 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
     ],
     append: (type, data) => ({ type, seq: nextOpeningSeq++, time: Date.now(), data }) as unknown as SessionEvent,
   })
-  let holdAIdle = false
-  let releaseAIdle!: () => void
-  const aIdle = new Promise<void>(resolve => { releaseAIdle = resolve })
-  let aIdleStarted!: () => void
-  const aIdleStartedPromise = new Promise<void>(resolve => { aIdleStarted = resolve })
   let releaseBResume!: () => void
   const bResume = new Promise<void>(resolve => { releaseBResume = resolve })
   let bResumeStarted!: () => void
@@ -238,6 +233,12 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
   const bIdle = new Promise<void>(resolve => { releaseBIdle = resolve })
   let bIdleStarted!: () => void
   const bIdleStartedPromise = new Promise<void>(resolve => { bIdleStarted = resolve })
+  // Failure fallbacks: a failed assertion inside the B-resume window must not
+  // leave the suspended transition for teardown to wait on. These defers are
+  // registered AFTER the fiber disposer, so (reverse-order teardown) they run
+  // BEFORE `fiber.dispose()`; resolves are idempotent.
+  life.defer(() => releaseBResume())
+  life.defer(() => releaseBIdle())
   const harness = makeHarness(
     home,
     [sessionA, sessionB],
@@ -246,10 +247,6 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
     undefined,
     undefined,
     async id => {
-      if (id === sessionA.id && holdAIdle) {
-        aIdleStarted()
-        await aIdle
-      }
       if (id === sessionB.id) {
         bIdleStarted()
         await bIdle
@@ -267,9 +264,35 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
   assert.ok(resumeHandler, 'the real runner must register /resume')
   const aAgent = liveAgentOf(harness, sessionA.id)
   ;(aAgent as { status: 'idle' | 'running' }).status = 'running'
-  holdAIdle = true
   const switchPromise = (resumeHandler as (invocation: { rawInput: string }) => Promise<unknown>)({ rawInput: sessionB.id })
-  await aIdleStartedPromise
+  // A gate wait is a bounded failure path: an early switch failure must fail
+  // the test with its real error, never leave the test parked on a Promise
+  // until the CI job times out. The gate itself remains the authoritative
+  // signal (this is not an observation window).
+  const waitForGate = async (gate: Promise<void>, label: string): Promise<void> => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_, reject) => {
+      // Bounded deadline: failure bound for a stuck transition, not a fixed
+      // observation window; the gate is the authoritative signal.
+      timer = setTimeout(() => reject(new Error(`${label}: timed out after 15000ms`)), 15_000)
+    })
+    // Only an EARLY REJECTION is a failure signal here: the command handler's
+    // promise resolves when the command is accepted, which is before the
+    // asynchronous switch reaches this gate.
+    const early = new Promise<never>((_, reject) => {
+      void switchPromise.catch(error => reject(error))
+    })
+    try {
+      await Promise.race([gate, deadline, early])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+  // PR-B stops the old owner BEFORE the drain/quiesce. Hold the OPENING CUT at
+  // B's resume gate instead: the old A owner is still current and its
+  // bookkeeping must remain visible while B is being resumed, before the
+  // synchronous commit publishes B.
+  await waitForGate(bResumeStartedPromise, 'B resume gate')
   const oldCallId = 'main-opening-old-tool' as ToolCallId
   context.emit('session/event', sessionA as never, event('tool/call', {
     turn: 1,
@@ -307,8 +330,6 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
     'the old tool/result cleanup must remove arguments before the target commits')
   assert.equal(probe.capturedApproval?.danger, undefined,
     'the old tool/result cleanup must remove danger state before the target commits')
-  releaseAIdle()
-  await bResumeStartedPromise
   assert.equal(harness.resumeSignals[1], harness.resumeSignals[0],
     'session switch resume must use the runner lifecycle signal')
 
@@ -351,7 +372,7 @@ test('a main Session opening cut preserves old-Agent bookkeeping and B transient
     time: 1_700_000_000_101, chunk: { type: 'usage', usage: { inputTokens: 13, outputTokens: 5, totalTokens: 18 } },
   })
   releaseBResume()
-  await bIdleStartedPromise
+  await waitForGate(bIdleStartedPromise, 'B idle gate')
   releaseBIdle()
   await switchPromise
   // The switch's own promise is the completion signal: it resolves after the new

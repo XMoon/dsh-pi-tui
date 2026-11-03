@@ -15,9 +15,10 @@
  */
 
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { afterEach, beforeEach } from 'node:test'
 import { resetCapabilitiesCache, setCapabilities, type Terminal, type TerminalProgressState } from '@xmoon76/pi-tui'
 import { effectiveImageProtocol } from '../../src/tui/graphics/image-capability.ts'
+import type { ImageGraphics } from '../../src/tui/graphics/native-image.ts'
 import { createZellijKittyGraphics } from '../../src/tui/graphics/zellij-image.ts'
 import { createTmuxKittyGraphics, TmuxKittyImage } from '../../src/tui/graphics/tmux-image.ts'
 import { TmuxKittyAdmission, probeTmuxKittyIdentity } from '../../src/tui/graphics/tmux-admission.ts'
@@ -26,6 +27,24 @@ import { KittyTerminalFacade } from '../../src/tui/graphics/kitty-terminal.ts'
 import { createFakeTmuxCli } from '../support/fake-tmux-cli.ts'
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+
+/** Every terminal-identity fact the classifier reads; the lane also clears them. */
+const TERMINAL_ENV_KEYS = ['ZELLIJ', 'TMUX', 'STY', 'TERM', 'TERM_PROGRAM', 'PI_IMAGE_PROTOCOL'] as const
+let environmentSnapshot: Map<string, string | undefined>
+
+beforeEach(() => {
+  environmentSnapshot = new Map(TERMINAL_ENV_KEYS.map(key => [key, process.env[key]]))
+  for (const key of TERMINAL_ENV_KEYS) delete process.env[key]
+  resetCapabilitiesCache()
+})
+
+afterEach(() => {
+  for (const [key, value] of environmentSnapshot) {
+    if (value === undefined) delete process.env[key]
+    else process.env[key] = value
+  }
+  resetCapabilitiesCache()
+})
 
 /** A sink that records the bytes the facade really offered it. */
 class RecordingTerminal implements Terminal {
@@ -79,6 +98,31 @@ test('no handle keeps the fork capability untouched, including its null', () => 
   resetCapabilitiesCache()
   setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
   assert.equal(effectiveImageProtocol(undefined), 'iterm2', 'iTerm2 keeps its own capability')
+})
+
+test('explicit protocols never accept the other static legacy capability', () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined, 'iterm2'), null,
+    'iterm2 must not render a Kitty APC just because the fork says kitty')
+  assert.equal(effectiveImageProtocol(undefined, 'kitty'), 'kitty')
+
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined, 'kitty'), null,
+    'kitty must not render an iTerm2 OSC 1337 sequence')
+  assert.equal(effectiveImageProtocol(undefined, 'iterm2'), 'iterm2')
+})
+
+test('the classifier consumes the startup preference it was given, not a later env mutation', () => {
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  process.env.PI_IMAGE_PROTOCOL = 'kitty'
+  assert.equal(effectiveImageProtocol(undefined, 'iterm2'), 'iterm2',
+    'the captured startup iterm2 preference still allows only Direct iTerm2')
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined, 'iterm2'), null,
+    'the captured preference never reinterprets a changed static capability')
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined, 'kitty'), null,
+    'the captured kitty preference never accepts iTerm2')
 })
 
 test('an admitted tmux handle paints kitty where the fork detects none, and revocation is live', async (t) => {
@@ -513,4 +557,121 @@ test('source to sink: the admitted component really emits the managed grid, and 
   } finally {
     cli.dispose()
   }
+})
+
+test('explicit none and sixel are text-only even when the fork detects Kitty', () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  process.env.PI_IMAGE_PROTOCOL = 'none'
+  assert.equal(effectiveImageProtocol(undefined), null, 'none is a hard off')
+  process.env.PI_IMAGE_PROTOCOL = 'sixel'
+  assert.equal(effectiveImageProtocol(undefined), null,
+    'sixel is never satisfied by the fork static capability; only its managed owner may paint')
+  process.env.PI_IMAGE_PROTOCOL = 'auto'
+  assert.equal(effectiveImageProtocol(undefined), 'kitty', 'auto keeps the fork answer')
+})
+
+test('every multiplexer topology blocks a legacy passthrough when no managed handle exists', () => {
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  const topologyCases: ReadonlyArray<readonly [string, Record<string, string | undefined>]> = [
+    ['ZELLIJ', { ZELLIJ: '0' }],
+    ['TMUX', { TMUX: '/tmp/tmux-1000/default,1,0' }],
+    ['STY', { STY: '1234.pts-0.host' }],
+    ['TERM tmux', { TERM: 'tmux-256color' }],
+    ['TERM screen', { TERM: 'screen-256color' }],
+    ['Herdr', { TERM_PROGRAM: 'herdr' }],
+    ['explicit kitty in tmux', { TMUX: '/tmp/tmux-1000/default,1,0', PI_IMAGE_PROTOCOL: 'kitty' }],
+    ['explicit iterm2 in tmux', { TMUX: '/tmp/tmux-1000/default,1,0', PI_IMAGE_PROTOCOL: 'iterm2' }],
+  ]
+  for (const [name, environment] of topologyCases) {
+    for (const key of TERMINAL_ENV_KEYS) delete process.env[key]
+    for (const [key, value] of Object.entries(environment)) {
+      if (value !== undefined) process.env[key] = value
+    }
+    setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+    assert.equal(effectiveImageProtocol(undefined), null, `${name}: no legacy image bytes may leak through a pane`)
+  }
+  for (const key of TERMINAL_ENV_KEYS) delete process.env[key]
+  process.env.ZELLIJ = ''
+  process.env.TMUX = ''
+  process.env.STY = ''
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined), 'kitty', 'an empty marker is not a session')
+})
+
+test('explicit iterm2 and kitty on an ordinary Direct terminal keep only their own answer', () => {
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  process.env.PI_IMAGE_PROTOCOL = 'iterm2'
+  assert.equal(effectiveImageProtocol(undefined), 'iterm2')
+  process.env.PI_IMAGE_PROTOCOL = 'sixel'
+  assert.equal(effectiveImageProtocol(undefined), null, 'sixel never falls back to legacy iTerm2')
+  process.env.PI_IMAGE_PROTOCOL = 'kitty'
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(undefined), 'kitty')
+})
+
+/**
+ * The classifier reads exactly TWO members of a handle (`mode` and
+ * `canPaint()`), so a minimal object is a faithful input for THIS contract — a
+ * fuller fake would only restate the Kitty face the sibling files already own.
+ */
+function classifierHandle(
+  mode: 'native' | 'tmux-virtual' | 'sixel' | 'zellij-negotiated',
+  paints: boolean,
+  selected: 'kitty' | 'sixel' | null = 'kitty',
+): ImageGraphics {
+  return {
+    mode,
+    canPaint: () => paints,
+    ...(mode === 'zellij-negotiated' ? { selectedProtocol: () => selected } : {}),
+  } as unknown as ImageGraphics
+}
+
+test('Direct SIXEL is the last branch: it never overrides a managed handle and never invents pixels', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: null, trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', true)), 'sixel', 'a ready Direct SIXEL owner answers sixel')
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', false)), null, 'pending/denied SIXEL paints text')
+
+  // A managed Kitty handle keeps precedence even while it cannot paint: a
+  // revoked tmux pane must not silently degrade to a different protocol.
+  assert.equal(effectiveImageProtocol(classifierHandle('native', true)), 'kitty')
+  assert.equal(effectiveImageProtocol(classifierHandle('native', false)), null)
+  assert.equal(effectiveImageProtocol(classifierHandle('tmux-virtual', false)), null)
+
+  // The SIXEL owner is the authority even where the fork's own legacy detection
+  // would answer iTerm2: `getCapabilities().images` never selects SIXEL.
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', true)), 'sixel')
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', false)), null, 'a denied SIXEL never falls back to iTerm2')
+  assert.equal(effectiveImageProtocol(undefined), 'iterm2', 'no handle keeps the fork answer')
+  resetCapabilitiesCache()
+})
+
+test('a managed native-tmux SIXEL handle is the only authority for that pane', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', true)), 'sixel',
+    'the tmux SIXEL handle answers sixel even when the fork would answer kitty')
+  assert.equal(effectiveImageProtocol(classifierHandle('sixel', false)), null,
+    'a revoked native-tmux SIXEL handle never falls back to the fork capability')
+  assert.equal(effectiveImageProtocol(classifierHandle('tmux-virtual', true)), 'kitty',
+    'the tmux virtual Kitty handle keeps its own transport')
+  resetCapabilitiesCache()
+})
+
+test('a negotiated Zellij handle projects only its own selection, never the inherited capability', () => {
+  resetCapabilitiesCache()
+  setCapabilities({ images: 'kitty', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', false, null)), null,
+    'pending paints text')
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', true, 'kitty')), 'kitty')
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', true, 'sixel')), 'sixel')
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', false, 'kitty')), null,
+    'a lost Kitty transport paints text, never legacy pixels')
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', false, 'sixel')), null,
+    'an unready/revoked SIXEL owner paints text')
+  setCapabilities({ images: 'iterm2', trueColor: true, hyperlinks: false })
+  assert.equal(effectiveImageProtocol(classifierHandle('zellij-negotiated', false, null)), null,
+    'a settled Zellij pane never falls back to the inherited iTerm2 answer')
+  resetCapabilitiesCache()
 })

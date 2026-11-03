@@ -71,7 +71,7 @@ import * as toolTodo from '@deepseek-ai/dsh-tool-todo'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
-import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
+import type { ClientReloadRequestResult, RemoteApplicationOverride, RunnerStartupSettlement } from '../../src/app/application-runtime.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { createRemoteApplicationRuntime } from '../../src/app/remote/runtime.ts'
 import { testPromptSerializer, waitFor } from '../support/remote-application-fixture.ts'
@@ -80,6 +80,7 @@ import { dshHome } from '../../src/runtime/process/diagnostics.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
+import { wireNodes } from '../support/tsp-picker-wire.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -99,6 +100,14 @@ function* scriptedTextTurn(text: string): Generator<StreamChunk> {
 class StubStreamingLlmAdapter extends LlmAdapter {
   private gate: Promise<void> | undefined
   private openGate: (() => void) | undefined
+  private heldStreams = 0
+
+  /** How many model requests actually ENTERED the held gate (a witness that a
+   *  test asserting a held step is not merely observing `step/start`, which the
+   *  Agent can append before the model request is issued). */
+  get heldStreamCount(): number {
+    return this.heldStreams
+  }
 
   /** Hold every subsequent turn open; returns the release. */
   hold(): () => void {
@@ -135,6 +144,7 @@ class StubStreamingLlmAdapter extends LlmAdapter {
     // of parking the Host teardown's whenIdle() forever.
     const gate = this.gate
     if (gate !== undefined) {
+      this.heldStreams += 1
       const signal = options.signal
       if (signal === undefined) {
         await gate
@@ -229,10 +239,16 @@ export async function mountRemoteRunner(
     beforeRunnerMount?: (presentation: RemoteApplicationOverride['presentation']) => void
     /** Mount the production TSP renderer over the scripted pane instead of PiTui. */
     renderer?: 'pi-tui' | 'tsp'
+    /** Advertise the TSP Session Browser presenter (for /sessions and /resume). */
+    sessionBrowser?: boolean
     /** Advertise native image + blobs when the TSP renderer is selected. */
     nativeImages?: boolean
     /** Advertise the native chart kind when the TSP renderer is selected. */
     nativeChart?: boolean
+    /** M4 PR4: the split Client's internal process startup settlement (the
+     *  ONE process-owned manual-reload capability). Absent keeps the Direct
+     *  pending behavior. */
+    startupSettlement?: RunnerStartupSettlement
   } = {},
 ): Promise<RemoteRunnerFixture> {
   const presetId = options.presetId ?? 'm3-4-pr2-preset'
@@ -259,7 +275,11 @@ export async function mountRemoteRunner(
   const vt = new VirtualTerminal(100, 30)
   let pane: TspPane | undefined
   if (options.renderer === 'tsp') {
-    pane = installTspPane({ nativeImages: options.nativeImages, nativeChart: options.nativeChart })
+    pane = installTspPane({
+      nativeImages: options.nativeImages,
+      nativeChart: options.nativeChart,
+      sessionBrowser: options.sessionBrowser,
+    })
     life.defer(() => pane?.restore())
     process.env.DSH_PI_TUI_RENDERER = 'tsp'
   } else {
@@ -303,7 +323,12 @@ export async function mountRemoteRunner(
   life.defer(() => { TuiApp.prototype.start = originalStart })
   options.beforeRunnerMount?.(override.presentation)
   const runnerFiber = runnerCtx.plugin(pluginCtx => {
-    applyRunnerWithRuntime(pluginCtx, TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never), override)
+    applyRunnerWithRuntime(
+      pluginCtx,
+      TuiConfigSchema({ fullscreen: 'off', sessionId: options.resumeSessionId } as never),
+      override,
+      options.startupSettlement,
+    )
   })
   await runnerFiber
   // Let the startup composition settle (mount + initial hydration).
@@ -1252,6 +1277,90 @@ test('navigation: switch, same-id rollover and reconnect re-init the presentatio
   await waitFor('new session surface', () => viewport().includes('alpha answer 3') === false, 20_000)
   assert.equal(viewport().includes('alpha answer 3'), false, 'the previous subject retires on /new')
   assert.equal(viewport().includes('beta answer 3'), false, 'and no older subject reappears')
+  void app
+})
+
+test('a real Remote /new cancels the running old turn through the official Host cancel, then commits the fresh Session', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'm3-4-pr2-preset'
+  const mainId = 'm3-4-pr2-navigation-cancel'
+  const adapter = new StubStreamingLlmAdapter()
+  const seedHost = await mountRemotePresentationHost(life, presetId, { llmAdapter: adapter })
+  await seedHost.harness.create(
+    SessionId(mainId),
+    { provider: 'smoke', model: 'smoke-model' } as never,
+    { cwd: seedHost.anchorDir },
+  )
+  const fixture = await mountRemoteRunner(life, { presetId, resumeSessionId: mainId, host: seedHost })
+  const app = await waitForApp(fixture)
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId)) as unknown as {
+    session: {
+      getSnapshot(): { readonly running: boolean }
+      prompt(
+        content: readonly { readonly type: 'text'; readonly text: string }[],
+        mode: 'queue' | 'steer',
+        signal?: AbortSignal,
+        requestId?: unknown,
+      ): Promise<unknown>
+    }
+  }
+  assert.ok(binding !== undefined, 'the resumed session is retained through the official Client')
+  // Hold a REAL Host turn open. Only a cancellation can end it: the release is
+  // registered for teardown and is never called by the assertion path.
+  const release = adapter.hold()
+  life.defer(release)
+  await binding.session.prompt([{ type: 'text', text: 'hold the old turn open' }], 'queue')
+  await waitFor('the old Host turn running', () => binding.session.getSnapshot().running, 20_000)
+  const agents = seedHost.ctx.get('agents') as unknown as {
+    get(id: SessionId): { readonly status: string } | undefined
+  }
+  const oldAgent = agents.get(SessionId(mainId))
+  assert.ok(oldAgent !== undefined, 'the old Host Agent is live')
+  assert.equal(oldAgent.status, 'running')
+  const oldSession = seedHost.ctx.sessions.get(SessionId(mainId)) as unknown as {
+    snapshotEvents(): readonly { type: string; data?: unknown }[]
+  }
+  // Wait for the real STEP and, decisively, for the MODEL REQUEST itself to
+  // enter the held gate: `step/start` can be appended before the request is
+  // issued, so only the adapter's own counter proves the held-model case. The
+  // hold is never released by the assertions.
+  await waitFor('the old Host step started', () => {
+    return oldSession.snapshotEvents().some(event => event.type === 'step/start')
+  }, 20_000)
+  await waitFor('the held model request entered its gate', () => adapter.heldStreamCount >= 1, 20_000)
+  const hostIdsBefore = new Set(seedHost.ctx.sessions.list().map(session => String(session.id)))
+
+  // The REAL user gesture: a /new typed into the mounted Remote composer.
+  const mounted = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
+  mounted.setDraft('/new')
+  mounted.submitDraft()
+
+  // 1. The official Host cancel reached the EXACT old generation: the held turn
+  //    aborts WITHOUT the test releasing the hold, and the durable boundary is
+  //    the user-cancellation reason.
+  await waitFor('the old Host turn aborted by the navigation stop', () => oldAgent.status !== 'running', 20_000)
+  const lastEnd = oldSession.snapshotEvents().filter(event => event.type === 'turn/end').at(-1)?.data as
+    { reason?: { kind?: string; reason?: { kind?: string } } } | undefined
+  assert.equal(lastEnd?.reason?.kind, 'aborted', 'the old turn ended through the durable cancellation reason')
+  assert.equal(lastEnd?.reason?.reason?.kind, 'user', 'the cancellation is the user navigation stop, not a shutdown cancel')
+  assert.ok(oldSession.snapshotEvents().some(event => event.type === 'step/start'),
+    'the aborted step is the held model request that only the navigation stop could end')
+
+  // 2. Exactly ONE fresh Host Session is created and becomes the current Remote
+  //    owner; the old Session stays durable.
+  await waitFor('exactly one fresh Host session', () => {
+    return seedHost.ctx.sessions.list().filter(session => !hostIdsBefore.has(String(session.id))).length === 1
+  }, 20_000)
+  const createdIds = seedHost.ctx.sessions.list()
+    .map(session => String(session.id))
+    .filter(id => !hostIdsBefore.has(id))
+  assert.equal(createdIds.length, 1, 'one /new creates exactly one fresh Session')
+  const freshId = createdIds[0]!
+  await waitFor('the fresh Remote owner is retained', () => {
+    return fixture.aggregate.wire.client.sessions.binding(SessionId(freshId)) !== undefined
+  }, 20_000)
+  assert.ok(seedHost.ctx.sessions.list().some(session => String(session.id) === mainId),
+    'the old Session remains persisted (a cancel is not a delete)')
   void app
 })
 
@@ -2688,5 +2797,149 @@ test('C3 Remote negative: the sample-less performance/context groups word Unavai
     if (originalEnvWAYLAND === undefined) delete process.env.WAYLAND_DISPLAY
     else process.env.WAYLAND_DISPLAY = originalEnvWAYLAND
     await fixture?.dispose()
+  }
+})
+
+test('a Remote TSP /resume failure is visible once and an indeterminate outcome never restores the command', async (t) => {
+  const life = testLifecycle(t)
+  const presetId = 'prc-remote-resume-preset'
+  const host = await mountRemotePresentationHost(life, presetId)
+  await host.harness.create(SessionId('prc-current'), undefined, { cwd: host.anchorDir })
+  await host.harness.create(SessionId('prc-target'), undefined, { cwd: host.anchorDir })
+  const fixture = await mountRemoteRunner(life, {
+    host,
+    presetId,
+    resumeSessionId: 'prc-current',
+    renderer: 'tsp',
+    sessionBrowser: true,
+  })
+  const pane = fixture.pane
+  assert.ok(pane, 'the Remote TSP pane must be mounted')
+  const composerText = (): string | undefined => {
+    const composer = wireNodes({ frames: () => pane.frames() }).find(node => node.id === 'dock.composer')
+    return typeof composer?.p === 'object' && composer.p !== null && typeof (composer.p as { text?: unknown }).text === 'string'
+      ? (composer.p as { text: string }).text
+      : undefined
+  }
+  const clearComposer = async (): Promise<void> => {
+    for (let index = 0; index < (composerText() ?? '').length; index += 1) pane.input.type('\x7f')
+    await waitFor('the composer to clear', () => (composerText() ?? '') === '', 15_000)
+  }
+  const submit = async (line: string): Promise<void> => {
+    pane.input.type(line)
+    await waitFor(`the composer to hold ${line}`, () => composerText() === line, 15_000)
+    pane.input.type('\r')
+  }
+  const lifecycle = fixture.override.selected.backend.sessionLifecycle as unknown as {
+    open: (...args: never[]) => Promise<unknown>
+  }
+  const originalOpen = lifecycle.open
+  life.defer(() => { lifecycle.open = originalOpen })
+  try {
+    lifecycle.open = async () => ({
+      ownership: 'current',
+      outcome: { kind: 'unavailable', message: 'session "prc-target" is lease-held' },
+    })
+    await submit('/resume prc-target')
+    await waitFor('the Remote failure notice', () => pane.output.text().includes('lease-held'), 25_000)
+    assert.equal(pane.output.text().split('lease-held').length - 1, 1,
+      'the card-less Remote route publishes the /resume failure exactly once')
+    assert.equal(composerText(), '/resume prc-target',
+      'a real failure keeps the command draft retryable')
+    await clearComposer()
+
+    lifecycle.open = async () => ({
+      ownership: 'superseded',
+      outcome: { kind: 'opened', handle: { session: { id: 'prc-target' } } },
+    })
+    await submit('/resume prc-target')
+    await waitFor('the Remote indeterminate notice', () => pane.output.text().includes('do not retry automatically'), 25_000)
+    assert.equal(pane.output.text().split('do not retry automatically').length - 1, 1,
+      'the indeterminate result is visible exactly once')
+    assert.equal(composerText(), '',
+      'an indeterminate open is not restored as a retryable command')
+  } finally {
+    lifecycle.open = originalOpen
+  }
+})
+
+// ── M4 PR4: the manual Client reload across the real composition ────────────
+
+/** An LLM endpoint that counts REAL model requests (the negative witness). */
+class CountingLlmAdapter extends StubStreamingLlmAdapter {
+  streams = 0
+  override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    this.streams += 1
+    yield* super.stream(options)
+  }
+}
+
+/**
+ * The `/reload-client` command must ride the REAL production chain:
+ * TuiApp input → the SubmissionController's existing line classifier → the
+ * live Client registry → the composition root's Client-local safety gate →
+ * the ONE process-owned capability injected through the internal startup
+ * settlement. This suite proves the accepted and refused process decisions are
+ * each reached EXACTLY once per bare command, that the fixed refusal notice is
+ * the ONE visible outcome, and that neither path becomes a model prompt. The
+ * Client-local safety reasons themselves are proven by the owner-level suites;
+ * the real PTY/install/reload process proof is the two-package upgrade smoke
+ * (U08).
+ */
+test('M4 PR4: the live /reload-client command reaches the ONE process capability with its fixed notice', async (t) => {
+  const life = testLifecycle(t)
+  const results: ClientReloadRequestResult[] = []
+  let next: ClientReloadRequestResult = { kind: 'accepted' }
+  const adapter = new CountingLlmAdapter()
+  const fixture = await mountRemoteRunner(life, {
+    llmAdapter: adapter,
+    // The argued-line control below is an ORDINARY submission (a real Host
+    // turn), so this suite mounts the production prompt serializer.
+    productionSerializer: true,
+    startupSettlement: {
+      surfaceReady: () => {},
+      surfaceFailed: () => {},
+      requestClientReload: () => {
+        results.push(next)
+        return next
+      },
+    },
+  })
+  try {
+    const app = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(request?: 'enter'): void }
+    await waitFor('sessionless Remote surface', () => fixture.vt.getViewport().join('').length > 0, 20_000)
+    const refusalNotice = 'Client reload failed: the installed replacement Client is unavailable or incompatible.'
+
+    // 1. ACCEPTED: the live registry executes the bare command and the process
+    //    capability is called exactly ONCE — with no duplicate notice and no
+    //    model prompt.
+    app.setDraft('/reload-client')
+    app.submitDraft()
+    await waitFor('accepted reload request', () => results.length === 1, 20_000)
+    assert.deepEqual(results, [{ kind: 'accepted' }])
+    assert.equal(adapter.streams, 0, 'the reload command became a model prompt')
+    assert.doesNotMatch(fixture.vt.getViewport().join('\n'), /Client reload (blocked|failed|skipped)/u,
+      'an accepted request published a redundant notice')
+
+    // 2. REFUSED: the process decision's fixed notice is the ONE visible
+    //    outcome and the same surface keeps accepting commands.
+    next = { kind: 'refused', reason: 'target-invalid' }
+    app.setDraft('/reload-client')
+    app.submitDraft()
+    await waitFor('refused reload request', () => results.length === 2, 20_000)
+    await waitFor('refusal notice', () => fixture.vt.getViewport().join('\n').includes(refusalNotice), 20_000)
+    assert.equal(fixture.vt.getViewport().join('\n').split(refusalNotice).length - 1, 1,
+      'the refusal notice must be published exactly once')
+    assert.equal(adapter.streams, 0, 'a refused reload became a model prompt')
+
+    // 3. The ARGUED line is not an invocation: it never reaches the Client
+    //    registry's reload handler (or the process capability) — it follows the
+    //    ordinary submission route instead.
+    app.setDraft('/reload-client anything')
+    app.submitDraft()
+    await waitFor('argued line became an ordinary submission', () => adapter.streams === 1, 20_000)
+    assert.equal(results.length, 2, 'an argued /reload-client line reached the reload handler')
+  } finally {
+    await fixture.dispose()
   }
 })

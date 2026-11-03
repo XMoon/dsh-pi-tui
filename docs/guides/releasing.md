@@ -241,40 +241,47 @@ package version, or installation guidance is incomplete; do not bypass it.
 
 ## 4. Run the appropriate verification gate
 
-The gate selection depends on whether the release range changed the vendored
-fork:
+The repository has ONE local release gate:
 
-| Release range | Command |
-|---|---|
-| No change under `packages/pi-tui/` | `pnpm run verify:prepush:nofork` |
-| Any change under `packages/pi-tui/` | `pnpm run verify:prepush` |
+```sh
+pnpm verify:release
+```
 
-Both commands run the documentation test, tooling tests, divergence
-ledger/vendor gates, naming gate, client-boundary gate, keybinding gate,
-production dependency audit, and `pack:release`. The full variant additionally
-runs the fork typecheck and fork tests. `pack:release`
-executes the package lifecycle: clean, build, bundle typecheck/tests, tarball
-smoke, public extension fixture smokes, plugin smokes, and declaration-leak
-checks. Do not treat source tests alone as sufficient.
+It runs the fork typecheck/tests, the benchmark typecheck, the tmux and
+tooling suites, the installation-doc / pi-divergence / naming /
+session-event / boundary / architecture / production-reads / keybinding
+gates, the production dependency audit, and finally `pnpm pack:release`.
 
-The CI tag workflow also runs its own source checks, fork tests, exact-tarball
-checks, compatibility matrix, `pi2dsh` TTY smoke, and security audit. The local
-nofork shortcut only avoids repeating the fork suite locally; it does not
-remove those CI checks.
+`pack:release` is an explicit local ORCHESTRATOR, not a lifecycle hook:
+`clean` -> `clean:fork` -> `build` -> `typecheck:bundle` -> `test:product`
+-> `pack:artifact` -> `smoke:release`. `pack:artifact` is the one physical
+pack entry and is strictly `pnpm pack --config.ignore-scripts=true`: it
+never builds, tests or runs smokes. `smoke:release` runs the eight
+packed-artifact smokes against that exact tarball. Do not treat source tests
+alone as sufficient.
 
-CI produces the tarball through an accelerated graph rather than through one
-`pnpm pack` invocation: one build, one bundle typecheck, N product-test shards
-joined by a coverage proof, and a lifecycle-free `pnpm pack` whose result is
-qualified by the same eight public-package smokes the `postpack` hook runs,
-plus the source-leak gate and the startup handshake. The ordinary `pnpm pack`
-is compared with the lifecycle-free one by a recorded content-equivalence
-proof, scoped to the dependency mode, the Node version and the platform, which
-re-runs a REAL comparison whenever a packaging input, the mode, the runtime or
-the recorded verdict changes. A release whose packaging inputs changed
-therefore pays for the ordinary pack again — that is the fail-closed path, not
-a regression, and the fast path must never be assumed. `scripts/ci-verdict.mjs`
-is the final gate: every required job must be exactly `success`, and the two
-mode-dependent jobs must show the status their mode requires.
+Git push has no automatic local hook. Run `verify:release` explicitly before
+tagging; the `nofork` shortcut no longer exists.
+
+The CI tag workflow also runs its own source checks, fork tests,
+exact-tarball checks, compatibility matrix, `pi2dsh` TTY smoke, and security
+audit. CI produces the tarball through an accelerated graph rather than
+through one `pnpm pack` invocation: one build, one bundle typecheck, N
+product-test shards joined by a coverage proof, and a lifecycle-free
+`pnpm pack:artifact` candidate whose bytes are qualified by the eight
+public-package smokes (`pnpm smoke:release`) plus the source-leak gate and
+the startup handshake. There is no second pack route and no
+content-equivalence proof: the candidate's identity is its SHA-256,
+re-proved at every consumer. `scripts/ci-verdict.mjs` is the final gate:
+every required job must be exactly `success`, the mode-dependent jobs must
+show the status their mode requires, and the split-process job must be
+exactly `success` on an npm release tag and exactly `skipped` on PR/branch
+refs (Source Mode always requires `skipped`). The Linux split-process smoke
+runs automatically ONLY on an npm release tag; ordinary PR and branch CI
+reports it as `skipped`. Host/Client split-process development work must run
+`pnpm smoke:split-process -- <candidate>` manually under its task plan against
+the actual candidate tarball and report the package SHA, DSH version, command,
+and PASS/FAIL (or `NOT_RUN`).
 
 A failed run is recovered without re-testing the jobs that already passed:
 GitHub's "Re-run failed jobs" (`gh run rerun <RUN_ID> --failed`) keeps the
@@ -346,8 +353,8 @@ git push origin vX.Y.Z
 git push origin next-vX.Y.Z-alpha.N
 ```
 
-The push skips the Husky gate for the branch and runs the full gate for the
-release tag. The tag starts `.github/workflows/ci.yml`:
+The push has no local hook; creating a release tag starts
+`.github/workflows/ci.yml`:
 
 1. the parser selects the npm dist-tag from the tag prefix and independently
    derives the GitHub prerelease state from the SemVer;
@@ -356,11 +363,11 @@ release tag. The tag starts `.github/workflows/ci.yml`:
    dependency audit run in parallel;
 3. the candidate tarball is packed from the verified build without the package
    lifecycle, then qualified by the eight public-package smokes, the
-   source-leak gate and the startup handshake; the pack-equivalence proof runs
-   here whenever its trigger fires;
+   source-leak gate and the startup handshake;
 4. `qualified` joins every required job — with the mode-dependent jobs checked
-   for their exact status — re-proves the candidate's SHA-256 and uploads that
-   same artifact as the only publishable one;
+   for their exact status, and the release-tag-only split-process proof
+   required to be `success` in npm mode — re-proves the candidate's SHA-256
+   and uploads that same artifact as the only publishable one;
 5. release metadata extracts the bilingual changelog body and checks parsed
    tag version/date parity;
 6. `publish` downloads the exact tested tarball (the qualified artifact, never

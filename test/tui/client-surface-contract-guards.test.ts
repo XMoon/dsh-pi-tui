@@ -124,8 +124,8 @@ test('the Remote presentation bridge is Client-derived (no Host registry, no pre
 
 test('the Remote permission path never writes through the Host preset service', () => {
   const status = code('app/surface/status-runtime.ts')
-  const cycleStart = status.indexOf('const cyclePermission = (): void => {')
-  assert.ok(cycleStart !== -1, 'the cycle owner exists')
+  const cycleStart = status.indexOf('const applySelectedPermission = (')
+  assert.ok(cycleStart !== -1, 'the shared permission apply owner exists')
   const authority = status.slice(
     cycleStart,
     status.indexOf('const agent = deps.liveAgent()', cycleStart),

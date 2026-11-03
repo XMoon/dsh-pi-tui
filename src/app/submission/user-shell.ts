@@ -32,7 +32,7 @@ import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import type { InterruptAgentLike } from '../session/interrupt.ts'
 import type { TuiSettingsDoc } from '../../runtime/config-port.ts'
 import type { HostUserShellPort } from '../../runtime/host-user-shell-port.ts'
-import type { SessionWriter } from '../../runtime/session-writer-port.ts'
+import type { SessionWriter, WriteOutcome } from '../../runtime/session-writer-port.ts'
 import { localShellSandboxPreferenceOf, shellCommandOf, shellModeOf } from './shell-context.ts'
 import { submitShell } from '../submission/runtime.ts'
 import type { LiveSessionScope } from '../session/scope.ts'
@@ -68,7 +68,13 @@ export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
   /** The ownership generation read (the run-start fence). */
   readonly ownership: { generation(): number }
   /** `SessionRuntime.withWriter`: the scope-bound writer admission. */
-  readonly session: { withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T> }
+  readonly session: {
+    withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
+    /** The scope-bound CONTROL admission: a busy interrupt must still reach
+     *  the exact captured owner while a navigation transition holds the
+     *  ordinary-writer barrier. */
+    interrupt(scope: LiveSessionScope): Promise<WriteOutcome<undefined>>
+  }
   /** The synchronous live-scope capture (throws when no live owner). */
   readonly requireLiveScope: () => LiveSessionScope
   /** The optional live-scope capture (undefined when no live owner) — the
@@ -95,8 +101,13 @@ export interface UserShellDeps<ExactAgent extends InterruptAgentLike> {
 
 /** The user-shell owner as the rest of the application consumes it. */
 export interface UserShellOwner {
-  /** Run one `!` / `!!` command. */
-  run(text: string, ackToken: number | undefined): void
+  /**
+   * Run one `!` / `!!` command.
+   * `endWrite` releases the gesture's accepted business-write lifetime; it is
+   * called EXACTLY once at this run's terminal settlement (including the
+   * context-mode `!` Session write), never on a timer.
+   */
+  run(text: string, ackToken: number | undefined, endWrite: () => void): void
   /** Abort the running Host user-shell run and interrupt the live Agent (Esc / cancel). */
   interrupt(): void
   /** Abort the run and remove every retained full-output temp file. */
@@ -141,11 +152,13 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
    *
    * 1. the Host user-shell PROCESS cancel — the branch-local abort
    *    controller, forwarded to the Host process by the adapter;
-   * 2. the Session TURN cancel — the semantic `SessionWriter.cancel` under
-   *    the live-scope writer admission, addressed by the CURRENT session
-   *    id (never by a Direct Agent object, so the Remote branch cancels
-   *    through the official Session cancel; §27 "remove Direct-Agent-only
-   *    current Session cancellation").
+   * 2. the Session TURN cancel — `SessionRuntime.interrupt`, the ONE
+   *    scope-bound CONTROL admission. It is accepted while a navigation
+   *    transition holds the ordinary-writer barrier, addresses the EXACT
+   *    captured owner (never a session-id re-resolution), and keeps the
+   *    Host pending inbox. A stale capture or an exiting runner settles as
+   *    `cancelled` (the request provably never left the TUI), so a normal
+   *    supersede is never reported as an `agent interrupt` error.
    */
   const interrupt = (): void => {
     if (deps.isCleanedUp()) return
@@ -157,14 +170,10 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
     const scope = deps.captureLiveScope()
     if (scope === undefined) return
     const generation = deps.ownership.generation()
-    // The scope-bound writer admission (A3-4): interrupt is NOT a submission
-    // write, so its business ownership stays here — only the admission moves
-    // through SessionRuntime.withWriter. ONE capture: the same record fences
-    // the admission and addresses the cancel.
-    runOwned('agent interrupt', () => deps.session.withWriter(
-      scope,
-      () => deps.writer.cancel(scope.sessionId),
-    ), {
+    // The control admission captures the exact owner synchronously and is not
+    // refused by a frozen transitional barrier. The business ownership stays
+    // here: the outcome/notice gates below belong to this gesture.
+    runOwned('agent interrupt', () => deps.session.interrupt(scope), {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
       onResult: (outcome) => {
@@ -174,9 +183,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
           ? outcome.error.message
           : outcome.kind === 'unsupported'
             ? outcome.reason
-            : outcome.kind === 'indeterminate'
-              ? 'session cancellation result is indeterminate — do not retry automatically'
-              : 'session cancellation was cancelled'
+            : 'session cancellation result is indeterminate — do not retry automatically'
         deps.notify(message, 'error')
       },
       onError: (error) => {
@@ -200,11 +207,25 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
    * excluded-from-context escape hatch): zero SessionWriter.prompt, zero
    * context message, zero model visibility.
    */
-  const runUserShell = (text: string, ackToken: number | undefined): void => {
-    if (deps.isCleanedUp()) return
+  const runUserShell = (text: string, ackToken: number | undefined, endWrite: () => void): void => {
+    // The gesture's accepted business-write lifetime: exactly one release at
+    // this run's terminal settlement (M4 PR4 `/reload-client` safety).
+    let writeSettled = false
+    const settleWrite = (): void => {
+      if (writeSettled) return
+      writeSettled = true
+      endWrite()
+    }
+    if (deps.isCleanedUp()) {
+      settleWrite()
+      return
+    }
     const includeInContext = shellModeOf(text) === 'context'
     const command = shellCommandOf(text)
-    if (command === '') return
+    if (command === '') {
+      settleWrite()
+      return
+    }
     // NOTE: the context-mode submit ack is armed AT THE GESTURE in
     // dispatchUserInput (before ensureSession) — NEVER here, or the T0
     // baseline would rebase after the session create. `ackToken` scopes
@@ -268,6 +289,7 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
           source: { kind: 'user' },
         }),
         diag: deps.diag,
+        onSettled: settleWrite,
       })
     }
     // A settled latch: the card must settle EXACTLY once — the first
@@ -294,8 +316,10 @@ export function createUserShell<ExactAgent extends InterruptAgentLike>(
       // ensure-Session gesture), so its Submitting row must settle too.
       if (localSignal.aborted) {
         shellTerminalAck('shell run aborted')
+        settleWrite()
       }
       if (includeInContext && !localSignal.aborted) submitResult(result)
+      else settleWrite()
     }
     // The Host execution policy from the persisted preference (a policy
     // name, never a locality choice). An unavailable policy fails closed

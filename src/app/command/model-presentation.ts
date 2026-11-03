@@ -29,8 +29,25 @@ export interface ModelPickerDirectory {
   readonly current: ModelSelectionDto | undefined
 }
 
+/**
+ * The initial presentation focus the opener asked for: the plain catalogue
+ * (`models`), or the catalogue with its Reasoning Effort strip as the initial
+ * keyboard zone (`effort`). It is a PRESENTATION-only entry hint captured at
+ * `open()` — it seeds no candidate, mirrors no long-lived model configuration
+ * and is never an uncommitted business write.
+ */
+export type ModelPickerEntry = 'models' | 'effort'
+
 export interface ModelPickerRequest {
   readonly subject: ModelPickerSubject
+  /**
+   * Which entry the panel opens on. The registered `/model` command always
+   * passes `models`; a high-frequency control (the TSP composer's Effort
+   * button) may pass `effort`, which only relocates the FIRST hydrated
+   * panel's initial focus (see the TSP presenter) and never changes the one
+   * write, the read owner or the subject.
+   */
+  readonly entry: ModelPickerEntry
   apply(selection: ModelSelectionDto): Promise<ModelApplyOutcome> | ModelApplyOutcome
   /**
    * Re-read the SAME directory authority after a failed or partial read. The

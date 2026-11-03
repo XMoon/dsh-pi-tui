@@ -66,6 +66,7 @@ test('REAL_DIRECT_HEADLESS: persisted main Session → DirectSessionReader → p
       noteUserInput() {},
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
+      openModelPicker() {},
     })
     const browserPresentation = renderer.sessionBrowserPresentation
     assert.ok(browserPresentation)
@@ -179,6 +180,7 @@ test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the p
       noteUserInput() {},
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
+      openModelPicker() {},
     })
     const browserPresentation = renderer.sessionBrowserPresentation
     assert.ok(browserPresentation)
@@ -286,7 +288,7 @@ test('DirectSessionReader: persisted subagent is excluded from native typed-matc
       }),
       diag,
       sessionId: () => parentId,
-      onResumeIntent: (intent, _scope, settle) => { intents.push(intent); settle() },
+      onResumeIntent: (intent, _scope, settle) => { intents.push(intent); settle({ kind: 'cancelled' }) },
     })
     const browse = owner.open()
     assert.deepEqual(await browse.settlement, { kind: 'ready' })

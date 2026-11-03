@@ -295,8 +295,14 @@ for (const busyEnter of ['queue', 'steer'] as const) {
         // Start a real turn; its model stream is HELD so the turn stays running.
         fixture.pane.input.type('first prompt')
         await awaitComposer(fixture, 'first prompt')
+        // The baseline MUST precede the submission: `stream()` counts the call
+        // the moment it runs, so a baseline read after Enter can already contain
+        // this request and the `>` comparison would never fire. TSP-7 PR-A
+        // retired the dock banner, so the turn is observed through the
+        // AUTHORITATIVE fact — this real model request.
+        const modelCallsBefore = fixture.modelCalls()
         fixture.pane.input.type('\r')
-        await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
+        await waitFor('the real model request to start', () => fixture.modelCalls() > modelCallsBefore, 25_000)
         await waitFor('the first settled prompt', () => recorder.calls() === 1 && promptCalls.length === 1, 25_000)
         assert.equal(promptCalls.length, recorder.calls(), 'the settled records and the count agree (a settled-only recorder)')
         const beforeSettled = recorder.calls()
@@ -398,12 +404,17 @@ test('Esc during a RUNNING turn cancels the turn through the existing path (no e
     await waitForInputDelivery(fixture.pane)
     fixture.pane.input.type('cancel me')
     await awaitComposer(fixture, 'cancel me')
+    // The baseline MUST precede the submission: `stream()` counts the call the
+    // moment it runs, so a baseline read after Enter can already contain this
+    // request and the `>` comparison would never fire. TSP-7 PR-A retired the
+    // dock banner, so the turn is observed through this real model request.
+    const modelCallsBefore = fixture.modelCalls()
     fixture.pane.input.type('\r')
-    await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
+    await waitFor('the real model request to start', () => fixture.modelCalls() > modelCallsBefore, 25_000)
     // Escape maps to the EXISTING application cancel path (never an exit).
-    // The authoritative observation is the LIVE MODEL REQUEST: the existing
-    // cancellation path (Esc → onCancel → UserShell.interrupt → the scoped
-    // SessionWriter.cancel → the real Agent's cancel) must abort it.
+    // The authoritative observation is the LIVE MODEL REQUEST: the control
+    // admission (Esc → onCancel → SessionRuntime.interrupt → the exact Agent
+    // cancel with keepInbox) must abort it.
     fixture.pane.input.type('\u001b')
     await waitFor('the live model request to observe the cancel', () => fixture.cancellations() >= 1, 25_000)
     assert.ok(fixture.cancellations() >= 1,
@@ -418,13 +429,12 @@ test('Esc during a RUNNING turn cancels the turn through the existing path (no e
   }
 })
 
-test('a REJECTED session cancel surfaces a renderer-neutral error notice (never an exit)', async (t) => {
-  // The cancel-ERROR qualification: when the semantic `SessionWriter.cancel`
-  // settles `rejected` (or errors), the user-shell owner's `onResult` must
-  // surface the structural message through the RENDERER-NEUTRAL notice sink
-  // (`surface.display.notify`) — the same seam the TSP dock renders — and the
-  // TUI must stay up. The recorder patches the production writer's `cancel`
-  // (unbound original, one-to-one) to return a typed rejection.
+test('a FAILING session control cancel surfaces a renderer-neutral indeterminate notice (never an exit)', async (t) => {
+  // The cancel-ERROR qualification under the control admission: a Busy Esc
+  // reaches SessionRuntime.interrupt -> the exact Direct owner cancel. A
+  // throwing Agent cancel is a dispatched-but-unproven result, so the
+  // user-shell owner must settle it as `indeterminate` through the
+  // RENDERER-NEUTRAL notice sink (the TSP dock seam) and the TUI must stay up.
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   let releaseStream!: () => void
@@ -435,27 +445,38 @@ test('a REJECTED session cancel surfaces a renderer-neutral error notice (never 
     streamHold: () => held,
     appExit: () => { exited = true },
   })
-  const rejectionMessage = 'the session refuses cancellation right now'
-  const recorder = fixture.recordCancels(() => ({
-    kind: 'rejected',
-    error: { code: 'session/agent-busy', message: rejectionMessage, details: {} },
-  }))
+  const failureMessage = 'the session refuses cancellation right now'
+  let restoreCancel: (() => void) | undefined
   try {
     await waitForInputDelivery(fixture.pane)
-    fixture.pane.input.type('cancel rejection case')
-    await awaitComposer(fixture, 'cancel rejection case')
+    fixture.pane.input.type('cancel failure case')
+    await awaitComposer(fixture, 'cancel failure case')
+    // The baseline MUST precede the submission: `stream()` counts the call the
+    // moment it runs, so a baseline read after Enter can already contain this
+    // request and the `>` comparison would never fire. TSP-7 PR-A retired the
+    // dock banner, so the turn is observed through this real model request.
+    const modelCallsBefore = fixture.modelCalls()
     fixture.pane.input.type('\r')
-    await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
+    await waitFor('the real model request to start', () => fixture.modelCalls() > modelCallsBefore, 25_000)
+    // Inject the backend failure at the REAL Direct Agent boundary: the exact
+    // Agent's cancel throws, so the retirement adapter returns `indeterminate`.
+    const agents = fixture.ctx.get('agents') as unknown as {
+      list(): Array<{ cancel(...args: unknown[]): void }>
+    }
+    const agent = agents.list()[0]
+    assert.ok(agent, 'the live Direct Agent must exist')
+    const originalCancel = agent.cancel
+    agent.cancel = () => { throw new Error(failureMessage) }
+    restoreCancel = () => { agent.cancel = originalCancel }
     fixture.pane.input.type('\u001b')
-    await waitFor('the rejected cancel notice', () =>
-      fixture.pane.output.text().includes(rejectionMessage), 25_000)
-    assert.ok(fixture.pane.output.text().includes(rejectionMessage),
-      'the rejected cancel surfaced its structural message through the renderer-neutral notice sink')
-    assert.equal(exited, false, 'a rejected cancel never exits the TUI')
-    recorder.detach()
+    await waitFor('the indeterminate cancel notice', () =>
+      fixture.pane.output.text().includes('session cancellation result is indeterminate'), 25_000)
+    assert.ok(fixture.pane.output.text().includes('session cancellation result is indeterminate'),
+      'the failed control cancel surfaced the renderer-neutral indeterminate notice')
+    assert.equal(exited, false, 'a failed cancel never exits the TUI')
   } finally {
+    restoreCancel?.()
     releaseStream()
-    recorder.detach()
     await fixture.settle()
   }
 })

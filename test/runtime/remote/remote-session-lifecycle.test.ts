@@ -372,6 +372,22 @@ test('open does not report opened before the initial history open settles', asyn
   assert.equal((await pending).outcome.kind, 'opened')
 })
 
+test('open reports opened+superseded when the generation is lost after a real open settles', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setReadyHold()
+  const pending = h.lifecycle.open({ sessionId: 'session-a' })
+  h.resolveReady()
+  h.setGeneration(2)
+  const result = await pending
+  assert.deepEqual(result, {
+    ownership: 'superseded',
+    outcome: { kind: 'opened', handle: { session: { id: 'session-a' } } },
+  }, 'an official open that already reached open is not a proven non-execution')
+  assert.equal(h.calls.releases.length, 1, 'the superseded reference is released exactly once')
+  assert.equal(h.bindingOf('session-a'), undefined, 'no superseded generation leaks')
+})
+
 test('open reports an official history-open error as unavailable and releases exactly once', async () => {
   const h = harness()
   h.setCatalogued('session-a', true)
@@ -440,27 +456,48 @@ test('open reports a rejected readiness as unavailable and releases exactly once
   assert.equal(h.bindingOf('session-a'), undefined)
 })
 
-test('a Connection rollover while open waits for readiness is superseded and releases once', async () => {
+test('a Connection rollover while open waits for readiness reports opened+superseded and releases once', async () => {
   const h = harness()
   h.setCatalogued('session-a', true)
   h.setReadyHold()
   const pending = h.lifecycle.open({ sessionId: 'session-a' })
   h.setGeneration(2)
   h.resolveReady()
-  assert.deepEqual(await pending, { ownership: 'superseded', outcome: { kind: 'cancelled' } })
+  assert.deepEqual(await pending, {
+    ownership: 'superseded',
+    outcome: { kind: 'opened', handle: { session: { id: 'session-a' } } },
+  }, 'the official open may have reached open before currentness was lost')
   assert.equal(h.calls.releases.length, 1)
   assert.equal(h.bindingOf('session-a'), undefined)
 })
 
-test('an abort while open waits for readiness is superseded and releases once', async () => {
+test('an abort before the official open settles is superseded and releases once', async () => {
   const h = harness()
   h.setCatalogued('session-a', true)
+  h.setOpenState('cold')
   h.setReadyHold()
   const controller = new AbortController()
   const pending = h.lifecycle.open({ sessionId: 'session-a', signal: controller.signal })
   controller.abort()
   assert.deepEqual(await pending, { ownership: 'superseded', outcome: { kind: 'cancelled' } })
   assert.equal(h.calls.releases.length, 1)
+  assert.equal(h.bindingOf('session-a'), undefined)
+})
+
+test('an abort after the official open settled but before continuation is opened+superseded', async () => {
+  const h = harness()
+  h.setCatalogued('session-a', true)
+  h.setReadyHold()
+  h.setOpenState('open')
+  const controller = new AbortController()
+  const pending = h.lifecycle.open({ sessionId: 'session-a', signal: controller.signal })
+  h.resolveReady()
+  controller.abort()
+  assert.deepEqual(await pending, {
+    ownership: 'superseded',
+    outcome: { kind: 'opened', handle: { session: { id: 'session-a' } } },
+  }, 'an official open that already reached open is not a proven non-execution')
+  assert.equal(h.calls.releases.length, 1, 'the aborted-opened reference is released exactly once')
   assert.equal(h.bindingOf('session-a'), undefined)
 })
 

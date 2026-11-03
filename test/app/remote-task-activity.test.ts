@@ -73,7 +73,7 @@ function taskActivityHarness(): TaskActivityHarness {
     },
   } as unknown as RemoteBackendRuntime
 
-  const task = createRemotePresentationSource(wire, backendRuntime).task
+  const task = createRemotePresentationSource(wire.client, backendRuntime).task
   return {
     activityOf: childSessionId => task.activityOf(childSessionId),
     jobs: sessionId => task.jobs(sessionId),

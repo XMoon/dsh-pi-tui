@@ -337,6 +337,7 @@ test('without a negotiated image capability the row renders the unavailable line
 test('every state renders its OWN fixed status phrase', () => {
   const cases: readonly [ToolImageState, RegExp][] = [
     [{ state: 'unsupported' }, /Native image display unavailable in this Tern pane$/u],
+    [{ state: 'disabled' }, /Image preview disabled by PI_IMAGE_PROTOCOL$/u],
     [{ state: 'no-scope' }, /Image unavailable for this session$/u],
     [{ state: 'loading' }, /Loading image…$/u],
     [{ state: 'error' }, /Image read failed$/u],
@@ -623,6 +624,7 @@ test('a chip with no drawable pixels states the reason and fabricates no blob', 
     { state: 'error' },
     { state: 'no-scope' },
     { state: 'unsupported' },
+    { state: 'disabled' },
   ] as unknown as ToolImageState[]) {
     const row = dockDraftImageNodes([dockEntry(1, 0, state)], 2)
     const [chip] = chipsOf(row)

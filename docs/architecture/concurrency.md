@@ -114,16 +114,21 @@ known-current fork adoption enters the gate for the visible handoff and
 old-owner retirement. Tasks are strictly FIFO; a rejected task fails its own
 caller and never blocks the queue; re-entering the gate from inside a task
 is refused loudly (AsyncLocalStorage detects it — re-entry would deadlock
-the queue). The runner exposes the gate as `runner.withSessionTransition(task)`.
+the queue). The runner exposes the gate as `runner.withSessionTransition(task)`
+(the user-navigation admission is `SessionRuntime.withNavigation`, entered
+through the same gate).
 
 On top of the gate, ordinary session transitions share ONE transaction shape
 (`runner.transitionTo`), whose phase order — fixed in `src/app/session/transition.ts`
 (`runTransitionTo`, unit-tested) — is the whole point:
 
-1. QUIESCE OLD — `old.whenIdle()` then the FINAL flush. (A `/new`
-   while the agent is busy WAITS for the current activity instead of aborting
-   it — the deliberate product semantics.) May fail → abort, ZERO child
-   side effects.
+1. QUIESCE OLD — `old.whenIdle()` then the FINAL flush. May fail → abort,
+   ZERO child side effects. For a USER NAVIGATION (`/new`, a selected-session
+   switch) the session runtime has ALREADY sent ONE exact-owner stop of the
+   captured old generation at the transition admission, BEFORE the admitted
+   writers drained (see "Navigation-initiated stop"); this quiesce then waits
+   for that stopped Turn to actually end. `/preset` and the other ordinary
+   transitions never stop the owner they are replacing.
 2. ALL TUI-owned preflight (preset/composition/stale checks — BEFORE the
    DSH boundary, so failures abort with ZERO side effects).
 3. create/open the CHILD — may fail → abort; once it SUCCEEDS the child
@@ -201,6 +206,85 @@ transition waits for in-flight writers to drain before it quiesces the old
 agent, and writers that start while a transition holds the barrier are
 refused (`TransitionInProgressError`).
 
+`runTransition` also owns the ONE user-navigation admission seam
+(`stopOldOwner`, see below). It runs after the freeze and before the drain,
+exactly once; it is not a writer admission and ordinary writers stay refused
+while it runs.
+
+### Navigation-initiated stop — `/new` and a selected-session switch
+
+A user who leaves the current Session (`/new`, a Session-Browser selection,
+`/resume <id>`) does not have to wait for the old Turn to finish naturally, and
+does not depend on a modal Question being answered. The canonical order is:
+
+```text
+UI intent captures the OLD generation (scope)
+→ freeze new ordinary writers (barrier)
+→ ONE exact-owner stop of the CAPTURED owner (control authority)
+→ admitted ordinary writers drain (the stop may be what lets one settle)
+→ whenIdleOrAbort / preflight
+→ final flush
+→ create/open the target ONCE
+→ synchronous owner publication
+→ old-owner retirement (its own close-order cancel → idle → drain → flush → dispose)
+```
+
+- The stop is the semantic USER cancel of the exact captured owner
+  (`SessionOwnerRetirement.cancel`): Direct calls the captured
+  `Agent.cancel({kind:'user'}, {keepInbox:true})`, Remote calls the exact
+  binding generation's official `SessionFace.cancel()`. It runs at most once,
+  and it is NOT the shutdown `preCancel`, NOT the retirement close-order
+  cancel (which still runs after the commit) and NOT a writer bypass.
+- The identity is captured SYNCHRONOUSLY by the command owner before its first
+  await (`/new`) or by the scoped browser intent. A stale capture — another
+  navigation published first — aborts silently without touching the
+  replacement generation. An UNSCOPED picker selection captures the owner it
+  is actually leaving inside the gate, right before the freeze, so a queued
+  later selection keeps its own FIFO intent instead of inheriting an older
+  generation.
+- ONLY a `committed` cancellation is permission to enter the next phase.
+  `rejected` (a proven refusal), `cancelled` (confirmed pre-dispatch: the exact
+  generation could not be addressed, or the runner is exiting) and
+  `indeterminate` (the call WAS dispatched but its effect is unproven) all abort
+  BEFORE the drain and before any child work: the current Session stays live,
+  nothing is created/opened and nothing is retried. `cancelled` means "the Host
+  cancel was NOT ADDRESSED", never "there is no work to stop": a disconnected
+  Connection generation, a replaced binding or a released owner reference
+  leaves the old Host Turn unproven, and `whenIdleOrAbort` returning
+  `'unobservable'` for a rolled/released binding or a changed Connection
+  generation is not proof of idle — the accepted stop carries its EXACT
+  generation receipt into the quiesce, so a reconnect during the writer drain
+  can never make the quiesce observe a later generation —
+  navigation never reaches that quiesce without a `committed` stop. Only
+  `indeterminate` states that the old Turn may already have stopped. The phase
+  distinction comes from `SessionOwnerRetirement.cancelForNavigation`, which
+  leaves the control `cancel` taxonomy untouched: the control Stop still
+  reports a dispatched caller/carrier cancellation as `cancelled`, while
+  navigation resolves that same reply as dispatched-unproven.
+- Cancellation is never rolled back. An ACCEPTED stop has two distinct proven
+  facts: until the pre-commit OLD-owner quiesce completes, a failure says the
+  stop was REQUESTED but its completion is not confirmed; only after an
+  OBSERVED settle (`whenIdleOrAbort === false`) followed by the final flush does
+  a failure say the old Turn is stopped and cannot be resumed. An
+  `'unobservable'` quiesce (a rolled/released exact binding) is NOT a completed
+  quiesce, and the Remote no-op flush adds no proof. A failure before any
+  accepted stop owns no message.
+- Browsing is read-only: opening `/sessions`, bare `/resume` or `/search` never
+  stops the current owner. Only an explicit target selection enters this
+  admission.
+- Duplicate `/new`: the command registration holds a local in-flight marker,
+  set in the handler's FIRST synchronous step (before its first await and
+  before the transition gate) and released at the true terminal settlement.
+  A second `/new` that reaches the handler while the first is in flight is
+  refused before any Host create ("a fresh session is already starting"),
+  never reuses the first result, and can be retried after a failure. The
+  transition gate's `busy` is NOT the duplicate authority — the gate also
+  serializes `/preset`, switches and fork adoption. A composer's own Submit
+  FIFO + frozen surface refuse an overlapping second gesture before the
+  handler (its draft is restored); the marker is the admission for every other
+  caller (the Host command plane / another surface) and for the registration
+  entry itself.
+
 ### SessionRuntime.withWriter — the writer-admission owner
 
 Every TUI-owned session writer enters the barrier through the BOUND session
@@ -245,6 +329,45 @@ a generic command failure.
   not. Every write they perform enters through `SessionRuntime.withWriter`, so
   the future Remote writer-held recovery hangs off this ONE caller-side module
   rather than every writer site.
+
+### Control admission — Stop stays reachable during a transition
+
+A user Stop gesture is not a session write. Busy Esc / extension
+`cancel-activity` and the Task-Center selected-subagent Stop enter
+`SessionOperationBarrier.runControl` (through `SessionRuntime.withControl` /
+`interrupt`) instead of `runWriter`:
+
+- a frozen navigation transition does NOT refuse the control section: the
+  captured owner's turn can still be stopped while the transition is waiting
+  for admitted writers to drain;
+- the control section never increments the writer count, never waits for the
+  transition, and never releases an ordinary writer; every ordinary writer
+  keeps `withWriter` and is still refused while frozen;
+- the control admission is scope-bound and NO-YIELD exactly like `withWriter`:
+  the captured live scope is checked and the EXACT owner is captured in the
+  same synchronous stack before the backend cancel. A stale capture rejects
+  with `SessionScopeSupersededError`; the semantic `interrupt` maps that and an
+  aborted runner to `cancelled` (a confirmed pre-dispatch outcome, never a
+  generic `agent interrupt` ERROR). A same-id owner rollover can never address
+  the newer generation;
+- the backend cancel is the ONE-SHOT user interrupt of that exact owner
+  (`SessionOwnerRetirement.cancel`), never the shutdown `preCancel`: Direct
+  calls the captured `Agent.cancel(..., { keepInbox: true })`, Remote calls the
+  exact borrowed `SessionFace.cancel()`; both return the shared `WriteOutcome`
+  (`committed` / `rejected` / `indeterminate` / `cancelled`) and never retry an
+  indeterminate result. Remote captures the official Connection generation
+  before dispatch and re-checks it together with the exact binding after the
+  reply; a reply from a superseded owner or connection generation is
+  `indeterminate` (the call did dispatch, so it is never a definite
+  success/refusal for the current generation);
+- Task-Center subagent Stop uses the same admission, while the durable
+  parent/child authority and the live activity/view fences still decide which
+  child may be stopped. A legitimate Stop is therefore not refused merely
+  because a navigation transition froze the ordinary writers.
+
+The transition's commit ordering is unchanged: an admitted ordinary writer
+still drains before the transition quiesces, flushes and commits, and the
+control cancel cannot turn a pre-publication failure into a commit.
 
 ### Known-rejection settlement inside the held writer
 
@@ -543,12 +666,38 @@ Where it runs:
   promise shared by every teardown path, never four copies. That entry has no
   exit-controller hook, so `retireOwnedSession` performs the same synchronous
   pre-cancel itself before creating the memoized promise.
+- **Client detach vs explicit Stop**: a Client surface teardown, Client
+  process exit or connection loss releases only the Client-owned surface,
+  official transport and Client root. It does not invoke the Direct/runtime
+  Session retirement cancel: that cancel remains the explicit Stop/navigation
+  authority. A Host-owned pending Question/Approval forward must stay pending in
+  the Host Gateway across the detach, and a later Client must answer the same
+  event/call identity at most once. A split Client composition must install its
+  interaction owner before the official Gateway event pump can consume the
+  pending forwarded event; a surface teardown must not settle that Host event,
+  and a permanent pending promise or private pending store is not a substitute
+  for the official Loader readiness ordering.
+- **Same-process Client surface revision**: when the internal split Client
+  replaces its surface, ONE serial revision task slot owns the transition:
+  close the old revision's input/admission, await the old runner's physical
+  tty release and Session-reference retirement, dispose its UI and memoized
+  application adapters in reverse, mount the new revision on the same Client
+  Context/transport, and await its real `surfaceReady`. The root Domain plane,
+  root interaction delivery owner and B1 transport stay alive across the
+  revision; the same Host Question/Approval invocation is handed to the new
+  surface at most once. A stop request aborts the in-flight revision and waits
+  for that slot before releasing the Client root; a failed revision disposes
+  its partial graph and exits the Client. The Host identity and Host business
+  objects never change.
 - **Successful ordinary session transition** (`/new`, `/sessions` switch,
-  or open): the pre-commit quiesce (whenIdle + flush) is preserved; AFTER the
-  commit the old owner is retired with the same fixed order, so the old
-  Agent's continuable descendants are drained and its final flush lands after
-  the drain. A failed child create never drains or disposes the old owner —
-  the old session stays current (the transaction semantics are unchanged).
+  or open): a USER NAVIGATION first sends its one exact-owner stop at the
+  transition admission (before the drain), then the pre-commit quiesce
+  (whenIdle + flush) waits for that Turn to end; AFTER the commit the old owner
+  is retired with the same fixed order, so the old Agent's continuable
+  descendants are drained and its final flush lands after the drain. A failed
+  child create never drains or disposes the old owner — the old session stays
+  current and, when the navigation stop was accepted, the failure says the old
+  Turn is already stopped (the transaction semantics are unchanged).
 - **Fork/rewind adoption:** Host publication is not rolled back on navigation
   supersession. Current Direct adoption retires the old owner after the gated
   visible handoff; a successful unselected child remains parked for a later

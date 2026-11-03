@@ -10,6 +10,8 @@ import {
 	isImageLine,
 	isKittyVirtualPlaceholderLine,
 	matchesKittyVirtualPlaceholderIdentity,
+	type SixelScreenPort,
+	type SixelVisibleCandidate,
 } from "./terminal-image.ts";
 import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
 import {
@@ -48,6 +50,8 @@ export interface LayoutFrame {
 	height: number;
 	lines: string[];
 	primaryScrollView?: ScrollView;
+	/** The visible SIXEL candidates this frame's final layout really shows (X072/X074). */
+	sixelDemands: SixelVisibleCandidate[];
 }
 
 export interface ScrollbarGeometry {
@@ -66,7 +70,14 @@ interface LayoutContext {
 	maxWidthCache: Map<Component, Map<number, number>>;
 	requestRender: () => void;
 	primaryScrollView: ScrollView | undefined;
+	/** The Client-local SIXEL trust port (X072), or undefined. */
+	sixelScreen: SixelScreenPort | undefined;
+	/** Visible candidates collected while painting this frame. */
+	sixelDemands: SixelVisibleCandidate[];
 }
+
+/** The largest number of image body rows an upward crop search may cross (X074). */
+const MAX_SIXEL_CROP_SCAN_ROWS = 12;
 
 function intersect(a: LayoutRect, b: LayoutRect): LayoutRect {
 	const x = Math.max(a.x, b.x);
@@ -331,7 +342,12 @@ export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false):
 	};
 }
 
-function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): void {
+function paintScrollbar(
+	box: LayoutBox,
+	screen: string[],
+	totalWidth: number,
+	sixelScreen: SixelScreenPort | undefined,
+): void {
 	const geometry = getScrollbarGeometry(box);
 	if (!geometry || !box.scrollView) return;
 
@@ -342,8 +358,21 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 		const replacement = isThumb
 			? box.scrollView.scrollbarThumbStyle(box.scrollView.isScrollbarActive ? "█" : "┃")
 			: box.scrollView.scrollbarTrackStyle("│");
+		// A trusted SIXEL anchor is a device command: slicing it to place one glyph
+		// would emit a corrupted command. A raster that does NOT reach the reserved
+		// scrollbar column keeps its intact DCS; only this anchor row has no bar
+		// glyph. A real horizontal overlap still yields to the scrollbar and is
+		// never composited, cut or shifted. (X074.)
+		const line = screen[row] ?? "";
+		const footprint = sixelScreen?.footprint(line);
+		if (footprint !== undefined && footprint.columns <= geometry.column) {
+			// The raster spans [0, columns); the one-cell track begins at column,
+			// so columns === column means the last pixel cell ends at column - 1.
+			continue;
+		}
+		const base = footprint === undefined ? line : "";
 		screen[row] = replaceScrollbarCell(
-			screen[row] ?? "",
+			base,
 			geometry.column,
 			totalWidth,
 			replacement,
@@ -413,7 +442,36 @@ function findRelocatedVirtualAnchor(
 	return undefined;
 }
 
-function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
+/**
+ * Paint one box's own lines, then its children, then its scrollbar.
+ *
+ * A trusted SIXEL raster may only be painted in a full-width box at x=0 whose
+ * clip still contains its visible part. Everything else paints NO pixels this
+ * frame — a DCS is never sliced, shifted or reflowed like text. The scrollbar
+ * pass owns the same rule from the other side: a reserved column replaces the
+ * anchor with its glyph instead of cutting the command. (X074.)
+ */
+/** One SIXEL block in a component's lines: a candidate marker or a trusted DCS. */
+type SixelBlock =
+	| { readonly kind: "candidate"; readonly rows: number; readonly fallback: string }
+	| { readonly kind: "dcs"; readonly rows: number };
+
+function sixelBlock(line: string, port: SixelScreenPort | undefined): SixelBlock | undefined {
+	if (port === undefined) return undefined;
+	const candidate = port.candidate(line);
+	if (candidate !== undefined) return { kind: "candidate", rows: candidate.layoutRows, fallback: candidate.fallback };
+	const footprint = port.footprint(line);
+	if (footprint !== undefined) return { kind: "dcs", rows: footprint.rows };
+	return undefined;
+}
+
+function paintBox(
+	box: LayoutBox,
+	screen: string[],
+	totalWidth: number,
+	context: LayoutContext,
+): void {
+	const sixelScreen = context.sixelScreen;
 	if (box.lines) {
 		const offset = box.lineOffset ?? 0;
 		const firstRow = Math.max(box.rect.y, box.clip.y, 0);
@@ -440,6 +498,48 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 				line = line.slice(marker.sequence.length);
 			}
 			if (relocated !== undefined && sourceIndex === relocated.sourceIndex) line = relocated.sequence + line;
+			const block = sixelBlock(line, sixelScreen);
+			if (block !== undefined) {
+				// A reserved scrollbar column owns this row: `paintScrollbar` draws its
+				// glyph onto a blank base, so the block yields this frame rather than
+				// cutting the command. (X074.)
+				const fullWidthCell = box.rect.x === 0 && box.rect.width >= totalWidth;
+				const clipBottom = Math.min(screen.length, box.clip.y + box.clip.height);
+				const visibleRows = Math.min(block.rows, clipBottom - row);
+				// A block whose row a visible scrollbar claims yields WITHOUT a demand:
+				// it paints no pixels, so it must not hold a residency slot either.
+				const scrollbar = box.scrollView === undefined ? undefined : getScrollbarGeometry(box);
+				// The TRACK spans its rows; a block whose ANCHOR is above the track but
+				// whose body rows intersect it still yields (paintScrollbar owns those
+				// rows), so compare the whole visible range, not just the anchor row.
+				const scrollbarClaimsRow =
+					scrollbar !== undefined &&
+					row <= scrollbar.trackTop + scrollbar.trackHeight - 1 &&
+					row + visibleRows - 1 >= scrollbar.trackTop;
+				if (block.kind === "candidate") {
+					if (fullWidthCell && visibleRows > 0 && !scrollbarClaimsRow) {
+						context.sixelDemands.push({ line, cropTopRows: 0, visibleRows, physicalRow: row });
+						// The owner answers only for a GRANTED occurrence; anything else
+						// (pending, revoked, over budget) becomes this block's own text.
+						screen[row] = sixelScreen?.materialize(line, 0, visibleRows) ?? block.fallback;
+					} else {
+						screen[row] = block.fallback;
+					}
+					continue;
+				}
+				if (fullWidthCell && visibleRows > 0) {
+					if (visibleRows >= block.rows) {
+						screen[row] = line;
+					} else {
+						// A bottom-clipped block is re-encoded from its own source at the
+						// SAME scale; clipping this DCS string would paint pixels outside
+						// the box. Until the variant is ready the row stays empty.
+						const cropped = sixelScreen?.crop(line, 0, visibleRows);
+						screen[row] = cropped ?? "";
+					}
+				}
+				continue;
+			}
 			const imageMetadata = getKittyImageMetadata(line);
 			if (imageMetadata) {
 				const clipBottom = Math.min(screen.length, box.clip.y + box.clip.height);
@@ -458,11 +558,40 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 			}
 		}
 	}
-	for (const child of box.children) paintBox(child, screen, totalWidth);
+	for (const child of box.children) paintBox(child, screen, totalWidth, context);
 
 	if (box.scrollView && box.scrollContentLines && box.scrollView.scrollTop > 0 && box.rect.height > 0) {
+		const scanFloor = Math.max(0, box.scrollView.scrollTop - MAX_SIXEL_CROP_SCAN_ROWS);
 		for (let imageRow = box.scrollView.scrollTop - 1; imageRow >= 0; imageRow--) {
 			const imageLine = box.scrollContentLines[imageRow] ?? "";
+			const block = sixelBlock(imageLine, sixelScreen);
+			if (block !== undefined) {
+				const hiddenRows = box.scrollView.scrollTop - imageRow;
+				const visibleRows = Math.min(box.rect.height, block.rows - hiddenRows);
+				if (
+					hiddenRows < block.rows
+					&& visibleRows > 0
+					&& box.rect.x === 0
+					&& box.rect.width >= totalWidth
+				) {
+					// The anchor scrolled above the viewport: re-encode the SAME source
+					// from its real top crop instead of relocating the unclipped DCS
+					// (which would paint above the box).
+					if (block.kind === "candidate") {
+						context.sixelDemands.push({
+							line: imageLine,
+							cropTopRows: hiddenRows,
+							visibleRows,
+							physicalRow: box.rect.y,
+						});
+						screen[box.rect.y] = sixelScreen?.materialize(imageLine, hiddenRows, visibleRows) ?? block.fallback;
+					} else {
+						const cropped = sixelScreen?.crop(imageLine, hiddenRows, visibleRows);
+						if (cropped !== undefined) screen[box.rect.y] = cropped;
+					}
+				}
+				break;
+			}
 			const metadata = getKittyImageMetadata(imageLine);
 			if (metadata) {
 				const hiddenRows = box.scrollView.scrollTop - imageRow;
@@ -474,10 +603,14 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 				break;
 			}
 			if (imageLine !== "") break;
+			// A SIXEL block never spans further than the owner's own body budget, so
+			// the upward search is bounded instead of scanning the whole corpus.
+			// Kitty keeps its upstream unbounded contiguous-blank scan.
+			if (sixelScreen !== undefined && imageRow <= scanFloor) break;
 		}
 	}
 
-	paintScrollbar(box, screen, totalWidth);
+	paintScrollbar(box, screen, totalWidth, sixelScreen);
 }
 
 export function renderLayoutFrame(
@@ -485,6 +618,7 @@ export function renderLayoutFrame(
 	width: number,
 	height: number,
 	requestRender: () => void,
+	sixelScreen?: SixelScreenPort,
 ): LayoutFrame {
 	const safeWidth = Math.max(1, Math.floor(width));
 	const safeHeight = Math.max(1, Math.floor(height));
@@ -494,6 +628,8 @@ export function renderLayoutFrame(
 		maxWidthCache: new Map(),
 		requestRender,
 		primaryScrollView: undefined,
+		sixelScreen,
+		sixelDemands: [],
 	};
 	const rootBox = layoutComponent(context, root, 0, 0, safeWidth, safeHeight, {
 		x: 0,
@@ -502,12 +638,13 @@ export function renderLayoutFrame(
 		height: safeHeight,
 	});
 	const lines = Array.from({ length: safeHeight }, () => "");
-	paintBox(rootBox, lines, safeWidth);
+	paintBox(rootBox, lines, safeWidth, context);
 	return {
 		root: rootBox,
 		width: safeWidth,
 		height: safeHeight,
 		lines,
+		sixelDemands: context.sixelDemands,
 		...(context.primaryScrollView === undefined ? {} : { primaryScrollView: context.primaryScrollView }),
 	};
 }

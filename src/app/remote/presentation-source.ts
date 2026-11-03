@@ -43,7 +43,11 @@ import { createRemoteLiveIngress, type RemoteLiveIngress } from './live-ingress.
 import { createRemoteChildViewSource } from './child-view.ts'
 import { createRemoteTerminalProgressSource } from './terminal-progress-source.ts'
 import { createRemoteCommandSource, type RemoteCommandSource } from './command-source.ts'
-import type { ExperimentalRemoteRuntime, RemoteBackendRuntime } from './runtime.ts'
+import type { RemoteBackendRuntime } from './runtime.ts'
+import type { RemoteM3ARuntimeSource } from './m3a-semantics.ts'
+import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { IJobs } from '@deepseek-ai/dsh-api-job-controller/client'
+import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 import type { RemoteApplicationSources,
   RemoteTransportLifetime,
 } from '../application-runtime.ts'
@@ -129,9 +133,23 @@ function detachedPlan(value: unknown): { readonly active: boolean; readonly pend
 }
 
 /**
- * Assemble the Remote application presentation source from the ONE Remote
- * application aggregate. Every member reuses a face the aggregate already
- * owns: `semantics.presentationReader` by identity, the wire's
+ * The shared Client runtime source PLUS the full official Client faces this
+ * presentation bundle borrows (the exact `ISessions` binding/eventSource,
+ * the official Jobs state, and the generated Remote namespaces). Both the M3
+ * in-process Client runtime and the real split Client's mounted Domain object
+ * satisfy it structurally — there is no proxy graph here.
+ */
+export interface RemotePresentationClientSource extends RemoteM3ARuntimeSource {
+  readonly sessions: ISessions
+  readonly jobs: IJobs
+  readonly remote: ClientRemote
+}
+
+/**
+ * Assemble the Remote application presentation source from the ONE shared
+ * Client runtime source (the M3-1 Client runtime or the real split Client's
+ * mounted official Domains). Every member reuses a face that source already
+ * owns: `semantics.presentationReader` by identity, its
  * `sessions`/`connection.generation` for the official projection/echo reads,
  * and the eventSource borrow for the live ingress. Constructing this bundle
  * installs exactly ONE watch — the ingress factory's process-lifetime
@@ -142,11 +160,11 @@ function detachedPlan(value: unknown): { readonly active: boolean; readonly pend
  * its own handle.
  */
 export function createRemotePresentationSource(
-  wire: ExperimentalRemoteRuntime,
+  client: RemotePresentationClientSource,
   backendRuntime: RemoteBackendRuntime,
 ): RemoteApplicationSource {
-  const sessions = wire.client.sessions
-  const generation = wire.client.connection.generation as RemoteConnectionGenerationSource
+  const sessions = client.sessions
+  const generation = client.connection.generation as RemoteConnectionGenerationSource
   const sessionReader = backendRuntime.semantics.sessionReader
   const planSource = sessions as RemotePlanBindingSource
   // The ONE shared live-ingress factory, referenced by both the main-surface
@@ -154,7 +172,7 @@ export function createRemotePresentationSource(
   const liveIngress = createRemoteLiveIngress(sessions, generation, CURRENT_STATUS_PROJECTION_KEYS)
   // The ONE semantic Task read over the SAME Client faces. It retains the root
   // Job roster watch for the session it last read.
-  const taskReader = new RemoteTaskReader(sessions, wire.client.jobs, generation)
+  const taskReader = new RemoteTaskReader(sessions, client.jobs, generation)
   return {
     presentationReader: backendRuntime.semantics.presentationReader,
     // PR4 §D1: the branch-specific command authority read, assembled from the
@@ -164,7 +182,7 @@ export function createRemotePresentationSource(
       // The generated namespaces (commands/skills) exist because the Client
       // runtime mounted their /remote contributions; the structural source
       // face is the same one remote-official-contract.test.ts proves.
-      authority: wire.client.remote,
+      authority: client.remote,
       generation,
       // §16: the SAME shared sessions service is the exact-binding fence
       // source (a same-id release/re-retain invalidates a settled read).
@@ -174,7 +192,7 @@ export function createRemotePresentationSource(
     // R2 §7.1: the ONE Host evidence stream, over the SAME wire faces and the
     // SAME retained-binding accessor every other Remote read borrows.
     terminalProgress: createRemoteTerminalProgressSource({
-      remote: wire.client.remote,
+      remote: client.remote,
       generation,
       binding: sessionId => sessions.binding(sessionId as never) as object | undefined,
     }),
@@ -229,7 +247,7 @@ export function createRemotePresentationSource(
     // authoritative answer is always the next semantic read.
     task: {
       readDescendants: (parentSessionId, signal) => taskReader.readDescendants(parentSessionId, signal),
-      jobs: sessionId => wire.client.jobs.state.getSnapshot().rows[sessionId] ?? [],
+      jobs: sessionId => client.jobs.state.getSnapshot().rows[sessionId] ?? [],
       // The commit-time activity read: the official Session-LIST fact, never a
       // borrowed binding (the listing retains no descendant).
       activityOf: childSessionId => {
@@ -239,7 +257,7 @@ export function createRemotePresentationSource(
         const entry = byId[childSessionId]
         return entry === undefined ? undefined : entry.running ? 'running' : 'inactive'
       },
-      subscribeJobs: listener => wire.client.jobs.state.subscribe(listener),
+      subscribeJobs: listener => client.jobs.state.subscribe(listener),
       subscribeSessions: listener => sessions.list.subscribe(listener),
       // The reader owns the retained root roster watch: release it through this
       // owner before the Client Context goes away.

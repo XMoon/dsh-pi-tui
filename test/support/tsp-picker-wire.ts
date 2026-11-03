@@ -20,7 +20,7 @@ export interface WireNode {
 
 /** Fold the pane's frame ops into the live node set (a retired receiver is
  *  gone, so it can never satisfy an assertion). */
-export function wireNodes(pane: TspPane): WireNode[] {
+export function wireNodes(pane: { readonly frames: () => ReadonlyArray<{ readonly ops: readonly Op[] }> }): WireNode[] {
   return foldWireNodes(pane.frames())
 }
 
@@ -85,7 +85,7 @@ export function surfaceFocusOps(pane: TspPane, sf: string): Array<string | null>
 }
 
 /** Fold a frame sequence into the live node set. */
-function foldWireNodes(frames: ReadonlyArray<{ readonly ops: readonly Op[] }>): WireNode[] {
+export function foldWireNodes(frames: ReadonlyArray<{ readonly ops: readonly Op[] }>): WireNode[] {
   const live = new Map<string, WireNode>()
   const parents = new Map<string, string>()
   const remove = (id: string): void => {

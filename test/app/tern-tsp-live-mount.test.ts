@@ -42,8 +42,11 @@ import {
 } from '../../src/app/surface/runtime.ts'
 import { TranscriptFolder } from '../../src/domain/transcript/folder.ts'
 import { TranscriptWindowController } from '../../src/domain/transcript/window.ts'
+import { resolveTspNativeFooterConfig } from '../../src/domain/footer/tsp-native-config.ts'
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { isQuitKey, mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import { foldWireNodes, wireNodes } from '../support/tsp-picker-wire.ts'
+import { waitUntil } from '../support/tsp-runner-harness.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -117,6 +120,8 @@ class ScriptedTern {
   readonly output = new FakeOutput()
   readonly frames: WireFrame[] = []
   readonly closeBodies: unknown[] = []
+  /** The pane-shaped frame reader the shared wire helpers fold. */
+  readonly pane = { frames: (): readonly WireFrame[] => this.frames }
 
   constructor(hello: typeof HELLO = HELLO) {
     this.output.onWrite = bytes => {
@@ -223,6 +228,8 @@ interface Harness {
   /** Replace the main fold under the same session id (re-hydration shape). */
   replaceMain(): void
   exitRequested(): boolean
+  /** PR-C (TSP-7): the handlers the input bind delivered (undefined pre-bind). */
+  boundHandlers(): Parameters<TspRenderer['bindInput']>[0] | undefined
   dispose(): Promise<void>
 }
 
@@ -230,6 +237,13 @@ async function mountTspHarness(options: {
   requestExit?: () => void
   onFatal?: (error: unknown) => void
   sessionBrowserCapabilities?: boolean
+  /** PR-E (TSP-7): advertise `el` so the Quiet Composer shell mounts. */
+  composerActions?: boolean
+  /** PR-C (TSP-7): the composition's late-bound `/model` UI entry, injected
+   *  exactly as `src/app/bootstrap.ts` injects it into `createSurfaceRuntime`. */
+  openModelPicker?: (entry: 'models' | 'effort') => void
+  /** PR-E (TSP-7): the composition's late-bound Permission UI seam. */
+  permissionUi?: { options(): readonly string[]; select(id: string): void }
 } = {}): Promise<Harness & { session: Session }> {
   const hello = options.sessionBrowserCapabilities
     ? {
@@ -237,7 +251,9 @@ async function mountTspHarness(options: {
       kinds: [...HELLO.kinds, 'picker', 'row', 'overlay', 'text', 'md'],
       features: [...HELLO.features, 'scroll'],
     }
-    : HELLO
+    : options.composerActions === true
+      ? { ...HELLO, kinds: [...HELLO.kinds, 'el'] }
+      : HELLO
   const tern = new ScriptedTern(hello)
   const session = await openSession(tern)
   let folder = new TranscriptFolder()
@@ -300,12 +316,21 @@ async function mountTspHarness(options: {
     mainProgressAuthority: 'local-events',
     terminalProgress: undefined,
     createPluginManagerPanel: createPluginManagerWorkspacePanel,
+    // PR-C (TSP-7): the composition's late-bound `/model` UI entry, when the
+    // case supplies one (the production bootstrap always does).
+    ...(options.openModelPicker === undefined ? {} : { openModelPicker: options.openModelPicker }),
+    // PR-E (TSP-7): the narrow Permission UI seam, forwarded by the runtime
+    // into the renderer input binding exactly like the production bootstrap.
+    ...(options.permissionUi === undefined ? {} : { permissionUi: options.permissionUi }),
   })
   surface.attachEventRouting(source)
 
   let mountedRenderer: TspRenderer | undefined
+  // PR-C (TSP-7): the handlers `bindRendererInput` delivered, so a case can
+  // drive the renderer's own input contract (the button click path's handler).
+  let boundHandlers: Parameters<TspRenderer['bindInput']>[0] | undefined
   const renderer: SurfaceRendererMount = {
-    mount: (binding) => {
+    mount: (binding, statusReader) => {
       mountedRenderer = mountTspRenderer(session, { copyVisual: async () => false,
         requestExit: () => {
           exitCount += 1
@@ -313,9 +338,25 @@ async function mountTspHarness(options: {
         },
         ...(options.onFatal === undefined ? {} : { onFatal: options.onFatal }),
       })
+      // TSP-7 PR-A: the status reader is bound BEFORE the image binding, like
+      // the production mount — a renderer that fails its image bind still
+      // releases through the existing path.
+      mountedRenderer.bindStatusReader(statusReader)
       // PR-C: the mount hands the renderer the ONE image binding of this
       // surface — the fake mount installs it, it never fakes success.
       mountedRenderer.bindImages(binding)
+      const innerBind = mountedRenderer.bindInput.bind(mountedRenderer)
+      mountedRenderer = new Proxy(mountedRenderer, {
+        get(target, prop, receiver) {
+          if (prop === 'bindInput') {
+            return (handlers: Parameters<TspRenderer['bindInput']>[0]) => {
+              boundHandlers = handlers
+              innerBind(handlers)
+            }
+          }
+          return Reflect.get(target, prop, receiver)
+        },
+      })
       return mountedRenderer
     },
     releaseUnmounted: async () => { await mountedRenderer?.dispose() },
@@ -354,6 +395,8 @@ async function mountTspHarness(options: {
       controller.setTurns(folder.groupedTurns())
     },
     exitRequested: () => exitCount > 0,
+    /** PR-C (TSP-7): the handlers the input bind delivered (test-only read). */
+    boundHandlers: () => boundHandlers,
     async dispose() {
       // The ONE renderer-release promise owns the disposal outcome: a failed
       // release must surface to THIS caller (never as an unowned rejection), and
@@ -620,6 +663,128 @@ test('A-04b: exit routes Ctrl+C and empty-draft Ctrl+D; a typed q is editor text
 
 // ── untrusted terminal output: the TSP dock never forwards raw controls ─────
 
+// ── PR-C (TSP-7): the late-bound `/model` UI entry reaches the bound renderer ─
+//
+// The composition's seam is narrow by construction: bootstrap assigns a
+// callback AFTER registration, `createSurfaceRuntime` forwards it verbatim
+// into the renderer input binding, and the renderer's handlers are the ONLY
+// consumers. These cases pin that wiring (the full business chain — command
+// owner → catalog → picker → writer — is qualified end-to-end by the
+// composer-actions suite and the model-picker suites).
+
+test('the late-bound /model entry reaches the bound renderer input exactly once', async () => {
+  const calls: Array<'models' | 'effort'> = []
+  const harness = await mountTspHarness({
+    openModelPicker: entry => { calls.push(entry) },
+  })
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound, 'the renderer input is bound')
+    bound.openModelPicker('models')
+    bound.openModelPicker('effort')
+    await settle() // window: let the seam callbacks run before reading the recorded calls
+    assert.deepEqual(calls, ['models', 'effort'],
+      'both entry hints traverse the surface seam verbatim, exactly once each')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('an unwired composition refuses the /model UI entry loudly, never silently', async () => {
+  const harness = await mountTspHarness()
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound)
+    // The runtime's placeholder throws: a dead composer control must be
+    // VISIBLE (the renderer reports it), not a silent no-op.
+    assert.throws(() => bound!.openModelPicker('models'),
+      /model picker command entry is not wired/)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('the late-bound Permission UI seam reaches the bound renderer input exactly once', async () => {
+  const calls: string[] = []
+  const harness = await mountTspHarness({
+    permissionUi: {
+      options: () => ['read-only', 'workspace-write'],
+      select: id => { calls.push(id) },
+    },
+  })
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound)
+    assert.deepEqual(bound.permissionOptions?.(), ['read-only', 'workspace-write'])
+    bound.selectPermission?.('workspace-write')
+    await settle() // window: let the seam callback run before reading the record
+    assert.deepEqual(calls, ['workspace-write'], 'the renderer reaches the ONE late-bound StatusRuntime seam')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('an unwired Permission UI seam reads empty and refuses the select loudly', async () => {
+  const harness = await mountTspHarness()
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound)
+    assert.deepEqual(bound.permissionOptions?.(), [], 'no owner composes an empty catalog, never a fabricated one')
+    assert.throws(() => bound.selectPermission?.('workspace-write'), /permission UI owner is not composed/)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('production assembly: surface.commitStatus + the Permission seam reach the Quiet Composer menu and one select', async () => {
+  const selects: string[] = []
+  const harness = await mountTspHarness({
+    composerActions: true,
+    permissionUi: {
+      options: () => ['read-only', 'workspace-write', 'danger-full-access'],
+      select: id => { selects.push(id) },
+    },
+  })
+  try {
+    harness.surface.bindRendererInput()
+    harness.surface.commitStatus(
+      { access: { permissionPreset: { id: 'workspace-write', label: 'Workspace Write', matched: true } } } as never,
+      {},
+      undefined,
+    )
+    await waitUntil('the quiet composer permission trigger paints', () =>
+      wireNodes({ frames: () => harness.tern.frames }).some(node => node.k === 'el'
+        && String(node.id).includes('.composer-permission-s')
+        && !String(node.id).includes('option')))
+    const trigger = wireNodes({ frames: () => harness.tern.frames }).find(node => node.k === 'el'
+      && String(node.id).includes('.composer-permission-s')
+      && !String(node.id).includes('option'))
+    assert.ok(trigger)
+    harnessFreeInput(harness.tern, { ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: trigger!.id, act: 'click' })
+    await waitUntil('the three standard permission options paint', () =>
+      wireNodes({ frames: () => harness.tern.frames }).filter(node => node.k === 'el'
+        && String(node.id).includes('.composer-permission-option-')).length === 3)
+    const full = wireNodes({ frames: () => harness.tern.frames }).find(node => node.k === 'el'
+      && String(node.id).includes('.composer-permission-option-')
+      && String(node.p['text'] ?? '').includes('Full Access'))
+    assert.ok(full)
+    harnessFreeInput(harness.tern, { ev: 'action', sf: harness.tern.frames.at(-1)!.sf, id: full!.id, act: 'click' })
+    await waitUntil('the select callback ran', () => selects.length === 1)
+    assert.deepEqual(selects, ['danger-full-access'])
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 test('a hostile notice never reaches the TSP wire raw', async () => {
   const harness = await mountTspHarness()
   try {
@@ -703,6 +868,63 @@ test('A-10: the joined pending presentation (queued + tail) renders in the dock'
   }
 })
 
+test('A-10b: an idle authoritative queue explains the next-prompt wake; local-only/running do not', async () => {
+  const harness = await mountTspHarness()
+  const lastFrame = (wire: string): string => wire.slice(wire.lastIndexOf('_tsp;f;') + 1)
+  try {
+    harness.surface.display.setPendingInputPresentation({
+      queued: [{ id: 'q-parked', text: 'parked queue text', mode: 'followup' }],
+      tail: [],
+      running: false,
+    } as never)
+    await waitUntil('the parked queue hint', () => lastFrame(harness.tern.output.text()).includes('dock.queue-parked-hint'))
+    let wire = harness.tern.output.text()
+    const parked = lastFrame(wire)
+    assert.ok(parked.includes('"add","dock.queue-parked-hint"') && parked.includes('waiting for the next prompt — send a message to continue'),
+      `the idle authoritative queue must explain the next-prompt wake:\n${parked}`)
+
+    harness.surface.display.setPendingInputPresentation({
+      queued: [{ id: 'q-local', text: 'local-only text', mode: 'followup', local: true }],
+      tail: [],
+      running: false,
+    } as never)
+    await waitUntil('the local-only queue row', () => lastFrame(harness.tern.output.text()).includes('local-only text'))
+    wire = harness.tern.output.text()
+    const local = lastFrame(wire)
+    assert.ok(local.includes('local-only text'), `the local echo must stay visible:\n${local}`)
+    assert.ok(local.includes('sending…'), `a local echo is still being admitted:\n${local}`)
+    assert.ok(!foldWireNodes(harness.tern.frames).some(node => node.id === 'dock.queue-parked-hint'),
+      `the old parked hint must be retired from the folded wire for local-only rows:\n${local}`)
+
+    harness.surface.display.setPendingInputPresentation({
+      queued: [{ id: 'q-running', text: 'running queue text', mode: 'followup' }],
+      tail: [],
+      running: true,
+    } as never)
+    // Re-establish the parked state, then transition directly to running: this
+    // proves the parked → running retirement, not just local → running.
+    harness.surface.display.setPendingInputPresentation({
+      queued: [{ id: 'q-parked-again', text: 'parked again', mode: 'followup' }],
+      tail: [],
+      running: false,
+    } as never)
+    await waitUntil('the parked hint returns', () => foldWireNodes(harness.tern.frames).some(node => node.id === 'dock.queue-parked-hint'))
+    harness.surface.display.setPendingInputPresentation({
+      queued: [{ id: 'q-running', text: 'running queue text', mode: 'followup' }],
+      tail: [],
+      running: true,
+    } as never)
+    await waitUntil('the running queue row', () => lastFrame(harness.tern.output.text()).includes('running queue text'))
+    wire = harness.tern.output.text()
+    const running = lastFrame(wire)
+    assert.ok(!foldWireNodes(harness.tern.frames).some(node => node.id === 'dock.queue-parked-hint'),
+      `a BUSY queued row is normal queueing, not parked; the hint is retired from the folded wire:\n${running}`)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
 // ── A-11 (F6): a mounted input-loop failure is FATAL, not a normal exit ─────
 
 test('A-11: a real SDK iterator failure routes the SAME error to the FATAL intent', async () => {
@@ -757,6 +979,7 @@ test('non-key SDK events reach no business action while no modal seat is up', as
       noteUserInput: () => { calls.noteUserInput += 1 },
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
+      openModelPicker() {},
     })
     await settle()
     // INJECTED protocol events, not events this UI emits: the current TSP view
@@ -837,6 +1060,7 @@ async function mountDiagnosed(tern: ScriptedTern) {
     noteUserInput: () => { business.noteUserInput += 1 },
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
+    openModelPicker() {},
   })
   return { renderer, diagnostics, notifications, business, fatals }
 }
@@ -1104,6 +1328,7 @@ test('A-12b: the PRODUCTION connector handshake releases a mount a REAL surface.
   const mount = await selectRendererMount({
     log: () => {},
     env: { DSH_PI_TUI_RENDERER: 'tsp' },
+    resolveFooterConfig: () => resolveTspNativeFooterConfig({ doc: { footer: 'default' }, readiness: 'ready', userItems: { items: [], invalidCount: 0 } }),
     connectTsp: productionTspConnector({ copyVisual: async () => false,
       cwd: '/tmp', requestExit, onFatal: () => {}, log: () => {}, logError: () => {},
       connect: async () => session,
@@ -1143,18 +1368,43 @@ test('A-13: the hydrate-tail reset keeps committed status facts and an explicit 
       'the hydrate-tail reset does not clear the just-committed title')
     assert.ok(harness.tern.output.text().includes('AUTHORITATIVE_TITLE'), 'the title stays visible')
 
-    // A partial commit must not drop the SIBLING facts (working/plan stay).
+    // A partial commit must not drop the SIBLING facts. Each surviving fact is
+    // witnessed on its OWN authority:
+    //   title → the displayable legacy line;
+    //   plan  → the NATIVE status row the projection owns (committed below).
+    // The banner's `working` word retired with the banner (plan §1.3); the
+    // run-phase display is PR-B scope and is NOT re-asserted here.
     harness.surface.display.commitStatusFacts({ todos: [{ content: 'a todo', status: 'pending' }] })
     await settle()
     const wire = harness.tern.output.text()
-    assert.ok(wire.includes('working'), 'the sibling working fact survives a partial commit')
-    assert.ok(wire.includes('plan'), 'the sibling plan fact survives a partial commit')
+    assert.ok(wire.includes('AUTHORITATIVE_TITLE'), 'the sibling title fact survives a partial commit')
     assert.ok(wire.includes('todos 0/1'), 'the todo fact is visible')
+    // The plan fact is a NATIVE row now: it exists only after a formal display
+    // commit has published the store snapshot that carries `collaboration.plan`.
+    // Committing it is the setup, not the witness — the witness is that the
+    // partial `todos` commit AFTER it does not drop the row.
+    harness.surface.commitStatus(
+      { collaboration: { plan: { effective: true } } } as never,
+      {},
+      undefined,
+    )
+    await settle()
+    const planSeg = wireNodes(harness.tern.pane)
+      .find(node => node.k === 'seg' && node.p.key === 'status-r1-plan')
+    assert.ok(planSeg !== undefined, 'the committed plan paints its native seg')
+    assert.equal(planSeg.p.text, 'plan', 'the plan word is the builtin formatter output')
+    harness.surface.display.commitStatusFacts({ sessionTitle: 'POST_PLAN_TITLE' })
+    await settle()
+    const planAfterFactsCommit = wireNodes(harness.tern.pane)
+      .find(node => node.k === 'seg' && node.p.key === 'status-r1-plan')
+    assert.ok(planAfterFactsCommit !== undefined,
+      'the plan seg survives a sibling status-facts commit')
 
     // PRESENCE semantics: an explicitly-present undefined title CLEARS it.
     harness.surface.display.commitStatusFacts({ sessionTitle: undefined })
     await settle()
-    assert.equal(harness.surface.display.getSessionTitle(), '', 'explicit undefined clears the title')
+    assert.equal(harness.surface.display.getSessionTitle(), '',
+      'explicit undefined clears even the replacement title')
   } finally {
     await harness.dispose()
     await harness.session.close()
@@ -1246,6 +1496,7 @@ test('A-08b: the interaction owner registers fail-closed answerers on a modal-le
     diag: () => ({ debug() {}, info() {}, warn() {}, error() {}, dispose() {} }),
     isCleanedUp: () => false,
     onAttentionChanged: () => {},
+    publishActivity: () => {},
   })
   interaction.attach(port as never, { lookupCallArgs: () => undefined, dangerCommand: () => false })
   try {
@@ -1379,9 +1630,12 @@ test('the surface withdraws the interaction owner BEFORE it starts the renderer 
       // PR-C: the fake mount receives the ONE image binding of this surface.
       // It PROVES the binding carries a real loader and a scope sampler
       // instead of accepting a default that would hide a missing binder.
-      mount: (binding) => {
+      mount: (binding, statusReader) => {
         assert.equal(typeof binding.imageLoader.load, 'function')
         assert.equal(typeof binding.imageScope, 'function')
+        // TSP-7 PR-A: the mount hands over a READ-ONLY reader — no store
+        // writer and no subscription travel with it.
+        assert.equal(typeof statusReader.snapshot, 'function')
         return {
           display,
           // The TSP mount always supplies the Task Center presentation sink

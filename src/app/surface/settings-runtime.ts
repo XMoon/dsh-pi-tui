@@ -28,6 +28,7 @@ import { isDisplayPresetAvailable, resolveDisplayPreset, type DisplayPreset, typ
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { isFooterLayout, parseFooterLayout, resolveCommandFooterFallback } from '../../domain/footer/layout.ts'
 import { activeFooterItemIds, executableCommandItemIds, parseFooterCustomItems, type FooterCustomCommandItemSettings, type FooterCustomItemSettings } from '../../domain/footer/custom-items.ts'
+import { resolveTspNativeFooterConfig, type TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import { themeOptOut } from '../../client/theme/environment.ts'
 import { normalizePersistedTheme } from '../../domain/display/theme-selection.ts'
 import { resolveThemeSelection } from './theme-selection.ts'
@@ -72,7 +73,7 @@ export interface SettingsSurface {
 
 /** The narrow semantic config slice the footer settings read. */
 export interface SettingsConfigPort {
-  readonly config: Pick<Backend['config'], 'footerCommandTrust' | 'footerCustomItems'>
+  readonly config: Pick<Backend['config'], 'configReadiness' | 'footerCommandTrust' | 'footerCustomItems'>
 }
 
 /** The narrow capabilities the settings owner consumes. */
@@ -126,6 +127,14 @@ export interface SettingsRuntime {
   applySafeKeybindingsMode(): void
   /** The terminal-resize hook: refresh the armed footer command runner. */
   requestFooterCommandRefresh(): void
+  /**
+   * PR-D (TSP-7): the ONE-SHOT read-only footer projection a TSP mount
+   * consumes at startup. Pure decision over the merged settings document,
+   * the config readiness and the USER-layer custom items — no PiTui footer
+   * mutation, no listener, no write, no execution. The USER-layer read is
+   * skipped entirely while the backend is not `ready` (fail closed).
+   */
+  resolveTspFooterConfig(): TspNativeFooterConfig
   /** Release the footer command runner + dynamic-item runtime (disposal). */
   disposeFooterCommand(): void
 }
@@ -576,6 +585,25 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
   }
   const requestFooterCommandRefresh = (): void => { deps.surface.app.requestFooterCommandRefresh() }
   /**
+   * PR-D (TSP-7): the boot-time TSP footer projection. The readiness gate
+   * runs FIRST: a not-ready backend must not even read the USER-layer custom
+   * items (the domain resolver then fails closed to the fixed default with
+   * the not-current notice). `footerCommandTrust` is deliberately NOT read:
+   * the TSP projection never executes anything, so the trust read would be a
+   * dead side channel; the mode classification alone decides the fallback.
+   */
+  const resolveTspFooterConfig = (): TspNativeFooterConfig => {
+    const readiness = deps.backend.config.configReadiness()
+    const userItems = readiness === 'ready'
+      ? deps.backend.config.footerCustomItems.get()
+      : { items: [], invalidCount: 0 }
+    return resolveTspNativeFooterConfig({
+      doc: deps.tuiSettings.get(),
+      readiness,
+      userItems,
+    })
+  }
+  /**
    * Release the footer command runner + per-item runtime. The lifecycle abort
    * already disposes an armed runner through its own abort listener; the
    * explicit unsubscribe + dispose keeps the release symmetric with the arm
@@ -610,6 +638,7 @@ export function createSettingsRuntime(deps: SettingsRuntimeDeps): SettingsRuntim
     userFooterItemsForSave,
     applySafeKeybindingsMode,
     requestFooterCommandRefresh,
+    resolveTspFooterConfig,
     disposeFooterCommand,
   }
 }

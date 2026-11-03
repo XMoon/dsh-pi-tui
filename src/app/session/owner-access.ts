@@ -13,6 +13,7 @@
  */
 
 import type { SessionHandle } from '../../runtime/session-lifecycle-port.ts'
+import type { WriteOutcome } from '../../runtime/session-writer-port.ts'
 import type { SessionOwnerRef } from './subject.ts'
 
 /** A backend's implementation of the opaque owner mapping. */
@@ -41,6 +42,35 @@ export interface SessionRetirementReport {
 }
 
 /**
+ * The phase-resolved cancellation settlement a USER NAVIGATION consumes. It
+ * deliberately separates "the request was never addressed" from "the request
+ * was dispatched but its effect is unproven": only `committed` is permission to
+ * proceed, and only `indeterminate` may claim the old Turn's state is an
+ * improvement. The control `cancel` keeps the shared `WriteOutcome` taxonomy
+ * (where a dispatched caller/carrier cancellation is `cancelled` for the user
+ * Stop gesture); this seam only answers the navigation question without
+ * changing that classification.
+ */
+export interface NavigationStopReceipt {
+  /** Backend-owned opaque token pinning the EXACT owner generation the one-shot
+   *  stop was addressed to. The runtime passes it back to `whenIdleOrAbort` so
+   *  the quiesce proves it is observing the SAME generation as the stop, never
+   *  a later reconnect/rollover. */
+  readonly token: unknown
+}
+
+export type NavigationCancelSettlement =
+  | { readonly kind: 'committed'; readonly receipt?: NavigationStopReceipt }
+  | { readonly kind: 'rejected'; readonly detail: string }
+  /** Confirmed pre-dispatch: the exact generation could not be addressed (or
+   *  the runner is exiting). NEVER permission to switch. */
+  | { readonly kind: 'cancelled' }
+  /** The request WAS dispatched and its effect cannot be proven (a superseded
+   *  reply, a caller/carrier cancellation, an unknown carrier failure). Never
+   *  retried. */
+  | { readonly kind: 'indeterminate'; readonly detail: string }
+
+/**
  * The owner retirement the session layer needs: quiesce/cancel one owner and
  * retire it in the official session-close order. `mode` selects the cancel
  * policy (`'transition'` = an explicit session switch; `'shutdown'` = the
@@ -48,10 +78,37 @@ export interface SessionRetirementReport {
  */
 export interface SessionOwnerRetirement {
   /** Await the owner's quiescence and report which condition ended the wait:
-   *  `true` when `signal` aborted first, `false` when the owner settled by
-   *  itself. HOW an abort is reflected onto the owner is the backend's decision
-   *  (a backend may cancel it, or merely stop waiting). */
-  whenIdleOrAbort(owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean>
+   *  `true` when `signal` aborted first, `false` when the EXACT owner was
+   *  OBSERVED settling by itself, and `'unobservable'` when the exact owner
+   *  generation can no longer be observed (a replaced/retired Remote binding, a
+   *  changed Connection generation, or a missing Direct attachment).
+   *  `'unobservable'` is NOT proof of idle and
+   *  must never be consumed as one. HOW an abort is reflected onto the owner is
+   *  the backend's decision (a backend may cancel it, or merely stop waiting). */
+  whenIdleOrAbort(
+    owner: SessionOwnerRef,
+    signal: AbortSignal,
+    receipt?: NavigationStopReceipt,
+  ): Promise<boolean | 'unobservable'>
+  /** ONE-SHOT user cancel of this EXACT owner's current work, preserving its
+   *  pending inbox (the Busy Esc / Stop semantic). This is deliberately NOT
+   *  {@link preCancel}: that one is the synchronous shutdown preparation and
+   *  makes no keepInbox promise. The backend addresses the captured owner
+   *  generation itself and returns the shared write settlement — only
+   *  `committed` means the backend accepted the cancel; a stale/gone
+   *  generation is `cancelled`, a proven refusal is `rejected`, and an
+   *  unproven carrier failure is `indeterminate` (never retried). */
+  cancel(owner: SessionOwnerRef): Promise<WriteOutcome<undefined>>
+  /**
+   * The USER-NAVIGATION stop of this EXACT owner's current work: the same
+   * one-shot cancel, reported with the pre-dispatch/dispatched phase resolved
+   * (see {@link NavigationCancelSettlement}). It never changes what
+   * {@link cancel} means for the user Stop gesture; it only gives navigation
+   * the fact it needs to decide whether the transition may proceed (only
+   * `committed`) and whether the old Turn may already have stopped (only
+   * `indeterminate`).
+   */
+  cancelForNavigation(owner: SessionOwnerRef): Promise<NavigationCancelSettlement>
   /** The final durable flush of the owner's session. */
   flush(owner: SessionOwnerRef): Promise<void>
   /** Synchronously cancel the owner's work BEFORE the surface is torn down. */

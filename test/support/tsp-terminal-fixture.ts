@@ -16,6 +16,8 @@
 import { EventEmitter } from 'node:events'
 import { concatBytes, type Op, type TermInput, type TermOutput } from '@stencil-hq/tern'
 
+import { readTspBlobMessages } from './tsp-blob-wire.ts'
+
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
 
@@ -145,6 +147,10 @@ export interface TspPane {
  * override the advertised set verbatim (the fail-closed negative). */
 export function installTspPane(options: {
   readonly modelPicker?: boolean
+  /** Advertise the composer action row's negotiated kinds (the `el` kind —
+   *  `styles` is already in the base feature set): a pane without it can never
+   *  carry the native composer buttons. */
+  readonly composerActions?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
   /**
@@ -164,6 +170,15 @@ export function installTspPane(options: {
   readonly nativeImages?: boolean
   /** Advertise the NATIVE CHART kind (the PR-D chart projection). */
   readonly nativeChart?: boolean
+  /**
+   * Advertise the exact kind set the native modal composites paint: the
+   * `questions` form and the pieces its same-style safe/Review pages and the
+   * native Tool approval really construct (`overlay`/`row`/`text`/`input`/
+   * `button`; `tool` and `code` are already in the base vocabulary). A case
+   * that wants the LEGACY modal branch must leave this off — that is the
+   * fail-closed default, not an accident.
+   */
+  readonly nativeInteraction?: boolean
   readonly kinds?: readonly string[]
   readonly features?: readonly string[]
 } = {}): TspPane {
@@ -187,14 +202,19 @@ export function installTspPane(options: {
   // The native-kind/feature sets are the pane's own advertised set, exactly like the
   // real client. Model, Preset and Session Browser opt-ins each add only their native
   // picker/Reader kinds; Preset adds `md` for its guide. Reader pages negotiate scroll.
+  // The three Details Readers add `kv` because those opt-ins are exactly the panes whose
+  // Reader paints its labelled short facts as a grid; a case that must prove the
+  // no-`kv` degradation passes `kinds` verbatim instead.
   // A case can override the advertised sets verbatim (fail-closed).
   const native = Array.from(new Set([
-    ...(options.modelPicker === true ? ['picker', 'row', 'overlay', 'text'] : []),
-    ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md'] : []),
-    ...(options.sessionBrowser === true ? ['picker', 'row', 'overlay', 'text'] : []),
+    ...(options.modelPicker === true ? ['picker', 'row', 'overlay', 'text', 'kv'] : []),
+    ...(options.composerActions === true ? ['el'] : []),
+    ...(options.presetPicker === true ? ['picker', 'row', 'overlay', 'text', 'md', 'kv'] : []),
+    ...(options.sessionBrowser === true ? ['picker', 'row', 'overlay', 'text', 'kv'] : []),
     ...(options.workDetails === true ? ['row', 'text'] : []),
     ...(options.nativeImages === true ? ['image'] : []),
     ...(options.nativeChart === true ? ['chart'] : []),
+    ...(options.nativeInteraction === true ? ['questions', 'overlay', 'row', 'text', 'input', 'button', 'scroll'] : []),
   ]))
   const nativeFeatures = [
     ...(options.presetPicker === true || options.sessionBrowser === true || options.workDetails === true ? ['scroll'] : []),
@@ -244,10 +264,9 @@ export function installTspPane(options: {
     for (const match of text.matchAll(/\u001b_tsp;o;([\s\S]*?)\u001b\\/g)) {
       openBodies.push(JSON.parse(match[1]!) as { readonly id: string; readonly mode?: string; readonly title?: string; readonly listen?: boolean })
     }
-    for (const match of text.matchAll(/\u001b_tsp;b;id=([0-9a-f]*);/g)) {
-      const id = match[1]!
-      blobList.push(id)
-      orderedWireEvents.push({ kind: 'blob', id })
+    for (const blob of readTspBlobMessages(bytes)) {
+      blobList.push(blob.id)
+      orderedWireEvents.push({ kind: 'blob', id: blob.id })
     }
     for (const match of text.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
       frames += 1
@@ -268,9 +287,11 @@ export function installTspPane(options: {
   const stdoutDescriptor = Object.getOwnPropertyDescriptor(process, 'stdout')
   Object.defineProperty(process, 'stdin', { configurable: true, get: () => input })
   Object.defineProperty(process, 'stdout', { configurable: true, get: () => output })
-  // The shipped SDK declines inside multiplexers (`TMUX`/`STY`/`ZELLIJ` are
-  // truthy even as "0") and under an explicit `TERN_TSP=0`. Clear them for the
-  // duration: the simulated pane IS the tty authority here.
+  // This fake scripted pane answers the DA1 probe, so it must stay on the SDK's
+  // non-tmux admission branch: clearing `TMUX` keeps the conditional tmux branch
+  // (which asks `tmux show-options @tern-tsp` and never sends DA1) out of the
+  // lane. `STY`/`ZELLIJ`/`TERN_TSP=0` are declined outright, and each is truthy
+  // even as "0" — the simulated pane IS the tty authority here.
   const declined = ['TMUX', 'STY', 'ZELLIJ', 'TERN_TSP', 'DSH_PI_TUI_RENDERER', 'DSH_PI_TUI_LOG'] as const
   const previousEnv = new Map<string, string | undefined>()
   for (const name of declined) {

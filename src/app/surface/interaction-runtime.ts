@@ -29,6 +29,7 @@ import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { InteractionPort } from '../../runtime/interaction-port.ts'
 import type { SurfaceInteractionPresenter } from './interaction-presenter.ts'
 import type { QuestionAttentionRow } from './question-controller.ts'
+import type { DisplayActivityFacts } from './display-seam.ts'
 import { QuestionSurfaceController } from './question-controller.ts'
 
 /** The approval/question presentation inputs (A4-7, plan §13.3/§16). */
@@ -90,6 +91,13 @@ export interface InteractionRuntimeOptions {
   readonly isCleanedUp: () => boolean
   /** The Task Center's PRESENTATION-only refresh after an attention change. */
   readonly onAttentionChanged: () => void
+  /**
+   * TSP-7 PR-B: the read-only projection of this owner's modal/parked facts onto
+   * the surface's ONE activity status. The surface (never this owner) is the
+   * `StatusStore` writer, and this never reads the Host, the catalog or a modal
+   * tree — it forwards facts this owner already derived.
+   */
+  readonly publishActivity: (facts: DisplayActivityFacts) => void
 }
 
 /** The approval/question owner `createSurfaceRuntime()` consumes. */
@@ -132,6 +140,15 @@ export interface InteractionRuntime {
    * accept keys for it. The full pass still runs later (hydration/activity).
    */
   withdrawReplacedPresentation(): void
+  /**
+   * M4 PR4: whether this surface currently holds UNSETTLED Client-local
+   * Question/Approval input — a live approval prompt (presented or FIFO-queued
+   * behind another modal), a refused-admission wait this owner would have to
+   * drain, or the Question controller's own live/continued local input. It is
+   * a SYNCHRONOUS read of the existing owner state, never the Host's pending
+   * question fact and never the footer's waiting icon.
+   */
+  hasReloadBlockingInput(): boolean
   /** Release the attention subscription, the controller and the answer lookup. */
   dispose(): void
 }
@@ -169,6 +186,13 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    */
   let ended = false
   /**
+   * The attached backend port. The split-Client adapter exposes an optional
+   * `detachSurface()`: revoking its current presentation token BEFORE the
+   * modal withdrawals is what keeps a local teardown result from reaching the
+   * Host as a user decision.
+   */
+  let attachedPort: InteractionPort | undefined
+  /**
    * The refused admissions' waits (F11): they never reached the seat, so THIS
    * owner is their teardown owner.
    */
@@ -184,10 +208,37 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
    * the renderer's own presenter (PiTui app chrome, TSP dock line) instead of a
    * PiTui-only `TuiApp` read — the read-only renderer has no app at all.
    */
+  /**
+   * TSP-7 PR-B (F4): the presented modal facts from the PRESENTER's own
+   * active-slot read — the ONE authority for the waiting phases. A request
+   * that is registered or FIFO-queued behind another modal is alive but NOT
+   * presented; a settle promotes the queue BEFORE the promise resolves, so the
+   * republish below always reads the already-promoted seat.
+   */
+  const presentedModalFacts = (): { approvalOpen: boolean; questionOpen: boolean } => {
+    const presented = options.presenter().presentedModalKind?.()
+    return {
+      approvalOpen: presented === 'approval',
+      questionOpen: presented === 'question',
+    }
+  }
+
   const publishAttention = (): void => {
     if (options.isCleanedUp()) return
     const rows = questionController?.attentionRows() ?? []
-    options.presenter().setQuestionAttention(rows.filter(row => row.presentation === 'parked').length)
+    const parked = rows.filter(row => row.presentation === 'parked').length
+    options.presenter().setQuestionAttention(parked)
+    // TSP-7 PR-B: the SAME commit publishes the parked COUNT and the presented
+    // fact together, so the two can never disagree on screen.
+    //
+    // `parked` is "still answerable but not on screen" — it is NEVER a
+    // `waiting-question` phase by itself; the phase comes from the presenter's
+    // ACTIVE slot (F4): the actually-presented form is the only proof the user
+    // is being waited on.
+    options.publishActivity({
+      questionAttention: parked,
+      ...presentedModalFacts(),
+    })
   }
 
   /** Whether a request for this Session may still be presented (F10/F12/F13). */
@@ -341,6 +392,7 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
 
   return {
     attach(port, deps) {
+      attachedPort = port
       // PR3-A: a renderer that cannot present interactive modals (the
       // read-only TSP renderer) still registers BOTH answerers, but
       // fail-closed: approvals resolve `'unavailable'` (the official
@@ -401,14 +453,30 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
             : waitForLifetime(lifetime, release)
         }
         if (sessionId !== undefined) liveApprovals.set(lifetime, { sessionId, retire })
-        return options.presenter().showApprovalPrompt({
+        // TSP-7 PR-B (F4): the presented facts are read AFTER the presenter
+        // call takes (or queues) the seat — a FIFO-queued approval behind a
+        // Question is alive but NOT presented, so the phase stays with the
+        // Question until the approval is actually promoted. The publish runs
+        // inside the SAME synchronous admission below.
+        const settledPrompt = options.presenter().showApprovalPrompt({
           toolName: req.toolName,
           reason: req.reason,
           signal: lifetime,
           ...args === undefined ? {} : { arguments: args },
           ...args !== undefined && req.toolName === 'bash' && deps.dangerCommand(args) ? { danger: true } : {},
-        }, true).finally(() => {
+        }, true)
+        // The synchronous admission already ran (TSP: enqueue→activate→render);
+        // publish the post-admission truth. A presenter that defers its mount
+        // would still be read here as its current truth — never a guess.
+        if (sessionId !== undefined) options.publishActivity(presentedModalFacts())
+        return settledPrompt.finally(() => {
           liveApprovals.delete(lifetime)
+          // The settle/abort/withdraw ends the wait: the phase must fall back
+          // immediately instead of waiting for the next model token (§3.3). The
+          // settle PROMOTED the queue before resolving this promise, so this
+          // re-read already names the successor (F4/RFL-002) — a Question that
+          // outlived the approval is restored in the SAME step.
+          if (sessionId !== undefined) options.publishActivity(presentedModalFacts())
           release()
         })
       })
@@ -430,8 +498,17 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
         port: port.questions,
         // The controller decides per presentation whether the Agent is blocked
         // on the answer: a LIVE foreground wait is, a CONTINUED late answer is not.
-        ask: (questions, signal, status, agentInputWait) =>
-          options.presenter().askQuestions(questions, signal, status, agentInputWait),
+        ask: (questions, signal, status, agentInputWait) => {
+          const settled = options.presenter().askQuestions(questions, signal, status, agentInputWait)
+          // PR-B F4: the presenter's synchronous admission already ran (TSP:
+          // enqueue→activate→render); publish the post-admission truth so a
+          // flow QUEUED behind another modal publishes THAT modal's phase, and
+          // a flow that TOOK the seat publishes waiting-question in the same
+          // step (the controller's pre-ask notify already published the
+          // pre-admission state — this is the completing half).
+          options.publishActivity(presentedModalFacts())
+          return settled
+        },
         notify: (message, level) => { options.presenter().notify(message, level) },
         repaint: () => options.schedulePaint(),
         currentSessionId: () => options.currentSessionId(),
@@ -460,6 +537,12 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
     controller: () => questionController,
     attentionRows: () => questionController?.attentionRows() ?? [],
     publishAttention,
+    hasReloadBlockingInput() {
+      if (ended) return false
+      return liveApprovals.size > 0
+        || refusedPresentations.size > 0
+        || questionController?.hasReloadBlockingInput() === true
+    },
     withdrawReplacedApprovals,
     reconcilePresentation,
     reconcilePublishedPresentation,
@@ -471,8 +554,10 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       // can never strand the later ones, and a second dispose is inert.
       const questionAttention = questionAttentionDisposal
       const controller = questionController
+      const port = attachedPort
       questionAttentionDisposal = undefined
       questionController = undefined
+      attachedPort = undefined
       // PR3-B B3 (§3.2.4): the ORDER is part of the contract. The controller
       // retires FIRST, so a live question/approval is still classified by the
       // Host's own ASK_ABORTED / ASK_CANCELLED path; only then does the
@@ -480,6 +565,10 @@ export function createInteractionRuntime(options: InteractionRuntimeOptions): In
       // dies with the surface), and the settled lookup is cleared last so no
       // late repaint can reach through it.
       runSyncDisposalSteps('interaction runtime disposal', [
+        // FIRST: revoke the split delivery token while the surface is still
+        // logically current; the modal withdrawal below then produces a
+        // LOCAL result the root owner discards instead of a Host decision.
+        () => port?.detachSurface?.(),
         () => questionAttention?.(),
         () => controller?.dispose(),
         () => options.livePresenter()?.withdrawPending(),

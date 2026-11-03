@@ -16,6 +16,7 @@
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { observeSettled, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import type { WriteOutcome } from '../../runtime/session-writer-port.ts'
 import {
   LifecycleError,
   requireCreated,
@@ -26,6 +27,7 @@ import {
 import { isRewindIdentityCurrent, type RewindNavigationIdentity } from './navigation-identity.ts'
 import { runFirstSessionCommit, runForkCommit, runOrdinaryCommit, runResumeCommit } from './commit-order.ts'
 import type {
+  NavigationStopReceipt,
   SessionOwnerAccess,
   SessionOwnerRetirement,
   SessionRetirementReport,
@@ -33,7 +35,15 @@ import type {
 import type { ForkSourcePin, SessionOwnershipCore } from './ownership-core.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './scope.ts'
 import type { SessionOwnerRef } from './subject.ts'
-import { runTransitionTo, type TransitionOutcome, type TransitionSteps } from './transition.ts'
+import {
+  runTransitionTo,
+  SessionNavigationStopError,
+  type NavigationAdmission,
+  type NavigationIntent,
+  type NavigationStopFailure,
+  type TransitionOutcome,
+  type TransitionSteps,
+} from './transition.ts'
 
 /** The runner-supplied surface operations the runtime drives. */
 export interface SessionRuntimeSurface {
@@ -141,6 +151,9 @@ export interface SessionRuntimeDeps {
   readonly surface: SessionRuntimeSurface
   /** Synchronous scope-currentness read (the runner's scope authority). */
   isScopeCurrent(scope: SessionScope): boolean
+  /** ONE synchronous scope capture over the same authority (a navigation
+   *  intent pins the owner/generation it is leaving BEFORE its first await). */
+  captureScope(): SessionScope
   /** Diagnostics; the runtime logs per-owner retirement failures and disposes
    *  the sink at the end of the exit retirement (its last consumer). */
   readonly diag: Diag
@@ -202,6 +215,19 @@ interface ForkAdoptionLedger {
 }
 
 /** The narrow entries the runner consumes. */
+/** The SETTLED result of a tracked session switch. `matched`/accepted is not
+ *  success: only `committed` means the target own the visible surface.
+ *  `superseded` is a locally stale intent (definitely not applied);
+ *  `indeterminate` is a Host-side open/commit whose local currentness was lost
+ *  (the target may be active — never report it as "not executed"). */
+export type SessionSwitchOutcome =
+  | { readonly kind: 'committed'; readonly sessionId: string }
+  | { readonly kind: 'already-current'; readonly message: string }
+  | { readonly kind: 'failed'; readonly message: string }
+  | { readonly kind: 'superseded'; readonly message: string }
+  | { readonly kind: 'indeterminate'; readonly message: string }
+  | { readonly kind: 'cancelled' }
+
 export interface SessionRuntime {
   /**
    * Run one scope-bound TUI writer. The admission is a NO-YIELD section:
@@ -213,12 +239,43 @@ export interface SessionRuntime {
    * keeps the barrier's own refusal (no auto retry).
    */
   withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
+  /**
+   * Run one CONTROL operation against the captured live scope: a user
+   * interrupt or a selected subagent Stop. It is admitted while a navigation
+   * transition holds the barrier (the writer drain does NOT block it) but
+   * still refuses a stale scope synchronously, and it receives the EXACT
+   * owner captured in the same no-yield section. It is not a writer bypass:
+   * an admitted writer still drains before the transition commits, and this
+   * section never increments the writer count.
+   */
+  withControl<T>(
+    scope: LiveSessionScope,
+    task: (owner: SessionOwnerRef) => Promise<T> | T,
+  ): Promise<T>
+  /**
+   * Interrupt the captured session's current work through the control
+   * admission, preserving its pending inbox. A stale capture or an aborted
+   * runner is `cancelled` (confirmed not dispatched, never a generic error);
+   * a backend refusal/unknown carrier result keeps its typed settlement.
+   */
+  interrupt(scope: LiveSessionScope): Promise<WriteOutcome<undefined>>
   /** Run one ordinary session transition/switch (plan §4A). */
   transitionTo<T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>>
+  /**
+   * Run ONE user-navigation transaction through the same transition gate and
+   * barrier. The intent's captured generation is stopped exactly once BEFORE
+   * the admitted-writer drain; a stale capture or a refused/unproven stop
+   * aborts before the body with {@link SessionNavigationStopError}. The intent's
+   * `admission` records whether that stop was accepted, so a later failure in
+   * `task` can state that the old Turn is already stopped.
+   */
+  withNavigation<T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T>
   /** Hand the TUI over to another persisted session (never throws). A scoped
    *  UI intent can supply its captured scope so a queued stale request is
    *  refused inside the transition gate before navigation side effects. */
   switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
+  /** The tracked settled switch outcome used by `/resume` (acceptance is not success). */
+  switchSessionOutcome(sessionId: string, expectedScope?: SessionScope): Promise<SessionSwitchOutcome>
   /** Adopt one forked child inside the gate (plan §4B). Resolves to the
    * navigation identity captured INSIDE the publication commit (PR5 v2
    * §3C — the caller's final settlement consumes exactly this saved
@@ -283,6 +340,159 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
 
   /**
+   * The scope-bound CONTROL admission (Busy Esc / subagent Stop). The scope
+   * check, the EXACT owner capture and the barrier control section run in the
+   * same synchronous stack, so a stale capture can never address a newer
+   * owner and a transition that is about to publish one can never hand its
+   * cancel to the wrong generation. Unlike {@link withWriter}, a frozen
+   * transition does NOT refuse this section; unlike an ordinary writer, it
+   * does not delay the transition's drain or its commit.
+   */
+  const withControl = <T>(
+    scope: LiveSessionScope,
+    task: (owner: SessionOwnerRef) => Promise<T> | T,
+  ): Promise<T> => {
+    if (!deps.isScopeCurrent(scope)) return Promise.reject(new SessionScopeSupersededError())
+    const owner = core.owner()
+    // `isScopeCurrent` already proved an owner-bearing capture; the guard
+    // only narrows the type and is unreachable in production.
+    if (owner === undefined) return Promise.reject(new SessionScopeSupersededError())
+    return core.barrier.runControl(() => task(owner))
+  }
+
+  /**
+   * Interrupt the captured live session's current work. The backend cancel is
+   * addressed by the EXACT owner captured inside {@link withControl}; a stale
+   * capture and an exiting runner are both `cancelled` (the request provably
+   * never left the TUI) and therefore never surface as a spurious
+   * `agent interrupt` ERROR.
+   */
+  const interrupt = (scope: LiveSessionScope): Promise<WriteOutcome<undefined>> => {
+    if (deps.lifecycleSignal.aborted) return Promise.resolve({ kind: 'cancelled' })
+    return withControl(scope, owner => deps.retirement.cancel(owner)).catch((error: unknown) => {
+      if (error instanceof SessionScopeSupersededError) return { kind: 'cancelled' as const }
+      throw error
+    })
+  }
+
+  /**
+   * ONE exact-owner stop for a user navigation. Runs INSIDE the frozen
+   * barrier: the scope check and the owner capture happen in the SAME
+   * synchronous stack as the backend call (exactly like the control
+   * admission), so a replacement published elsewhere can never receive this
+   * navigation's stop. A still-current capture is the ONLY prerequisite:
+   *
+   * - `stopped` (backend `committed`) — the backend accepted the STOP REQUEST;
+   *   only the transition's OLD-owner quiesce can prove the Turn stopped, and
+   *   the failure wording distinguishes "requested, not yet confirmed" from
+   *   "quiesced, cannot be resumed";
+   * - `nothing` — the surface is sessionless (there is no old owner to stop),
+   *   or the runner is exiting (the transition is moot);
+   * - `failed` — ONLY a `committed` cancellation is permission to enter the
+   *   next phase. A proven refusal (`rejected`), a confirmed pre-dispatch
+   *   refusal (`cancelled`) and a dispatched-unproven stop (`indeterminate`)
+   *   all abort navigation. A `cancelled` result means the exact generation
+   *   could not be addressed, NOT that the Host has no running work; a Remote
+   *   `whenIdleOrAbort` returning `'unobservable'` for a rolled/released
+   *   binding is likewise not proof of idle, and is never reached on this
+   *   path. An
+   *   indeterminate stop is never retried.
+   * A stale capture aborts FIRST: another navigation owns the surface, and
+   * this intent must not stop the replacement's work.
+   */
+  /** The receipt of the LAST navigation stop in this gate task; read by
+   *  `transitionTo` so the OLD-owner quiesce validates the SAME generation the
+   *  accepted cancel was addressed to (never a later reconnect). */
+  let navigationReceipt: NavigationStopReceipt | undefined
+
+  const navigationStop = async (scope: SessionScope): Promise<
+    | { readonly kind: 'stopped'; readonly receipt?: NavigationStopReceipt }
+    | { readonly kind: 'nothing' }
+    | { readonly kind: 'failed'; readonly failure: NavigationStopFailure }
+  > => {
+    if (deps.lifecycleSignal.aborted) return { kind: 'nothing' }
+    if (!deps.isScopeCurrent(scope)) {
+      return { kind: 'failed', failure: { settlement: 'stale', detail: '' } }
+    }
+    const owner = core.owner()
+    if (owner === undefined) return { kind: 'nothing' }
+    // The PHASE-RESOLVED navigation settlement: a pre-dispatch refusal is
+    // `cancelled`; a dispatched reply whose effect is unproven (including a
+    // caller/carrier cancellation) is `indeterminate`. Only `committed` may
+    // proceed.
+    const settlement = await deps.retirement.cancelForNavigation(owner)
+    if (settlement.kind === 'committed') {
+      return settlement.receipt === undefined
+        ? { kind: 'stopped' }
+        : { kind: 'stopped', receipt: settlement.receipt }
+    }
+    if (settlement.kind === 'cancelled') {
+      return { kind: 'failed', failure: { settlement: 'cancelled', detail: '' } }
+    }
+    return { kind: 'failed', failure: { settlement: settlement.kind, detail: settlement.detail } }
+  }
+
+  /**
+   * The barrier half of a navigation admission (the caller holds the gate):
+   * freeze → ONE exact-owner stop of the intent's captured generation →
+   * admitted writer drain → the transition body. The intent's `admission` fact
+   * is written from the stop callback, before the body runs; a stop failure
+   * aborts with ZERO body side effects.
+   */
+  const runNavigationTransition = <T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T> => {
+    let stopReceipt: NavigationStopReceipt | undefined
+    return core.barrier.runTransition(
+      async () => {
+        // Publish the accepted stop's exact generation for the transition body
+        // (and only for it): the quiesce must not re-capture a later
+        // generation after a writer-drain reconnect.
+        navigationReceipt = stopReceipt
+        try {
+          return await task()
+        } finally {
+          navigationReceipt = undefined
+        }
+      },
+      async () => {
+        const stop = await navigationStop(intent.scope)
+        if (stop.kind === 'failed') throw new SessionNavigationStopError(stop.failure)
+        intent.admission.oldStopAccepted = stop.kind === 'stopped'
+        stopReceipt = stop.kind === 'stopped' ? stop.receipt : undefined
+      },
+    )
+  }
+
+  /**
+   * Run one navigation task through the gate and ALWAYS close the
+   * deferred-queue-recall window at its end. A queue pull-back admitted before
+   * the freeze can finish during the stop, remove its occurrences and DEFER its
+   * local restore to the pending transition — whose production predicate is
+   * `gate.pending || barrier.inTransition`, so a QUEUED later task also keeps it
+   * pending. The body's own settle restores it only when the body runs; a
+   * refused admission, a stale scoped recheck and a stop failure never reach
+   * that body.
+   *
+   * The settle is registered DIRECTLY on the gate task promise. The gate's own
+   * `active=false` reaction was registered first, and the next queued task is
+   * chained on the tail that reaction resolves — so this runs after the gate
+   * cleared and BEFORE the next task starts. A writer that defers during this
+   * task (including one that observed the still-queued next task) is caught
+   * here; one that defers later is attributed to the NEXT navigation task, which
+   * closes its own window the same way. The commit/body settlements already
+   * performed make this a no-op on the ordinary success path.
+   */
+  const runNavigationGate = <T>(task: () => Promise<T> | T): Promise<T> =>
+    core.gate.run(task).finally(() => deps.surface.settlePendingQueueRecalls(false))
+
+  /**
+   * Run ONE user-navigation transaction through the gate + barrier. The stop
+   * and drain run BEFORE the body; the body then creates and commits exactly
+   * like {@link transitionTo}.
+   */
+  const withNavigation = <T>(intent: NavigationIntent, task: () => Promise<T> | T): Promise<T> =>
+    runNavigationGate(() => runNavigationTransition(intent, task))
+
+  /**
    * Run one ordinary session transition/switch: quiesce + flush the old owner,
    * run the caller's preflight/create, commit the visible handle through the
    * fixed order (`runOrdinaryCommit`, plan §4A) and retire the old owner. The
@@ -293,6 +503,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * retirement takes over) and the outcome stays successful.
    */
   const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
+    // The accepted navigation stop's generation receipt, if this transition is
+    // the body of a user navigation. Non-navigation transitions have none.
+    const stopReceipt = navigationReceipt
     core.bumpNavigationEpoch()
     const from = core.currentSessionId()
     const opening = deps.surface.beginOpening(steps.target.id)
@@ -327,12 +540,23 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // (which may be a NEW owner committed by an earlier queued transition),
           // so the transition settles instead of hanging past the appExit
           // watchdog.
-          await deps.retirement.whenIdleOrAbort(owner, deps.lifecycleSignal)
+          const idle = await deps.retirement.whenIdleOrAbort(owner, deps.lifecycleSignal, stopReceipt)
+          if (idle === true) return
+          if (idle === 'unobservable') {
+            // The exact OLD generation can no longer be observed: we cannot
+            // prove its Turn stopped. A user navigation must NOT create/open a
+            // replacement behind an unknown old Turn (that would be a silent
+            // detach); abort before the create with the phase fact preserved.
+            throw new Error('the old session owner is no longer observable — refusing to switch without a confirmed stop')
+          }
           // Final flush before the switch. The owner is re-read AFTER the quiesce
           // (the abort path may have swapped it), matching the pre-cutover read.
           const flushOwner = core.owner()
           if (flushOwner === undefined) return
           await deps.retirement.flush(flushOwner)
+          // ONLY an OBSERVED settle proves the old Turn idle; 'unobservable'
+          // (a rolled Remote binding / missing attachment) is not idle.
+          if (idle === false) steps.onOldOwnerQuiesced?.()
         },
         commit: (next) => {
           // Map the NEW owner BEFORE the commit section can throw: the commit
@@ -467,7 +691,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // initialization below (it would repaint into the disposed app) and
           // let the committed child stand.
           const aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
-          if (aborted) {
+          if (aborted === true) {
             // The lifecycle is exiting: the committed child stands and the
             // retirement takes over. Skip the surface init AND the switch
             // report (the `finally` still clears the opening journal).
@@ -527,50 +751,119 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    * caller's `.then(error => ...)` needs no rejection path. The whole switch
    * (open → commit) runs inside the session-transition gate, so it can never
    * interleave with another ordinary transition.
+   *
+   * A switch is a USER NAVIGATION: the old generation is stopped once by the
+   * barrier admission before the admitted writers drain. A SCOPED intent (the
+   * Session Browser's captured row) is fenced by that capture: a stale one is a
+   * superseded navigation and settles silently. An UNSCOPED intent (a picker
+   * selection made against the live surface) captures its scope INSIDE the gate
+   * right before the freeze, so a queued later selection still follows the FIFO
+   * and never inherits an older generation. A refused or unproven stop keeps the
+   * CURRENT session live and says why.
    */
-  const switchSession = (sessionId: string, expectedScope?: SessionScope): Promise<string | undefined> => {
-    const runLocked = (): Promise<string | undefined> => core.barrier.runTransition(async () => {
-      try {
-        return await switchSessionLocked(sessionId)
-      } finally {
-        // Preflight can fail before `transitionTo` is reached; settle any
-        // recall that was waiting on this transition in that case.
-        deps.surface.settlePendingQueueRecalls(false)
+  const switchSessionOutcome = (sessionId: string, expectedScope?: SessionScope): Promise<SessionSwitchOutcome> => {
+    /** The barrier half of this switch (the gate wrapper is added below). */
+    const runLocked = (scope: SessionScope): Promise<SessionSwitchOutcome> => {
+      const intent: NavigationIntent = { scope, admission: { oldStopAccepted: false } }
+      return runNavigationTransition(intent, async () => {
+        try {
+          return await switchSessionLockedOutcome(sessionId, intent.admission)
+        } finally {
+          // Preflight can fail before `transitionTo` is reached; settle any
+          // recall that was waiting on this transition in that case.
+          deps.surface.settlePendingQueueRecalls(false)
+        }
+      })
+    }
+    const mapStopFailure = (error: unknown): SessionSwitchOutcome => {
+      if (!(error instanceof SessionNavigationStopError)) throw error
+      // A stale capture is a locally superseded navigation: the surface
+      // already moved, so the intent is definitely not applied here.
+      if (error.settlement === 'stale') {
+        return { kind: 'superseded', message: 'the session changed before this switch could start' }
       }
-    })
+      return { kind: 'failed', message: `${error.message}; the session was not switched` }
+    }
+    /**
+     * A switch INTO the session already current is a NO-OP: it replaces nothing,
+     * so it must NOT stop the current owner's turn. Evaluated INSIDE the gate,
+     * so a queued intent whose target became current in the meantime skips the
+     * stop too — on BOTH the scoped and the unscoped admission.
+     */
+    const noOpSwitch = (): SessionSwitchOutcome | undefined => {
+      if (core.currentSessionId() !== sessionId) return undefined
+      deps.surface.settlePendingQueueRecalls(false)
+      return { kind: 'already-current', message: 'already on this session' }
+    }
     if (expectedScope === undefined) {
       core.bumpNavigationEpoch()
-      return core.gate.run(runLocked)
+      return runNavigationGate((): SessionSwitchOutcome | Promise<SessionSwitchOutcome> => {
+        const noOp = noOpSwitch()
+        if (noOp !== undefined) return noOp
+        // Capture the owner this queued selection is actually leaving WHEN ITS
+        // TURN COMES: every earlier transition already settled, and the capture
+        // and the barrier freeze still happen in the SAME synchronous stack.
+        return runLocked(deps.captureScope())
+      }).catch(mapStopFailure)
     }
-    if (!deps.isScopeCurrent(expectedScope)) return Promise.resolve(undefined)
-    return core.gate.run(() => {
+    if (!deps.isScopeCurrent(expectedScope)) {
+      return Promise.resolve<SessionSwitchOutcome>({ kind: 'superseded', message: 'the session changed before this switch could start' })
+    }
+    return runNavigationGate((): SessionSwitchOutcome | Promise<SessionSwitchOutcome> => {
       // A previous queued transition may have published a new owner while this
       // intent waited. Recheck before this request bumps navigation or opens B.
-      if (!deps.isScopeCurrent(expectedScope)) return undefined
+      if (!deps.isScopeCurrent(expectedScope)) {
+        return { kind: 'superseded', message: 'the session changed before this switch could start' }
+      }
+      const noOp = noOpSwitch()
+      if (noOp !== undefined) return noOp
       core.bumpNavigationEpoch()
-      return runLocked()
-    })
+      return runLocked(expectedScope)
+    }).catch(mapStopFailure)
   }
 
-  const switchSessionLocked = async (sessionId: string): Promise<string | undefined> => {
-    // A switch INTO the session we are already on is a no-op.
-    if (core.currentSessionId() === sessionId) {
-      return 'already on this session'
+  /** Compatibility projection for callers that only need the old error string
+   *  (`undefined` = committed or a silent superseded intent). New navigation
+   *  settlement code must use {@link switchSessionOutcome}. */
+  const switchSession = async (sessionId: string, expectedScope?: SessionScope): Promise<string | undefined> => {
+    const outcome = await switchSessionOutcome(sessionId, expectedScope)
+    switch (outcome.kind) {
+      case 'committed':
+      case 'cancelled':
+      case 'superseded':
+        return undefined
+      case 'already-current':
+      case 'failed':
+      case 'indeterminate':
+        return outcome.message
+    }
+  }
+
+  const switchSessionLockedOutcome = async (
+    sessionId: string,
+    admission: NavigationAdmission,
+  ): Promise<SessionSwitchOutcome> => {
+    // Every failure AFTER an ACCEPTED stop distinguishes the two proven
+    // states: the old Turn is stopped and can never be resumed only once the
+    // pre-commit quiesce completed; before that, the stop is merely requested.
+    const stopNote = (quiesced: boolean): string => {
+      if (!admission.oldStopAccepted) return ''
+      return quiesced
+        ? '; old turn stopped (cannot resume)'
+        : '; turn stop requested (not yet confirmed)'
     }
     // Draft cleanup happens ONLY after the switch committed (the transaction
     // returned ok): a refused/failed switch keeps the CURRENT session and its
     // staged drafts intact — clearing up front would orphan the editor's
     // placeholders on every failed switch.
+    let oldOwnerQuiesced = false
     try {
-      // The unified transaction: the OLD session is flushed FIRST, then the
-      // resume publishes the child. A failure anywhere before the create leaves
-      // the current session live — there is nothing to re-acquire (the DSH
-      // SessionWriteLease is the only writer authority). The recorded preset
-      // drives the Direct adapter's internal resume composition; the
-      // cross-backend open request carries only the Session identity.
-      if (deps.lifecycleSignal.aborted) return undefined
+      if (deps.lifecycleSignal.aborted) return { kind: 'cancelled' }
       const result = await transitionTo({
         target: { id: sessionId },
+        // The quiesce callback is the ONLY proof that the old Turn reached
+        // idle; the failure note below distinguishes it from a stop request.
+        onOldOwnerQuiesced: () => { oldOwnerQuiesced = true },
         // A rejected open leaves the target untouched: no pin, no retry — the
         // CURRENT session stays live and the user can retry the switch.
         create: async () => requireOpened(await deps.lifecycle.open({
@@ -580,37 +873,47 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       })
       if (!result.ok) {
         if (result.error instanceof LifecycleError) {
-          // Preserve the machine-readable cause even on the silent path.
           deps.diag.warn('session switch did not own the surface', {
             settlement: result.error.settlement,
             ownership: result.error.ownership,
             publishedSessionId: result.error.publishedSessionId,
             requestedSessionId: result.error.requestedSessionId,
           })
-          // A locally SUPERSEDED open/switch emits no error notice: the surface
-          // moved, so the message belongs to a stale operation.
-          if (result.error.ownership === 'superseded') return undefined
+          if (result.error.ownership === 'superseded') {
+            // A superseded OPEN that already published/opened its target is
+            // an INDETERMINATE switch, not a silent success and not a proven
+            // non-execution: the Host may already have opened it.
+            return result.error.publishedSessionId !== undefined
+              ? {
+                  kind: 'indeterminate',
+                  message: `${result.message}${stopNote(oldOwnerQuiesced)} — do not retry automatically`,
+                }
+              : { kind: 'superseded', message: 'the session changed before this switch completed' }
+          }
+          if (result.error.settlement === 'indeterminate') {
+            return { kind: 'indeterminate', message: `${result.message}${stopNote(oldOwnerQuiesced)} — do not retry automatically` }
+          }
         }
-        // The resume failed: the CURRENT session is still live.
-        return result.message
+        // The resume failed: the CURRENT session is still live. The full
+        // official message (including its raw-log path) stays in the
+        // diagnostic log; the NOTICE drops the path so the actionable refusal
+        // plus the old-turn note fit a 44x20 viewport without scrolling the
+        // current Session card away.
+        deps.diag.warn('session switch refused', { sessionId, message: result.message })
+        const displayMessage = result.message.replace(/\s+\(raw log: .*\)$/u, '')
+        return { kind: 'failed', message: `${displayMessage}${stopNote(oldOwnerQuiesced)}` }
       }
       // The switch COMMITTED: staged drafts are per-session UI state — drop the
       // unpinned ones now (never durable attachments). In-flight submissions
       // keep their pinned drafts so a stale submission can still restore its
       // text with a live backing draft.
       deps.surface.clearUnpinnedDrafts()
-      // (PR3-B §7.3: the ACTIVE-draft drop moved onto the publication's
-      // synchronous commit block — see the publishOwner seam in
-      // `transitionTo`. Keeping it here left the race the review probed: the
-      // new session's hydration had already lifted the input fence, so a
-      // post-hydration keystroke was wiped by this late clear, and the old
-      // text stayed in the composer through B's first editable frames.)
-      return undefined
+      return { kind: 'committed', sessionId }
     } catch (error) {
       const message = safeErrorMessage(error)
       deps.surface.reportSwitchFailure(sessionId, message)
       // The CURRENT session is still live.
-      return `switch failed: ${message}`
+      return { kind: 'failed', message: `switch failed: ${message}${stopNote(oldOwnerQuiesced)}` }
     }
   }
 
@@ -925,13 +1228,13 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // that success would otherwise race its own retirement.
           if (retirement !== undefined) await retirement
         }
-        let aborted = false
+        let aborted: boolean | 'unobservable' = false
         try {
           aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
         } catch (error) {
           deps.diag.error('fork child quiescence failed after commit', { error: safeErrorMessage(error), session: nextSessionId })
         }
-        if (!aborted) {
+        if (aborted !== true) {
           try {
             await deps.surface.initLiveSession(nextOwner)
           } catch (error) {
@@ -1108,7 +1411,7 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
       bumpGeneration: core.bumpGeneration,
       quiesceChild: async () => {
         try {
-          return await deps.retirement.whenIdleOrAbort(childOwner, deps.lifecycleSignal)
+          return (await deps.retirement.whenIdleOrAbort(childOwner, deps.lifecycleSignal)) === true
         } catch (error) {
           deps.diag.warn('first session whenIdle failed', { error: safeErrorMessage(error) })
           return false
@@ -1344,8 +1647,12 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
   }
   return {
     withWriter,
+    withControl,
+    interrupt,
+    withNavigation,
     transitionTo,
     switchSession,
+    switchSessionOutcome,
     adoptFork,
     forkSession,
     parkForkOwner,

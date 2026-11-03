@@ -32,7 +32,7 @@ import { consumeDraftAttachments, draftHasAttachments, draftHasImages, pinDraftA
 import { prepareUserMessage, type DirectPrepareInputDeps } from './direct-message-preparation.ts'
 import { expandImagePlaceholders } from '../../client/media/image/placeholder.ts'
 import { clientTimeZone } from '../../client/time-zone.ts'
-import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
+import { classifyCommandLine, isBareCommandLine, isLocalCommandLine, isPlainExitPrompt, localCommandMayWrite, LOCAL_COMMANDS, SESSIONLESS_COMMANDS, shouldConsumeAdvertisedMiss, type CommandLineClassification } from '../../domain/command/policy.ts'
 import { resolveSubmitDelivery } from './command-policy.ts'
 import { isIndeterminateSkillWrite, type HostCommandClaim, type SubmitDelivery } from '../../commands.ts'
 import type { ClientCommandRegistry } from '../command/client-command-registry.ts'
@@ -165,6 +165,9 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
     withWriter<T>(scope: LiveSessionScope, task: () => Promise<T> | T): Promise<T>
     submitPrompt(submission: PromptSubmission): Promise<void>
     deferQueueRecall(recall: PendingQueueRecall): void
+    /** M4 PR4: the runtime's OWN accepted-write lifetime read (a write that
+     *  bypasses this controller's FIFO still counts). */
+    hasUnsettledClientWrite(): boolean
   }
   /** The A5b-3 command authority owner. */
   readonly command: SubmissionCommandAuthority
@@ -209,9 +212,11 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
   readonly extensions: SubmissionExtensionsDeps
   /** The client artifact-save owner. */
   readonly artifacts: { start(name: 'export' | 'transcript', agent: ExactAgent): void }
-  /** The user-shell owner (the run/inspect seam). */
+  /** The user-shell owner (the run/inspect seam). `endWrite` releases the
+   *  gesture's accepted business-write lifetime at the shell owner's terminal
+   *  settlement (M4 PR4). */
   readonly shell: {
-    run(text: string, ackToken: number | undefined): void
+    run(text: string, ackToken: number | undefined, endWrite: () => void): void
     interrupt(): void
   }
   /**
@@ -345,6 +350,26 @@ export interface SubmissionController {
   markDispatch(sessionId: string | undefined): void
   /** Prepare the outgoing message (image/file admission + canonicalization). */
   prepareMessage(text: string, requestId: string): Promise<unknown>
+  /**
+   * M4 PR4: whether an accepted business write of this Client is still
+   * unsettled — a submitted prompt/Host command, a steer, a local shell run
+   * (its context-mode output write included) or a queue mutation. A read of
+   * the LIVE owner lifecycles, never a cached boolean and never the display
+   * acknowledgement row. `/reload-client` itself is a local control command and
+   * is deliberately NOT counted.
+   */
+  hasUnsettledClientWrite(): boolean
+  /**
+   * M4 PR4: begin ONE accepted Client-local semantic-work lifetime for an
+   * owner OUTSIDE the submission FIFO — the command coordinator's detached
+   * skill delivery and the rewind picker selection. Registration is
+   * synchronous at the acceptance point; the returned release is idempotent
+   * and MUST run at the operation's REAL settlement (success, refusal,
+   * failure or cancellation), never at an intermediate read or handler
+   * return. This is the SAME counter `hasUnsettledClientWrite()` reads:
+   * no second tracker, busy flag or reload state machine is created.
+   */
+  beginClientWrite(): () => void
 }
 
 /** Create the submission/input controller (plan §A5b-4). */
@@ -690,17 +715,45 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
   
   let submitSerialTail: Promise<void> = Promise.resolve()
 
-  const takeSubmitTurn = (): { wait: Promise<void>; release: () => void } => {
+  /**
+   * M4 PR4: the accepted business-write lifetime counter of this controller.
+   * Additions happen in the SYNCHRONOUS acceptance stack (the cleared composer
+   * is already gone), releases at the workflow's EXISTING terminal settlement
+   * (success, refusal, cancellation, indeterminate or reset). Local control
+   * commands (`/reload-client` and its siblings) never count: they are not a
+   * Host/user mutation and would otherwise make the reload refuse itself.
+   * The read is `hasUnsettledClientWrite()` below; it is never cached by the
+   * composition.
+   */
+  let unsettledClientWrites = 0
+  const beginUnsettledClientWrite = (): (() => void) => {
+    unsettledClientWrites += 1
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      unsettledClientWrites -= 1
+    }
+  }
+
+  /**
+   * Take the ONE submit FIFO turn. `countsClientWrite` (default true) makes
+   * this turn the accepted-write lifetime of the gesture: a local UI/control
+   * command passes false, every user/Host mutation keeps it.
+   */
+  const takeSubmitTurn = (countsClientWrite = true): { wait: Promise<void>; release: () => void } => {
     const wait = submitSerialTail
     let releaseTail!: () => void
     const turn = new Promise<void>(resolve => { releaseTail = resolve })
     submitSerialTail = turn
+    if (countsClientWrite) unsettledClientWrites += 1
     let released = false
     return {
       wait,
       release: () => {
         if (released) return
         released = true
+        if (countsClientWrite) unsettledClientWrites -= 1
         releaseTail()
       },
     }
@@ -932,8 +985,19 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // throw before this point must not strand the tail (no turn was taken),
     // and no other submission can interleave during the synchronous setup
     // above, so the ordering contract is unchanged.
+    // M4 PR4: the turn IS this gesture's accepted-write lifetime, except for a
+    // LIVE Client-owned local control command (the `/reload-client` family):
+    // it runs no Host/user mutation, and counting it would make a reload
+    // refuse itself. A skill invocation stays agent-facing and counts.
+    const localControlAtSubmit = parsedAtSubmit !== undefined
+      && submitOriginClaim?.claimed !== true
+      && !deps.command.isSkillInvocation(parsedAtSubmit, text)
+      && (deps.command.clientClaimsLine(parsedAtSubmit)
+        || (isBareCommandLine(parsedAtSubmit)
+          && deps.command.isSkillWrapperName(parsedAtSubmit.name) !== true
+          && deps.extensions.findContribution(parsedAtSubmit.name) !== undefined))
     const tag = `${text.slice(0, 14)}:${submitRequestId.slice(0, 8)}`
-    const submitTurn = takeSubmitTurn()
+    const submitTurn = takeSubmitTurn(!localControlAtSubmit)
     runOwned('submit', () => runReservedSubmit({
       reserve: (t) => {
         try {
@@ -1361,10 +1425,18 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     // in diagnostics — runOwned (AGENTS.md), never a bare void. The
     // handler may be a SYNC implementation, so the factory must run inside
     // runOwned (a sync throw would otherwise escape before the entry).
+    // M4 PR4 external review: an accepted local command that MAY write
+    // persisted config holds the accepted-command lifetime for its WHOLE
+    // handler (the async preparation before the write included). Read-only
+    // commands and `/reload-client` itself stay uncounted, so a refresh never
+    // blocks the reload and the reload never blocks itself. The lifetime is
+    // released at the same terminal callbacks that already settle the command.
+    const endLocalWrite = localCommandMayWrite(parsed.name) ? beginUnsettledClientWrite() : undefined
     runOwned('local command', () => handler(invocation), {
       diag: deps.diag,
       sessionId: () => deps.liveAgent()?.session.id,
       onResult: (result) => {
+        endLocalWrite?.()
         if (deps.isCleanedUp()) return
         if (result !== undefined && result.kind === 'error') {
           if (bridgeCommandRef !== undefined) deps.extensions.recordError(bridgeCommandRef, new Error(result.text))
@@ -1379,6 +1451,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         }
       },
       onError: (error) => {
+        endLocalWrite?.()
         if (deps.isCleanedUp()) return
         if (bridgeCommandRef !== undefined) deps.extensions.recordError(bridgeCommandRef, error)
         const message = safeErrorMessage(error)
@@ -1388,6 +1461,9 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
           // The cordis logger must not block the user notice.
         }
         deps.app().notify(message, 'error')
+      },
+      onCancel: () => {
+        endLocalWrite?.()
       },
     })
   }
@@ -1624,6 +1700,11 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // THIS gesture is still the newest one. Both modes arm it: a
       // sessionless `!!` also creates its execution Session now.
       const shellAckToken = acceptLocalSubmitAck()
+      // M4 PR4: the `!`/`!!` gesture owns ONE accepted business-write lifetime
+      // from this synchronous acceptance until the shell owner's terminal
+      // settlement (the context-mode `!` Session write included). A Client
+      // reload must not retire underneath an unsubmitted shell result.
+      const endShellWrite = beginUnsettledClientWrite()
       // An owned workflow: the session creation failure restores the draft
       // (failSubmission) — runOwned (AGENTS.md), never a bare void. The
       // history row is written AFTER the session exists (the
@@ -1631,17 +1712,19 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
       // carries its id.
       runOwned('user shell', () => deps.session.ensureSession().then(() => {
         persistHistory(deps.liveAgent()?.session.id)
-        deps.shell.run(text, shellAckToken)
+        deps.shell.run(text, shellAckToken, endShellWrite)
       }), {
         diag: deps.diag,
         sessionId: () => deps.liveAgent()?.session.id,
         onError: (error) => {
+          endShellWrite()
           // The session create failed: nothing will be written — the
           // ack row armed at the gesture is TERMINAL here (plan D).
           settleLocalSubmitAck('session creation failed', { token: shellAckToken, terminal: true })
           failSubmission(text)(error)
         },
         onCancel: () => {
+          endShellWrite()
           if (deps.isCleanedUp()) return
           // NOT wrapped in runReservedSubmit: nothing restores the draft
           // here, so a cancelled ensureSession would silently lose the
@@ -2005,6 +2088,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
         notify: (message, kind) => deps.app().notify(message, kind),
         refreshPendingInput: () => deps.surface.refreshPendingInput(),
         diag: deps.diag,
+        beginClientWrite: beginUnsettledClientWrite,
       })
     }
 
@@ -2059,5 +2143,7 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     settleLocalSubmission: (requestId) => settleLocalSubmission(requestId),
     markDispatch: (sessionId) => { submitLatencyTracker.mark(sessionId, 'dispatch') },
     prepareMessage,
+    hasUnsettledClientWrite: () => unsettledClientWrites > 0 || deps.submissionRuntime.hasUnsettledClientWrite(),
+    beginClientWrite: () => beginUnsettledClientWrite(),
   }
 }

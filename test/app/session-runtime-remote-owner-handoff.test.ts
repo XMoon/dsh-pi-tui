@@ -13,9 +13,12 @@ import type { Diag } from '../../src/runtime/process/diagnostics.ts'
 import { createRemoteSessionOwnerServices } from '../../src/app/remote/session-owners.ts'
 import { createSessionOwnershipCore } from '../../src/app/session/ownership-core.ts'
 import { bindSessionRuntime, type SessionRuntimeSurface } from '../../src/app/session/runtime.ts'
+import { bindSubmissionRuntime } from '../../src/app/submission/runtime.ts'
 import type { SessionOwnerRef } from '../../src/app/session/subject.ts'
+import type { SessionOwnerRetirement } from '../../src/app/session/owner-access.ts'
 import {
   createSessionScopeAuthority,
+  SessionScopeSupersededError,
   type SessionScope,
   type SessionScopeAuthority,
   type SessionScopeLive,
@@ -28,6 +31,8 @@ import type {
   SessionLifecycle,
 } from '../../src/runtime/session-lifecycle-port.ts'
 import type { ClientSessionOwner } from '../../src/runtime/session-lifecycle-port.ts'
+import type { RemoteConnectionGenerationSource } from '../../src/runtime/remote/session-reader-remote.ts'
+import type { RemoteResultLike } from '../../src/runtime/remote/session-writer-remote.ts'
 
 const fakeDiag: Diag = {
   debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, dispose: () => {},
@@ -39,13 +44,18 @@ interface FakeBinding {
   readonly session: {
     getSnapshot(): { readonly running: boolean }
     subscribe(fn: () => void): () => void
+    cancel(): Promise<RemoteResultLike<{ readonly accepted: true }>>
   }
   setRunning(running: boolean): void
+  setCancelResult(result: RemoteResultLike<{ readonly accepted: true }>): void
+  cancelCalls(): number
 }
 
 function makeBinding(sessionId: string): FakeBinding {
   const listeners = new Set<() => void>()
   let running = false
+  let cancels = 0
+  let cancelResult: RemoteResultLike<{ readonly accepted: true }> = { ok: true, value: { accepted: true } }
   return {
     sessionId,
     session: {
@@ -54,11 +64,17 @@ function makeBinding(sessionId: string): FakeBinding {
         listeners.add(fn)
         return () => { listeners.delete(fn) }
       },
+      cancel: async (): Promise<RemoteResultLike<{ readonly accepted: true }>> => {
+        cancels += 1
+        return cancelResult
+      },
     },
     setRunning: (next: boolean): void => {
       running = next
       for (const fn of [...listeners]) fn()
     },
+    setCancelResult: (result): void => { cancelResult = result },
+    cancelCalls: (): number => cancels,
   }
 }
 
@@ -69,11 +85,14 @@ interface OpenArm {
   /** The adapter-level supersession contract: release the new reference and
    *  report a superseded open. */
   supersede?: boolean
+  /** Model an open that REACHED the Host and produced a handle, but whose
+   *  local surface was already superseded: the target may be active. */
+  openedSupersede?: boolean
   /** Fail the open with `unavailable` before retaining. */
   fail?: boolean
 }
 
-function harness() {
+function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {}) {
   const events: string[] = []
   const diagnostics: Array<{ readonly message: string; readonly fields?: Record<string, unknown> }> = []
   const diag: Diag = {
@@ -116,15 +135,26 @@ function harness() {
     }
   }
 
+  let generationState: { id: number } | undefined = { id: 1 }
+  const generation: RemoteConnectionGenerationSource = {
+    getSnapshot: () => generationState,
+    subscribe: () => () => {},
+  }
   const services = createRemoteSessionOwnerServices({
     binding: (id: string) => live.get(id)?.binding,
-  })
+  }, generation)
   let failCompletionIdentity = false
   let currentScope = true
   let scopeAuthority: SessionScopeAuthority | undefined
   let failNextSessionId = false
   let sessionIdCalls = 0
   let throwOnSessionIdCall = 0
+  /** Every queue-recall settlement, with the transition state at settle time
+   *  (the deferred-recall restoration must happen AFTER the gate cleared). */
+  const recallSettlements: Array<{ committed: boolean; inTransition: boolean; gateBusy: boolean }> = []
+  /** A test probe run after each settlement — the place to model a pull-back
+   *  writer that finishes exactly at a transition boundary. */
+  let recallSettleObserver: ((entry: { committed: boolean; inTransition: boolean; gateBusy: boolean }) => void) | undefined
   const countingOwners = {
     owners: {
       ...services.owners,
@@ -177,6 +207,13 @@ function harness() {
         wrapper.release()
         return { ownership: 'superseded', outcome: { kind: 'cancelled' } }
       }
+      if (arm?.openedSupersede === true) {
+        wrapper.release()
+        return {
+          ownership: 'superseded',
+          outcome: { kind: 'opened', handle: { session: { id: request.sessionId }, client: wrapper } },
+        }
+      }
       return {
         ownership: 'current',
         outcome: { kind: 'opened', handle: { session: { id: request.sessionId }, client: wrapper } },
@@ -191,6 +228,10 @@ function harness() {
     },
   }
 
+  // The REAL queue-recall ledger (its defer/settle pair), so a test can hold a
+  // deferred recall across an aborted navigation exactly like an admitted
+  // Alt+Up pull-back would.
+  const queueRecalls = bindSubmissionRuntime({ surface: {} as never })
   let disposed = false
   let failNextCatalog = false
   const surface: SessionRuntimeSurface = {
@@ -199,7 +240,17 @@ function harness() {
     isSurfaceDisposed: (): boolean => disposed,
     beginOpening: (sessionId) => ({ sessionId }),
     clearOpening: () => {},
-    settlePendingQueueRecalls: (committed) => { events.push(`recalls:${committed}`) },
+    settlePendingQueueRecalls: (committed) => {
+      events.push(`recalls:${committed}`)
+      const entry = {
+        committed,
+        inTransition: core.barrier.inTransition,
+        gateBusy: core.gate.busy,
+      }
+      recallSettlements.push(entry)
+      queueRecalls.settleQueueRecalls(committed)
+      recallSettleObserver?.(entry)
+    },
     settleLocalSubmitAck: () => {},
     resetSubmitLatency: () => {},
     setCompletionOwner: (identity) => { events.push(`completion:${String(identity)}`) },
@@ -243,11 +294,12 @@ function harness() {
   const controller = new AbortController()
   const runtime = bindSessionRuntime(core, {
     owners: countingOwners.owners,
-    retirement: services.retirement,
+    retirement: { ...services.retirement, ...options.retirement },
     lifecycle,
     lifecycleSignal: controller.signal,
     surface,
     isScopeCurrent: (scope) => scopeAuthority?.isCurrent(scope) ?? currentScope,
+    captureScope: () => scopeAuthority?.capture() ?? ({ sessionId: core.currentSessionId() } as SessionScope),
     diag,
   })
 
@@ -325,6 +377,10 @@ function harness() {
     setScopeAuthority: (authority: SessionScopeAuthority): void => { scopeAuthority = authority },
     failNextCatalogRefresh: (): void => { failNextCatalog = true },
     diagnostics,
+    queueRecalls,
+    recallSettlements,
+    setRecallSettleObserver: (observer: typeof recallSettleObserver): void => { recallSettleObserver = observer },
+    setGeneration: (next: { id: number } | undefined): void => { generationState = next },
     sessionIdCallCount: (): number => sessionIdCalls,
     throwOnSessionIdCall: (call: number): void => { throwOnSessionIdCall = call },
   }
@@ -778,6 +834,8 @@ test('a Direct-shaped owned fork handle adopts directly without any lifecycle op
     owners,
     retirement: {
       whenIdleOrAbort: async () => false,
+      cancel: async () => ({ kind: 'committed', value: undefined }),
+      cancelForNavigation: async () => ({ kind: 'committed' as const }),
       flush: async () => {},
       preCancel: () => {},
       retire: async () => ({ failures: [], durabilityFailure: undefined }),
@@ -832,6 +890,7 @@ test('a Direct-shaped owned fork handle adopts directly without any lifecycle op
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,
     isScopeCurrent: () => true,
+    captureScope: () => ({ sessionId: core.currentSessionId() } as SessionScope),
     diag: fakeDiag,
   })
   const outcome = await runtime.forkSession('session-direct-source')
@@ -875,8 +934,8 @@ test('a pre-publication commit throw releases the acquired NEW owner; OLD stays 
   const falseCount = h.events.filter(entry => entry === 'recalls:false').length
   assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 0,
     'neither failed transition committed the recalls')
-  assert.equal(falseCount, 3,
-    'each failure restored the recalls (transitionTo finally + the switch wrapper no-op + the direct transitionTo finally)')
+  assert.equal(falseCount, 4,
+    'each failure restored the recalls (transitionTo finally + the switch body finally + the navigation gate close + the DIRECT transitionTo finally)')
 })
 
 test('a pre-publication commit throw after the adoption open releases the retained child exactly once', async () => {
@@ -921,6 +980,8 @@ test('a Direct pre-publication commit throw releases the child once and never re
     },
     retirement: {
       whenIdleOrAbort: async () => false,
+      cancel: async () => ({ kind: 'committed', value: undefined }),
+      cancelForNavigation: async () => ({ kind: 'committed' as const }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -980,6 +1041,7 @@ test('a Direct pre-publication commit throw releases the child once and never re
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,
     isScopeCurrent: () => true,
+    captureScope: () => ({ sessionId: core.currentSessionId() } as SessionScope),
     diag: fakeDiag,
   })
   explodeCommit = true
@@ -1036,6 +1098,8 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
     },
     retirement: {
       whenIdleOrAbort: async () => false,
+      cancel: async () => ({ kind: 'committed', value: undefined }),
+      cancelForNavigation: async () => ({ kind: 'committed' as const }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -1095,6 +1159,7 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,
     isScopeCurrent: () => true,
+    captureScope: () => ({ sessionId: core.currentSessionId() } as SessionScope),
     diag: fakeDiag,
   })
   explodeCompletion = true
@@ -1126,6 +1191,8 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
     },
     retirement: {
       whenIdleOrAbort: async () => false,
+      cancel: async () => ({ kind: 'committed', value: undefined }),
+      cancelForNavigation: async () => ({ kind: 'committed' as const }),
       flush: async () => {},
       preCancel: () => {},
       retire: async (owner, mode) => {
@@ -1180,6 +1247,7 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,
     isScopeCurrent: () => true,
+    captureScope: () => ({ sessionId: core.currentSessionId() } as SessionScope),
     diag: fakeDiag,
   })
   explodeCommit = true
@@ -1337,4 +1405,605 @@ test('no owner metadata re-read after the publication: the fork still retires th
   assert.ok(h.core.currentSessionId()!.startsWith('child-'), 'the child is current')
   assert.equal(h.countRefs('session-a'), 0, 'the source owner is retired exactly once')
   assert.equal(h.events.filter(entry => entry === 'recalls:true').length, 1, 'the recalls stay committed exactly once')
+})
+
+// ── the control admission: Stop during a frozen navigation transition ─────
+
+/** Install the production scope authority over this harness's ownership core. */
+function installScope(h: ReturnType<typeof harness>): SessionScopeAuthority {
+  const authority = createSessionScopeAuthority({
+    current: (): SessionScopeLive => {
+      const sessionId = h.core.currentSessionId()
+      const subject = h.core.captureSubject()
+      if (sessionId === undefined || subject === undefined) {
+        assert.equal(sessionId, undefined)
+        assert.equal(subject, undefined)
+        return { subject: undefined, sessionId: undefined, generation: h.core.generation() }
+      }
+      return { subject, sessionId, generation: h.core.generation() }
+    },
+    isSubjectCurrent: (subject) => h.core.isSubjectCurrent(subject),
+  })
+  h.setScopeAuthority(authority)
+  return authority
+}
+
+test('the control interrupt reaches the EXACT old binding while a navigation transition is frozen, before its writer drains', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+
+  // An ordinary writer admitted BEFORE the navigation: it holds the barrier
+  // drain open while the transition is already frozen.
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const writer = h.runtime.withWriter(oldScope, async () => {
+    h.events.push('writer-start')
+    await writerGate
+    h.events.push(`writer-end@${h.core.currentSessionId() ?? '(none)'}`)
+  })
+  const transition = h.runtime.switchSession('session-b')
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.core.barrier.inTransition, true, 'the navigation transition froze the writer barrier')
+  assert.equal(h.core.barrier.activeWriters, 1, 'the admitted writer is still outstanding')
+  assert.equal(h.events.includes('open:session-b'), false, 'the transition body has not run yet')
+  // The navigation admission already stopped the captured old generation ONCE,
+  // before the drain (the PR-B order).
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1,
+    'the navigation stop reached the exact old binding before the writer drain')
+
+  // The Busy Esc / Stop control entry: it is admitted while frozen, captures
+  // the SAME exact OLD owner and cancels only that generation's binding again
+  // (a user Stop after the navigation stop is a Host no-op, but it must still
+  // be addressed exactly).
+  assert.deepEqual(await h.runtime.interrupt(oldScope), { kind: 'committed', value: undefined })
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 2, 'the OLD exact binding received the control cancel')
+  assert.equal(h.bindingOf('session-b'), undefined, 'the NEW binding was not even materialized by the control')
+  assert.equal(h.events.includes('open:session-b'), false, 'the control did not shortcut the writer drain')
+
+  releaseWriter()
+  await writer
+  assert.ok(h.events.includes('writer-end@session-a'),
+    'the admitted writer resumed while OLD was still the current owner: it could never address the NEW owner')
+  assert.equal(await transition, undefined)
+  assert.equal(h.core.currentSessionId(), 'session-b', 'the transition still committed the NEW owner')
+  assert.equal(h.bindingOf('session-b')!.cancelCalls(), 0, 'the control cancel never touched the NEW owner')
+  assert.equal(h.countRefs('session-a'), 0, 'the transition retirement released OLD exactly once')
+})
+
+test('the control interrupt refuses a stale captured scope before any backend cancel', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+
+  assert.equal(await h.runtime.switchSession('session-b'), undefined)
+  assert.equal(h.core.currentSessionId(), 'session-b')
+
+  assert.deepEqual(await h.runtime.interrupt(oldScope), { kind: 'cancelled' },
+    'a superseded capture is a confirmed pre-dispatch cancellation, never a generic failure')
+  assert.equal(h.bindingOf('session-b')!.cancelCalls(), 0, 'the stale capture never cancels the current generation')
+  await assert.rejects(
+    h.runtime.withControl(oldScope, () => { throw new Error('the control task must never run') }),
+    (error: unknown) => error instanceof SessionScopeSupersededError,
+    'the control admission keeps the same exact-scope refusal as a writer',
+  )
+})
+
+test('the control interrupt with an aborted runner is cancelled and never reaches the backend', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  h.controller.abort()
+  assert.deepEqual(await h.runtime.interrupt(scope), { kind: 'cancelled' })
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 0)
+})
+
+// ── the navigation admission: stop the captured old generation, then switch ─
+//
+// A selected-session switch and `/new` are USER NAVIGATIONS: the captured OLD
+// generation is stopped EXACTLY once, after the barrier freeze and BEFORE the
+// admitted-writer drain, and a refused/unproven stop aborts BEFORE any target
+// open/create. The stop is the official one-shot Host cancel of the exact
+// binding generation (`SessionFace.cancel` in the fake model), never a
+// `preCancel` no-op.
+
+test('a selected-session switch stops the exact captured owner BEFORE its writer drain, then commits', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+
+  // An ordinary writer admitted BEFORE the navigation holds the drain open.
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const writer = h.runtime.withWriter(oldScope, async () => {
+    h.events.push('writer-start')
+    await writerGate
+    h.events.push('writer-end')
+  })
+  const transition = h.runtime.switchSession('session-b', oldScope)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.core.barrier.inTransition, true, 'the switch froze the barrier')
+  assert.equal(h.core.barrier.activeWriters, 1, 'the admitted writer is still outstanding')
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1,
+    'the navigation stop reached the exact captured binding while the writer still drains')
+  assert.deepEqual(h.calls.opens, [], 'the target open has not run before the drain')
+
+  releaseWriter()
+  await writer
+  assert.equal(await transition, undefined)
+  assert.equal(h.core.currentSessionId(), 'session-b', 'the switch committed after the drain')
+  assert.equal(h.bindingOf('session-b')!.cancelCalls(), 0, 'the target generation never receives the old stop')
+  assert.deepEqual(h.calls.opens, ['session-b'], 'the target is opened exactly once, after the drain')
+  assert.equal(h.countRefs('session-a'), 0, 'the replaced owner is released exactly once')
+})
+
+test('a REFUSED navigation stop keeps the old session current and never opens the target', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+  // A pinned domain refusal (a proven pre-dispatch rejection): the stop did NOT
+  // happen, so navigation must not create/switch behind a possibly running Turn.
+  h.bindingOf('session-a')!.setCancelResult({
+    ok: false,
+    error: { code: 'session/not-found', message: 'no live Agent for the addressed session' },
+  })
+  const message = await h.runtime.switchSession('session-b', oldScope)
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
+  assert.deepEqual(h.calls.opens, [], 'the target is never opened')
+  assert.equal(h.countRefs('session-b'), 0, 'no target generation is retained')
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'the refused stop was dispatched exactly once')
+  assert.match(String(message), /the current turn could not be stopped/)
+  assert.doesNotMatch(String(message), /may already have stopped/,
+    'a proven refusal must not claim the old Turn may have stopped')
+  assert.match(String(message), /the session was not switched/)
+})
+
+test('an INDETERMINATE navigation stop aborts with the may-have-stopped statement and never opens the target', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+  // An unproven carrier failure after dispatch: the cancel may have taken
+  // effect, so the navigation aborts (no child) and never retries.
+  h.bindingOf('session-a')!.setCancelResult({
+    ok: false,
+    error: { code: 'gateway/internal', message: 'carrier internal' },
+  })
+  const message = await h.runtime.switchSession('session-b', oldScope)
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
+  assert.deepEqual(h.calls.opens, [], 'the target is never opened')
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'an indeterminate stop is never replayed')
+  assert.match(String(message), /unconfirmed result/)
+  assert.match(String(message), /the current turn may already have stopped/,
+    'the failure must state that the old Turn may already be stopped')
+  assert.match(String(message), /the session was not switched/)
+})
+
+test('a stale captured scope never stops the replacement session', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+  // Another navigation commits first: the captured A scope is now stale.
+  assert.equal(await h.runtime.switchSession('session-b'), undefined)
+  assert.equal(h.core.currentSessionId(), 'session-b')
+  const cancelCallsBefore = h.bindingOf('session-b')!.cancelCalls()
+  const opensBefore = [...h.calls.opens]
+  const superseded = await h.runtime.switchSession('session-c', oldScope)
+  assert.equal(superseded, undefined, 'a superseded queued switch settles silently')
+  assert.equal(h.bindingOf('session-b')!.cancelCalls(), cancelCallsBefore,
+    'the stale intent never stops the replacement generation')
+  assert.deepEqual(h.calls.opens, opensBefore, 'the stale intent never opens its target')
+  assert.equal(h.core.currentSessionId(), 'session-b')
+})
+
+test('withNavigation writes the admission fact BEFORE the body and stops the captured owner once', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const intent = {
+    scope: scopeAuthority.capture(),
+    admission: { oldStopAccepted: false },
+  }
+  // A held writer keeps the drain open: the body must not run until it settles,
+  // while the stop has already been dispatched.
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+  const writer = h.runtime.withWriter(oldScope, async () => { await writerGate })
+  const task = h.runtime.withNavigation(intent, async () => {
+    assert.equal(intent.admission.oldStopAccepted, true,
+      'the body must observe the accepted stop fact')
+    h.events.push('navigation-body')
+    return 'created'
+  })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'the admission stopped the captured owner')
+  assert.equal(h.events.includes('navigation-body'), false, 'the body still waits for the writer drain')
+  releaseWriter()
+  await writer
+  assert.equal(await task, 'created')
+  assert.ok(h.events.includes('navigation-body'))
+})
+
+test('a refused navigation stop aborts withNavigation BEFORE its body (create is never dispatched)', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const intent = {
+    scope: scopeAuthority.capture(),
+    admission: { oldStopAccepted: false },
+  }
+  h.bindingOf('session-a')!.setCancelResult({
+    ok: false,
+    error: { code: 'session/not-found', message: 'no live Agent for the addressed session' },
+  })
+  let bodyRan = false
+  await assert.rejects(
+    h.runtime.withNavigation(intent, () => { bodyRan = true; return 'created' }),
+    (error: unknown) => error instanceof Error
+      && error.name === 'SessionNavigationStopError'
+      && /could not be stopped/.test(error.message),
+    'the refused stop aborts the navigation with the typed failure',
+  )
+  assert.equal(bodyRan, false, 'the transition body never runs')
+  assert.equal(intent.admission.oldStopAccepted, false, 'no stop may be reported')
+  assert.equal(h.core.currentSessionId(), 'session-a')
+  assert.equal(h.core.barrier.inTransition, false, 'the aborted admission unfreezes the barrier')
+  assert.equal(h.core.barrier.activeWriters, 0)
+})
+
+test('a caller-cancelled cancel still aborts navigation: only a COMMITTED stop may proceed', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  // The official call was dispatched, then its reply was a caller/carrier
+  // cancellation (PR-A's `cancelled`). The navigation must NOT read that as
+  // permission to switch: only a committed stop may enter quiesce/create.
+  h.bindingOf('session-a')!.setCancelResult({
+    ok: false,
+    error: { code: 'gateway/cancelled', message: 'carrier cancelled the reply' },
+  })
+  const message = await h.runtime.switchSession('session-b', scope)
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
+  assert.deepEqual(h.calls.opens, [], 'the target is never opened')
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'the dispatched cancel is never replayed')
+  assert.match(String(message), /unconfirmed result/)
+  assert.match(String(message), /the current turn may already have stopped/,
+    'a DISPATCHED caller cancellation is the dispatched-unproven settlement for navigation')
+})
+
+test('an UNADDRESSABLE exact generation aborts navigation: cancelled is NOT permission to switch', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  // A disconnected Connection generation: the official cancel can never be
+  // dispatched (PR-A's `cancelled`), but that does NOT prove the Host has no
+  // running work for the exact generation. Navigation keeps the PR-A
+  // classification (no fake `indeterminate`) and aborts before any open.
+  const oldBinding = h.bindingOf('session-a')!
+  h.setGeneration(undefined)
+  const message = await h.runtime.switchSession('session-b', scope)
+  assert.match(String(message), /the current turn could not be stopped/)
+  assert.match(String(message), /not been proven stopped/)
+  assert.doesNotMatch(String(message), /may already have stopped/)
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
+  assert.deepEqual(h.calls.opens, [], 'the target is never opened')
+  assert.equal(oldBinding.cancelCalls(), 0, 'no cancel was dispatched on the disconnected generation')
+})
+
+test('a RELEASED exact owner reference aborts navigation: cancelled is not permission to switch', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  const owner = h.core.owner()
+  assert.ok(owner !== undefined)
+  const oldBinding = h.bindingOf('session-a')!
+  // The exact owner reference was released while the app-level subject still
+  // reports it as current (the adapter's pre-dispatch `cancelled` family), and
+  // the same Session id is re-materialized as a NEW binding generation.
+  await h.services.retirement.retire(owner, 'transition')
+  const replacement = h.retain('session-a')
+  const replacementBinding = h.bindingOf('session-a')!
+  const message = await h.runtime.switchSession('session-b', scope)
+  assert.match(String(message), /the current turn could not be stopped/)
+  assert.match(String(message), /not been proven stopped/)
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
+  assert.deepEqual(h.calls.opens, [], 'the target is never opened')
+  assert.equal(oldBinding.cancelCalls(), 0, 'no official cancel was dispatched')
+  assert.equal(replacementBinding.cancelCalls(), 0,
+    'the replaced same-id generation never receives the old owner cancel')
+  replacement.release()
+})
+
+test('a failed navigation stop restores the deferred queue recall AFTER the gate clears (no leak into a later transition)', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  // Hold the official stop call: this is the window in which an already
+  // admitted Alt+Up pull-back can finish, remove its occurrences and DEFER its
+  // local restore to the pending transition. The stop then fails, so the
+  // transition body and its own settlement never run.
+  const binding = h.bindingOf('session-a')!
+  let releaseDispatch!: () => void
+  const dispatchGate = new Promise<void>(resolve => { releaseDispatch = resolve })
+  let entered!: () => void
+  const enteredPromise = new Promise<void>(resolve => { entered = resolve })
+  const originalCancel = binding.session.cancel
+  binding.session.cancel = async () => {
+    entered()
+    await dispatchGate
+    return { ok: false, error: { code: 'gateway/internal', message: 'carrier internal' } }
+  }
+  const transition = h.runtime.switchSession('session-b', scope)
+  await enteredPromise
+  assert.equal(h.core.barrier.inTransition, true, 'the stop runs inside the frozen transition')
+  assert.deepEqual(h.calls.opens, [], 'the body has not run')
+  assert.equal(h.recallSettlements.length, 0, 'nothing has been settled while the stop is in flight')
+  releaseDispatch()
+  const message = await transition
+  assert.match(String(message), /unconfirmed result/)
+  assert.deepEqual(h.calls.opens, [], 'the aborted navigation never opens its target')
+  assert.equal(h.core.currentSessionId(), 'session-a')
+  assert.equal(h.recallSettlements.length, 1,
+    'the aborted admission settles the one deferred recall exactly once')
+  assert.deepEqual(h.recallSettlements[0], { committed: false, inTransition: false, gateBusy: false },
+    'the recall is restored only AFTER the barrier unfroze AND the gate cleared')
+  // The barrier/gate are reusable, and a later navigation settles its own
+  // (empty) recall ledger without replaying the old one.
+  binding.session.cancel = originalCancel
+  assert.equal(await h.runtime.switchSession('session-b', scope), undefined)
+  assert.equal(h.core.currentSessionId(), 'session-b')
+  // The successful navigation's own ledger is empty: its commit settles `true`
+  // and its body/gate settles are no-ops. The failed admission's restore stays
+  // the FIRST and only aborted settlement.
+  assert.deepEqual(h.recallSettlements.map(entry => entry.committed), [false, true, false, false])
+  assert.deepEqual(h.recallSettlements[0], { committed: false, inTransition: false, gateBusy: false })
+})
+
+test('a scoped switch to the CURRENT session is a no-op: no stop, no open (seam contract)', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  const binding = h.bindingOf('session-a')!
+  // No current production scoped caller (the TSP browser filters the same id
+  // before it reaches the runtime), but the seam contract must not cancel the
+  // current turn if a future caller passes it.
+  assert.equal(await h.runtime.switchSession('session-a', scope), 'already on this session')
+  assert.equal(h.core.currentSessionId(), 'session-a')
+  assert.equal(binding.cancelCalls(), 0, 'a no-op switch must not stop the current owner turn')
+  assert.deepEqual(h.calls.opens, [], 'a no-op switch must not reopen the current Session')
+  assert.equal(h.recallSettlements.length, 2, 'the no-op gesture still settles its recall fence (in-task and at gate close)')
+  assert.deepEqual(h.recallSettlements[0], { committed: false, inTransition: false, gateBusy: true },
+    'the no-op settles INSIDE its gate task (no freeze, no body)')
+  assert.deepEqual(h.recallSettlements[1], { committed: false, inTransition: false, gateBusy: false },
+    'the navigation gate close runs after the task cleared and before any next task')
+})
+
+test('a failed admission aborts its deferred recall BEFORE the queued next navigation starts', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  const binding = h.bindingOf('session-a')!
+  // The first navigation's official stop is HELD; the second navigation queues
+  // behind it in the same FIFO. The first stop then fails.
+  let releaseStop!: () => void
+  const stopGate = new Promise<void>(resolve => { releaseStop = resolve })
+  let stopEntered!: () => void
+  const stopEnteredPromise = new Promise<void>(resolve => { stopEntered = resolve })
+  let cancelCalls = 0
+  const originalCancel = binding.session.cancel
+  binding.session.cancel = async () => {
+    cancelCalls += 1
+    if (cancelCalls === 1) {
+      stopEntered()
+      await stopGate
+      return { ok: false, error: { code: 'gateway/internal', message: 'carrier internal' } }
+    }
+    return { ok: true, value: { accepted: true } }
+  }
+  const recallLog: string[] = []
+  // The exact deferred ledger an admitted Alt+Up pull-back would park while the
+  // transition is pending (`deferQueueRecall` is its production entry).
+  h.queueRecalls.deferQueueRecall({
+    commit: () => recallLog.push('commit'),
+    abort: () => recallLog.push('abort'),
+  })
+  const first = h.runtime.switchSession('session-b', scope)
+  await stopEnteredPromise
+  assert.equal(h.core.barrier.inTransition, true, 'the first navigation holds the frozen barrier')
+  const second = h.runtime.switchSession('session-c')
+  assert.equal(h.core.gate.pending, true, 'the second navigation is QUEUED behind the first')
+  releaseStop()
+  assert.match(String(await first), /unconfirmed result/)
+  assert.equal(await second, undefined)
+  assert.deepEqual(recallLog, ['abort'],
+    'the deferred recall is aborted once, before the next transition can commit it')
+  assert.equal(h.core.currentSessionId(), 'session-c', 'the queued navigation still commits normally')
+  assert.equal(h.recallSettlements[0]!.gateBusy, false,
+    'the restore ran after the gate cleared and BEFORE the queued next task started')
+  assert.equal(h.recallSettlements[0]!.inTransition, false)
+  assert.equal(h.recallSettlements.filter(entry => entry.committed).length, 1,
+    'the second navigation commits only its own (already empty) ledger')
+})
+
+test('a recall deferred at a boundary is settled by the QUEUED stale navigation, never leaked', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scopeA = scopeAuthority.captureLive()
+  assert.ok(scopeA !== undefined)
+  const binding = h.bindingOf('session-a')!
+  // The first navigation commits B (with one keepInbox stop); the second scoped
+  // intent was captured while A was current and is STALE by the time its gate
+  // turn comes, so it returns silently without a body.
+  const first = h.runtime.switchSession('session-b', scopeA)
+  const second = h.runtime.switchSession('session-c', scopeA)
+  assert.equal(h.core.gate.pending, true, 'the second intent is queued behind the first')
+  const recallLog: string[] = []
+  let injected = false
+  // Model the production late writer: `isTransitionPending` is
+  // `gate.pending || barrier.inTransition`, so a pull-back finishing exactly
+  // after the FIRST navigation's gate close (and while the stale second is
+  // queued) still defers. The observer fires on that first close.
+  h.setRecallSettleObserver(entry => {
+    if (injected || entry.committed || entry.inTransition || entry.gateBusy) return
+    injected = true
+    h.queueRecalls.deferQueueRecall({
+      commit: () => recallLog.push('commit'),
+      abort: () => recallLog.push('abort'),
+    })
+  })
+  assert.equal(await first, undefined)
+  assert.equal(await second, undefined, 'the stale scoped intent is refused silently')
+  assert.equal(h.core.currentSessionId(), 'session-b')
+  assert.deepEqual(h.calls.opens, ['session-b'], 'the stale intent never opens its target')
+  assert.equal(injected, true, 'the boundary deferral was actually injected')
+  assert.deepEqual(recallLog, ['abort'],
+    'the queued stale navigation still closed the deferred-recall window instead of leaking it')
+  assert.equal(binding.cancelCalls(), 1, 'only the first navigation stopped the old owner')
+})
+
+test('a binding rollover after an accepted cancel reports "requested, not confirmed", never a stopped Turn', async () => {
+  // The Host ACCEPTED the cancel (committed), then the exact Remote binding
+  // became unobservable before the quiesce: `whenIdleOrAbort` reports
+  // 'unobservable' (NOT idle). A subsequent open failure must use the weak
+  // claim.
+  const h = harness({
+    retirement: {
+      cancelForNavigation: async () => ({ kind: 'committed' }),
+      whenIdleOrAbort: async () => 'unobservable',
+      flush: async () => {},
+    },
+  })
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  const message = await h.runtime.switchSession('session-b', scope)
+  assert.match(String(message), /no longer observable/)
+  assert.match(String(message), /turn stop requested \(not yet confirmed\)/)
+  assert.doesNotMatch(String(message), /old turn stopped \(cannot resume\)/,
+    'an unobservable binding is not proof that the old Turn stopped')
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old session stays current')
+  assert.deepEqual(h.calls.opens, [], 'the target open is NEVER attempted without a confirmed old quiesce')
+})
+
+test('an accepted stop cannot be quiesced against a generation captured after a mid-drain reconnect', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const scope = scopeAuthority.captureLive()
+  assert.ok(scope !== undefined)
+  const binding = h.bindingOf('session-a')!
+  binding.setRunning(true)
+  // A writer admitted before the navigation keeps the drain open while the
+  // accepted cancel (G1 receipt) is followed by a reconnect.
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const writer = h.runtime.withWriter(scope, async () => { await writerGate })
+  const transition = h.runtime.switchSession('session-b', scope)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.core.barrier.inTransition, true)
+  assert.equal(h.core.barrier.activeWriters, 1)
+  assert.equal(binding.cancelCalls(), 1, 'the stop was accepted on G1 before the drain')
+  // Reconnect during the drain: G2 is current, the exact binding object still
+  // exists, and the old face even reports running=false.
+  h.setGeneration({ id: 2 })
+  binding.setRunning(false)
+  releaseWriter()
+  await writer
+  const message = await transition
+  assert.match(String(message), /no longer observable/)
+  assert.match(String(message), /turn stop requested \(not yet confirmed\)/)
+  assert.doesNotMatch(String(message), /old turn stopped \(cannot resume\)/)
+  assert.equal(h.core.currentSessionId(), 'session-a')
+  assert.deepEqual(h.calls.opens, [],
+    'the target is never opened against a generation captured after the accepted stop')
+})
+
+test('a stale captured switch scope never opens the target or stops the new owner', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  const authority = installScope(h)
+  const staleScope = authority.captureLive()
+  assert.ok(staleScope !== undefined)
+  assert.equal(await h.runtime.switchSession('session-c'), undefined, 'the intervening navigation commits C')
+  const opensBefore = h.calls.opens.length
+  const outcome = await h.runtime.switchSessionOutcome('session-b', staleScope)
+  assert.deepEqual(outcome, {
+    kind: 'superseded', message: 'the session changed before this switch could start',
+  }, 'the old scope is a proven superseded intent')
+  assert.equal(h.calls.opens.length, opensBefore,
+    'the stale intent must not open the target against the new owner')
+  assert.equal(h.core.currentSessionId(), 'session-c', 'the new owner stays current')
+})
+
+test('the tracked switch outcome distinguishes committed, already-current, failed, and superseded', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  assert.deepEqual(await h.runtime.switchSessionOutcome('session-a'), {
+    kind: 'already-current', message: 'already on this session',
+  }, 'a same-id switch is an explicit no-op, not success')
+  h.arms.set('session-b', { fail: true })
+  const failed = await h.runtime.switchSessionOutcome('session-b')
+  assert.equal(failed.kind, 'failed', 'an unavailable target is a real failure')
+  h.arms.set('session-c', { supersede: true })
+  const superseded = await h.runtime.switchSessionOutcome('session-c')
+  assert.equal(superseded.kind, 'superseded', 'a proven local supersession is not reported as success')
+  const committed = await h.runtime.switchSessionOutcome('session-d')
+  assert.deepEqual(committed, { kind: 'committed', sessionId: 'session-d' })
+  assert.equal(h.core.currentSessionId(), 'session-d')
+})
+
+test('a same-id new generation leaves the old captured switch scope superseded', async () => {
+  const h = harness()
+  const first = h.publishRetained('session-a')
+  const authority = installScope(h)
+  const staleScope = authority.captureLive()
+  assert.ok(staleScope !== undefined)
+  await h.services.retirement.retire(first.owner, 'transition')
+  h.publishRetained('session-a')
+  const opensBefore = h.calls.opens.length
+  const outcome = await h.runtime.switchSessionOutcome('session-b', staleScope)
+  assert.equal(outcome.kind, 'superseded',
+    'the old generation must not be treated as the new same-id owner')
+  assert.equal(h.calls.opens.length, opensBefore, 'no target may open against the replacement generation')
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the same-id replacement stays current')
+})
+
+test('a Host-opened target whose local surface was superseded is INDETERMINATE, never a silent failure', async () => {
+  const h = harness()
+  h.publishRetained('session-a')
+  h.arms.set('session-b', { openedSupersede: true })
+  const outcome = await h.runtime.switchSessionOutcome('session-b')
+  assert.equal(outcome.kind, 'indeterminate',
+    'the target was opened but the local surface was superseded — the operation may have happened')
+  assert.match(outcome.message, /opened but the local surface was superseded/)
+  assert.equal(h.core.currentSessionId(), 'session-a', 'the old owner remains current locally')
 })

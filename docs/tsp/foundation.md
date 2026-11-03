@@ -87,6 +87,9 @@ reading is an additional rendering container, never a second renderer.
 | SDK frame/ACK/current sent View | Installed SDK `Surface`/`Session` | A second application-side reconciler without a demonstrated gap |
 | The temporary reading surface, its reading identity and its close | `src/tui/tsp/session.ts` (the reader slot) | A presenter-owned surface, a business owner, a second Session, or a persisted reading state |
 | Terminal rendering, pixel clipping and scroll view state | Tern client | Node-tree text, TypeScript props, guessed pixels |
+| Status facts (permission, workspace, usage, plan) | The ONE `StatusStore` the `SurfaceRuntime` creates and updates | A renderer-owned store, a second writer, or a value derived from the dock, the transcript or `process.cwd()` |
+| Composer presentation (controlled editor, Quiet Composer controls, Permission menu) | The renderer's presentational view + `StatusSnapshot.access` for the current permission label; permission writes go through `StatusRuntime.selectPermission` → the existing `ConfigPort.permissions.applyPermissionPreset` | A renderer-owned permission cache/writer, a label parsed into a preset id, a second input loop, or optimistic permission state |
+| Footer settings (mode/layout/custom items) | The ConfigPort + settings document; the TSP renderer consumes ONE boot-time read-only projection bound at mount (`bindNativeFooterConfig`) | A renderer-owned settings store, a config watcher, a second write path, or any command/extension execution from the projection |
 
 State-representation rule: authority, disposable projection, SDK transport
 state and component-local draft may contain similar values without being
@@ -144,6 +147,26 @@ reduction; a search hit or "two variables" is not proof of entropy.
    frame pump does not establish a practical deadlock or authorize a
    retry/watchdog. SDK `close()` can force a final flush; it is teardown, not a
    runtime delivery cure.
+9. The renderer receives the status facts through a READ-ONLY port
+   (`StatusSnapshotReader`) that the mount installs once; it carries a `snapshot()`
+   getter and nothing else. The surface stays the sole writer: it updates the
+   ONE store inside `SurfaceRuntime.commitStatus` and then completes the display
+   commit on the renderer, which samples the snapshot at exactly that point —
+   never per render and never through a store subscription. A renderer with no
+   bound reader fails the display commit fast instead of projecting a substitute.
+10. The native footer presentation is a BOOT-TIME READ-ONLY CONFIG PROJECTION,
+   the same one-shot install shape as the status reader: the composition root
+   resolves it from the ConfigPort (readiness-gated; the USER-layer custom-item
+   read is skipped entirely while the backend is not `ready`) and the mount
+   binds it exactly once (`bindNativeFooterConfig`) before the first status
+   commit. It is a snapshot of that boot, not a live settings view: no
+   watcher, no re-read, no write-back, and a settings change takes effect on
+   the NEXT TSP process, not through a repaint. A direct mount that binds no
+   config renders the frozen default rows. Unsupported capabilities in the
+   projection (whole-footer command, custom command items, extension items,
+   foreign separators) are explicit unavailability facts — a native fallback
+   plus bounded one-time notices — never a fabricated value and never silent
+   execution. See the footer guide for the user-facing compatibility table.
 
 ### Bounded reader surface lifecycle
 
@@ -246,6 +269,13 @@ toggle/pressed state; none is a universal keyboard focus token. The client's
 caret/editing effect for a region-root focus was not established; do not
 classify that as a confirmed bug or confirmed correct caret behavior.
 
+The composer editor is the ONE visible focus seat. On a pane that negotiated
+`el` and `styles`, the Quiet Composer shell nests it at
+`dock.quiet-composer.composer`; the no-chrome branch keeps the historical
+`dock.composer`. `applyFocus` picks ONE of those paths through the same
+capability gate that decides whether the shell is mounted — never both, and
+never a guessed focus target.
+
 ### Reader event admission and reading anchor
 
 - An event addressed at the temporary reading surface is admitted only when ALL
@@ -274,6 +304,64 @@ arbitration. A client may intercept pointer clicks with a modal backdrop, but
 that is not permission to skip currentness/ownership checks on every UI event
 or later build.
 
+**Native composite presentation.** A Question or Approval may be painted with a
+client-owned composite (a native choice/steps form, a native tool-approval
+control, real buttons). The composite owns presentation and a local intent ONLY.
+The one controller and the one seat keep their authority unchanged: the active
+slot, the FIFO order, withdrawn/retired lifetimes, settle-once, and the Host
+answer/approval outcome. Render state (choices, current page, visible answers)
+flows one way out of the seat's own draft; a composite never becomes a second
+answer store and its own submit payload is never written to the Host.
+
+**One event route, exact admission.** Composite `action`/`change` events reach
+the seat through the single Session event iterator, and no SDK node handler is
+bound on those nodes: a handler would consume the event before the iterator and
+silently split delivery. An event is admitted only when the surface id, the
+active request, the current modal/page visit, the exact node id that visit
+painted, and an enumerated payload value ALL agree; anything else is dropped
+rather than reinterpreted, and never matched by a substring or by the action name
+alone. A page or panel change repaints the same stable keys, so the visit
+identity belongs in the node key: an action from a superseded visit can never
+advance, select or settle the current one. Keyboard and pointer converge on the
+same local transition, so both share one answer semantics.
+
+**Projection safety.** Ordinary non-sensitive questions project onto indexed
+native choice tokens derived from source order; the source option labels remain
+the answer values and the source question ids remain the answer keys. Free text
+and masked values never enter the native choice map: a masked value is painted as
+bullets everywhere (props, children, action payloads and logs) while the
+authoritative answer returned to the Host keeps its real value. A client-side
+selection order is never an answer order. The final native `submit` opens the
+review step only; the explicit review commit is the single business write, and
+no-data/cancel/restore semantics are unchanged.
+
+**Approval reading order and outcomes.** The complete tool identity, reason,
+danger marker and argument body are painted BEFORE the native approval control in
+the same overlay, and that control carries no body children: a client places an
+approval panel between the head and the body, so arguments put inside the tool
+would be read after the decision. Only `allowed-once`, `rejected` and `cancelled`
+exist; a native long-lived grant (`always`/`session`) is never accepted, and its
+affordance is hidden rather than reinterpreted.
+
+**Capability and fallback.** Each composite family is enabled by the exact kind
+and feature combination it really paints, gated separately because they fail
+differently: an Approval whose client draws a shortcut keycap the application
+deliberately ignores must first be able to hide that keycap, or the pane keeps
+the text approval instead of advertising a binding that does not exist. A missing
+capability falls back to the existing non-native form; it never fabricates a
+business result and never infers compatibility from a version label.
+
+**Visual contract.** A composite is judged against the same host, layout and
+scope as its non-native form, never against an isolated component demo: high-risk
+facts stay readable and scrollable, the decision controls stay reachable, and
+content that already carries one frame is not wrapped in a second. Real-GUI,
+headless, SDK-level and business-chain evidence are separate tiers that do not
+substitute for one another.
+
+Where a composite's own affordance contradicts the application's key contract,
+the minimum correction is ONE scoped rule installed once on the surface, never a
+per-render style write and never a broad client theme override.
+
 ## 5. Layout, native components and capability policy
 
 - A `picker` is a terminal-owned data-first sheet. A picker `item` and a generic
@@ -298,6 +386,15 @@ or later build.
   simpler composition; write-critical controls may need fail-closed. OMP's
   component-initiated capability fallback is not an automatic unsupported-kind
   conversion in this SDK.
+- The Quiet Composer shell is a presentation composition over the negotiated
+  `el` + `styles` capabilities: the controlled editor, left Permission trigger
+  and right Model/Effort/Stop/Send controls share ONE shell. A pane without
+  that pair keeps the controlled editor and the native footer only, with no
+  fake button. The Permission menu offers only catalog-present standard ids
+  (`read-only`, `workspace-write`, `danger-full-access`); a missing/mismatched
+  current fact paints a read-only trigger, and every actual write goes through
+  the existing StatusRuntime permission owner. The footer visibility defaults
+  in `docs/guides/footer.md` remain the only Footer filtering authority.
 - A client build's advertised kinds/features/credits/cell size describe that
   run, not other sizes/fonts/builds.
 - Do not assume native browser Tab/Enter behavior for `el` nodes. Design
@@ -350,6 +447,12 @@ identity line plus — when the pane negotiated the `image` kind and the `blobs`
 feature — one native image node. The flat text is not drawn again beside the
 block-wise body, and a tool card's own args, status, target and children are
 unchanged.
+
+TSP native `ui.image` follows the same Client-local `PI_IMAGE_PROTOCOL` policy:
+it is enabled only for `auto`; an explicit value projects the text identity with
+a disabled status and sends no blob. This does not affect `ui.chart`, model
+attachments or attachment persistence. See
+[terminal output](../architecture/terminal-output.md#image-protocol-preference-pi_image_protocol).
 
 - The authority for WHICH attachment a row shows is that row's own structured
   content: User `content`, Assistant `displayBlocks` (while an opaque block is
@@ -407,10 +510,9 @@ store.
   it, which is exactly why the per-node ceiling above exists. CSS is a visual
   degradation, never a substitute for the ceiling and never a reason to withhold
   the composer.
-- **Count summary.** The draft count prefixes the EXISTING dock status line
-  (`Draft N · …`); with no staged image the status text and its key are
-  unchanged. Occurrences beyond the shown ones are not deleted — they are simply
-  not drawn, and the count still reports them.
+- **Count summary.** The draft count is its own short dock line (`Draft N`),
+  present only while a draft is really staged. Occurrences beyond the shown ones
+  are not deleted — they are simply not drawn, and the count still reports them.
 - The canonical `[image #N (W×H)]` token parser is the ONE source of WHICH
   occurrences a draft references, so the preview and the submission expansion
   cannot disagree. A staged image that no live token references is not a
@@ -680,7 +782,10 @@ universal/version-independent claim; a tier qualifies a claim, not a repository.
   cancellation error, never a fabricated answer. Masked plaintext must be
   absent from the whole wire. Cold continued Questions stay parked. A
   tentative Session opening is not an owner replacement, but a published B must
-  never leave A's modal owning presentation/input.
+  never leave A's modal owning presentation/input. A native composite form is a
+  presentation of this same seat, never a second owner: see §4 "Modal scope" for
+  its event admission, projection and reading-order obligations, and for the
+  capability gate that falls back to the non-native form.
 - **Narrow/Preview/reachability.** `preview` is a layout hint; key info and
   every action need another reachable path. Reachability, not a pixel promise.
   Measured constants are parameters of the verified environment; never lower a

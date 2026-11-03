@@ -4966,18 +4966,21 @@ export class TranscriptFolder {
         // foreign log that records a null/undefined/non-object source folds
         // as standalone injected Context instead of crashing the whole fold.
         const sourcePresentation = contextPresentation(event.data.source)
-        // Narrow Working delivery provenance: a producer-declared tool-jobs
-        // Notice claimed from the SAME turn's next-step inbox is the one
-        // Context the presentation may carry with that turn's Work. It is
-        // derived ONLY from the durable insert/claim identity chain above (no
-        // Agent.status sampling, no summary/wording inference); next-turn
-        // wakeups, foreign/legacy logs and every other producer stay absent
-        // and therefore fail open as independent Context.
-        const isWorkingToolJobsNotice = wasClaimedFromNextStep === true
+        // Narrow Working delivery provenance: a Context row claimed from the
+        // SAME turn's next-step inbox is the one delivery the presentation may
+        // carry with that turn's Work, and only for the two exact Working
+        // pairs — a tool-jobs Notice or an Agent relay. It is derived ONLY
+        // from the durable insert/claim identity chain above (no Agent.status
+        // sampling, no summary/wording inference); next-turn wakeups,
+        // foreign/legacy logs and every other producer stay absent and
+        // therefore fail open as independent Context.
+        const claimedInThisTurn = wasClaimedFromNextStep === true
           && claimedIdentity !== undefined
           && claimedIdentity.insertionTurn === this.currentTurn
-          && sourcePresentation.sourceKind === 'tool-jobs'
-          && sourcePresentation.form === 'notice'
+        const sameTurnNextStepDelivery = claimedInThisTurn && (
+          (sourcePresentation.sourceKind === 'tool-jobs' && sourcePresentation.form === 'notice')
+          || (sourcePresentation.sourceKind === 'agent-message' && sourcePresentation.form === 'relay')
+        )
         if (sourcePresentation.sourceKind === 'user') {
           if (!userBlocksVisibleNow(blocks)) break
           const activity = this.activityFor(this.currentTurn)
@@ -5027,8 +5030,8 @@ export class TranscriptFolder {
             // form-aware Context roles Compact and Focus present. The
             // semantic marker above stays the surfaced authority. The narrow
             // same-turn next-step flag is added only for a proven Working
-            // tool-jobs Notice (see above); it never changes the source facts.
-            contextPresentation: isWorkingToolJobsNotice
+            // delivery pair (see above); it never changes the source facts.
+            contextPresentation: sameTurnNextStepDelivery
               ? { ...sourcePresentation, sameTurnNextStep: true as const }
               : sourcePresentation,
           }

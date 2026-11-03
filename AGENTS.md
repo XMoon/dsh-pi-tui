@@ -148,6 +148,19 @@ issues/PRs, not in repository docs.
   `docs/architecture/host-client.md` only when the durable coupling/authority
   contract actually changes. Stage status and qualification records belong to
   GitHub issues/PRs, not repository docs.
+- The application composition facade `src/app/bootstrap.ts` has exactly TWO
+  real OS process composition roots. The Direct root is
+  `src/index.ts -> app/bootstrap.ts` (the Host process; the runner shares the
+  Host Context and its services). The internal split Client root is
+  `src/app/remote-process/local-client-entry.ts -> app/bootstrap.ts`: ONE
+  lazy dynamic import, executed only after the official `PluginPackages`
+  resolution is live, with the Client process's own Context, `appExit`,
+  transport and mounted Client domains. It is the only
+  `app/** -> app/bootstrap.ts` dynamic exception; never make it static, never
+  extend it to another owner, and never let the two roots share a Context,
+  plugin service object or Host service instance. See
+  `docs/architecture/overview.md` (composition zone) and
+  `docs/architecture/host-client.md`.
 - Every Host-touching feature declares locality (Client-local, Host-owned, or
   split), its narrow semantic-port owner, and its wire story. Never assume
   Client cwd/filesystem equals Host cwd/filesystem. Host workspace semantics —
@@ -235,36 +248,39 @@ extension-facing contract.
 Common checks:
 
 ```sh
-pnpm build
-pnpm typecheck
-pnpm test
+mise run build
+mise run typecheck
+mise run test
 ```
 
-Use the smallest relevant validation for the current change. Prefer targeted
-tests first; do not run expensive compatibility suites mechanically.
+`mise` is the project tool entry for Node, pnpm and the pinned DSH CLI. The
+mise tasks are thin proxies; keep using the existing pnpm/script lanes for
+everything else (`mise exec -- pnpm <script>`). Use the smallest relevant
+validation for the current change. Prefer targeted tests first; do not run
+expensive compatibility suites mechanically.
 
 Adding or changing a test? Read `docs/guides/testing.md` first: it owns the
 test-tree ownership map, the new-test rules, the lane commands and the
 objective discovery guards.
 
-A stage-final validation must not run the same suite twice. `pnpm verify:prepush`
+A stage-final validation must not run the same suite twice. `pnpm verify:release`
 is the repository's full pipeline: `typecheck:fork` + `typecheck:bench`,
 `test:fork`, `test:tmux`, `test:tooling`, the architecture / boundary /
 keybinding / naming / session-event / installation-doc / pi-divergence /
 pi-vendor gates, `pnpm audit`, and finally `pnpm pack:release`. `pack:release`
-is NOT packaging-only: its `prepack` runs `clean` + `build` +
-`typecheck:bundle` + `test:product`, and its `postpack` runs the eight
-public-package smokes (tarball, extension fixture, advanced, phase4, unstable,
-vim, examples, composeAgent). So in one pass never also run `typecheck:bundle`,
-`test:product`, `scripts/tarball-smoke.mjs` or
+is the explicit local orchestrator: `clean` + `clean:fork` + `build` +
+`typecheck:bundle` + `test:product` + `pack:artifact` + `smoke:release`
+(the eight packed-artifact smokes: tarball, extension fixture, advanced,
+phase4, unstable, vim, examples, composeAgent). So in one pass never also run
+`typecheck:bundle`, `test:product`, `scripts/tarball-smoke.mjs` or
 `scripts/compose-agent-compat-smoke.mjs` by hand, and never invoke
-`pnpm pack`/`pack:release` while a build or an artifact-dependent gate is
-running. `pnpm test` already contains `test:fork` + `test:product` +
+`pnpm pack:artifact`/`pack:release` while a build or an artifact-dependent gate
+is running. `pnpm test` already contains `test:fork` + `test:product` +
 `test:tooling` + `test:tmux`; prefer it over the individual pieces. What a
-stage-final pass still needs ON TOP of `verify:prepush`: the migration contract
+stage-final pass still needs ON TOP of `verify:release`: the migration contract
 smokes (`smoke:remote-*`), `smoke:boundary`, `smoke:startup-strictness`, the
 published-DSH compatibility checks (`compat:dsh:npm`, `compat:dsh:client-family`
-— `verify:prepush` does NOT contain them), `git diff --check` (unstaged and
+— `verify:release` does NOT contain them), `git diff --check` (unstaged and
 staged), plus whatever stage-specific validation the authority plan for the
 current stage requires (e.g. the Pre-M3 plan's §35.5/§35.6 matrix).
 
@@ -297,10 +313,17 @@ of them only when the resolved DSH mode is `source`), `test:tmux`,
 `generate:pi-divergences` with a `git diff --exit-code` on `DIVERGENCES.md`,
 `gate:pi-divergence-ledger`, `gate:pi-vendor-diff --strict` and the naming gate;
 `Build and pack` runs the root `build`, `typecheck:bundle` and `test:product`
-through `pack`, the public-package smokes and `smoke:startup-strictness`; the
-remaining jobs run `smoke:boundary`, `smoke:official-presets`,
-`compat:dsh:client-family`, the tarball smokes and `pnpm audit`. The lanes CI
-does NOT run — therefore the only ones a stage-final pass must run locally — are
+in separate jobs, then a lifecycle-free `pack:artifact` candidate qualified by
+the eight packed-artifact smokes through `smoke:release`; the qualification job
+also runs `smoke:startup-strictness`. The `mise-toolchain` job installs the
+locked project toolchain, proves the DSH CLI version and setup in npm mode, and
+proves the Source toolchain contract without running npm setup in source mode. The remaining jobs
+run `smoke:boundary`, `smoke:official-presets`, `compat:dsh:client-family`, the
+tarball smokes and `pnpm audit`. `split-process` runs only for an npm release
+tag: PR, main and next runs legitimately report it as `skipped`, and
+Host/Client split-process development work must run `pnpm smoke:split-process`
+manually against the actual candidate tarball. The lanes CI does NOT run — therefore the only ones a stage-final pass
+must run locally — are
 `compat:dsh:npm`, `gate:keybindings`, `gate:boundary`, `gate:architecture`,
 `scripts/check-no-session-events.mjs`, `gate:dsh-preset-parity`,
 `smoke:remote-d2-fork` and `smoke:remote-session-lifecycle-parity`; a mode-gated
@@ -328,10 +351,11 @@ Validation mechanics for this toolchain:
 * Changing WHAT the public entry re-exports (moving or re-exporting a
   publicly-exported type/function) changes the emitted declaration graph: the
   bundled `dist/*.d.mts` may only carry the top-level regions allowlisted in
-  `scripts/tarball-smoke.mjs`. Run `pnpm build` and then
-  `node scripts/tarball-smoke.mjs` before pushing — the ordinary product suite
-  does NOT cover this (it is a `postpack`/CI check), and a stale `dist` makes it
-  pass locally.
+  `scripts/tarball-smoke.mjs`. Run `pnpm build`, then `pnpm pack:artifact`, then
+  `pnpm smoke:release -- ./xmoon76-dsh-pi-tui-<version>.tgz` before pushing —
+  the ordinary product suite does NOT cover this (it is a `smoke:release`/CI
+  check), and a stale `dist` or an old tgz makes it pass locally. For the full
+  local route use `pnpm pack:release` instead.
 * A publicly-exported helper therefore follows the canonical owner-layer placement
   (`## Repository boundaries` → `### Source module placement`) and is exposed through
   the public entry (`src/index.ts`) or an existing documented facade. Do not create a
@@ -345,22 +369,56 @@ Validation mechanics for this toolchain:
 When entering a development worktree:
 
 ```sh
-pnpm dev:doctor
+mise install --locked
+mise run setup
 ```
 
-Use `pnpm dev:bootstrap` only when the environment is not ready. On a
-source-mode worktree (a worktree whose tracked `test/compat/dsh-mode.json`
-selects `source` — `next` is not always source-mode), a plain `pnpm install`
-before bootstrap leaves the DSH workspace state incorrect (`workspace DSH
-incorrect` / `local state missing`); run `pnpm dev:doctor` first and let
-`pnpm dev:bootstrap` perform the dependency install itself, then re-run
-`pnpm dev:doctor` until it reports `READY`. A plain `pnpm install` after
-bootstrap re-resolves `@deepseek-ai/*` to registry versions and breaks the
-source-mode workspace again; use `pnpm dev:shell` (or
-`source ./.dsh-dev-env`) for commands that need the source environment, and
-re-run `pnpm dev:bootstrap` after any real install. Keep each worktree's
-`node_modules` and `dist` independent; never symlink them, and build in that
-worktree before using a profile.
+`mise install` provides the project Node, pnpm and the DSH CLI whose exact
+version comes from `package.json`; `mise run setup` performs the npm-mode frozen
+install and refuses `source` mode. `setup` is an install action, not a doctor or
+state writer: a fresh npm worktree may still report legacy `pnpm dev:doctor`
+`MISSING`; that is not a setup failure. If your global mise config declares other
+tools, scope the install with
+`MISE_ENABLE_TOOLS=node,pnpm,npm:@deepseek-ai/dsh mise install --locked` (the
+same allowlist CI uses).
+
+Source Mode is a long-lived workflow, not legacy. On a source worktree use the
+explicit source tasks; their mode is always `source` regardless of the tracked
+`test/compat/dsh-mode.json` default:
+
+```sh
+mise run source:doctor
+mise run source:bootstrap
+mise run source:doctor    # must report READY
+mise run build
+mise run source:profile
+mise run source:dsh
+```
+
+A worktree with an existing Source materialization must not run `mise run setup`
+or the npm `dev:profile`/`dev:dsh` entries, even when its tracked mode is npm;
+use the Source tasks. `source:profile` and `source:dsh` use this worktree's
+`./node_modules/.bin/dsh` and the isolated `temp/source-dsh-home`; never use a
+bare `dsh`, the mise npm CLI or the real `~/.dsh` for Source Mode. A plain `pnpm install` before bootstrap leaves the DSH workspace
+state incorrect (`workspace DSH incorrect` / `local state missing`); the
+bootstrap task performs the dependency install itself, then `source:doctor`
+must report `READY`. A plain `pnpm install` after bootstrap re-resolves
+`@deepseek-ai/*` to registry versions and breaks the source-mode workspace
+again; use `DSH_MODE=source mise exec -- pnpm dev:shell` (or `source ./.dsh-dev-env` with `DSH_MODE=source` set) for commands that need the source environment, and re-run `source:bootstrap` after any real install.
+Keep each worktree's `node_modules` and `dist` independent; never symlink them,
+and build in that worktree before using a profile.
+
+For an interactive npm-mode TUI session in this worktree:
+
+```sh
+mise run build
+mise run dev:profile
+mise run dev:dsh
+```
+
+The profile lives under the worktree's `temp/mise-dsh-home`. Never point
+`DSH_HOME` at the real `~/.dsh`, and never treat a direct `dsh` invocation as
+the isolated development profile.
 
 * `main` is the released npm-backed compatibility line; `next` is the
   forward-integration line and may use its tracked Source Mode.

@@ -415,6 +415,7 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   assert.ok(view.includes('Style') && view.includes('Tone'), `the item editor menu missing:\n${view}`)
   assert.ok(view.includes('Style'), `the style row missing:\n${view}`)
   assert.ok(view.includes('Tone'), `the tone row missing:\n${view}`)
+  assert.ok(view.includes('Hide in TSP'), `the visibility row missing:\n${view}`)
   assert.ok(view.includes('Advanced…'), `the advanced row missing:\n${view}`)
   assert.ok(view.includes('↑↓ Select · Enter Open · ←→ Change · Esc Back'), `item help missing:\n${view}`)
   const contextFormat = (): string | undefined =>
@@ -445,6 +446,38 @@ test('the Item Editor edits style/tone; the picker renders live examples', async
   app.stop()
 })
 
+test('the Item Editor exposes the universal Hide in TSP toggle with the id default', async () => {
+  const { vt, app } = startApp()
+  const model = openDefault(vt, app)
+  await vt.waitForRender()
+  vt.sendInput('\r') // → Edit Row 1
+  await vt.waitForRender()
+  while (idAt(model) !== 'model') vt.sendInput('\x1b[B')
+  vt.sendInput('\r') // → item editor
+  await vt.waitForRender()
+  let view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Hide in TSP'), `the universal visibility row missing:\n${view}`)
+  assert.ok(view.includes('On'), `model must default to Hide in TSP: On:\n${view}`)
+  const modelRef = (): import('../../src/domain/footer/layout.ts').FooterItemRef =>
+    model.preview().rows[0]!.left.find(ref => ref.id === 'model')!
+  // Style → Tone → Hide in TSP, then Enter toggles in place (no sub-page).
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\x1b[B')
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(model.state().mode, 'item', 'Enter toggles in place')
+  assert.equal(modelRef().hideInTsp, false, 'the default-On item stores the real false override')
+  assert.equal(model.isDirty(), true, 'a non-default override is dirty')
+  view = vt.getViewport().join('\n')
+  assert.ok(view.includes('Off'), `the toggled value must repaint:\n${view}`)
+  // Toggle back: the default-equal value is omitted from the saved projection.
+  vt.sendInput('\r')
+  await vt.waitForRender()
+  assert.equal(modelRef().hideInTsp, undefined)
+  assert.equal(model.isDirty(), false, 'returning to the id default is clean')
+  app.stop()
+})
+
 test('the Advanced editor edits prefix inline and shows the values', async () => {
   const { vt, app } = startApp()
   const model = openDefault(vt, app)
@@ -452,9 +485,10 @@ test('the Advanced editor edits prefix inline and shows the values', async () =>
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
   while (idAt(model) !== 'model') vt.sendInput('\x1b[B')
-  vt.sendInput('\r') // → item editor (model: Style, Tone, Advanced)
+  vt.sendInput('\r') // → item editor (model: Style, Tone, Hide in TSP, Advanced)
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // → Tone
+  vt.sendInput('\x1b[B') // → Hide in TSP
   vt.sendInput('\x1b[B') // → Advanced…
   vt.sendInput('\r')
   await vt.waitForRender()
@@ -499,9 +533,10 @@ test('the Advanced page sanitizes hand-built prefix/suffix values too', async ()
   await vt.waitForRender()
   vt.sendInput('\r') // → Edit Row 1
   await vt.waitForRender()
-  vt.sendInput('\r') // → item editor (single item; menu: Style, Tone, Advanced)
+  vt.sendInput('\r') // → item editor (single item; menu: Style, Tone, Hide in TSP, Advanced)
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // → Tone
+  vt.sendInput('\x1b[B') // → Hide in TSP
   vt.sendInput('\x1b[B') // → Advanced…
   vt.sendInput('\r') // → the Advanced page
   await vt.waitForRender()
@@ -571,6 +606,7 @@ test('bracketed paste feeds the Advanced prefix editor', async () => {
   vt.sendInput('\r') // → item editor
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // → Tone
+  vt.sendInput('\x1b[B') // → Hide in TSP
   vt.sendInput('\x1b[B') // → Advanced…
   vt.sendInput('\r') // → the Advanced page
   await vt.waitForRender()
@@ -840,6 +876,7 @@ test('CSI-u encoded printables type into the Add search and the prefix', async (
   vt.sendInput('\r')
   await vt.waitForRender()
   vt.sendInput('\x1b[B') // → Tone
+  vt.sendInput('\x1b[B') // → Hide in TSP
   vt.sendInput('\x1b[B') // → Advanced…
   vt.sendInput('\r')
   await vt.waitForRender()

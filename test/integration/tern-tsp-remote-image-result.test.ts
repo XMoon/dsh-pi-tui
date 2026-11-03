@@ -17,6 +17,7 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { mountRemotePresentationHost, mountRemoteRunner } from '../app/runner-remote-presentation.test.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
 
 const SESSION_ID = 'prc-remote-image-session'
 
@@ -213,13 +214,19 @@ test('a Remote tool-result image is authorized by its retained Session and reach
         },
       }, { surfaceOp: 'append' })
 
-      await waitFor('the SDK emitted the admitted image blob', () => fixture.pane!.blobIds().includes(expectedBlobId), 15_000)
+      // The `b` write is not the end of the chain: the `f` that references the
+      // blob leaves the SDK later (frame credit), so the wait observes the frame
+      // the assertions below read.
+      await waitFor('the SDK emitted the admitted image blob and the frame that references it', () => {
+        const sent = fixture.pane!.output.text()
+        return fixture.pane!.blobIds().includes(expectedBlobId) && drewImage(sent, expectedBlobId)
+      }, 15_000)
       const wire = fixture.pane.output.text()
       assert.equal(wire.includes('[IMAGE] shot.png'), true, 'the image identity row names the admitted attachment')
       assert.equal(drewImage(wire, expectedBlobId), true, 'an official SDK frame references the image blob id')
-      const base64 = wire.match(new RegExp(`\\u001b_tsp;b;id=${expectedBlobId};[^;]*;([A-Za-z0-9+/=]+)`))?.[1]
-      assert.ok(base64 !== undefined, 'the official SDK blob message carries a body')
-      assert.deepEqual(new Uint8Array(Buffer.from(base64, 'base64')), png, 'wire bytes equal the exact admitted PNG')
+      const sent = readTspBlobMessages(wire).find(blob => blob.id === expectedBlobId)
+      assert.ok(sent !== undefined, 'the official SDK blob message carries a body')
+      assert.deepEqual(sent.bytes, png, 'wire bytes equal the exact admitted PNG')
       const events = fixture.pane.wireEvents()
       const blobIndex = events.findIndex(event => event.kind === 'blob' && event.id === expectedBlobId)
       const referenceIndex = events.findIndex((event, index) => index > blobIndex
@@ -281,7 +288,10 @@ test('a Remote USER body image is authorized by its retained Session and painted
         turn: 1,
       }, { surfaceOp: 'append' })
 
-      await waitFor('the SDK emitted the USER body image blob', () => fixture.pane!.blobIds().includes(expectedBlobId), 20_000)
+      await waitFor('the SDK emitted the USER body image blob and the frame that references it', () => {
+        const sent = fixture.pane!.output.text()
+        return fixture.pane!.blobIds().includes(expectedBlobId) && drewImage(sent, expectedBlobId)
+      }, 20_000)
       const wire = fixture.pane!.output.text()
       assert.equal(wire.includes('[IMAGE] body-shot.png'), true,
         'the USER body identity row names the admitted attachment')

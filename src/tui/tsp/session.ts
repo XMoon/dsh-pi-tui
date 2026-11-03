@@ -41,6 +41,7 @@
 import { connect as sdkConnect, ui, View } from '@stencil-hq/tern'
 import type { Key, Node, ScrollTo, Session, SessionInput, Surface, Tree, TspEvent } from '@stencil-hq/tern'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type { StatusSnapshot, StatusSnapshotReader } from '../../domain/status/types.ts'
 import type { ComposerSubmitRequest } from '../../tui-app.ts'
 import type {
   DisplayDockNotice,
@@ -56,12 +57,18 @@ import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
+import { imageProtocolPreference } from '../graphics/image-protocol-preference.ts'
+import { clampMiddle } from './picker-text.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
 import { sanitizedPhysicalLine } from '../presentation/lines.ts'
-import { createTspInteractionSeat, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
+import { createTspInteractionSeat, NATIVE_APPROVAL_ROLE, type TspContinuedRow, type TspInteractionSeat } from './interaction.ts'
 import { TspModelPicker } from './model-picker.ts'
 import { TspPresetPicker } from './preset-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
+import { nativeStatuslineRows, compileNativeFooterPresentation, type NativeFooterPresentation } from './statusline-view.ts'
+import { quietComposerView, QUIET_COMPOSER_SHEET, QUIET_COMPOSER_STYLES, QUIET_COMPOSER_ROLES, type QuietComposerPermissionOption } from './quiet-composer-view.ts'
+import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
+import type { TspFooterAffordances } from '../../domain/footer/layout.ts'
 import { TspWorkHub } from './work-hub.ts'
 import {
   WORK_DETAILS_REGION,
@@ -100,22 +107,19 @@ import {
 } from './assistant-visual.ts'
 import type { ToolImageState } from './transcript-view.ts'
 
-/**
- * The banner the composer-active renderer pins in its dock. The PR3-A
- * read-only banner (with its bare `q` quit key) retired together with the
- * composer: a typed `q` is EDITOR TEXT now. Like the PR3-A banner, it names
- * NO chord labels — the renderer owns no keymap (there is no authority to
- * route a chord label through), and the host-keybindings gate keeps its
- * sanctioned-seam list closed to non-keymap copy. The submit/newline
- * gestures are the SDK editor's own affordances.
- */
-const DOCK_BANNER = 'DSH TSP renderer · experimental composer'
-
-/** The renderer-local dock state (banner + status facts + welcome + notices). */
+/** The renderer-local dock state (welcome + notices). */
 interface DockState {
-  statusLine: string
   notices: readonly DisplayDockNotice[]
   welcome: readonly DisplayWelcomeFacts[]
+  /**
+   * TSP-7 PR-D: the mount-scoped footer compatibility notices. They are a
+   * SEPARATE segment from the transient `notices`: the transient list evicts
+   * its oldest entries at NOTICE_LIMIT, but a footer notice states a config
+   * fact of THIS mount that must stay observable for the whole session (a
+   * later transient notice must never evict it). Rendered before the
+   * transient list, in their fixed bind order.
+   */
+  footerNotices: readonly DisplayDockNotice[]
 }
 
 /** One eligible final Assistant row: the ONLY row kind that owns visuals. */
@@ -226,6 +230,30 @@ export interface TspInputHandlers {
    * controller, whose own recheck decides. The renderer mounts no form itself.
    */
   reopenContinuedQuestion(sessionId: string, callId: string): boolean
+  /**
+   * PR-C (TSP-7): open the registered `/model` picker from the composer's
+   * high-frequency Model/Effort buttons — the SAME command owner the typed
+   * `/model` runs, never a fabricated submission or a renderer-built request.
+   * The composition's late-bound entry owns the read/write; the renderer only
+   * re-checks its own seat admission before forwarding.
+   */
+  openModelPicker(entry: 'models' | 'effort'): void
+  /** Whether the native `/model` picker business entry is actually installed
+   *  (registered, not Host-owned). Optional only for old test fixtures; an
+   *  absent fact falls back to the negotiated-kind check below. */
+  modelPickerAvailable?(): boolean
+  /**
+   * TSP-7 PR-E: the live standard-permission catalog for the Quiet Composer
+   * menu. A read-only projection of the SAME StatusRuntime authority the
+   * Shift+Tab cycle uses. Absent on a test/composition without the seam: the
+   * menu reads an empty catalog and never dispatches.
+   */
+  permissionOptions?(): readonly string[]
+  /**
+   * TSP-7 PR-E: apply one explicitly chosen standard preset through the ONE
+   * StatusRuntime selection writer (never optimistic, never a renderer store).
+   */
+  selectPermission?(id: string): void
 }
 
 /** The B1 binding: editor-local + lifecycle only (submissions are B2). */
@@ -329,6 +357,26 @@ export interface TspRenderer extends TspInputBinding {
    */
   readonly bindImages: (binding: SurfaceImageBinding) => void
   /**
+   * TSP-7 PR-A: install the read-only status reader ONCE. It carries NO store
+   * authority: the renderer samples a snapshot only at the formal display
+   * commit point, never subscribes and never writes. A second binding or a
+   * binding after disposal is an explicit error (the mount is the only
+   * installer, and it runs before the first business commit).
+   */
+  readonly bindStatusReader: (reader: StatusSnapshotReader) => void
+  /**
+   * TSP-7 PR-D: install the ONE-SHOT read-only footer config. Exactly like
+   * the reader: called once by the mount before the first status commit, a
+   * second binding or a post-disposal binding fails fast. An UNBOUND mount
+   * (a direct test mount) keeps the frozen PR-A/B default presentation —
+   * only the production composition root reads user settings.
+   *
+   * The config is a boot-time SNAPSHOT: hydration, session switches and
+   * status repaints never re-read it, and its notices are enqueued exactly
+   * once at bind time.
+   */
+  readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
+  /**
    * Stop the input loop, close the surface + session ONCE. The promise
    * settles only after the SDK restored the tty (input drain included), so
    * callers awaiting it can safely touch the terminal afterwards.
@@ -393,6 +441,10 @@ function errorText(value: unknown): string {
 
 /** Mount the renderer over an already-connected SDK session. */
 export function mountTspRenderer(session: Session, options: TspRendererOptions): TspRenderer {
+  // The startup image preference is a renderer-lifetime fact: parse it before
+  // the surface exists so an invalid value is a startup configuration error,
+  // never a silent fallback, and never drifts mid-session.
+  const imagePreference = imageProtocolPreference(process.env)
   // Ownership rule (R2-3): the session belongs to the CALLER until this mount
   // succeeds. A throwing `open` therefore re-raises WITHOUT closing here —
   // `connectTspRenderer` (the owner that connected it) performs the recorded
@@ -447,6 +499,33 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         outline: 1px solid var(--accent);
         outline-offset: 1px;
       }
+    `)
+  }
+  /**
+   * The native modal capability: the EXACT kind set each composite really
+   * paints, read from the negotiated handshake — never from a version label or
+   * a window size. Questions needs its own form kind plus the pieces of the
+   * same-style safe/Review pages; the Tool approval additionally needs
+   * `badge` is in the set because a dangerous request paints a danger marker,
+   * and an approval that cannot show one is not an honest approval. It also
+   * needs `styles`, because the pane must be able to hide the Enter keycap below
+   * before the form may advertise a shortcut the application deliberately
+   * refuses to honour. A pane that lacks either half keeps the text form; it
+   * never gets a misleading affordance and never a fabricated result.
+   */
+  const nativeQuestionsCapable = (): boolean =>
+    ['questions', 'button', 'input', 'overlay', 'col', 'row', 'text'].every(kind => session.caps.kinds.includes(kind))
+  const nativeApprovalCapable = (): boolean =>
+    ['tool', 'overlay', 'col', 'text', 'code', 'scroll', 'badge'].every(kind => session.caps.kinds.includes(kind))
+    && session.caps.features.includes('styles')
+  if (nativeApprovalCapable()) {
+    // ONE scoped rule, installed once at surface init (never from `render()`):
+    // it hides ONLY the Enter keycap the client draws on the native approval's
+    // Allow button. It changes no button, theme, event or outcome; the seat
+    // still refuses a bare Enter (`handleApprovalKey` consumes it), so leaving
+    // the keycap painted would advertise a binding that does not exist.
+    surface.stylesheet('dsh-native-approval-shortcuts', `
+      [data-role="${NATIVE_APPROVAL_ROLE}"] .sf-tool-ask-btn .sf-kbd { display: none; }
     `)
   }
   let disposed = false
@@ -517,7 +596,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * premature no-op (and the resources are still released exactly once).
    */
   let disposeTask: Promise<void> | undefined
-  const dock: DockState = { statusLine: DOCK_BANNER, notices: [], welcome: [] }
+  const dock: DockState = { notices: [], welcome: [], footerNotices: [] }
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
   /** The application's pending-submit fact, surfaced as a dock line. */
   let pendingSubmit: SubmitPendingDetail | undefined
@@ -559,6 +638,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // modal takes the LOGICAL seat. Retire it synchronously here, BEFORE the
     // form becomes visible/answerable; the close stays owned by this renderer.
     beforeModalSeat: () => { retireWorkDetails('modal') },
+    // The native modal inputs: the base surface's OWN id (an event addressed at
+    // another surface is foreign to this seat) plus the two negotiated
+    // capability decisions taken above from the handshake. The seat never reads
+    // the transport, a version label or a window size to decide them.
+    surfaceId: surface.id,
+    nativeQuestions: nativeQuestionsCapable(),
+    nativeApproval: nativeApprovalCapable(),
   })
   modelPicker = new TspModelPicker({
     render: () => render(),
@@ -568,6 +654,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // for. The presenter names a wire id of the frame IT built; the SDK stays
     // here and is never handed to the business/Host side.
     nativeScroll: (id, to) => { surface.scroll(id, to) },
+    // The ONE handshake fact the read-only Reader needs to decide its short-fact
+    // layout. It is a display capability only: it never enters an admission list,
+    // and a pane without it keeps the plain-text facts.
+    nativeKv: session.caps.kinds.includes('kv'),
   })
   presetPicker = new TspPresetPicker({
     render: () => render(),
@@ -576,6 +666,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // The SAME ONE Surface owner performs the native scroll the Overview/Guide
     // reading keys ask for. The presenter names a wire id of the frame IT built.
     nativeScroll: (id, to) => { surface.scroll(id, to) },
+    // The same single handshake fact as the Model/Session Readers: which layout the
+    // Details page's four identity facts may use. A display capability, never an
+    // admission requirement — a pane without it keeps the original text lines.
+    nativeKv: session.caps.kinds.includes('kv'),
   })
   sessionBrowser = new TspSessionBrowser({
     surfaceId: surface.id,
@@ -584,6 +678,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     notify: (text, kind) => display.notify(text, kind),
     nativeScroll: (id, to) => { surface.scroll(id, to) },
     scrollSupported: session.caps.features.includes('scroll'),
+    // The same single handshake fact as the Model Reader: a display capability,
+    // never an admission requirement.
+    nativeKv: session.caps.kinds.includes('kv'),
   })
   modelPicker.resize(session.caps.cols, session.caps.cell.w)
   workHub = new TspWorkHub({
@@ -762,6 +859,59 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   let imageBinding: SurfaceImageBinding | undefined
   let imageBindingInstalled = false
   /**
+   * TSP-7 PR-A: the read-only status reader, installed ONCE by the mount. It
+   * is sampled ONLY at the formal display commit point — never on a render,
+   * never through a subscription — so the renderer never observes a
+   * half-applied store state.
+   */
+  let statusReader: StatusSnapshotReader | undefined
+  /** TSP-7 PR-A: the one-time binding latch (a lifecycle fact, not a cache). */
+  let statusReaderInstalled = false
+  /**
+   * TSP-7 PR-D: the compiled footer presentation of THIS mount (undefined =
+   * the frozen PR-A/B default — a direct test mount that never bound a
+   * config). Immutable for the renderer's whole life: the boot snapshot is
+   * compiled once at bind time and never re-read (a settings change needs a
+   * new TSP process, not a repaint).
+   */
+  let footerPresentation: NativeFooterPresentation | undefined
+  /**
+   * TSP-7 PR-A: the last FORMALLY COMMITTED, displayable snapshot reference.
+   * It is a read-only presentation pointer — never patched, derived or
+   * persisted — cleared at every hydration begin so an outgoing subject's
+   * status can never paint beside the incoming one's transcript.
+   */
+  let presentedStatus: StatusSnapshot | undefined
+  /**
+   * PR-C (external review r3): the busy-LIFETIME identity of the current
+   * display subject — a renderer-local presentation serial advanced at every
+   * FALSE→TRUE busy edge of the formally-committed snapshot (and reset with
+   * the subject at hydration). It is the same class of ephemeral identity as
+   * `readerEpoch`/`noticeSeq`, NOT a business mirror: nothing reads it except
+   * the Stop button's node key, so a click minted against turn A's Stop can
+   * never resolve onto turn B's re-painted button — the old node id is simply
+   * absent from the current view and the SDK's own dispatch drops it.
+   */
+  let busyEpoch = 0
+  /**
+   * TSP-7 PR-E: the ONLY local presentation state of the Quiet Composer
+   * Permission menu. `permissionMenuEpoch` advances on every false→true
+   * expansion so a click minted for an older expansion can never resolve onto
+   * the new one; `permissionMenuIndex` is the keyboard-highlighted option.
+   * Neither is a business pending flag: the StatusRuntime owns every write.
+   */
+  let permissionMenuOpen = false
+  let permissionMenuEpoch = 0
+  let permissionMenuIndex = 0
+  /** Close the menu and invalidate in-flight option identities. Returns
+   *  whether the menu was open (the caller decides whether to repaint). */
+  function closePermissionMenu(): boolean {
+    if (!permissionMenuOpen) return false
+    permissionMenuOpen = false
+    permissionMenuIndex = 0
+    return true
+  }
+  /**
    * PR-C: the immutable image scope of the CURRENT display subject, captured
    * ONCE per projection source. An ordinary repaint or delta REUSES it: the
    * scope is never re-resolved when an async read settles, so a retired
@@ -829,6 +979,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    *  the composer dead after the first modal close). */
   let lastAppliedFocusId: string | null | undefined
 
+  /** The ONE composer-chrome capability gate (PR-C row / PR-E Quiet
+   *  Composer): without `el`+`styles` the renderer keeps the controlled
+   *  editor + native footer only, never a fake text button. */
+  const composerChromeSupported = (): boolean =>
+    session.caps.features.includes('styles') && session.caps.kinds.includes('el')
+
+  /** The editor's REAL node path: inside the Quiet Composer Shell it is
+   *  `dock.quiet-composer.composer` (region -> shell key -> editor key); the
+   *  no-chrome branch keeps the historical `dock.composer`. ONE function so
+   *  `applyFocus` can never focus two paths or the wrong one. */
+  const composerEditorFocusId = (): string =>
+    composerChromeSupported() ? 'dock.quiet-composer.composer' : 'dock.composer'
+
   /** Apply the seat's desired hardware focus after a committed frame. */
   const applyFocus = (force: boolean): void => {
     if (disposed) return
@@ -841,6 +1004,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       lastAppliedFocusId = undefined
       return
     }
+    const composerFocusId = composerEditorFocusId()
     const desired = seat.hasModalSeat()
       ? seat.desiredFocusId()
       : workHub?.isOpen() === true
@@ -851,10 +1015,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
             ? presetPicker.desiredFocusId() ?? null
             : modelPicker?.isOpen() === true
               ? modelPicker.desiredFocusId() ?? null
-              : 'dock.composer'
+              : composerFocusId
     if (!force && desired === lastAppliedFocusId) return
     lastAppliedFocusId = desired
-    composer.setFocused(desired === 'dock.composer')
+    composer.setFocused(desired === composerFocusId)
     surface.focus(desired)
   }
 
@@ -1234,10 +1398,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /**
    * PR-C: whether the pane can carry a native image at all. The `image` kind
    * and the `blobs` feature are NEGOTIATED by the client — the mapper never
-   * infers them from a TypeScript prop.
+   * infers them from a TypeScript prop. The SAME `PI_IMAGE_PROTOCOL` policy
+   * that governs PiTui pixels governs this native TSP path: only `auto` may
+   * send an image node/blob. Any explicit value is a deliberate disable of
+   * ANSI/native image preview, not a request to emulate another transport.
    */
   const nativeImagesSupported = (): boolean =>
-    session.caps.kinds.includes('image') && session.caps.features.includes('blobs')
+    imagePreference === 'auto'
+    && session.caps.kinds.includes('image')
+    && session.caps.features.includes('blobs')
 
   /**
    * PR-C: the image attachments the CURRENT window projects, in window
@@ -1304,7 +1473,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const states = new Map<string, ToolImageState>()
     const refs = projectedImageRefs()
     if (!nativeImagesSupported()) {
-      for (const ref of refs) states.set(ref.attachmentId, { state: 'unsupported' })
+      // Distinguish a user-disabled preview from a pane that never negotiated
+      // the capability: the former is a policy outcome, not a Tern limitation.
+      const state: ToolImageState = imagePreference === 'auto' ? { state: 'unsupported' } : { state: 'disabled' }
+      for (const ref of refs) states.set(ref.attachmentId, state)
       return states
     }
     const scope = activeImageScope
@@ -1818,9 +1990,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * publish.
    */
   const dockPreviewLimit = (): number => {
+    // The same policy gate as every native image path: a user-disabled image
+    // preview has no chip, no read and no blob even when the pane advertises
+    // `styles`+`image`+`blobs`.
+    if (!nativeImagesSupported()) return 0
     const canPreview = previewStylesSupported()
-      && session.caps.features.includes('blobs')
-      && session.caps.kinds.includes('image')
     if (!canPreview) return 0
     const cols = session.caps.cols
     return cols < DOCK_DRAFT_SINGLE_PREVIEW_COLS ? 0 : cols < DOCK_DRAFT_TWO_PREVIEW_COLS ? 1 : 2
@@ -1854,7 +2028,17 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // lane (authoritative queued + local echoes) and the ordered conversation
     // tail, exactly as the ONE join produced them.
     for (const item of pending.queued) {
-      lines.push(ui.text({ key: `queue-${item.id}`, text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}`) }))
+      const sending = item.local === true ? ' — sending…' : ''
+      lines.push(ui.text({ key: `queue-${item.id}`, text: sanitizeDisplayText(`queued (${item.mode}): ${item.text}${sending}`) }))
+    }
+    // An IDLE subject with at least one authoritative queued occurrence is the
+    // preserved parked queue: the next real prompt wakes it. A local-only echo
+    // has no Host occurrence yet and never gets this explanation.
+    if (!pending.running && pending.queued.some(item => item.local !== true)) {
+      lines.push(ui.text({
+        key: 'queue-parked-hint',
+        text: 'waiting for the next prompt — send a message to continue',
+      }))
     }
     for (const [index, row] of pending.tail.entries()) {
       lines.push(ui.text({ key: `tail-${index}`, text: sanitizeDisplayText(pendingRowText(row, index)) }))
@@ -1865,14 +2049,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (pendingSubmit !== undefined) {
       lines.push(ui.text({ key: 'pending-submit', text: pendingSubmit === 'submit' ? 'Submitting…' : 'Queued…' }))
     }
-    // PR4: the draft count rides the EXISTING status line as a single prefix
-    // (`Draft N · <status>`), so the dock gains no second title row. With no
-    // draft the text and the key stay byte-identical to before.
+    // TSP-7 PR-A: the draft count is its own short line (only when a draft is
+    // really staged). It no longer rides a status banner — the banner is gone
+    // (its `plan` word moved to the native plan-state row; the run-phase display
+    // is PR-B scope).
     const draftCount = imageBinding?.draftImages.occurrences().length ?? 0
-    const statusLine = draftCount === 0
-      ? dock.statusLine
-      : `Draft ${draftCount} · ${dock.statusLine === '' ? DOCK_BANNER : dock.statusLine}`
-    if (statusLine !== '') lines.push(ui.text({ key: 'status', wrap: 'none', text: sanitizedPhysicalLine(statusLine) }))
+    if (draftCount > 0) {
+      lines.push(ui.text({ key: 'draft-count', wrap: 'none', text: `Draft ${draftCount}` }))
+    }
+    // TSP-7 PR-A: the legacy text facts that no native row carries yet, kept
+    // as short single lines above the editor (the session title and the todo
+    // completion count have no PR-A native item, and the compaction phase is an
+    // immediate state channel).
+    for (const legacy of legacyDockLines()) lines.push(ui.text({ key: legacy.key, wrap: 'none', text: sanitizedPhysicalLine(legacy.text) }))
     // PR3-B B3 (§3.8): the parked-Question count is a PRESENTATION of the ONE
     // controller's read (`InteractionRuntime.publishAttention` → presenter);
     // the Alt+Q entry is the inspection route, never an answerability fact.
@@ -1900,6 +2089,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         text: `${TSP_VISUAL_SELECT_LABEL} select visual · ${TSP_VISUAL_COPY_LABEL} copy`,
       }))
     }
+    // The MOUNT-scoped footer notices render first, in their fixed bind
+    // order — they are config facts of this mount, never evicted and never
+    // re-issued (a later hydration/subject does not touch them).
+    for (const notice of dock.footerNotices) {
+      lines.push(ui.text({ key: `notice-${notice.id}`, text: notice.kind === 'error' ? `! ${sanitizeDisplayText(notice.text)}` : sanitizeDisplayText(notice.text) }))
+    }
     for (const notice of dock.notices) {
       const noticeText = sanitizeDisplayText(notice.text)
       lines.push(ui.text({ key: `notice-${notice.id}`, text: notice.kind === 'error' ? `! ${noticeText}` : noticeText }))
@@ -1912,16 +2107,30 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const preview = dockDraftNodes(draftStates)
     if (preview !== undefined) lines.push(preview)
     // The controlled composer: SDK `ui.editor` with client-supplied
-    // text/cursor (UTF-16). The native edit/undo/send features are NOT
-    // advertised (`sendable` stays unset); the program owns every edit.
-    lines.push(ui.editor({
-      key: 'composer',
-      text: composer.state().text,
-      cursor: composer.state().cursor,
-      maxLines: 8,
-      placeholder: 'Message',
-      prompt: '> ',
-    }))
+    // text/cursor (UTF-16). On an `el`+`styles` pane it is wrapped in the ONE
+    // Quiet Composer shell with the native control row; every other pane keeps
+    // the pre-PR-C editor exactly as before. The native edit/undo/send
+    // features are NOT advertised; the program owns every edit.
+    const editorNode = composerEditorNode()
+    const quietShell = composerActionsSupported() ? quietComposerNode(editorNode) : undefined
+    lines.push(quietShell ?? editorNode)
+    // TSP-7 PR-A/PR-D/PR-E: the native status rows follow the composer. They
+    // are projected from the LAST FORMALLY COMMITTED snapshot through THIS
+    // mount's compiled footer presentation (the frozen PR-A/B default when no
+    // config was bound), suppressed for the whole hydration window, and — on
+    // the Quiet Composer branch — wrapped in the ONE transparent footer group
+    // so the Shell→Footer gap belongs to the presentation, never a synthetic
+    // row inside the dock. An empty projection adds NO wrapper and NO height.
+    const footerRows = presentedStatus !== undefined && !hydrating
+      ? nativeStatuslineRows(presentedStatus, footerPresentation, nativeFooterAffordances())
+      : []
+    if (footerRows.length > 0) {
+      if (composerActionsSupported()) {
+        lines.push(ui.col({ key: 'footer-group', role: QUIET_COMPOSER_ROLES.footerGroup, gap: 'none' }, ...footerRows))
+      } else {
+        lines.push(...footerRows)
+      }
+    }
     return ui.col({ key: 'dock' }, ...lines)
   }
 
@@ -1951,6 +2160,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // The new subject committed: the hydration input fence lifts with it.
       hydrating = false
       scopeEpoch += 1
+      // TSP-7 PR-E: a new presentation scope invalidates any open Permission
+      // menu expansion; the option keys themselves also carry the epoch.
+      closePermissionMenu()
       scopePrefix = `s${scopeEpoch}-`
       scopeKeys = new TranscriptNodeKeys()
       // PR-C: the retired subject's image subscriptions go with it, and the
@@ -1978,36 +2190,76 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     render()
   }
 
-  /** Mutable renderer-local mirror of the last committed status facts. */
-  const statusFacts: { busy?: boolean; working?: boolean; planMode?: boolean; sessionTitle?: string; todos?: readonly TodoItem[]; compactionPhase?: DisplayStatusFacts['compactionPhase'] } = {}
-  const flushStatus = (): void => {
-    const parts: string[] = []
-    if (statusFacts.busy === true || statusFacts.working === true) parts.push('working')
-    if (statusFacts.planMode === true) parts.push('plan')
-    if (statusFacts.compactionPhase !== undefined && statusFacts.compactionPhase !== 'idle') parts.push(`compacting (${statusFacts.compactionPhase})`)
-    if (statusFacts.sessionTitle !== undefined && statusFacts.sessionTitle !== '') parts.push(statusFacts.sessionTitle)
+  /** Mutable renderer-local mirror of the last committed status facts (the
+   * facts the legacy dock lines still read; the machine facts the activity
+   * projection consumes live in the surface's store, not here). */
+  const statusFacts: { sessionTitle?: string; todos?: readonly TodoItem[]; compactionPhase?: DisplayStatusFacts['compactionPhase'] } = {}
+  /**
+   * TSP-7 PR-A: the legacy dock text lines that survive as SHORT standalone
+   * rows. They are the facts no PR-A native item carries (the session title and
+   * the todo completion count) plus the compaction phase, an immediate state
+   * channel that must not depend on a status commit. The banner's `plan` word
+   * migrated to the native plan-state row; the run-phase display lives in the
+   * surface's activity projection (the native run seg), not this mirror.
+   */
+  const legacyDockLines = (): { key: string; text: string }[] => {
+    const lines: { key: string; text: string }[] = []
+    if (statusFacts.compactionPhase !== undefined && statusFacts.compactionPhase !== 'idle') {
+      lines.push({ key: 'compaction-phase', text: `compacting (${statusFacts.compactionPhase})` })
+    }
+    if (statusFacts.sessionTitle !== undefined && statusFacts.sessionTitle !== '') {
+      lines.push({ key: 'session-title', text: statusFacts.sessionTitle })
+    }
     const todos = statusFacts.todos
     if (todos !== undefined && todos.length > 0) {
       const open = todos.filter(todo => todo.status !== 'completed').length
-      parts.push(`todos ${todos.length - open}/${todos.length}`)
+      lines.push({ key: 'todos', text: `todos ${todos.length - open}/${todos.length}` })
     }
-    dock.statusLine = parts.length === 0 ? DOCK_BANNER : `${DOCK_BANNER} · ${parts.join(' · ')}`
+    return lines
+  }
+  const flushStatus = (): void => {
+    // TSP-7 PR-A: the legacy banner text is gone, so this is the presentation
+    // repaint only — the facts above are read by `dockView` on the next frame.
     render()
   }
 
   const display: SurfaceDisplaySeam = {
     setTranscript,
     commitDisplaySubject() {
-      // The shared StatusStore sections are committed by the surface
-      // aggregate at its ONE atomic commit point (surface.commitStatus);
-      // the read-only renderer has no chrome projection of its own.
+      // TSP-7 PR-A: the surface already committed the store patch (the ONE
+      // atomic commit in `SurfaceRuntime.commitStatus`); this is the display
+      // completion point of that SAME business commit. The snapshot is
+      // sampled HERE — not on every render and never through a subscription —
+      // so the native rows always belong to the subject the surface just
+      // committed, never to a half-applied store state.
+      //
+      // A DISPOSED renderer samples nothing: the reader belongs to the mount
+      // this renderer already released, and a late commit on a retained seam
+      // owns no frame to paint (§3.4). This is a lifecycle stop, not a silent
+      // fallback — the normal path never reaches it, because the surface
+      // withdraws the display seam with the renderer release.
+      if (disposed) return
+      if (statusReader === undefined) {
+        throw new Error('the TSP renderer has no status reader: the mount must bind one')
+      }
+      const previous = presentedStatus
+      presentedStatus = statusReader.snapshot()
+      // PR-C (external review r3): every FALSE→TRUE busy edge of the committed
+      // snapshot starts a NEW busy lifetime — the next Stop button paints under
+      // a fresh node identity, so a stale click from the PREVIOUS run of the
+      // same session can never cancel the new one. A TRUE→TRUE commit keeps
+      // the identity (one continuous run), and the subject reset below owns
+      // the cross-session case.
+      if (previous !== undefined
+        && previous.activity.busy !== true
+        && presentedStatus.activity.busy === true) {
+        busyEpoch += 1
+      }
+      render()
     },
     commitStatusFacts(facts) {
       // PRESENCE is the write authority: an explicitly-present
       // `sessionTitle: undefined` CLEARS (Remote current-facts rely on it).
-      if (facts.busy !== undefined) statusFacts.busy = facts.busy
-      if (facts.working !== undefined) statusFacts.working = facts.working
-      if (facts.planMode !== undefined) statusFacts.planMode = facts.planMode
       if ('sessionTitle' in facts) statusFacts.sessionTitle = facts.sessionTitle
       if (facts.todos !== undefined) statusFacts.todos = facts.todos
       if (facts.compactionPhase !== undefined) statusFacts.compactionPhase = facts.compactionPhase
@@ -2021,6 +2273,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     },
     beginSessionHydration() {
       if (disposed) return
+      // TSP-7 PR-E: the open Permission menu belongs to the outgoing subject;
+      // revoke its expansion identity with the subject before any later frame
+      // can paint a stale option target.
+      closePermissionMenu()
       // B3-A2 §8.2: the Reader belongs to the OUTGOING subject, so it is
       // revoked FIRST — before any retiring Presenter callback can run — and
       // its close stays owned here. `resetSessionFacts()` deliberately does
@@ -2041,6 +2297,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // window (§3.4 row 1).
       hydrating = true
       retiredSource = projectionScope
+      // TSP-7 PR-A: the outgoing subject's status is dropped with its
+      // transcript — the Loading frame shows NO native status row, so an old
+      // permission/cwd/usage fact can never sit beside the incoming subject.
+      presentedStatus = undefined
+      // PR-C (external review r3): the outgoing subject's busy lifetime dies
+      // with it — the incoming subject's first busy edge mints a fresh Stop
+      // identity even though the serial is renderer-local.
+      busyEpoch = 0
       // PR-C: the retired subject's image subscriptions go with it - a late
       // settle of the outgoing subject must not repaint the incoming one.
       releaseImageSubscriptions()
@@ -2182,6 +2446,382 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     return true
   }
 
+  // ── TSP-7 PR-C/PR-E: the ONE Quiet Composer (editor + controls) ──
+  //
+  // The shell exists ONLY where the pane negotiated BOTH `el` and `styles`
+  // (the documented measured trap: without them an `el` button paints as bare
+  // text). Without them the dock keeps the controlled editor + native footer
+  // and draws no fake control.
+  const composerActionsSupported = (): boolean => composerChromeSupported()
+  /** The native Model picker the composer's Model/Effort buttons open needs
+   *  the picker surface itself (`picker`/`row`/`overlay`); `el`+`styles` alone
+   *  only proves the button can paint, not that its business entry can run. */
+  const modelPickerCapable = (): boolean =>
+    ['picker', 'row', 'overlay'].every(kind => session.caps.kinds.includes(kind))
+  /** The REAL `/model` business entry: negotiated picker kinds AND the
+   *  registered UI opener (a Host-owned `/model` leaves the name registered
+   *  but no TUI opener). */
+  const modelPickerAvailable = (): boolean =>
+    composerActionsSupported()
+    && modelPickerCapable()
+    && (boundHandlers?.modelPickerAvailable?.() ?? true)
+  /** The three standard presets the Quiet Composer menu may offer, in the
+   * Owner-frozen order. `auto`/custom presets stay available through
+   * `/permission` and Shift+Tab but never enter this three-row menu. */
+  const STANDARD_PERMISSION_OPTIONS = [
+    { id: 'read-only', label: 'Read Only' },
+    { id: 'workspace-write', label: 'Workspace Write' },
+    { id: 'danger-full-access', label: 'Full Access' },
+  ] as const
+  /** The render-time menu projection: catalog ids intersected with the
+   * standard three, and the authoritative current id marked selected. */
+  const permissionMenuOptions = (): readonly QuietComposerPermissionOption[] => {
+    const handlers = boundHandlers
+    if (handlers === undefined) return []
+    const roster = handlers.permissionOptions?.() ?? []
+    const fact = presentedStatus?.access.permissionPreset
+    return STANDARD_PERMISSION_OPTIONS
+      .filter(option => roster.includes(option.id))
+      .map(option => ({
+        id: option.id,
+        label: option.label,
+        selected: fact?.matched === true && fact.id === option.id,
+      }))
+  }
+  /** Whether the Quiet Composer really provides an operable Permission
+   * control for the CURRENT main subject — the PR-F footer fallback reads
+   * this exact fact (never a status value guess). */
+  const permissionComposerAffordance = (): boolean =>
+    composerActionsSupported()
+    && boundHandlers !== undefined
+    && presentedStatus?.view.subject.kind === 'main'
+    && presentedStatus?.access.permissionPreset?.matched === true
+    && permissionMenuOptions().length > 0
+
+  /**
+   * PR-F: the LIVE composer capability facts the universal footer visibility
+   * uses for its default-On fallback. Each flag means "the TSP dock really
+   * presents and can operate this control now" — never "a status value
+   * exists". PR-E now provides the real Permission control; the model and
+   * reasoning controls exist whenever the Quiet Composer chrome does.
+   */
+  const nativeFooterAffordances = (): TspFooterAffordances => ({
+    permission: permissionComposerAffordance(),
+    model: modelPickerAvailable(),
+    reasoning: modelPickerAvailable(),
+  })
+  if (composerActionsSupported()) {
+    surface.stylesheet(QUIET_COMPOSER_SHEET, QUIET_COMPOSER_STYLES)
+  }
+
+  /**
+   * PR-C (TSP-7 §3.3): the ONE shared submit helper — the Editor's Enter
+   * branch and the Send button both run EXACTLY this sequence (the frozen
+   * PR3-B §3.4 before-callback ordering). No business-level filtering lives
+   * here: the submission controller owns admission, rollback and the queue.
+   */
+  const submitComposerDraft = (handlers: TspInputHandlers, gesture: 'enter' | 'accelerated'): void => {
+    handlers.noteUserInput()
+    const serializedDraft = composer.getDraft()
+    composer.setDraft('')
+    handlers.submit(serializedDraft, gesture)
+  }
+
+  /**
+   * PR-C (TSP-7 §3.3): the ONE pointer admission predicate of the composer
+   * controls. A click arrives on the SDK node-handler channel (not through
+   * `dispatchKey`), so it re-checks the CURRENT seat here: disposal, the
+   * hydration window, the pre-bind renderer, a modal seat, the temporary
+   * Reader and any open native presenter each own the input before the dock
+   * does. It is a shared local predicate — no `enabled` mirror is persisted
+   * and no second state machine exists.
+   */
+  const composerActionsAdmitted = (): boolean => visualActionsAdmitted()
+
+  /**
+   * PR-C (TSP-7): the Send click — the same one-shot submit path as Enter. A
+   * wire-form-empty draft (no text AND no image placeholder) is refused here:
+   * the client does not enforce `disabled` on an `el` button (measured), so
+   * the program is the one that must not submit an empty prompt.
+   */
+  const composerSendClicked = (): void => {
+    if (!composerActionsAdmitted()) return
+    const handlers = boundHandlers
+    if (handlers === undefined) return
+    if (!composerDraftSubmittable()) return
+    submitComposerDraft(handlers, 'enter')
+  }
+
+  /**
+   * PR-C (TSP-7): the Stop click — the EXISTING cancel intent, exactly like
+   * Ctrl+C. It re-checks the busy fact at click time (a one-frame-old painted
+   * button must never cancel a NEW session's run) and never reads or writes
+   * the draft.
+   */
+  const composerStopClicked = (): void => {
+    if (!composerActionsAdmitted()) return
+    const handlers = boundHandlers
+    if (handlers === undefined) return
+    if (presentedStatus?.activity.busy !== true) return
+    handlers.cancel()
+  }
+
+  /** PR-C (TSP-7): whether the live wire-form draft carries a submittable
+   *  payload — non-empty text or at least one staged image placeholder. */
+  const composerDraftSubmittable = (): boolean => {
+    if (composer.getDraft() !== '') return true
+    return (imageBinding?.draftImages.occurrences().length ?? 0) > 0
+  }
+
+  /**
+   * PR-C (TSP-7): the Model/Effort click — the ONE registered `/model`
+   * command's own UI entry (§3.1's late-bound seam), admitted only on the
+   * current seat. The draft and caret are untouched: the picker is a modal
+   * layer over the same composer.
+   */
+  const composerModelClicked = (entry: 'models' | 'effort'): void => {
+    if (!composerActionsAdmitted()) return
+    const handlers = boundHandlers
+    if (handlers === undefined) return
+    try {
+      handlers.openModelPicker(entry)
+    } catch (error) {
+      // The loud placeholder of an unwired composition is a USER-facing fact,
+      // not a renderer crash: the dock states it and the keyboard route stays.
+      display.notify('model selection is unavailable in this session (the /model command is not registered)', 'error')
+      options.logError?.('tsp renderer: composer model entry refused', { error: errorText(error) })
+    }
+  }
+
+  /** The Quiet Composer's narrow-pane threshold (measured: 400px pane is
+   *  below this, the 637px GUI pane is above it). */
+  const QUIET_COMPOSER_NARROW_COLS = 56
+  /** The bounded display budgets of the Quiet Composer labels. */
+  const QUIET_COMPOSER_MODEL_WIDTH = 34
+  const QUIET_COMPOSER_MODEL_NARROW_WIDTH = 14
+  const QUIET_COMPOSER_PERMISSION_WIDTH = 24
+
+  /** The controlled editor node: the SAME program-owned draft/cursor cell,
+   *  with the v2 placeholder and NO `> ` prompt inside the quiet shell. */
+  const composerEditorNode = (): Node => {
+    const state = composer.state()
+    return composerActionsSupported()
+      ? ui.editor({
+          key: 'composer',
+          text: state.text,
+          cursor: state.cursor,
+          maxLines: 8,
+          placeholder: 'What would you like to work on?',
+        })
+      : ui.editor({
+          key: 'composer',
+          text: state.text,
+          cursor: state.cursor,
+          maxLines: 8,
+          placeholder: 'Message',
+          prompt: '> ',
+        })
+  }
+
+  /** The authoritative permission label, one-line sanitized and bounded. */
+  const permissionTriggerLabel = (): string => {
+    const fact = presentedStatus?.access.permissionPreset
+    const source = fact?.label !== undefined && fact.label !== '' ? fact.label : fact?.id
+    const clean = source === undefined ? '' : sanitizedPhysicalLine(source).trim()
+    if (clean === '') return 'Permission'
+    if (session.caps.cols < QUIET_COMPOSER_NARROW_COLS && fact?.id === 'workspace-write') return 'Write'
+    return clampMiddle(clean, QUIET_COMPOSER_PERMISSION_WIDTH)
+  }
+
+  /** The edit-time admission of the permission menu: a real main-subject
+   *  permission fact, a non-empty standard roster, the bound UI owner and no
+   *  modal/Reader/picker/hydration/disposed owner. */
+  const permissionMenuAdmitted = (): boolean =>
+    permissionComposerAffordance() && visualActionsAdmitted()
+
+  /** Toggle the menu; opening starts a NEW expansion identity and lands the
+   *  keyboard highlight on the current preset when one is present. */
+  const composerPermissionToggled = (): void => {
+    if (!permissionMenuAdmitted()) return
+    if (permissionMenuOpen) {
+      closePermissionMenu()
+      render()
+      return
+    }
+    const options = permissionMenuOptions()
+    if (options.length === 0) return
+    permissionMenuOpen = true
+    permissionMenuEpoch += 1
+    const selected = options.findIndex(option => option.selected)
+    permissionMenuIndex = selected < 0 ? 0 : selected
+    render()
+  }
+
+  /** One admitted option click. The captured expansion scope and epoch are
+   *  both re-checked against the live renderer before the single writer is
+   *  called; the menu closes FIRST so no second click can ever double-apply. */
+  const permissionOptionChosen = (renderScope: number, id: string, menuEpoch: number): void => {
+    if (disposed || hydrating || !inputBound) return
+    if (renderScope !== scopeEpoch || !permissionMenuOpen || menuEpoch !== permissionMenuEpoch) return
+    if (!permissionMenuAdmitted()) {
+      closePermissionMenu()
+      render()
+      return
+    }
+    const option = permissionMenuOptions().find(candidate => candidate.id === id)
+    if (option === undefined) {
+      closePermissionMenu()
+      render()
+      return
+    }
+    closePermissionMenu()
+    render()
+    if (option.selected) return // the current preset is a no-op, never a write
+    const handlers = boundHandlers
+    const select = handlers?.selectPermission
+    if (select === undefined) {
+      display.notify('permission selection is unavailable in this session', 'error')
+      return
+    }
+    try {
+      select(id)
+    } catch (error) {
+      display.notify('permission selection is unavailable in this session', 'error')
+      options.logError?.('tsp renderer: permission selection entry refused', { error: errorText(error) })
+    }
+  }
+
+  /** The menu's keyboard slice: Up/Down cycle, Enter chooses the highlighted
+   *  option, Escape closes ONLY the menu. Returns true when the key was
+   *  consumed by the menu. */
+  const permissionMenuHandleKey = (key: Key): boolean => {
+    if (!permissionMenuOpen) return false
+    const optionsNow = permissionMenuOptions()
+    if (optionsNow.length === 0) {
+      closePermissionMenu()
+      render()
+      return false
+    }
+    const count = optionsNow.length
+    if (key.name === 'up') {
+      permissionMenuIndex = (Math.min(permissionMenuIndex, count - 1) - 1 + count) % count
+      render()
+      return true
+    }
+    if (key.name === 'down') {
+      permissionMenuIndex = (Math.min(permissionMenuIndex, count - 1) + 1) % count
+      render()
+      return true
+    }
+    if (key.name === 'enter') {
+      const option = optionsNow[Math.min(permissionMenuIndex, count - 1)]!
+      permissionOptionChosen(scopeEpoch, option.id, permissionMenuEpoch)
+      return true
+    }
+    if (key.name === 'escape') {
+      closePermissionMenu()
+      render()
+      return true
+    }
+    // Any other key closes the menu and then reaches the ORIGINAL composer
+    // path exactly once (never both a menu action and a composer action).
+    if (closePermissionMenu()) render()
+    return false
+  }
+
+  /** The Quiet Composer's model/effort labels + title, with the frozen
+   *  narrow-pane degradation and external-fact sanitization. */
+  const quietComposerModelView = (): { label: string; title: string; interactive: boolean } => {
+    const model = presentedStatus?.composition.model
+    const cleanName = model?.displayName === undefined ? undefined : sanitizedPhysicalLine(model.displayName).trim()
+    const cleanEffort = model?.reasoningEffort === undefined ? undefined : sanitizedPhysicalLine(model.reasoningEffort).trim()
+    const narrow = session.caps.cols < QUIET_COMPOSER_NARROW_COLS
+    const value = cleanName === undefined || cleanName === ''
+      ? undefined
+      : clampMiddle(cleanName, narrow ? QUIET_COMPOSER_MODEL_NARROW_WIDTH : QUIET_COMPOSER_MODEL_WIDTH)
+    return {
+      label: `${value ?? 'Model'} ▾`,
+      title: model === undefined
+        ? 'Model — type /model to switch'
+        : `Model ${cleanName}${cleanEffort === undefined || cleanEffort === '' ? '' : ` · effort ${cleanEffort}`} — type /model to switch`,
+      interactive: boundHandlers !== undefined,
+    }
+  }
+  /** The narrow-pane effort abbreviation: keep the REAL value's identity,
+   *  never a guessed `H` for every non-High value. Unknown free-form values
+   *  keep a bounded prefix instead of being relabelled. */
+  const narrowEffortLabel = (value: string): string => {
+    switch (value.toLowerCase()) {
+      case 'low': return 'L'
+      case 'medium': return 'M'
+      case 'high': return 'H'
+      case 'max': return 'Max'
+      case 'off': return 'Off'
+      default: return clampMiddle(value, 6)
+    }
+  }
+  const quietComposerEffortView = (): { label: string; title: string; interactive: boolean } => {
+    const effort = presentedStatus?.composition.model?.reasoningEffort
+    const clean = effort === undefined ? undefined : sanitizedPhysicalLine(effort).trim()
+    if (clean === undefined || clean === '') {
+      return { label: 'Effort ▾', title: 'Reasoning effort — type /model to change', interactive: boundHandlers !== undefined }
+    }
+    return {
+      label: `${session.caps.cols < QUIET_COMPOSER_NARROW_COLS ? narrowEffortLabel(clean) : clampMiddle(clean, 14)} ▾`,
+      title: `Reasoning effort ${clean} — type /model to change`,
+      interactive: boundHandlers !== undefined,
+    }
+  }
+
+  /** Build the ONE Quiet Composer shell around the controlled editor. */
+  const quietComposerNode = (editor: Node): Node | undefined => {
+    if (!composerActionsSupported()) return undefined
+    // A modal/Reader/picker/hydration frame invalidates an open menu before
+    // it can paint a stale click target.
+    if (permissionMenuOpen && !permissionMenuAdmitted()) closePermissionMenu()
+    const baseOptions = permissionMenuOptions()
+    const index = Math.min(Math.max(0, permissionMenuIndex), Math.max(0, baseOptions.length - 1))
+    permissionMenuIndex = index
+    const options = baseOptions.map((option, optionIndex) => ({ ...option, highlighted: optionIndex === index }))
+    const model = quietComposerModelView()
+    const effort = quietComposerEffortView()
+    const renderScope = scopeEpoch
+    return quietComposerView({
+      editor,
+      scope: `s${renderScope}`,
+      busyEpoch,
+      permission: {
+        label: permissionTriggerLabel(),
+        interactive: permissionComposerAffordance(),
+        expanded: permissionMenuOpen && options.length > 0,
+        options,
+        menuEpoch: permissionMenuEpoch,
+      },
+      model,
+      effort,
+      busy: presentedStatus?.activity.busy === true && !hydrating,
+      sendable: composerDraftSubmittable(),
+      onPermissionToggle: () => { composerPermissionToggled() },
+      onPermissionChoose: (id, menuEpoch) => { permissionOptionChosen(renderScope, id, menuEpoch) },
+      onModel: () => {
+        if (closePermissionMenu()) render()
+        composerModelClicked('models')
+      },
+      onEffort: () => {
+        if (closePermissionMenu()) render()
+        composerModelClicked('effort')
+      },
+      onSend: () => {
+        if (closePermissionMenu()) render()
+        composerSendClicked()
+      },
+      onStop: () => {
+        if (closePermissionMenu()) render()
+        composerStopClicked()
+      },
+    })
+  }
+
   /** The EXACT payload of one admitted publication: the final ChartFact as
    *  pretty JSON, or the admitted SVG source verbatim (never trimmed). */
   const visualCopyPayload = (publication: PublishedVisual): string | undefined => {
@@ -2313,6 +2953,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    unconditional exit. Interrupting a live Agent must not kill the
     //    TUI. The composer's exit-empty (below) is the only exit gesture.
     if (key.ctrl === true && key.name === 'c') {
+      // Ctrl+C always belongs to the original cancel owner; the local menu
+      // expansion is revoked without consuming the intent.
+      if (closePermissionMenu()) render()
       handlers.cancel()
       return false
     }
@@ -2320,6 +2963,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (sessionBrowser?.handleKey(key)) return false
     if (presetPicker?.handleKey(key)) return false
     if (modelPicker?.handleKey(key)) return false
+    // TSP-7 PR-E: the Quiet Composer Permission menu sits AFTER every seat/
+    // Reader/picker owner and BEFORE the original Escape cancel. Up/Down
+    // cycle, Enter chooses, Escape closes ONLY the menu; any other key closes
+    // the menu and then reaches the ONE composer reducer exactly once.
+    if (permissionMenuHandleKey(key)) return false
     if (key.name === 'escape') {
       handlers.cancel()
       return false
@@ -2353,16 +3001,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     //    Enter gestures, paste, edits). A typed `q` is TEXT now.
     const edit = composer.applyKey(key)
     if (edit.kind === 'submit') {
-      handlers.noteUserInput()
-      // PR3-B §3.4 submission gesture ordering: snapshot the serialized
-      // draft, CLEAR the composer BEFORE invoking onSubmit (a synchronous
-      // rejection/restore merges into the empty draft instead of being
-      // erased by a post-callback clear), and never re-apply a stale
-      // pre-callback editor snapshot afterwards. The submission controller
-      // owns the business outcome (admission, rollback, queue).
-      const serializedDraft = composer.getDraft()
-      composer.setDraft('')
-      handlers.submit(serializedDraft, edit.gesture)
+      submitComposerDraft(handlers, edit.gesture)
     }
     if (edit.kind === 'edited') handlers.noteUserInput()
     if (edit.kind === 'exit-empty') return true
@@ -2440,9 +3079,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         if ('sf' in input.event && input.event.sf === details.surface.id) return false
         // While the Screen exists the masked base takes no user input claim at
         // all — not even through an event carrying the base surface id.
+        // The native modal's `change` belongs to this same class: a choice made
+        // on a base form the user may not be looking at must never reach it.
         if (input.event.ev === 'focus' || input.event.ev === 'edit' || input.event.ev === 'undo'
           || input.event.ev === 'send' || input.event.ev === 'toggle'
-          || input.event.ev === 'select' || input.event.ev === 'activate' || input.event.ev === 'action') {
+          || input.event.ev === 'select' || input.event.ev === 'activate' || input.event.ev === 'action'
+          || input.event.ev === 'change') {
           return false
         }
       }
@@ -2628,6 +3270,47 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (imageBindingInstalled) throw new Error('the TSP renderer image binding is already installed')
       imageBindingInstalled = true
       imageBinding = binding
+    },
+    // TSP-7 PR-A: the read-only status reader. Binding is capability install
+    // ONLY: no snapshot is sampled and no frame is painted here, so a mount
+    // that fails afterwards leaves nothing to unwind.
+    bindStatusReader: (reader) => {
+      if (disposed) throw new Error('cannot bind status reader after TSP renderer disposal')
+      if (statusReaderInstalled) throw new Error('the TSP renderer status reader is already bound')
+      statusReaderInstalled = true
+      statusReader = reader
+    },
+    // TSP-7 PR-D: the one-shot footer config. The presentation compiles and
+    // the FULL notice set commits BEFORE the single render, so no frame ever
+    // paints a partially-notified dock (the reentrancy rule: commit the
+    // decided state, then render once). The footer notices are
+    // MOUNT-scoped facts: they are enqueued in their fixed order at bind
+    // time, never re-issued by a later subject/hydration, and the ordinary
+    // NOTICE_LIMIT eviction never applies to them (a legal config can
+    // produce up to four distinct notices; dropping one would hide a real
+    // compatibility fact the plan requires visible).
+    bindNativeFooterConfig: (config) => {
+      if (disposed) throw new Error('cannot bind the footer config after TSP renderer disposal')
+      if (footerPresentation !== undefined) throw new Error('the TSP renderer footer config is already bound')
+      // Compile first: a throwing compile (a hostile layout) leaves the
+      // renderer in the clean unbound state instead of half-installed. The
+      // compile also decides the renderer-owned unavailable-items notice
+      // (a registry fact, never a domain builtin-list copy).
+      footerPresentation = compileNativeFooterPresentation(config)
+      // The whole set commits synchronously in ONE dock update, into the
+      // MOUNT-scoped footer segment — the transient `notify()` list (with its
+      // eviction limit and per-call render) is deliberately bypassed. Every
+      // footer notice is an error-severity compatibility fact (the dock
+      // prefixes it with `!`).
+      const footerNotices: DisplayDockNotice[] = footerPresentation.notices.map((text, index) => ({
+        id: `fn${index + 1}`,
+        text,
+        kind: 'error',
+      }))
+      if (footerNotices.length > 0) {
+        dock.footerNotices = footerNotices
+        render()
+      }
     },
     bindInput: (handlers) => {
       if (disposed) throw new Error('the TSP renderer is disposed')

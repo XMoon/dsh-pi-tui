@@ -298,6 +298,8 @@ function isPresentableImageRef(ref: unknown): ref is ImageAttachmentRefLike {
 export type ToolImageState =
   /** The pane negotiated neither the `image` kind nor the `blobs` feature. */
   | { readonly state: 'unsupported' }
+  /** The user disabled image preview through PI_IMAGE_PROTOCOL. */
+  | { readonly state: 'disabled' }
   /** The display subject has no immutable image scope: nothing may be read. */
   | { readonly state: 'no-scope' }
   /** The authorized read has not produced bytes yet. */
@@ -403,6 +405,7 @@ export function imageIdentityText(ref: unknown): string {
 export function imageStatusText(state: ToolImageState): string | undefined {
   switch (state.state) {
     case 'unsupported': return 'Native image display unavailable in this Tern pane'
+    case 'disabled': return 'Image preview disabled by PI_IMAGE_PROTOCOL'
     case 'no-scope': return 'Image unavailable for this session'
     case 'loading': return 'Loading image…'
     case 'error': return 'Image read failed'
@@ -438,7 +441,7 @@ function imageBlockNodes(
   const status = state === undefined ? 'Native image display unavailable in this Tern pane' : imageStatusText(state)
   const info = status === undefined ? identity : `${identity} · ${status}`
   const nodes: Node[] = [ui.text({ key: `${keyPrefix}${block.index}-info`, text: sanitizeDisplayText(info) })]
-  if (state === undefined || state.state === 'unsupported' || state.state === 'no-scope') return nodes
+  if (state === undefined || state.state === 'unsupported' || state.state === 'disabled' || state.state === 'no-scope') return nodes
   const blob = state.state === 'ready' ? state.blobId : PENDING_IMAGE_BLOB_ID
   nodes.push(ui.image({ key: `${keyPrefix}${block.index}-image`, blob, alt }))
   return nodes

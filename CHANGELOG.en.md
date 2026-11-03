@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-11-03
+
+### Installation and version pairing
+
+This release validates against the published DSH `0.2.1-rc.5` and keeps the
+minimum at `0.2.1-rc.2`. Installing DSH requires explicitly allowing its
+native install scripts:
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.5
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.5
+dsh --profile pi-tui
+```
+
+Upgrading from the published `0.5.4`: let in-flight conversation turns and
+background jobs finish, exit the old TUI/DSH process normally, then install
+`0.5.5` with the official commands above and start it again. Do not install
+the new package while the old version is still running and expect a
+zero-interruption hot swap; this release makes no in-place lossless upgrade
+promise for a live old Host. The published `0.5.4` and `0.5.3` remain
+compatible with `0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.4`. Older DSH
+releases keep their pairings unchanged: `@deepseek-ai/dsh@0.2.0-rc.2` uses
+`@xmoon76/dsh-pi-tui@0.5.1` or `@xmoon76/dsh-pi-tui@0.5.2-rc.1`;
+`@deepseek-ai/dsh@0.2.0-rc.1` (including `0.1.7-rc.2`) uses
+`@xmoon76/dsh-pi-tui@0.5.0`, and `@deepseek-ai/dsh@0.1.7-rc.1` uses
+`@xmoon76/dsh-pi-tui@0.4.8`.
+
+### Added
+
+- **SIXEL image support in the Direct terminal.** On Direct terminals that
+  genuinely report SIXEL (such as Windows Terminal), conversation and draft
+  images render inline, with an image workspace, a fullscreen viewer and SVG
+  thumbnails/viewer; SIXEL images coexist with automatic scrollbars.
+
+- **Native SIXEL support in tmux and Zellij.** A tmux pane renders SIXEL
+  automatically when the server reports `sixel_support` and the display
+  client is proven to support it; Zellij negotiates its graphics channel from
+  real pane evidence and selects Kitty > SIXEL > text.
+
+- **Subagent cards show the real agent identity.** Relay and settled cards
+  display readable agent titles derived from the official projection and stay
+  current with it; same-turn agent relays fold together with their work.
+
+### Changed
+
+- **Session switching and resume are decisive and truthful.** `/new`, a
+  session switch or `/resume` no longer waits for the old turn to finish
+  naturally — it stops the session being left immediately; `/resume` reports
+  success by the real settled outcome, and a preserved queue is explained in
+  the queue pane as waiting for the next prompt.
+
+- **`PI_IMAGE_PROTOCOL` is now one explicit protocol selection across every
+  backend.** It accepts `auto`, `kitty`, `sixel`, `iterm2` and `none`/`0`:
+  explicit values try only the selected protocol and fall back to text instead
+  of switching transports; unknown values fail startup. The real
+  tmux/Zellij transport gates and DCS ownership stay unchanged.
+
+- **Zellij + Windows Terminal automatic mode avoids the startup Kitty false
+  positive.** An early Kitty `OK` no longer selects Kitty; when the pane's DA1
+  and the local Zellij version qualify, SIXEL is used, otherwise text. Real
+  Kitty and every other automatic environment keep Kitty priority.
+
+### Fixed
+
+- **Terminal progress writes are no longer silently dropped** on terminals
+  without a stateful progress projection.
+
 ## [0.5.4] - 2026-10-29
 
 ### Installation and version pairing
@@ -2079,7 +2146,8 @@ Users who must keep DSH `0.1.1-rc.2` should use `@xmoon76/dsh-pi-tui@0.3`.
 - Fullscreen layout, Ctrl+F transcript search, theme system.
 - Single-package release model.
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3
 [0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1

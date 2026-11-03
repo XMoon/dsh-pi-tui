@@ -36,7 +36,7 @@ import type { SkillCatalogCapability } from '../../runtime/catalog-port.ts'
 import type { SessionScopeAuthority } from '../session/scope.ts'
 import type { SessionRuntime as ApplicationSessionRuntime } from '../session/runtime.ts'
 import { CatalogRefreshCoordinator, CoalescingRefreshGate, type CatalogRefreshOutcome, type CatalogRefreshRequest, type CatalogRefreshSource } from './catalog-refresh.ts'
-import { registerTuiCommands, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
+import { registerTuiCommands, type ClientReloadCommandResult, type CommandRegistryLike, type HostCommandClaim, type InitialCommandCatalog, type SubmitDelivery, type TuiCommandRunner } from '../../commands.ts'
 import type { ClientCommandRegistry } from './client-command-registry.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
@@ -49,6 +49,7 @@ import { draftHasImages } from '../../client/media/draft-attachments.ts'
 import { prepareUserMessage } from '../submission/direct-message-preparation.ts'
 import type { ModelSelectionValue } from '../../domain/session/model-selection.ts'
 import type { SessionScope } from '../session/scope.ts'
+import type { NavigationIntent } from '../session/transition.ts'
 import type { TuiApp } from '../../tui-app.ts'
 import type { CommandRuntime } from './runtime.ts'
 import type { ModelSelectionOwner, SelectionRef } from './model-selection.ts'
@@ -153,7 +154,16 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
    *  and sessionTransitionPending seams). */
   readonly transition: {
     pending(): boolean
-    run<T>(task: () => Promise<T> | T): Promise<T>
+    /**
+     * Run one gated session transition. `navigation` marks a USER NAVIGATION
+     * (`/new`, a selected-session switch): the runtime captures that scope
+     * before its first await and its transition admission stops the captured
+     * old generation BEFORE the admitted writers drain. `undefined` (e.g. the
+     * `/preset` swap) keeps the plain transition admission and never cancels.
+     * The intent's `admission.oldStopAccepted` records whether the one-shot
+     * stop was accepted (always false without a navigation).
+     */
+    run<T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T>
   }
   /** The command registry lookup (the Host commands service), or undefined. */
   readonly commandsRegistry: () => CommandRegistryLike | undefined
@@ -268,6 +278,7 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
     ensureSession(): Promise<void>
     withWriter: CommandSessionRuntime['withWriter']
     switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
+    switchSessionOutcome?(sessionId: string, expectedScope?: SessionScope): Promise<import('../session/runtime.ts').SessionSwitchOutcome>
     /** The application Session runtime's `/fork` entry. Its `SessionForkOutcome`
      *  carries the POST-ADOPTION navigation identity, so the facade can tell a
      *  real adoption from a superseded/parked child that also reports success. */
@@ -333,6 +344,9 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly submission: {
     prepareDeps: () => Parameters<typeof prepareUserMessage>[2]
     settleQueueRecalls(committed: boolean): void
+    /** M4 PR4: the controller-owned accepted-write lifetime (the SAME
+     *  `beginUnsettledClientWrite`, never a second counter). */
+    beginClientWrite(): () => void
   }
   /** The shared prompt-assembly state objects. */
   readonly promptState: {
@@ -352,6 +366,14 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
   readonly openRewindPicker: () => void
   /** The ONE exit orchestration. */
   readonly requestExit: () => void
+  /**
+   * M4 PR4: the split Client's ONE manual reload entry. Supplied by the
+   * composition root only where a real Client process capability is mounted;
+   * absent on Direct, whose `/reload-client` answers its fixed unavailable
+   * refusal. Purely synchronous — the caller must not `await` between the
+   * safety decision and the process request.
+   */
+  readonly requestClientReload?: () => ClientReloadCommandResult
   /** The launcher's appExit. */
   readonly exit: TuiCommandRunner['exit']
 }
@@ -386,6 +408,19 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
   refreshCompletions(): void
   /** Bind one submission's resolved delivery for its launch window. */
   withCommandDelivery<T>(delivery: SubmitDelivery, run: () => T): T
+  /**
+   * PR-C (TSP-7): open the SAME registered `/model` picker the typed command
+   * runs, from a high-frequency composer control. It is admitted only while
+   * the `/model` registration actually succeeded (`commandsRegistered` with a
+   * live `modelPickerOpener`); an unregistered surface notifies the existing
+   * error and returns without reading any catalog. `entry` changes only the
+   * panel's initial presentation focus.
+   */
+  openModelPicker(entry: 'models' | 'effort'): void
+  /** Whether the native `/model` picker UI entry is actually installed
+   *  (registered, not Host-owned). The footer affordance uses this real
+   *  business-entry fact, never the painted button alone. */
+  modelPickerAvailable(): boolean
   /** Request one catalog refresh through the coordinator. */
   requestCatalogRefresh(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
   /** Whether the catalog coordinator is registered yet. */
@@ -505,6 +540,15 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * the unwired default simply runs the launch. */
   
   let withCommandDelivery = <T>(_delivery: SubmitDelivery, run: () => T): T => run()
+
+  /**
+   * PR-C (TSP-7): the installed `/model` UI entry — the `openModelPicker`
+   * member `registerTuiCommands` returns, captured only when the `/model`
+   * registration itself succeeded. `undefined` means "not registered (yet)":
+   * the public entry then refuses with the existing notice path instead of
+   * constructing a request of its own.
+   */
+  let modelPickerOpener: ((entry: 'models' | 'effort') => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
 
   /** Consume TUI-local command draft dispositions after DSH normalizes the
    * public CommandResult. A missing id is used only for a thrown command
@@ -709,6 +753,43 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     })
   }
 
+  /** PR-C (TSP-7): the ONE `/model` UI entry — the registered handler's own
+   *  body, admitted only while its registration is live. A refusal states
+   *  itself through the existing notice path; it never constructs a
+   *  `ModelPickerRequest` of its own. */
+  const openModelPicker = (entry: 'models' | 'effort'): void => {
+    if (!commandsRegistered || modelPickerOpener === undefined) {
+      deps.notify('model selection is unavailable in this session (the /model command is not registered)', 'error')
+      return
+    }
+    // The UI entry obeys the SAME capability admission the typed `/model`
+    // route already enforces (tsp-capability): a mounted renderer whose pane
+    // cannot present the native picker must not run the handler, because its
+    // PiTui fallback presenter has no `TuiApp` on the TSP branch. The mounted
+    // presenter getter is the existing availability fact — no new state. On
+    // the PiTui branch the typed presenter IS the fallback, so the entry
+    // simply runs (it has no composer consumer there anyway).
+    if (deps.app() === undefined && deps.modelPresentation?.() === undefined) {
+      deps.notify("This command's UI is not available in TSP yet", 'error')
+      return
+    }
+    // The registered handler's own runOwned/diag/sessionId wiring owns this
+    // promise (see createModelCommands); the surface adds no second owner. A
+    // resolved ERROR result is surfaced through the existing notice path (the
+    // typed `/model` route shows the same text through the command card);
+    // a rejection is diagnostics only — never a bare floating promise.
+    const opened = modelPickerOpener(entry)
+    void opened.then((result) => { // allowlist: result observer — the command owns the task
+      if (result.kind === 'error' && typeof result.text === 'string' && result.text !== '') {
+        deps.notify(result.text, 'error')
+      }
+    }, (error: unknown) => { // allowlist: diagnostics observer, the command owns the task
+      deps.logError(`tui-runner: model picker UI entry failed: ${safeErrorMessage(error)}`)
+    })
+  }
+
+  const modelPickerAvailable = (): boolean => commandsRegistered && modelPickerOpener !== undefined
+
   const registerCommands = (initial?: InitialCommandCatalog): void => {
     if (commandsRegistered) return
     commandsRegistered = true
@@ -759,6 +840,12 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       isSkillWrapperName = installed.isSkillWrapper
       refreshCommandCompletions = installed.refreshCommandCompletions
       withCommandDelivery = installed.withDelivery
+      // PR-C (TSP-7): the `/model` UI entry exists only where the registration
+      // really installed one. `registerTuiCommands` registers `/model` at its
+      // frozen position before returning, so a missing member here can only
+      // mean the registration degraded (a Host-claimed name): the surface then
+      // refuses the composer control truthfully instead of guessing a route.
+      modelPickerOpener = installed.openModelPicker
       takeCommandDraftDisposition = installed.takeCommandDraftDisposition
       // The coordinator's surface hooks point INTO the command surface;
       // the command runtime's refresh facades (and the switch/first-session
@@ -1127,6 +1214,7 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
         return 'applied' as const
       },
       switchSession: (sessionId, expectedScope) => deps.session.switchSession(sessionId, expectedScope),
+      ...(deps.session.switchSessionOutcome === undefined ? {} : { switchSessionOutcome: (sessionId, expectedScope) => deps.session.switchSessionOutcome!(sessionId, expectedScope) }),
       forkSession: async (sourceSessionId) => {
         const result = await deps.session.forkSession(sourceSessionId)
         // The ONE `/fork` success notice. `kind: 'success'` alone also covers a
@@ -1173,8 +1261,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // command-side switches run create AND commit inside one exclusive
       // section via this seam. Host fork dispatch is outside this FIFO;
       // forked-child adoption and rewind navigation use their own gated
-      // adoption path.
-      withSessionTransition: <T>(task: () => Promise<T> | T) =>
+      // adoption path. `navigation` opts a USER NAVIGATION into the runtime's
+      // exact-owner stop-before-drain admission; `/preset` and every other
+      // transition keep the plain admission.
+      withSessionTransition: <T>(task: () => Promise<T> | T, navigation?: NavigationIntent) =>
         deps.transition.run(async () => {
           try {
             return await task()
@@ -1183,10 +1273,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
             // transitionTo; do not leave a deferred recall unresolved.
             deps.submission.settleQueueRecalls(false)
           }
-        }),
+        }, navigation),
       enterView: (childId: Id, label: string | undefined, mode: 'one-shot' | 'continuable', parentSessionId: Id, activity: 'running' | 'inactive') =>
         deps.viewer.enterView(childId, label, mode, parentSessionId, activity),
       requestExit: deps.requestExit,
+      ...(deps.requestClientReload === undefined ? {} : {
+        requestClientReload: () => deps.requestClientReload!(),
+      }),
+      beginClientWrite: () => deps.submission.beginClientWrite(),
       exit: deps.exit,
     }
     // The ONE generic→concrete bridge of this owner: the frozen
@@ -1242,6 +1336,8 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     // The delivery binding is a LATE-REBOUND slot: read it on every call, or the
     // owner would hand out the pre-registration default forever.
     withCommandDelivery: (delivery, run) => withCommandDelivery(delivery, run),
+    openModelPicker,
+    modelPickerAvailable,
     requestCatalogRefresh,
     catalogRefreshAvailable,
     isSkillInvocation,

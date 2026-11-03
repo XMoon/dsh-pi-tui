@@ -164,6 +164,7 @@ async function mount(
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
+    openModelPicker() {},
   })
   const opens: TaskBrowserPresentationHandle[] = []
   const harness: WorkHubHarness = {
@@ -683,6 +684,7 @@ test('real Task Runtime task facts commit through the TSP presentation port to t
     presentation: () => h.renderer.taskPresentation,
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   t.after(() => tasks.resetTasks())
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
@@ -718,6 +720,7 @@ test('opening the Work Hub retires the Model, Preset and Session Browser present
   assert.ok(model, 'the pane advertises the Model picker kinds')
   const modelHandle = model.open({
     subject: { sessionless: false },
+    entry: 'models',
     isCurrent: () => true,
     retry: () => {},
     apply: () => 'committed',
@@ -875,6 +878,7 @@ test('a stale sibling sweep stops when a retirement callback opens a still-to-be
     () => mountedPickerKeys(h.pane).some(key => key.startsWith('session-browser-')))
   const outer = modelPresentation.open({
     subject: { sessionless: false },
+    entry: 'models',
     isCurrent: () => true,
     retry: () => {},
     apply: () => 'committed',

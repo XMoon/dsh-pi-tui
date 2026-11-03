@@ -152,6 +152,44 @@ sanitizer keeps its own vetted OSC 8 contract; that contract is unchanged).
 - **Never** add a terminal emulator, PTY, image passthrough or a
   color-preserving parser dependency to solve this.
 
+## Image protocol preference (`PI_IMAGE_PROTOCOL`)
+
+`PI_IMAGE_PROTOCOL` is the ONE Client-local startup preference for inline image
+pixels. `src/tui/graphics/image-protocol-preference.ts` parses it once per
+application/renderer lifetime; it is a protocol SELECTION, never a capability.
+The real transport admission described below still decides whether the selected
+family can actually paint.
+
+| Value (trimmed, case-insensitive) | Meaning |
+|---|---|
+| unset / empty / `auto` | Existing automatic order: Direct/Zellij keep `Kitty > SIXEL > text`; tmux keeps its live U1/Sxl relative order. |
+| `kitty` | Only an admitted Kitty transport; no SIXEL or iTerm2 fallback. |
+| `sixel` | Only an admitted SIXEL transport; a static Kitty/iTerm2 detection cannot satisfy it. |
+| `iterm2` | Only the Direct legacy OSC 1337 path; multiplexer panes paint text. |
+| `none` / `0` | Hard off for every renderer's image pixels; attachment input, persistence and model input are unchanged. |
+| Any other value | A startup configuration error that names the variable, the actual value and the allowed values. |
+
+Only `auto` applies the strict local Zellij + Windows Terminal compatibility
+rule: a Kitty `a=q OK` is treated as the known startup false positive only when
+`ZELLIJ` is a non-empty session marker, `TMUX` and `STY` are empty,
+`WT_SESSION` is non-empty, `TERM_PROGRAM` is absent/empty or exactly
+`windows_terminal` (lowercased), no SSH marker is set, no conflicting
+Kitty/Ghostty/WezTerm/iTerm/Warp marker or `TERM` identity is present, and the
+preference is `auto`. The filter only discards Kitty's startup answer: SIXEL is
+still selected solely from the pane's DA1 attribute `4`, the local Zellij
+`>= 0.45.0` gate and Screen readiness; otherwise the pane paints text. Every
+other automatic environment keeps the existing order. An explicit
+`kitty`/`sixel`/`iterm2`/`none` always overrides this auto rule.
+
+No preference may bypass a physical gate: Direct SIXEL still requires DA1
+attribute `4` plus the Screen's real cell/background facts; Zellij still needs
+its one bounded negotiation and version gate; tmux still needs the live single
+display client plus `sixel_support=1`/`Sxl` (native) or U1/passthrough (virtual
+Kitty); a managed DCS still needs the trusted registry. The experimental TSP
+renderer's native `ui.image` path is enabled only for `auto` with the negotiated
+`image`+`blobs` capability; explicit values render text-only disabled status,
+while `ui.chart`, model attachments and attachment persistence are unaffected.
+
 ## Kitty graphics ownership
 
 Inline Kitty graphics are the ONE protocol family with a Client-local
@@ -222,8 +260,9 @@ retirement and the resident budget.
   no multiplexer in between. `TERM` is not an identity fact; a `tmux*`/`screen*`
   value (or `TMUX`/`ZELLIJ`/`STY`, or Herdr) still denies the DIRECT path
   because it is a transport boundary, not a brand policy. `PI_IMAGE_PROTOCOL=none/0`
-  is the global hard opt-out and `iterm2` keeps the iTerm2 path; no environment
-  override can force admission past a null or non-Kitty effective capability.
+  is the global hard opt-out, `iterm2` keeps the Direct iTerm2 path, and
+  `sixel` never changes this static answer: it denies the Native Kitty factory
+  above and is satisfied only by the Direct SIXEL owner's own DA1/Screen facts.
   A non-empty `ZELLIJ` marker makes the process a CANDIDATE: a separate Zellij
   factory creates the same one `KittyGraphicsCore` / `KittyTerminalFacade`
   Native path, sends exactly one per-handle bounded `a=q` query after the real
@@ -370,6 +409,242 @@ Proof: `test/tui/tmux-kitty-admission.test.ts`,
 `test/integration/kitty-tmux-screen.test.ts`, plus the Native and virtual halves
 of `test/tui/kitty-graphics-owner.test.ts` and the geometry parity in
 `test/tui/kitty-native-protocol.test.ts`.
+
+## SIXEL capability facts and the pixel gate
+
+SIXEL has no image-id residency model, so nothing here is shared with the Kitty
+Core. What the Client may rely on is one observed terminal fact and one gate:
+
+- **The primary DA1 is the only capability source for Direct SIXEL.** A terminal
+  that paints SIXEL advertises attribute `4` in its primary device-attributes
+  reply; the
+  graphics-inquiry query is not a reliable substitute (some terminals never
+  answer it). `ProcessTerminal` therefore observes a COMPLETE DA1 and exposes it
+  through the optional `Terminal.onSixelSupport()` (divergence X071). The
+  observation is passive: it issues no query, selects no protocol, and does not
+  change the keyboard-negotiation, program-status or color-query sentinels that
+  already own those replies. Parameters are matched as whole tokens, so `14` and
+  `42` are not SIXEL evidence. The observed answer belongs to the physical
+  terminal and survives `stop()`/`start()`; a new instance starts unknown.
+- **Admission is a candidate verdict, not permission to paint.**
+  `src/tui/graphics/sixel-capability.ts` folds the observation together with the
+  environment and the existing legacy capability into
+  `pending | admitted | denied`. An explicit `PI_IMAGE_PROTOCOL=none|0`, a
+  configured or detected Kitty/iTerm2 terminal, and any multiplexer topology
+  deny the candidate outright; no reply stays `pending`, which consumers treat
+  as "not paintable". A managed Kitty handle keeps precedence over SIXEL even
+  while its own admission is pending or revoked, so a multiplexed pane paints
+  text instead of silently switching protocol.
+- **Three real facts, one projection, one protocol answer.**
+  `src/tui/graphics/sixel-image.ts` is the only Direct SIXEL owner. It paints
+  only after the DA1 attribute, the active Screen's real `CSI 6;h;w t` reply and
+  the active Screen's real OSC 11 background have all arrived for THAT screen;
+  a missing fact is text, never a `9x18` default cell or a guessed background.
+  The screen handoff and every terminal resize re-observe those facts, and a
+  colour-scheme report re-observes them without changing the binding. Only then
+  does `effectiveImageProtocol()` answer `'sixel'` — from the owner's live
+  readiness, never from `getCapabilities().images` or `PI_IMAGE_PROTOCOL`.
+- **A DCS is a device command, so the Screen must own it.** A SIXEL raster has
+  no deletable id: only clearing the whole occupied cell footprint (`CSI 2K` per
+  affected row) removes it, and clearing the anchor row alone leaves pixels
+  behind. The Screen therefore receives exactly one narrow trust port
+  (`SixelScreenPort`, divergence X072): it reports the real footprint of an
+  EXACT string the owner encoded, and re-encodes a visible crop from the same
+  source at the same scale. A DCS is never parsed for syntax, sliced, truncated,
+  reflowed or composited as text; an unregistered one stays ordinary text.
+- **The image workspace consumes the same owner.** `ImageWorkspacePanel` keeps
+  ONE leased screen for its list/viewer states; its `ImageViewerPanel` and
+  `SvgViewerPanel` paint through the SAME `ImageGraphics` handle and
+  `SvgRasterLoader` the rest of the surface uses — never a second graphics owner
+  or SVG raster pipeline. An SVG thumbnail's clickable body is the Screen's
+  last-committed footprint (`paintedBodyAt`), read at hit time; a pending,
+  covered, collapsed or revoked occurrence holds no pixels and no hit.
+- **Residency follows the physical frame, not component lifetime.** A component
+  in SIXEL mode emits an inert candidate marker for its block, never a DCS. The
+  Screen collects the blocks its FINAL layout really shows — including a
+  bottom-clipped block and an anchor that scrolled above the viewport — and asks
+  the owner to reconcile that frame's demands. The owner grants residency within
+  its fixed budget (bottom-up: the newest visible content wins), answers
+  `materialize()` with the exact DCS only for a granted and ready window, and
+  takes no other token→DCS path. After a frame is really written, the Screen
+  reports every raster the physical screen still shows (written this frame, or
+  kept by the diff); the owner pins those occurrences, releases every other
+  retained record, and only then tasks the one encoder lane for granted-but-
+  unready blocks, which paint on a later settled frame. A component that merely
+  rendered, an occurrence scrolled off screen, and a pending or refused block
+  all hold no pixels and no clickable body.
+- **A residency decision never rewrites committed scrollback.** On the main
+  screen a projected block whose pixels already sit above the viewport is a
+  historical fact: a change of residency/materialization for the SAME occurrence
+  must be projected onto the previous physical line, not treated as new content.
+  Only a real content change (source, fold, deletion, reorder, text, width,
+  clear or reset) may become `firstChanged`; a no-write frame keeps the previous
+  physical raster set instead of releasing it as an empty one.
+- **The erase and the paint order belong to the physical Screen.** The main
+  screen (X073) expands its diff to the union of the old and new footprint,
+  erases every covered row before any text lands on it, and writes the command
+  after every text row of the frame, positioned from the clamped top margin and
+  protected by DECSC/DECRC because a DCS's post-command cursor is
+  terminal-defined. The alternate screen (X074) re-encodes the visible window
+  for a bottom-clipped or top-scrolled block, erases the old footprint, writes
+  text/border/overlay/scrollbar first and one command per visible block last. A
+  trusted anchor whose registered raster columns do not reach the scrollbar's
+  single track column keeps its intact command and only that anchor row loses the
+  bar glyph; a real horizontal overlap still yields the column, and an overlay
+  that claims the block still withholds it. The image's identity row above the
+  body stays text in every case.
+- **Untrusted text never becomes SIXEL.** The sanitizers accept no DCS; only a
+  codec operating on authorized image bytes may produce a sequence, and only the
+  owner's registry can make the Screen treat it as an image.
+
+### Native tmux SIXEL is a separate transport from passthrough
+
+A tmux pane that is compiled with native SIXEL support paints the pane's OWN
+SIXEL DCS; it does not need the Kitty passthrough envelope. The two transports
+therefore have different authorities and must never be collapsed:
+
+- **Admission is live server + client evidence, never a pane hint.**
+  `src/tui/graphics/tmux-sixel-admission.ts` admits only when the live tmux
+  server reports `#{sixel_support}=1`, exactly one ordinary display client
+  (Control Mode excluded) owns the pane's session with valid name/tty and is
+  not a nested multiplexer; `termname`/`termtype` are recorded as optional
+  live identity fields and may be empty when the client does not provide
+  them, and `show-messages -T -t <exact client>` reports exactly
+  one complete `Sxl: (flag) true`. A pane DA1 SIXEL attribute, `TERM_PROGRAM`,
+  `WT_SESSION`, `KITTY_WINDOW_ID` or a terminal brand is never proof. The
+  binding is immutable for the TUI lifetime; any later mismatch, lost server
+  support or lost Sxl revokes the handle one way, and only a restart may choose
+  a transport again.
+- **The automatic factory order is fixed.** `auto` tries Native Kitty, ONE
+  Zellij negotiated handle (Kitty > SIXEL > text), native tmux SIXEL, tmux
+  virtual Kitty, then Direct SIXEL. The explicit preferences use only their own
+  subset of that order and never create a competing backend: `kitty` never
+  admits a SIXEL transport (no Direct SIXEL factory, no native tmux SIXEL, and
+  the Zellij handle never considers it); `sixel` never constructs Native Kitty
+  or tmux virtual Kitty; `iterm2`/`none` create no managed handle. A live
+  known-U1 Kitty/Ghostty tmux client (or the explicit
+  `PI_TUI_TMUX_KITTY_PLACEHOLDERS=1` assertion) keeps the virtual transport
+  ahead of SIXEL in `auto`; a merely pending unknown-renderer U1 probe does not
+  outrank a proven Sxl client. `PI_TUI_TMUX_KITTY_IMAGES=0` disables only the
+  virtual Kitty transport and never this native SIXEL route;
+  `PI_IMAGE_PROTOCOL=none|0|kitty|iterm2` denies native tmux SIXEL before any
+  tmux query, while `sixel` admits only that native SIXEL route (never the
+  virtual Kitty one).
+- **Writes are trusted complete DCS only.** `src/tui/graphics/tmux-sixel.ts`
+  wraps the real `Terminal` and scans the byte stream for the owner's exact
+  `ESC P0;1;q … ESC \` DCS. The fork's `BoundedTerminalWriter` can split a
+  frame at 1 MiB, so a partial command is held (bounded by the owner's 32 MiB
+  registry budget) and never reaches the sink; a complete string is accepted
+  only when the owner's exact registry reports its footprint; an unregistered
+  complete DCS is a refusal with zero managed bytes, never ordinary text. After
+  registry acceptance a forced live admission probe runs BEFORE the first byte.
+  A refused command writes zero managed bytes, throws
+  `TmuxGraphicsRevokedError`, drops the owner's paintable facts, and the app
+  boundary schedules one full text repaint. Ordinary text and
+  other ANSI sequences pass through in order; ordinary IO errors propagate
+  unchanged. No unwrapped or partially wrapped command ever escapes, and no
+  `DCS tmux;` envelope is added.
+- **The same SIXEL owner and Screen contract.** `src/tui/graphics/sixel-image.ts`
+  keeps ONE encoder, registry, crop path and Screen port for Direct and tmux
+  SIXEL; only the admission source and the write gate differ. `graphics.mode`
+  stays `'sixel'`, so every media consumer keeps asking
+  `effectiveImageProtocol()` and gets `'sixel'` only while the owner can paint.
+
+Proof: `packages/pi-tui/test/terminal.test.ts` (passive DA1 observation),
+`test/tui/sixel-capability.test.ts` (production DA1 stream to verdict),
+`test/client/sixel-image.test.ts` (three-fact gating, trust registry, crop
+variants), `packages/pi-tui/test/tui-cell-size-input.test.ts` (the one cell-size
+parser), `packages/pi-tui/test/tui-sixel-main.test.ts` (X073 erase/paint order)
+and `packages/pi-tui/test/layout.test.ts` + `tui-alt-screen.test.ts` (X074 crop
+and paint order), plus the end-to-end chain in
+`test/integration/sixel-direct-screen.test.ts`. The native tmux SIXEL server/
+client evidence and the trusted-DCS write gate are guarded by
+`test/tui/tmux-sixel-admission.test.ts` and
+`test/integration/sixel-tmux-native-screen.test.ts`.
+
+### Zellij native SIXEL is one negotiated pane handle
+
+A Zellij pane inherits the outer terminal's environment, so `TERM_PROGRAM`,
+`WT_SESSION`, `getCapabilities().images` and an inherited Kitty capability are
+not pane capability proof. The product creates ONE `zellij-negotiated` handle
+per app lifetime when `ZELLIJ` is a non-empty session marker with no nested
+`TMUX`/`STY`. `PI_IMAGE_PROTOCOL=none`/`0`/`iterm2` creates no Zellij handle;
+`sixel` and `kitty` create it with their own single-protocol policy. That
+handle owns both the existing Native Kitty Core/Facade and a potential Direct
+SIXEL owner; only one of them can ever become paintable.
+
+- **Selection is driven by two live pane facts, exactly once.** In `auto`, the
+  existing bounded Kitty `a=q` query (500 ms) answers the pane's Kitty
+  transport; the terminal's passive primary DA1 observation
+  (`onSixelSupport`, attribute `4`) answers SIXEL. Kitty wins whenever its
+  probe returns the matching `OK`, even if DA1 also declares SIXEL, except for
+  the strict local Windows Terminal rule described above, where the startup
+  `OK` is filtered to `denied`. SIXEL is selected only when Kitty did not
+  admit, DA1 declares attribute `4`, and the LOCAL `zellij --version` is
+  strictly `>= 0.45.0` (older programs advertised SIXEL unconditionally). No
+  answer, a timeout, a missing/malformed version or an ineligible version
+  settles to text; DA1 has ONE 800 ms initial bound. Unknown is never treated
+  as positive.
+- **Explicit protocol values keep one decision path.** `kitty` sends the same
+  ONE `a=q` and accepts only a matching `OK`; SIXEL is never eligible. `sixel`
+  sends NO Kitty probe at all (`ZellijKittyAdmission.denyWithoutProbe()` commits
+  the Kitty branch denied after the coordinator's capability/callback wiring
+  exists), creates no Kitty pixel delegate, and still requires the same DA1 +
+  local version + Screen readiness; failure is text. Both modes keep the same
+  one-way selection and the same bounded re-query/revoke contract.
+- **No runtime protocol switching.** Once `kitty` or `sixel` is committed the
+  choice never changes. A late Kitty `OK` or DA1 reply is consumed but inert.
+  After SIXEL is selected, a later complete DA1 that omits attribute `4`
+  permanently revokes SIXEL: the owner drops every registered raster, grant and
+  clickable footprint and forces a full text repaint. It never falls back to
+  Kitty and never re-enters SIXEL.
+- **One write path, one SIXEL owner.** The negotiated handle keeps the existing
+  `ZellijKittyTerminal` as the ONLY `Terminal` writer; the potential SIXEL
+  branch is `createSixelGraphicsWithAdmission()` over the SAME encoder,
+  registry, crop path and `SixelScreenPort` as Direct/native-tmux SIXEL. Every
+  Main/Alt/workspace Screen receives that port at construction even while the
+  handle is pending; the port's owner refuses all pixels unless SIXEL is
+  selected and the three Direct-SIXEL facts (DA1, real cell size, real OSC 11
+  background) are complete. `effectiveImageProtocol()` derives
+  `'kitty' | 'sixel' | null` from the handle's live selection and `canPaint()`;
+  it never falls back to the inherited fork capability for a Zellij pane.
+- **Per-source rendering is one lazy delegate.** `ZellijNegotiatedImage`
+  renders the caller's fallback until selection, then creates exactly one
+  protocol delegate per source: `NativeKittyImage` for Kitty or the SIXEL
+  owner's `image()` for SIXEL. It never creates both pixel children and never
+  switches after selection.
+- **SIXEL re-verifies the pane on ownership changes.** After SIXEL is selected,
+  a real terminal resize, screen handoff or external-editor resume sends ONE
+  bounded `CSI c` re-query while the app owns the input listener. The reply is
+  consumed after `StdinBuffer` framing and before the editor; the capability
+  boolean remains the existing `onSixelSupport` observation. Until the
+  affirmative reply arrives the surface paints text; a negative reply or the
+  800 ms bound revokes SIXEL permanently. There is no per-frame query.
+- **Zellij's transparent first band needs a bounded width repair.** The ONE
+  SIXEL encoder can emit a first band with no painted pixels when the source's
+  top band is fully transparent; Zellij may then infer a zero-width image.
+  `src/tui/graphics/zellij-sixel-width.ts` accepts only the production
+  encoder's own grammar, verifies the declared raster width, and inserts a
+  transparent `!<widthPx>?$` run before the first `-`. It never rewrites an
+  arbitrary/external DCS, never duplicates an existing run, and refuses an
+  over-budget or unrecognised grammar (the occurrence then paints text). Full
+  and crop variants go through the same `admit()` entry, so the registry and
+  physical Screen always see the same repaired bytes.
+- **A screen constructed before selection keeps the Kitty cleanup protocol.**
+  `TuiAltScreen` captures its image protocol at construction. While the
+  negotiated handle is pending/denied it therefore uses the legacy Kitty
+  lifecycle (it paints no pixels because the consumer gate is `null`); a
+  confirmed SIXEL selection uses SIXEL screen semantics. SIXEL clearing itself
+  is driven by the independent Screen port, not by this construction-time
+  protocol value.
+
+Proof: `test/tui/zellij-image.test.ts`,
+`test/tui/zellij-sixel-width.test.ts`,
+`test/integration/kitty-zellij-screen.test.ts`,
+`test/integration/sixel-zellij-native-screen.test.ts`,
+`test/client/sixel-image.test.ts`, plus the existing Direct SIXEL and native
+tmux SIXEL suites. Real Zellij GUI/outer-terminal pixels are qualified by the
+release protocol smoke, never by a repository-doc claim.
 
 ## Specialized contracts that stay as they are
 

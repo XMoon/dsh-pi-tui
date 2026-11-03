@@ -1,6 +1,6 @@
 /**
  * Contract tests for the private `piTuiFileReferences` Host service
- * (app/remote/pi-tui-file-reference-host.ts), its transport-neutral Host
+ * (app/host/features/file-reference.ts), its transport-neutral Host
  * bridge (runtime/remote/pi-tui-file-reference-host-bridge.ts) and its
  * handwritten Typert descriptor
  * (runtime/remote/pi-tui-file-reference-contract.ts): ONE invocation
@@ -31,7 +31,7 @@ import {
   PiTuiFileReferenceHostService,
   type FileReferencesServiceLike,
   type PiTuiFileReferenceHostDeps,
-} from '../../src/app/remote/pi-tui-file-reference-host.ts'
+} from '../../src/app/host/features/file-reference.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 
 const abort = new AbortController().signal
@@ -108,8 +108,8 @@ test('the composition registers the endpoint in its OWN fiber and disposal withd
   const deps = hostDeps(life, {})
   const ctx = new Context()
   await ctx.plugin(TypertRegistry)
-  // The composition owns the package contribution; the service row owns only
-  // its binding (see host-runtime.ts step 0a/0b).
+  // The built-in PiTui Host Runtime owns the package contribution; this
+  // fixture reproduces its two independent fibers (contribution + service row).
   const contribution = ctx.inject(['typert'], contributionCtx => {
     contributionCtx.effect(
       () => contributionCtx.typert.register(PI_TUI_HOST_CONTRIBUTION),

@@ -10,6 +10,8 @@
  * @module @xmoon76/dsh-pi-tui/app/bootstrap/renderer-selection
  */
 
+import type { StatusSnapshotReader } from '../../domain/status/types.ts'
+import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import type { SurfaceRendererMount } from '../surface/runtime.ts'
 
 /** What the selection needs from the composition root. */
@@ -47,10 +49,30 @@ export interface RendererSelectionDeps {
      * the renderer needs it before its first tool projection.
      */
     readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
+    /**
+     * TSP-7 PR-A: install the read-only status reader ONCE, before the first
+     * image binding. It carries presentation capability only — no render, no
+     * store subscription, no business write — so a later `bindImages` failure
+     * still leaves the existing acquired-session release path intact.
+     */
+    readonly bindStatusReader: (reader: StatusSnapshotReader) => void
+    /**
+     * TSP-7 PR-D: install the ONE-SHOT read-only footer config. Called at
+     * most once, at the mount — a snapshot taken at boot; the TSP renderer
+     * re-reads nothing later (a settings change needs a TSP restart).
+     */
+    readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
     readonly dispose: () => Promise<void>
   } | undefined>
   /** The environment read (production: `process.env`). */
   readonly env: Record<string, string | undefined>
+  /**
+   * TSP-7 PR-D: the boot-time footer projection source. Evaluated ONLY when
+   * the TSP mount actually runs (never on the PiTui path or a declined
+   * connect) — the composition root supplies the settings owner's read-only
+   * resolver here.
+   */
+  readonly resolveFooterConfig: () => TspNativeFooterConfig
 }
 
 /**
@@ -73,7 +95,15 @@ export async function selectRendererMount(deps: RendererSelectionDeps): Promise<
     // the mount — before the surface's first transcript projection. The
     // renderer keeps the ONE loader of this mount; the wrapper never builds
     // a second one.
-    mount: (binding) => {
+    // TSP-7 PR-A: the status reader is installed FIRST and synchronously — a
+    // renderer that later fails its image binding still releases through the
+    // existing acquired-session path, and no status subscription is created.
+    // TSP-7 PR-D: the footer config binds exactly once at the mount, BEFORE
+    // the first status commit can paint a row (a resolver throw propagates —
+    // the mount-failure release path owns the session).
+    mount: (binding, statusReader) => {
+      tsp.bindStatusReader(statusReader)
+      tsp.bindNativeFooterConfig(deps.resolveFooterConfig())
       tsp.bindImages(binding)
       return {
         display: tsp.display,
@@ -135,6 +165,8 @@ export function productionTspConnector(
   readonly interaction: import('../surface/interaction-presenter.ts').SurfaceInteractionPresenter
   readonly bindInput: (handlers: import('../surface/runtime.ts').SurfaceInputBinding) => void
   readonly bindImages: (binding: import('../surface/runtime.ts').SurfaceImageBinding) => void
+  readonly bindStatusReader: (reader: StatusSnapshotReader) => void
+  readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
   readonly dispose: () => Promise<void>
 } | undefined> {
   return async () => {

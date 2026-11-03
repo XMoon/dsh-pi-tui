@@ -773,6 +773,88 @@ test('ordinary text and OSC sequences pass through byte-for-byte', () => {
   assert.equal(terminal.text, text)
 })
 
+/**
+ * `Terminal`'s optional members are RUNTIME capability facts, not facade
+ * decoration: `TuiApp.writeTerminalProgress` branches on the member's
+ * existence, so a facade that invents `setProgressState` makes a Tern app take
+ * the stateful branch and silently drop the write when the real terminal has
+ * no such method. Existence and receiver must be the underlying terminal's.
+ */
+test('the facade preserves a missing or present stateful projection of the real terminal', () => {
+  const core = new KittyGraphicsCore()
+  const absent = new RecordingTerminal()
+  Object.defineProperty(absent, 'setProgressState', { value: undefined, configurable: true })
+  const absentFacade = new KittyTerminalFacade(absent, core)
+  try {
+    assert.equal(absentFacade.setProgressState, undefined,
+      'a missing optional member stays missing through the facade')
+  } finally {
+    absentFacade.dispose()
+  }
+
+  const states: TerminalProgressState[] = []
+  const receivers: unknown[] = []
+  const present = new RecordingTerminal()
+  present.setProgressState = function (state: TerminalProgressState): void {
+    receivers.push(this)
+    states.push(state)
+  }
+  const presentFacade = new KittyTerminalFacade(present, core)
+  try {
+    const method = presentFacade.setProgressState
+    assert.equal(typeof method, 'function', 'a present optional member is exposed')
+    method?.('indeterminate')
+    assert.deepEqual(states, ['indeterminate'], 'one call performs exactly one physical write')
+    assert.equal(receivers[0], present, 'the real terminal is the receiver, never the facade')
+  } finally {
+    presentFacade.dispose()
+  }
+})
+
+test('the facade preserves the optional SIXEL capability subscription of the real terminal', () => {
+  const core = new KittyGraphicsCore()
+  const absent = new RecordingTerminal()
+  Object.defineProperty(absent, 'onSixelSupport', { value: undefined, configurable: true })
+  const absentFacade = new KittyTerminalFacade(absent, core)
+  try {
+    assert.equal(absentFacade.onSixelSupport, undefined,
+      'a terminal without the passive DA1 seam stays without it through the facade')
+  } finally {
+    absentFacade.dispose()
+  }
+
+  const listeners = new Set<(supported: boolean) => void>()
+  const subscribeReceivers: unknown[] = []
+  const unsubscribeReceivers: unknown[] = []
+  const present = new RecordingTerminal()
+  Object.defineProperty(present, 'onSixelSupport', {
+    configurable: true,
+    value: function (listener: (supported: boolean) => void): () => void {
+      subscribeReceivers.push(this)
+      listeners.add(listener)
+      return () => {
+        unsubscribeReceivers.push(this)
+        listeners.delete(listener)
+      }
+    },
+  })
+  const presentFacade = new KittyTerminalFacade(present, core)
+  try {
+    const events: boolean[] = []
+    const unsubscribe = presentFacade.onSixelSupport?.((supported) => { events.push(supported) })
+    assert.equal(typeof unsubscribe, 'function', 'the subscription is forwarded')
+    assert.equal(subscribeReceivers[0], present, 'subscribed on the real terminal')
+    assert.equal(listeners.size, 1)
+    for (const listener of [...listeners]) listener(true)
+    assert.deepEqual(events, [true], 'a synchronous terminal notification reaches the consumer')
+    unsubscribe?.()
+    assert.equal(listeners.size, 0, 'the terminal-owned unsubscribe really runs')
+    assert.equal(unsubscribeReceivers[0], present, 'the unsubscribe keeps the real terminal receiver')
+  } finally {
+    presentFacade.dispose()
+  }
+})
+
 
 /**
  * Image-7B-A — the virtual mode of the SAME Core. These cases prove the one

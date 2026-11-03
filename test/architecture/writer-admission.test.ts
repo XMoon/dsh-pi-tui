@@ -608,6 +608,18 @@ test('exit: SessionRuntime is the SOLE operation-barrier writer admission owner'
     'only SessionRuntime.withWriter may call the operation barrier')
 })
 
+test('exit: SessionRuntime is the SOLE operation-barrier CONTROL admission owner', () => {
+  // `runControl` is the ONE narrow Stop bypass around the transition freeze.
+  // Only the session runtime may call it; a UI/submission module reaching the
+  // barrier directly would turn it into a general writer bypass.
+  const root = new URL('../../src/', import.meta.url)
+  const offenders = srcTsFiles(root)
+    .filter(rel => rel !== 'app/session/runtime.ts')
+    .filter(rel => readFileSync(new URL(rel, root), 'utf8').includes('.barrier.runControl('))
+  assert.deepEqual(offenders, [],
+    'only SessionRuntime.withControl/interrupt may call the operation barrier control hook')
+})
+
 test('no production fence carries the transition gate into an admitted writer', () => {
   // The transition gate may gate a writer that has NOT yet been admitted, but
   // once a writer holds the barrier the gate must WAIT for the whole writer.

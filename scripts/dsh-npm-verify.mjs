@@ -22,8 +22,7 @@
  * @module dsh-npm-verify
  */
 
-import { execFileSync } from 'node:child_process'
-import { cpSync, existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, lstatSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -130,22 +129,6 @@ export function pinNpmDshDependencies(workspace, version) {
   writeFileSync(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`, 'utf8')
 }
 
-/** Point the temporary workspace at the real repository's git metadata so
- * git-dependent tests (the pre-push hook gate) behave identically to the
- * source verification workspace. Best-effort: a checkout without git
- * metadata can still run the other gates. */
-function attachGitMetadata(workspace) {
-  try {
-    const gitDir = execFileSync('git', ['rev-parse', '--absolute-git-dir'], {
-      cwd: PACKAGE_ROOT,
-      encoding: 'utf8',
-    }).trim()
-    if (gitDir !== '') writeFileSync(join(workspace, '.git'), `gitdir: ${gitDir}\n`, 'utf8')
-  } catch {
-    // A source checkout without Git metadata can still run the other gates.
-  }
-}
-
 export function candidateTarball(workspace) {
   const candidates = readdirSync(workspace)
     .filter(name => /^xmoon76-dsh-pi-tui-.*\.tgz$/u.test(name))
@@ -175,7 +158,6 @@ async function main() {
   try {
     writeFileSync(npmConfigPath, `registry=${PUBLIC_NPM_REGISTRY}\n`, 'utf8')
     copyRepository(workspace)
-    attachGitMetadata(workspace)
     // The declared target's exact-family lane FREEZES the tracked lockfile: it
     // already resolves the whole family at the target, and re-resolving under
     // the glob override both rewrites the lockfile's own config and leaves
@@ -228,11 +210,11 @@ async function main() {
       // before the unit suite (the install runs with --ignore-scripts and
       // dist is not committed).
       ['TUI build', ['build']],
-      // The PRODUCT suite runs inside `prepack` (the packaging safety gate
-      // must stay self-contained), so running `test:bundle` here would run
-      // the whole product suite TWICE against the same workspace and the same
-      // dependency graph. The TOOLING suite is not part of `prepack`, so it
-      // still needs its own run here.
+      // The build above is the ONLY build. The remaining explicit steps are
+      // `pack:release` minus clean/build, because this workspace already holds
+      // that build; `pack:artifact` itself must never build or test.
+      ['TUI bundle typecheck', ['typecheck:bundle']],
+      ['TUI product tests', ['test:product']],
       ['TUI tooling tests', ['test:tooling']],
       ['tmux terminal tooling tests', ['test:tmux']],
       // `gate:pi-surface-compat` is the re-vendor HARD GATE. It overlaps the
@@ -240,7 +222,8 @@ async function main() {
       // kept: a re-vendor contract must not depend on the product suite's
       // discovery staying unchanged.
       ['Pi surface compatibility gate', ['gate:pi-surface-compat']],
-      ['TUI candidate build and pack', ['pack:release']],
+      ['TUI candidate pack', ['pack:artifact']],
+      ['TUI packed-artifact smokes', ['smoke:release']],
     ]) await run(PNPM_COMMAND, args, workspace, label, npmEnvironment)
     const candidate = candidateTarball(workspace)
     assertNoSourceLeak(candidate)

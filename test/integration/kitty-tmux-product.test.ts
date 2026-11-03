@@ -439,8 +439,11 @@ test('the real composition root admits the tmux virtual handle where the fork de
 
 test('explicit 0 disables the managed handle without read/conversion/APC/PUA', async (t) => {
   const h = product(t, { tmuxSetting: '0' })
-  assert.equal(h.graphics, undefined, 'the explicit opt-out means no managed handle')
-  assert.deepEqual(h.cli.calls(), [], 'the opt-out never spawns a tmux admission query')
+  assert.equal(h.graphics, undefined, 'the explicit opt-out means no managed Kitty handle')
+  assert.deepEqual(h.cli.calls(), [
+    'display-message -p -t %7 #{session_name}',
+    'display-message -p -t %7 #{sixel_support}',
+  ], 'the Kitty opt-out still evaluates the native SIXEL candidate; this server denies it')
 
   const ref = pngRef('att-optout', 'optout.png')
   const folder = new TranscriptFolder()
@@ -490,8 +493,11 @@ test('an unset opt-in admits the automatic handle and paints real pixels end to 
 
 test('an invalid opt-in value behaves exactly like 0, with no probe and no image work', async (t) => {
   const h = product(t, { tmuxSetting: 'invalid' })
-  assert.equal(h.graphics, undefined, 'a misspelled opt-in must not fall into automatic admission')
-  assert.deepEqual(h.cli.calls(), [], 'an invalid value never spawns a tmux admission query')
+  assert.equal(h.graphics, undefined, 'a misspelled opt-in must not fall into automatic Kitty admission')
+  assert.deepEqual(h.cli.calls(), [
+    'display-message -p -t %7 #{session_name}',
+    'display-message -p -t %7 #{sixel_support}',
+  ], 'the failed Kitty opt-in still evaluates the native SIXEL candidate; this server denies it')
 
   const ref = pngRef('att-invalid', 'invalid.png')
   const folder = new TranscriptFolder()

@@ -22,17 +22,33 @@
  * owner, so `flush`/`preCancel` are deliberate no-ops, `retire` releases the
  * exact Client reference exactly once, and `whenIdleOrAbort` observes the
  * official `SessionSnapshot.running` without ever cancelling the Host session.
+ * The ONE Host mutation here is `cancel`: the explicit user Stop addresses the
+ * EXACT captured binding generation through the official `SessionFace.cancel`
+ * verb; it never substitutes a same-id replacement and never releases the
+ * Client reference. The Connection generation is captured before dispatch and
+ * re-checked with the exact binding after the reply, so a superseded reply is
+ * `indeterminate`, never the current generation's definite result. The same
+ * one-shot verb serves the navigation audience through `cancelForNavigation`,
+ * which resolves the dispatch PHASE (a dispatched reply whose classification is
+ * a caller/carrier `cancelled` is dispatched-unproven there) without changing
+ * the control `cancel` taxonomy; only `committed` lets navigation proceed.
  *
- * Composition note: this provider is not wired into any production
- * bootstrap yet (M3-3B/M3-4 own the Remote runtime selection seam). Tests and
- * the future Remote composition construct it directly.
+ * Composition note: the Remote application runtime constructs this provider
+ * ONCE over the official Client's sessions and Connection generation source.
+ * Tests may construct it directly over a fake binding/generation source.
  *
  * @module @xmoon76/dsh-pi-tui/app/remote/session-owners
  */
 
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
 import { clientOwnerOf, type ClientSessionOwner, type SessionHandle } from '../../runtime/session-lifecycle-port.ts'
+import type { WriteOutcome } from '../../runtime/session-writer-port.ts'
+import type { RemoteConnectionGenerationSource } from '../../runtime/remote/session-reader-remote.ts'
+import { classifyRemoteWriteFailure } from '../../runtime/remote/write-failure.ts'
+import type { RemoteResultLike } from '../../runtime/remote/session-writer-remote.ts'
 import type {
+  NavigationCancelSettlement,
+  NavigationStopReceipt,
   SessionOwnerAccess,
   SessionOwnerRetirement,
   SessionRetirementFailure,
@@ -46,9 +62,14 @@ interface RemoteOwnerRunningFace {
   subscribe(fn: () => void): () => void
 }
 
+/** The official `SessionFace` cancellation verb addressed by EXACT binding. */
+interface RemoteOwnerCancelFace extends RemoteOwnerRunningFace {
+  cancel(): Promise<RemoteResultLike<{ readonly accepted: true }>>
+}
+
 /** Structural official `SessionBinding` observation subset (`session` face). */
 export interface RemoteOwnerBindingFace {
-  readonly session: RemoteOwnerRunningFace
+  readonly session: RemoteOwnerCancelFace
 }
 
 /**
@@ -58,6 +79,19 @@ export interface RemoteOwnerBindingFace {
  */
 export interface RemoteOwnerBindingSource {
   binding(id: string): RemoteOwnerBindingFace | undefined
+  /** Official `ISessions.retainInfo(id)`: a stable observable of the local
+   *  reference counts. A same-id binding replacement necessarily changes those
+   *  counts (the new retain and/or the old release), so it is the liveness
+   *  event that catches a rollover even when the OLD face emits no snapshot
+   *  change. Optional so a narrow test source can omit it; the production
+   *  `ISessions` always provides it. */
+  retainInfo?(id: string): RemoteRetainInfoSource
+}
+
+/** The official local-retain-count observable subset. */
+export interface RemoteRetainInfoSource {
+  getSnapshot(): { readonly referenceCount: number }
+  subscribe(listener: () => void): () => void
 }
 
 /** The registry record behind one opaque Remote owner. */
@@ -76,11 +110,17 @@ export interface RemoteSessionOwnerServices {
 }
 
 /**
- * Build the Remote Session owner services over one binding borrow source.
- * `owners` and `retirement` share the SAME registry state; constructing two
- * independent mappings would create a second owner truth.
+ * Build the Remote Session owner services over one binding borrow source and
+ * the Connection generation source. `owners` and `retirement` share the SAME
+ * registry state; constructing two independent mappings would create a second
+ * owner truth. The generation source is the SAME official pre-dispatch fence
+ * the Remote session writer uses: an owner mutation's reply is only a definite
+ * outcome for the generation it was dispatched on.
  */
-export function createRemoteSessionOwnerServices(source: RemoteOwnerBindingSource): RemoteSessionOwnerServices {
+export function createRemoteSessionOwnerServices(
+  source: RemoteOwnerBindingSource,
+  generation: RemoteConnectionGenerationSource,
+): RemoteSessionOwnerServices {
   // Identity is keyed by the exact binding object, never by session id.
   const byBinding = new WeakMap<object, SessionOwnerRef>()
   const byOwner = new WeakMap<SessionOwnerRef, RemoteOwnerRecord>()
@@ -139,40 +179,167 @@ export function createRemoteSessionOwnerServices(source: RemoteOwnerBindingSourc
 
   const sessionId = (owner: SessionOwnerRef): string => recordOf(owner).sessionId
 
-  const whenIdleOrAbort = (owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean> => {
+  /**
+   * The ONE exact-owner cancel body. `dispatched` records whether the official
+   * `SessionFace.cancel()` was actually invoked: a local fence can prove it was
+   * not; every reply (including a cancelled/superseded one) is about a call
+   * that WAS made. The control audience projects only `outcome` (PR-A's
+   * taxonomy is unchanged); the navigation audience resolves the phase.
+   */
+  const cancelExactOwner = async (owner: SessionOwnerRef): Promise<{
+    readonly outcome: WriteOutcome<undefined>
+    readonly dispatched: boolean
+    readonly receipt?: NavigationStopReceipt
+  }> => {
+    const notDispatched = (outcome: WriteOutcome<undefined>): { outcome: WriteOutcome<undefined>; dispatched: false } =>
+      ({ outcome, dispatched: false })
     const record = recordOf(owner)
+    if (record.currentWrapper === undefined) return notDispatched({ kind: 'cancelled' })
+    const capturedGeneration = generation.getSnapshot()
+    if (capturedGeneration === undefined) return notDispatched({ kind: 'cancelled' })
+    const borrowed = source.binding(record.sessionId)
+    if (borrowed === undefined || !Object.is(borrowed, record.bindingIdentity)) {
+      return notDispatched({ kind: 'cancelled' })
+    }
+    // The borrow and the generation re-read are synchronous; a replacement
+    // observed here proves the official call was never dispatched.
+    if (!Object.is(capturedGeneration, generation.getSnapshot())) return notDispatched({ kind: 'cancelled' })
+    const result = await borrowed.session.cancel()
+    // Post-dispatch identity fence (host-client.md: every Remote async result
+    // is generation-bound; a superseded reply is never the current
+    // generation's definite outcome). The call happened, so this is
+    // indeterminate — not a refusal, not a success, never a replay.
+    const currentGeneration = generation.getSnapshot()
+    if (currentGeneration === undefined
+      || !Object.is(capturedGeneration, currentGeneration)
+      || record.currentWrapper === undefined
+      || !Object.is(source.binding(record.sessionId), record.bindingIdentity)) {
+      return {
+        outcome: {
+          kind: 'indeterminate',
+          error: {
+            code: 'session/cancel-superseded',
+            message: 'the session owner or connection generation changed while the cancel was in flight',
+          },
+        },
+        dispatched: true,
+      }
+    }
+    if (result.ok) {
+      return {
+        outcome: { kind: 'committed', value: undefined },
+        dispatched: true,
+        // Pin the EXACT generation this accepted stop belongs to; the quiesce
+        // must validate against this token, never a generation captured later.
+        receipt: { token: capturedGeneration },
+      }
+    }
+    return { outcome: classifyRemoteWriteFailure(result.error), dispatched: true }
+  }
+
+  /** The control (Busy Esc / Stop) audience: PR-A's shared write taxonomy. */
+  const cancel = async (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> =>
+    (await cancelExactOwner(owner)).outcome
+
+  /**
+   * The navigation audience. The phase is resolved HERE, without changing
+   * `cancel`:
+   * - a pre-dispatch local fence is `cancelled` (the request was not addressed;
+   *   never permission to switch);
+   * - a DISPATCHED reply classified as a caller/carrier cancellation is
+   *   `indeterminate` (the Host may have executed it) — the control audience
+   *   still sees PR-A's `cancelled`;
+   * - a dispatched superseded reply is already `indeterminate`;
+   * - a proven business refusal is `rejected`, success `committed`.
+   */
+  const cancelForNavigation = async (owner: SessionOwnerRef): Promise<NavigationCancelSettlement> => {
+    const { outcome, dispatched, receipt } = await cancelExactOwner(owner)
+    switch (outcome.kind) {
+      case 'committed': return { kind: 'committed', ...receipt === undefined ? {} : { receipt } }
+      case 'rejected': return { kind: 'rejected', detail: outcome.error.message }
+      case 'unsupported': return { kind: 'rejected', detail: outcome.reason }
+      case 'cancelled':
+        return dispatched
+          ? {
+              kind: 'indeterminate',
+              detail: 'the Host session cancel was dispatched but its reply was a caller/carrier cancellation',
+            }
+          : { kind: 'cancelled' }
+      case 'indeterminate': return { kind: 'indeterminate', detail: outcome.error.message }
+    }
+  }
+
+  const whenIdleOrAbort = (
+    owner: SessionOwnerRef,
+    signal: AbortSignal,
+    receipt?: NavigationStopReceipt,
+  ): Promise<boolean | 'unobservable'> => {
+    const record = recordOf(owner)
+    // The accepted navigation stop pins its EXACT Connection generation in the
+    // receipt; the quiesce must observe THAT generation, never one captured
+    // after a later reconnect. A missing/foreign receipt generation is not a
+    // proof either.
+    const capturedGeneration = (receipt === undefined ? generation.getSnapshot() : receipt.token) as
+      | ReturnType<typeof generation.getSnapshot>
+      | undefined
+    if (capturedGeneration === undefined) return Promise.resolve('unobservable')
+    // If the stop's generation is already no longer the live one, the quiesce
+    // cannot prove anything about it.
+    if (!Object.is(generation.getSnapshot(), capturedGeneration)) return Promise.resolve('unobservable')
     // Borrow the live binding and fence it by exact identity: a replaced or
     // fully retired generation is not observable through the official borrow,
     // and the wait must never observe a NEW same-id generation instead.
     const borrowed = source.binding(record.sessionId)
     if (borrowed === undefined || !Object.is(borrowed, record.bindingIdentity)) {
-      // Nothing of this owner's generation is observable client-side anymore;
-      // there is no running work this wait could see.
-      return Promise.resolve(false)
+      // The exact generation is no longer observable: this is NOT proof that
+      // its Host Turn is idle.
+      return Promise.resolve('unobservable')
     }
+    const exactBindingCurrent = (): boolean =>
+      Object.is(source.binding(record.sessionId), record.bindingIdentity)
+      && Object.is(generation.getSnapshot(), capturedGeneration)
     const face = borrowed.session
-    if (!face.getSnapshot().running) return Promise.resolve(false)
+    if (!face.getSnapshot().running) return Promise.resolve(exactBindingCurrent() ? false : 'unobservable')
     if (signal.aborted) return Promise.resolve(true)
-    return new Promise<boolean>(resolve => {
+    return new Promise<boolean | 'unobservable'>(resolve => {
       let settled = false
       let unsubscribe: (() => void) | undefined
       let offAbort: (() => void) | undefined
-      const settle = (aborted: boolean): void => {
+      let offGeneration: (() => void) | undefined
+      let offRetain: (() => void) | undefined
+      const retainInfo = source.retainInfo?.(record.sessionId)
+      const settle = (result: boolean | 'unobservable'): void => {
         if (settled) return
         settled = true
         unsubscribe?.()
         offAbort?.()
-        resolve(aborted)
+        offGeneration?.()
+        offRetain?.()
+        resolve(result)
+      }
+      // A Connection-generation replacement, or a same-id binding rollover
+      // (observed through the local retain-count source), makes the exact
+      // generation unobservable IMMEDIATELY — the wait must not depend on the
+      // old face's next snapshot notification.
+      const onGeneration = (): void => {
+        if (!Object.is(generation.getSnapshot(), capturedGeneration)) settle('unobservable')
+      }
+      const onRetain = (): void => {
+        if (!exactBindingCurrent()) settle('unobservable')
       }
       const onSnapshot = (): void => {
-        if (!face.getSnapshot().running) settle(false)
+        if (!face.getSnapshot().running) settle(exactBindingCurrent() ? false : 'unobservable')
       }
       const onAbort = (): void => { settle(true) }
       // Arm the abort cleanup BEFORE subscribing: `subscribe` may invoke the
       // snapshot callback synchronously, and that settle must be able to
-      // remove the abort listener it is already responsible for.
+      // remove every listener it is already responsible for.
       signal.addEventListener('abort', onAbort, { once: true })
       offAbort = (): void => { signal.removeEventListener('abort', onAbort) }
+      offGeneration = generation.subscribe(onGeneration)
+      if (settled) offGeneration()
+      offRetain = retainInfo?.subscribe(onRetain)
+      if (settled) offRetain?.()
       unsubscribe = face.subscribe(onSnapshot)
       // A synchronous settle during `subscribe` could not remove the
       // subscription yet (the unsubscribe handle did not exist); remove it
@@ -180,8 +347,8 @@ export function createRemoteSessionOwnerServices(source: RemoteOwnerBindingSourc
       if (settled) unsubscribe()
       // Lost-wakeup fence: the running → idle transition may have happened
       // before this subscriber registered, so re-check the snapshot after
-      // subscribing.
-      if (!face.getSnapshot().running) settle(false)
+      // subscribing — with the same exact-binding/generation fence.
+      if (!face.getSnapshot().running) settle(exactBindingCurrent() ? false : 'unobservable')
       if (signal.aborted) settle(true)
     })
   }
@@ -240,9 +407,12 @@ export function createRemoteSessionOwnerServices(source: RemoteOwnerBindingSourc
     },
     retirement: {
       whenIdleOrAbort,
+      cancel,
+      cancelForNavigation,
       // Host-owned durability: rc.2 has no Client flush verb.
       flush: async (): Promise<void> => {},
-      // Synchronous by contract; the real Remote cancel is SessionWriter.cancel.
+      // Synchronous by contract; the real Remote cancel is this adapter's
+      // `cancel` (the official SessionFace.cancel on the exact binding).
       preCancel: (): void => {},
       retire,
       park,

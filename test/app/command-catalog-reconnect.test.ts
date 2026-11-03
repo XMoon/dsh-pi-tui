@@ -218,6 +218,7 @@ function fakeRunnerDeps(options: {
     }).applyPermissionPreset = options.applyPermissionPreset
   }
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
@@ -422,6 +423,7 @@ function fakeRunnerDeps(options: {
       copyEnv: undefined as never,
     },
     submission: {
+      beginClientWrite: () => () => {},
       prepareDeps: () => ({}) as never,
       settleQueueRecalls: () => {},
     },

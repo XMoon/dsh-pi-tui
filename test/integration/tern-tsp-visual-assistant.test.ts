@@ -52,6 +52,7 @@ import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import { CHART_TOOL_NAME, PRESENT_VISUAL_TOOL_NAME, SVG_TOOL_NAME } from '../../src/domain/visual/tools.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
+import { readTspBlobMessages } from '../support/tsp-blob-wire.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -129,8 +130,8 @@ class ScriptedTern {
         setTimeout(() => this.input.type(`\u001b_tsp;r;${JSON.stringify(HELLO)}\u001b\\\u001b[?62;52;c`), 1)
         return
       }
-      for (const match of text.matchAll(/\u001b_tsp;b;id=([0-9a-f]+);(?:mime=([^;]+);)?/g)) {
-        this.blobs.push({ id: match[1] as string, mime: match[2] })
+      for (const blob of readTspBlobMessages(bytes)) {
+        this.blobs.push({ id: blob.id, mime: blob.mime })
       }
       for (const match of text.matchAll(/\u001b_tsp;f;([\s\S]*?)\u001b\\/g)) {
         const frame = JSON.parse(match[1] as string) as WireFrame
@@ -420,17 +421,23 @@ async function mountTspSurface(
     },
   })
   const rendererMount: SurfaceRendererMount = {
-    mount: () => ({
-      display: renderer.display,
-      taskPresentation: renderer.taskPresentation,
-      composer: renderer.composer,
-      modelPresentation: renderer.modelPresentation,
-      presetPresentation: renderer.presetPresentation,
-      sessionBrowserPresentation: renderer.sessionBrowserPresentation,
-      interaction: renderer.interaction,
-      bindInput: handlers => renderer.bindInput(handlers),
-      dispose: () => renderer.dispose(),
-    }),
+    mount: (binding, statusReader) => {
+      // TSP-7 PR-A: this mount drives a REAL TSP renderer, so it installs the
+      // read-only status reader and the image binding exactly as production.
+      renderer.bindStatusReader(statusReader)
+      renderer.bindImages(binding)
+      return {
+        display: renderer.display,
+        taskPresentation: renderer.taskPresentation,
+        composer: renderer.composer,
+        modelPresentation: renderer.modelPresentation,
+        presetPresentation: renderer.presetPresentation,
+        sessionBrowserPresentation: renderer.sessionBrowserPresentation,
+        interaction: renderer.interaction,
+        bindInput: handlers => renderer.bindInput(handlers),
+        dispose: () => renderer.dispose(),
+      }
+    },
     releaseUnmounted: () => renderer.dispose(),
   }
   const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })

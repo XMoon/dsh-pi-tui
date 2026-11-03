@@ -1,13 +1,22 @@
 /**
- * Experimental Remote-serving Host composition (M3-1).
+ * Experimental Remote-serving Host additive composition (M3-1).
  *
- * This module owns ONLY the additive Host rows of the Remote runtime: the
- * package's single private Typert contribution, the private
- * `piTuiFileReferences` augmentation row, the private `piTuiTerminalProgress`
- * status row plus the exact official Remote Host composition closure. It receives the already-running ordinary
- * pi-tui Host `Context`, mounts everything as tracked Cordis fibers, and
- * exposes the narrow in-process carrier that `client-runtime.ts` installs as
- * the Client Connection transport.
+ * M3-ONLY. The production M4 Host composition is the built-in
+ * `@xmoon76/dsh-pi-tui/host-runtime` Loader row plus the official
+ * Session-serving rows in the Host-only overlay; this module is retained only
+ * for the old in-process L5 fixtures and is deleted with B2-S.
+ *
+ * This module owns ONLY the M3-only additive official rows of the Remote
+ * runtime: the official Connection/FileUpload/stats/outline/SessionController/
+ * SettingsController/api-remotes/archive closure. It receives the
+ * already-running ordinary pi-tui Host `Context` and exposes the narrow
+ * in-process carrier that `client-runtime.ts` installs as the Client
+ * Connection transport.
+ *
+ * The private PiFile/TerminalProgress services, their package contribution and
+ * the Performance projection are NOT mounted here: the caller must have mounted
+ * the built-in PiTui Host Runtime (and the Performance row) first, and this
+ * function only verifies their readiness gates exist.
  *
  * It does not boot a second Host Context, does not edit or emulate
  * `cordis.patch.yml`, and never touches the existing `jobController` row.
@@ -29,10 +38,6 @@ import FileUploads from '@deepseek-ai/dsh-client-file-upload'
 import * as sessionLogExport from '@deepseek-ai/dsh-session-log-export'
 import * as sessionStats from '@deepseek-ai/dsh-session-stats'
 import * as sessionTurnOutline from '@deepseek-ai/dsh-session-turn-outline'
-import { PiTuiFileReferenceHostService, type FileReferencesServiceLike, type LiveAgentLike } from './pi-tui-file-reference-host.ts'
-import { PiTuiTerminalProgressHostService, type LiveAgentLike as TerminalProgressLiveAgentLike } from './terminal-progress-host.ts'
-import * as performanceHost from '../host/performance-host.ts'
-import { PI_TUI_HOST_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { mergeCause } from './dispose-cause.ts'
 import { assertRemoteHostPrerequisites } from './host-prerequisites.ts'
 
@@ -56,16 +61,8 @@ export interface InProcessHostCarrier {
 }
 
 /**
- * The narrow Host diagnostics channel the additive rows report through. It is
- * the runner's `Diag` shape declared structurally, so no application type
- * crosses into the Host composition; absent, the rows report through the
- * Host's own Cordis logger.
+ * The M3-only additive Host-side Remote runtime.
  */
-export interface RemoteHostDiagnostics {
-  warn(message: string, fields?: Record<string, unknown>): void
-}
-
-/** The composed additive Host-side Remote runtime. */
 export interface RemoteHostRuntime {
   /** The ordinary Host Context this composition mounted onto (never disposed here). */
   readonly hostContext: Context
@@ -112,28 +109,31 @@ function createInProcessCarrier(hostContext: Context): InProcessHostCarrier {
 }
 
 /**
- * Mount the exact additive official Host closure (§2.4.1) onto the existing
- * Host Context and await every fiber. The existing `jobController` service is
- * asserted before and after construction and never re-mounted.
+ * Mount the exact M3-only additive official Host closure onto the existing Host
+ * Context and await every fiber. The caller must already have mounted the
+ * built-in PiTui Host Runtime (private services + readiness) and the
+ * Performance projection row exactly once; this function verifies both
+ * readiness gates and then mounts only the M3-only official additive fibers.
+ *
+ * The existing `jobController`/`userQuestions` services are asserted before and
+ * after construction and never re-mounted.
  *
  * On a partial construction failure the already-mounted fibers unwind in
  * reverse order before the original error rethrows.
  */
-export async function createRemoteHostRuntime(
-  hostContext: Context,
-  options: { readonly diag?: RemoteHostDiagnostics } = {},
-): Promise<RemoteHostRuntime> {
+export async function createRemoteHostRuntime(hostContext: Context): Promise<RemoteHostRuntime> {
   assertRemoteHostPrerequisites(hostContext)
-  // An unknown upstream `turn/end.reason.kind` must never be dropped silently
-  // and must never crash the Host: absent an injected channel the row reports
-  // through this Host's own logger.
-  const diag: RemoteHostDiagnostics = options.diag ?? {
-    warn: (message, fields) => { hostContext.logger('remote-host').warn(message, fields) },
+  // M3-ONLY: the private services/contribution and Performance belong to the
+  // built-in PiTui Host Runtime / Performance row mounted by the caller's
+  // fixture or Profile. Never silently mount a second copy here (B2-S deletes
+  // this whole M3-only composition).
+  for (const service of ['piTuiHostReady', 'piTuiFileReferences', 'piTuiTerminalProgress', 'piTuiPerformanceReady'] as const) {
+    if (hostContext.reflect.get(service) === undefined) {
+      throw new Error(
+        `remote host runtime: the M3 composition requires the mounted PiTui Host Runtime and Performance row; missing "${service}"`,
+      )
+    }
   }
-  /** The live Agent of one session, read PER CALL through the authoritative
-   *  Host registry (never a composition-time snapshot). */
-  const liveAgentFor = (sessionId: string): unknown =>
-    (hostContext.reflect.get('agents') as { get(id: string): unknown } | undefined)?.get(sessionId)
   const jobControllerBefore = hostContext.reflect.get('jobController') as { typertRemote?: unknown }
   const userQuestionsBefore = hostContext.reflect.get('userQuestions') as { typertRemote?: unknown }
 
@@ -161,50 +161,6 @@ export async function createRemoteHostRuntime(
   }
 
   try {
-    // 0a. The package's ONE private Typert contribution: both descriptors
-    //     (`piTuiFileReferences/list`, `piTuiTerminalProgress/watch`) are
-    //     registered together because rc.2 admits exactly one contribution per
-    //     package identity. Registered FIRST and in its own fiber, so every
-    //     private endpoint is live before any Client can call it and is
-    //     withdrawn with this runtime.
-    const contributionFiber = hostContext.inject(['typert'], contributionCtx => {
-      contributionCtx.effect(
-        () => contributionCtx.typert.register(PI_TUI_HOST_CONTRIBUTION),
-        'pi-tui-private-remote-host',
-      )
-    })
-    fibers.push(contributionFiber)
-    await contributionFiber
-    // 0b. The private `piTuiFileReferences` Host service (TS8-HF1): the explicit
-    //    `@`-completion augmentation. Mounted ahead of the carrier so the
-    //    service binding is live before the first Client call. The composition
-    //    resolves the two narrow Host facts it needs (the same reflect reads
-    //    the prerequisite check above uses for base services).
-    const fileReferenceFiber = hostContext.inject(PiTuiFileReferenceHostService.inject, pluginCtx => {
-      new PiTuiFileReferenceHostService(pluginCtx, {
-        // Both facts are read PER CALL: a replaced `agents` registry or
-        // `fileReferences` provider must be observed, never a composition-time
-        // snapshot (the same reflect idiom the prerequisite check above uses).
-        agentFor: sessionId => liveAgentFor(sessionId) as LiveAgentLike | undefined,
-        official: () => hostContext.reflect.get('fileReferences') as FileReferencesServiceLike | undefined,
-      })
-    })
-    fibers.push(fileReferenceFiber)
-    await fileReferenceFiber
-    // 0c. The private `piTuiTerminalProgress` Host service (plan R2 §6): the
-    //     Remote branch's ONLY terminal-outcome authority. It observes the
-    //     durable turn boundaries and the live Agent status of this Host with
-    //     the SHARED interval fold and serves them over the private stream.
-    const terminalProgressFiber = hostContext.inject(PiTuiTerminalProgressHostService.inject, pluginCtx => {
-      new PiTuiTerminalProgressHostService(pluginCtx, {
-        agentFor: sessionId => liveAgentFor(sessionId) as TerminalProgressLiveAgentLike | undefined,
-        onUnknownReason: kind => {
-          diag.warn('terminal progress: unknown turn/end reason', { kind })
-        },
-      })
-    })
-    fibers.push(terminalProgressFiber)
-    await terminalProgressFiber
     // 1. Host connection — provides `connection` for the in-process carrier.
     //    No HTTP surface is composed, so the row's browser-authentication
     //    side is deliberately absent (the proven in-process fixture form);
@@ -218,19 +174,10 @@ export async function createRemoteHostRuntime(
     const uploadFiber = hostContext.plugin(FileUploads)
     fibers.push(uploadFiber)
     await uploadFiber
-    // 3./4. Whole-log projection units before the Session controller.
+    // 3. Whole-log projection units before the Session controller.
     const statsFiber = hostContext.plugin(sessionStats)
     fibers.push(statsFiber)
     await statsFiber
-    // 4b. The bundle's OWN Host performance projection (plan PR-1 §4): the one
-    //     authority for the R5/All model-request rate and the recent TTFB.
-    //     Mounted right after the official `sessionStats` unit it mirrors and
-    //     before the Session controller / Client carrier, on THIS Host Context
-    //     (the Direct profile registers its own row on the base Host Context —
-    //     one registration per context is the contract).
-    const performanceFiber = hostContext.plugin(performanceHost)
-    fibers.push(performanceFiber)
-    await performanceFiber
     const outlineFiber = hostContext.plugin(sessionTurnOutline)
     fibers.push(outlineFiber)
     await outlineFiber

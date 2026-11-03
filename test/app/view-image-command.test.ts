@@ -83,6 +83,7 @@ function setup(options: {
   const clientCwd = options.cwd ?? '/ws'
   const sessionCwd = options.sessionCwd ?? '/ws'
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app: options.mounted === false ? undefined : app,

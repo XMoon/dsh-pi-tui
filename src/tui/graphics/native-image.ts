@@ -24,8 +24,11 @@ import {
   type Terminal,
 } from '@xmoon76/pi-tui'
 import { KittyGraphicsCore, type KittyGraphicsCoreOptions, type KittyImage, type KittyImageSource } from './kitty-core.ts'
+import { imageProtocolPreference } from './image-protocol-preference.ts'
 import { calculateNativeCellSize, encodeKittyPlacement, type KittyPlacementGeometry } from './kitty-native.ts'
 import { KittyTerminalFacade } from './kitty-terminal.ts'
+import type { DirectSixelGraphics } from './sixel-image.ts'
+import type { ZellijNegotiatedGraphics } from './zellij-sixel.ts'
 
 /** The options one managed image occurrence declares. */
 export interface NativeKittyImageOptions {
@@ -60,6 +63,8 @@ export interface PixelBody {
 /** The body one render really painted (the host row mapper reads it). */
 export interface NativeKittyImageBody extends KittyPlacementGeometry {
   readonly width: number
+  /** Rows cropped from the TOP of the source by the Screen's visible window. */
+  readonly cropTopRows?: number
 }
 
 /**
@@ -191,23 +196,44 @@ export class NativeKittyImage implements Component {
   }
 }
 
+/**
+ * Every managed graphics handle a consumer may hold (Image-8 / I8-2A).
+ *
+ * The union exists so a media component swaps its renderer without knowing the
+ * protocol: it asks `effectiveImageProtocol()` and calls the same
+ * `image(source, options)` / `canPaint()` / `terminal` / `dispose()` surface.
+ * Kitty keeps precedence everywhere it was admitted; SIXEL is only ever the
+ * single owner of a Direct terminal that reported its own DA1 attribute.
+ */
+export type ImageGraphics = KittyGraphics | DirectSixelGraphics | ZellijNegotiatedGraphics
+
 const MULTIPLEXER_ENV_KEYS = ['TMUX', 'ZELLIJ', 'STY'] as const
 
 /**
  * Whether the managed native topology is present: a Direct capable Kitty
  * protocol terminal, with no multiplexer in between.
  *
+ * The explicit `PI_IMAGE_PROTOCOL` preference is applied BEFORE every
+ * detection fact: `sixel`, `iterm2` and `none` never admit this factory, so a
+ * static Kitty detection (or the fork's own legacy override) cannot keep a
+ * Kitty owner alive for a user who asked for another protocol. `kitty` and
+ * `auto` keep the existing capability/topology logic; `kitty` therefore still
+ * needs the fork's effective `images === 'kitty'` answer, and `auto` keeps the
+ * terminal's own detection order.
+ *
  * The fork's effective `images === 'kitty'` capability is deliberately the
- * protocol authority: it already covers Kitty, Ghostty, WezTerm, Warp, Tern and
- * a user's explicit `PI_IMAGE_PROTOCOL=kitty` override. No terminal-brand
- * allowlist is applied. `TERM` is not an identity fact — `xterm-ghostty`,
- * `xterm-256color`, a custom value or no `TERM` at all are accepted — it only
- * rejects a known multiplexer prefix (`tmux*`/`screen*`), alongside the
- * `TMUX`/`ZELLIJ`/`STY` keys and Herdr. Those transport exclusions are what
- * keep an inherited capability from being mistaken for a direct pane
- * protocol.
+ * protocol authority for the admitted case: it already covers Kitty, Ghostty,
+ * WezTerm, Warp, Tern and a user's explicit `PI_IMAGE_PROTOCOL=kitty`
+ * override. No terminal-brand allowlist is applied. `TERM` is not an identity
+ * fact — `xterm-ghostty`, `xterm-256color`, a custom value or no `TERM` at all
+ * are accepted — it only rejects a known multiplexer prefix
+ * (`tmux*`/`screen*`), alongside the `TMUX`/`ZELLIJ`/`STY` keys and Herdr.
+ * Those transport exclusions are what keep an inherited capability from being
+ * mistaken for a direct pane protocol.
  */
 export function admitsNativeKitty(environment: NodeJS.ProcessEnv = process.env): boolean {
+  const preference = imageProtocolPreference(environment)
+  if (preference !== 'auto' && preference !== 'kitty') return false
   if (getCapabilities().images !== 'kitty') return false
   const termProgram = (environment.TERM_PROGRAM ?? '').toLowerCase()
   const term = (environment.TERM ?? '').toLowerCase()

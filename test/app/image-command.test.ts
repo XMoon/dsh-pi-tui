@@ -92,6 +92,7 @@ function setup(options: { cwd?: string; sessionCwd?: string; signal?: AbortSigna
   const clientCwd = options.cwd ?? '/ws'
   const sessionCwd = options.sessionCwd ?? '/ws'
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     app,
@@ -518,6 +519,7 @@ function mountedHarness(options: {
   let cwdReads = 0
   const scopeFacts = sessionScopeFacts(() => undefined, () => generation)
   const runner: TuiCommandRunner = {
+    beginClientWrite: () => () => {},
     deliveredFilesSnapshot: () => undefined,
     ctx,
     // The TSP renderer mounts no TuiApp: every PiTui-only member is absent.

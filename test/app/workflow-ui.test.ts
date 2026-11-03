@@ -536,6 +536,7 @@ test('Fold -> TUI click -> TaskRuntime live driver gate -> enterView (open and r
     presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => [], reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   const source: TaskSurfaceSource = {
     sessionId: () => 'sess-main',

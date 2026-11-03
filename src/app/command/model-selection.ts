@@ -28,6 +28,11 @@ export interface SelectionRef<Selection> {
 export interface ModelSelectionDeps<Selection extends ModelSelectionValue> {
   /** The live agent of the current owner, or undefined (sessionless surface). */
   readonly liveAgent: () => unknown
+  /** Whether an actual Session owner is open (Direct Agent OR the Remote
+   *  Client's retained main Session). The in-flight marker follows the
+   *  SESSION, not the in-process Agent: the split Remote surface has a live
+   *  Session and no Agent object. */
+  readonly hasSession: () => boolean
   /** The current ownership generation (the marker fence). */
   readonly generation: () => number
   /** The persisted Host default selection (the sessionless base read). */
@@ -178,7 +183,7 @@ export function createModelSelectionOwner<Selection extends ModelSelectionValue>
   
   const currentModelSelectionMarker = ():
     { readonly selection: Selection; readonly status: 'pending' | 'unresolved' } | undefined => {
-    if (deps.liveAgent() !== undefined) {
+    if (deps.hasSession()) {
       return pendingModelSelection !== undefined && pendingModelSelection.generation === deps.generation()
         ? { selection: pendingModelSelection.selection, status: pendingModelSelection.status }
         : undefined

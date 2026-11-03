@@ -7,6 +7,61 @@
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-11-03
+
+### 安装与版本对应
+
+本版以已发布的 DSH `0.2.1-rc.5` 作为精确验证目标，最低版本仍为 `0.2.1-rc.2`。安装
+DSH 需要显式允许其原生安装脚本：
+
+```sh
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.5
+dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.5
+dsh --profile pi-tui
+```
+
+从已发布的 `0.5.4` 升级：先让进行中的对话回合与后台任务正常结束，再正常退出旧的
+TUI/DSH 进程，然后通过上面的官方命令安装 `0.5.5` 并重新启动。不要在旧版本仍活跃
+运行时直接安装新包并期待零中断热替换；本版不承诺对运行中的旧 Host 做原地无损升级。
+已发布的 `0.5.4`、`0.5.3` 仍可与 `0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4` 配对
+使用。旧版本 DSH 的配对关系不变：`@deepseek-ai/dsh@0.2.0-rc.2` 使用
+`@xmoon76/dsh-pi-tui@0.5.1` 或 `@xmoon76/dsh-pi-tui@0.5.2-rc.1`；
+`@deepseek-ai/dsh@0.2.0-rc.1`（含 `0.1.7-rc.2`）使用
+`@xmoon76/dsh-pi-tui@0.5.0`，`@deepseek-ai/dsh@0.1.7-rc.1` 使用
+`@xmoon76/dsh-pi-tui@0.4.8`。
+
+### 新增
+
+- **Direct 终端图片支持（SIXEL）。** 在真实上报 SIXEL 能力的 Direct 终端（如
+  Windows Terminal）中，对话与草稿里的图片直接内嵌渲染，并提供图片工作区、
+  全屏查看器与 SVG 缩略图/查看器；SIXEL 图片与自动滚动条可以共存。
+
+- **tmux 与 Zellij 的原生 SIXEL 支持。** tmux pane 在服务器上报
+  `sixel_support` 且显示客户端实测支持时自动渲染 SIXEL 图片；Zellij 从真实
+  pane 证据协商图形通道，按 Kitty > SIXEL > 文本选择。
+
+- **Subagent 卡片显示真实的代理身份。** 中继与已结算卡片显示来自官方投影的
+  可读代理标题，并随投影保持最新；同一回合内的代理中继与其工作折叠显示。
+
+### 变更
+
+- **会话切换与恢复更果断、更真实。** `/new`、切换会话或 `/resume` 不再等待
+  旧回合自然结束，而是立即停止被离开的会话；`/resume` 按真实结算结果报告
+  成败，保留的队列在队列窗格中如实解释为等待下一条提示。
+
+- **`PI_IMAGE_PROTOCOL` 成为全后端一致的显式协议选择。** 支持 `auto`、`kitty`、
+  `sixel`、`iterm2`、`none`/`0`：显式值只会尝试所选协议，失败时显示文本而不会切换到
+  其他协议；未知值在启动时报错。tmux/Zellij 的真实传输安全门槛和 DCS 所有权不变。
+
+- **Zellij + Windows Terminal 自动模式避开 Kitty 启动期假阳性。** 启动期的
+  Kitty `OK` 不再抢占图片协议；pane 的 DA1 与本地 Zellij 版本满足条件时自动
+  使用 SIXEL，否则显示文本。真实 Kitty 及其他自动环境仍保持 Kitty 优先。
+
+### 修复
+
+- **修复部分终端上终端进度条被静默丢弃的问题。** 终端不具备有状态进度投影
+  时，进度写入不再被错误地丢弃。
+
 ## [0.5.4] - 2026-10-29
 
 ### 安装与版本对应
@@ -1628,7 +1683,8 @@ dsh --profile pi-tui
 - 全屏布局、Ctrl+F 搜索、主题系统。
 - 单包发布模型。
 
-[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...HEAD
+[Unreleased]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.5...HEAD
+[0.5.5]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/XMoon/dsh-pi-tui/compare/next-v0.5.2-rc.1...v0.5.3
 [0.5.2-rc.1]: https://github.com/XMoon/dsh-pi-tui/compare/v0.5.1...next-v0.5.2-rc.1

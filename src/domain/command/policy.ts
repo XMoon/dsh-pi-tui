@@ -53,6 +53,10 @@ export const SESSIONLESS_COMMANDS = new Set([
   // delivered files. With no session it must answer "No delivered files"
   // directly instead of creating a Session just to say so.
   'deliverables',
+  // `/reload-client` (M4 PR4) reloads the split Client PROCESS from the
+  // installed build — it never needs a Session and must not create one on a
+  // first-boot invocation (a sessionless split Client is a legal reload).
+  'reload-client',
 ])
 
 /**
@@ -93,6 +97,10 @@ export const LOCAL_COMMANDS = new Set([
   // `/settings` alias (see the registration comments: both pairings are
   // explicit aliases, and the near-synonym rule stays for NEW commands).
   'statusline',
+  // `/reload-client` (M4 PR4) is the Client-local PROCESS reload. It is a
+  // reserved local name (plugins can never shadow it) and is NOT the
+  // catalog/settings `/reload`, which keeps its own unchanged semantics.
+  'reload-client',
 ])
 
 /**
@@ -344,4 +352,40 @@ export function shouldConsumeAdvertisedMiss(
  */
 export function isPlainExitPrompt(text: string): boolean {
   return text.trim() === 'exit'
+}
+
+/**
+ * The TUI-local commands whose OWN handler performs no persistent Host write
+ * (they read/browse/stage locally, open a read-only panel, or are the reload
+ * command itself). Their execution never holds the accepted-command reload
+ * lifetime — a `/reload` catalog/settings refresh or `/exit` must not block a
+ * manual Client reload.
+ *
+ * Every OTHER local command is treated as a potential persisted writer
+ * (fail-safe): its accepted execution — including the asynchronous preparation
+ * that precedes a configuration write — keeps the Client reload gate closed
+ * until the handler settles. A new write-capable local command is therefore
+ * protected by default instead of requiring an addition to this set.
+ */
+export const READ_ONLY_LOCAL_COMMANDS: ReadonlySet<string> = new Set([
+  // The manual Client reload itself: it must never refuse itself.
+  'reload-client',
+  // The catalog/settings REFRESH only reads.
+  'reload',
+  // Exit orchestration and read-only chrome/panels.
+  'exit', 'quit', 'help', 'keybindings',
+  // Local clipboard / attachment intake / artifact output / transcript views.
+  'copy', 'attach', 'image', 'export', 'transcript', 'deliverables', 'view-image',
+  // Read-only pickers and the task center.
+  'sessions', 'resume', 'search', 'tasks',
+])
+
+/**
+ * Whether one TUI-local command may perform a persistent Host write during its
+ * own handler execution. Fail-safe: anything not explicitly read-only is
+ * treated as a possible writer.
+ * @param name - the local command name (bare token).
+ */
+export function localCommandMayWrite(name: string): boolean {
+  return !READ_ONLY_LOCAL_COMMANDS.has(name)
 }

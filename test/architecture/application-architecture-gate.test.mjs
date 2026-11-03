@@ -26,6 +26,7 @@ import {
   findDirectAdapterConstructions,
   findConcreteRegistryPlacementViolations,
   findFinalSourceRootStateViolations,
+  findProcessCompositionEdgeViolations,
   findRemoteDynamicImportViolations,
   findRemoteToDirectViolations,
   findRetiredSourceDirectoryViolations,
@@ -37,6 +38,8 @@ import {
   isDirectCompositionFile,
   isDshImplementationPackage,
   isRemoteComposition,
+  PROCESS_COMPOSITION_BOOTSTRAP_ENTRY,
+  PROCESS_COMPOSITION_BOOTSTRAP_TARGET,
   isRuntimeProcessSubtree,
   listSourceRootDirectories,
   listSourceRootFiles,
@@ -1990,4 +1993,63 @@ test('the startup island must not reach a repository implementation module', () 
     entry('startup.ts', "import type { Terminal } from '@xmoon76/pi-tui'\n"),
     entry('tui/other.ts', "import { ProcessTerminal } from '@xmoon76/pi-tui'\n"),
   ]), [])
+})
+
+test('the split-Client bootstrap edge is exactly one lazy import from the ONE process entry, after PluginPackages', () => {
+  const entrySource = (body) => `async function run() {\n${body}\n}\n`
+  const bootstrapTarget = [
+    entry('app/bootstrap.ts', 'export const bootstrap = 1\n'),
+  ]
+  const valid = [
+    entry(PROCESS_COMPOSITION_BOOTSTRAP_ENTRY, entrySource(
+      "  const packageFiber = context.plugin(hostModules.PluginPackages, { resolution })\n"
+      + "  await packageFiber\n"
+      + "  const { applyRunnerWithRuntime } = await import('../bootstrap.ts')\n",
+    )),
+    ...bootstrapTarget,
+  ]
+  assert.deepEqual(findProcessCompositionEdgeViolations(valid), [])
+
+  // No other owner may name the facade dynamically, and the edge must be
+  // unique in the one allowed entry.
+  assert.equal(findProcessCompositionEdgeViolations([
+    entry('app/remote-process/local-host-entry.ts', "const bootstrap = await import('../bootstrap.ts')\n"),
+    ...valid,
+  ]).length, 1)
+  // Two expressions are one uniqueness violation plus the (also true) missing
+  // PluginPackages-first ordering.
+  assert.equal(findProcessCompositionEdgeViolations([
+    entry(PROCESS_COMPOSITION_BOOTSTRAP_ENTRY, entrySource(
+      "  await import('../bootstrap.ts')\n  await import('../bootstrap.ts')\n",
+    )),
+    ...bootstrapTarget,
+  ]).length, 2)
+
+  // The official resolution must be mounted first.
+  assert.equal(findProcessCompositionEdgeViolations([
+    entry(PROCESS_COMPOSITION_BOOTSTRAP_ENTRY, entrySource("  await import('../bootstrap.ts')\n")),
+    ...bootstrapTarget,
+  ]).length, 1)
+
+  // A missing edge fails closed: the surface composition must not lose its
+  // only runner mount silently.
+  assert.equal(findProcessCompositionEdgeViolations(bootstrapTarget).length, 1)
+
+  // The generic dynamic rule admits the sanctioned edge and rejects every
+  // other owner/target, while static imports stay governed by their rule.
+  const dynamicRuleViolations = findViolations([
+    entry(PROCESS_COMPOSITION_BOOTSTRAP_ENTRY, entrySource(
+      "  const packageFiber = context.plugin(hostModules.PluginPackages, { resolution })\n"
+      + "  await packageFiber\n"
+      + "  const { applyRunnerWithRuntime } = await import('../bootstrap.ts')\n",
+    )),
+    ...bootstrapTarget,
+  ]).filter(violation => violation.rule === 'owner-dynamic-imports-bootstrap')
+  assert.deepEqual(dynamicRuleViolations, [])
+  const otherDynamic = findViolations([
+    entry('app/surface/runtime.ts', "const bootstrap = await import('../../app/bootstrap.ts')\n"),
+    ...bootstrapTarget,
+  ])
+  assert.equal(otherDynamic.filter(violation => violation.rule === 'owner-dynamic-imports-bootstrap').length, 1)
+  assert.equal(PROCESS_COMPOSITION_BOOTSTRAP_TARGET, 'app/bootstrap.ts')
 })

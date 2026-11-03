@@ -211,6 +211,7 @@ function startQuick(options: {
     presentation: () => pituiTaskCenterPresentation(app),
     isCleanedUp: () => false,
     attention: { rows: () => attention, reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })
 
@@ -667,6 +668,7 @@ test('the production Question controller subscription reaches the painted window
       publish: publishAttention,
       reopen: (sessionId, callId) => controller.reopen(sessionId, callId),
     },
+    publishActivity: () => {},
   })
   tasks.attachTasks({
     sessionId: () => SESSION,

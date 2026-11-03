@@ -18,8 +18,10 @@
  *   XML with a local `scrollTop`; the ORIGINAL string is never rewritten, and
  *   `Copy` sends it unchanged.
  *
- * Preview pixels are Kitty-only. Without a usable protocol the page says
- * `Preview unavailable` and Source/Copy stay fully usable.
+ * Preview pixels are available on Kitty and on Direct SIXEL (Image-8 / I8-2B);
+ * iTerm2 keeps the intentional workspace restriction. Without a usable
+ * protocol the page says `Preview unavailable` and Source/Copy stay fully
+ * usable.
  * @module @xmoon76/dsh-pi-tui/tui/components/media/svg-viewer
  */
 
@@ -36,8 +38,9 @@ import { SVG_MAX_RASTER_PIXELS, SVG_MAX_RASTER_SIDE } from '../../../domain/visu
 import { admitSvg, type SvgAdmission } from '../../../domain/visual/svg-admission.ts'
 import { isolatedSvgRasterSupported } from '../../../client/media/svg/rasterize.ts'
 import type { SvgRasterLoader, SvgRasterState } from '../../../client/media/svg/raster-loader.ts'
-import type { KittyGraphics, PixelBody } from '../../graphics/native-image.ts'
+import type { ImageGraphics, PixelBody } from '../../graphics/native-image.ts'
 import { effectiveImageProtocol } from '../../graphics/image-capability.ts'
+import type { ImageProtocolPreference } from '../../graphics/image-protocol-preference.ts'
 import { SVG_VIEWER_CHORDS, SVG_VIEWER_SCROLL_LABEL } from '../../keybindings/hints.ts'
 import { renderActionBarRow, type ActionBarSegment } from '../../presentation/action-bar.ts'
 import { sanitizedPhysicalLine } from '../../presentation/lines.ts'
@@ -72,7 +75,9 @@ export interface SvgViewerInput {
    * Preview page paints through the Core when it is admitted; the legacy
    * `Image` path stays for every other surface.
    */
-  readonly graphics?: KittyGraphics
+  readonly graphics?: ImageGraphics
+  /** The app's ONE startup image-protocol preference. */
+  readonly imageProtocolPreference?: ImageProtocolPreference
 }
 
 /** The two Viewer pages. */
@@ -389,11 +394,13 @@ export class SvgViewerPanel implements Component {
     return rows
   }
 
-  /** Whether this surface may paint real SVG pixels at all. */
+  /** Whether this surface may paint real SVG pixels at all: Kitty and Direct
+   *  SIXEL (the isolated raster lane is Linux-only); iTerm2 stays excluded. */
   private previewSupported(): boolean {
+    const protocol = effectiveImageProtocol(this.input.graphics, this.input.imageProtocolPreference)
     return this.input.loader !== undefined
       && this.admission.ok
-      && effectiveImageProtocol(this.input.graphics) === 'kitty'
+      && (protocol === 'kitty' || protocol === 'sixel')
       && isolatedSvgRasterSupported()
   }
 

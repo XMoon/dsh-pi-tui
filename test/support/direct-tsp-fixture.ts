@@ -61,7 +61,7 @@ import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
-import { LlmAdapter, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { LlmAdapter, ToolCallId, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { WriteOutcome } from '../../src/runtime/session-writer-port.ts'
 import { DirectSessionWriter } from '../../src/runtime/direct/session-writer-direct.ts'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
@@ -127,6 +127,47 @@ export class ScriptedStreamingAdapter extends LlmAdapter {
   }
 }
 
+/** The adapter with ONE scripted model tool call on its first stream (the real
+ *  Agent loop executes it), then the ordinary scripted text. */
+class ScriptedToolCallAdapter extends ScriptedStreamingAdapter {
+  private readonly call: { readonly callId: string; readonly name: string; readonly arguments: string }
+  private issued = false
+
+  constructor(
+    deltas: readonly string[],
+    call: { readonly callId: string; readonly name: string; readonly arguments: string },
+    hold?: () => Promise<void>,
+  ) {
+    super(deltas, hold)
+    this.call = call
+  }
+
+  override async *stream(options: { readonly signal?: AbortSignal }): AsyncIterable<StreamChunk> {
+    if (this.issued) {
+      yield* super.stream(options)
+      return
+    }
+    this.issued = true
+    yield { type: 'block-start', index: 0, blockType: 'text' }
+    yield { type: 'text-delta', index: 0, text: 'asking the user' }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'asking the user' } }
+    yield { type: 'block-start', index: 1, blockType: 'tool-call' }
+    yield {
+      type: 'tool-call-delta',
+      index: 1,
+      id: ToolCallId(this.call.callId),
+      name: this.call.name,
+      argumentsDelta: this.call.arguments,
+    }
+    yield {
+      type: 'block-end',
+      index: 1,
+      block: { type: 'tool-call', id: ToolCallId(this.call.callId), name: this.call.name, arguments: this.call.arguments },
+    }
+    yield { type: 'finish', reason: { kind: 'tool-calls' } }
+  }
+}
+
 export interface DirectTspFixture {
   readonly pane: TspPane
   readonly ctx: Context
@@ -165,14 +206,6 @@ export interface DirectTspFixture {
     readonly agentStatus: string
     readonly outcome: WriteOutcome
   }) => void): { readonly calls: () => number; readonly detach: () => void }
-  /**
-   * FAULT-INJECTION override for the production writer's `cancel` (the
-   * cancel-ERROR qualification): saves the unbound original (identity
-   * restored on detach) but does NOT forward — every call returns the fixed
-   * outcome. This is deliberately NOT a recorder; the injected outcome is
-   * the subject under test.
-   */
-  recordCancels(outcome: () => WriteOutcome): { readonly detach: () => void }
   settle(): Promise<void>
 }
 
@@ -226,6 +259,9 @@ export interface DirectTspFixtureOptions {
   readonly deltas?: readonly string[]
   /** Keep the model stream OPEN until this resolves (a running turn). */
   readonly streamHold?: () => Promise<void>
+  /** Script ONE real model tool call on the first stream (the production Agent
+   *  loop executes it), then continue with the scripted text. */
+  readonly scriptedToolCall?: { readonly callId: string; readonly name: string; readonly arguments: string }
   /** Extra TUI plugin config (e.g. `{ busyEnter: 'steer' }`) — the SAME
    *  volatile authority `applyRunner` reads, so the busy preference under
    *  test is the real configured one. */
@@ -253,6 +289,8 @@ export interface DirectTspFixtureOptions {
   }>
   readonly startup?: { readonly sessionId?: string; readonly presetId?: string }
   readonly modelPicker?: boolean
+  /** Advertise the `el` kind so the native composer action row mounts. */
+  readonly composerActions?: boolean
   readonly presetPicker?: boolean
   readonly sessionBrowser?: boolean
   /**
@@ -325,6 +363,13 @@ export interface DirectTspFixtureOptions {
      * suite that proves the real `/tasks` roster must reproduce that row.
      */
     readonly subagentRuntime?: boolean
+    /**
+     * Mount the production `@deepseek-ai/dsh-tool-ask-user` row (the same tool
+     * the shipped bundle registers). Requires a scripted tool call that invokes
+     * `ask_user_question`; the real tool then takes the Agent loop's OWN
+     * cancellation signal into the official user-questions request.
+     */
+    readonly askUserTool?: boolean
   }
   /**
    * Negative composition: mount no credentials provider at all, so the
@@ -381,6 +426,7 @@ export async function createDirectTspFixture(
         sessionBrowser: options.sessionBrowser,
         nativeImages: options.nativeImages,
         nativeChart: options.nativeChart,
+        composerActions: options.composerActions,
       })
   // OWNERSHIP, not success-contingency: scripted mode replaces the PROCESS tty
   // and clears five env vars; external-Tern and PiTui modes must leave the
@@ -437,7 +483,9 @@ export async function createDirectTspFixture(
   await mountAgentLoopTestDependencies(ctx, options.workingDirectory === true ? { workingDirectory: true } : {})
   persistenceFiber = await ctx.plugin(JsonlSessionPersistence, { root: join(workRoot, 'persistence') })
   await mountAgentLoopTestHarness(ctx)
-  llmAdapter = new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
+  llmAdapter = options.scriptedToolCall === undefined
+    ? new ScriptedStreamingAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.streamHold)
+    : new ScriptedToolCallAdapter(options.deltas ?? ['B2', '-DIRECT', '-OK'], options.scriptedToolCall, options.streamHold)
   ctx.llm.registerAdapter([DIRECT_TSP_PROVIDER], llmAdapter)
   await ctx.plugin(CommandRuntime)
   for (const command of options.hostCommands ?? []) {
@@ -458,6 +506,10 @@ export async function createDirectTspFixture(
   await ctx.plugin(LocalAttachmentStore, { dshHome: workRoot })
   ctx.provide('fileReferences', { list: async () => [] })
   await ctx.plugin(UserQuestionService)
+  if (options.officialServices?.askUserTool === true) {
+    const askUser = await import('@deepseek-ai/dsh-tool-ask-user')
+    await ctx.plugin({ name: askUser.name, inject: askUser.inject, apply: askUser.apply } as never, undefined as never)
+  }
   await ctx.plugin(Loader)
   if (options.profileDefault !== undefined) await mountModelProfile(ctx, workRoot, options.profileDefault)
   if (options.presetProfile !== undefined) {
@@ -694,18 +746,6 @@ export async function createDirectTspFixture(
     }
   }
 
-  /** The cancel-ERROR fault-injection seam: force the production outcome. */
-  const recordCancels = (outcome: () => WriteOutcome): { readonly detach: () => void } => {
-    const prototype = DirectSessionWriter.prototype as unknown as {
-      cancel(this: DirectSessionWriter, sessionId: string): Promise<WriteOutcome>
-    }
-    const originalCancel = prototype.cancel
-    prototype.cancel = async function (this: DirectSessionWriter) {
-      return outcome()
-    }
-    return { detach: () => { prototype.cancel = originalCancel } }
-  }
-
   const fixture = {
     ctx,
     workRoot,
@@ -713,7 +753,6 @@ export async function createDirectTspFixture(
     cancellations: () => llmAdapter.aborts.length,
     modelCalls: () => llmAdapter.calls,
     recordPrompts,
-    recordCancels,
     settle,
   }
   return pane === undefined ? fixture : { ...fixture, pane }

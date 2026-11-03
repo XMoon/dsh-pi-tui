@@ -85,7 +85,10 @@ const captured = (isCurrent?: () => boolean) => ({
 function ownerFor(
   presentation: PresentationProbe,
   value: SessionReader,
-  options: { readonly isCurrent?: () => boolean; readonly onResumeIntent?: (intent: SessionBrowserResumeIntent) => void } = {},
+  options: {
+    readonly isCurrent?: () => boolean
+    readonly onResumeIntent?: (intent: SessionBrowserResumeIntent, scope: SessionScope, settle: (outcome: import('../../src/app/command/session-browser-read.ts').SessionBrowserResumeSettlement) => void) => void
+  } = {},
 ) {
   const diag = DIAG()
   const owner = createSessionBrowserReadOwner({
@@ -673,4 +676,45 @@ test('an already-disposed presentation handle starts NO listing and leaves the o
   assert.equal(listCalls, 1, 'exactly the admitted panel read the listing')
   assert.deepEqual(await admitted.settlement, { kind: 'ready' },
     'the admitted panel settles its own listing outcome')
+})
+
+test('a direct resume accepts the intent but the resume settlement carries the real switch outcome', async () => {
+  const presentation = new PresentationProbe()
+  let settleResume!: (outcome: import('../../src/app/command/session-browser-read.ts').SessionBrowserResumeSettlement) => void
+  const { owner } = ownerFor(presentation, reader({ list: async () => [row('session-target')] }), {
+    onResumeIntent: (_intent, _scope, settle) => { settleResume = settle },
+  })
+  const handle = owner.open({ directMatch: { query: 'target', find: findSessionMatch } })
+  assert.deepEqual(await handle.settlement, { kind: 'matched', sessionId: 'session-target' },
+    'the read owner accepts the matched row')
+  let resolved: import('../../src/app/command/session-browser-read.ts').SessionBrowserResumeSettlement | undefined
+  void handle.resumeSettlement.then(outcome => { resolved = outcome })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(resolved, undefined, 'acceptance is not a committed switch')
+  settleResume({ kind: 'failed', text: 'session open failed: lease held' })
+  assert.deepEqual(await handle.resumeSettlement, { kind: 'failed', text: 'session open failed: lease held' })
+})
+
+test('a failed resume attempt re-enables the panel and each intent settles independently', async () => {
+  const presentation = new PresentationProbe()
+  const settles: Array<(outcome: import('../../src/app/command/session-browser-read.ts').SessionBrowserResumeSettlement) => void> = []
+  const { owner } = ownerFor(presentation, reader({ list: async () => [row('session-target'), row('session-other')] }), {
+    onResumeIntent: (_intent, _scope, settle) => { settles.push(settle) },
+  })
+  const handle = owner.open()
+  assert.deepEqual(await handle.settlement, { kind: 'ready' })
+  const request = presentation.requests[0]!
+  request.onResumeIntent({ sessionId: 'session-target', currentSessionId: 'session-current', source: 'enter' })
+  await waitUntil('first resume accepted', () => presentation.latest()?.resumePending === true, 3_000)
+  settles[0]!({ kind: 'failed', text: 'lease held' })
+  await waitUntil('the failed attempt clears pending', () => presentation.latest()?.resumePending === false, 3_000)
+  request.onResumeIntent({ sessionId: 'session-other', currentSessionId: 'session-current', source: 'enter' })
+  await waitUntil('the retry is accepted', () => presentation.latest()?.resumePending === true, 3_000)
+  // A LATE settle from the FIRST attempt must not clear the SECOND attempt.
+  settles[0]!({ kind: 'switched', sessionId: 'session-target' })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(presentation.latest()?.resumePending, true,
+    'the older attempt must not settle the newer pending intent')
+  settles[1]!({ kind: 'switched', sessionId: 'session-other' })
+  await waitUntil('the retry settles pending', () => presentation.latest()?.resumePending === false, 3_000)
 })

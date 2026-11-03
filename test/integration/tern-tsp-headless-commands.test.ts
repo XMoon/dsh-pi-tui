@@ -15,8 +15,11 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { symbols } from '@deepseek-ai/cordis'
+import { SessionId } from '@deepseek-ai/dsh-session'
 import { createDirectTspFixture, directSettle, waitFor, waitForInputDelivery, type DirectTspFixture } from '../support/direct-tsp-fixture.ts'
-import { wireNodes } from '../support/tsp-picker-wire.ts'
+import { SessionOperationBarrier } from '../../src/app/session/operation-barrier.ts'
+import { pickerNode, pickerProps, sendAction, sendActivate, wireNodes } from '../support/tsp-picker-wire.ts'
 
 // ── wire helpers ────────────────────────────────────────────────────────────
 
@@ -24,6 +27,22 @@ import { wireNodes } from '../support/tsp-picker-wire.ts'
 function composerText(fixture: DirectTspFixture): string | undefined {
   const composer = wireNodes(fixture.pane).find(node => node.id === 'dock.composer')
   return typeof composer?.p.text === 'string' ? composer.p.text : undefined
+}
+
+/** Whether the REAL live Host Agent inbox still holds a matching occurrence. */
+function hostInboxHas(fixture: DirectTspFixture, sessionId: string, marker: string): boolean {
+  const agents = fixture.ctx.get('agents') as unknown as {
+    get(id: SessionId): {
+      readonly inbox: {
+        readonly nextTurn: readonly unknown[]
+        readonly nextStep: readonly unknown[]
+      }
+    } | undefined
+  }
+  const agent = agents.get(SessionId(sessionId))
+  if (agent === undefined) return false
+  return [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+    .some(item => JSON.stringify(item).includes(marker))
 }
 
 /** The current Session id(s) the dock welcome card carries (hydration signal). */
@@ -790,8 +809,10 @@ test('a no-panel TUI builtin executes locally while the turn runs (busyEnter=ste
   const writes = fixture.recordPrompts(() => {})
   try {
     await waitForInputDelivery(fixture.pane)
+    // seedTurn already waits for the AUTHORITATIVE running-turn fact (the real
+    // model request). TSP-7 PR-A retired the dock banner, so there is no banner
+    // word left to wait for.
     const sessionId = await seedTurn(fixture, 'hold the turn open')
-    await waitFor('the running turn', () => fixture.pane.output.text().includes('working'), 25_000)
     const writesBefore = writes.calls()
     await submitInput(fixture, '/title While the turn runs')
     await waitFor('the title write while running', () =>
@@ -886,8 +907,24 @@ test('a /copy success that outlives its Session is not announced on the replacem
     life.defer(() => { agents.resume = originalResume })
     // The Browser settles its handler without waiting for the switch, so the
     // FIFO is free while the transition is still in flight.
-    await submitInput(fixture, '/resume f5-target-b')
+    // PR-C: direct `/resume` now waits for its tracked switch settlement. Use
+    // the independent Browser selection (a non-FIFO navigation entry) to start
+    // the gated switch, then close the Browser so `/copy` can run on A while
+    // the switch is still held.
+    await submitInput(fixture, '/sessions')
+    await waitFor('the Session Browser is ready', () => pickerNode(fixture.pane, 'session-browser-') !== undefined, 25_000)
+    const browserId = pickerNode(fixture.pane, 'session-browser-')!.id
+    sendAction(fixture.pane, 'scope', 'all', browserId)
+    await waitFor('the target row is listed', () => {
+      const items = (pickerProps(fixture.pane, 'session-browser-').items ?? []) as Array<{ id?: unknown }>
+      return items.some(item => String(item.id).includes('f5-target-b'))
+    }, 25_000)
+    const targetItem = (pickerProps(fixture.pane, 'session-browser-').items as Array<{ id?: unknown }>)
+      .find(item => String(item.id).includes('f5-target-b'))!
+    sendActivate(fixture.pane, String(targetItem.id), pickerNode(fixture.pane, 'session-browser-')!.id)
     await waitFor('the resume to be entered', () => resumeEntered, 25_000)
+    fixture.pane.key('\x1b')
+    await waitFor('the Browser closes while the switch stays held', () => pickerNode(fixture.pane, 'session-browser-') === undefined, 25_000)
     await submitInput(fixture, '/copy')
     // SYNCHRONIZATION PROOF: the copy is INSIDE the native clipboard helper and
     // already carries A's assistant text before the switch may publish. Without
@@ -1089,6 +1126,390 @@ test('the post-boot wait observes the tty input DELIVERY boundary, not a fixed s
     // the one input bind and replays it).
     fixture.pane.input.type('kept')
     await waitFor('the delivered key to reach the composer', () => composerText(fixture) === 'kept', 25_000)
+  } finally {
+    await fixture.settle()
+  }
+})
+
+test('Busy Esc preserves the REAL Direct Host pending inbox while a REAL admitted Host-command writer holds a frozen /new transition', async (t) => {
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  let releaseHold!: () => void
+  const hold = new Promise<void>(resolve => { releaseHold = resolve })
+  let releaseSlow!: () => void
+  const slowGate = new Promise<void>(resolve => { releaseSlow = resolve })
+  let slowStarted = false
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['PR-A real host'],
+    streamHold: () => hold,
+    tuiConfig: { busyEnter: 'queue' },
+    hostCommands: [{
+      name: 'slowcmd',
+      description: 'hold the admitted writer',
+      handler: async () => {
+        slowStarted = true
+        await slowGate
+        return { kind: 'success' }
+      },
+    }],
+  })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    await submitInput(fixture, 'opener marker')
+    await waitFor('the real Direct session', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    const oldId = welcomeSessionIds(fixture)[0]!
+    const agents = fixture.ctx.get('agents') as unknown as {
+      get(id: SessionId): {
+        readonly status: string
+        readonly inbox: {
+          readonly nextTurn: readonly unknown[]
+          readonly nextStep: readonly unknown[]
+        }
+      } | undefined
+    }
+    await waitFor('the real turn running', () => agents.get(SessionId(oldId))?.status === 'running', 25_000)
+    const inboxHas = (sessionId: string, marker: string): boolean => {
+      const agent = agents.get(SessionId(sessionId))
+      if (agent === undefined) return false
+      return [...agent.inbox.nextTurn, ...agent.inbox.nextStep]
+        .some(item => JSON.stringify(item).includes(marker))
+    }
+
+    // The real Host-owned queue: Enter while the real Agent runs queues the
+    // message in the official inbox.
+    await submitInput(fixture, 'queued marker')
+    await waitFor('the real pending queue occurrence', () => inboxHas(oldId, 'queued marker'), 25_000)
+
+    // A real admitted Host-command writer holds the ordinary-writer barrier.
+    await submitInput(fixture, '/slowcmd')
+    await waitFor('the real Host command handler admitted', () => slowStarted, 25_000)
+
+    // Observe the real /new transition freeze on that writer.
+    const originalRunTransition = SessionOperationBarrier.prototype.runTransition
+    let frozen = false
+    let bodyRan = false
+    SessionOperationBarrier.prototype.runTransition = function <T>(
+      this: SessionOperationBarrier,
+      fn: () => Promise<T>,
+      stopOldOwner?: () => Promise<void>,
+    ): Promise<T> {
+      const promise = originalRunTransition.call(this, async () => {
+        bodyRan = true
+        return fn()
+      }, stopOldOwner) as Promise<T>
+      if (this.activeWriters > 0) frozen = true
+      return promise
+    }
+    life.defer(() => { SessionOperationBarrier.prototype.runTransition = originalRunTransition })
+
+    // Record the durable flush -> child create order on the REAL Host services.
+    const sessions = fixture.ctx.get('sessions') as unknown as { flush: (session?: unknown) => Promise<unknown> }
+    const originalFlush = sessions.flush
+    const order: string[] = []
+    sessions.flush = async function (this: unknown, session?: unknown) {
+      order.push(`flush:${(session as { id?: string } | undefined)?.id ?? '?'}`)
+      return originalFlush.call(this, session)
+    }
+    const realAgents = fixture.ctx.get('agents') as unknown as {
+      create: (options: { sessionId: string }) => Promise<unknown>
+    }
+    const originalCreate = realAgents.create
+    realAgents.create = async function (this: unknown, options) {
+      order.push(`create:${options.sessionId}`)
+      return originalCreate.call(this, options)
+    }
+    life.defer(() => {
+      sessions.flush = originalFlush
+      realAgents.create = originalCreate
+    })
+
+    // The real registered /new command entry (the production handler).
+    const commands = fixture.ctx.get('commands') as {
+      find(agent: unknown, name: string): { handler: (invocation: unknown) => unknown } | undefined
+    }
+    const newDefinition = commands.find(undefined, 'new')
+    assert.ok(newDefinition, 'the real TUI /new handler must be registered in the Host registry')
+    // Record EVERY cancel the real Agent receives, with its options, by
+    // shadowing the production instance method and forwarding unchanged (never
+    // `.bind`, so the real receiver and the original function identity are
+    // preserved): the navigation stop and the Busy Esc control stop must BOTH
+    // be visible even after the first one already ended the held request.
+    const realOldAgent = agents.get(SessionId(oldId)) as unknown as {
+      cancel: (cause: unknown, options?: { keepInbox?: boolean }) => void
+    }
+    const originalCancel = realOldAgent.cancel
+    const cancelCalls: Array<{ keepInbox: boolean | undefined }> = []
+    realOldAgent.cancel = function recordedCancel(
+      this: unknown,
+      cause: unknown,
+      options?: { keepInbox?: boolean },
+    ): void {
+      cancelCalls.push({ keepInbox: options?.keepInbox })
+      originalCancel.call(this, cause, options)
+    }
+    life.defer(() => { realOldAgent.cancel = originalCancel })
+    const transition = Promise.resolve(newDefinition.handler({
+      commandId: 'cmd-pra-real-new',
+      agent: undefined,
+      rawInput: '',
+      signal: new AbortController().signal,
+    }))
+    await waitFor('the real /new transition froze on the admitted writer', () => frozen, 25_000)
+    assert.equal(bodyRan, false, 'the transition body must still be waiting for the real writer')
+
+    // The navigation stop lands at admission: the OLD turn's held model
+    // request observes the cancel while the admitted writer is STILL draining,
+    // and before the transition body runs.
+    await waitFor('the /new navigation stop cancelled the held turn', () => fixture.cancellations() === 1, 25_000)
+    assert.deepEqual(cancelCalls, [{ keepInbox: true }],
+      'the navigation stop is ONE keepInbox user cancel of the exact old Agent, before any control Stop')
+    assert.equal(bodyRan, false, 'the navigation stop must not shortcut the real writer drain')
+    assert.ok(inboxHas(oldId, 'queued marker'),
+      'the REAL Direct Host pending inbox preserves the queued occurrence across the navigation stop')
+
+    // The real Busy Esc: TSP pane input -> application onCancel -> the real
+    // SessionRuntime.interrupt -> the exact real Direct Agent cancel.
+    fixture.pane.key('\x1b')
+    await waitFor('the Busy Esc control stop also reached the exact old Agent', () => cancelCalls.length === 2, 25_000)
+    assert.deepEqual(cancelCalls[1], { keepInbox: true },
+      'the control stop keeps the Host pending inbox even when the turn already ended')
+    assert.equal(bodyRan, false, 'the control cancel must not shortcut the real writer drain')
+    assert.ok(inboxHas(oldId, 'queued marker'),
+      'the REAL Direct Host pending inbox preserves the queued occurrence across the control cancel')
+
+    // Release the real writer: drain -> old flush -> child create/commit.
+    releaseSlow()
+    await transition
+    await waitFor('the /new child session', () => {
+      const ids = welcomeSessionIds(fixture)
+      return ids.length === 1 && ids[0] !== oldId
+    }, 25_000)
+    const newId = welcomeSessionIds(fixture)[0]!
+    assert.notEqual(newId, oldId)
+    assert.ok(order.includes(`flush:${oldId}`), `the old session must be flushed: ${JSON.stringify(order)}`)
+    assert.ok(order.includes(`create:${newId}`), `the child session must be created: ${JSON.stringify(order)}`)
+    assert.ok(order.indexOf(`flush:${oldId}`) < order.indexOf(`create:${newId}`),
+      `the old flush must precede the child create: ${JSON.stringify(order)}`)
+    assert.ok(agents.get(SessionId(newId)) !== undefined, 'the new owner Agent must be live')
+    assert.equal(inboxHas(newId, 'queued marker'), false,
+      'the old queue is never transferred to the new Session')
+
+    // The old durable history survives the retirement; the new Session exists.
+    const headers = await sessionHeaders(fixture)
+    assert.ok(headers.some(row => row.id === oldId), 'the old Session history remains persisted')
+    assert.ok(headers.some(row => row.id === newId), 'the new Session is persisted')
+    const query = fixture.ctx.get('sessionQuery') as unknown as {
+      observeSession(id: SessionId): Promise<{ events: readonly { type: string; data?: unknown }[] }>
+    }
+    const oldLog = await query.observeSession(SessionId(oldId))
+    assert.ok(oldLog.events.some(event => event.type === 'user/message'
+      && JSON.stringify(event.data).includes('opener marker')),
+      'the old Session keeps its durable user history')
+    assert.ok(oldLog.events.some(event => event.type === 'turn/end'),
+      'the cancelled old turn has a durable terminal boundary')
+  } finally {
+    releaseHold()
+    releaseSlow()
+    await fixture.settle() // bounded fixture teardown (not a fixed wait)
+  }
+})
+test('a BUSY TSP /new submit runs the TUI navigation command, never Queue/Steer', async (t) => {
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  let releaseHold!: () => void
+  const hold = new Promise<void>(resolve => { releaseHold = resolve })
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['BUSY NEW'],
+    streamHold: () => hold,
+    tuiConfig: { busyEnter: 'queue' },
+  })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    await submitInput(fixture, 'busy /new opener')
+    await waitFor('the real Direct session', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    const oldId = welcomeSessionIds(fixture)[0]!
+    await waitFor('the real turn running', () => {
+      const agents = fixture.ctx.get('agents') as unknown as {
+        get(id: SessionId): { readonly status: string } | undefined
+      }
+      return agents.get(SessionId(oldId))?.status === 'running'
+    }, 25_000)
+    const modelCallsBefore = fixture.modelCalls()
+
+    // The REAL busy Composer submit: if the line were misrouted as a queue or
+    // steer prompt it would enter the Host inbox and later start a model turn.
+    await submitInput(fixture, '/new')
+    assert.equal(hostInboxHas(fixture, oldId, '/new'), false,
+      'the /new line must never enter the Host queue or steering inbox')
+    assert.equal(fixture.modelCalls(), modelCallsBefore, 'the /new line must never start a model turn')
+
+    // The navigation stop cancels the held turn: the fresh Session is created
+    // WITHOUT waiting for the hold to be released (a `/new` never waits for
+    // the old Turn to finish naturally).
+    await waitFor('the /new child session while the old stream is still held', () => {
+      const ids = welcomeSessionIds(fixture)
+      return ids.length === 1 && ids[0] !== oldId
+    }, 25_000)
+    assert.equal(fixture.cancellations(), 1,
+      'the navigation stop is the cancellation that ended the held old turn')
+    const newId = welcomeSessionIds(fixture)[0]!
+    assert.notEqual(newId, oldId)
+    assert.equal(fixture.modelCalls(), modelCallsBefore,
+      'the /new line never became a queued prompt that started a second model turn')
+  } finally {
+    releaseHold()
+    await fixture.settle() // bounded fixture teardown (not a fixed wait)
+  }
+})
+
+test('a BUSY TSP /new with a genuine Host /new keeps the Host sink', async (t) => {
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  let releaseHold!: () => void
+  const hold = new Promise<void>(resolve => { releaseHold = resolve })
+  const calls: string[] = []
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['HOST NEW'],
+    streamHold: () => hold,
+    tuiConfig: { busyEnter: 'queue' },
+    hostCommands: [{
+      name: 'new',
+      description: 'Host-owned new',
+      handler: () => { calls.push('host-new'); return { kind: 'success' } },
+    }],
+  })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    await submitInput(fixture, 'busy host /new opener')
+    await waitFor('the real Direct session', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    const oldId = welcomeSessionIds(fixture)[0]!
+    await waitFor('the real turn running', () => {
+      const agents = fixture.ctx.get('agents') as unknown as {
+        get(id: SessionId): { readonly status: string } | undefined
+      }
+      return agents.get(SessionId(oldId))?.status === 'running'
+    }, 25_000)
+    const modelCallsBefore = fixture.modelCalls()
+
+    await submitInput(fixture, '/new')
+    await waitFor('the genuine Host /new sink', () => calls.length === 1, 25_000)
+    assert.deepEqual(welcomeSessionIds(fixture), [oldId],
+      'the TUI /new navigation handler must not create a second Session when the Host wins')
+    assert.equal(hostInboxHas(fixture, oldId, '/new'), false,
+      'the genuine Host /new line must never become a queued prompt')
+    assert.equal(fixture.modelCalls(), modelCallsBefore, 'the genuine Host /new must not start a model turn')
+  } finally {
+    releaseHold()
+    await fixture.settle() // bounded fixture teardown (not a fixed wait)
+  }
+})
+
+test('a real ask_user_question tool call settles ASK_ABORTED on the /new navigation cancel', async (t) => {
+  const life = (await import('../support/temp-lifecycle.ts')).testLifecycle(t)
+  const fixture = await createDirectTspFixture(life, {
+    deltas: ['the question was cancelled'],
+    // The REAL production tool invocation: the scripted model requests the
+    // official ask-user tool, the production Agent loop executes it with its
+    // OWN tool-call signal, and that tool takes that signal into
+    // `userQuestions.ask` — no test-side signal bridge.
+    scriptedToolCall: {
+      callId: 'call-nav-question',
+      name: 'ask_user_question',
+      arguments: JSON.stringify({
+        questions: [{ id: 'q-nav', question: 'Which target?', options: [{ label: 'alpha' }, { label: 'beta' }] }],
+      }),
+    },
+    officialServices: { askUserTool: true },
+  })
+  // Observe the PRODUCTION user-questions service instance the tool actually
+  // calls. Unwrap the Cordis proxy, keep the real receiver and the original
+  // function identity, and forward every settlement unchanged (one call ⇒ one
+  // record): the test must assert the actual rejection code, not infer it from
+  // the withdrawn modal.
+  const questionsProxy = fixture.ctx.get('userQuestions') as unknown as {
+    ask(request: unknown): Promise<unknown>
+    readonly [symbols.original]?: unknown
+  }
+  const questions = (questionsProxy[symbols.original] ?? questionsProxy) as {
+    ask(request: unknown): Promise<unknown>
+  }
+  const originalAsk = questions.ask
+  const askFailures: Array<string | undefined> = []
+  questions.ask = function recordedAsk(this: unknown, request: unknown): Promise<unknown> {
+    return originalAsk.call(this, request).then(
+      value => value,
+      (error: unknown) => {
+        askFailures.push(typeof error === 'object' && error !== null
+          ? (error as { readonly code?: string }).code
+          : undefined)
+        throw error
+      },
+    )
+  }
+  life.defer(() => { questions.ask = originalAsk })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    // A real user turn: the model answers with the tool call, the Host executes
+    // it and the official Question request blocks on the TUI answerer.
+    await submitInput(fixture, 'ask me before you continue')
+    await waitFor('the Session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    const oldId = welcomeSessionIds(fixture)[0]!
+    await waitFor('the live official Question form', () => fixture.pane.output.text().includes('Which target?'), 30_000)
+    const agents = fixture.ctx.get('agents') as unknown as {
+      get(id: SessionId): { readonly status: string } | undefined
+    }
+    const oldAgent = agents.get(SessionId(oldId))
+    assert.ok(oldAgent !== undefined, 'the fresh Session has a live Host Agent')
+    assert.equal(oldAgent.status, 'running',
+      'the Agent Turn is RUNNING while the tool awaits the human answer')
+
+    // The REAL registered /new handler (the live modal owns the keys, so the
+    // command plane is the production path to a navigation transition).
+    const commands = fixture.ctx.get('commands') as unknown as {
+      find(agent: unknown, name: string): { handler(invocation: unknown): unknown } | undefined
+    }
+    const newDefinition = commands.find(undefined, 'new')
+    assert.ok(newDefinition, 'the real TUI /new handler is registered')
+    const transition = Promise.resolve(newDefinition.handler({
+      commandId: 'cmd-nav-question',
+      agent: undefined,
+      rawInput: '',
+      signal: new AbortController().signal,
+    }))
+    await transition
+
+    // The navigation stop cancelled the running owner: the REAL tool call's
+    // signal aborted, the official request settled (the form leaves the seat),
+    // and the cancelled Turn reached its durable terminal boundary.
+    await waitFor('the /new child session', () => {
+      const ids = welcomeSessionIds(fixture)
+      return ids.length === 1 && ids[0] !== oldId
+    }, 25_000)
+    const liveModalCount = (): number => {
+      const live = new Set<string>()
+      for (const frame of fixture.pane.frames()) {
+        for (const op of frame.ops) {
+          if (op[0] === 'add' && /^layer\.modal-\d+$/u.test(op[1])) live.add(op[1])
+          else if (op[0] === 'del' && /^layer\.modal-\d+$/u.test(op[1])) live.delete(op[1])
+        }
+      }
+      return live.size
+    }
+    await waitFor('the replaced Question form left the seat', () => liveModalCount() === 0, 25_000)
+    assert.deepEqual(askFailures, ['ASK_ABORTED'],
+      'the REAL user-questions service rejected the tool request ONCE with the official abort code')
+    const query = fixture.ctx.get('sessionQuery') as unknown as {
+      observeSession(id: SessionId): Promise<{ events: readonly { type: string; data?: unknown }[] }>
+    }
+    const oldLog = await query.observeSession(SessionId(oldId))
+    const end = oldLog.events.filter(event => event.type === 'turn/end').at(-1)?.data as
+      { reason?: { kind?: string; reason?: { kind?: string } } } | undefined
+    assert.equal(end?.reason?.kind, 'aborted',
+      'the cancelled Turn has the durable aborted terminal result')
+    assert.equal(end?.reason?.reason?.kind, 'user',
+      'the abort cause is the user navigation stop, not a shutdown cancel')
+    // No fabricated answer was ever dispatched: the request died by its own
+    // cancellation lifetime, and the new Session owns the surface.
+    const ids = welcomeSessionIds(fixture)
+    assert.equal(ids.length, 1)
+    assert.notEqual(ids[0], oldId)
   } finally {
     await fixture.settle()
   }

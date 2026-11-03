@@ -150,6 +150,7 @@ async function compose(
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
+    openModelPicker() {},
   })
   composition.renderer = renderer
 
@@ -189,6 +190,7 @@ async function compose(
     // The REAL attention projection (`fullQuestionRows`) is what turns these
     // rows into panel items; the Reader consumes the projected row only.
     attention: { rows: () => attention.rows, reconcile: () => {}, publish: () => {}, reopen: () => false },
+    publishActivity: () => {},
   })
   composition.tasks = tasks
   tasks.attachTasks(source, { diag: createDiag({ filePath: undefined, stderrLevel: 'off' }), isCleanedUp: () => false })

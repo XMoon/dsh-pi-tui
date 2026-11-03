@@ -12,6 +12,7 @@ import { MessageId, type ToolCallId } from '@deepseek-ai/dsh-llm'
 import type { SubagentDescendantListEntry } from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { TuiApp } from '../../src/tui-app.ts'
+import { SessionOperationBarrier } from '../../src/app/session/operation-barrier.ts'
 import {
   disposeContext,
   event,
@@ -41,6 +42,13 @@ import { VirtualTerminal } from '../support/virtual-terminal.ts'
  * never paints — the user-visible ownership signal these cases assert on,
  * instead of an overlay handle count.
  */
+/** Drain pending microtasks for the new-test cases. Kept local (rather than
+ *  the shared `settle`, which the fixed-wait policy's global helper-name scan
+ *  treats as a fixed wait) because these are scheduler drains, not sleeps. */
+async function microtasks(): Promise<void> {
+  for (let index = 0; index < 40; index += 1) await Promise.resolve()
+}
+
 const JOB_WORKSPACE_MARK = 'Retained preview · not full history'
 const jobWorkspaceOpen = (rendered: string): boolean => rendered.includes(JOB_WORKSPACE_MARK)
 
@@ -3233,12 +3241,12 @@ test('PERF (plan §5): the Direct compat read adds no perceptible refresh cost o
 //
 // Independent fix PR: the ONE Task Browser Host-text terminal boundary. This
 // case drives the REAL production route end to end — `/tasks` → the row's
-// interrupt → bootstrap's `SessionRuntime.withWriter` writer admission →
+// interrupt → bootstrap's `SessionRuntime.withControl` control admission →
 // `DirectSubagentPort` → `ctx.subagents.interrupt` → the app's ONE transient
 // notice line — with a HOSTILE official label, and asserts on the RAW stream
 // the TUI writes to the terminal (never a `stripTerminalSequences()` shot).
 
-test('S-03 L6: the real /tasks Subagent interrupt admits through the session writer and a hostile label never reaches the terminal stream', async (t) => {
+test('S-03 L6: the real /tasks Subagent interrupt admits through the session control admission and a hostile label never reaches the terminal stream', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-task-interrupt-text-safety-')
   const previousHome = process.env.DSH_HOME
@@ -3332,4 +3340,144 @@ test('S-03 L6: the real /tasks Subagent interrupt admits through the session wri
   const stream = written.join('')
   assert.ok(!stream.includes(']52;c;'), 'no Host OSC reaches the terminal stream')
   assert.ok(!stream.includes('UFdORUQ='), 'no Host clipboard payload reaches the terminal stream')
+})
+
+test('PRA-L6: Task Stop is admitted through the control barrier while a /new transition is frozen, and a superseded browser never dispatches again', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-pra-task-control-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const vt = new VirtualTerminal(100, 30)
+  life.defer(installVirtualProcessTerminal(vt))
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+
+  const parent: FakeSession = fakeSession({
+    id: 'pra-task-control-parent',
+    header: { id: 'pra-task-control-parent', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('parent answer'),
+  })
+  const child: FakeSession = fakeSession({
+    id: 'pra-task-control-child',
+    header: { id: 'pra-task-control-child', cwd: home, createdAt: 1_700_000_000_001, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('child answer'),
+  })
+  const interrupts: string[] = []
+  const subagents = {
+    listDescendants: async () => [{
+      kind: 'child', id: child.id, label: 'running child', mode: 'continuable', activity: 'running',
+      hasChildren: false, parentId: parent.id, depth: 1,
+    }],
+    interrupt: (childSessionId: string): void => { interrupts.push(childSessionId) },
+  }
+  const harness = makeHarness(home, [parent, child], { provider: 'p', model: 'm' }, undefined, undefined, subagents)
+  const childHandle = await (harness.agents as { resume: (options: { resumeSessionId: string }) => Promise<{ dispose: () => Promise<void> }> }).resume({ resumeSessionId: child.id })
+  life.defer(() => childHandle.dispose())
+  ;(liveAgentOf(harness, child.id) as { status: string }).status = 'running'
+
+  const commands = harness.commands as {
+    register(def: { name: string; handler: () => unknown }): () => void
+    execute(agent: unknown, line: string, attachments?: readonly unknown[]): Promise<unknown>
+    handler(name: string): ((...args: never[]) => unknown) | undefined
+  }
+  commands.register({ name: 'slowcmd', handler: () => ({ kind: 'success' }) })
+  let slowStarted = false
+  let slowSettled = false
+  let releaseSlow!: () => void
+  const slowGate = new Promise<void>(resolve => { releaseSlow = resolve })
+  const originalExecute = commands.execute.bind(commands)
+  commands.execute = async (agent, line, attachments) => {
+    if (line.trim().startsWith('/slowcmd')) {
+      slowStarted = true
+      await slowGate
+      slowSettled = true
+      return { commandId: 'cmd-pra-slow', result: { kind: 'success' } }
+    }
+    return originalExecute(agent, line, attachments)
+  }
+
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: parent.id }, { sessionId: parent.id })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const input = (data: string): void => {
+    (app as unknown as { tui: { handleTerminalInput(data: string): void } }).tui.handleTerminalInput(data)
+  }
+  await vt.waitForRender()
+
+  // A real admitted Host-command writer holds the barrier open.
+  ;(app as unknown as { setDraft(text: string): void }).setDraft('/slowcmd')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  for (let index = 0; index < 100 && !slowStarted; index += 1) await microtasks()
+  assert.equal(slowStarted, true, 'the Host-command writer must be admitted before the navigation')
+
+  // Observe the REAL /new transition freeze on the admitted writer.
+  const originalRunTransition = SessionOperationBarrier.prototype.runTransition
+  let frozen = false
+  let bodyRan = false
+  SessionOperationBarrier.prototype.runTransition = function <T>(
+    this: SessionOperationBarrier,
+    fn: () => Promise<T>,
+    stopOldOwner?: () => Promise<void>,
+  ): Promise<T> {
+    const promise = originalRunTransition.call(this, async () => {
+      bodyRan = true
+      return fn()
+    }, stopOldOwner) as Promise<T>
+    if (this.activeWriters > 0) frozen = true
+    return promise
+  }
+  life.defer(() => { SessionOperationBarrier.prototype.runTransition = originalRunTransition })
+
+  const newHandler = commands.handler('new')
+  assert.ok(newHandler, 'the real runner must register /new')
+  const transition = Promise.resolve(newHandler())
+  for (let index = 0; index < 100 && !frozen; index += 1) await microtasks()
+  assert.equal(frozen, true, 'the /new transition must freeze on the admitted writer')
+  assert.equal(bodyRan, false)
+
+  const tasksHandler = commands.handler('tasks')
+  assert.ok(tasksHandler, 'the real runner must register /tasks')
+  await tasksHandler()
+  await microtasks()
+  await vt.waitForRender()
+
+  // The real selected-child Stop chord while the barrier is frozen.
+  input('S')
+  await microtasks()
+  input('y')
+  await microtasks()
+  assert.deepEqual(interrupts, [child.id],
+    'the frozen Task Stop must be admitted through the control channel to the exact durable child')
+  assert.equal(slowSettled, false, 'the Task Stop must not wait for the admitted writer')
+  assert.equal(bodyRan, false, 'the Task Stop must not shortcut the navigation drain')
+
+  // Release: /new drains, preflights, commits the child session and retires OLD.
+  releaseSlow()
+  await transition
+  await microtasks()
+  assert.equal(slowSettled, true)
+  assert.equal(harness.createdSessions.length, 1, 'the /new transition committed one child Session')
+
+  // The cross-owner publication withdraws the replaced Task Browser. The old
+  // confirmation therefore cannot reach a stale live panel: S must not
+  // resurrect it. The captured-subject refusal for a panel that somehow stays
+  // live is the separate S-03e surface case.
+  input('S')
+  await microtasks()
+  await vt.waitForRender()
+  assert.ok(!vt.getViewport().join('\n').includes('Stop running child?'),
+    'the retired Task Browser must not receive a Stop confirmation after the parent generation changed')
+  input('y')
+  await microtasks()
+  await vt.waitForRender()
+  assert.deepEqual(interrupts, [child.id], 'a retired Task Browser never dispatches another Stop')
 })

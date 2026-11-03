@@ -10,11 +10,38 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ClientSessionOwner, SessionHandle } from '../../src/runtime/session-lifecycle-port.ts'
+import type {
+  RemoteConnectionGenerationSource,
+  RemoteConnectionGeneration,
+} from '../../src/runtime/remote/session-reader-remote.ts'
+import type { RemoteResultLike } from '../../src/runtime/remote/session-writer-remote.ts'
 import {
   createRemoteSessionOwnerServices,
   type RemoteOwnerBindingFace,
 } from '../../src/app/remote/session-owners.ts'
 import type { SessionOwnerRef } from '../../src/app/session/subject.ts'
+
+/** The official Connection generation face plus a test-side replacement. */
+function generationHarness(initial: RemoteConnectionGeneration | undefined = { id: 1 }): {
+  readonly source: RemoteConnectionGenerationSource
+  set(next: RemoteConnectionGeneration | undefined): void
+} {
+  let current: RemoteConnectionGeneration | undefined = initial
+  const listeners = new Set<() => void>()
+  return {
+    source: {
+      getSnapshot: () => current,
+      subscribe: (fn: () => void): (() => void) => {
+        listeners.add(fn)
+        return () => { listeners.delete(fn) }
+      },
+    },
+    set: (next) => {
+      current = next
+      for (const fn of [...listeners]) fn()
+    },
+  }
+}
 
 /** A counting AbortSignal stand-in: proves listener removal precisely. */
 function fakeSignal(): AbortSignal & { listenerCount(): number; abortNow(): void } {
@@ -41,8 +68,13 @@ interface HarnessBinding extends RemoteOwnerBindingFace {
   setRunning(running: boolean): void
   /** Snapshot invalidation (the official subscribe contract). */
   notify(): void
+  /** Control the official `SessionFace.cancel()` settlement. */
+  setCancelResult(result: RemoteResultLike<{ readonly accepted: true }>): void
+  /** Run a test hook inside the official cancel call, before it returns. */
+  setCancelHook(hook: (() => void) | undefined): void
   subscribeCalls(): number
   unsubscribeCalls(): number
+  cancelCalls(): number
 }
 
 function harness() {
@@ -57,6 +89,9 @@ function harness() {
     let running = false
     let subscribes = 0
     let unsubscribes = 0
+    let cancels = 0
+    let cancelResult: RemoteResultLike<{ readonly accepted: true }> = { ok: true, value: { accepted: true } }
+    let cancelHook: (() => void) | undefined
     const binding: HarnessBinding = {
       sessionId,
       session: {
@@ -69,6 +104,11 @@ function harness() {
             listeners.delete(fn)
           }
         },
+        cancel: async (): Promise<RemoteResultLike<{ readonly accepted: true }>> => {
+          cancels += 1
+          cancelHook?.()
+          return cancelResult
+        },
       },
       setRunning: (next: boolean): void => {
         running = next
@@ -77,8 +117,11 @@ function harness() {
       notify: (): void => {
         for (const fn of [...listeners]) fn()
       },
+      setCancelResult: (result): void => { cancelResult = result },
+      setCancelHook: (hook): void => { cancelHook = hook },
       subscribeCalls: (): number => subscribes,
       unsubscribeCalls: (): number => unsubscribes,
+      cancelCalls: (): number => cancels,
     }
     return binding
   }
@@ -112,12 +155,33 @@ function harness() {
     }
   }
 
+  /** Model `ISessions.retainInfo(id)`: the stable local-reference observable
+   *  that wakes a wait when a same-id generation is retained/released. */
+  const retainInfos = new Map<string, { count: number; listeners: Set<() => void> }>()
+  const retainInfoOf = (id: string): { count: number; listeners: Set<() => void> } => {
+    const existing = retainInfos.get(id)
+    if (existing !== undefined) return existing
+    const created = { count: 0, listeners: new Set<() => void>() }
+    retainInfos.set(id, created)
+    return created
+  }
   /** Model `ISessions.binding(id)`: the official borrow of a retained generation. */
   const bindingSource = {
     binding: (id: string): RemoteOwnerBindingFace | undefined => live.get(id)?.binding,
+    retainInfo: (id: string): { getSnapshot(): { referenceCount: number }; subscribe(fn: () => void): () => void } => {
+      const entry = retainInfoOf(id)
+      return {
+        getSnapshot: () => ({ referenceCount: entry.count }),
+        subscribe: (fn) => {
+          entry.listeners.add(fn)
+          return () => { entry.listeners.delete(fn) }
+        },
+      }
+    },
   }
+  const generation = generationHarness()
 
-  const services = createRemoteSessionOwnerServices(bindingSource)
+  const services = createRemoteSessionOwnerServices(bindingSource, generation.source)
   /** `fromHandle` with the retained-handle owner contract asserted. */
   const ownerOf = (handle: SessionHandle): SessionOwnerRef => {
     const owner = services.owners.fromHandle(handle)
@@ -129,6 +193,12 @@ function harness() {
     services,
     ownerOf,
     retain,
+    generation,
+    notifyRetainInfo: (id: string, referenceCount: number): void => {
+      const entry = retainInfoOf(id)
+      entry.count = referenceCount
+      for (const fn of [...entry.listeners]) fn()
+    },
     bindingOf: (id: string): HarnessBinding | undefined => live.get(id)?.binding,
     isLive: (id: string): boolean => live.has(id),
     handleOf: (sessionId: string, client?: ClientSessionOwner): SessionHandle => ({
@@ -263,7 +333,7 @@ test('a running generation settles when running flips to false, unsubscribing on
   const owner = h.ownerOf(handle)
   h.bindingOf('session-a')!.setRunning(true)
   const signal = fakeSignal()
-  let settled: boolean | undefined
+  let settled: boolean | 'unobservable' | undefined
   const pending = h.services.retirement.whenIdleOrAbort(owner, signal).then(result => { settled = result })
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(settled, undefined, 'a running generation must not settle early')
@@ -295,9 +365,10 @@ test('a synchronous snapshot notification during subscribe leaves no listener be
           listeners.delete(fn)
         }
       },
+      cancel: async () => ({ ok: true as const, value: { accepted: true as const } }),
     },
   }
-  const services = createRemoteSessionOwnerServices({ binding: () => binding })
+  const services = createRemoteSessionOwnerServices({ binding: () => binding }, generationHarness().source)
   const owner = services.owners.fromHandle({
     session: { id: 'session-a' },
     client: { bindingIdentity: binding, release: () => {} },
@@ -324,9 +395,10 @@ test('a running→false flip before the subscription registers cannot be lost', 
         listeners.add(fn)
         return () => { listeners.delete(fn) }
       },
+      cancel: async () => ({ ok: true as const, value: { accepted: true as const } }),
     },
   }
-  const services = createRemoteSessionOwnerServices({ binding: () => binding })
+  const services = createRemoteSessionOwnerServices({ binding: () => binding }, generationHarness().source)
   const owner = services.owners.fromHandle({
     session: { id: 'session-a' },
     client: { bindingIdentity: binding, release: () => {} },
@@ -342,7 +414,7 @@ test('abort stops the LOCAL wait only — no cancel, no release, listeners remov
   const owner = h.ownerOf(handle)
   h.bindingOf('session-a')!.setRunning(true)
   const signal = fakeSignal()
-  let settled: boolean | undefined
+  let settled: boolean | 'unobservable' | undefined
   const pending = h.services.retirement.whenIdleOrAbort(owner, signal).then(result => { settled = result })
   await new Promise(resolve => setImmediate(resolve))
   signal.abortNow()
@@ -437,8 +509,9 @@ test('whenIdleOrAbort on a fully retired generation has nothing to wait for', as
   const { handle } = retainedHandle(h, 'session-a')
   const owner = h.ownerOf(handle)
   await h.services.retirement.retire(owner, 'transition')
-  // The generation is no longer observable through the official borrow.
-  assert.equal(await h.services.retirement.whenIdleOrAbort(owner, fakeSignal()), false)
+  // The generation is no longer observable through the official borrow:
+  // 'unobservable' is NOT proof of idle.
+  assert.equal(await h.services.retirement.whenIdleOrAbort(owner, fakeSignal()), 'unobservable')
 })
 
 test('whenIdleOrAbort refuses to observe a replaced same-id generation', async () => {
@@ -451,7 +524,254 @@ test('whenIdleOrAbort refuses to observe a replaced same-id generation', async (
   const second = retainedHandle(h, 'session-a')
   h.bindingOf('session-a')!.setRunning(true)
   // The old owner's binding identity is no longer the live generation: the
-  // wait must not observe the NEW generation's running state.
-  assert.equal(await h.services.retirement.whenIdleOrAbort(ownerA, fakeSignal()), false)
+  // wait must not observe the NEW generation's running state, and must not
+  // claim the old one is idle.
+  assert.equal(await h.services.retirement.whenIdleOrAbort(ownerA, fakeSignal()), 'unobservable')
   void second
+})
+
+// ── the one-shot control cancel: exact binding, shared taxonomy ────────────
+
+test('a control cancel addresses the exact retained binding and never releases it', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'committed', value: undefined })
+  assert.equal(binding.cancelCalls(), 1, 'the official SessionFace.cancel runs exactly once')
+  assert.deepEqual(h.calls.releases, [], 'a control cancel never releases the Client reference')
+  assert.ok(h.isLive('session-a'), 'the owner generation stays retained after the cancel')
+})
+
+test('a control cancel refuses a replaced same-id generation and never cancels the new binding', async () => {
+  const h = harness()
+  const first = retainedHandle(h, 'session-a')
+  const ownerA = h.ownerOf(first.handle)
+  // Full release + re-retain: the same id now names a NEW binding generation.
+  await h.services.retirement.retire(ownerA, 'transition')
+  const second = retainedHandle(h, 'session-a')
+  const ownerB = h.ownerOf(second.handle)
+  const newBinding = h.bindingOf('session-a')!
+  assert.notEqual(ownerB, ownerA, 'a new binding object is a new owner generation')
+  assert.deepEqual(await h.services.retirement.cancel(ownerA), { kind: 'cancelled' },
+    'the old generation is not addressable client-side anymore')
+  assert.equal(newBinding.cancelCalls(), 0, 'the old owner must never cancel the new generation')
+  assert.deepEqual(await h.services.retirement.cancel(ownerB), { kind: 'committed', value: undefined })
+  assert.equal(newBinding.cancelCalls(), 1, 'the current owner cancels exactly its own binding')
+})
+
+test('a control cancel on a fully retired generation is cancelled without a Host call', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  await h.services.retirement.retire(owner, 'transition')
+  assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'cancelled' })
+  assert.deepEqual(h.calls.releases, ['session-a'], 'the retired reference was released exactly once')
+})
+
+test('the navigation cancel resolves the dispatch phase without changing the control taxonomy', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  // Pre-dispatch, unaddressable: BOTH audiences keep PR-A's `cancelled`.
+  h.generation.set(undefined)
+  assert.deepEqual(await h.services.retirement.cancelForNavigation(owner), { kind: 'cancelled' })
+  assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'cancelled' })
+  assert.equal(binding.cancelCalls(), 0, 'a local fence never dispatches an official call')
+  h.generation.set({ id: 2 })
+  // Committed: navigation may proceed, and the accepted stop carries the
+  // exact-generation receipt the quiesce must later validate.
+  const committed = await h.services.retirement.cancelForNavigation(owner)
+  assert.equal(committed.kind, 'committed')
+  assert.ok(committed.kind === 'committed' && committed.receipt !== undefined,
+    'the accepted stop pins its generation')
+  // A DISPATCHED caller/carrier cancellation: the control audience keeps
+  // PR-A's `cancelled`, while navigation learns the call WAS dispatched.
+  binding.setCancelResult({ ok: false, error: { code: 'gateway/cancelled', message: 'caller cancelled' } })
+  assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'cancelled' })
+  const dispatched = await h.services.retirement.cancelForNavigation(owner)
+  assert.equal(dispatched.kind, 'indeterminate')
+  assert.match(dispatched.kind === 'indeterminate' ? dispatched.detail : '', /caller\/carrier cancellation/)
+  // A proven business refusal stays rejected for navigation.
+  binding.setCancelResult({ ok: false, error: { code: 'session/not-running', message: 'nothing to cancel' } })
+  assert.equal((await h.services.retirement.cancelForNavigation(owner)).kind, 'rejected')
+  assert.equal(binding.cancelCalls(), 4, 'each audience addressed the exact binding once per call')
+})
+
+test('a control cancel keeps the official write-failure taxonomy', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  binding.setCancelResult({ ok: false, error: { code: 'session/not-running', message: 'nothing to cancel' } })
+  assert.equal((await h.services.retirement.cancel(owner)).kind, 'rejected',
+    'a proven business refusal stays rejected')
+  binding.setCancelResult({ ok: false, error: { code: 'gateway/internal', message: 'carrier internal' } })
+  assert.equal((await h.services.retirement.cancel(owner)).kind, 'indeterminate',
+    'an unproven carrier failure must never be reported as rejected')
+  binding.setCancelResult({ ok: false, error: { code: 'gateway/cancelled', message: 'caller cancelled' } })
+  assert.equal((await h.services.retirement.cancel(owner)).kind, 'cancelled',
+    'an official caller cancellation keeps its own settlement')
+})
+
+test('a control cancel is indeterminate when the exact owner is replaced before its reply', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const oldBinding = h.bindingOf('session-a')!
+  let replacement: ClientSessionOwner | undefined
+  oldBinding.setCancelHook(() => {
+    // Retire the TUI's exact generation synchronously, then materialize a
+    // same-id replacement while the OLD official call is still in flight.
+    void h.services.retirement.retire(owner, 'transition')
+    replacement = h.retain('session-a')
+  })
+  const outcome = await h.services.retirement.cancel(owner)
+  assert.equal(outcome.kind, 'indeterminate',
+    'a dispatched reply carried by a replaced owner is never a definite result')
+  assert.equal(outcome.kind === 'indeterminate' ? outcome.error.code : undefined, 'session/cancel-superseded')
+  assert.equal(oldBinding.cancelCalls(), 1, 'the dispatched cancel is never replayed')
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 0,
+    'the same-id replacement binding never receives the old owner cancel')
+  assert.deepEqual(h.calls.releases, ['session-a'], 'the old wrapper is released exactly once by the retire')
+  replacement?.release()
+})
+
+test('a control cancel is indeterminate when the owner is retired before its reply', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  binding.setCancelHook(() => {
+    void h.services.retirement.retire(owner, 'transition')
+  })
+  const outcome = await h.services.retirement.cancel(owner)
+  assert.equal(outcome.kind, 'indeterminate')
+  assert.equal(outcome.kind === 'indeterminate' ? outcome.error.code : undefined, 'session/cancel-superseded')
+  assert.equal(binding.cancelCalls(), 1)
+  assert.ok(!h.isLive('session-a'), 'the retired owner generation stays retired')
+  assert.deepEqual(h.calls.releases, ['session-a'])
+})
+
+test('a control cancel is indeterminate when the Connection generation is replaced before its reply', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  binding.setCancelHook(() => { h.generation.set({ id: 2 }) })
+  const outcome = await h.services.retirement.cancel(owner)
+  assert.equal(outcome.kind, 'indeterminate')
+  assert.equal(outcome.kind === 'indeterminate' ? outcome.error.code : undefined, 'session/cancel-superseded')
+  assert.equal(binding.cancelCalls(), 1)
+  assert.ok(h.isLive('session-a'), 'a connection replacement does not release the exact Client reference')
+  assert.deepEqual(h.calls.releases, [])
+})
+
+test('a control cancel on a disconnected Connection is cancelled without dispatch', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  h.generation.set(undefined)
+  assert.deepEqual(await h.services.retirement.cancel(owner), { kind: 'cancelled' })
+  assert.equal(binding.cancelCalls(), 0, 'a disconnected generation never receives the cancel')
+})
+
+test('whenIdleOrAbort reports unobservable when the exact binding rolls over DURING the wait', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const oldBinding = h.bindingOf('session-a')!
+  oldBinding.setRunning(true)
+  const signal = fakeSignal()
+  let settled: boolean | 'unobservable' | undefined
+  const pending = h.services.retirement.whenIdleOrAbort(owner, signal).then(result => { settled = result })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, undefined, 'a running exact generation must not settle early')
+  // The exact generation is retired and a same-id replacement is retained
+  // WHILE the wait is armed; the OLD face then emits its teardown
+  // running=false notification. That notification is not observed idle.
+  await h.services.retirement.retire(owner, 'transition')
+  const replacement = retainedHandle(h, 'session-a')
+  oldBinding.setRunning(false)
+  await pending
+  assert.equal(settled, 'unobservable',
+    'a mid-wait rollover must not be reported as an observed idle settle')
+  void replacement
+})
+
+test('whenIdleOrAbort reports unobservable when the Connection generation changes DURING the wait', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  binding.setRunning(true)
+  const signal = fakeSignal()
+  let settled: boolean | 'unobservable' | undefined
+  const pending = h.services.retirement.whenIdleOrAbort(owner, signal).then(result => { settled = result })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, undefined, 'the running exact generation must not settle early')
+  // A reconnect replaces the Connection generation while the old binding
+  // object is STILL retained: the old running snapshot cannot prove this
+  // generation is idle.
+  h.generation.set({ id: 2 })
+  await pending
+  assert.equal(settled, 'unobservable',
+    'a generation change during the wait is not an observed idle settle')
+  assert.equal(binding.cancelCalls(), 0, 'the quiesce wait never cancels')
+})
+
+test('whenIdleOrAbort reports unobservable when the binding is replaced with NO old-face notification', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  binding.setRunning(true)
+  const signal = fakeSignal()
+  let settled: boolean | 'unobservable' | undefined
+  const pending = h.services.retirement.whenIdleOrAbort(owner, signal).then(result => { settled = result })
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, undefined)
+  // Retire the exact generation and retain a same-id replacement. The OLD
+  // face deliberately emits NOTHING; only the local retain-count observable
+  // wakes the wait.
+  await h.services.retirement.retire(owner, 'transition')
+  const replacement = retainedHandle(h, 'session-a')
+  h.notifyRetainInfo('session-a', 2)
+  await pending
+  assert.equal(settled, 'unobservable',
+    'a silent binding replacement must be detected through the retain-count liveness, never an old-face notification')
+  assert.equal(binding.session.getSnapshot().running, true, 'the old face never emitted running=false')
+  void replacement
+})
+
+test('a navigation stop receipt pins the generation the quiesce must observe', async () => {
+  const h = harness()
+  const { handle } = retainedHandle(h, 'session-a')
+  const owner = h.ownerOf(handle)
+  const binding = h.bindingOf('session-a')!
+  const settlement = await h.services.retirement.cancelForNavigation(owner)
+  assert.equal(settlement.kind, 'committed')
+  const receipt = settlement.kind === 'committed' ? settlement.receipt : undefined
+  assert.ok(receipt !== undefined, 'an accepted stop returns its generation receipt')
+  // The stopping generation G1 is gone, but the exact binding object survives:
+  // the quiesce must not capture G2 and use its snapshot.
+  binding.setRunning(true)
+  h.generation.set({ id: 2 })
+  assert.equal(await h.services.retirement.whenIdleOrAbort(owner, fakeSignal(), receipt), 'unobservable',
+    'the quiesce observes the receipt generation, not the live one')
+  // Positive control: with the receipt for the CURRENT generation, an observed
+  // running=false settle is still a real idle proof.
+  const h2 = harness()
+  const second = retainedHandle(h2, 'session-a')
+  const owner2 = h2.ownerOf(second.handle)
+  const binding2 = h2.bindingOf('session-a')!
+  const settlement2 = await h2.services.retirement.cancelForNavigation(owner2)
+  const receipt2 = settlement2.kind === 'committed' ? settlement2.receipt : undefined
+  binding2.setRunning(true)
+  const waiting = h2.services.retirement.whenIdleOrAbort(owner2, fakeSignal(), receipt2)
+  await new Promise(resolve => setImmediate(resolve))
+  binding2.setRunning(false)
+  assert.equal(await waiting, false, 'the same-generation receipt still observes a real idle settle')
 })

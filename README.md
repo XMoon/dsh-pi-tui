@@ -38,7 +38,7 @@ dsh --profile pi-tui
 > `@deepseek-ai/dsh@alpha` 指向 `0.2.1-alpha.5`，而 `@xmoon76/dsh-pi-tui@next`
 > 仍指向 `0.5.2-rc.1`（peer floor `>=0.2.0-rc.2`，npm semver 不接受不同
 > major.minor.patch tuple 的 prerelease）。请以下方版本对应表和
-> [兼容性指南](docs/guides/dsh-compatibility.md) 的通用匹配原则为准；稳定版 `0.5.4` 发布在
+> [兼容性指南](docs/guides/dsh-compatibility.md) 的通用匹配原则为准；稳定版 `0.5.5` 发布在
 > `@latest` 而不是 `@next`，因此这两个移动 channel 上没有可安装的兼容组合。
 > 本 checkout 的精确验证请使用 `pnpm compat:dsh:npm`。
 
@@ -60,21 +60,26 @@ pnpm compat:dsh:npm
 
 | TUI 包版本 | 对应的官方 DSH tags | 说明 |
 |---|---|---|
-| `0.5.4`（stable / `@latest`） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 当前稳定版；最低 DSH 版本为 0.2.1-rc.2，本仓库当前 checkout 的精确验证目标为 0.2.1-rc.4 |
+| `0.5.5`（stable / `@latest`） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4`、`dsh-v0.2.1-rc.5` | 当前稳定版；最低 DSH 版本为 0.2.1-rc.2，本仓库当前 checkout 的精确验证目标为 0.2.1-rc.5 |
+| `0.5.4`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
 | `0.5.3`（stable，历史） | `dsh-v0.2.1-rc.2`、`dsh-v0.2.1-rc.3`、`dsh-v0.2.1-rc.4` | 上一稳定版；最低 DSH 版本为 0.2.1-rc.2，已在该三个 DSH 版本通过官方 preset assembly |
 | `0.5.1`（stable，历史） | `dsh-v0.2.0-rc.2` | 上一稳定版；最低与精确验证目标均为 0.2.0-rc.2 family |
 | `0.5.2-rc.1`（next 通道预览，已发布） | `dsh-v0.2.0-rc.2` | 上一轮 next 预览：已发布到 npm `next` 通道（2026-10-17）；整套 peer floor 仍是 `>=0.2.0-rc.2`，不覆盖 0.2.1-rc.2 |
-| `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.4` |
+| `dsh-v0.2.1-rc.1`（无配对 TUI） | 无 | 该中间版本没有本矩阵宣称兼容的已发布 TUI；不要为它复用 `0.5.5` |
 | `0.5.0`（stable，历史） | `dsh-v0.1.7-rc.2`、`dsh-v0.2.0-rc.1` | 上一稳定版；最低 0.1.7-rc.2，精确验证目标 0.2.0-rc.1 |
 | `0.4.9`（stable，历史） | `dsh-v0.1.7-rc.2` | 上一稳定版；0.1.7-rc.2 runtime 的兼容 TUI |
 | `0.4.8`（stable，历史） | `dsh-v0.1.7-rc.1` | 上一稳定版；0.1.7-rc.1 runtime 的兼容 TUI |
 | `0.4.6`（stable，历史） | `dsh-v0.1.5-rc.1`、`dsh-v0.1.5-rc.2` | 上一稳定版；0.1.5 runtime 的兼容 TUI |
 | `0.4.7-alpha.2`（next，历史） | `dsh-v0.1.6-alpha.2` | 上一条 next 线；0.1.6-alpha.2 runtime 的兼容 TUI |
 
-不要把稳定线与 `@next` 预发布线混装。`0.5.4` 是当前稳定版：它的最低 DSH
+不要把稳定线与 `@next` 预发布线混装。`0.5.5` 是当前稳定版：它的最低 DSH
 版本（peer floor）仍是 `0.2.1-rc.2` family，本仓库当前 checkout 的精确验证目标
-是 `0.2.1-rc.4`。已发布的 `0.5.3` 是上一稳定版，同样可与 `0.2.1-rc.2`、
-`0.2.1-rc.3`、`0.2.1-rc.4` 配对使用。中间的
+是 `0.2.1-rc.5`。已发布的 `0.5.4`、`0.5.3` 是上一稳定版，同样可与
+`0.2.1-rc.2`、`0.2.1-rc.3`、`0.2.1-rc.4` 配对使用。从旧的稳定版升级到 `0.5.5`
+的安全顺序：先让进行中的对话回合与后台任务正常结束，再正常退出旧的
+TUI/DSH 进程，然后用官方 plugin 命令安装 `0.5.5` 并重新启动；不要在旧版本
+进程仍活跃运行时直接安装新包并期待零中断热替换，本版不承诺对运行中的旧
+Host 做原地无损升级。中间的
 `dsh-v0.2.1-rc.1` 没有配对 TUI，`0.5.2-rc.1` 是上一轮已发布到 npm `next` 通道的
 预览身份（配对 0.2.0-rc.2；它不覆盖 0.2.1-rc.2）。上一稳定版 `0.5.1` 继续配对
 0.2.0-rc.2：它把整个 DSH peer floor 提升到 `>=0.2.0-rc.2`（Question 生命周期消费
@@ -411,6 +416,20 @@ Ctrl+V 会读取系统剪贴板：剪贴板里是图片时得到规范占位符 
 用户消息、助手消息和工具结果里的图片都按原始顺序显示在各自的卡片中：一行身份信息（名称、像素尺寸、字节数）加一张图片。PiTUI 的查看器见下；实验性 TSP renderer 的查看与缩放由 Tern 客户端提供（相邻图片导航取决于客户端版本与能力）。图片读取失败、格式不支持或超出单张 16 MiB 限制时，卡片会显示身份与真实原因，不会显示伪造的图片。在原生 Kitty 终端中，Transcript 缩略图、输入框上方的草稿预览卡以及从图片打开的全屏查看页都会先在后台把 JPEG/WebP 转换成受限的 PNG 再显示像素（WebP 只取第一帧、按 EXIF 方向摆正、最长边不超过 768 像素；身份行与查看页仍使用原始名称、尺寸、格式与字节数；草稿卡只处理当前最后一张有权限显示的本地图片）。折叠的缩略图不会触发转换；转换中或失败时只显示文字（失败为 `Preview unavailable`），只有真正画出像素的正文才能点击。全屏查看页展示的是同一份受限缩略图，不提供高清原图浏览；PNG、iTerm2、GIF、窄屏与不支持图形的终端行为不变。
 
 全屏图片信息行最右 3 格 `[-]`/`[+]` 只折叠该图片；点击图片正文打开只读查看器。`/view-image` 列出当前已挂载 transcript window 的图片，`Enter` 查看、`Esc back` 返回原列表。
+
+### 图片协议选择
+
+默认按 `auto` 自动协商（Direct/Zellij 为 Kitty > SIXEL > 文本；tmux 保留其 live U1/Sxl 相对优先级）。可在启动时用同一个 `PI_IMAGE_PROTOCOL` 显式选择：
+
+```sh
+PI_IMAGE_PROTOCOL=auto    # 默认自动协商；严格识别的 Zellij + Windows Terminal 会避开已知的 Kitty 启动期假阳性
+PI_IMAGE_PROTOCOL=kitty   # 只使用已准入的 Kitty 传输，否则文本
+PI_IMAGE_PROTOCOL=sixel   # 只使用已准入的 SIXEL 传输（Direct 需真实 DA1；Zellij/tmux 仍走各自安全门），否则文本
+PI_IMAGE_PROTOCOL=iterm2  # 仅 Direct 的 legacy iTerm2 路径；Multiplexer 不假装转发
+PI_IMAGE_PROTOCOL=none    # 关闭所有渲染后端的图片像素；0 等价
+```
+
+显式值是对协议**选择**，不是对不支持终端的保证：tmux 的 live client/Sxl/U1、Zellij 的 DA1/版本/Screen 就绪以及 DCS 所有权检查仍然生效。非法值会在启动时报错。`none` 只关闭终端像素预览，不影响图片附件、模型输入或发送；实验性 TSP renderer 的原生图片也遵循同一开关。
 
 ### TSP renderer（实验性）
 

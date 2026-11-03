@@ -246,6 +246,25 @@ export class QuestionSurfaceController {
     return registered
   }
 
+  /**
+   * Whether this surface currently holds UNSETTLED Client-local Question
+   * input (M4 PR4 `/reload-client` safety read). It reads the controller's
+   * EXISTING owner state synchronously — never a second cache and never the
+   * Host projection: a live foreground flow (presented, queued behind another
+   * modal or still opening its claim), a mounted continued form, or a
+   * continued entry that keeps a local draft. A parked entry with no draft
+   * holds no local input, so it does not block the Client from retiring; the
+   * Host keeps its own question and the replacement Client re-reads it.
+   */
+  hasReloadBlockingInput(): boolean {
+    if (this.disposed) return false
+    if (this.livePresentations.size > 0) return true
+    for (const entry of this.entries.values()) {
+      if (entry.state === 'visible' || entry.draft !== undefined) return true
+    }
+    return false
+  }
+
   /** Release every controller-owned registration: the port subscription, the
    *  mounted late-answer panels (their owned abort controllers) and every held
    *  claim / countdown. Every owner slot/set is retired before any callback
@@ -475,6 +494,7 @@ export class QuestionSurfaceController {
     return rows
   }
 
+
   /** Observe Question attention changes (presentation-only invalidation). */
   subscribeAttention(listener: () => void): () => void {
     this.attentionListeners.add(listener)
@@ -673,6 +693,10 @@ export class QuestionSurfaceController {
     // ADMISSION currentness (B3 finding F10): a request whose Session the surface
     // no longer shows never presents — and never takes a Host claim either.
     const admissible = this.deps.isAdmissibleSession(request.sessionId)
+    // TSP-7 PR-B: only an ADMISSIBLE flow publishes the presented-Question fact.
+    // A late request of a replaced session (RFL-001) is kept alive until its
+    // Host lifetime ends, but it must never paint THIS subject as waiting.
+    if (admissible) this.notifyAttention()
     if (admissible && timed && callId !== undefined) {
       status.text = 'Claiming this question’s foreground wait…'
       this.deps.repaint()
@@ -738,6 +762,11 @@ export class QuestionSurfaceController {
       // opening: the presenter then refuses the mount by itself (the lifetime is
       // on its retirement list) and the request keeps its own lifetime — so the
       // SAME call is harmless here and there is no second presentation path.
+      // The flow is NOW handed to the presenter: publish the attention state in
+      // the same synchronous step so the surface's activity projection re-reads
+      // the presenter's ACTIVE slot (PR-B F4 — the seat is the presented
+      // authority; a flow queued behind another modal publishes that truth).
+      this.notifyAttention()
       const answers = await this.deps.ask(request.questions.map(toTuiQuestion), signal, status, true)
       return { answers: answers.map(toAnswerItem) }
     } catch (error) {
@@ -754,6 +783,10 @@ export class QuestionSurfaceController {
     } finally {
       settled = true
       this.livePresentations.delete(signal)
+      // TSP-7 PR-B: the wait ENDED (answered, cancelled, timed out, Host-ended or
+      // withdrawn), so the presented-Question fact must fall in the SAME step —
+      // never on the next model token.
+      this.notifyAttention()
       this.activeCleanups.delete(teardown)
       stopTimer()
       claim?.release()

@@ -178,7 +178,21 @@ export class BulletedComponent implements Component {
     }
     this.lastChild = child
     this.lastWidth = width
-    this.cached = child.map((line, index) => (index === 0 ? this.prefix : this.indent) + line)
+    this.cached = child.map((line, index) => {
+      // A SIXEL occurrence is an inert token line, not paint text: the Screen
+      // resolves it by EXACT line lookup (X072), so indenting it like a wrapped
+      // text row would make the lookup miss and leak the marker to the terminal.
+      // The token is invisible, so skipping the indent changes nothing the user
+      // sees; every real text/image row still indents under the bullet.
+      if (index > 0 && line.startsWith('\u2063SIXC:')) return line
+      // Keep blank CONTINUATION rows EMPTY: the Screen's top-crop scan walks
+      // upward through empty content lines to a SIXEL anchor, and an
+      // indent-only row reads as non-empty content, hiding the anchor. The
+      // first child row keeps the bullet prefix so an empty leading row cannot
+      // silently lose the owner bullet.
+      if (index > 0 && line === '') return line
+      return (index === 0 ? this.prefix : this.indent) + line
+    })
     return this.cached
   }
 }

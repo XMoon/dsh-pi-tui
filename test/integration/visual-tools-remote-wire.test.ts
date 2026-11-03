@@ -13,11 +13,12 @@
  *
  * FIXTURE MANIFEST
  * - REAL: `createRemoteApplicationHostFixture` (rc.2 Host services, persistence,
- *   storage, credentials, jobs, gateway, Loader, AgentLoop harness), the shared
+ *   storage, credentials, jobs, gateway, Loader, AgentLoop harness, the built-in
+ *   PiTui Host Runtime), the shared
  *   `test/support/visual-tools-plane.ts` configuration plane (production Host
  *   row + official ConfigEditor/SettingsForms over a disposable profile), the
- *   production Remote Host composition, the real generated Client runtime and
- *   the production Remote config adapter.
+ *   M3-only official additive rows, the real generated Client runtime and the
+ *   production Remote config adapter.
  * - STAND-INS: the fixture's ordinary readiness values (agent default model,
  *   web server) and the unsupported prompt-serializer test double — neither is
  *   on this path. No model turn runs.

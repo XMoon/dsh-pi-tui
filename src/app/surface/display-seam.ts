@@ -59,6 +59,38 @@ export interface DisplayStatusFacts {
   readonly compactionPhase?: CompactionPhase
 }
 
+/**
+ * TSP-7 PR-B: the SURFACE-SCOPED machine activity facts the surface's ONE
+ * activity projection consumes. Every field is a fact an existing authority
+ * already committed to this surface — never a Host read, never a catalog walk:
+ *
+ * - `busy` / `working` / `compactionPhase` / `todoCount` come from the SAME
+ *   `commitStatusFacts` producers that drive the renderer's legacy banner;
+ * - `task*` / `childAgent*` / `failedTaskCount` / `questionAttention` are the
+ *   Task Center's already-settled GLOBAL summary and the Question controller's
+ *   parked count;
+ * - `approvalOpen` / `questionOpen` are the LIVE modal facts.
+ *
+ * Field PRESENCE is the write authority, exactly like `DisplayStatusFacts`: an
+ * absent field keeps the last committed value, so a title-only update can never
+ * clear `working`; a `false` / `'idle'` value really ENDS the fact it names.
+ */
+export interface DisplayActivityFacts {
+  readonly working?: boolean
+  readonly busy?: boolean
+  readonly compactionPhase?: CompactionPhase
+  readonly approvalOpen?: boolean
+  readonly questionOpen?: boolean
+  readonly questionAttention?: number
+  readonly queuedCount?: number
+  readonly todoCount?: number
+  readonly taskCount?: number
+  readonly taskTotalCount?: number
+  readonly childAgentCount?: number
+  readonly childAgentTotalCount?: number
+  readonly failedTaskCount?: number
+}
+
 /** The welcome-card facts (see TuiApp.setWelcomeCard). */
 export interface DisplayWelcomeFacts {
   readonly cwd: string

@@ -12,8 +12,9 @@
  *      NOT import `@xmoon76/pi-tui` externally (it is bundled);
  *   3. parse — every `.mjs` passes `node --check`; every `.d.mts` parses via
  *      the TypeScript compiler when available;
- *   4. install — the tarball installs standalone (`npm install --omit=dev`
- *      in a fresh temp project), both `exports` entries import, and
+ *   4. install — the tarball installs with the exact declared DSH Host
+ *      (`npm install --omit=dev` in a fresh temp project), public `exports`
+ *      entries import, and
  *      `@xmoon76/pi-tui` is NOT resolvable from the installed package.
  *
  * Usage: node scripts/tarball-smoke.mjs [path-to-tgz]
@@ -26,7 +27,7 @@
  * local DSH source-pack adapter for a truly fresh pnpm install. Without it,
  * the existing npm registry install path is used.
  *
- * Env: TARBALL_SMOKE_SKIP_INSTALL=1 skips the install step (offline postpack
+ * Env: TARBALL_SMOKE_SKIP_INSTALL=1 skips the install step (offline packed-artifact
  * structural checks) when no source distribution is supplied; it is rejected
  * for Source Mode so a fresh-install check cannot be bypassed. TARBALL_SMOKE_KEEP=1
  * keeps the temp dirs for inspection.
@@ -55,6 +56,7 @@ import {
   assertSourceResolution,
   isDshPackage,
   loadDshDistribution,
+  npmDshVersion,
   prepareDshInstall,
   restoreDshInstall,
   sourceInstallPackages,
@@ -194,12 +196,14 @@ function sourceInstallEnvironment() {
 }
 
 function resultDetail(result) {
-  return [result?.stderr, result?.stdout, result?.error?.message]
+  const lines = [result?.stderr, result?.stdout, result?.error?.message]
     .filter(value => typeof value === 'string' && value.length > 0)
-    .join(' ')
+    .join('\n')
     .split(/\r?\n/u)
-    .slice(-20)
-    .join(' ')
+  return (lines.length <= 120
+    ? lines
+    : [...lines.slice(0, 80), '[... output truncated ...]', ...lines.slice(-40)])
+    .join('\n')
 }
 
 function runSourceInstall(tarball, candidate, distribution, probeDir) {
@@ -279,6 +283,16 @@ function main() {
     check('types dist/builtins.d.mts', has('dist/builtins.d.mts'))
     check('exports entry dist/visual-tools.mjs', has('dist/visual-tools.mjs'))
     check('types dist/visual-tools.d.mts', has('dist/visual-tools.d.mts'))
+    check('exports entry dist/host-runtime.mjs', has('dist/host-runtime.mjs'))
+    check('types dist/host-runtime.d.mts', has('dist/host-runtime.d.mts'))
+    // M4-B2-HF: ONE Loader subpath for the built-in Host composition. The two
+    // private business services must never become installable business
+    // subpaths of their own.
+    check('host-runtime is the only new Loader subpath',
+      pkg.exports?.['./host-runtime'] !== undefined
+        && pkg.exports?.['./file-reference-host'] === undefined
+        && pkg.exports?.['./terminal-progress-host'] === undefined,
+      `exports=${Object.keys(pkg.exports ?? {}).join(',')}`)
     check('cordis.patch.yml included', has('cordis.patch.yml'))
     check('no duplicated official preset root', !files.some(name => name.startsWith('config/agent-presets/')))
     // The generated preset mirror MUST ship: upstream bundle-patch loading
@@ -402,12 +416,15 @@ function main() {
       // `app/host/performance-host` is a public Loader row ENTRY (like
       // `startup`/`builtins`), exposed as the flat `./performance-host`
       // subpath — the nested canonical source path, never a new root module.
+      // `app/host/pi-tui-host-runtime` is the M4-B2-HF built-in Host Runtime
+      // entry; its two internal feature modules are inlined regions of that
+      // entry, not separate public entries.
       const isRoot = name === 'dist/index.d.mts'
       for (const line of lines) {
         const match = /\/\/#region\s+(\S+)/.exec(line)
         if (match) {
           const regionPath = match[1]
-          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/host\/performance-host|app\/host\/visual-tools|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
+          const allowed = /^src\/(app\/bootstrap\/profile|app\/config\/schema|app\/host\/features\/file-reference|app\/host\/features\/terminal-progress|app\/host\/performance-host|app\/host\/pi-tui-host-runtime|app\/host\/visual-tools|app\/session\/interrupt|app\/submission\/command-policy|app\/submission\/pending-input|app\/surface\/compaction-presentation|app\/surface\/pending-presentation|app\/surface\/task-presentation|app\/surface\/viewer-policy|builtins|client\/launcher\/profile|client\/media\/image\/types|commands|display-preset|domain\/catalog\/skill|domain\/catalog\/surface|domain\/command\/policy|domain\/communication\/policy|domain\/media\/types|domain\/shell\/danger|extension\/advanced|extension\/advanced-types|extension\/public-types|extension\/service|extension\/slot-map|extension\/unstable|extension\/unstable-types|extensions|index|runtime\/direct\/surface-catalog|runtime\/process\/diagnostics|startup)\.d\.ts$/.test(regionPath)
           const rootAllowed = isRoot && /^src\/tui-app\.d\.ts$/.test(regionPath)
           if (!allowed && !rootAllowed) dtsLeaks.push(`${name}: region ${regionPath}`)
         }
@@ -442,15 +459,35 @@ function main() {
         installSucceeded = sourceInstall.installed
       } else {
         mkdirSync(probeDir)
-        writeFileSync(join(probeDir, 'package.json'), JSON.stringify({ name: 'tarball-smoke-probe', private: true }))
+        const dshPeers = Object.keys(pkg.peerDependencies ?? {}).filter(isDshPackage)
+        let installLabel = 'tarball installs standalone (npm install --omit=dev)'
+        if (dshPeers.length === 0) {
+          // A synthetic fixture without a DSH peer family is not a published
+          // DSH plugin; keep the plain standalone probe.
+          writeFileSync(join(probeDir, 'package.json'), JSON.stringify({ name: 'tarball-smoke-probe', private: true }))
+        } else {
+          // The published bundle is a DSH plugin: the Host owns its peer family.
+          // A bare npm project auto-installs each DSH peer independently, mixing
+          // stale/latest and next release trains instead of testing a real Host.
+          // Include the Host and the exact DSH peers this candidate requires;
+          // this is probe-only and does not alter the published peer ranges.
+          const dshVersion = npmDshVersion()
+          const dependencies = { '@deepseek-ai/dsh': dshVersion }
+          for (const name of dshPeers) dependencies[name] = dshVersion
+          writeFileSync(join(probeDir, 'package.json'), JSON.stringify({
+            name: 'tarball-smoke-probe',
+            private: true,
+            dependencies,
+          }))
+          installLabel = 'tarball installs with exact DSH Host (npm install --omit=dev)'
+        }
         const install = run('npm', [
           'install', '--omit=dev', '--no-save',
           '--cache', join(workDir, 'npm-cache'),
           tarball,
         ], { cwd: probeDir, timeout: 180_000 })
         installSucceeded = install.status === 0
-        check('tarball installs standalone (npm install --omit=dev)', installSucceeded,
-          installSucceeded ? '' : resultDetail(install))
+        check(installLabel, installSucceeded, installSucceeded ? '' : resultDetail(install))
       }
       if (installSucceeded) {
         const installed = join(probeDir, 'node_modules', '@xmoon76', 'dsh-pi-tui')
@@ -459,7 +496,8 @@ function main() {
           "Promise.all([import('@xmoon76/dsh-pi-tui'), import('@xmoon76/dsh-pi-tui/startup'),"
             + "import('@xmoon76/dsh-pi-tui/extensions'), import('@xmoon76/dsh-pi-tui/builtins'),"
             + "import('@xmoon76/dsh-pi-tui/extensions/advanced'), import('@xmoon76/dsh-pi-tui/extensions/unstable'),"
-            + "import('@xmoon76/dsh-pi-tui/performance-host'), import('@xmoon76/dsh-pi-tui/visual-tools')])"
+            + "import('@xmoon76/dsh-pi-tui/performance-host'), import('@xmoon76/dsh-pi-tui/visual-tools'),"
+            + "import('@xmoon76/dsh-pi-tui/host-runtime')])"
             + ".then(m => { if (m[4].ADVANCED_API_LEVEL !== 1) throw new Error('ADVANCED_API_LEVEL');"
             + "if (m[5].UNSTABLE_API_LEVEL !== 1) throw new Error('UNSTABLE_API_LEVEL');"
             + "if (m[6].name !== 'pi-tui-performance-host') throw new Error('performance-host row');"
@@ -471,6 +509,9 @@ function main() {
             + "if (m[7].SVG_TOOL_NAME !== 'dsh_pi_tui_svg') throw new Error('SVG_TOOL_NAME');"
             + "if (typeof m[7].apply !== 'function') throw new Error('visual-tools apply');"
             + "if (!Array.isArray(m[7].inject)) throw new Error('visual-tools inject');"
+            + "if (m[8].name !== 'pi-tui-host-runtime') throw new Error('host-runtime row');"
+            + "if (typeof m[8].apply !== 'function') throw new Error('host-runtime apply');"
+            + "if (!Array.isArray(m[8].inject) || m[8].inject.join(',') !== 'typert,agents,fileReferences,workingDirectory') throw new Error('host-runtime inject');"
             + "console.log('imports-ok') })"
             + ".catch(e => { console.error(e.message); process.exit(1) })",
         ], { cwd: probeDir })

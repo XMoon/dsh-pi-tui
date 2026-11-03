@@ -15,13 +15,18 @@
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { Diag } from '../../runtime/process/diagnostics.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
+import type { WriteOutcome } from '../../runtime/session-writer-port.ts'
 import {
   retireDirectOwnedSession,
   type RetirementFailure,
   type RetirementReport,
 } from '../../runtime/direct/owned-session-retirement.ts'
 import type { SessionOwnerRef } from '../session/subject.ts'
-import type { SessionOwnerRetirement, SessionRetirementReport } from '../session/owner-access.ts'
+import type {
+  NavigationCancelSettlement,
+  SessionOwnerRetirement,
+  SessionRetirementReport,
+} from '../session/owner-access.ts'
 import type { DirectOwnerRegistry } from './owner-registry.ts'
 
 /** The Direct boundary facts the retirement needs. */
@@ -86,6 +91,62 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
     const record = attachmentOf(owner)
     if (record === undefined) return
     await deps.flushSession(record.agent.session)
+  }
+
+  /**
+   * The ONE-SHOT user interrupt of an exact Direct owner. This is NOT the
+   * retirement cancel and NOT the shutdown `preCancel`: the live turn is
+   * stopped while the Host-owned pending inbox is preserved (`keepInbox`).
+   * The Agent OBJECT is the address, never a session-id re-resolution, so a
+   * same-id generation rollover can never receive this owner's interrupt.
+   */
+  const cancel = async (owner: SessionOwnerRef): Promise<WriteOutcome<undefined>> => {
+    const record = attachmentOf(owner)
+    if (record === undefined) {
+      // A Remote generation reaching the Direct port is a composition defect:
+      // report a real pre-dispatch refusal instead of a false committed.
+      return {
+        kind: 'rejected',
+        error: {
+          code: 'session/owner-unattached',
+          message: 'the session owner has no Direct attachment in this runtime',
+        },
+      }
+    }
+    if (deps.isLifecycleAborted()) {
+      // The shutdown path owns this Agent's cancel; dispatching a second one
+      // after the root teardown unregistered the inbox projection is exactly
+      // the late-cancel failure the exactly-once set exists to prevent.
+      return { kind: 'cancelled' }
+    }
+    try {
+      record.agent.cancel({ kind: 'user' }, { keepInbox: true })
+    } catch (error) {
+      // `cancel` is synchronous; a throw does not prove the turn was left
+      // running (it may have taken effect before the failure).
+      return {
+        kind: 'indeterminate',
+        error: { code: 'session/cancel-indeterminate', message: safeErrorMessage(error) },
+      }
+    }
+    return { kind: 'committed', value: undefined }
+  }
+
+  /**
+   * The navigation audience of the SAME one-shot cancel. Direct's settlement is
+   * already phase-exact: a `cancelled` is only the local pre-dispatch refusal
+   * (an exiting runner), a synchronous throw is dispatched-unproven, and a
+   * proven refusal stays rejected.
+   */
+  const cancelForNavigation = async (owner: SessionOwnerRef): Promise<NavigationCancelSettlement> => {
+    const outcome = await cancel(owner)
+    switch (outcome.kind) {
+      case 'committed': return { kind: 'committed' }
+      case 'rejected': return { kind: 'rejected', detail: outcome.error.message }
+      case 'unsupported': return { kind: 'rejected', detail: outcome.reason }
+      case 'cancelled': return { kind: 'cancelled' }
+      case 'indeterminate': return { kind: 'indeterminate', detail: outcome.error.message }
+    }
   }
 
   const preCancel = (owner: SessionOwnerRef): void => {
@@ -203,10 +264,15 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
     if (record !== undefined) deps.parkHandle(record.handle)
   }
 
-  const whenIdleOrAbort = async (owner: SessionOwnerRef, signal: AbortSignal): Promise<boolean> => {
+  const whenIdleOrAbort = async (
+    owner: SessionOwnerRef,
+    signal: AbortSignal,
+    _receipt?: import('../session/owner-access.ts').NavigationStopReceipt,
+  ): Promise<boolean | 'unobservable'> => {
     const record = attachmentOf(owner)
-    // No Direct attachment (a Remote generation): nothing to quiesce.
-    if (record === undefined) return false
+    // No Direct attachment (a Remote generation): the exact owner is not
+    // observable here; that is not proof of idle.
+    if (record === undefined) return 'unobservable'
     const agent = record.agent
     if (signal.aborted) {
       cancelShutdownAgent(agent)
@@ -250,5 +316,14 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
     return aborted
   }
 
-  return { whenIdleOrAbort, flush, preCancel, retire, park, retireParked }
+  return {
+    whenIdleOrAbort,
+    cancel,
+    cancelForNavigation,
+    flush,
+    preCancel,
+    retire,
+    park,
+    retireParked,
+  }
 }

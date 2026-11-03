@@ -11,7 +11,7 @@
  */
 
 import { ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
+import { CommandDefinitionId, type CommandResult } from '@deepseek-ai/dsh-commands'
 import type { TuiApp } from '../../tui-app.ts'
 import type { SessionScope } from '../../app/session/scope.ts'
 import { TransitionInProgressError } from '../../app/session/operation-barrier.ts'
@@ -79,6 +79,15 @@ export interface ModelCommandRegistrars {
   registerModel(): void
   registerYolo(): void
   registerPreset(): void
+  /**
+   * PR-C (TSP-7): the command-only UI entry into the SAME `/model` picker the
+   * registered command opens — the high-frequency composer controls call this
+   * instead of fabricating a submission or a second request owner. `entry`
+   * only changes the panel's INITIAL presentation focus (`'effort'` lands the
+   * first hydrated catalogue on its Reasoning Effort strip); every read,
+   * scope, writer and outcome owner is the registered handler's own.
+   */
+  openModel(entry: 'models' | 'effort'): Promise<CommandResult>
 }
 
 /**
@@ -128,11 +137,10 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
   // surface token decides which picker is allowed to hydrate/repaint/close.
   let presetSurfaceToken = 0
 
-  const registerModel = (): void => {
-    registerOne({
-      name: 'model',
-      description: 'Switch the model (and reasoning effort) for this session; before a session exists, change the default when supported',
-      handler: async () => {
+  /** The shared `/model` body: ONE handler closure per registration lifetime,
+   *  serving the registered command and the command-only UI entry (`openModel`)
+   *  — never two catalog readers or two writer owners. */
+  const openModel = (entry: 'models' | 'effort'): Promise<CommandResult> => (async (): Promise<CommandResult> => {
         const presentation = deps.modelPresentation ?? pituiModelPresentation(app)
         const models = runner.catalog.models
         if (!models.available()) return { kind: 'error', text: 'model service unavailable' }
@@ -289,6 +297,7 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         let reading = false
         const picker = presentation.open({
           subject,
+          entry,
           isCurrent: () => surfaceToken === modelSurfaceToken && ownerCurrent(),
           retry: () => loadOnce(),
           // The picker owns presentation only: brand the effort id here so the
@@ -374,7 +383,16 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
         }
         loadOnce()
         return { kind: 'success' }
-      },
+  })()
+
+  const registerModel = (): void => {
+    registerOne({
+      name: 'model',
+      description: 'Switch the model (and reasoning effort) for this session; before a session exists, change the default when supported',
+      // The registered command and the command-only UI entry (`openModel`)
+      // share ONE body: the same scope capture, the same catalog reader, the
+      // same writer and the same presentation tokens.
+      handler: () => openModel('models'),
     })
   }
 
@@ -885,5 +903,5 @@ export function createModelCommands(deps: ModelCommandDeps): ModelCommandRegistr
     })
   }
 
-  return { registerModel, registerYolo, registerPreset }
+  return { registerModel, registerYolo, registerPreset, openModel }
 }

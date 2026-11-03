@@ -512,6 +512,11 @@ test('the REAL TSP seat parks a continued form on Esc and reopens it with the pr
     onFatal: () => {},
     notify: () => {},
     setSettledQuestionAnswersLookup: () => {},
+    // The shared seat interface's three modal inputs: these unit seats are
+    // built without a pane, so they exercise the legacy (non-native) branch.
+    surfaceId: 's1',
+    nativeQuestions: false,
+    nativeApproval: false,
   })
   const key = (name: string, extra: Partial<{ text: string; ctrl: boolean; alt: boolean; shift: boolean; meta: boolean }> = {}) =>
     ({ name, ctrl: false, alt: false, shift: false, meta: false, ...extra })
@@ -579,6 +584,11 @@ test('a held timed claim retired by a publication never mounts its form (and is 
     onFatal: () => {},
     notify: () => {},
     setSettledQuestionAnswersLookup: () => {},
+    // The shared seat interface's three modal inputs: these unit seats are
+    // built without a pane, so they exercise the legacy (non-native) branch.
+    surfaceId: 's1',
+    nativeQuestions: false,
+    nativeApproval: false,
   })
   let releaseClaim: (() => void) | undefined
   const claimHeld = new Promise<void>(resolve => { releaseClaim = resolve })

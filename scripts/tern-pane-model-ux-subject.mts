@@ -139,13 +139,26 @@ const FAILED = 'catalog is unreachable\r\nsecond line\r\n\r\nfourth line'
 const describe = (layer: Node) => {
   let pickerNode: Node | undefined
   let overlayNode: Node | undefined
+  // The catalogue's own summary grid is the FIRST `kv` of the frame; the Reader
+  // paints one grid PER GROUP, so the reader facts are addressed by each grid's
+  // own `key`, never by "whichever kv came first".
   let kvNode: Node | undefined
+  const readerKv: Record<string, unknown> = {}
   let notice: Record<string, unknown> | undefined
   const visit = (node: Node | undefined): void => {
     if (node === undefined) return
     if (node.kind === 'picker' && pickerNode === undefined) pickerNode = node
     if (node.kind === 'overlay' && overlayNode === undefined) overlayNode = node
-    if (node.kind === 'kv' && kvNode === undefined) kvNode = node
+    if (node.kind === 'kv') {
+      if (kvNode === undefined) kvNode = node
+      const key = node.props?.['key']
+      if (typeof key === 'string' && key.startsWith('reader-kv-')) {
+        readerKv[key.slice('reader-kv-'.length)] = {
+          layout: node.props?.['layout'],
+          items: node.props?.['items'],
+        }
+      }
+    }
     // The Reader's notice is a `ui.text` whose value is a TONED span, not a bare
     // `text` prop. The frame record keeps the span's text + tone and the text
     // node's own key set, so the role ink is asserted on the WIRE, not inferred.
@@ -223,6 +236,10 @@ const describe = (layer: Node) => {
       }))
       : undefined,
     summary: kvNode === undefined ? undefined : kvNode.props['items'],
+    // Per-group reader grids, keyed by the view's OWN group key. An empty object is
+    // the wire fact "this pane got no reader grid", which the degraded lane asserts;
+    // it is never inferred from the absence of a record.
+    readerKv,
     notice,
   }
 }
@@ -314,6 +331,9 @@ picker = new TspModelPicker({
     note({ nativeScroll: { id, to } })
     surface.scroll(id, to)
   },
+  // The REAL negotiated kind set of THIS pane: the subject never forces the
+  // display capability, so the recorded frames show what this client really gets.
+  nativeKv: session.caps.kinds.includes('kv'),
 })
 
 const openPanel = (sessionless: boolean) => picker.presentation.open({

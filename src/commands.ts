@@ -39,6 +39,10 @@ import type { CommandInvocation, CommandResult, CommandDescriptor, CommandDefini
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands'
 import { TransitionInProgressError } from './app/session/operation-barrier.ts'
 import { SessionScopeSupersededError, type LiveSessionScope, type SessionScope } from './app/session/scope.ts'
+import type { SessionSwitchOutcome } from './app/session/runtime.ts'
+import type { NavigationIntent } from './app/session/transition.ts'
+import type { ClientReloadProcessRefusal } from './app/application-runtime.ts'
+import type { ClientReloadRefusal } from './app/remote-process/client-reload-safety.ts'
 import type { DefaultIntentRecord } from './app/command/model-default-intent.ts'
 import type { Component } from '@xmoon76/pi-tui'
 import type { EmbeddedPluginPage } from './tui/plugin-manager/workspace.ts'
@@ -72,7 +76,7 @@ import type { ClientCommandRegistry } from './app/command/client-command-registr
 import type { SubmissionComposerPort } from './app/submission/composer-port.ts'
 import { commandSummaryOf, type SurfaceCatalogSnapshot, type SurfaceCommandSummary } from './domain/catalog/surface.ts'
 import { isUserInvocableSkill, type HumanSkillCatalog, type HumanSkillSummary } from './domain/catalog/skill.ts'
-import { registerExitCommand, registerHelpCommand } from './tui/commands/utility.ts'
+import { registerExitCommand, registerHelpCommand, registerReloadClientCommand } from './tui/commands/utility.ts'
 import { registerPluginsCommand, registerTasksCommand } from './tui/commands/tasks.ts'
 import { createModelCommands } from './tui/commands/models.ts'
 import type { ModelPresentation } from './app/command/model-presentation.ts'
@@ -269,9 +273,23 @@ export type PermissionPresetResult =
   | { readonly ownership: 'refused' }
   | { readonly ownership: OperationOwnership; readonly outcome: PermissionPresetOutcome }
 
+/**
+ * M4 PR4: the complete refusal vocabulary of ONE manual Client reload request:
+ * the Client-local safety reasons (read from the live owners in the same
+ * synchronous stack) plus the process preflight's own reasons.
+ */
+export type ClientReloadRefusalReason = ClientReloadRefusal | ClientReloadProcessRefusal
+
+/**
+ * M4 PR4: the synchronous result of ONE manual Client reload request, as the
+ * `/reload-client` handler receives it.
+ */
+export type ClientReloadCommandResult =
+  | { readonly kind: 'accepted' }
+  | { readonly kind: 'refused'; readonly reason: ClientReloadRefusalReason }
+
 /** Everything the TUI-owned commands read from the runner. */
-export interface TuiCommandRunner {
-  ctx: Context
+export interface TuiCommandRunner {  ctx: Context
   /** PR3-A: undefined while a non-PiTui renderer owns the terminal; the
    * boot-mandatory completions install skips, executions are input-gated. */
   app: TuiApp | undefined
@@ -439,6 +457,23 @@ export interface TuiCommandRunner {
    * disposal) — shared by Ctrl+C/Ctrl+D, /exit and /quit. Command handlers
    * must NEVER stop the app, flush or exit themselves. */
   requestExit(): void
+  /**
+   * M4 PR4: the split Client's ONE manual `/reload-client` entry. The
+   * composition root supplies the implementation, which performs the
+   * Client-local safety decision and (when safe) the process-owned reexec
+   * request in ONE synchronous stack. Absent outside a real split-Client
+   * surface mount: Direct answers the fixed "unavailable" refusal.
+   */
+  readonly requestClientReload?: () => ClientReloadCommandResult
+  /**
+   * M4 PR4: begin ONE accepted Client-local semantic-work lifetime — the SAME
+   * counter `SubmissionController.hasUnsettledClientWrite()` reads, exposed
+   * for owners OUTSIDE the submission FIFO (the coordinator's detached skill
+   * delivery and the rewind picker selection). Synchronous registration;
+   * the returned release is idempotent and MUST run at the operation's real
+   * settlement, never at an intermediate read/handler return.
+   */
+  beginClientWrite(): () => void
   cwd: string
   /** The per-TUI draft image registry (image pipeline, plan M1). Shared by
    * the /image command, the clipboard intake and the submission path; the
@@ -498,6 +533,8 @@ export interface TuiCommandRunner {
   recordExtensionError?: (ref: { slot: string; id: string; owner: string }, error: unknown) => void
   clearExtensionError?: (ref: { slot: string; id: string; owner: string }) => void
   switchSession(sessionId: string, expectedScope?: SessionScope): Promise<string | undefined>
+  /** Tracked switch settlement for `/resume`; optional for narrow legacy fakes. */
+  switchSessionOutcome?(sessionId: string, expectedScope?: SessionScope): Promise<SessionSwitchOutcome>
   /** Host-owned /fork navigation. The runner dispatches the semantic fork
    * outside the destructive transition FIFO and only commits the visible child
    * while the captured navigation intent is still current. Optional keeps
@@ -516,6 +553,8 @@ export interface TuiCommandRunner {
     /** The child's pre-generated session identity (mandatory). */
     target: { id: string; header?: { cwd?: string } }
     prepare?: () => Promise<void> | void
+    /** See `TransitionSteps.onOldOwnerQuiesced`. */
+    onOldOwnerQuiesced?: () => void
     create: () => Promise<T>
   }): Promise<{ ok: true; next: T } | { ok: false; message: string; error?: unknown }>
   /** The preset the live agent runs on, when the deployment composes one. */
@@ -733,8 +772,16 @@ export interface TuiCommandRunner {
    * outside this FIFO; only its current visible adoption and Direct retirement
    * handoff use the gate. Re-entering the gate from inside a task is refused
    * loudly (it would deadlock).
+   *
+   * `navigation` marks a USER NAVIGATION intent (`/new`, a selected-session
+   * switch): the caller captures `runner.captureSessionScope()` synchronously
+   * before its first await and passes the intent here. The transition admission
+   * then sends ONE exact-owner stop of that captured generation BEFORE the
+   * admitted writers drain; without it (e.g. the `/preset` swap) nothing is
+   * cancelled. The intent records whether that stop was accepted, so a later
+   * failure can state that the old Turn is already stopped.
    */
-  withSessionTransition<T>(task: () => Promise<T> | T): Promise<T>
+  withSessionTransition<T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T>
   /**
    * Run one scope-bound TUI session write (A3 §1.3): the captured scope is
    * validated ONCE, synchronously, before the operation barrier is entered, so
@@ -931,6 +978,17 @@ export function registerTuiCommands(
   /** Bind one submission's resolved delivery mode for the synchronous window
    * that launches a command execution (see the TUI skill handlers). */
   withDelivery<T>(delivery: SubmitDelivery, run: () => T): T
+  /**
+   * PR-C (TSP-7): the command-only UI entry into the SAME registered `/model`
+   * handler the typed command runs — the composer's high-frequency Model and
+   * Effort controls call this, never a fabricated submission. `entry` changes
+   * only the panel's initial presentation focus; the read/scope/writer owners
+   * stay the registered command's own. UNDEFINED when the `/model`
+   * registration itself degraded (a Host-owned same-name command): the UI
+   * opener then does not exist and the composer control is refused by the
+   * command surface's own notice path.
+   */
+  openModelPicker?(entry: 'models' | 'effort'): Promise<CommandResult>
 } {
   const { ctx, app } = runner
   // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal
@@ -1631,6 +1689,14 @@ export function registerTuiCommands(
     notify(text, 'info')
   }
   registerExitCommand({ runner, registerTuiCommand })
+  // M4 PR4: the manual split-Client reload, registered immediately after the
+  // exit pair at its frozen position. It is a bare Client-local command: no
+  // alias, no `input` schema, no keybinding and no Host RPC. The draft
+  // disposition is always `suppressed` — the refusals are reported by the
+  // handler's own notice and the command line must never be restored into the
+  // editor (that would also turn the next reload attempt into a draft-text
+  // refusal).
+  registerReloadClientCommand({ runner, registerTuiCommand, recordCommandDraftDisposition })
 
   const settingsCommands = createSettingsCommands({
     runner,
@@ -1722,200 +1788,211 @@ export function registerTuiCommands(
     delivery: SubmitDelivery | undefined,
     commandId?: string,
   ): Promise<{ kind: 'success'; text: string } | { kind: 'error'; text: string }> => {
-    const skillSignal = signal === runner.signal ? runner.signal : AbortSignal.any([runner.signal, signal])
-    skillSignal.throwIfAborted()
-    // PR4 §1.6 (D4) — the REMOTE literal-gesture path: the Client NEVER loads
-    // a skill body there (no `skills/read` exists on the wire), so the whole
-    // definition resolution is skipped. The wrapper's OWN live presence in
-    // the human catalog (isSkillWrapperName) is the claim the caller already
-    // validated; the Host's dsh-tool-skill pre-step owns body resolution,
-    // isUserInvocable re-check and injection at gesture time.
-    const remoteLiteralGesture = runner.commandRegistry === undefined
-    let resolved: SkillDefinitionResult | undefined
-    if (!remoteLiteralGesture) {
-      // The scope-bound catalog facade validates the captured owner BEFORE the
-      // dispatch and again after the read settles — the scope is never downgraded
-      // to a bare session id handed to a current-owner resolver.
+    // M4 PR4 (RFL-006): an accepted skill invocation holds the ONE
+    // accepted-write lifetime from its synchronous entry through the actual
+    // writer settlement, so a manual Client reload cannot cancel the
+    // picker-detached preparation window. The same finally covers every
+    // refusal/error/cancellation/stale exit; the typed/wrapper FIFO turn
+    // remains the second (overlapping) layer.
+    const endClientWrite = runner.beginClientWrite()
+    try {
+      const skillSignal = signal === runner.signal ? runner.signal : AbortSignal.any([runner.signal, signal])
+      skillSignal.throwIfAborted()
+      // PR4 §1.6 (D4) — the REMOTE literal-gesture path: the Client NEVER loads
+      // a skill body there (no `skills/read` exists on the wire), so the whole
+      // definition resolution is skipped. The wrapper's OWN live presence in
+      // the human catalog (isSkillWrapperName) is the claim the caller already
+      // validated; the Host's dsh-tool-skill pre-step owns body resolution,
+      // isUserInvocable re-check and injection at gesture time.
+      const remoteLiteralGesture = runner.commandRegistry === undefined
+      let resolved: SkillDefinitionResult | undefined
+      if (!remoteLiteralGesture) {
+        // The scope-bound catalog facade validates the captured owner BEFORE the
+        // dispatch and again after the read settles — the scope is never downgraded
+        // to a bare session id handed to a current-owner resolver.
+        try {
+          resolved = await runner.resolveScopedSkill(scope, name)
+        } catch (error) {
+          if (error instanceof SupersededReadError) {
+            return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+          }
+          throw error
+        }
+        skillSignal.throwIfAborted()
+        if (!runner.isSessionScopeCurrent(scope)) {
+          return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+        }
+        if (resolved!.kind === 'unavailable') return { kind: 'error', text: 'skill service unavailable' }
+        if (resolved!.kind === 'unknown') return { kind: 'error', text: 'unknown skill "' + name + '"' }
+        if (resolved!.kind === 'malformed') return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
+        const skill = resolved!.skill
+        if (!isUserInvocableSkill(skill)) return { kind: 'error', text: `skill "${name}" is not invocable by the user` }
+      }
+      // Web parity (the dsh-tool-skill pre-step boundary): a user-explicit
+      // skill invocation is a PLAIN user message whose leading `/name` line
+      // the host recognizes — the user's own words (including any `/name args`
+      // the wrapper was invoked with) always travel as the original text, and
+      // the rendered skill body follows as injected instructions context.
+      // Arguments are never carved out and never dropped: the bug this fixes
+      // was the wrapper discarding `rawInput` and injecting a hand-rolled body
+      // card that swallowed the user's request.
+      const line = remoteLiteralGesture || resolved === undefined || resolved.kind !== 'found'
+        ? (args.trim() === '' ? '/' + name : '/' + name + ' ' + args.trimStart())
+        : (() => {
+          const skill = resolved.skill
+          return args.trim() === '' ? '/' + skill.name : '/' + skill.name + ' ' + args.trimStart()
+        })()
+      // The skill invocation is an AGENT-FACING prompt: build its message
+      // through the shared prepared-input pipeline so an image-bearing
+      // `/skill [image #1 ...]` line is a real multimodal prompt, exactly
+      // like a plain prompt (review finding 4). The referenced drafts are
+      // pinned across the WHOLE invocation — the async prepare, the steer
+      // and the draft consumption — so a concurrent /image prune can never
+      // delete images this invocation is still admitting (review finding 1).
+      // The host's pre-step listener (dsh-tool-skill) injects the rendered
+      // body only when its tool registration is visible to this agent. Probe
+      // that semantic catalog fact before choosing the delivery path.
+      let hostLoadsSkillBody = false
       try {
-        resolved = await runner.resolveScopedSkill(scope, name)
+        hostLoadsSkillBody = runner.hostLoadsSkillBody(scope)
       } catch (error) {
         if (error instanceof SupersededReadError) {
           return { kind: 'error', text: 'the session changed while loading the skill — try again' }
         }
         throw error
       }
-      skillSignal.throwIfAborted()
-      if (!runner.isSessionScopeCurrent(scope)) {
-        return { kind: 'error', text: 'the session changed while loading the skill — try again' }
-      }
-      if (resolved!.kind === 'unavailable') return { kind: 'error', text: 'skill service unavailable' }
-      if (resolved!.kind === 'unknown') return { kind: 'error', text: 'unknown skill "' + name + '"' }
-      if (resolved!.kind === 'malformed') return { kind: 'error', text: `skill "${name}" returned a malformed definition` }
-      const skill = resolved!.skill
-      if (!isUserInvocableSkill(skill)) return { kind: 'error', text: `skill "${name}" is not invocable by the user` }
-    }
-    // Web parity (the dsh-tool-skill pre-step boundary): a user-explicit
-    // skill invocation is a PLAIN user message whose leading `/name` line
-    // the host recognizes — the user's own words (including any `/name args`
-    // the wrapper was invoked with) always travel as the original text, and
-    // the rendered skill body follows as injected instructions context.
-    // Arguments are never carved out and never dropped: the bug this fixes
-    // was the wrapper discarding `rawInput` and injecting a hand-rolled body
-    // card that swallowed the user's request.
-    const line = remoteLiteralGesture || resolved === undefined || resolved.kind !== 'found'
-      ? (args.trim() === '' ? '/' + name : '/' + name + ' ' + args.trimStart())
-      : (() => {
-        const skill = resolved.skill
-        return args.trim() === '' ? '/' + skill.name : '/' + skill.name + ' ' + args.trimStart()
-      })()
-    // The skill invocation is an AGENT-FACING prompt: build its message
-    // through the shared prepared-input pipeline so an image-bearing
-    // `/skill [image #1 ...]` line is a real multimodal prompt, exactly
-    // like a plain prompt (review finding 4). The referenced drafts are
-    // pinned across the WHOLE invocation — the async prepare, the steer
-    // and the draft consumption — so a concurrent /image prune can never
-    // delete images this invocation is still admitting (review finding 1).
-    // The host's pre-step listener (dsh-tool-skill) injects the rendered
-    // body only when its tool registration is visible to this agent. Probe
-    // that semantic catalog fact before choosing the delivery path.
-    let hostLoadsSkillBody = false
-    try {
-      hostLoadsSkillBody = runner.hostLoadsSkillBody(scope)
-    } catch (error) {
-      if (error instanceof SupersededReadError) {
-        return { kind: 'error', text: 'the session changed while loading the skill — try again' }
-      }
-      throw error
-    }
-    // When the Host skill pre-step is absent, deliver the original invocation
-    // and its rendered body as two ordered single prompts. This preserves the
-    // original-line-before-body ordering without bypassing the semantic writer.
-    // Remote (the literal-gesture branch) never builds a fallback body: there
-    // is no Client-side definition to render, and its composition invariant
-    // already answers hostLoadsSkillBody=true.
-    const fallbackBody = !hostLoadsSkillBody && !remoteLiteralGesture && resolved !== undefined && resolved.kind === 'found'
-      ? (() => {
-        const skill = resolved.skill
-        const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
-        const resourceBase = readResourceBase(skill.resourceBase)
-        return createUserMessage({
-          content: [{ type: 'text', text: renderSkillContent({
-            name: skill.name,
-            provider: typeof skill.provider === 'string' && skill.provider !== '' ? skill.provider : 'tui',
-            ...resourceBase === undefined ? {} : { resourceBase },
-            content: body,
-          }) }],
-          source: { kind: 'skill-invocation', name: skill.name, form: 'instructions' },
-        })
-      })()
-      : undefined
-    // Acquire the pin HERE, immediately before the `try` that owns its release:
-    // every earlier step is synchronous, so a throw above can no longer strand
-    // the pin and permanently block pruning of the referenced drafts.
-    const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
-    let userMessage: import('@deepseek-ai/dsh-llm').UserMessage | undefined
-    // The delivery payload the session writer receives: on Remote the writer's
-    // serializer requires the PreparedPrompt built by the SAME transport-aware
-    // preparation the ordinary submission uses; on Direct the immutable
-    // UserMessage stays the contract.
-    let deliveryMessage: unknown
-    try {
-      // A transition ALREADY pending when this invocation is about to enter the
-      // writer is refused by the admission itself (draft restored by the catch
-      // below). Once the writer owns the barrier, a transition that starts LATER
-      // MUST wait for this writer to drain — `SessionOperationBarrier`'s
-      // writer-first contract — so there is deliberately NO transition re-check
-      // inside the section (a re-check would let a later transition cancel a
-      // writer that started first).
-      // The whole image admission + commit runs inside the operation barrier
-      // (transition drain) and, when the invocation references an image draft,
-      // inside the SAME per-Agent serialization window as a `/model` selection
-      // (rc.2 `serializeImageAdmission`): a concurrent model switch can never
-      // change the model between the image capability check and the commit.
-      const admission = await runner.withWriter(scope, () =>
-        runner.withPromptAdmission(scope, line, async (): Promise<
-          | { readonly kind: 'stale' }
-          | { readonly kind: 'written'; readonly outcome: Awaited<ReturnType<typeof runner.sessionWriter.prompt>> | undefined }
-        > => {
-          skillSignal.throwIfAborted()
-          if (!runner.isSessionScopeCurrent(scope)) return { kind: 'stale' }
-          deliveryMessage = runner.prepareTransportMessage !== undefined
-            ? await runner.prepareTransportMessage(line, commandId ?? `skill-${name}`)
-            : (userMessage = await runner.prepareDraftMessage(line))
-          skillSignal.throwIfAborted()
-          if (!runner.isSessionScopeCurrent(scope)) return { kind: 'stale' }
-          // Web parity (busyEnter): a skill invocation is an agent-facing
-          // prompt — under the queue mode it QUEUES like a plain prompt
-          // (web: session.prompt with the policy-resolved mode). The mode
-          // was resolved ONCE at the gesture's own boundary and handed in;
-          // re-deriving it here from the persisted preference would lose the
-          // accelerated chord's opposite mode, which exists only in the
-          // dispatch that resolved it.
-          // The no-loader fallback follows the dsh-web style: the original line
-          // and the rendered body are two ordered steer prompts. This is
-          // intentionally best-effort rather than a same-step batch; if the
-          // first prompt does not commit, the body is never sent.
-          if (delivery !== 'steer' && hostLoadsSkillBody) {
-            return { kind: 'written', outcome: await runner.sessionWriter.prompt(scope.sessionId, deliveryMessage, 'queue') }
-          }
-          if (fallbackBody !== undefined) {
-            const first = await runner.sessionWriter.prompt(scope.sessionId, deliveryMessage, 'steer')
-            if (first.kind !== 'committed') return { kind: 'written', outcome: first }
-            // The original invocation is durable once the first prompt
-            // commits. Consume its attachments before the body prompt so a
-            // later body failure cannot make a retry duplicate the line or
-            // re-admit its images.
-            try {
-              consumeDraftAttachments(line, runner.imageStore, runner.fileStore)
-              const body = await runner.sessionWriter.prompt(scope.sessionId, fallbackBody, 'steer')
-              if (body.kind !== 'committed') recordCommandDraftDisposition(commandId, 'suppressed')
-              return { kind: 'written', outcome: body }
-            } catch (error) {
-              // The first prompt already committed; the outer command sink
-              // must not restore/replay its invocation after a body failure.
-              recordCommandDraftDisposition(commandId, 'suppressed')
-              throw error
+      // When the Host skill pre-step is absent, deliver the original invocation
+      // and its rendered body as two ordered single prompts. This preserves the
+      // original-line-before-body ordering without bypassing the semantic writer.
+      // Remote (the literal-gesture branch) never builds a fallback body: there
+      // is no Client-side definition to render, and its composition invariant
+      // already answers hostLoadsSkillBody=true.
+      const fallbackBody = !hostLoadsSkillBody && !remoteLiteralGesture && resolved !== undefined && resolved.kind === 'found'
+        ? (() => {
+          const skill = resolved.skill
+          const body = typeof skill.content === 'string' && skill.content !== '' ? skill.content : skill.description
+          const resourceBase = readResourceBase(skill.resourceBase)
+          return createUserMessage({
+            content: [{ type: 'text', text: renderSkillContent({
+              name: skill.name,
+              provider: typeof skill.provider === 'string' && skill.provider !== '' ? skill.provider : 'tui',
+              ...resourceBase === undefined ? {} : { resourceBase },
+              content: body,
+            }) }],
+            source: { kind: 'skill-invocation', name: skill.name, form: 'instructions' },
+          })
+        })()
+        : undefined
+      // Acquire the pin HERE, immediately before the `try` that owns its release:
+      // every earlier step is synchronous, so a throw above can no longer strand
+      // the pin and permanently block pruning of the referenced drafts.
+      const releasePin = pinDraftAttachments(line, runner.imageStore, runner.fileStore)
+      let userMessage: import('@deepseek-ai/dsh-llm').UserMessage | undefined
+      // The delivery payload the session writer receives: on Remote the writer's
+      // serializer requires the PreparedPrompt built by the SAME transport-aware
+      // preparation the ordinary submission uses; on Direct the immutable
+      // UserMessage stays the contract.
+      let deliveryMessage: unknown
+      try {
+        // A transition ALREADY pending when this invocation is about to enter the
+        // writer is refused by the admission itself (draft restored by the catch
+        // below). Once the writer owns the barrier, a transition that starts LATER
+        // MUST wait for this writer to drain — `SessionOperationBarrier`'s
+        // writer-first contract — so there is deliberately NO transition re-check
+        // inside the section (a re-check would let a later transition cancel a
+        // writer that started first).
+        // The whole image admission + commit runs inside the operation barrier
+        // (transition drain) and, when the invocation references an image draft,
+        // inside the SAME per-Agent serialization window as a `/model` selection
+        // (rc.2 `serializeImageAdmission`): a concurrent model switch can never
+        // change the model between the image capability check and the commit.
+        const admission = await runner.withWriter(scope, () =>
+          runner.withPromptAdmission(scope, line, async (): Promise<
+            | { readonly kind: 'stale' }
+            | { readonly kind: 'written'; readonly outcome: Awaited<ReturnType<typeof runner.sessionWriter.prompt>> | undefined }
+          > => {
+            skillSignal.throwIfAborted()
+            if (!runner.isSessionScopeCurrent(scope)) return { kind: 'stale' }
+            deliveryMessage = runner.prepareTransportMessage !== undefined
+              ? await runner.prepareTransportMessage(line, commandId ?? `skill-${name}`)
+              : (userMessage = await runner.prepareDraftMessage(line))
+            skillSignal.throwIfAborted()
+            if (!runner.isSessionScopeCurrent(scope)) return { kind: 'stale' }
+            // Web parity (busyEnter): a skill invocation is an agent-facing
+            // prompt — under the queue mode it QUEUES like a plain prompt
+            // (web: session.prompt with the policy-resolved mode). The mode
+            // was resolved ONCE at the gesture's own boundary and handed in;
+            // re-deriving it here from the persisted preference would lose the
+            // accelerated chord's opposite mode, which exists only in the
+            // dispatch that resolved it.
+            // The no-loader fallback follows the dsh-web style: the original line
+            // and the rendered body are two ordered steer prompts. This is
+            // intentionally best-effort rather than a same-step batch; if the
+            // first prompt does not commit, the body is never sent.
+            if (delivery !== 'steer' && hostLoadsSkillBody) {
+              return { kind: 'written', outcome: await runner.sessionWriter.prompt(scope.sessionId, deliveryMessage, 'queue') }
             }
-          }
-          return { kind: 'written', outcome: await runner.sessionWriter.prompt(scope.sessionId, deliveryMessage, 'steer') }
-        }))
-      if (admission.kind === 'stale') return { kind: 'error', text: 'the session changed while loading the skill — try again' }
-      const outcome = admission.outcome
-      if (outcome === undefined) return { kind: 'error', text: 'the session changed while loading the skill — try again' }
-      if (outcome.kind !== 'committed') {
-        if (outcome.kind === 'indeterminate') { throw new IndeterminateSkillWriteError() }
-        if (outcome.kind === 'cancelled') throw cancellationError('skill write cancelled')
-        const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
-        return { kind: 'error', text: message }
+            if (fallbackBody !== undefined) {
+              const first = await runner.sessionWriter.prompt(scope.sessionId, deliveryMessage, 'steer')
+              if (first.kind !== 'committed') return { kind: 'written', outcome: first }
+              // The original invocation is durable once the first prompt
+              // commits. Consume its attachments before the body prompt so a
+              // later body failure cannot make a retry duplicate the line or
+              // re-admit its images.
+              try {
+                consumeDraftAttachments(line, runner.imageStore, runner.fileStore)
+                const body = await runner.sessionWriter.prompt(scope.sessionId, fallbackBody, 'steer')
+                if (body.kind !== 'committed') recordCommandDraftDisposition(commandId, 'suppressed')
+                return { kind: 'written', outcome: body }
+              } catch (error) {
+                // The first prompt already committed; the outer command sink
+                // must not restore/replay its invocation after a body failure.
+                recordCommandDraftDisposition(commandId, 'suppressed')
+                throw error
+              }
+            }
+            return { kind: 'written', outcome: await runner.sessionWriter.prompt(scope.sessionId, deliveryMessage, 'steer') }
+          }))
+        if (admission.kind === 'stale') return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+        const outcome = admission.outcome
+        if (outcome === undefined) return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+        if (outcome.kind !== 'committed') {
+          if (outcome.kind === 'indeterminate') { throw new IndeterminateSkillWriteError() }
+          if (outcome.kind === 'cancelled') throw cancellationError('skill write cancelled')
+          const message = outcome.kind === 'rejected' ? outcome.error.message : outcome.reason
+          return { kind: 'error', text: message }
+        }
+      } catch (error) {
+        if (error instanceof TransitionInProgressError) {
+          const liveApp = app as TuiApp
+          const merged = mergeDraft(liveApp.getDraft(), line)
+          liveApp.setEditorText(merged)
+          recordCommandDraftDisposition(commandId, 'restored')
+          return { kind: 'error', text: merged === line
+            ? 'a session transition is in progress — try again in a moment'
+            : 'the draft changed while transitioning — review it before submitting again' }
+        }
+        // A stale capture is refused at the writer admission (BEFORE the task
+        // body) with its OWN signal — never the frozen-transition refusal. It
+        // takes the same user-visible stale path as the in-task scope checks.
+        if (error instanceof SessionScopeSupersededError) {
+          return { kind: 'error', text: 'the session changed while loading the skill — try again' }
+        }
+        throw error
+      } finally {
+        // The pin releases on EVERY exit — including a synchronous steer
+        // throw (review finding: a leaked pin would block pruning and eat
+        // draft capacity forever).
+        releasePin()
       }
-    } catch (error) {
-      if (error instanceof TransitionInProgressError) {
-        const liveApp = app as TuiApp
-        const merged = mergeDraft(liveApp.getDraft(), line)
-        liveApp.setEditorText(merged)
-        recordCommandDraftDisposition(commandId, 'restored')
-        return { kind: 'error', text: merged === line
-          ? 'a session transition is in progress — try again in a moment'
-          : 'the draft changed while transitioning — review it before submitting again' }
-      }
-      // A stale capture is refused at the writer admission (BEFORE the task
-      // body) with its OWN signal — never the frozen-transition refusal. It
-      // takes the same user-visible stale path as the in-task scope checks.
-      if (error instanceof SessionScopeSupersededError) {
-        return { kind: 'error', text: 'the session changed while loading the skill — try again' }
-      }
-      throw error
+      // The invocation COMMITTED: consume the image drafts it referenced (the
+      // prepared message holds the durable refs now; a concurrent intake's newer
+      // draft survives — review finding).
+      consumeDraftAttachments(line, runner.imageStore, runner.fileStore)
+      return { kind: 'success', text: 'skill ' + name + ' loaded' }
     } finally {
-      // The pin releases on EVERY exit — including a synchronous steer
-      // throw (review finding: a leaked pin would block pruning and eat
-      // draft capacity forever).
-      releasePin()
+      endClientWrite()
     }
-    // The invocation COMMITTED: consume the image drafts it referenced (the
-    // prepared message holds the durable refs now; a concurrent intake's newer
-    // draft survives — review finding).
-    consumeDraftAttachments(line, runner.imageStore, runner.fileStore)
-    return { kind: 'success', text: 'skill ' + name + ' loaded' }
   }
 
   // Per-skill slash commands (/glab, /find-skills, ...), pi-style: each
@@ -2331,6 +2408,16 @@ export function registerTuiCommands(
     /** The revalidating transition (the coordinator's target-change hook). */
     enterTransition: (): void => enterCatalogTransition(),
     withDelivery,
+    // PR-C (TSP-7): the narrow UI entry over the SAME registered `/model`
+    // handler. The registrars object is captured ONCE here — the closure owns
+    // the command identity — and the caller receives only this method, never
+    // the whole registrar surface. It exists ONLY where the `/model`
+    // registration itself succeeded: a Host-owned duplicate name leaves the
+    // entry undefined, so the composer control is told the truth instead of
+    // bypassing the Host route.
+    ...(registrationFailures.some(failure => failure.startsWith('/model:'))
+      ? {}
+      : { openModelPicker: (entry: 'models' | 'effort'): Promise<CommandResult> => modelCommands.openModel(entry) }),
     takeCommandDraftDisposition: (commandId?: string): CommandDraftDisposition | undefined => {
       if (commandId !== undefined) {
         const disposition = commandDraftDispositions.get(commandId)
