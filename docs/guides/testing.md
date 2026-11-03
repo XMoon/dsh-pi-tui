@@ -332,17 +332,23 @@ recent checkpoints, per-process exit and official event names). No
 `Error.message` is ever copied into the default output — the lane assertion,
 the tool failure and the parser text all stay out of it — so terminal bytes,
 captured stderr, record contents, session text, cookies, tokens and connect
-URLs are never reported. A passing run writes no report.
+URLs are never reported. The only code a report may name is one the lanes
+declare; an unknown `error.code` leaves the entry at its category instead of
+becoming reported text, and a report write that fails is announced as
+`DIAGNOSTIC_WRITE_FAILURE` with its errno only — never turning a failure into a
+pass or blocking the cleanup. A passing run writes no report.
 
 `SPLIT_PROCESS_SMOKE_KEEP=1` and `SPLIT_UPGRADE_KEEP=1` are the explicit
 forensic mode: they preserve the isolated work root, which holds the real
 profile, session logs and private telemetry of the run, and they add one
 `*_SMOKE_FORENSICS` line carrying the raw error text. That directory stays
-local: never attach or upload it as evidence. `--evidence` writes the lane's
-JSON result — the PASS document keeps its schema, and a failure writes the same
-safe failure projection instead — always onto a freshly created private `0600`
-inode, so a pre-existing target never keeps a looser mode. Its path is outside
-the work root.
+local: never attach or upload it as evidence. `--evidence` is a requested
+deliverable, not a diagnostic: the PASS document is written onto a freshly
+created private `0600` inode BEFORE the success marker is printed, so a lane
+that cannot land the evidence its operator asked for fails instead of
+announcing a pass, and a pre-existing target never keeps a looser mode. A
+failure writes the same safe failure projection to that path instead. Its path
+is outside the work root.
 
 Record a lane result exactly as the lane reports it: the candidate and old
 package SHA256 values, the exact DSH pin, the command, and the per-lane
