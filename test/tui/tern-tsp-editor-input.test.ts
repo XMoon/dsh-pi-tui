@@ -428,7 +428,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
       steer: () => {},
       pasteMedia: () => { pasteMediaCalls += 1 },
       pastedPath: (receipt) => { pastedPaths.push(receipt) },
-      admitPastedPathDelivery: () => true,
+      admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
       noteUserInput: () => { userInputs += 1 }, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true
     })
   }
@@ -541,7 +541,7 @@ test('one accepted edit calls Surface.render exactly ONCE (no double render)', a
     return surface
   }
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
-  renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
+  renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
   await settle()
   const baseline = renderCalls
   tern.input.type('h')
@@ -600,7 +600,7 @@ test('a bound Enter submits the snapshot and clears the composer BEFORE the call
     steer: () => {},
     pasteMedia: () => {},
     pastedPath: () => {},
-    admitPastedPathDelivery: () => true,
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true
   })
   await settle()
@@ -644,7 +644,7 @@ test('a PRE-BIND Enter is held and submits at the bind, never before it', async 
     renderer.bindInput({
       exit: () => {}, cancel: () => {},
       submit: (text: string) => { heldSubmits.push(text) },
-      steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true
+      steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true
     })
     await settle()
     assert.deepEqual(heldSubmits, ['draft text'] as string[], 'the held keys replayed in order: the text then the submit')
@@ -748,11 +748,11 @@ test('keys before the bind are HELD, then consumed exactly once at the bind', as
     assert.equal(lastEditorProps(harness.frames())?.text, '', 'a pre-bind key never edits the composer')
     assert.equal(harness.userInputs(), 0, 'no user activity is observed before the bind')
     // The bind consumes the held keys ONCE, in arrival order.
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
     await settle()
     assert.equal(lastEditorProps(harness.frames())?.text, 'held', 'the bind consumed the held keys')
     // A second bind is refused — exactly ONE input owner.
-    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true }),
+    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true }),
       /already bound/, 'a second bind throws')
   } finally {
     await harness.dispose()
@@ -767,7 +767,7 @@ test('a dispose before the bind discards the held keys unconsumed', async () => 
   await harness.session.close()
   const framesBefore = harness.frames().length
   // A late bind after dispose is refused; the held keys died with the renderer.
-  assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true }), /disposed/)
+  assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true }), /disposed/)
   harness.tern.input.type('late')
   await settle()
   assert.equal(harness.frames().length, framesBefore, 'nothing renders after dispose — the queue was discarded')
@@ -785,7 +785,7 @@ test('the bound exit handler routes the composer exit gesture', async () => {
   let boundExits = 0
   let boundCancels = 0
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => { rendererExits += 1 } })
-  renderer.bindInput({ exit: () => { boundExits += 1 }, cancel: () => { boundCancels += 1 }, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
+  renderer.bindInput({ exit: () => { boundExits += 1 }, cancel: () => { boundCancels += 1 }, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
   await settle()
   try {
     tern.input.type('a')
@@ -848,7 +848,7 @@ test('a held key orders the pre-bind Ctrl+D — no exit before the bind replays 
     assert.equal(harness.exitCount(), 0, 'no pre-bind exit while the held key makes the draft non-empty')
     // The bind replays 'a' then Ctrl+D in order: 'a' applies, Ctrl+D meets a
     // NON-empty draft and is an editor no-op — still no exit.
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
     await settle()
     assert.equal(harness.exitCount(), 0, 'the replayed Ctrl+D saw the applied draft and did not exit')
     const editor = lastEditorProps(harness.frames())
@@ -888,7 +888,7 @@ test('a pre-bind input flood fails loud ONCE and still replays the held prefix',
     await settle()
     const wire = harness.tern.output.text()
     assert.ok(wire.includes('were dropped'), 'the overflow is observable (fail loud), not a silent drop')
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, shouldRememberInput: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
     await settle()
     const editor = lastEditorProps(harness.frames())
     assert.equal(editor?.text, 'a'.repeat(128), 'the held PREFIX (the bounded queue) still replayed at the bind')
@@ -979,7 +979,7 @@ test('a Ctrl+V held before the bind is replayed ONCE at the bind', async () => {
       exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {},
       pasteMedia: () => { pastes += 1 },
       pastedPath: () => {},
-      admitPastedPathDelivery: () => true,
+      admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
       noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true
     })
     // The shared render wait: it covers the SDK frame/delivery the assertion
@@ -1007,7 +1007,7 @@ test('a dispose before the bind discards a held Ctrl+V unconsumed', async () => 
     exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {},
     pasteMedia: () => { pastes += 1 },
     pastedPath: () => {},
-    admitPastedPathDelivery: () => true,
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true
   }), /disposed/)
   assert.equal(pastes, 0, 'a paste held across disposal never reaches the application')

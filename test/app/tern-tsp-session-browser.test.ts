@@ -148,7 +148,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     steer() {},
     pasteMedia: () => {},
     pastedPath: () => {},
-    admitPastedPathDelivery: () => true,
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

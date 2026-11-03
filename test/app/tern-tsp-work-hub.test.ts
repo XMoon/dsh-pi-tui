@@ -162,7 +162,7 @@ async function mount(
     steer() {},
     pasteMedia: () => {},
     pastedPath: () => {},
-    admitPastedPathDelivery: () => true,
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

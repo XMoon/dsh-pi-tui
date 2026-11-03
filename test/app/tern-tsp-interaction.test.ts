@@ -161,7 +161,7 @@ async function mountHarness(options: {
     steer: () => {},
     pasteMedia: () => {},
     pastedPath: () => {},
-    admitPastedPathDelivery: () => true,
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput: () => {},
     listContinuedQuestions: () => harness.continued,
     reopenContinuedQuestion: (sessionId, callId) => {

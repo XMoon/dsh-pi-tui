@@ -145,7 +145,9 @@ interface Mounted {
   readonly pane: TspPane
   readonly renderer: TspRenderer
   readonly calls: {
-    readonly submits: Array<{ readonly text: string; readonly gesture: string }>
+    readonly submits: Array<{ readonly text: string; readonly gesture: string; readonly scopeToken: number | undefined }>
+    /** TSP I-A: every reach of the History-eligibility policy. */
+    readonly eligibilityReads: string[]
     readonly cancels: number
     readonly modelEntries: Array<'models' | 'effort'>
     /** TSP-7 PR-G: every reach of the combined trigger's quick entry. */
@@ -183,7 +185,8 @@ async function mountComposerActions(options: {
     onFatal: (e) => assert.fail(String(e)),
   })
   const calls = {
-    submits: [] as Array<{ text: string; gesture: string }>,
+    submits: [] as Array<{ text: string; gesture: string; scopeToken: number | undefined }>,
+    eligibilityReads: [] as string[],
     cancels: 0,
     modelEntries: [] as Array<'models' | 'effort'>,
     quickEntries: [] as number[],
@@ -193,11 +196,12 @@ async function mountComposerActions(options: {
   renderer.bindInput({
     exit() {},
     cancel: () => { calls.cancels += 1 },
-    submit: (text, request) => { calls.submits.push({ text, gesture: String(request) }) },
+    submit: (text, request, scopeToken) => { calls.submits.push({ text, gesture: String(request), scopeToken }) },
     steer() {},
     pasteMedia: () => {},
     pastedPath: () => {},
     admitPastedPathDelivery: () => true,
+    shouldRememberInput: text => { calls.eligibilityReads.push(text); return true },
     noteUserInput: () => { calls.notes += 1 },
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
@@ -337,12 +341,22 @@ test('composer actions: Send runs the EXACT Enter path — one submit, draft cle
   await waitUntil('one submit', () => calls.submits.length === 1)
   assert.equal(calls.submits[0]!.text, 'hello composer')
   assert.equal(m.renderer.composer.getDraft(), '', 'the draft was cleared before the callback ran')
+  // TSP I-A (N03): the click path IS the same recall path as Enter — exactly
+  // one eligibility read and one occurrence token from the mount's ONE kernel.
+  assert.equal(typeof calls.submits[0]!.scopeToken, 'number',
+    'the Send click records an occurrence token')
+  assert.deepEqual(calls.eligibilityReads, ['hello composer'],
+    'Send consults the History policy EXACTLY ONCE for the gesture')
   // Enter on a refilled draft is the SAME path (one more submit, not two).
   pane.key('second')
   await settle(60)
   pane.key('\r')
   await waitUntil('the second submit', () => calls.submits.length === 2)
   assert.equal(calls.submits[1]!.text, 'second')
+  assert.notEqual(calls.submits[1]!.scopeToken, calls.submits[0]!.scopeToken,
+    'Enter and Send are two occurrences, never one shared token')
+  assert.deepEqual(calls.eligibilityReads, ['hello composer', 'second'],
+    'neither gesture double-reads the policy nor double-submits')
 })
 
 test('composer actions: Send refuses an empty wire-form draft AND paints the disabled state', async (t) => {

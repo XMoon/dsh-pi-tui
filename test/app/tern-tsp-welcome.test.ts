@@ -128,7 +128,7 @@ async function mountWelcome(options: {
   const state: HandlerState = { browserOpens: 0, browserAvailable: true, browserThrows: false }
   renderer.bindInput({
     exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {},
-    pastedPath: () => {}, admitPastedPathDelivery: () => true,
+    pastedPath: () => {}, admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
     openModelPicker() {}, openModelQuick() {},
     openSessionBrowser() {

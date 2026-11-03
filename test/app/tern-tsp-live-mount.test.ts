@@ -34,6 +34,7 @@ import type { Op, Session, TermInput, TermOutput, WireNode } from '@stencil-hq/t
 import { MessageId, ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantLiveInput } from '../../src/runtime/assistant-stream-port.ts'
+import type { ComposerSubmitRequest } from '../../src/tui-app.ts'
 import type { SurfaceEventRoutingSource } from '../../src/app/surface/event-routing.ts'
 import {
   createSurfaceRuntime,
@@ -244,6 +245,13 @@ async function mountTspHarness(options: {
   openModelPicker?: (entry: 'models' | 'effort') => void
   /** PR-E (TSP-7): the composition's late-bound Permission UI seam. */
   permissionUi?: { options(): readonly string[]; select(id: string): void }
+  /** TSP I-A: the ONE application submit entry the real `pendingInputBinding`
+   *  forwards to (default: inert, exactly what every existing case assumes). */
+  onSubmit?: (text: string, request: ComposerSubmitRequest, scopeToken?: number) => void
+  /** TSP I-A: the composition's History-eligibility policy. Absent means the
+   *  events table declares NO predicate at all (the PiTui `?.() === false`
+   *  shape then accepts). */
+  shouldRememberInput?: (text: string) => boolean
 } = {}): Promise<Harness & { session: Session }> {
   const hello = options.sessionBrowserCapabilities
     ? {
@@ -362,7 +370,15 @@ async function mountTspHarness(options: {
     releaseUnmounted: async () => { await mountedRenderer?.dispose() },
   }
   const startDeps: Parameters<SurfaceRuntime<SessionEvent>['start']>[0] = {
-    events: { onSubmit: () => {}, onExit: () => {} },
+    events: {
+      // TSP I-A: the ONE application submit entry the real binding forwards to,
+      // plus the optional History-eligibility policy the composition owns.
+      onSubmit: (text, request, scopeToken) => { options.onSubmit?.(text, request, scopeToken) },
+      onExit: () => {},
+      ...(options.shouldRememberInput === undefined
+        ? {}
+        : { shouldRememberInput: options.shouldRememberInput }),
+    },
     renderer,
     workspaceRoot: '/tmp',
     iconStyle: 'emoji',
@@ -977,7 +993,7 @@ test('non-key SDK events reach no business action while no modal seat is up', as
       steer: () => { calls.steer += 1 },
       pasteMedia: () => {},
       pastedPath: () => {},
-      admitPastedPathDelivery: () => true,
+      admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
       noteUserInput: () => { calls.noteUserInput += 1 },
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
@@ -1060,7 +1076,7 @@ async function mountDiagnosed(tern: ScriptedTern) {
     steer: () => { business.steer += 1 },
     pasteMedia: () => {},
     pastedPath: () => {},
-    admitPastedPathDelivery: () => true,
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput: () => { business.noteUserInput += 1 },
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
@@ -1798,6 +1814,136 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
       'the child settle never rewrites the root card')
     assert.equal(collectWireNodes().filter(node => node.id === childId).length, 1,
       'the child node was never remounted across the routed settle')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+// ── TSP I-A: the APPLICATION composition of the recall occurrence ───────────
+/*
+ * PRODUCTION SHAPE: the real `createSurfaceRuntime` + `surface.start(startDeps)`
+ * build the ONE `pendingInputBinding`; `bindRendererInput()` installs it into
+ * the real `mountTspRenderer`; a real key on the scripted pane then runs the
+ * renderer's own composer → that bound handler → `deps.events` and the real
+ * `SurfaceRuntime.display` seam. STAND-IN: the scripted pane is not a physical
+ * Tern client, and the routing source is the minimal PR2 harness family (no
+ * Host, no DSH Session, no JSONL writer — those are qualified by
+ * `test/app/history-persist.test.ts`).
+ */
+
+test('I-A: the real SurfaceRuntime binding carries the recall occurrence into the ONE application submit entry', async () => {
+  const submitted: Array<{ text: string; request: string; scopeToken: number | undefined }> = []
+  const harness = await mountTspHarness({
+    onSubmit: (text, request, scopeToken) => {
+      submitted.push({ text, request: String(request), scopeToken })
+    },
+  })
+  try {
+    harness.surface.bindRendererInput()
+    assert.ok(harness.boundHandlers(), 'the bind delivered the real pendingInputBinding')
+    harness.tern.input.type('composed prompt')
+    await settle()
+    harness.tern.input.type('\r')
+    await settle()
+    assert.deepEqual(submitted.map(entry => entry.text), ['composed prompt'],
+      'the real Enter reaches the application submit entry exactly once')
+    assert.equal(typeof submitted[0]!.scopeToken, 'number',
+      'the occurrence token rides the EXISTING third argument through the composition')
+    assert.equal(submitted[0]!.request, 'enter', 'the gesture is untouched by the wider signature')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('I-A: the application display seam — not the renderer — opens and closes the mounted scope', async () => {
+  const submitted: Array<{ text: string; scopeToken: number | undefined }> = []
+  const harness = await mountTspHarness({
+    onSubmit: (text, _request, scopeToken) => { submitted.push({ text, scopeToken }) },
+  })
+  try {
+    harness.surface.bindRendererInput()
+    // The owner's hydration reseed, driven through the REAL `SurfaceRuntime`
+    // display seam (the same call `session-presentation` makes): the submission
+    // path stays, the scope closes.
+    harness.surface.display.resetInputHistory(['reseeded row'], SESSION_ID)
+    harness.tern.input.type('after the reseed')
+    await settle()
+    harness.tern.input.type('\r')
+    await settle()
+    assert.deepEqual(submitted, [{ text: 'after the reseed', scopeToken: undefined }],
+      'a closed scope still submits through the application, allocating no occurrence')
+
+    // The formal publication seam reopens it (the same call `bootstrap` makes).
+    submitted.length = 0
+    harness.surface.display.beginInputHistoryScope('next-owner')
+    harness.tern.input.type('for the next owner')
+    await settle()
+    harness.tern.input.type('\r')
+    await settle()
+    assert.equal(submitted.length, 1)
+    assert.equal(typeof submitted[0]!.scopeToken, 'number',
+      'the published owner reopens the mounted renderer\'s scope')
+
+    // A settlement routed through the SAME seam changes neither half: the
+    // submission still runs and the scope stays open.
+    const liveToken = submitted[0]!.scopeToken
+    submitted.length = 0
+    harness.surface.display.settleScopeInput({
+      token: liveToken,
+      owner: 'next-owner',
+      outcome: 'written',
+      text: 'for the next owner',
+    })
+    harness.tern.input.type('still open')
+    await settle()
+    harness.tern.input.type('\r')
+    await settle()
+    assert.equal(submitted.length, 1, 'the settlement submitted nothing of its own')
+    assert.equal(typeof submitted[0]!.scopeToken, 'number', 'the scope stayed open across the settlement')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('I-A: shouldRememberInput is the application policy projected, never a renderer guess', async () => {
+  const submitted: Array<{ text: string; scopeToken: number | undefined }> = []
+  const harness = await mountTspHarness({
+    onSubmit: (text, _request, scopeToken) => { submitted.push({ text, scopeToken }) },
+    shouldRememberInput: text => !text.includes('<img'),
+  })
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound)
+    assert.equal(bound!.shouldRememberInput('plain prompt'), true)
+    assert.equal(bound!.shouldRememberInput('<img 1>'), false,
+      'the binding PROJECTS the application predicate — it owns no policy of its own')
+
+    // The refused input is still a BUSINESS submission (the controller owns
+    // that), it just records no recall occurrence.
+    harness.tern.input.type('<img 1>')
+    await settle()
+    harness.tern.input.type('\r')
+    await settle()
+    assert.deepEqual(submitted, [{ text: '<img 1>', scopeToken: undefined }],
+      'a History-policy refusal submits normally and allocates no occurrence')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('I-A: a composition that declares NO History predicate accepts (the PiTui optional shape)', async () => {
+  const harness = await mountTspHarness()
+  try {
+    harness.surface.bindRendererInput()
+    const bound = harness.boundHandlers()
+    assert.ok(bound)
+    assert.equal(bound!.shouldRememberInput('anything'), true,
+      'an absent application predicate means nothing to refuse — the SAME `?.() === false` shape PiTui uses')
   } finally {
     await harness.dispose()
     await harness.session.close()

@@ -296,7 +296,7 @@ async function mountedQuick(options: {
     steer() {},
     pasteMedia() {},
     pastedPath: () => {},
-    admitPastedPathDelivery: () => true,
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

@@ -134,7 +134,7 @@ async function mount(t: { after(fn: () => unknown): void }): Promise<ScrollHarne
     steer: text => { harness.steers.push(text) },
     pasteMedia: () => {},
     pastedPath: () => {},
-    admitPastedPathDelivery: () => true,
+    admitPastedPathDelivery: () => true, shouldRememberInput: () => true,
     noteUserInput() {},
     listContinuedQuestions: () => {
       harness.continuedOpens.push(1)
