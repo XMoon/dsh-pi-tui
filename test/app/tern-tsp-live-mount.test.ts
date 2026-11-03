@@ -1832,6 +1832,24 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
  * `test/app/history-persist.test.ts`).
  */
 
+/* One real draft + one Enter through the mounted renderer, awaited on the
+ * AUTHORITATIVE facts: the surface's own composer port (the renderer's live
+ * draft) and the application submit entry that recorded the gesture. No fixed
+ * window is used — the waits are the facts the case asserts. */
+async function enterDraft(
+  harness: Harness & { session: Session },
+  submitted: readonly { readonly text: string }[],
+  text: string,
+): Promise<void> {
+  harness.tern.input.type(text)
+  await waitUntil(`the mounted composer holds ${JSON.stringify(text)}`,
+    () => harness.surface.composer.getDraft() === text)
+  const expected = submitted.length + 1
+  harness.tern.input.type('\r')
+  await waitUntil(`the application submit entry recorded ${expected} submission(s)`,
+    () => submitted.length === expected)
+}
+
 test('I-A: the real SurfaceRuntime binding carries the recall occurrence into the ONE application submit entry', async () => {
   const submitted: Array<{ text: string; request: string; scopeToken: number | undefined }> = []
   const harness = await mountTspHarness({
@@ -1842,10 +1860,7 @@ test('I-A: the real SurfaceRuntime binding carries the recall occurrence into th
   try {
     harness.surface.bindRendererInput()
     assert.ok(harness.boundHandlers(), 'the bind delivered the real pendingInputBinding')
-    harness.tern.input.type('composed prompt')
-    await settle()
-    harness.tern.input.type('\r')
-    await settle()
+    await enterDraft(harness, submitted, 'composed prompt')
     assert.deepEqual(submitted.map(entry => entry.text), ['composed prompt'],
       'the real Enter reaches the application submit entry exactly once')
     assert.equal(typeof submitted[0]!.scopeToken, 'number',
@@ -1868,26 +1883,18 @@ test('I-A: the application display seam — not the renderer — opens and close
     // display seam (the same call `session-presentation` makes): the submission
     // path stays, the scope closes.
     harness.surface.display.resetInputHistory(['reseeded row'], SESSION_ID)
-    harness.tern.input.type('after the reseed')
-    await settle()
-    harness.tern.input.type('\r')
-    await settle()
+    await enterDraft(harness, submitted, 'after the reseed')
     assert.deepEqual(submitted, [{ text: 'after the reseed', scopeToken: undefined }],
       'a closed scope still submits through the application, allocating no occurrence')
 
     // The formal publication seam reopens it (the same call `bootstrap` makes).
     submitted.length = 0
     harness.surface.display.beginInputHistoryScope('next-owner')
-    harness.tern.input.type('for the next owner')
-    await settle()
-    harness.tern.input.type('\r')
-    await settle()
-    assert.equal(submitted.length, 1)
+    await enterDraft(harness, submitted, 'for the next owner')
     assert.equal(typeof submitted[0]!.scopeToken, 'number',
       'the published owner reopens the mounted renderer\'s scope')
 
-    // A settlement routed through the SAME seam changes neither half: the
-    // submission still runs and the scope stays open.
+    // A settlement routed through the SAME seam changes neither half.
     const liveToken = submitted[0]!.scopeToken
     submitted.length = 0
     harness.surface.display.settleScopeInput({
@@ -1896,11 +1903,11 @@ test('I-A: the application display seam — not the renderer — opens and close
       outcome: 'written',
       text: 'for the next owner',
     })
-    harness.tern.input.type('still open')
-    await settle()
-    harness.tern.input.type('\r')
-    await settle()
-    assert.equal(submitted.length, 1, 'the settlement submitted nothing of its own')
+    // `settleScopeInput` is a SYNCHRONOUS seam commit, so its immediate
+    // observable is enough: it wrote nothing into the live composer.
+    assert.equal(harness.surface.composer.getDraft(), '',
+      'the settlement never touched the draft (no render, no seat change)')
+    await enterDraft(harness, submitted, 'still open')
     assert.equal(typeof submitted[0]!.scopeToken, 'number', 'the scope stayed open across the settlement')
   } finally {
     await harness.dispose()
@@ -1924,10 +1931,7 @@ test('I-A: shouldRememberInput is the application policy projected, never a rend
 
     // The refused input is still a BUSINESS submission (the controller owns
     // that), it just records no recall occurrence.
-    harness.tern.input.type('<img 1>')
-    await settle()
-    harness.tern.input.type('\r')
-    await settle()
+    await enterDraft(harness, submitted, '<img 1>')
     assert.deepEqual(submitted, [{ text: '<img 1>', scopeToken: undefined }],
       'a History-policy refusal submits normally and allocates no occurrence')
   } finally {
