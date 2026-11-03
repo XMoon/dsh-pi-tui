@@ -391,18 +391,18 @@ async function main() {
       assert.ok(referenceCount > 0, 'Flow A retain must hold a reference')
       handle.client.release()
       assert.ok(sessions.retainInfo(SessionId(requested)).getSnapshot().referenceCount
-        < referenceCount, 'Flow A release must return the reference')
+        < referenceCount, 'the first create release must return the reference')
       flows.ordinaryCreate = { status: 'covered', sessionId: requested }
     }
 
-    // ---- Flow A2: a BLANK requested Session is reused ---------------------
+    // ---- Blank-reuse flow: a BLANK requested Session is reused -------------
     {
       const requested = 'lifecycle-blank-reuse'
       const first = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
-      assert.equal(first.outcome.kind, 'created', `Flow A2 first create failed: ${first.ownership}/${first.outcome.kind}`)
+      assert.equal(first.outcome.kind, 'created', `blank-reuse first create failed: ${first.ownership}/${first.outcome.kind}`)
       first.outcome.handle.client?.release()
       const second = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
-      assert.equal(second.outcome.kind, 'created', `Flow A2 reuse create failed: ${second.ownership}/${second.outcome.kind}`)
+      assert.equal(second.outcome.kind, 'created', `blank-reuse second create failed: ${second.ownership}/${second.outcome.kind}`)
       assert.equal(second.outcome.handle.session.id, requested,
         'the Host REUSES a still-reusable blank Session and reports that identity')
       assert.equal(host.hostCreateCalls.filter(id => id === requested).length, 2,
@@ -411,21 +411,21 @@ async function main() {
       flows.blankReuse = { status: 'covered', sessionId: requested }
     }
 
-    // ---- Flow A3: a NON-BLANK requested id is never reused ---------------
+    // ---- Non-blank flow: a NON-BLANK requested id is never reused ----------
     {
-      // Flow A's Session is still blank; run one turn so the Host cannot reuse it.
+      // The first Session is still blank; run one turn so the Host cannot reuse it.
       const requested = 'lifecycle-ordinary'
       const agent = host.ctx.agents.get(SessionId(requested))
-      assert.ok(agent !== undefined, 'Flow A3 needs the live Host Agent of the created Session')
+      assert.ok(agent !== undefined, 'the non-blank flow needs the live Host Agent of the created Session')
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: 'make this Session non-blank' }],
         source: { kind: 'user' },
       }))
-      await waitFor('Flow A3 turn to settle', () =>
+      await waitFor('the non-blank flow turn to settle', () =>
         hostSession(requested).snapshotEvents().some(event => event.type === 'turn/end'), 20_000)
 
       const result = await lifecycle.create({ sessionId: requested, cwd: anchorDir })
-      assert.equal(result.outcome.kind, 'created', `Flow A3 create failed: ${result.ownership}/${result.outcome.kind}`)
+      assert.equal(result.outcome.kind, 'created', `the non-blank flow create failed: ${result.ownership}/${result.outcome.kind}`)
       const published = result.outcome.handle.session.id
       assert.notEqual(published, requested,
         'the Host publishes ANOTHER identity when the requested id is not reusable (returned id is the authority)')

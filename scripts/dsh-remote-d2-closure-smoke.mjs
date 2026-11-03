@@ -27,7 +27,7 @@ import { dirname, resolve } from 'node:path'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PROOFS = [
-  ['D2.4 fork/rewind parity', 'scripts/dsh-remote-d2.4-fork-parity-smoke.mjs'],
+  ['fork/rewind parity', 'scripts/dsh-remote-d2.4-fork-parity-smoke.mjs'],
 ]
 
 function main() {
@@ -46,7 +46,7 @@ function main() {
       throw new Error(`${name} failed (exit ${String(result.status)})`)
     }
   }
-  console.log('D2 closure smoke passed')
+  console.log('fork/rewind closure smoke passed')
 }
 
 try {

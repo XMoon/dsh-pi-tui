@@ -210,7 +210,7 @@ async function createHost(workRoot) {
     // constructor registers the agentPreset projection definition.
     await ctx.plugin(Loader)
     await ctx.plugin(AgentPresetRegistry, { default: PRESET })
-    await ctx.get('agentPresets').register({ id: PRESET, name: 'B3 parity preset', plugins: [] })
+    await ctx.get('agentPresets').register({ id: PRESET, name: 'fork parity preset', plugins: [] })
     await ctx.inject(SqliteSessionQueryEngine.inject, queryCtx => {
       new SqliteSessionQueryEngine(queryCtx, { path: ':memory:', openAt: 'first-search' })
     })
@@ -404,7 +404,7 @@ async function main() {
     host = await createHost(workRoot)
     const anchorDir = join(workRoot, 'anchor')
     mkdirSync(anchorDir, { recursive: true })
-    const workspace = await host.ctx.get('workspaceRegistry').create(anchorDir, 'B3 parity workspace')
+    const workspace = await host.ctx.get('workspaceRegistry').create(anchorDir, 'anchor parity workspace')
     const workspaceMembership = () => host.ctx.get('workspaceRegistry').list()
       .find(candidate => candidate.id === workspace.id)?.sessionIds ?? []
 
@@ -447,7 +447,7 @@ async function main() {
     // P7: subagent-origin sources whose PARENT owns the workspace membership.
     const subagentDir = join(workRoot, 'subagent-parent')
     mkdirSync(subagentDir, { recursive: true })
-    const subagentWorkspace = await host.ctx.get('workspaceRegistry').create(subagentDir, 'B3 subagent workspace')
+    const subagentWorkspace = await host.ctx.get('workspaceRegistry').create(subagentDir, 'subagent fork workspace')
     const subagentMembership = () => host.ctx.get('workspaceRegistry').list()
       .find(candidate => candidate.id === subagentWorkspace.id)?.sessionIds ?? []
     for (const parentId of [SOURCES.p7HostParent, SOURCES.p7DirectParent]) {
