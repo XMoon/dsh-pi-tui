@@ -58,6 +58,10 @@ export interface WelcomeViewInput {
   readonly resumeAvailable: boolean
   /** Whether this client negotiated BOTH `el` and `styles` (the styled path). */
   readonly nativeStyled: boolean
+  /** Whether this client negotiated the `icon` KIND. `el`+`styles` do NOT
+   *  imply it, so the leading icon is sent only when the pane really paints
+   *  one; without it the action keeps its label and arrow and claims nothing. */
+  readonly nativeIcon: boolean
   /** The presentation scope prefix of the current subject (`s<epoch>-`); the
    *  action key rides it so a retired subject's button can never act. */
   readonly scopeKey: string
@@ -161,10 +165,12 @@ function styledWelcome(input: WelcomeViewInput): Node {
           // The icon is the CLIENT's own icon vocabulary, never a hand-painted
         // glyph: `↶` is already the icon registry's `context-recall` mark and
         // the design language forbids one glyph carrying two meanings in one
-        // family (docs/architecture/design-language.md §4.4 + the width gate),
-        // so painting it here would add an unregistered second meaning. The
-        // Quiet Composer's Permission icon is the same existing mechanism.
-        ui.icon({ key: 'welcome-resume-icon', role: ROLES.resumeIcon, name: 'history' }),
+        // family (docs/architecture/design-language.md §4.4 + the width gate).
+        // It is sent ONLY when the pane negotiated the `icon` kind — a node
+        // the client cannot paint is a false affordance, not a decoration.
+        ...(input.nativeIcon
+          ? [ui.icon({ key: 'welcome-resume-icon', role: ROLES.resumeIcon, name: 'history' })]
+          : []),
           html.span({ key: 'welcome-resume-label', role: ROLES.resumeLabel }, 'Resume session'),
           html.span({ key: 'welcome-resume-arrow', role: ROLES.resumeArrow }, '›'),
         ),

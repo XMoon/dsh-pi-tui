@@ -43,6 +43,16 @@ import { clickNode, wireNodes, type WireNode } from '../support/tsp-picker-wire.
 import { welcomeView, TSP_WELCOME_STYLES } from '../../src/tui/tsp/welcome-view.ts'
 import { WELCOME_WHALE_VARIANTS, welcomeWhaleGradientColors, welcomeWhalePlainLines } from '../../src/tui/components/welcome-whale.ts'
 
+/**
+ * The styled vocabulary a real Tern pane negotiates: `el`+`styles` for the
+ * native nodes, the picker kinds + `scroll` for the Session Browser, and the
+ * `icon` KIND for the client's own icon vocabulary. A case that must prove a
+ * capability gate overrides this list verbatim — the handshake decides, the
+ * test never forces a capability on the view.
+ */
+const STYLED_KINDS = ['col', 'card', 'section', 'md', 'code', 'badge', 'tool', 'el', 'picker', 'row', 'overlay', 'text', 'kv', 'icon']
+const STYLED_FEATURES = ['flow', 'styles', 'scroll']
+
 /** The committed version this suite's status reader carries. */
 const TEST_VERSION = '0.0.0-welcome-test'
 const VERSION_LINE = `v${TEST_VERSION} · DeepSeek Harness`
@@ -97,17 +107,16 @@ async function mountWelcome(options: {
    *  documented plain-text fallback, so the handshake decides and the test
    *  never forces a capability on the view. */
   readonly kinds?: readonly string[]
-  /** Whether this pane negotiates the native Session Browser at all. */
-  readonly sessionBrowser?: boolean
+  /** The advertised features (the styled default negotiates `scroll` too). */
+  readonly features?: readonly string[]
   /** Bind no status reader: the formal snapshot has never committed. */
   readonly bindStatus?: boolean
 } = {}): Promise<WelcomeMount> {
-  const sessionBrowser = options.sessionBrowser ?? true
-  const pane = installTspPane(
-    options.kinds === undefined
-      ? { composerActions: true, ...(sessionBrowser ? { sessionBrowser: true } : {}) }
-      : { kinds: options.kinds },
-  )
+  const kinds = options.kinds ?? STYLED_KINDS
+  const pane = installTspPane({
+    kinds,
+    features: options.features ?? STYLED_FEATURES,
+  })
   const session = await connect({ timeout: 500, exitHooks: false })
   assert.ok(session, 'the scripted pane must connect through the shipped SDK')
   const fatals: unknown[] = []
@@ -473,7 +482,11 @@ test('W14: an unavailable Session Browser paints a genuinely disabled action wit
 })
 
 test('W14: a mount whose pane offers no Session Browser presentation paints the same disabled form', async (t) => {
-  const m = await mountWelcome({ sessionBrowser: false })
+  // No Session Browser presentation: the pane keeps `el`+`styles`+`icon` but
+  // does not negotiate the Browser's own picker vocabulary.
+  const m = await mountWelcome({
+    kinds: STYLED_KINDS.filter(kind => kind !== 'picker' && kind !== 'overlay'),
+  })
   t.after(() => m.dispose())
   await idle(m)
   const button = m.node('welcome-resume')
@@ -556,6 +569,24 @@ test('W18: a pane without `el` gets the plain-text form and claims no button', a
     'the fallback names the typed route by its own key')
 })
 
+test('W18: a pane with `el`+`styles` but no `icon` kind gets the styled action with no icon node', async (t) => {
+  // `el` + `styles` do NOT imply the `icon` KIND: sending an icon node here
+  // would be a node the client cannot paint. The action must keep its label
+  // and arrow and claim nothing else.
+  const m = await mountWelcome({ kinds: STYLED_KINDS.filter(kind => kind !== 'icon') })
+  t.after(() => m.dispose())
+  await idle(m)
+  const nodes = m.nodes('main.')
+  assert.equal(nodes.some(node => node.k === 'icon'), false, 'no `icon` node is sent to a pane without the kind')
+  assert.equal(nodes.some(node => node.id.includes('welcome-resume-icon')), false, 'and the icon slot is simply absent')
+  const button = m.node('welcome-resume')
+  assert.ok(button !== undefined, 'the action is still painted')
+  assert.equal(JSON.stringify(button?.p.actions ?? {}), '{"click":"click"}', 'and it is still the real operable button')
+  const texts = nodes.map(node => String(node.p.text ?? '')).filter(text => text !== '')
+  assert.ok(texts.includes('Resume session') && texts.includes('›'), 'label and arrow carry the affordance alone')
+  assert.equal(nodes.some(node => node.id.endsWith('.welcome-box')), true, 'the styled stage still mounts')
+})
+
 // ── W19: ONE sheet, and nothing live after dispose ──────────────────────────
 
 test('W19: the Welcome sheet is installed exactly once at mount and never re-registered', async (t) => {
@@ -597,6 +628,7 @@ test('W20: every variant carries exactly the shared plain rows and the sheet col
       whaleLines: rows,
       resumeAvailable: true,
       nativeStyled: true,
+      nativeIcon: true,
       scopeKey: `s${variant}-`,
       onResume: () => {},
     }).toJSON())
