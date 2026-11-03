@@ -35,6 +35,7 @@ import {
   SplitSmokeInputError,
   SplitSmokeWaitError,
 } from '../../scripts/lib/split-smoke-diagnostics.mjs'
+import { waitForAcceptedHandoff, waitForReloadNotice } from '../../scripts/split-process-upgrade-smoke.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const UPGRADE_SCRIPT = join(ROOT, 'scripts', 'split-process-upgrade-smoke.mjs')
@@ -421,4 +422,177 @@ test('the reload notice and rejection classifiers only ever return fixed enums',
   assert.equal(classifyHandoffRejection('local client reexec: the installed Client already runs this build'), 'ALREADY_CURRENT')
   assert.equal(classifyHandoffRejection('some arbitrary failure containing COOKIE_SENTINEL'), 'TARGET_INVALID_UNCLASSIFIED')
   assert.equal(classifyHandoffRejection(undefined), 'TARGET_INVALID_UNCLASSIFIED')
+})
+
+// ── The U reload waits: early FAIL, PTY-only PASS ───────────────────────────
+
+const ALREADY_CURRENT = 'Client reload skipped: this Client already runs the installed build.'
+const ATTACHMENTS = 'Client reload blocked: remove or submit the staged attachments first.'
+const TARGET_INVALID = 'Client reload failed: the installed replacement Client is unavailable or incompatible.'
+const PIN_REJECTION = 'local client reexec: the target package is pinned to a different DSH runtime'
+const SHORT_WAIT_MS = 300
+
+/** A contract-shaped Client view: the real waiters only use these members. */
+function fakeClient({ records = [], painted = [], exited = false, recordError = undefined }) {
+  return {
+    role: 'surface-client',
+    records,
+    exited,
+    recordError,
+    async viewport() {
+      return painted
+    },
+    finalRecordRead() {
+      return undefined
+    },
+  }
+}
+
+async function rejection(run) {
+  try {
+    await run()
+  } catch (error) {
+    return error
+  }
+  assert.fail('the wait must fail')
+}
+
+test('waitForReloadNotice PASSES only on the painted notice', async () => {
+  const client = fakeClient({ painted: ['some row', `✗ ${ALREADY_CURRENT}`, 'another row'] })
+  assert.equal(await waitForReloadNotice(client, ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS),
+    'ALREADY_CURRENT')
+})
+
+test('waitForReloadNotice fails a refusal that can never paint the expected notice', async () => {
+  // The recorded rejection of THIS action says pin mismatch; the wait expects
+  // already-current. That is decisive, so it must not consume the 120s budget.
+  const started = Date.now()
+  const error = await rejection(() => waitForReloadNotice(
+    fakeClient({ records: [{ m4r: 'handoff-request-rejected', error: PIN_REJECTION }] }),
+    ALREADY_CURRENT, 'U08 already-current notice', 0,
+  ))
+  assert.equal(error.category, 'UNEXPECTED_RELOAD_REFUSAL')
+  assert.equal(error.code, 'PROCESS_REFUSED_RELOAD')
+  assert.equal(error.expected, 'ALREADY_CURRENT')
+  assert.equal(error.observed, 'TARGET_INVALID_DSH_PIN_MISMATCH')
+  assert.ok(Date.now() - started < 5_000, `the refusal must fail fast, took ${String(Date.now() - started)}ms`)
+  // A DIFFERENT painted notice is equally decisive.
+  const painted = await rejection(() => waitForReloadNotice(
+    fakeClient({ painted: [`✗ ${ATTACHMENTS}`] }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(painted.category, 'UNEXPECTED_RELOAD_REFUSAL')
+  assert.equal(painted.code, 'PAINTED_NOTICE_MISMATCH')
+  assert.equal(painted.observed, 'ATTACHMENTS')
+})
+
+test('waitForReloadNotice never PASSES from telemetry alone', async () => {
+  // An internal refusal that AGREES with the expectation still has to be
+  // painted: without a rendered notice this wait times out, it does not pass.
+  const error = await rejection(() => waitForReloadNotice(
+    fakeClient({ records: [{ m4r: 'handoff-request-rejected', error: 'local client reexec: the installed Client already runs this build' }] }),
+    ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(error.category, 'WAIT_TIMEOUT')
+  assert.equal(error.expected, 'ALREADY_CURRENT')
+})
+
+test('waitForReloadNotice attributes only THIS action records to THIS action', async () => {
+  // A refusal left BEFORE the boundary belongs to an earlier command, so it can
+  // never decide the current wait: this one still runs to its own deadline.
+  const stale = await rejection(() => waitForReloadNotice(
+    fakeClient({ records: [{ m4r: 'handoff-request-rejected', error: PIN_REJECTION }] }),
+    TARGET_INVALID, 'U08 target-invalid notice', 1, SHORT_WAIT_MS,
+  ))
+  assert.equal(stale.category, 'WAIT_TIMEOUT', 'a pre-boundary refusal must not decide the current wait')
+  // The same slot, with a refusal that contradicts THIS expectation, is decisive.
+  const decided = await rejection(() => waitForReloadNotice(
+    fakeClient({ records: [{ m4r: 'handoff-request-ignored', reason: 'not-ready' }, { m4r: 'handoff-request-rejected', error: 'local client reexec: the installed Client already runs this build' }] }),
+    TARGET_INVALID, 'U08 target-invalid notice', 1, SHORT_WAIT_MS,
+  ))
+  assert.equal(decided.category, 'UNEXPECTED_RELOAD_REFUSAL')
+  assert.equal(decided.observed, 'ALREADY_CURRENT')
+})
+
+test('waitForReloadNotice reports a dead or unreadable Client by its own category', async () => {
+  const dead = await rejection(() => waitForReloadNotice(
+    fakeClient({ exited: true }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(dead.category, 'PROCESS_EXITED')
+  const unreadable = await rejection(() => waitForReloadNotice(
+    fakeClient({ recordError: new Error('malformed') }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(unreadable.category, 'INFRA_FAILURE')
+})
+
+test('waitForAcceptedHandoff requires this action request for this PID', async () => {
+  const accepted = { m4r: 'handoff-requested', pid: 4242, source: 'user-command' }
+  const client = fakeClient({ records: [accepted] })
+  assert.equal(await waitForAcceptedHandoff(client, 4242, 'U08 accepted reload', 0, SHORT_WAIT_MS), accepted)
+  // Another PID is not this Client's own request.
+  const wrongPid = await rejection(() => waitForAcceptedHandoff(
+    fakeClient({ records: [accepted] }), 9999, 'U08 accepted reload', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(wrongPid.category, 'WAIT_TIMEOUT')
+  // A request left by the PREVIOUS command does not satisfy this one.
+  const stale = await rejection(() => waitForAcceptedHandoff(
+    fakeClient({ records: [accepted] }), 4242, 'U08 accepted reload', 1, SHORT_WAIT_MS,
+  ))
+  assert.equal(stale.category, 'WAIT_TIMEOUT')
+})
+
+test('waitForAcceptedHandoff reports the actual refusal of the same action', async () => {
+  const rejected = await rejection(() => waitForAcceptedHandoff(
+    fakeClient({ records: [{ m4r: 'handoff-request-rejected', error: PIN_REJECTION }] }), 4242, 'U08 accepted reload', 0,
+  ))
+  assert.equal(rejected.category, 'UNEXPECTED_RELOAD_REFUSAL')
+  assert.equal(rejected.observed, 'TARGET_INVALID_DSH_PIN_MISMATCH')
+  const ignored = await rejection(() => waitForAcceptedHandoff(
+    fakeClient({ records: [{ m4r: 'handoff-request-ignored', reason: 'already-requested' }] }), 4242, 'U08 accepted reload', 0,
+  ))
+  assert.equal(ignored.code, 'PROCESS_IGNORED_RELOAD')
+  assert.equal(ignored.observed, 'STOPPING')
+})
+
+test('a real process wait failure reports no terminal or record payload', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-smoke-wait-payload-')
+  const entry = join(dir, 'silent-exit.mjs')
+  writeFileSync(entry, 'process.exit(0)\n')
+  const probe = `
+    const { EntryProcess, SurfaceEntryProcess } = await import(${JSON.stringify(pathToFileURL(PROCESS_SCRIPT).href)})
+    const options = {
+      cwd: ${JSON.stringify(dir)},
+      env: { ...process.env },
+      anchor: ${JSON.stringify(join(dir, 'anchor.json'))},
+      profile: 'pi-tui',
+      scratch: ${JSON.stringify(dir)},
+      workDir: ${JSON.stringify(dir)},
+    }
+    const failures = []
+    const plain = new EntryProcess('probe-host', ${JSON.stringify(entry)}, options)
+    try { await plain.waitFor(record => record.m4a0 === 'ready', 'probe Host ready', 10_000) }
+    catch (error) { failures.push({ category: error.category, code: error.code, message: error.message }) }
+    const surface = new SurfaceEntryProcess(${JSON.stringify(entry)}, options)
+    try { await surface.waitForScreen('never painted', 'probe notice', 10_000) }
+    catch (error) { failures.push({ category: error.category, code: error.code, message: error.message }) }
+    process.stdout.write(JSON.stringify(failures))
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    encoding: 'utf8',
+    timeout: 60_000,
+    cwd: dir,
+  })
+  assert.equal(result.status, 0, `the probe process failed:\n${result.stderr}`)
+  const failures = JSON.parse(result.stdout)
+  assert.equal(failures.length, 2, `both waiters must fail: ${result.stderr}`)
+  for (const failure of failures) {
+    assert.equal(failure.category, 'PROCESS_EXITED')
+    // The reported context is bounded; the bytes stay where they belong: the
+    // private JSONL under KEEP, never the default error line.
+    assert.ok(!/records=|stderr=|raw=|viewport=/u.test(failure.message),
+      `a waiter error must not carry a payload dump: ${failure.message}`)
+    assert.ok(failure.message.length < 300, `a waiter error must stay short: ${failure.message}`)
+  }
+  assert.match(failures[0].message, /probe Host ready/u)
+  assert.match(failures[1].message, /probe notice/u)
 })

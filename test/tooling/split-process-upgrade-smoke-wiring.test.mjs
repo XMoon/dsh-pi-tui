@@ -2,10 +2,10 @@
  * M4-C2-D split-process upgrade smoke wiring guard.
  *
  * The real dual-artifact lane is `scripts/split-process-upgrade-smoke.mjs`.
- * It needs two genuinely packaged `.tgz` payloads and a real DSH rc.4
- * installation, so it stays an explicit manual qualification lane. This test
- * only prevents its argument contract and package wiring from rotting; it is
- * NOT evidence that U02–U06 passed.
+ * It needs two genuinely packaged `.tgz` payloads and a real installation of
+ * the exact DSH runtime this checkout pins, so it stays an explicit manual
+ * qualification lane. This test only prevents its argument contract and
+ * package wiring from rotting; it is NOT evidence that U02-U06 passed.
  *
  * @module split-process-upgrade-smoke-wiring.test
  */
@@ -314,4 +314,66 @@ test('the U lane reports every failure with a bounded default projection', () =>
   assert.match(source, /evidence\.status = 'PASS'/u)
   assert.match(source, /evidence\.verdict = 'cross-build-compatible'/u)
   assert.match(source, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: \$\{boundedErrorSummary\(error\)\}/u)
+})
+
+test('the reload waits fail early on a refusal yet still PASS only on a painted notice', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.match(source, /export async function waitForReloadNotice\(client, expectedText, label, fromRecordIndex/u)
+  assert.match(source, /export async function waitForAcceptedHandoff\(client, pid, label, fromRecordIndex/u)
+  // PASS authority #1: the real PTY viewport, checked FIRST inside the loop.
+  const noticeWait = source.slice(
+    source.indexOf('export async function waitForReloadNotice'),
+    source.indexOf('const IGNORED_REASON_TYPES'),
+  )
+  assert.ok(noticeWait.indexOf('const viewport = await client.viewport()') < noticeWait.indexOf('if (viewport.join(\'\\n\').includes(expectedText)) return'),
+    'the painted viewport must be the first and only PASS check')
+  assert.ok(noticeWait.indexOf('if (viewport.join(\'\\n\').includes(expectedText)) return')
+    < noticeWait.indexOf("record?.m4r !== 'handoff-request-rejected'"),
+    'telemetry may only ever shorten a wait, never satisfy it')
+  // PASS authority #2: an accepted handoff must be THIS PID's own record.
+  const handoffWait = source.slice(
+    source.indexOf('export async function waitForAcceptedHandoff'),
+    source.indexOf('async function runUserCommandReloadRound'),
+  )
+  assert.match(handoffWait, /record\?\.m4r === 'handoff-requested' && record\.pid === pid/u)
+  // Every command or signal has its OWN pre-send record boundary; no site reads
+  // a refusal left by an earlier action.
+  const boundaries = [
+    'const alreadyCurrentFrom = reloadOldClient.records.length',
+    'const attachmentsFrom = reloadOldClient.records.length',
+    'const reloadRequestFrom = reloadClient.records.length',
+    'const targetInvalidFrom = client.records.length',
+    'const manualReloadFrom = client.records.length',
+    'const qualificationFrom = client.records.length',
+    'const reexecRequestFrom = clientA.records.length',
+    'const childFailureRequestFrom = clientA2.records.length',
+  ]
+  for (const capture of boundaries) {
+    const index = source.indexOf(capture)
+    assert.ok(index > 0, `the wait needs its own boundary: ${capture}`)
+    const after = source.slice(index, index + 400)
+    assert.ok(/send\('\/reload-client\\r'\)|signalBusiness\('SIGUSR2'\)/u.test(after),
+      `${capture} must be captured immediately before this action's command`)
+  }
+  for (const call of [
+    "waitForReloadNotice(reloadOldClient, 'Client reload skipped: this Client already runs the installed build.',\n    'U08 already-current notice', alreadyCurrentFrom)",
+    "waitForReloadNotice(reloadOldClient, 'Client reload blocked: remove or submit the staged attachments first.',\n    'U08 attachments refusal', attachmentsFrom)",
+    'waitForReloadNotice(client, \'Client reload failed: the installed replacement Client is unavailable or incompatible.\',\n    \'U08 target-invalid notice\', targetInvalidFrom)',
+    "waitForReloadNotice(client, 'Client reload skipped: this Client already runs the installed build.',\n    'U09 manual already-current notice', manualReloadFrom)",
+  ]) {
+    assert.ok(source.includes(call), `the painted-notice wait must own this site:\n${call}`)
+  }
+  // The Session-content and prompt proofs stay plain PTY waits: they are not
+  // reload notices and must not be routed through the refusal classifier.
+  assert.match(source, /waitForScreen\(holdPrompt, 'U08 old Client painted the admitted prompt', 120_000\)/u)
+  assert.match(source, /waitForScreen\(holdPrompt, 'U09 the replacement painted the admitted prompt', 120_000\)/u)
+  assert.match(source, /waitForScreen\('c2d-upgrade-hold'/u)
+  // The untouched safety assertions around the converted waits still exist.
+  assert.match(source, /waitForClearedComposer\(reloadOldClient, '\[image #', 'U08 staged placeholder cleared'\)/u)
+  assert.match(source, /assertOldSurfaceKept/u)
+  assert.match(source, /m4r === 'handoff-restored'/u)
+  // The fault-injection negatives keep their own expectations.
+  assert.match(source, /qualification forced client bootstrap failure/u)
+  assert.match(source, /assertEqual\(childFailureExit\.code, 1/u)
+  assert.match(source, /HOST_IDENTITY_MISMATCH/u)
 })
