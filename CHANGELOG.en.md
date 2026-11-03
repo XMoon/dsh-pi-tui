@@ -11,12 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Installation and version pairing
 
-This release validates against the published DSH `0.2.1-rc.4` and keeps the
+This release validates against the published DSH `0.2.1-rc.5` and keeps the
 minimum at `0.2.1-rc.2`. Installing DSH requires explicitly allowing its
 native install scripts:
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.4
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.5
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.5
 dsh --profile pi-tui
 ```

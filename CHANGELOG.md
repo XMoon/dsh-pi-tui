@@ -11,11 +11,11 @@
 
 ### 安装与版本对应
 
-本版以已发布的 DSH `0.2.1-rc.4` 作为精确验证目标，最低版本仍为 `0.2.1-rc.2`。安装
+本版以已发布的 DSH `0.2.1-rc.5` 作为精确验证目标，最低版本仍为 `0.2.1-rc.2`。安装
 DSH 需要显式允许其原生安装脚本：
 
 ```sh
-npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.4
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty @deepseek-ai/dsh@0.2.1-rc.5
 dsh plugin --profile pi-tui -- add @xmoon76/dsh-pi-tui@0.5.5
 dsh --profile pi-tui
 ```

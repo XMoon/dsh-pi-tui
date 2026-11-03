@@ -64,7 +64,7 @@ next compatibility range, and fallback paths.
 
 | TUI package line | Official DSH tags for the pairing | Notes |
 |---|---|---|
-| `0.5.5` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Current stable line; the minimum DSH version is 0.2.1-rc.2, and this checkout's exact validation target is 0.2.1-rc.4 |
+| `0.5.5` (stable / `@latest`) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4`, `dsh-v0.2.1-rc.5` | Current stable line; the minimum DSH version is 0.2.1-rc.2, and this checkout's exact validation target is 0.2.1-rc.5 |
 | `0.5.4` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.3` (stable, previous) | `dsh-v0.2.1-rc.2`, `dsh-v0.2.1-rc.3`, `dsh-v0.2.1-rc.4` | Previous stable line; the minimum DSH version is 0.2.1-rc.2, and it passes the official preset assembly on all three DSH versions |
 | `0.5.1` (stable, previous) | `dsh-v0.2.0-rc.2` | Previous stable line; both the minimum and the exact validation target are the 0.2.0-rc.2 family |
@@ -78,7 +78,7 @@ next compatibility range, and fallback paths.
 
 Do not mix the stable and `@next` prerelease lines. `0.5.5` is the current
 stable release: its minimum DSH version (peer floor) stays the `0.2.1-rc.2`
-family, and this checkout's exact validation target is `0.2.1-rc.4`. The
+family, and this checkout's exact validation target is `0.2.1-rc.5`. The
 published `0.5.4` and `0.5.3` are the previous stable lines and also pair with
 `0.2.1-rc.2`, `0.2.1-rc.3` and `0.2.1-rc.4`. The safe order for upgrading from
 an older stable line to `0.5.5`: let in-flight conversation turns and
