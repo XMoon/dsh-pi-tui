@@ -807,29 +807,33 @@ function lastSurfaceStatus(client) {
 export async function waitForSurfaceStatus(client, predicate, label, timeoutMs = 120_000) {
   const started = Date.now()
   const deadline = started + timeoutMs
+  /** Read the complete JSONL tail once, then re-check the status. */
+  const settleOrFail = (category, code) => {
+    const unread = client.finalRecordRead(label)
+    if (unread !== undefined) throw unread
+    const late = lastSurfaceStatus(client)
+    if (late !== undefined && predicate(late)) return late
+    throw new SplitSmokeWaitError(category, {
+      code,
+      waitLabel: label,
+      processRole: client.role,
+      elapsedMs: Date.now() - started,
+      process: client,
+    })
+  }
   while (Date.now() < deadline) {
     const status = lastSurfaceStatus(client)
     if (status !== undefined && predicate(status)) return status
     // A Client that died while the status never arrived is not a timeout: that
-    // is the failure itself, and it must not consume the whole budget.
-    if (client.exited) {
-      throw new SplitSmokeWaitError('PROCESS_EXITED', {
-        code: 'PROCESS_EXITED_BEFORE_STATUS',
-        waitLabel: label,
-        processRole: client.role,
-        elapsedMs: Date.now() - started,
-        process: client,
-      })
-    }
+    // is the failure itself, and it must not consume the whole budget. The
+    // poller stops on close, so the LAST line may still be unread — read it
+    // before deciding the status is missing.
+    if (client.exited) return settleOrFail('PROCESS_EXITED', 'PROCESS_EXITED_BEFORE_STATUS')
     await sleep(25)
   }
-  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
-    code: 'SURFACE_STATUS_WAIT_TIMEOUT',
-    waitLabel: label,
-    processRole: client.role,
-    elapsedMs: Date.now() - started,
-    process: client,
-  })
+  // Same read before a timeout: a status written just before the deadline must
+  // not be reported as never having arrived.
+  return settleOrFail('WAIT_TIMEOUT', 'SURFACE_STATUS_WAIT_TIMEOUT')
 }
 
 /** Wait for the first ready record among concurrent entries. */
@@ -842,10 +846,14 @@ export async function waitForAnyReady(processes, label, timeoutMs) {
       if (record !== undefined) return { process, record }
     }
     if (processes.every(process => process.exited)) {
+      // The close callback removed every contender from `activeProcesses`, so a
+      // report built later would show NO process at all for exactly the failure
+      // that involves all of them. Carry them on the error for the projection.
       throw new SplitSmokeWaitError('PROCESS_EXITED', {
         code: 'READY_RACE_EXITED',
         waitLabel: label,
         elapsedMs: Date.now() - started,
+        processes,
       })
     }
     await sleep(25)

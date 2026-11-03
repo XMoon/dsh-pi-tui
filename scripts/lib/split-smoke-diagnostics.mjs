@@ -191,6 +191,12 @@ function sha256OrUndefined(value) {
   return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value) ? value : undefined
 }
 
+/** A locator is reportable only when its shape AND its source are trusted. */
+function assertionSiteOrUndefined(value) {
+  if (typeof value !== 'string' || !ASSERTION_SITE.test(value)) return undefined
+  return LANE_SOURCES.has(value.slice(0, value.indexOf(':'))) ? value : undefined
+}
+
 function reloadNoticeTypeOrUndefined(value) {
   return RELOAD_NOTICE_TYPES.includes(value) ? value : undefined
 }
@@ -237,6 +243,8 @@ export class SplitSmokeWaitError extends Error {
     /** The throwing waiter's own view of its process (already-exited targets are
      *  not in the lane's live list; this projection is bounded at report time). */
     this.processSummary = facts.process
+    /** Every process this wait observed, for a failure that outlived the set. */
+    this.processSummaries = Array.isArray(facts.processes) ? facts.processes : undefined
   }
 }
 
@@ -425,10 +433,11 @@ export function projectFailureReport(input = {}) {
   if (reason !== undefined) report.reason = reason
   const checkpoint = boundedName(input.checkpoint)
   if (checkpoint !== undefined) report.checkpoint = checkpoint
-  // The assertion locator is a `<basename>:<line>` shape, never free text.
-  if (/^[A-Za-z0-9._-]{1,64}\.mjs:[1-9][0-9]{0,6}$/u.test(String(input.assertion ?? ''))) {
-    report.assertion = input.assertion
-  }
+  // The assertion locator must satisfy the shape AND belong to a trusted lane
+  // source. A shape-only check would let any error that happens to carry an
+  // `assertion` property name a file the locator never vouched for.
+  const assertion = assertionSiteOrUndefined(input.assertion)
+  if (assertion !== undefined) report.assertion = assertion
   const waitLabel = bounded(input.waitLabel, MAX_LABEL_CHARS)
   if (waitLabel !== undefined) report.waitLabel = waitLabel
   if (Number.isInteger(input.elapsedMs)) report.elapsedMs = input.elapsedMs
@@ -476,9 +485,8 @@ export function safeFailureSummary(error) {
   const category = failureCategoryOf(error)
   const reason = laneCodeOrUndefined(error?.code)
   const head = reason === undefined ? category : `${category}: ${reason}`
-  const at = /^[A-Za-z0-9._-]{1,64}\.mjs:[1-9][0-9]{0,6}$/u.test(String(error?.assertion ?? ''))
-    ? ` at ${error.assertion}`
-    : ''
+  const site = assertionSiteOrUndefined(error?.assertion)
+  const at = site === undefined ? '' : ` at ${site}`
   return `${head}${at}`
 }
 
@@ -530,6 +538,8 @@ export function isLaneSourceFile(basename) {
 }
 const STACK_FRAME = /^at (?:async )?(?:(?<fn>[A-Za-z0-9_$.<>| ]+?) \()?(?<path>[^\s()]+):(?<line>\d+):\d+\)?$/u
 const SAFE_BASENAME = /^[A-Za-z0-9._-]{1,64}\.mjs$/u
+/** The published assertion-site shape; the source check is separate. */
+const ASSERTION_SITE = /^[A-Za-z0-9._-]{1,64}\.mjs:[1-9][0-9]{0,6}$/u
 
 export class SplitSmokeAssertionError extends Error {
   constructor(message, facts = {}) {
@@ -701,7 +711,9 @@ export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, a
         category: extra.category ?? failureCategoryOf(error),
         reason: extra.reason ?? error?.code,
         checkpoint: extra.checkpoint ?? steps.at(-1)?.name,
-        assertion: extra.assertion ?? error?.assertion,
+        // Only the class that DERIVED a locator may contribute one; an arbitrary
+        // error carrying an `assertion` property is not a trusted producer.
+        assertion: extra.assertion ?? (error instanceof SplitSmokeAssertionError ? error.assertion : undefined),
         waitLabel: extra.waitLabel ?? error?.waitLabel,
         elapsedMs: extra.elapsedMs ?? error?.elapsedMs,
         expected: extra.expected ?? error?.expected,
@@ -709,9 +721,11 @@ export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, a
         runtimeDshPin: pinned,
         artifacts: identity,
         progress: steps,
-        processes: error?.processSummary === undefined
-          ? processes
-          : [...processes, error.processSummary],
+        processes: [
+          ...processes,
+          ...(error?.processSummaries ?? []),
+          ...(error?.processSummary === undefined ? [] : [error.processSummary]),
+        ],
       })
       const path = writeFailureReport(report)
       process.stderr.write(`${heading}_FAILURE\n${formatFailureSummary(report, path)}\n`)
