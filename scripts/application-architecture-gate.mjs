@@ -161,15 +161,13 @@ export const REMOTE_COMPOSITION_SPECIFIER =
   /^@deepseek-ai\/dsh-(?:(?:client-|api-)[^/]*$|[^/]+\/(?:client|remote)$)/u
 
 /**
- * The only sanctioned value dynamic-import edge into the Remote composition
- * (M3-1 + M3-4 PR1): `runtime/backend-loader.ts` may dynamically import
- * exactly `app/remote/runtime.ts` — the single entry module that also
- * statically re-exports the application-runtime aggregate; any other src
- * module dynamically importing `app/remote/**` violates the boundary, and so
- * does a second dynamic target.
+ * The RETIRED lazy boundary pair kept only as names for the negative locks: the
+ * module and its dynamic target no longer exist, and no `src/**` module may
+ * dynamically import `app/remote/**` at all (see
+ * `findRemoteDynamicImportViolations`).
  */
-export const REMOTE_DYNAMIC_IMPORT_OWNER = 'runtime/backend-loader.ts'
-export const REMOTE_DYNAMIC_IMPORT_TARGET = 'app/remote/runtime.ts'
+export const RETIRED_REMOTE_LOADER = 'runtime/backend-loader.ts'
+export const RETIRED_REMOTE_LOADER_TARGET = 'app/remote/runtime.ts'
 
 /**
  * Existing historical exceptions as `"<src-relative file>:<resolved target>"`.
@@ -951,48 +949,101 @@ export function parseValueDynamicImports(source, rel = 'module.ts') {
 }
 
 /**
- * Rule: `app/remote/**` may be reached by a VALUE dynamic import only through
- * the sanctioned lazy boundary edge — the single owner
- * (`runtime/backend-loader.ts`), its ONE target (`app/remote/runtime.ts`,
- * the entry module that statically re-exports the application-runtime
- * aggregate), and exactly ONE import expression for that target (the frozen
- * "ONE dynamic edge" is one owner + one expression + one target). The check
- * is scoped to the Remote composition boundary — dynamic imports of anything
- * else stay out of scope.
+ * Rule: NO `src/**` module may reach `app/remote/**` by a VALUE dynamic import.
+ *
+ * The retired M3 in-process composition was the only reason a lazy Remote
+ * boundary existed. Its last sanctioned owner (`runtime/backend-loader.ts`) is
+ * deleted, so there is no legal dynamic edge into `app/remote/**` at all: the
+ * real split Client imports the shared Domain/application modules STATICALLY
+ * (it owns the Context/transport), and a dynamic edge could only re-introduce a
+ * second composition path. Dynamic imports of anything else stay out of scope.
  * @param {Array<{ rel: string, source: string }>} entries
  * @returns {Array<{ file: string, line: number, rule: string, detail: string }>}
  */
 export function findRemoteDynamicImportViolations(entries) {
-  const known = new Set(entries.map(entry => entry.rel))
   const violations = []
-  const sanctionedEdges = []
   for (const { rel, source } of entries) {
     for (const { specifier, line } of parseValueDynamicImports(source, rel)) {
       const resolved = resolveRelativeImport(rel, specifier)
       if (resolved === undefined) continue
-      const target = staticImportCandidates(resolved).find(candidate => known.has(candidate)) ?? resolved
-      if (!target.startsWith('app/remote/')) continue
-      if (rel === REMOTE_DYNAMIC_IMPORT_OWNER && target === REMOTE_DYNAMIC_IMPORT_TARGET) {
-        sanctionedEdges.push({ rel, target, line })
-        continue
-      }
+      if (!resolved.startsWith('app/remote/')) continue
       violations.push({
         file: rel,
         line,
         rule: 'remote-dynamic-import-owner',
-        detail: `only ${REMOTE_DYNAMIC_IMPORT_OWNER} may dynamically import ${REMOTE_DYNAMIC_IMPORT_TARGET} `
-          + `(found ${rel} -> ${specifier})`,
+        detail: 'no src module may dynamically import app/remote/** — the retired in-process '
+          + `composition boundary is gone; the split Client imports it statically (found ${rel} -> ${specifier})`,
       })
     }
   }
-  if (sanctionedEdges.length > 1) {
-    violations.push({
-      file: sanctionedEdges[1].rel,
-      line: sanctionedEdges[1].line,
-      rule: 'remote-dynamic-import-owner',
-      detail: `${REMOTE_DYNAMIC_IMPORT_OWNER} must carry exactly ONE dynamic import expression for `
-        + `${REMOTE_DYNAMIC_IMPORT_TARGET} (found ${sanctionedEdges.length})`,
-    })
+  return violations
+}
+
+/**
+ * The retired M3 in-process composition symbols. After the M3 retirement they
+ * exist ONLY in `test/support/m3-inprocess/**`; a `src/**` identifier with one
+ * of these names would mean a new production consumer appeared.
+ */
+export const RETIRED_M3_COMPOSITION_SYMBOLS = Object.freeze([
+  'createExperimentalRemoteRuntime',
+  'createRemoteHostRuntime',
+  'createRemoteClientRuntime',
+  'createRemoteApplicationRuntime',
+  'loadExperimentalRemoteRuntime',
+  'loadRemoteApplicationRuntime',
+])
+
+/**
+ * Rule: the production graph must never import a `test/**` module, and must
+ * never name a retired M3 in-process composition symbol.
+ *
+ * The retired composition is a TEST-ONLY carrier (`test/support/m3-inprocess/`)
+ * precisely because `src/**` must not reach it: importing it would re-create a
+ * second Host/Client/Gateway composition path that the split Client does not
+ * own. The symbol scan is an AST identifier walk, so comments and documentation
+ * are free to describe the retirement.
+ */
+export function findRetiredM3CompositionViolations(entries) {
+  const violations = []
+  for (const { rel, source } of entries) {
+    let sourceFile
+    try {
+      sourceFile = ts.createSourceFile(rel, source, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS)
+    } catch {
+      continue
+    }
+    const report = (node, rule, detail) => {
+      const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
+      violations.push({ file: rel, line: line + 1, rule, detail })
+    }
+    const checkSpecifier = (node, specifier) => {
+      const resolved = resolveRelativeImport(rel, specifier)
+      if (resolved === undefined || !resolved.startsWith('test/')) return
+      report(node, 'src-imports-test-support',
+        `src/** must never import test/** (${specifier}); the M3 carrier is test-only`)
+    }
+    const visit = (node) => {
+      if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
+        && node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) {
+        checkSpecifier(node, node.moduleSpecifier.text)
+      } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword
+        && node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0])) {
+        checkSpecifier(node, node.arguments[0].text)
+      } else if (ts.isIdentifier(node) && RETIRED_M3_COMPOSITION_SYMBOLS.includes(node.text)) {
+        const parent = node.parent
+        // The property NAME of an object literal / member access is not a
+        // reference to the symbol, and a property access (`x.createRemote...`)
+        // is checked by its own identifier node.
+        const isPropertyName = (ts.isPropertyAssignment(parent) || ts.isPropertyAccessExpression(parent)
+          || ts.isMethodDeclaration(parent)) && parent.name === node
+        if (!isPropertyName) {
+          report(node, 'retired-m3-composition',
+            `src/** must not reference the retired M3 in-process composition symbol "${node.text}"`)
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sourceFile)
   }
   return violations
 }
@@ -1228,6 +1279,7 @@ export function findViolations(entries, options = {}) {
   const known = new Set(entries.map(entry => entry.rel))
   const violations = [
     ...findRemoteDynamicImportViolations(entries),
+    ...findRetiredM3CompositionViolations(entries),
     // The split-Client edge assertion only runs when the production entry is
     // part of the scanned tree; synthetic rule fixtures that merely include an
     // `app/bootstrap.ts` target must not fail for a missing process entry.

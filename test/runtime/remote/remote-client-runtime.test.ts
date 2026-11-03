@@ -53,21 +53,23 @@ import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
 import * as piTuiHostRuntime from '../../../src/app/host/pi-tui-host-runtime.ts'
 import * as performanceHost from '../../../src/app/host/performance-host.ts'
-import { loadExperimentalRemoteRuntime } from '../../../src/runtime/backend-loader.ts'
+import { createExperimentalRemoteRuntime } from '../../support/m3-inprocess/runtime.ts'
 import { RemoteJobObservationPort } from '../../../src/runtime/remote/job-observation-remote.ts'
 import type { JobObservedSnapshot } from '../../../src/runtime/job-observation-port.ts'
 import {
-  createRemoteClientRuntime,
   disposeRemoteContributions,
   createScopedClientModuleLoader,
   installScopedModuleLoaderShim,
   loadOfficialClientModulesOnce,
   OFFICIAL_CLIENT_BUNDLES,
-  type RemoteClientRuntime,
 } from '../../../src/app/remote/client-runtime.ts'
-import { createRemoteHostRuntime, type RemoteHostRuntime } from '../../../src/app/remote/host-runtime.ts'
+import {
+  createRemoteClientRuntime,
+  type RemoteClientRuntime,
+} from '../../support/m3-inprocess/client-runtime.ts'
+import { createRemoteHostRuntime, type RemoteHostRuntime } from '../../support/m3-inprocess/host-runtime.ts'
 import { mergeCause } from '../../../src/app/remote/dispose-cause.ts'
-import type { ExperimentalRemoteRuntime } from '../../../src/app/remote/runtime.ts'
+import type { ExperimentalRemoteRuntime } from '../../support/m3-inprocess/runtime.ts'
 import { testLifecycle, type TestLifecycle } from '../../support/temp-lifecycle.ts'
 
 const SEED_SESSION_ID = 'm3-l5-seed'
@@ -294,9 +296,9 @@ function seedHostSession(host: HostFixture): void {
   host.ctx.sessions.create(SessionId(SEED_SESSION_ID), { meta: { cwd: host.anchorDir } })
 }
 
-/** Load the Remote composition through the sanctioned lazy boundary. */
-function loadRuntimeModule(): Promise<typeof import('../../../src/app/remote/runtime.ts')> {
-  return loadExperimentalRemoteRuntime()
+/** The retired M3 wire composer, now a TEST-ONLY fixture module. */
+function loadRuntimeModule(): Promise<typeof import('../../support/m3-inprocess/runtime.ts')> {
+  return import('../../support/m3-inprocess/runtime.ts')
 }
 
 // ---------------------------------------------------------------------------
@@ -1040,12 +1042,22 @@ test('the Client composition never crosses the Host legacy-settings boundary', (
   // half of the proof is the whole suite above, which composes, connects,
   // lists and disposes under the runner's contained temp DSH_HOME.
   const clientRuntimeDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'src', 'app', 'remote')
-  for (const file of ['client-runtime.ts', 'host-runtime.ts', 'runtime.ts']) {
+  const m3CarrierDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'support', 'm3-inprocess')
+  // The Host-side composition is the retired in-process carrier now, so its
+  // token scan follows it into the test-only module.
+  for (const file of ['client-runtime.ts', 'runtime.ts', 'application-stage.ts', 'application-runtime.ts']) {
     const source = readFileSync(join(clientRuntimeDir, file), 'utf8')
     assert.doesNotMatch(source, /legacy-settings-migration/, `${file} must not import the legacy settings migration`)
     assert.doesNotMatch(source, /profileContext/, `${file} must not read profileContext`)
     assert.doesNotMatch(source, /settings\.yaml/, `${file} must not open \$DSH_HOME/settings.yaml(.imported)`)
     assert.doesNotMatch(source, /\$DSH_HOME/, `${file} must not read \$DSH_HOME`)
+  }
+  for (const file of ['host-runtime.ts', 'client-runtime.ts', 'runtime.ts', 'application-runtime.ts']) {
+    const source = readFileSync(join(m3CarrierDir, file), 'utf8')
+    assert.doesNotMatch(source, /legacy-settings-migration/, `${file} must not import the legacy settings migration`)
+    assert.doesNotMatch(source, /profileContext/, `${file} must not read profileContext`)
+    assert.doesNotMatch(source, /settings\.yaml/, `${file} must not open $DSH_HOME/settings.yaml(.imported)`)
+    assert.doesNotMatch(source, /\$DSH_HOME/, `${file} must not read $DSH_HOME`)
   }
 })
 

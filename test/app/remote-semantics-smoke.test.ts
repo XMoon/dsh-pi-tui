@@ -73,8 +73,8 @@ import { RemoteAccessService } from '@deepseek-ai/dsh-api-remote-access'
 import WorkingDirectory from '@deepseek-ai/dsh-working-directory'
 import * as piTuiHostRuntime from '../../src/app/host/pi-tui-host-runtime.ts'
 import * as performanceHost from '../../src/app/host/performance-host.ts'
-import { loadExperimentalRemoteRuntime } from '../../src/runtime/backend-loader.ts'
-import type { ExperimentalRemoteRuntime } from '../../src/app/remote/runtime.ts'
+import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
+import type { ExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { createRemoteM3ASemantics, type RemoteM3ASemantics } from '../../src/app/remote/m3a-semantics.ts'
 import { createRemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
 import { RemoteConfigPort } from '../../src/runtime/remote/config-remote.ts'
@@ -642,7 +642,7 @@ async function mountSettingsWorkspace(
 }
 
 async function composeRuntime(host: HostFixture): Promise<Composed['runtime']> {
-  return await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
+  return await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
   })

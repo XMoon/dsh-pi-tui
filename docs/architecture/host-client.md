@@ -70,12 +70,35 @@ Host service resolution belongs to:
 explicit `inject` and `ctx.reflect.get`, and consumers read only semantic DTOs or
 port values. `src/app/host/pi-tui-host-runtime.ts` is the ONE built-in Host
 Runtime Loader row; `src/app/host/features/**` are its two internal business
-modules, not independent plugins. The Remote graph is ONE `RemoteHostRuntime` +
-ONE official Client Context + ONE semantic assembly + ONE owner registry,
-reached only through the single dynamic edge `src/runtime/backend-loader.ts` →
-`src/app/remote/runtime.ts`. Base/profile-owned Host services are reused, never
-remounted; optional generated Remotes are mounted by their feature Client owner
-without duplicating core namespace or authority.
+modules, not independent plugins.
+
+There are exactly TWO real OS-process composition roots, and each owns its own
+graph:
+
+- **Direct (production default).** `src/index.ts -> app/bootstrap.ts` boots one
+  Direct runtime over the caller's Host Context. No Remote module participates.
+- **Split Host (internal, Linux-only).** `local-host-entry.ts` boots the official
+  profile through `runProfile()` with the Host-only overlay, and the overlay's
+  single built-in `@xmoon76/dsh-pi-tui/host-runtime` row owns the package's ONE
+  private Typert contribution and its two business services. Base/profile-owned
+  Host services are reused, never remounted.
+- **Split Client (internal, Linux-only).** `local-client-entry.ts` owns its OWN
+  Client Context, the official B1 transport and the one official Client Domain
+  mount (`app/remote/client-runtime.ts`, mounted in two stages so the interaction
+  owner exists before the Gateway's first generation). It then composes the ONE
+  semantic assembly and owner registry through
+  `createRemoteApplicationRuntimeFromClient()` (`app/remote/application-runtime.ts`)
+  over the shared `app/remote/application-stage.ts`, and adopts that pre-built
+  core through the selection seam instead of constructing a second graph.
+- **Retired in-process carrier (test-only).** The former M3 in-process
+  composition lives in `test/support/m3-inprocess/**`. It is not a third
+  production composition: `src/**` must never import it, it must never enter the
+  published bundle, and it exists only so the historical L5/L6 suites can
+  exercise transport-neutral Remote semantics.
+
+Optional generated Remotes are mounted by their feature Client owner without
+duplicating core namespace or authority, and no composition may mount a second
+copy of a base prerequisite.
 
 Must-not:
 
@@ -301,11 +324,16 @@ service or setting survives an arbitrary reload.
 
 `performance-host` remains an independent Host projection row, and
 `visual-tools` remains an independent Loader row; neither is absorbed into the
-built-in runtime. `src/app/remote/host-runtime.ts` is only the legacy in-process
-test composition for the old L5 fixtures: it mounts its own additive official
-rows and verifies the built-in runtime's readiness gates, but it never mounts
-the private contribution/services or the Performance projection and is not the
-production Host graph.
+built-in runtime. The legacy in-process Host composition is
+`test/support/m3-inprocess/host-runtime.ts`: it carries the `TEST_ONLY_M3_CARRIER`
+boundary, mounts its own additive official rows on an already-running Host
+Context and verifies the built-in runtime's readiness gates, but it never mounts
+the private contribution/services or the Performance projection, is not the
+production Host graph, and cannot be reached from `src/**`. Nothing here promises
+that an arbitrary Host business plugin reload is transparent to running work:
+the Host rows and plugin resources follow the official DSH Loader and Plugin
+Manager lifecycle, while a Client-only surface revision never touches a Host
+fiber.
 
 The Host-only readiness audit requires every official Session-serving row and
 the built-in row to be ACTIVE, checks the official and private Typert
@@ -739,7 +767,14 @@ Rules:
 - Never present a Host-only suite as a TUI PASS, a skipped/mode-gated CI step as
   passed, or a lane green on a different snapshot.
 - The Linux split-process lane (`smoke:split-process`, driven from an installed
-  npm tarball) is a distribution-boundary proof outside L1–L6. It proves OS
-  process admission, the official authenticated loopback carrier and the
-  `sessionOpen=false` boundary; it is not a TUI Session or Direct/Remote parity
-  proof.
+  npm tarball) is a distribution-boundary proof outside L1–L6: it is the only
+  tier that observes two real OS processes. What it proves is a list of durable
+  capability classes, not one boundary row: OS process admission and kernel-seat
+  uniqueness; the official authenticated loopback carrier and Host identity;
+  official Session open, durable history and live catch-up through a real
+  surface; accepted Turn/Tool/Job/Child continuity across Client death; pending
+  Question/Approval recovery; Client-only surface revision; the private Host
+  Remotes over the authenticated wire; and the fail-closed upgrade/signal paths.
+  It remains a lane-level proof: it never replaces Direct/Remote parity, it does
+  not prove a capability the lane does not exercise, and a green split lane is
+  not a TUI Session acceptance on its own.

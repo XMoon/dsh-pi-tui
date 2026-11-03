@@ -44,7 +44,7 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { applyRunnerWithRuntime } from '../../src/app/bootstrap.ts'
 import { TRANSITION_FENCE_NOTICE } from '../../src/app/submission/steer.ts'
 import type { RemoteApplicationOverride } from '../../src/app/application-runtime.ts'
-import { createRemoteApplicationRuntime } from '../../src/app/remote/runtime.ts'
+import { createRemoteApplicationRuntime } from '../support/m3-inprocess/application-runtime.ts'
 import { waitFor } from '../support/remote-application-fixture.ts'
 import { testLifecycle, type TestLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
@@ -145,7 +145,7 @@ async function mountPr3Runner(
 ): Promise<Pr3Fixture> {
   const presetId = options.presetId ?? 'm3-4-pr3-preset'
   const host = options.host ?? await mountHost(life, presetId)
-  const { createRemoteApplicationRuntime } = await import('../../src/app/remote/runtime.ts')
+  const { createRemoteApplicationRuntime } = await import('../support/m3-inprocess/application-runtime.ts')
   const aggregate = await createRemoteApplicationRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},

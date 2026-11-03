@@ -30,7 +30,7 @@ const FORBIDDEN_HOST_ENTRY_IDS = ['tui-app', 'pi-tui-extension-host', 'pi-tui-bu
 /** Minimal structural view of one Loader entry. */
 interface LoaderEntryLike {
   readonly options: { readonly id: string; readonly name: string; readonly disabled?: boolean }
-  readonly fiber?: { readonly state: number }
+  readonly fiber?: { readonly state: number; readonly uid?: number }
 }
 
 /** Minimal structural view of the running Loader service. */
@@ -59,7 +59,14 @@ export interface HostEntryStatus {
   readonly services: Record<string, boolean>
   readonly terminalProgressWatches: number
   readonly ownerEntries: Record<string, readonly string[]>
-  readonly entries: ReadonlyArray<{ id: string; name: string; state: string }>
+  /**
+   * Per-row Loader facts. `fiberUid` is the CURRENT Loader fiber identity of
+   * that row, read straight from the live `loader.entries()` object; it is a
+   * qualification diagnosis only (never an authentication, compatibility or
+   * admission input) and lets a Client-only surface revision prove that the
+   * Host rows were not re-mounted.
+   */
+  readonly entries: ReadonlyArray<{ id: string; name: string; state: string; fiberUid?: number }>
   readonly forbiddenActive: readonly string[]
   readonly webServer?: { host: string; port: number }
 }
@@ -280,6 +287,9 @@ export function collectHostEntryStatus(
       id: entry.options.id,
       name: entry.options.name,
       state: fiberStateLabel(entry),
+      // The live fiber identity of THIS row, or nothing. A row whose fiber never
+      // started has no UID and must not be given a fabricated one.
+      ...(typeof entry.fiber?.uid === 'number' ? { fiberUid: entry.fiber.uid } : {}),
     })),
     forbiddenActive: [],
     webServer: { host: webServer.host, port: webServer.port },

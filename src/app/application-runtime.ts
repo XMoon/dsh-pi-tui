@@ -58,40 +58,6 @@ export interface SelectedApplicationRuntime {
 }
 
 /**
- * The Remote application-runtime composition input for the selection seam
- * (M3-4 PR1): exactly the arguments the Remote aggregate needs. The seam owns
- * the LOADING (`runtime/backend-loader.ts` — the sole sanctioned dynamic
- * boundary into the Remote composition); the composition input itself stays
- * transport-descriptive, so this module imports no Remote code.
- */
-export interface RemoteApplicationSelection {
-  /** The already-running ordinary Host Context (never disposed by the graph). */
-  readonly hostContext: object
-  /** Host bootstrap prerequisite barrier owned by the caller (M3-0 ordering
-   *  contract: the Remote composition must not race the Host-local
-   *  legacy-settings migration). */
-  readonly waitForHostPrerequisites: () => Promise<void>
-  /** Lifecycle signal observed between the Host prerequisite and composition. */
-  readonly signal?: AbortSignal
-  /**
-   * The application-owned prompt serializer (the D2.2 writer dependency).
-   * PR1 supplies a real one only in composition tests; the production
-   * serializer is completed in the M3-4 submission PR. There is deliberately
-   * NO default here: a missing serializer is a composition error, never a
-   * fabricated partial Remote writer.
-   */
-  readonly promptSerializer: object
-  /**
-   * The Client-local UI startup facts (M3-6 PR1): the detached
-   * `sessionId`/`presetId` data the Remote application's Client UI subtree
-   * (extension host + first-party builtins on the official Client Context)
-   * mounts under. Data facts ONLY — the Host-only `markSurfaceMounted`
-   * readiness callback never crosses into the Client Context.
-   */
-  readonly clientUiStartup: ClientUiStartupFacts
-}
-
-/**
  * The detached startup facts the Remote Client-local UI subtree consumes
  * (M3-6 PR1 D2): plain data only. It must never contain
  * `markSurfaceMounted`, `appExit`, a Host Context, a Loader,
@@ -398,12 +364,11 @@ export interface RemoteSessionFactsSource {
   sessionStatsProjection(sessionId: string): unknown
 }
 
-/** The internal application runtime-selection seam input (M3-4 PR1): which
- *  branch to select and HOW to construct it. The Direct branch takes a
- *  FACTORY, never a pre-built runtime; the Remote branch takes the
- *  composition INPUT — the seam itself reaches the Remote aggregate through
- *  the lazy `runtime/backend-loader.ts` boundary, making this seam the sole
- *  product-level Remote application runtime construction owner (plan §5). */
+/** The internal application runtime-selection seam input: which core to adopt
+ *  and how to construct the Direct one. There is deliberately NO Remote
+ *  construction input: the retired in-process Remote aggregate is test-only, so
+ *  a production Remote core can only arrive FULLY ASSEMBLED as `preselected`
+ *  from the internal split Client composition root. */
 export interface ApplicationRuntimeSelection {
   readonly kind: BackendKind
   /** Construct the Direct application runtime (the Direct branch's source). */
@@ -412,14 +377,11 @@ export interface ApplicationRuntimeSelection {
     readonly owners: SessionOwnerAccess
     readonly retirement: SessionOwnerRetirement
   }
-  /** The Remote composition input (internal/test M3-4 paths only). */
-  readonly remote: RemoteApplicationSelection | undefined
   /**
-   * A pre-built selected core the seam adopts VERBATIM (M3-4 PR2 internal
-   * L6 composition): the caller already constructed the ONE Remote
-   * application aggregate through the canonical path; the seam constructs
-   * nothing and returns this core by identity. Internal/test paths only —
-   * the production `apply()` selection never supplies it.
+   * A pre-built selected core the seam adopts VERBATIM: the caller already
+   * constructed the ONE application core (the internal split Client's
+   * `createRemoteApplicationRuntimeFromClient`), so the seam constructs nothing
+   * and returns it by identity. The Direct root never supplies it.
    */
   readonly preselected?: SelectedApplicationRuntime
 }

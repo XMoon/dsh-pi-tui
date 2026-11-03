@@ -240,13 +240,13 @@ function runNetworkLoop(bundle, evidence) {
       name: 'dsh-optional-bundles-harness',
       private: true,
       type: 'module',
-      dependencies: { '@deepseek-ai/dsh': targetDshVersion },
+      dependencies: { '@deepseek-ai/dsh': TARGET_VERSION },
     }, null, 2)}\n`)
-    runPnpmInstall(harnessDir, env, loadDshDistribution({ mode: 'npm', version: targetDshVersion }))
+    runPnpmInstall(harnessDir, env, loadDshDistribution({ mode: 'npm', version: TARGET_VERSION }))
     const invocation = dshInvocation(harnessDir)
     const version = runDsh(invocation, ['--version'], harnessDir, env)
     if (version.status !== 0) fail('INFRA_INSTALL_FAILURE', `installed DSH --version failed:\n${commandOutput(version)}`)
-    requireExactVersion('DSH', commandOutput(version).trim(), targetDshVersion)
+    requireExactVersion('DSH', commandOutput(version).trim(), TARGET_VERSION)
 
     const profile = 'optional-bundle-smoke'
     const profileDir = join(dshHome, 'profiles', profile)
@@ -301,7 +301,7 @@ function runNetworkLoop(bundle, evidence) {
     if (!onAgain.includes(marker)) fail('PROFILE_COMPOSITION_FAILURE', `the restarted tree does not name ${marker} (${bundle})`)
     evidence.network = {
       status: 'PASS',
-      dshVersion: targetDshVersion,
+      dshVersion: TARGET_VERSION,
       bundle,
       installedVersion,
       profileDir,
