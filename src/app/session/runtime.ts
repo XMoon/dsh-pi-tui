@@ -706,8 +706,23 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         try {
           await deps.retirement.flush(nextOwner)
         } catch (error) {
+          // The failure is fixed HERE, before the next await: the OLD owner's
+          // retirement and the child quiesce are unbounded, and the exit
+          // watchdog may end the process before a later summary line. The
+          // diagnostic sink writes synchronously (`writeSync`), so the exact
+          // session id and the original error are captured in this same stack.
           committedDurabilityFailure = safeErrorMessage(error)
+          deps.diag.error('committed session durability checkpoint failed', {
+            session: committedSessionId,
+            error: committedDurabilityFailure,
+          })
           retired.push(`committed child flush: ${committedDurabilityFailure}`)
+          // Single user notice, also at the failure itself. A synchronous
+          // notify may re-enter the application (and even begin an exit), so
+          // nothing below may assume the surface stayed live.
+          if (!deps.surface.isSurfaceDisposed() && committedSessionId !== undefined) {
+            deps.surface.warnCommittedDurability(committedSessionId, committedDurabilityFailure)
+          }
         }
         // Retire the OLD owner through the retirement port (which owns the
         // official close order): the pre-commit quiesce already idled + flushed,
@@ -746,12 +761,6 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
                 failures: retired,
               })
             }
-            if (committedDurabilityFailure !== undefined) {
-              deps.diag.error('committed session durability checkpoint failed', {
-                session: committedSessionId,
-                error: committedDurabilityFailure,
-              })
-            }
             return
           }
         } catch (error) {
@@ -779,12 +788,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             failures: retired,
           })
         }
-        // The post-commit checkpoint failure is user-visible: the switch DID
-        // happen, but durability of the new session could not be confirmed.
-        // Reported AFTER the surface work settled, never as a failed switch.
-        if (committedDurabilityFailure !== undefined && committedSessionId !== undefined) {
-          deps.surface.warnCommittedDurability(committedSessionId, committedDurabilityFailure)
-        }
+        // The checkpoint failure (if any) was already diagnosed and notified at
+        // the failure itself; the switch DID commit, so it is never reported as
+        // a failed transition.
         deps.surface.reportSwitch(from, nextOwner)
       },
       recordFailure: (phase, error) => {

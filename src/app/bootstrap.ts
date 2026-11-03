@@ -1023,11 +1023,11 @@ export function applyRunnerWithRuntime(
           ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
           diag.error('switch failed', { session: sessionId, error: message })
         },
-        warnCommittedDurability: (sessionId, error) => {
-          // The switch committed but its durability checkpoint failed: report
-          // BOTH the user notice and the diagnostic — never silently degrade
-          // to a log line, and never imply the transition failed.
-          diag.error('committed session durability checkpoint failed', { session: sessionId, error })
+        warnCommittedDurability: (_sessionId, error) => {
+          // UI authority only: the diagnostic authority is the checkpoint's own
+          // catch (it fires before any long await, so the evidence is fixed
+          // even if the process is torn down mid-transition). Repeating the
+          // same error here would report one failure twice.
           surface.display.notify(
             `session committed, but the durability checkpoint failed (${error}) — the new session may not be persisted`,
             'error',
