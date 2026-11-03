@@ -103,7 +103,8 @@ test('an exit during the TSP SDK handshake after a resume releases the renderer 
   const events = harness.retirementEvents
   assert.equal(events.filter(event => event === `cancel:${resumed.id}`).length, 1, 'the resumed owner is cancelled exactly once')
   assert.equal(events.filter(event => event === `dispose:${resumed.id}`).length, 1, 'the resumed owner is disposed exactly once')
-  assert.equal(events.filter(event => event === `flush:${resumed.id}`).length, 1, 'the resumed owner is flushed exactly once')
+  assert.equal(events.filter(event => event === `flush:${resumed.id}`).length, 0,
+    'the early-exit shutdown retirement runs no explicit flush (DSH close owns durability)')
 })
 
 test('an HMR unload during a held TSP handshake after a resume releases the renderer and retires the owner once', async (t) => {
@@ -167,6 +168,7 @@ test('an HMR unload during a held TSP handshake after a resume releases the rend
   assert.equal(pane.input.isRaw, rawModeBaseline, 'the scripted tty is restored to cooked mode')
   const events = harness.retirementEvents
   assert.equal(events.filter(event => event === `cancel:${resumed.id}`).length, 1, 'the resumed owner is cancelled exactly once')
-  assert.equal(events.filter(event => event === `flush:${resumed.id}`).length, 1, 'the resumed owner is flushed exactly once')
+  assert.equal(events.filter(event => event === `flush:${resumed.id}`).length, 0,
+    'the HMR shutdown retirement runs no explicit flush (DSH close owns durability)')
   assert.equal(events.filter(event => event === `dispose:${resumed.id}`).length, 1, 'the resumed owner is disposed exactly once')
 })

@@ -587,11 +587,12 @@ destroys the Host Agent, which is exactly why the port fixes only the
 observable contract (await quiescence and report which condition ended the
 wait) and leaves HOW an abort is reflected onto the owner to the backend.
 
-The retirement order is fixed (mirroring the official DSH ACP session
-close):
+The retirement order is mode-dependent, because the two modes have different
+durability owners:
 
 ```text
-cancel → idle → descendants → flush → dispose
+transition (the Host stays live):  cancel → idle → descendants → sessions.flush → dispose
+shutdown / HMR / parked exit:       cancel → idle → descendants → AgentHandle.dispose
 ```
 
 - `cancel` — `agent.cancel({ kind: 'user' })` stops new main-Agent work.
@@ -601,11 +602,36 @@ cancel → idle → descendants → flush → dispose
   Activations, and releases their `AgentHandle`s child-first. This is the
   piece that previously let a continuable subagent keep the process alive
   for minutes after the TUI exited.
-- `flush` — the FINAL `sessions.flush` runs AFTER the descendant drain, so
-  the durability boundary includes every descendant settlement.
+- `flush` (transition only) — the FINAL `sessions.flush` runs AFTER the
+  descendant drain, so the durability boundary includes every descendant
+  settlement. The Host is still live here, so this explicit flush is the
+  transition's own durability barrier and cannot race another closer.
 - `dispose` — `AgentHandle.dispose()` releases the persistence writer and
   stops Agent-scoped background jobs (the TUI never enumerates/kills jobs
-  itself — DSH jobs lifecycle is bound to the Agent scope).
+  itself — DSH jobs lifecycle is bound to the Agent scope). In shutdown
+  mode this disposal IS the durability settlement: it joins DSH's own
+  durable handle close/drain.
+
+The shutdown mode deliberately runs NO explicit `sessions.flush`: during
+root unload the DSH agent loop and the JSONL backend may already be closing
+the same write handle (the backend's `session/disposed` listener and its
+open-handle close sweep), and a flush issued after `closing` started is
+rejected with `flush on a closed handle`. Re-issuing that flush would race
+DSH's close authority instead of adding durability; a shutdown dispose
+failure is therefore reported as durability UNCONFIRMED (never as a flush
+failure, and never as proof that data was lost).
+
+A successful ordinary transition also checkpoints the COMMITTED child: after
+the post-commit child quiesce confirms idle and before the new owner's
+surface init, ONE `retirement.flush(nextOwner)` materializes the new
+session's durable boundary (an empty `/new` session has no events, so only
+an explicit flush guarantees it becomes resumable). The checkpoint uses the
+commit-time owner only — never a re-read — and a failure never rolls the
+child back or misreports the switch: the surface warns
+"session committed, durability checkpoint failed" with the original error.
+DSH `AgentHandle.dispose` remains the sole final close/drain authority; the
+pi-tui flush only establishes the recoverable boundary while the Host is
+live. Root shutdown never waits for a full retirement before `appExit`.
 
 Every phase is individually contained: a failure is recorded and the next
 phase still runs, so one failure can never re-create a handle leak (a
@@ -625,7 +651,7 @@ Where it runs:
   → resume hint
   → appExit
   → application-tree disposer joins the SAME memoized retirement:
-       idle → descendants → flush → dispose
+       idle → descendants → dispose (shutdown mode: DSH close owns durability)
   ```
 
   Only the FIRST cancel comes forward. It is needed because the ordinary

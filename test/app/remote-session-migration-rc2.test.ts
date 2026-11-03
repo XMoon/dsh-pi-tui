@@ -224,6 +224,7 @@ test('a failed Remote open never replaces the current Session, its draft, or rep
     beginInputHistoryScope: () => {},
     retireStaleHistorySeat: () => {},
     reportSwitchFailure: (sessionId) => { events.push(`switchFailure:${sessionId}`) },
+    warnCommittedDurability: (sessionId, error) => { events.push(`committedDurability:${sessionId}:${error}`) },
     launchComposition: async () => ({ composition: {} }),
     setResumeFailure: () => {},
     reportFirstSessionCreateFailure: () => {},

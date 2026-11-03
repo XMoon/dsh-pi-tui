@@ -14,6 +14,10 @@
   `/image`；文件仍在读取时按 Enter / 发送 / 转向会被拒绝并提示重试，读取失败则
   保留原路径文字。PiTui 与 TSP 两种渲染器均支持，图片仍走既有的草稿与提交链。
 
+### 修复
+
+- 修复 `/new` 后立即 `/exit` 时退出日志出现 `retire phase failed phase=flush: flush on a closed handle` 的竞态：退出/热重载/驻留会话的退休不再对 DSH 已开始关闭的写句柄重复执行显式 flush，最终持久化由 `AgentHandle.dispose` 加入 DSH 的关闭/排空完成；普通会话切换的旧 owner 仍保留显式 flush，且新提交的空会话在提交后立即建立可恢复的持久化边界（失败会明确提示，不再静默）。
+
 ## [0.5.5] - 2026-11-03
 
 ### 安装与版本对应

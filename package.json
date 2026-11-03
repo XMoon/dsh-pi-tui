@@ -351,6 +351,7 @@
     "gate:dsh-preset-parity": "node scripts/generate-dsh-presets.mjs --check",
     "smoke:job-controller-profile": "node scripts/dsh-job-controller-profile-smoke.mjs",
     "smoke:optional-bundles": "node scripts/dsh-optional-bundles-smoke.mjs",
+    "smoke:direct-empty-retirement": "node scripts/direct-empty-session-retirement-smoke.mjs",
     "pack:artifact": "rm -f xmoon76-dsh-pi-tui-*.tgz && pnpm pack --config.ignore-scripts=true --pack-destination .",
     "smoke:release": "node scripts/qualify-tarball.mjs",
     "pack:release": "pnpm clean && pnpm clean:fork && pnpm build && pnpm typecheck:bundle && pnpm test:product && pnpm pack:artifact && pnpm smoke:release",

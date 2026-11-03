@@ -683,7 +683,7 @@ test('/fork retires an unclaimed parked Direct owner during teardown', async (t)
     'an unclaimed parked Direct owner must be disposed exactly once during teardown')
 })
 
-test("an unclaimed parked owner's flush failure still warns the user (merged retirement durability)", async (t) => {
+test("an unclaimed parked owner's dispose failure still warns the user (merged retirement durability)", async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-fork-parked-flush-warn-')
   const previousHome = process.env.DSH_HOME
@@ -718,13 +718,18 @@ test("an unclaimed parked owner's flush failure still warns the user (merged ret
   })
   const harness = makeHarness(home, [source, target], { provider: 'global', model: 'fallback' }, undefined, createGate)
   // The CURRENT owner's retirement stays CLEAN; only the parked fork child's
-  // final flush fails. That durability failure must still reach the user, which
-  // requires the runner to report the MERGED (current + parked) report. The
-  // predicate is timing-independent: the fork child is the only session that is
-  // neither the source nor the resumed target.
-  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
-    const id = (session as { id?: string } | undefined)?.id
-    if (id !== undefined && id !== source.id && id !== target.id) throw new Error('disk full')
+  // final close/drain fails. The parked owner is retired in SHUTDOWN mode —
+  // durability is settled by AgentHandle.dispose, so the injected failure is
+  // a REJECTING dispose (the harness keys it by session id and throws inside
+  // the fake handle's dispose). The fork child is the only CREATED session in
+  // this test, so failing every created child's dispose is exact.
+  const originalCreate = (harness.agents as {
+    create: (options: { sessionId: unknown }) => Promise<unknown>
+  }).create.bind(harness.agents)
+  ;(harness.agents as { create: (options: { sessionId: unknown }) => Promise<unknown> }).create = async (options) => {
+    const result = await originalCreate(options as never)
+    harness.disposeFailures.add(String(options.sessionId))
+    return result
   }
   const stderrWrites: string[] = []
   const originalWrite = process.stderr.write.bind(process.stderr)
@@ -756,8 +761,10 @@ test("an unclaimed parked owner's flush failure still warns the user (merged ret
   fiber = undefined
   await settle()
   const output = stderrWrites.join('')
-  assert.ok(output.includes('session flush failed during retirement'),
+  assert.ok(output.includes('session close failed during retirement'),
     `the parked owner's durability failure must reach the user: ${JSON.stringify(output)}`)
+  assert.ok(output.includes('durability could not be confirmed'),
+    'the warning must state the unconfirmed durability')
 })
 
 test('/fork suppresses a delayed failure after navigation supersession', async (t) => {

@@ -300,7 +300,6 @@ Host/Client split-process development work must run it manually against the
 actual candidate tarball and record the package SHA, DSH version, command, and
 PASS/FAIL (or `NOT_RUN`).
 
-### The split-process qualification lanes
 
 ```sh
 pnpm smoke:split-process -- <candidate.tgz>
@@ -358,6 +357,19 @@ Record a lane result exactly as the lane reports it: the candidate and old
 package SHA256 values, the exact DSH pin, the command, and the per-lane
 PASS/FAIL with the checkpoint a failure reached. Synthetic manifest-only
 tarballs are input-preflight fixtures; they never qualify a pairing.
+
+`pnpm smoke:direct-empty-retirement -- <candidate.tgz>` is a Linux/PTY-only
+real-DSH smoke for the Direct session-retirement contract: it boots the
+candidate tarball in a fully isolated `DSH_HOME` (official dsh + dsh-base +
+candidate only, no model calls) and drives `/new`/`/exit` transitions,
+verifying that no retirement phase hits an already-closed write handle, that
+a committed empty session is durable through the official persistence
+artifact plus a real resume, and that a no-session exit materializes
+nothing. It also asserts the isolated profile composition (exactly the base
+and candidate bundles, an empty user patch layer, the shipped bundle patch,
+no `--patch` overlay), an isolated tmux socket, and the DSH process exit
+status. The candidate tarball argument is required (no published-package
+fallback); it is a manual qualification lane, not part of `verify:release`.
 
 A single file:
 

@@ -911,7 +911,12 @@ export function applyRunnerWithRuntime(
           // The SEMANTIC outcome decides the wording; the backend's phase labels
           // are printed only as diagnostics.
           const durabilityFailure = report.durabilityFailure
-          if (durabilityFailure !== undefined) {
+          if (durabilityFailure?.phase === 'dispose') {
+            // Shutdown-mode durability: a failed dispose means DSH's durable
+            // close/drain could not be CONFIRMED — not that a flush ran and
+            // failed, and not proof that data was lost.
+            safeTerminalWarning(`\n${color.textDim('Warning:')} session close failed during retirement (${durabilityFailure.error}) — durability could not be confirmed\n`)
+          } else if (durabilityFailure !== undefined) {
             safeTerminalWarning(`\n${color.textDim('Warning:')} session flush failed during retirement (${durabilityFailure.error}) — the latest events may not be persisted\n`)
           } else {
             const phases = report.failures.map(failure => failure.phase).join(', ')
@@ -1017,6 +1022,16 @@ export function applyRunnerWithRuntime(
         reportSwitchFailure: (sessionId, message) => {
           ctx.logger.warn(`tui-runner: switch to ${sessionId} failed: ${message}`)
           diag.error('switch failed', { session: sessionId, error: message })
+        },
+        warnCommittedDurability: (sessionId, error) => {
+          // The switch committed but its durability checkpoint failed: report
+          // BOTH the user notice and the diagnostic — never silently degrade
+          // to a log line, and never imply the transition failed.
+          diag.error('committed session durability checkpoint failed', { session: sessionId, error })
+          surface.display.notify(
+            `session committed, but the durability checkpoint failed (${error}) — the new session may not be persisted`,
+            'error',
+          )
         },
         launchComposition: () => launchComposition(),
         setResumeFailure: (failure) => { resumeFailure = failure },
