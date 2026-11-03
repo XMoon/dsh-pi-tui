@@ -162,20 +162,18 @@ function assertProfileComposition({ profileDir, tarball, invocation, env }) {
     fail('INFRA_INSTALL_FAILURE', `profile bundles must be exactly ${JSON.stringify(EXPECTED_BUNDLES)}, got ${JSON.stringify(bundles)}`)
   }
 
-  // The user patch layer: every non-comment line is checked, so an unrelated
-  // id / insert / disable / override (a real user patch) fails the smoke.
+  // The user patch layer: a POSITIVE allowlist, never an enumeration of the
+  // patch operations we happen to remember. The only acceptable layer is the
+  // empty list or the candidate's own shipped `tui-app` config row, so every
+  // other row form (insert / disabled / override / name / group / intercept /
+  // isolate) and any unknown row key fails.
   const userPatchPath = join(profileDir, 'cordis.patch.yml')
   if (!existsSync(userPatchPath)) {
     fail('INFRA_INSTALL_FAILURE', `profile user patch layer is missing: ${userPatchPath}`)
   }
-  const userPatchLines = readFileSync(userPatchPath, 'utf8')
-    .split(/\r?\n/u)
-    .map(line => line.trim())
-    .filter(line => line !== '' && !line.startsWith('#'))
-  const foreignIds = userPatchLines.filter(line => line.startsWith('- id:') && line !== '- id: tui-app')
-  const foreignRows = userPatchLines.filter(line => /^- (?:insert|disable|patch):/u.test(line))
-  if (foreignIds.length > 0 || foreignRows.length > 0) {
-    fail('INFRA_INSTALL_FAILURE', `the profile user patch layer carries a user patch (${JSON.stringify([...foreignIds, ...foreignRows])})`)
+  const violations = userPatchViolations(readFileSync(userPatchPath, 'utf8'))
+  if (violations.length > 0) {
+    fail('INFRA_INSTALL_FAILURE', `the profile user patch layer carries a user patch (${JSON.stringify(violations)})`)
   }
 
   // The package layer: the installed bundle patch must be the SHIPPED one.
@@ -197,7 +195,11 @@ function assertProfileComposition({ profileDir, tarball, invocation, env }) {
 
   return {
     profileBundles: bundles,
-    userPatchLayer: { path: userPatchPath, rows: userPatchLines },
+    userPatchLayer: {
+      path: userPatchPath,
+      // The accepted (allowlisted) row lines, recorded as evidence.
+      rows: readFileSync(userPatchPath, 'utf8').split(/\r?\n/u).map(line => line.trim()).filter(line => line !== '' && !line.startsWith('#')),
+    },
     packagePatchMatchesTarball: true,
     patchOverlays: [],
   }
@@ -272,6 +274,38 @@ function committedSessionIdsFromLog(logText) {
     ids.push(match[1])
   }
   return ids
+}
+
+/**
+ * Every line of a profile user patch layer that is NOT the shipped allowlist:
+ * an empty list, or the candidate's own `tui-app` row (`- id: tui-app`, the
+ * candidate `name:`, `config:` and its nested keys). A positive allowlist is
+ * what makes an `insert`/`disabled`/`override`/unknown row fail instead of
+ * relying on an enumeration of patch operation names.
+ * @param text - the raw cordis.patch.yml content.
+ * @returns the offending lines (empty = the layer is clean).
+ */
+function userPatchViolations(text) {
+  const lines = text
+    .split(/\r?\n/u)
+    .map(line => line.trim())
+    .filter(line => line !== '' && !line.startsWith('#'))
+  const violations = []
+  for (const line of lines) {
+    if (line === '[]') continue
+    if (line === '- id: tui-app') continue
+    if (/^name:\s*["']@xmoon76\/dsh-pi-tui["']$/u.test(line)) continue
+    // A nested config key/value of the allowed row, or the row's own config map.
+    if (/^config:$/u.test(line)) continue
+    if (line.startsWith('- ')) { violations.push(line); continue }
+    // Any other line is either a nested config value of the allowed row or a
+    // patch operation/unknown key. The operations are rejected BY NAME here so
+    // an indented `override:` cannot hide inside the allowed row either.
+    if (/^(?:insert|insertAfter|insertBefore|disabled|override|patch|group|intercept|isolate|name|id):/u.test(line)) {
+      violations.push(line)
+    }
+  }
+  return violations
 }
 
 /** Find the durable JSONL artifact of one session under $DSH_HOME/sessions.
@@ -527,7 +561,7 @@ async function main() {
   }
 }
 
-export { assertProfileComposition, countSessionArtifacts, EXPECTED_BUNDLES }
+export { assertProfileComposition, countSessionArtifacts, EXPECTED_BUNDLES, userPatchViolations }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
   main().catch(error => {

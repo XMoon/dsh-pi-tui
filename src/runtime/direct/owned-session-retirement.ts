@@ -67,7 +67,20 @@ interface DirectOwnedSessionRetirementCommon {
  * handle that the root teardown may already be closing.
  */
 export type DirectOwnedSessionRetirementDeps = DirectOwnedSessionRetirementCommon & (
-  | { mode: 'transition'; flush(): Promise<void> }
+  | {
+      mode: 'transition'
+      /**
+       * Whether the LIVE-HOST durability regime still holds at FLUSH time.
+       * The entry-time mode alone is not enough: the exit can begin DURING
+       * this retirement's `idle`/`descendants` awaits (the runner's shutdown
+       * does not wait for an in-flight transition retirement), and once it has
+       * begun DSH owns the durable close — flushing then races a closing write
+       * handle. The adapter supplies the authoritative lifecycle fact here, so
+       * the phase is evaluated when it actually runs.
+       */
+      isLiveHost(): boolean
+      flush(): Promise<void>
+    }
   | { mode: 'shutdown' }
 )
 
@@ -124,14 +137,18 @@ export async function retireDirectOwnedSession(
   }
   await runPhase('idle', deps.whenIdle, failures)
   await runPhase('descendants', deps.drainDescendants, failures)
-  if (deps.mode === 'transition') {
+  // The explicit durable flush belongs to the LIVE-HOST regime only, and that
+  // regime is re-read HERE (not at entry): an exit that began during the
+  // awaits above has already handed durability to DSH's close/drain.
+  const liveHostFlush = deps.mode === 'transition' && deps.isLiveHost()
+  if (liveHostFlush) {
     await runPhase('flush', deps.flush, failures)
   }
   await runPhase('dispose', deps.disposeOwner, failures)
   // The semantic outcome the consumer needs: which failure (if any) broke
-  // final durability for THIS mode. The consumer never has to know this
-  // implementation's phases.
-  const durabilityFailure = deps.mode === 'transition'
+  // final durability for the regime THIS retirement actually used. The
+  // consumer never has to know this implementation's phases.
+  const durabilityFailure = liveHostFlush
     ? failures.find(failure => failure.phase === 'flush')
     : failures.find(failure => failure.phase === 'dispose')
   return { failures, durabilityFailure }
