@@ -1157,3 +1157,56 @@ test('a disposed renderer forwards no receipt for a late paste', async () => {
   assert.equal(harness.pastedPaths().length, 0)
   await harness.session.close()
 })
+
+test('a plain-text bracketed paste forwards no pastedPath receipt and tracks nothing', async () => {
+  const harness = await mountPane()
+  try {
+    harness.tern.input.type('\u001b[200~hello world \u001b[201~')
+    harness.tern.input.type('\u001b[200~second line\u001b[201~')
+    // The shared render wait: it covers the SDK frame the assertion reads,
+    // not a guessed readiness window.
+    await settle()
+    assert.equal(harness.pastedPaths().length, 0,
+      'a non-candidate paste never registers a lease')
+    assert.equal(lastEditorProps(harness.frames())?.text, 'hello world second line',
+      'the plain text is ordinary editable content')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('an edit INSIDE a pasted image path retires its tracked span', async () => {
+  const path = '/home/xmoon/.cache/tern/pastes/a07fa8e58c3d1059.png'
+  const harness = await mountPane()
+  try {
+    harness.tern.input.type(`\u001b[200~${path} \u001b[201~`)
+    // The shared render wait: it covers the SDK frame the assertion reads,
+    // not a guessed readiness window.
+    await settle()
+    assert.equal(harness.pastedPaths().length, 1)
+    const receipt = harness.pastedPaths()[0]!
+    assert.equal(receipt.hasLivePath(path), true)
+
+    // Move the caret before the final "png" and paste duplicate text INSIDE
+    // the path: the text alone is ambiguous, the composer's real edit is not.
+    for (let step = 0; step < 4; step += 1) harness.tern.input.type('\u001b[D')
+    // The shared render wait: it covers the SDK frame the assertion reads,
+    // not a guessed readiness window.
+    await settle()
+    harness.tern.input.type('\u001b[200~png\u001b[201~')
+    // The shared render wait: it covers the SDK frame the assertion reads,
+    // not a guessed readiness window.
+    await settle()
+
+    assert.equal(harness.pastedPaths().length, 1,
+      'the non-candidate inside paste forwards no receipt')
+    assert.equal(receipt.hasLivePath(path), false, 'the inside edit retired the lease')
+    assert.equal(receipt.replacePastedPath(path, '[image #9 (1×1)]'), false)
+    assert.equal(lastEditorProps(harness.frames())?.text, `${path}png `,
+      'the user text stays ordinary editable content')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})

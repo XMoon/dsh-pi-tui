@@ -360,7 +360,7 @@ import { OverlayBroker } from './tui/interaction/overlay-broker.ts'
 import { EditorSeatMount } from './tui/interaction/editor-seat.ts'
 import { EditorSeatHolder } from './tui/interaction/editor-seat-holder.ts'
 import { TuiEditor, type TuiEditorPasteCommit, type TuiEditorRenderLayout } from './tui/interaction/tui-editor.ts'
-import { PasteRangeTracker } from './tui/interaction/pasted-path-range.ts'
+import { PasteRangeTracker, proveCaretEdit } from './tui/interaction/pasted-path-range.ts'
 import { PASTE_PENDING_NOTICE, type PastedImageIntakePort, type PastedPathReceipt } from './app/surface/pasted-image-intake.ts'
 import { serializeEditorInput, serializedDraftHasPayload, shellPrefixForMode, type EditorInputMode } from './tui/interaction/editor-input-mode.ts'
 import type { EditorRegistry } from './extension/internal/editor-registry.ts'
@@ -3031,6 +3031,10 @@ export class TuiApp {
   /** The short-lived paste-range leases of the default host composer: the
    *  only identity an async image read may replace. */
   private readonly pasteRanges = new PasteRangeTracker()
+  /** The REAL editor state before the current input event. The one splice it
+   *  caused is proven from this anchor — the tracker never infers a position
+   *  from a text diff (two different edits can produce the same text). */
+  private pasteEditAnchor: { text: string; cursor: number } | undefined
   /** @see TuiAppOptions.terminalPastedPath — the application intake owner. */
   private readonly terminalPastedPath: PastedImageIntakePort | undefined
   /**
@@ -4787,6 +4791,8 @@ export class TuiApp {
       return false
     }
     this.editor.onBracketedPasteCommitted = (commit) => { this.acceptHostPastedText(commit) }
+    this.editor.onInputStart = (state) => { this.pasteEditAnchor = { text: state.text, cursor: state.cursor } }
+    this.editor.onInputEnd = () => { this.pasteEditAnchor = undefined }
     this.editor.onBeforeSubmitClear = (text) => this.draftImagePreviewReserve?.(text)
     this.editor.onSubmit = (text) => {
       const gesture: ComposerSubmitGesture = 'enter'
@@ -4857,10 +4863,10 @@ export class TuiApp {
       this.events.onSubmit(serialized, 'enter', scopeToken)
     }
     this.editor.onChange = () => {
-      // FIRST: the paste range leases track the editor's REAL document, so a
-      // subsequent edit shifts/invalidates them before any external callback
-      // (undo retention, seat subscribers) can act on a stale offset.
-      this.pasteRanges.observe(this.editor.getText())
+      // FIRST: the paste range leases consume the input's EXACT splice before
+      // any external callback (undo retention, seat subscribers) can act on a
+      // stale offset. No common-prefix/suffix guess is made here.
+      this.observePasteMutation()
       // Ordinary editor input is an intervening action, so it disarms a
       // pending exit confirmation. Ctrl+C clear-draft arms again after its
       // own setText mutation completes.
@@ -4935,6 +4941,7 @@ export class TuiApp {
       // leases immediately; backend acceptance is irrelevant to the history.
       this.editor.onUndoHistoryRetired = () => {
         this.pasteRanges.retireAll()
+        this.pasteEditAnchor = undefined
         undo.releaseUndoForOwner(this.editor)
       }
     }
@@ -5862,6 +5869,7 @@ export class TuiApp {
     if (this.disposed) return
     this.disposed = true
     this.pasteRanges.retireAll()
+    this.pasteEditAnchor = undefined
     // M3-6 PR3: the final teardown is ONE ordered non-truncating batch. Every
     // independent resource is attempted even when a sibling throws; the
     // process live-TUI slot stays CLAIMED unless the WHOLE batch settles
@@ -15333,6 +15341,43 @@ export class TuiApp {
     this.requestRender()
   }
 
+  /** The flat UTF-16 caret of the host editor's raw document. */
+  private editorFlatCursor(): number {
+    const cursor = this.editor.getCursor()
+    const lines = this.editor.getText().split('\n')
+    let offset = 0
+    for (let line = 0; line < cursor.line && line < lines.length; line += 1) offset += (lines[line] ?? '').length + 1
+    return offset + cursor.col
+  }
+
+  /**
+   * Consume ONE editor change notification.
+   *
+   * The input's REAL pre-edit caret (announced by `TuiEditor.onInputStart`)
+   * proves the single splice that changed the document. Only an exact proof
+   * may shift or keep a paste lease; an async change, a multi-splice input or
+   * any ambiguity retires every lease — the tracker never guesses.
+   */
+  private observePasteMutation(): void {
+    const nextText = this.editor.getText()
+    const anchor = this.pasteEditAnchor
+    if (anchor !== undefined) {
+      if (anchor.text === nextText) {
+        // A change notification without a text change (mode toggle): the
+        // anchor stays valid for the next mutation of the same input.
+        return
+      }
+      const edit = proveCaretEdit(anchor.text, anchor.cursor, nextText)
+      if (edit !== undefined) {
+        this.pasteRanges.applyEdit(edit, nextText)
+        this.pasteEditAnchor = { text: nextText, cursor: this.editorFlatCursor() }
+        return
+      }
+    }
+    this.pasteRanges.reset(nextText)
+    this.pasteEditAnchor = undefined
+  }
+
   /**
    * ONE completed bracketed paste of the default host composer.
    *
@@ -15345,7 +15390,7 @@ export class TuiApp {
    * by construction.
    */
   private acceptHostPastedText(commit: TuiEditorPasteCommit): void {
-    if (commit.span === undefined || this.events.onTerminalPastedPath === undefined) return
+    if (this.events.onTerminalPastedPath === undefined) return
     if (this.disposed || this.viewerMode !== undefined) return
     if (this.seatEditor().id !== 'host' || this.editor.getInputMode() !== 'prompt') return
     const id = this.pasteRanges.add(commit.span)
@@ -15384,8 +15429,24 @@ export class TuiApp {
     if (cursor >= span.end) nextCursor += placeholder.length - path.length
     else if (cursor > span.start) nextCursor = span.start + placeholder.length
     const next = raw.slice(0, span.start) + placeholder + raw.slice(span.end)
+    // The replacement is ONE known splice. Announce the resulting document so
+    // the synchronous onChange is a no-op, then apply the splice to the OTHER
+    // live leases: leases after the replaced span must shift, and this lease
+    // must die (a replacement never keeps its own identity).
+    this.pasteEditAnchor = { text: next, cursor: nextCursor }
+    try {
+      seat.replaceTextUndoable(next, nextCursor)
+    } catch (error) {
+      this.pasteEditAnchor = undefined
+      this.pasteRanges.reset(this.seatEditor().getText())
+      throw error
+    }
+    this.pasteEditAnchor = undefined
+    this.pasteRanges.applyEdit(
+      { start: span.start, oldEnd: span.end, newEnd: span.start + placeholder.length },
+      next,
+    )
     this.pasteRanges.retire(id)
-    seat.replaceTextUndoable(next, nextCursor)
     return true
   }
 
@@ -16835,6 +16896,7 @@ export class TuiApp {
     // The outgoing seat's paste ranges are dead: the incoming editor holds a
     // different document/Undo authority and must never inherit a span.
     this.pasteRanges.retireAll()
+    this.pasteEditAnchor = undefined
     // Perform the atomic handoff (create → transfer → mount → dispose).
     // The registry revision rides along so a failed target's guard clears
     // on a same-id re-registration (round-1 finding 4).
@@ -17765,6 +17827,7 @@ export class TuiApp {
     // transfer, forced clear) is NOT the original paste: retire every lease
     // before the text changes, even when the same path bytes reappear.
     this.pasteRanges.retireAll()
+    this.pasteEditAnchor = undefined
     this.invalidateDraftPreviewCaches()
     const seat = this.seatEditor()
     if (seat.id === 'host') {
@@ -17772,6 +17835,7 @@ export class TuiApp {
     } else {
       seat.setText(text)
     }
+    this.pasteRanges.reset(this.seatEditor().getText())
   }
 
   /** After an accepted submission the editor returns to the prompt mode
@@ -22011,9 +22075,11 @@ export class TuiApp {
    *  (which PUSHES undo). */
   private clearSubmittedDraft(): void {
     this.pasteRanges.retireAll()
+    this.pasteEditAnchor = undefined
     const editor = this.seatEditor()
     if (editor.clearDraftAfterSubmit !== undefined) editor.clearDraftAfterSubmit()
     else editor.setText('')
+    this.pasteRanges.reset(this.seatEditor().getText())
     this.editorSeatHolder.notifyChanged()
   }
 

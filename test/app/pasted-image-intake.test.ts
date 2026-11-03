@@ -48,28 +48,37 @@ class RendererSeat {
   readonly tracker = new PasteRangeTracker()
   current = true
   type(text: string): void {
+    const start = this.composer.text.length
     this.composer.text += text
-    this.tracker.observe(this.composer.text)
+    this.tracker.applyEdit({ start, oldEnd: start, newEnd: start + text.length }, this.composer.text)
   }
   paste(body: string): PastedPathReceipt {
     const before = this.composer.text
     const beforeCursor = before.length
     this.composer.text = before + body
-    this.tracker.observe(this.composer.text)
+    this.tracker.applyEdit(
+      { start: beforeCursor, oldEnd: beforeCursor, newEnd: beforeCursor + body.length },
+      this.composer.text,
+    )
     const span = pastedBodySpan(before, beforeCursor, this.composer.text, this.composer.text.length, body)
-    assert.ok(span !== undefined, 'the test paste must prove its span')
-    const id = this.tracker.add(span)
-    assert.ok(id !== undefined)
+    // A non-candidate body never proves a span (the renderer would forward no
+    // receipt at all); the fake still hands one over so the owner's own
+    // candidate gate is exercised.
+    const id = span === undefined ? undefined : this.tracker.add(span)
     return {
       text: body,
       seatCurrent: () => this.current,
-      hasLivePath: (path) => this.tracker.live(id)?.expected === path,
+      hasLivePath: (path) => id !== undefined && this.tracker.live(id)?.expected === path,
       replacePastedPath: (path, placeholder) => {
+        if (id === undefined) return false
         const live = this.tracker.live(id)
         if (live === undefined || live.expected !== path) return false
         const next = this.composer.text.slice(0, live.start) + placeholder + this.composer.text.slice(live.end)
+        this.tracker.applyEdit(
+          { start: live.start, oldEnd: live.end, newEnd: live.start + placeholder.length },
+          next,
+        )
         this.tracker.retire(id)
-        this.tracker.observe(next)
         this.composer.text = next
         return true
       },
@@ -329,8 +338,9 @@ test('deleting the pasted path while the read is in flight cancels the commit an
   const life = testLifecycle(t)
   const h = harness(life)
   h.owner.accept(h.seat.paste(`${h.imagePath} `))
+  const before = h.seat.composer.text
   h.seat.composer.text = '看看 '
-  h.seat.tracker.observe(h.seat.composer.text)
+  h.seat.tracker.applyEdit({ start: 3, oldEnd: before.length, newEnd: 3 }, h.seat.composer.text)
   await h.release()
   assert.equal(h.images.size(), 0)
   assert.equal(h.owner.blocksDelivery('anything'), false, 'the dead lease no longer blocks')

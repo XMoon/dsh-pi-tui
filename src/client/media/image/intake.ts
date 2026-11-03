@@ -332,7 +332,17 @@ export async function readImageFileUninjected(
   extraSafetyCap?: number,
 ): Promise<ImageFileIntake> {
   const path = await resolveImagePath(rawPath, cwd)
-  const stats = await stat(path)
+  const label = basename(path)
+  // The file can still disappear or lose read access between the resolve and
+  // the read (a terminal-cleaned temp file). Native fs errors carry the FULL
+  // path, so both steps are normalized to the same basename-only taxonomy the
+  // resolve step already uses.
+  let stats
+  try {
+    stats = await stat(path)
+  } catch {
+    throw new ImageInputError(`Image file cannot be read: ${label}`)
+  }
   const sizeCap = Math.min(
     limits?.maxImageBytes ?? INTAKE_SAFETY_MAX_BYTES,
     extraSafetyCap ?? INTAKE_SAFETY_MAX_BYTES,
@@ -340,7 +350,12 @@ export async function readImageFileUninjected(
   if (stats.size > sizeCap) {
     throw new ImageTooLargeError(stats.size, sizeCap)
   }
-  const bytes = new Uint8Array(await readFile(path))
+  let bytes: Uint8Array
+  try {
+    bytes = new Uint8Array(await readFile(path))
+  } catch {
+    throw new ImageInputError(`Image file cannot be read: ${label}`)
+  }
   const meta = parseImageMetadata(bytes)
   if (meta === undefined) {
     throw new UnsupportedImageTypeError()

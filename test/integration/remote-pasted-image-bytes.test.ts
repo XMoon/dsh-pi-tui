@@ -71,9 +71,8 @@ async function stagedPaste(t: Parameters<typeof testLifecycle>[0]): Promise<{
   const files = new DraftFileStore()
   const composer = new Composer()
   const tracker = new PasteRangeTracker()
-  tracker.observe('')
   composer.text = `${path} `
-  tracker.observe(composer.text)
+  tracker.applyEdit({ start: 0, oldEnd: 0, newEnd: composer.text.length }, composer.text)
   const span = pastedBodySpan('', 0, composer.text, composer.text.length, `${path} `)
   assert.ok(span !== undefined)
   const id = tracker.add(span)
@@ -99,9 +98,10 @@ async function stagedPaste(t: Parameters<typeof testLifecycle>[0]): Promise<{
     replacePastedPath: (expected, placeholder) => {
       const live = tracker.live(id)
       if (live === undefined || live.expected !== expected) return false
-      composer.text = composer.text.slice(0, live.start) + placeholder + composer.text.slice(live.end)
+      const next = composer.text.slice(0, live.start) + placeholder + composer.text.slice(live.end)
+      tracker.applyEdit({ start: live.start, oldEnd: live.end, newEnd: live.start + placeholder.length }, next)
       tracker.retire(id)
-      tracker.observe(composer.text)
+      composer.text = next
       return true
     },
   })
