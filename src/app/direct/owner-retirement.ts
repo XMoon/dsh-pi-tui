@@ -200,7 +200,25 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
       cancel: () => cancelRetiredOwner(agent),
       whenIdle: () => agent.whenIdle(),
       drainDescendants: () => deps.drainContinuableDescendants(agent),
-      flush: () => deps.flushSession(agent.session),
+      flush: async () => {
+        try {
+          await deps.flushSession(agent.session)
+        } catch (error) {
+          // A close() overtaking an in-flight flush refuses it (DSH re-checks
+          // the handle inside the flush's chained turn — see the real-backend
+          // assertion in test/runtime/direct/session-flush-close-race). For a
+          // session that already owns a durable artifact, close drains its
+          // buffered events durably; that is the shutdown durability owner, not
+          // a live-Host flush failure. Classified by the authoritative
+          // lifecycle fact, never by the error text; the dispose phase below
+          // still settles durability and reports a failed close.
+          if (deps.isLifecycleAborted()) {
+            deps.diag.info('retire flush superseded by shutdown', { session: agent.session.id })
+            return
+          }
+          throw error
+        }
+      },
       disposeOwner: () => handle.dispose(),
     })
 

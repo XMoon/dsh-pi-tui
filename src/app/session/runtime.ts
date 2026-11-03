@@ -560,7 +560,24 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // (the abort path may have swapped it), matching the pre-cutover read.
           const flushOwner = core.owner()
           if (flushOwner === undefined) return
-          await deps.retirement.flush(flushOwner)
+          try {
+            await deps.retirement.flush(flushOwner)
+          } catch (error) {
+            // The flush can be OVERTAKEN by a shutdown while it is in flight:
+            // DSH's flush re-checks the handle's `closing` inside its chained
+            // turn, so a close() that starts after the flush was issued refuses
+            // it (asserted against the installed backend in
+            // test/runtime/direct/session-flush-close-race). For a session that
+            // already has events, that close drains them durably, which is
+            // DSH's own `flushAll` rule and a different durability owner — not
+            // a pi-tui flush failure. The authoritative discriminator is the
+            // lifecycle fact, never the error text.
+            if (deps.lifecycleSignal.aborted) {
+              deps.diag.info('old-owner flush superseded by shutdown', { error: safeErrorMessage(error) })
+              return
+            }
+            throw error
+          }
           // ONLY an OBSERVED settle proves the old Turn idle; 'unobservable'
           // (a rolled Remote binding / missing attachment) is not idle.
           if (idle === false) steps.onOldOwnerQuiesced?.()
@@ -690,10 +707,26 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // fast otherwise).
         const nextOwner = committedOwner
         if (nextOwner === undefined) throw new Error('committed transition child has no owned Session generation')
-        // The child is only checkpointed when its quiesce COMPLETED normally:
-        // a rejected quiesce never proved idle, and the plan's post-commit
-        // checkpoint is defined as running after a confirmed-idle child.
-        let childQuiesced = false
+        // D2 durability checkpoint — IMMEDIATELY after the commit, BEFORE the
+        // abort-aware child quiesce and before any surface work. The order is
+        // load-bearing: DSH's close drains what was appended but does not
+        // materialize an empty, never-appended session (asserted against the
+        // installed backend in test/runtime/direct/session-flush-close-race),
+        // and a shutdown closes the handle concurrently with this transaction.
+        // Issuing the checkpoint here means the artifact exists before the one
+        // long await below can be overtaken by an exit; a checkpoint parked
+        // behind it could lose the session entirely. Only the COMMIT-time
+        // `nextOwner` is flushed — never a re-read of the current owner (a
+        // newer transition may already have replaced it). A failure does NOT
+        // roll the child back or fail the transition: it is recorded here, and
+        // the surface warns when it is still reachable.
+        let committedDurabilityFailure: string | undefined
+        try {
+          await deps.retirement.flush(nextOwner)
+        } catch (error) {
+          committedDurabilityFailure = safeErrorMessage(error)
+          retired.push(`committed child flush: ${committedDurabilityFailure}`)
+        }
         try {
           // The child quiesce is abort-aware too: an exit during this
           // post-commit phase must cancel the NEW owner instead of hanging past
@@ -707,32 +740,18 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             // retirement takes over. Skip the surface init AND the switch
             // report (the `finally` still clears the opening journal).
             retired.push('child quiesce aborted by lifecycle')
+            // The warning below is unreachable on this path (the surface is
+            // disposed), so a checkpoint failure must still reach the log.
+            if (committedDurabilityFailure !== undefined) {
+              deps.diag.error('committed session durability checkpoint failed', {
+                session: committedSessionId,
+                error: committedDurabilityFailure,
+              })
+            }
             return
           }
-          // ONLY an OBSERVED settle proves the child idle: 'unobservable'
-          // (a rolled Remote binding / missing attachment) is not proof, and
-          // the checkpoint must never claim a confirmed-idle boundary.
-          childQuiesced = aborted === false
         } catch (error) {
           retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
-        }
-        // D2 post-commit durability checkpoint: the child is COMMITTED here and
-        // its quiesce settled, so one explicit `flush` materializes the new
-        // session's durable boundary (an empty `/new` session otherwise has no
-        // events and only close() — which drains but does not guarantee
-        // materialization). Only the COMMIT-time `nextOwner` is flushed — never
-        // a re-read of the current owner (a newer transition may already have
-        // replaced it). A failure does NOT roll the child back or fail the
-        // transition: the failure is recorded and the user is warned after the
-        // surface work below.
-        let committedDurabilityFailure: string | undefined
-        if (childQuiesced) {
-          try {
-            await deps.retirement.flush(nextOwner)
-          } catch (error) {
-            committedDurabilityFailure = safeErrorMessage(error)
-            retired.push(`committed child flush: ${committedDurabilityFailure}`)
-          }
         }
         try {
           await deps.surface.initLiveSession(nextOwner)
