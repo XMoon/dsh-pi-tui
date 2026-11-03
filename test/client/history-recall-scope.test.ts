@@ -1,12 +1,12 @@
 /**
- * The input-recall SCOPE kernel (TSP I-A) — pure-semantics unit tests.
+ * The input-recall SCOPE kernel — pure-semantics unit tests.
  *
  * These exercise ONLY `src/client/history/recall-scope.ts`'s public contract:
  * no terminal, no renderer, no Session and no history file. The point is the
- * boundaries the frozen plan enumerates (A01–A11) — the sessionless-pool
- * adoption, the settlement/append watermark, the run-bounded occurrences and
- * the linear reconcile — because the PiTui adapter and the TSP adapter now
- * share this ONE implementation and neither may re-derive it.
+ * rare boundaries of that contract — the sessionless-pool adoption, the
+ * settlement/append watermark, the run-bounded occurrences and the linear
+ * reconcile — because the PiTui adapter and the TSP adapter now share this ONE
+ * implementation and neither may re-derive it.
  *
  * The PiTui-visible half of the same rules (the editor ↑/↓ stack, the mirror,
  * the real submit entries) stays covered by `test/client/tui-app.test.ts`; the
@@ -36,7 +36,7 @@ function settleToken(
   })
 }
 
-test('A01: a boot reset seeds the cwd recall and leaves the sessionless pool OPEN', () => {
+test('a boot reset with no owner seeds the cwd recall and leaves the sessionless pool open', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['cwd-new', 'cwd-old'])
   assert.deepEqual(scope.snapshot(), ['cwd-new', 'cwd-old'],
@@ -48,7 +48,7 @@ test('A01: a boot reset seeds the cwd recall and leaves the sessionless pool OPE
   assert.deepEqual(scope.snapshot(), ['first prompt', 'cwd-new', 'cwd-old'])
 })
 
-test('A02: the first published owner ADOPTS the pool occurrence and closes on its own reseed', () => {
+test('the first published owner adopts the pool occurrence and closes on its own reseed', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['cwd-old'])
   const poolToken = scope.rememberAccepted('pool prompt')
@@ -68,7 +68,7 @@ test('A02: the first published owner ADOPTS the pool occurrence and closes on it
     'the owner whose hydration committed the reseed closed the scope')
 })
 
-test('A03: a pool entry settled under another identity — written OR skipped — stays out of the new owner', () => {
+test('a pool occurrence settled under another identity stays out of the new owner, written or skipped', () => {
   // A row already written under `undefined` belongs to no Session; a SKIP under
   // `undefined` is equally foreign (cross-Session visibility follows the
   // SETTLEMENT's identity, not whether a row happened to exist).
@@ -89,7 +89,7 @@ test('A03: a pool entry settled under another identity — written OR skipped �
   }
 })
 
-test('A04: a REPLACED owner drops its pending occurrences, settlements and projection', () => {
+test('a replaced owner drops its pending occurrences, its settlements and its projection', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['a row'], 'A')
   scope.begin('B')
@@ -112,7 +112,7 @@ test('A04: a REPLACED owner drops its pending occurrences, settlements and proje
   assert.deepEqual(scope.snapshot(), ['a row'])
 })
 
-test('A05: skipped / written / unsettled occurrences interleave in APPEND order', () => {
+test('skipped, written and unsettled occurrences interleave in append order, not by outcome', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['anchor'], 'A')
   scope.begin('B')
@@ -127,7 +127,7 @@ test('A05: skipped / written / unsettled occurrences interleave in APPEND order'
     'the skipped occurrence sits at its settlement rank, never hoisted ahead of every row')
 })
 
-test('A06: two identical texts are told apart by their tokens, around a tokenless writer', () => {
+test('two identical texts are told apart by their tokens around a tokenless writer', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['anchor'], 'A')
   scope.begin('B')
@@ -145,7 +145,7 @@ test('A06: two identical texts are told apart by their tokens, around a tokenles
     'each occurrence keeps its own rank: the first a stays skipped, the later a owns the appended row')
 })
 
-test('A07: a long run of identical pending input costs O(1) and never evicts an older occurrence', () => {
+test('a long run of identical pending input costs bounded state and never evicts an older occurrence', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['anchor'], 'A')
   scope.begin('B')
@@ -168,7 +168,7 @@ test('A07: a long run of identical pending input costs O(1) and never evicts an 
     'the older distinct occurrence survives a thousand duplicates')
 })
 
-test('A08: the append watermark outlives the bounded settlement queue', () => {
+test('the per-owner append watermark outlives the bounded settlement queue', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['anchor'], 'A')
   scope.begin('B')
@@ -189,7 +189,7 @@ test('A08: the append watermark outlives the bounded settlement queue', () => {
     `the durable facts stay bounded: ${scope.scopeFactCountForTest()}`)
 })
 
-test('A09: a settlement of an occurrence the scope cap dropped neither resurrects nor duplicates', () => {
+test('a settlement of an occurrence the scope cap dropped neither resurrects it nor duplicates a row', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['anchor'], 'A')
   scope.begin('B')
@@ -211,7 +211,7 @@ test('A09: a settlement of an occurrence the scope cap dropped neither resurrect
     `the facts are bounded by the LIVE occurrences: ${scope.scopeFactCountForTest()}`)
 })
 
-test('A10: seed is an APPEND, keeps non-consecutive repeats, and never opens or closes a scope', () => {
+test('seed appends and keeps non-consecutive repeats without opening or closing a scope', () => {
   const boot = createHistoryRecallScope()
   boot.reset(['a', 'b', 'a'])
   assert.deepEqual(boot.snapshot(), ['a', 'b', 'a'],
@@ -234,7 +234,7 @@ test('A10: seed is an APPEND, keeps non-consecutive repeats, and never opens or 
     'the cap keeps the newest 100 in the newest-first order')
 })
 
-test('A11: the reconcile visits a LINEAR number of positions (the O(100) bound)', () => {
+test('the recall reconcile visits a linear number of positions in the scope and the window', () => {
   const scope = createHistoryRecallScope()
   scope.reset(['anchor'], 'A')
   scope.begin('B')

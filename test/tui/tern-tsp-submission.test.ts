@@ -899,9 +899,14 @@ test('the retired source\'s Preparing rows can never revive the Loading state', 
  *  - PRODUCTION: the real renderer, its real composer, its real dispatchKey
  *    route and the real `SurfaceDisplaySeam` object.
  *  - TEST STAND-IN: the scripted pane is not a physical Tern client, and the
- *    bound `submit` handler here stands in for `ApplicationEvents.onSubmit`
- *    (the application composition is pinned separately in
- *    `test/app/tern-tsp-live-mount.test.ts`).
+ *    bound `submit` handler here stands in for `ApplicationEvents.onSubmit`.
+ *    These cases therefore prove the RENDERER half only. Everything past that
+ *    handler is pinned elsewhere, and no case here may be read as covering it:
+ *    the real application binding + the production `InputHistory` writer + the
+ *    real JSONL row + the same-mount settlement are one run in
+ *    `test/app/tern-tsp-live-mount.test.ts`, and the refused `!` line's
+ *    business facts (no row, draft restored) are on the real Direct
+ *    composition in `test/integration/tern-tsp-direct-admission.test.ts`.
  *  - NOT COVERED: the token's effect on the recall SNAPSHOT ORDER is a kernel
  *    fact proven in `test/client/history-recall-scope.test.ts`; TSP shows no
  *    ↑/↓ recall yet, so no case here may be read as a visible-history or
@@ -921,7 +926,7 @@ async function recordEnter(harness: Harness, text: string): Promise<void> {
   harness.input.type('\r')
 }
 
-test('I-A: a real Enter allocates ONE occurrence token and forwards it as the submit third arg', async () => {
+test('a real TSP Enter allocates one occurrence token and forwards it as the submit third arg', async () => {
   const sent: Sent[] = []
   const harness = await mountPane((text, request, scopeToken) => {
     sent.push({ text, gesture: String(request), scopeToken })
@@ -944,7 +949,7 @@ test('I-A: a real Enter allocates ONE occurrence token and forwards it as the su
   }
 })
 
-test('I-A: the history display seams are REAL commits — a reseed closes the scope, a publication reopens it', async () => {
+test('the TSP history display seams are real commits: a reseed closes the scope, a publication reopens it', async () => {
   const sent: Sent[] = []
   const harness = await mountPane((text, _request, scopeToken) => {
     sent.push({ text, gesture: String(_request), scopeToken })
@@ -990,11 +995,14 @@ test('I-A: the history display seams are REAL commits — a reseed closes the sc
   }
 })
 
-test('I-A: the application History REFUSAL records no occurrence and still submits', async () => {
-  // N01: a staged attachment / an in-flight pasted path is refused by the ONE
-  // application `shouldRememberInput` policy. The business submission is the
-  // controller\'s decision and still runs; only the plain-text recall is
-  // declined, so no placeholder text ever becomes a recall row.
+test('a TSP input the History policy refuses still submits and records no occurrence', async () => {
+  // Renderer-local half of N01: whatever the application's ONE
+  // `shouldRememberInput` policy answers, the mount records no occurrence and
+  // STILL hands the draft to the existing submit entry. The policy's real
+  // attachment/paste content is the application owner's (the binding only
+  // projects it — see the `SurfaceRuntime` case in
+  // `test/app/tern-tsp-live-mount.test.ts`); the business admission stays with
+  // the submission controller.
   const sent: Sent[] = []
   let reads = 0
   const harness = await mountPane((text, request, scopeToken) => {
@@ -1013,7 +1021,7 @@ test('I-A: the application History REFUSAL records no occurrence and still submi
   }
 })
 
-test('I-A: a refused paste leaves no occurrence, and a blank handover allocates nothing', async () => {
+test('a refused TSP paste leaves no occurrence, and a blank handover allocates nothing', async () => {
   // N01 (the paste half) + the blank rule: the refusal happens BEFORE the
   // clear, so the draft/caret survive and the recall never saw the input.
   let admit = false
@@ -1045,10 +1053,12 @@ test('I-A: a refused paste leaves no occurrence, and a blank handover allocates 
   }
 })
 
-test('I-A: a `!` line the TSP shell cannot run gets NO occurrence but keeps its original rejection path', async () => {
-  // N02: the submission controller refuses TSP user-shell outright (no row, no
-  // Session, the draft restored). The recall must not accept a line that can
-  // never run — while the BUSINESS admission stays the controller\'s alone.
+test('a TSP `!` line reaches the application submit path but records no occurrence', async () => {
+  // The recall-local half of N02 ONLY: a `!` line allocates no occurrence and
+  // still reaches the existing submit entry. The refused shell's BUSINESS facts
+  // (no JSONL row, draft restored, no Session) are qualified on the real Direct
+  // composition by `test/integration/tern-tsp-direct-admission.test.ts`, not
+  // here — this handler is a recorder, not the submission controller.
   const sent: Sent[] = []
   const harness = await mountPane((text, _request, scopeToken) => {
     sent.push({ text, gesture: String(_request), scopeToken })
@@ -1065,7 +1075,7 @@ test('I-A: a `!` line the TSP shell cannot run gets NO occurrence but keeps its 
   }
 })
 
-test('I-A: keys HELD before the bind allocate nothing; a dispose ends the mount\'s recall', async () => {
+test('keys held before the TSP bind allocate nothing, and a dispose allocates nothing', async () => {
   // N07: the pre-bind window and the disposed mount must never reach the
   // kernel. The held-key replay is fenced by the existing §3.4 gate, and after
   // `dispose()` the renderer routes nothing at all.
@@ -1087,9 +1097,9 @@ test('I-A: keys HELD before the bind allocate nothing; a dispose ends the mount\
   }
 })
 
-test('I-A: a Welcome/hydration/resize commit is NOT a scope event (no false close, no false settle)', async () => {
+test('a Welcome or hydration display commit never closes the open TSP recall scope', async () => {
   // N04: the recall scope may ONLY be opened by the publication seam and
-  // closed by that owner\'s reseed seam. Every OTHER display commit the
+  // closed by that owner's reseed seam. Every OTHER display commit the
   // lifecycle makes must leave the open scope open, so a later Enter still
   // allocates its occurrence.
   const sent: Sent[] = []

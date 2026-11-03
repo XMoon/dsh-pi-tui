@@ -47,6 +47,12 @@ import { resolveTspNativeFooterConfig } from '../../src/domain/footer/tsp-native
 import { createPluginManagerWorkspacePanel } from '../../src/tui/plugin-manager/workspace.ts'
 import { isQuitKey, mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
 import { foldWireNodes, wireNodes } from '../support/tsp-picker-wire.ts'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { createInputHistory } from '../../src/app/surface/input-history.ts'
+import type { SurfaceDisplaySeam } from '../../src/app/surface/display-seam.ts'
+import type { HistoryScopeSettlement } from '../../src/client/history/recall-scope.ts'
+import { historyFilePath, loadHistoryRecords } from '../../src/client/history/store.ts'
+import { createDiag } from '../../src/runtime/process/diagnostics.ts'
 import { waitUntil } from '../support/tsp-runner-harness.ts'
 
 const ENCODER = new TextEncoder()
@@ -231,6 +237,8 @@ interface Harness {
   exitRequested(): boolean
   /** PR-C (TSP-7): the handlers the input bind delivered (undefined pre-bind). */
   boundHandlers(): Parameters<TspRenderer['bindInput']>[0] | undefined
+  /** The mounted TSP renderer itself (undefined before the mount commits). */
+  renderer(): TspRenderer
   dispose(): Promise<void>
 }
 
@@ -413,6 +421,11 @@ async function mountTspHarness(options: {
     exitRequested: () => exitCount > 0,
     /** PR-C (TSP-7): the handlers the input bind delivered (test-only read). */
     boundHandlers: () => boundHandlers,
+    renderer: () => {
+      const mounted = mountedRenderer
+      if (mounted === undefined) throw new Error('no renderer is mounted in this harness')
+      return mounted
+    },
     async dispose() {
       // The ONE renderer-release promise owns the disposal outcome: a failed
       // release must surface to THIS caller (never as an unowned rejection), and
@@ -1826,10 +1839,14 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
  * build the ONE `pendingInputBinding`; `bindRendererInput()` installs it into
  * the real `mountTspRenderer`; a real key on the scripted pane then runs the
  * renderer's own composer → that bound handler → `deps.events` and the real
- * `SurfaceRuntime.display` seam. STAND-IN: the scripted pane is not a physical
- * Tern client, and the routing source is the minimal PR2 harness family (no
- * Host, no DSH Session, no JSONL writer — those are qualified by
- * `test/app/history-persist.test.ts`).
+ * `SurfaceRuntime.display` seam. The last case additionally drives the
+ * PRODUCTION `InputHistory` owner over a real `$DSH_HOME/user-history` file, so
+ * the accepted input → original writer → same-stack settlement → reseed chain is
+ * one run, not a splice.
+ * STAND-IN: the scripted pane is not a physical Tern client; the routing source
+ * is the minimal PR2 harness family (no Host Session); the recorder on the
+ * mounted renderer's own display seam is a one-to-one observer that calls the
+ * UNBOUND original through, so the kernel commit still runs.
  */
 
 /* One real draft + one Enter through the mounted renderer, awaited on the
@@ -1850,7 +1867,7 @@ async function enterDraft(
     () => submitted.length === expected)
 }
 
-test('I-A: the real SurfaceRuntime binding carries the recall occurrence into the ONE application submit entry', async () => {
+test('the SurfaceRuntime input binding carries the recall occurrence into the application submit entry', async () => {
   const submitted: Array<{ text: string; request: string; scopeToken: number | undefined }> = []
   const harness = await mountTspHarness({
     onSubmit: (text, request, scopeToken) => {
@@ -1872,7 +1889,7 @@ test('I-A: the real SurfaceRuntime binding carries the recall occurrence into th
   }
 })
 
-test('I-A: the application display seam — not the renderer — opens and closes the mounted scope', async () => {
+test('the application display seam, not the renderer, opens and closes the mounted recall scope', async () => {
   const submitted: Array<{ text: string; scopeToken: number | undefined }> = []
   const harness = await mountTspHarness({
     onSubmit: (text, _request, scopeToken) => { submitted.push({ text, scopeToken }) },
@@ -1915,7 +1932,7 @@ test('I-A: the application display seam — not the renderer — opens and close
   }
 })
 
-test('I-A: shouldRememberInput is the application policy projected, never a renderer guess', async () => {
+test('the TSP binding projects the application shouldRememberInput policy instead of guessing one', async () => {
   const submitted: Array<{ text: string; scopeToken: number | undefined }> = []
   const harness = await mountTspHarness({
     onSubmit: (text, _request, scopeToken) => { submitted.push({ text, scopeToken }) },
@@ -1940,7 +1957,7 @@ test('I-A: shouldRememberInput is the application policy projected, never a rend
   }
 })
 
-test('I-A: a composition that declares NO History predicate accepts (the PiTui optional shape)', async () => {
+test('a composition that declares no History predicate accepts the input for recall', async () => {
   const harness = await mountTspHarness()
   try {
     harness.surface.bindRendererInput()
@@ -1948,6 +1965,102 @@ test('I-A: a composition that declares NO History predicate accepts (the PiTui o
     assert.ok(bound)
     assert.equal(bound!.shouldRememberInput('anything'), true,
       'an absent application predicate means nothing to refuse — the SAME `?.() === false` shape PiTui uses')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a real TSP Enter reaches the production history owner, writes its row and settles the same mount', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('pi-tui-tsp-recall-chain-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const file = historyFilePath(home, home)
+  const submitted: Array<{ text: string; scopeToken: number | undefined }> = []
+  // The PRODUCTION write owner, composed exactly as `bootstrap` composes it:
+  // the late-bound display seam of THIS surface, the client cwd, the row
+  // owner's cwd. Nothing here reimplements the write policy.
+  const harness = await mountTspHarness({
+    onSubmit: (text, _request, scopeToken) => {
+      submitted.push({ text, scopeToken })
+      historyOwner.persist({
+        text,
+        sessionId: SESSION_ID,
+        hasAttachments: false,
+        timestamp: T0,
+        ...(scopeToken === undefined ? {} : { scopeToken }),
+      })
+    },
+  })
+  const historyOwner = createInputHistory({
+    surface: { get display() { return harness.surface.display } },
+    clientCwd: home,
+    sessionCwd: () => home,
+    diag: createDiag({ stderrLevel: 'off' }),
+    isCleanedUp: () => false,
+  })
+  // One-to-one observation of the settlement ON THE PRODUCTION CONSUMER: the
+  // mounted renderer's own seam member is saved UNBOUND, re-called through the
+  // same instance, and the SAME function identity is restored afterwards, so
+  // the kernel commit below it still runs (the recorder never replaces it).
+  const seam: SurfaceDisplaySeam = harness.renderer().display
+  const originalSettle = seam.settleScopeInput
+  const settlements: HistoryScopeSettlement[] = []
+  seam.settleScopeInput = (settlement) => {
+    settlements.push(settlement)
+    originalSettle.call(seam, settlement)
+  }
+  life.defer(() => { seam.settleScopeInput = originalSettle })
+  try {
+    harness.surface.bindRendererInput()
+
+    await enterDraft(harness, submitted, 'recall chain prompt')
+    assert.equal(typeof submitted[0]!.scopeToken, 'number', 'the accepted Enter is an occurrence')
+    // SINK 1 — the real file: one row, this Session's id, the submitted text.
+    const rows = loadHistoryRecords(file)
+    assert.deepEqual(rows.map(row => row.content), ['recall chain prompt'],
+      'the production owner appended exactly one real row')
+    assert.equal(rows[0]!.sessionId, SESSION_ID, 'the row carries the live session id')
+    // SINK 2 — the same synchronous stack settled THAT occurrence, and the
+    // settlement reached the mounted renderer's own seam (exactly one call).
+    assert.deepEqual(settlements, [{
+      token: submitted[0]!.scopeToken,
+      owner: SESSION_ID,
+      outcome: 'written',
+      text: 'recall chain prompt',
+    }], 'persist settled the occurrence on its own stack, once')
+
+    // N05 at the real writer: a SECOND identical Enter is a distinct occurrence
+    // (the CWD-level dedupe skips its row), so write and skip stay separable.
+    await enterDraft(harness, submitted, 'recall chain prompt')
+    assert.equal(typeof submitted[1]!.scopeToken, 'number')
+    assert.notEqual(submitted[1]!.scopeToken, submitted[0]!.scopeToken,
+      'two identical accepted Enters are two occurrences')
+    assert.equal(settlements.length, 2, 'the second submission settled exactly once more')
+    assert.equal(settlements[1]!.outcome, 'skipped', 'the per-file consecutive dedupe skipped the row')
+    assert.equal(settlements[1]!.token, submitted[1]!.scopeToken,
+      'the skip is attributed to ITS OWN occurrence, not to the text')
+    assert.equal(loadHistoryRecords(file).length, 1, 'a policy skip wrote no row')
+
+    // The owner's hydration reseed, driven with the REAL rows the file now
+    // holds: the kernel commits it and CLOSES the scope. The next Enter is
+    // therefore a plain tokenless write — the witness that the reseed really
+    // changed this mount's state instead of being dropped.
+    const diskRows = loadHistoryRecords(file).map(row => row.content).reverse()
+    harness.surface.display.resetInputHistory(diskRows, SESSION_ID)
+    await enterDraft(harness, submitted, 'after the real reseed')
+    assert.equal(submitted[2]!.scopeToken, undefined,
+      "the real reseed closed this mount's open scope")
+    assert.deepEqual(loadHistoryRecords(file).map(row => row.content),
+      ['recall chain prompt', 'after the real reseed'],
+      'a closed scope still writes through the production owner')
+    assert.equal(settlements.length, 3, 'the tokenless write settled once, with no token')
+    assert.equal(settlements[2]!.token, undefined, 'the tokenless writer reports no occurrence')
   } finally {
     await harness.dispose()
     await harness.session.close()
