@@ -381,8 +381,12 @@ export default async function (h) {
         h.check('all twelve failed providers lay out in the menu column, below the fixed search row',
           lines.length === 12 && nowMenu !== undefined
           && searchBox !== undefined && searchBox.w > 0 && searchBox.h > 0
+          // BELOW the row means below its BOTTOM, not below its top edge: a row
+          // starting at the search field's own y would otherwise satisfy the test
+          // while still overlapping the fixed chrome the claim says it belongs
+          // under. One pixel of slack for the client's fractional line boxes.
           && lines.every(line => line.x >= nowMenu.x - 1 && line.right <= nowMenu.right + 1
-            && line.y >= searchBox.y),
+            && line.y >= searchBox.bottom - 1),
           JSON.stringify({
             menu: nowMenu, search: searchBox, count: lines.length,
             first: lines[0], last: lines.at(-1),
