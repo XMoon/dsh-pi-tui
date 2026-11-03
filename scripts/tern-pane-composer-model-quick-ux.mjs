@@ -361,32 +361,32 @@ export default async function (h) {
         const lines = now.nodes
           .filter(node => String(node.text ?? '').includes('unavailable') || /Provider \d+ · /.test(String(node.text ?? '')))
           .map(node => boxOf(node))
-        h.check('all twelve failed providers are stated, none dropped', lines.length === 12,
-          `${lines.length} failure lines laid out`)
-        // The client reports a scrolled-out row at its LAYOUT position, outside
-        // the scroller's clip, so this lane never claims anything about what the
-        // clip hides. What it does claim, at every size: each line is laid out in
-        // the menu's own column and BELOW the fixed search row — i.e. it belongs
-        // to the body, not to the fixed chrome. Which node is whose CHILD is the
-        // structural claim and the automated wire case owns it (the failure nodes
-        // are children of the scroller node), which the tree here cannot show.
-        const searchBox = boxOf(now.nodes.find(node => String(node.class ?? '')
-          .split(' ').includes('sf-input')) ?? { rect: [0, 0, 0, 0] })
-        h.check('the failed-provider lines lay out in the menu column, below the fixed search row',
-          nowMenu !== undefined
+        // ONE assertion, no vacuous half. The count, the painted fixed search row
+        // and the layout condition are checked together, so "twelve rows exist"
+        // cannot carry a `lines.every(...)` that is trivially true on an empty
+        // list, and a missing search node cannot leave `y >=` comparing against a
+        // zero box.
+        //
+        // The claim is about LAYOUT POSITION only. The client clips at an overflow
+        // ancestor while the tree still reports a scrolled-out row's layout rect,
+        // so a node rect is not a visibility proof
+        // (docs/guides/tern-pane-testing.md §Rules) — this lane therefore makes no
+        // machine claim about how many rows are readable without scrolling; the
+        // captured frame is what a human reads for that. Which node is whose CHILD
+        // is the structural claim, and the automated wire case owns it (the failure
+        // nodes are children of the scroller node).
+        const searchNode = now.nodes.find(node => String(node.class ?? '')
+          .split(' ').includes('sf-input'))
+        const searchBox = searchNode === undefined ? undefined : boxOf(searchNode)
+        h.check('all twelve failed providers lay out in the menu column, below the fixed search row',
+          lines.length === 12 && nowMenu !== undefined
+          && searchBox !== undefined && searchBox.w > 0 && searchBox.h > 0
           && lines.every(line => line.x >= nowMenu.x - 1 && line.right <= nowMenu.right + 1
             && line.y >= searchBox.y),
-          JSON.stringify({ menu: nowMenu, search: searchBox, first: lines[0], last: lines.at(-1) }))
-        // Only a pane that gives the body room makes a visibility promise: there,
-        // a real subset must be readable with no scrolling at all. A short pane
-        // promises no visible count — its promise is the fixed chrome, which the
-        // two checks below are the ones that can actually break.
-        if (height >= 600) {
-          const paintedLines = nowMenu === undefined ? [] : lines.filter(line => inside(nowMenu, line))
-          h.check('a pane with room for the body shows failed providers without scrolling',
-            paintedLines.length >= 3,
-            JSON.stringify({ menu: nowMenu, painted: paintedLines.length, laidOut: lines.length }))
-        }
+          JSON.stringify({
+            menu: nowMenu, search: searchBox, count: lines.length,
+            first: lines[0], last: lines.at(-1),
+          }))
         h.check('the menu keeps its own height budget under a dozen failures',
           nowMenu !== undefined && paneBox !== undefined && nowMenu.h <= paneBox.h + 2,
           JSON.stringify({ menu: nowMenu, pane: paneBox }))
@@ -394,6 +394,10 @@ export default async function (h) {
           paneBox !== undefined && inside(paneBox, boxOf(footerRow(now))),
           JSON.stringify({ footer: boxOf(footerRow(now)), pane: paneBox }))
         h.measure('manyfail-lines', String(lines.length))
+        // Recorded for the reader of the capture, deliberately NOT a check: what
+        // is readable without scrolling is not something a layout rect can prove.
+        h.measure('manyfail-rows-inside-menu', String(nowMenu === undefined ? 0
+          : lines.filter(line => inside(nowMenu, line)).length))
         h.capture(`${testCase}-${width}x${height}-${appearance}-failures`, 'a dozen failed providers inside the anchored menu')
       }
       if (testCase === 'escape') {
@@ -531,6 +535,9 @@ export default async function (h) {
     await h.key('z', 400)
     const typed = h.snapshot()
     h.check('typing edits the menu search only', editorText(typed) === beforeDraft
+      // A positive witness first: the filter really took, so the exclusion below
+      // cannot be satisfied by an empty label list.
+      && menuPainted(typed).includes('zz')
       && menuLabels(typed).every(label => !label.includes('Alpha Two')),
       JSON.stringify({ labels: menuLabels(typed), draft: editorText(typed) }))
     await h.key('Tab', 400)
