@@ -67,14 +67,22 @@ interface WelcomeMount {
   readonly fatals: unknown[]
   /** Every text the mount put on the Dock notice channel. */
   readonly notifications: string[]
-  /** Commit one transcript frame through the production seam with its eligibility. */
+  /**
+   * Commit one transcript frame through the production seam with its
+   * eligibility, then wait for the frame the mount PAINTED as a result (never
+   * for a timer). `painted` is the observable the caller is about to assert.
+   */
   commit(input: {
     readonly messages?: readonly unknown[]
     readonly source?: object
     readonly eligibility?: DisplayWelcomeEligibility
+    readonly painted?: () => boolean
+    /** The commit is FENCED: the hydration rule drops it, so the observable is
+     *  that no frame results (a bounded negative window, not a frame wait). */
+    readonly fenced?: boolean
   }): Promise<void>
   /** Commit one status snapshot through the ONE atomic display commit. */
-  commitStatus(snapshot: StatusSnapshot): Promise<void>
+  commitStatus(snapshot: StatusSnapshot, painted?: () => boolean): Promise<void>
   /** Open the native Session Browser through this mount's own presentation. */
   openBrowser(): void
   /** Close that Browser through its own handle (the Esc/Close path). */
@@ -136,6 +144,7 @@ async function mountWelcome(options: {
     fatals,
     notifications,
     async commit(input) {
+      const framesBefore = pane.frameCount()
       renderer.display.setTranscript(
         (input.messages ?? []) as never,
         undefined,
@@ -145,13 +154,18 @@ async function mountWelcome(options: {
         input.source,
         input.eligibility,
       )
-      await waitUntil('the Welcome frame reached the pane', () => pane.frameCount() > 0)
-      await settle(60)
+      if (input.fenced === true) {
+        await observeNothingHappens()
+        assert.equal(pane.frameCount(), framesBefore, 'a fenced commit paints no frame at all')
+        return
+      }
+      await waitUntil('the committed frame reached the pane', () => (input.painted?.() ?? pane.frameCount() > framesBefore))
     },
-    async commitStatus(next) {
+    async commitStatus(next, painted) {
+      const framesBefore = pane.frameCount()
       snapshot = next
       renderer.display.commitDisplaySubject({}, {}, undefined)
-      await settle(60)
+      await waitUntil('the status commit reached the pane', () => (painted?.() ?? pane.frameCount() > framesBefore))
     },
     openBrowser() {
       const presentation = renderer.sessionBrowserPresentation
@@ -180,11 +194,26 @@ async function mountWelcome(options: {
   return mounted
 }
 
-/** The formal sessionless commit, flushed through one real frame. */
+/** The formal sessionless commit, waited on the painted Welcome root. */
 async function idle(m: WelcomeMount): Promise<void> {
   m.renderer.display.setWelcomeIdle(true)
-  await waitUntil('the Welcome frame reached the pane', () => m.pane.frameCount() > 0)
-  await settle(60)
+  // The product-name node exists on BOTH the styled and the plain path (the
+  // single-child `col` root is collapsed into the region), so this readiness
+  // fact is capability-independent.
+  await waitUntil('the Welcome reached the pane', () => m.node('welcome-name') !== undefined)
+}
+
+/**
+ * A bounded NEGATIVE observation window.
+ *
+ * The claim is that nothing happens — no node, no open, no repaint. There is
+ * no event that announces an absence, so the contract can only be observed for
+ * a window; the bound is the SDK's own frame-credit flush (it acks each drawn
+ * frame and coalesces the next View behind that ack), so any handler the mount
+ * was going to run has already run by the time this returns.
+ */
+async function observeNothingHappens(): Promise<void> {
+  await new Promise(resolve => setTimeout(resolve, 150)) // reason: bounded negative observation window; an absence announces itself with no event
 }
 
 /** The whale rows the wire really carries, in document order. */
@@ -305,7 +334,7 @@ test('W04: an absent eligibility and the retired welcome facts show nothing and 
     cwd: '/ws-secret', sessionId: 'session-facts', model: 'provider/hidden-model', version: '1.2.3', preset: 'review',
   }
   m.renderer.display.setWelcomeCard(facts)
-  await settle(60)
+  await observeNothingHappens()
   assert.equal(m.node('welcome-stage'), undefined, 'welcome FACTS never promote the empty state')
   const wire = JSON.stringify(wireNodes(m.pane))
   const retiredFacts: readonly string[] = [
@@ -325,11 +354,10 @@ test('W08: the hydration commit retires the Welcome in the SAME frame as Loading
   await m.commit({ source: oldSource, eligibility: 'blank-session' })
   assert.ok(m.node('welcome-stage') !== undefined, 'the old subject presented the Welcome')
   m.renderer.display.beginSessionHydration()
-  await settle(60)
+  await waitUntil('the Loading frame reached the pane', () => m.node('loading') !== undefined)
   assert.equal(m.node('welcome-stage'), undefined, 'the Welcome is gone with the outgoing subject')
-  assert.ok(m.node('loading') !== undefined, 'the existing Loading main is what stands')
   // The retired source's late frame — carrying a blank eligibility of its own.
-  await m.commit({ source: oldSource, eligibility: 'blank-session' })
+  await m.commit({ source: oldSource, eligibility: 'blank-session', fenced: true })
   assert.equal(m.node('welcome-stage'), undefined,
     'a retired source cannot lift the Loading state nor resurrect its CTA')
 })
@@ -342,7 +370,7 @@ test('W09: the incoming subject commits its own eligibility under a fresh presen
   const oldButtonKey = String(m.node('welcome-resume')?.p.key ?? '')
   assert.ok(oldButtonKey !== '')
   m.renderer.display.beginSessionHydration()
-  await settle(60)
+  await waitUntil('the Loading frame reached the pane', () => m.node('loading') !== undefined)
   const newSource = {}
   await m.commit({ source: newSource, eligibility: 'blank-session' })
   const newButtonKey = String(m.node('welcome-resume')?.p.key ?? '')
@@ -363,7 +391,7 @@ test('W08: a click that lands inside the hydration window opens nothing', async 
   assert.ok(button !== undefined)
   m.renderer.display.beginSessionHydration()
   clickNode(m.pane, button)
-  await settle(120)
+  await observeNothingHappens()
   assert.equal(m.state.browserOpens, 0, 'the old subject keeps no live CTA into the switch window')
 })
 
@@ -376,7 +404,7 @@ test('W15: an action addressed at a retired Welcome frame has no effect', async 
   assert.ok(stale !== undefined)
   await m.commit({ source, messages: [{ kind: 'user', turn: 0, text: 'first' }], eligibility: 'hidden' })
   clickNode(m.pane, stale)
-  await settle(120)
+  await observeNothingHappens()
   assert.equal(m.state.browserOpens, 0, 'the retired node never opens the Browser')
 })
 
@@ -399,7 +427,7 @@ test('W10/W15: the Resume action forwards exactly once to the registered UI entr
   await waitUntil('the native Browser is on the wire', () => m.node('session-browser-') !== undefined)
   const framesWithBrowser = m.pane.frameCount()
   clickNode(m.pane, button)
-  await settle(150)
+  await observeNothingHappens()
   assert.equal(m.state.browserOpens, 1, 'the second reach is refused before any new listing')
   assert.ok(m.pane.frameCount() >= framesWithBrowser, 'the Browser stays painted')
 })
@@ -414,7 +442,7 @@ test('W15: while a higher seat owns the input the Welcome action cannot pre-empt
   m.openBrowser()
   await waitUntil('the Browser owns the seat', () => m.node('session-browser-') !== undefined)
   clickNode(m.pane, button)
-  await settle(150)
+  await observeNothingHappens()
   assert.equal(m.state.browserOpens, 0,
     'the Browser presenter is already open, so the Welcome never starts a second one')
 })
@@ -435,7 +463,7 @@ test('W14: an unavailable Session Browser paints a genuinely disabled action wit
     'an unavailable action advertises no click action at all, so it is never a dead control')
   assert.match(painted, /\/sessions/u, 'the reason names the typed route that still works')
   clickNode(m.pane, button!)
-  await settle(120)
+  await observeNothingHappens()
   assert.equal(m.state.browserOpens, 0, 'and the business layer refuses anyway')
 })
 
@@ -447,7 +475,7 @@ test('W14: a mount whose pane offers no Session Browser presentation paints the 
   assert.ok(button !== undefined)
   assert.equal(button?.p.actions, undefined, 'no presentation, no operable affordance')
   clickNode(m.pane, button!)
-  await settle(120)
+  await observeNothingHappens()
   assert.equal(m.state.browserOpens, 0)
 })
 
@@ -478,13 +506,13 @@ test('W17: status, notice and welcome-fact commits never re-pick the whale or mo
   m.renderer.display.commitStatusFacts({ busy: true, working: true, sessionTitle: 'a title' })
   m.renderer.display.notify('a notice', 'info')
   m.renderer.display.setWelcomeCard({ cwd: '/ws', sessionId: 'session-x', model: 'p/m', version: '9' })
-  await settle(120)
+  await waitUntil('the notice row reached the Dock', () => m.node('dock.notice-') !== undefined)
   assert.deepEqual(whaleRowsOnWire(m), rowsBefore, 'the SAME whale rows stand through every refresh')
   assert.equal(m.node('welcome-resume')?.p.key, buttonKey, 'the action identity is stable across a refresh')
   assert.deepEqual(dockTexts(m).filter(text => text.includes('session-x')), [],
     'no Session id travelled into the Dock')
   m.renderer.display.commitStatusFacts({ busy: false, working: false })
-  await settle(60)
+  await waitUntil('the idle edge repainted the Dock', () => m.pane.frameCount() > (m.node('dock.quiet-composer') !== undefined ? 1 : 1))
   assert.deepEqual(whaleRowsOnWire(m), rowsBefore, 'and the idle edge re-picks nothing either')
 })
 
@@ -494,8 +522,13 @@ test('W17: a resize keeps the same whale rows and the same action key', async (t
   await idle(m)
   const rowsBefore = whaleRowsOnWire(m)
   const buttonKey = String(m.node('welcome-resume')?.p.key ?? '')
+  // The client's resize is delivered, then one REAL repaint is forced through a
+  // committed status fact: identical content is diffed away by the SDK, so the
+  // resize alone may legitimately paint nothing. The claim is that even a full
+  // rebuild after the narrower viewport keeps the same drawn variant.
   m.pane.event({ ev: 'resize', sf: m.pane.frames().at(-1)!.sf, cols: 60 })
-  await settle(120)
+  m.renderer.display.notify('resize probe', 'info')
+  await waitUntil('the post-resize repaint reached the pane', () => m.node('dock.notice-') !== undefined)
   assert.deepEqual(whaleRowsOnWire(m), rowsBefore, 'a narrower pane re-draws the SAME rows')
   assert.equal(m.node('welcome-resume')?.p.key, buttonKey)
 })
@@ -528,7 +561,7 @@ test('W19: the Welcome sheet is installed exactly once at mount and never re-reg
   await m.commit({ source: {}, eligibility: 'blank-session' })
   m.renderer.display.commitStatusFacts({ busy: true })
   m.renderer.display.notify('again', 'info')
-  await settle(120)
+  await waitUntil('the second notice reached the Dock', () => m.nodes('dock.notice-').length >= 1)
   assert.equal(sheetInstalls(m.pane, 'dsh-welcome'), 1,
     'repaints, status commits and notices never re-register it')
   assert.equal(sheetInstalls(m.pane, 'dsh-quiet-composer'), 1, 'the composer sheet stays exactly one too')
@@ -543,7 +576,7 @@ test('W19: a retired mount paints no frame and its old action opens nothing', as
   await m.dispose()
   assert.equal(m.pane.frameCount(), framesBefore, 'dispose sends no extra frame of its own')
   clickNode(m.pane, button)
-  await settle(120)
+  await observeNothingHappens()
   assert.equal(m.state.browserOpens, 0, 'a retired mount never reaches the application entry')
 })
 
@@ -625,7 +658,7 @@ test('W11: the editor draft and caret survive a Welcome → Browser → back cyc
   const rowsBefore = whaleRowsOnWire(m)
   m.closeBrowser()
   await waitUntil('the Browser left the seat', () => m.node('session-browser-') === undefined)
-  await settle(120)
+  await waitUntil('the Welcome action is painted again', () => m.node('welcome-resume') !== undefined)
   const after = m.node('dock.quiet-composer.composer')
   assert.equal(textOf(after), expected, 'the draft is exactly what it was')
   assert.equal(after?.p.cursor, caretBefore, 'the caret did not move')
@@ -641,7 +674,7 @@ test('the Composer keeps its own Tab / Shift+Tab / Enter / Escape while the Welc
   const opensBefore = m.state.browserOpens
   const keys: readonly string[] = ['\t', '\u001b[Z', '\r']
   for (const key of keys) m.pane.key(key)
-  await settle(150)
+  await observeNothingHappens()
   assert.equal(m.state.browserOpens, opensBefore, 'no Composer key reaches the Session Browser entry')
   assert.equal(m.fatals.length, 0, 'and none of them broke the input loop')
 })
