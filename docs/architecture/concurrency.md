@@ -633,15 +633,32 @@ flush (the same fact the cancel phase reads to choose the shutdown cancel).
 The resolved regime also decides which phase owns durability for the report —
 `flush` while the live-Host regime held, otherwise `dispose`.
 
-A successful ordinary transition also checkpoints the COMMITTED child: after
-the post-commit child quiesce confirms idle and before the new owner's
-surface init, ONE `retirement.flush(nextOwner)` materializes the new
-session's durable boundary (an empty `/new` session has no events, so only
-an explicit flush guarantees it becomes resumable). The checkpoint uses the
-commit-time owner only — never a re-read — and a failure never rolls the
-child back or misreports the switch: the surface warns
-"session committed, durability checkpoint failed" with the original error.
-DSH `AgentHandle.dispose` remains the sole final close/drain authority; the
+A successful ordinary transition also checkpoints the COMMITTED child:
+IMMEDIATELY after the synchronous commit, BEFORE the abort-aware child
+quiesce and any surface work, ONE `retirement.flush(nextOwner)` materializes
+the new session's durable boundary (an empty `/new` session has no events,
+so only an explicit flush makes it resumable). That position is part of the
+contract, not an implementation detail: a shutdown closes the handle
+concurrently with the transaction, and DSH's close drains what was appended
+but does NOT materialize a never-appended session — a checkpoint parked
+behind the quiesce await can therefore be stranded by the very exit it must
+survive. The checkpoint uses the commit-time owner only — never a re-read —
+and a failure never rolls the child back or misreports the switch: the
+surface warns "session committed, durability checkpoint failed" with the
+original error (and the diagnostic channel records it when the surface is
+already disposed).
+
+A flush can also be OVERTAKEN while it is in flight: DSH re-checks the
+handle's closing state inside the flush's own turn, so a `close()` that
+starts after the flush was issued refuses it. For an already-materialized
+session, that close drains the buffered events durably — the backend applies
+the same rule to its own flush sweep — so the settlement is classified by
+the authoritative lifecycle fact: once the lifecycle aborted, the explicit
+flush is no longer a live-Host durability failure and the shutdown close/
+dispose owns durability (and reports a failed close). The classification is
+never derived from error text. A never-materialized session is the
+exception the checkpoint placement above exists for. DSH
+`AgentHandle.dispose` remains the sole final close/drain authority; the
 pi-tui flush only establishes the recoverable boundary while the Host is
 live. Root shutdown never waits for a full retirement before `appExit`.
 

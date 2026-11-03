@@ -6,6 +6,8 @@
  * every reachable shutdown and transition timing. */
 
 import assert from 'node:assert/strict'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import test from 'node:test'
 import { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-subagent'
@@ -1419,15 +1421,21 @@ test('a transition retiring an old owner AFTER the lifecycle aborted does NOT fl
   // Bounded microtask drain (no wall-clock wait): the appExit disposal settles.
   await settle()
   const events = harness.retirementEvents
-  assert.deepEqual(flushCalls, ['late-transition-flush-old'],
-    `only the pre-commit old-owner flush may run; the aborted-lifecycle transition retirement must add none: ${JSON.stringify(flushCalls)}`)
+  const child = harness.createdSessions.at(-1)
+  assert.ok(child, 'the non-cooperative create still commits a child')
+  // The pre-commit old-owner flush, plus the COMMITTED CHILD's own checkpoint
+  // (which must be attempted even under an aborted lifecycle, because close
+  // cannot materialize an empty session). The OLD owner's retirement flush is
+  // the one that must never happen.
+  assert.deepEqual(flushCalls, ['late-transition-flush-old', `${child.id}:closing`],
+    `the aborted-lifecycle transition retirement must not flush the old owner: ${JSON.stringify(flushCalls)}`)
   assert.equal(events.filter(event => event === 'dispose:late-transition-flush-old').length, 1,
     'the replaced owner must still be disposed exactly once')
   assert.ok(!stderrWrites.some(write => write.includes('session flush failed during retirement')),
     `a skipped flush must never surface a flush failure: ${JSON.stringify(stderrWrites)}`)
 })
 
-test('the post-commit checkpoint is skipped when the committed child quiesce REJECTS (never a checkpoint without confirmed idle)', async (t) => {
+test('the committed child is checkpointed even when its quiesce REJECTS (the artifact must not depend on quiescence)', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-retire-quiesce-reject-')
   const previousHome = process.env.DSH_HOME
@@ -1448,10 +1456,11 @@ test('the post-commit checkpoint is skipped when the committed child quiesce REJ
     events: sessionEvents('old answer'),
   })
   const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
-  // The COMMITTED CHILD's whenIdle REJECTS (a real Agent failure): no idle was
-  // proven, so no checkpoint may run. The reject is injected on the CREATED
-  // handle (the shared fake's whenIdleGate swallows its gate rejection), so it
-  // reaches the production whenIdleOrAbort path unchanged.
+  // The COMMITTED CHILD's whenIdle REJECTS (a real Agent failure). The
+  // checkpoint is a MATERIALIZATION boundary issued at the commit, so it must
+  // have already run: a shutdown can close the handle and DSH's close does not
+  // materialize an empty session, which is why the artifact cannot wait for a
+  // quiescence that may never come.
   const agents = harness.agents as {
     create: (options: { sessionId: unknown }) => Promise<{ agent: { whenIdle: () => Promise<void> } }>
   }
@@ -1470,9 +1479,10 @@ test('the post-commit checkpoint is skipped when the committed child quiesce REJ
   const created = harness.createdSessions.at(-1)
   assert.ok(created, '/new must create a child session')
   const events = harness.retirementEvents
-  assert.equal(events.filter(event => event === `flush:${created.id}`).length, 0,
-    `a rejected child quiesce must not run the post-commit checkpoint: ${JSON.stringify(events)}`)
-  // The committed child is still retired exactly once by the teardown.
+  assert.equal(events.filter(event => event === `flush:${created.id}`).length, 1,
+    `the committed child must be checkpointed exactly once, before any quiesce: ${JSON.stringify(events)}`)
+  // The rejected quiesce is contained: the child still initializes and is
+  // retired exactly once on teardown.
   await fiber.dispose()
   fiber = undefined
   assert.equal(events.filter(event => event === `dispose:${created.id}`).length, 1,
@@ -1564,12 +1574,166 @@ test('an exit beginning DURING the old-owner retirement (mode already resolved) 
   await transition
   // Bounded microtask drain (no wall-clock wait): the appExit disposal settles.
   await settle()
-  // Only the pre-commit old-owner flush ran; the retirement must not add a
-  // second one against the now-closing handle.
-  assert.deepEqual(flushCalls, ['midflight-abort-old'],
-    `no flush may run after the mid-flight exit began: ${JSON.stringify(flushCalls)}`)
+  // The pre-commit old-owner flush, plus the committed child's own checkpoint.
+  // Neither targets the now-closing OLD handle.
+  const child = harness.createdSessions.at(-1)
+  assert.ok(child, 'the transition commits a child')
+  assert.deepEqual(flushCalls, ['midflight-abort-old', `${child.id}:closing`],
+    `no flush of the closing old handle may run after the mid-flight exit: ${JSON.stringify(flushCalls)}`)
   assert.equal(harness.retirementEvents.filter(event => event === 'dispose:midflight-abort-old').length, 1,
     'the old owner must still be disposed exactly once')
   assert.ok(!stderrWrites.some(write => write.includes('session flush failed during retirement')),
     `a skipped flush must never surface a flush failure: ${JSON.stringify(stderrWrites)}`)
+})
+
+test('an in-flight PRE-COMMIT flush overtaken by the shutdown is classified as shutdown-owned, not a durability failure', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-precommit-flush-overtaken-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'precommit-overtaken-old',
+    header: { id: 'precommit-overtaken-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // Park the PRE-COMMIT old-owner flush (the first flush of this session) and
+  // make the shutdown overtake it while it is in flight: the real backend
+  // refuses a flush that a concurrent close overtook.
+  let flushStarted!: () => void
+  const flushStartedPromise = new Promise<void>(resolve => { flushStarted = resolve })
+  let releaseFlush!: () => void
+  const flushGate = new Promise<void>(resolve => { releaseFlush = resolve })
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  let handleClosing = false
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    if ((session as { id?: string } | undefined)?.id === 'precommit-overtaken-old') {
+      flushStarted()
+      await flushGate
+      if (handleClosing) throw new Error('session "precommit-overtaken-old": flush on a closed handle')
+    }
+    await flushOriginal(session)
+  }
+  const stderrWrites: string[] = []
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: unknown) => {
+    stderrWrites.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  life.defer(() => { process.stderr.write = originalWrite })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
+    handleClosing = true
+    void fiber?.dispose()
+  })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await flushStartedPromise
+  // Exit while the flush is in flight; then let it settle against the closing
+  // handle.
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded microtask drain: the exit latch reaches appExit while the flush parks.
+  await settle()
+  releaseFlush()
+  const result = await transition as { kind: string; text?: string }
+  await settle()
+  // The takeover must NOT be reported as a transition failure carrying the
+  // closed-handle error: DSH's close drains the materialized old session
+  // durably, so the shutdown retirement owns that settlement.
+  assert.ok(!(result.text ?? '').includes('closed handle'),
+    `a shutdown-overtaken pre-commit flush must not fail the transition: ${JSON.stringify(result)}`)
+  assert.ok(!stderrWrites.some(write => write.includes('the latest events may not be persisted')),
+    `a shutdown-overtaken flush must not claim a durability loss: ${JSON.stringify(stderrWrites)}`)
+  // The supersede is recorded as a diagnostic, not as a user-visible failure.
+  const preCommitDiag = readdirSync(join(home, 'logs'))
+    .filter(name => name.startsWith('pi-tui-') && name.endsWith('.log'))
+    .map(name => readFileSync(join(home, 'logs', name), 'utf8'))
+    .join('\n')
+  assert.ok(preCommitDiag.includes('old-owner flush superseded by shutdown'),
+    `the takeover must be recorded: ${JSON.stringify(preCommitDiag.slice(-400))}`)
+  await fiber.dispose()
+  fiber = undefined
+})
+
+test('the committed child is checkpointed BEFORE the abort-aware child quiesce (a shutdown cannot strand an empty session)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-checkpoint-ordering-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'checkpoint-order-old',
+    header: { id: 'checkpoint-order-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // Park the COMMITTED CHILD's abort-aware quiesce: the checkpoint must already
+  // have run by then, because DSH's close cannot materialize an empty session
+  // and the exit closes the handle concurrently with this transaction.
+  let childQuiesceStarted!: () => void
+  const childQuiesce = new Promise<void>(resolve => { childQuiesceStarted = resolve })
+  let releaseChildQuiesce!: () => void
+  const childQuiesceGate = new Promise<void>(resolve => { releaseChildQuiesce = resolve })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents, async (sessionId) => {
+    if (sessionId !== 'checkpoint-order-old') {
+      childQuiesceStarted()
+      await childQuiesceGate
+    }
+  })
+  const childCheckpoints: string[] = []
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    const id = (session as { id?: string } | undefined)?.id
+    if (id !== undefined && id !== 'checkpoint-order-old') childCheckpoints.push(id)
+    await flushOriginal(session)
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => { void fiber?.dispose() })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await childQuiesce
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, '/new must commit its child before the quiesce')
+  // THE ORDERING CONTRACT: one checkpoint of the committed child, already done
+  // while its quiesce is still in flight.
+  assert.deepEqual(childCheckpoints, [created.id],
+    `the committed child must be checkpointed before the long quiesce await: ${JSON.stringify(childCheckpoints)}`)
+  // Now exit while the quiesce is parked: the artifact already exists, so the
+  // shutdown cannot strand the session.
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded microtask drain: the exit latch reaches appExit before the release.
+  await settle()
+  releaseChildQuiesce()
+  await transition
+  await settle()
+  assert.equal(harness.retirementEvents.filter(event => event === `dispose:${created.id}`).length, 1,
+    'the committed child must still be retired exactly once')
+  await fiber.dispose()
+  fiber = undefined
 })

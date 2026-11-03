@@ -209,19 +209,38 @@ function sha256OfText(text) {
   return createHash('sha256').update(text).digest('hex')
 }
 
-function writeLauncher(path, invocation, env) {
+function writeLauncher(path, invocation, env, exitCodeFile) {
   const lines = [
     '#!/bin/sh',
-    'set -eu',
+    // NOTE: no `set -e` — a non-zero DSH exit must be CAPTURED, not shortcut.
+    'set -u',
     `export HOME=${shellQuote(env.HOME)}`,
     `export DSH_HOME=${shellQuote(env.DSH_HOME)}`,
     'export TERM="${TERM:-xterm-256color}"',
     // --profile is a LAUNCHER flag: it must come FIRST, because everything
     // after the first unrecognized token is handed to the booted app verbatim.
-    `exec ${invocation.map(shellQuote).join(' ')}`,
+    `${invocation.map(shellQuote).join(' ')}`,
+    'code=$?',
+    // The tmux/script layer cannot report the TUI's own status back to us, so
+    // the launcher records it: a session disappears the same way for a clean
+    // exit and for a crash, and the smoke must never treat "the pane is gone"
+    // as success.
+    `printf '%s' "$code" > ${shellQuote(exitCodeFile)}`,
+    'exit "$code"',
     '',
   ]
   writeFileSync(path, lines.join('\n'), { encoding: 'utf8', mode: 0o700 })
+}
+
+/** Require the recorded DSH process status to be a clean zero. */
+function assertCleanDshExit(exitCodeText, label) {
+  const code = String(exitCodeText).trim()
+  if (!/^\d+$/u.test(code)) {
+    fail(`${label.toUpperCase()}_EXIT_CODE_FAILURE`, `${label}: the DSH exit status was not recorded (got ${JSON.stringify(code)})`)
+  }
+  if (Number(code) !== 0) {
+    fail(`${label.toUpperCase()}_EXIT_CODE_FAILURE`, `${label}: the DSH process exited with status ${code}`)
+  }
 }
 
 /** One driven TUI run in its own tmux session; `steps` receives the driver. */
@@ -230,7 +249,7 @@ async function driveTuiRun(label, options) {
   // work dir (`-S <path>`, an explicit socket path; `-L` would take a NAME):
   // the smoke must never attach to, collide with, or kill a session on the
   // developer's default tmux server.
-  const { socket, session, launcher, tuiLog, env } = options
+  const { socket, session, launcher, tuiLog, exitCodeFile, env } = options
   const tmuxArgs = (args) => run('tmux', ['-S', socket, ...args], { env })
   const started = tmuxArgs([
     'new-session', '-d', '-s', session, '-x', '100', '-y', '30',
@@ -250,6 +269,9 @@ async function driveTuiRun(label, options) {
     await options.steps(tmux)
     // The process exit is the barrier that all log producers stopped.
     await waitUntil(`${label} exit`, STEP_TIMEOUT_MS, () => !tmux.has(), `${label.toUpperCase()}_EXIT_FAILURE`)
+    // "The pane is gone" is not success: require the recorded DSH status.
+    const exitCodeText = existsSync(exitCodeFile) ? readFileSync(exitCodeFile, 'utf8') : ''
+    assertCleanDshExit(exitCodeText, label)
     return readFileSync(tuiLog, 'utf8')
   } finally {
     tmux.stop()
@@ -277,35 +299,24 @@ function committedSessionIdsFromLog(logText) {
 }
 
 /**
- * Every line of a profile user patch layer that is NOT the shipped allowlist:
- * an empty list, or the candidate's own `tui-app` row (`- id: tui-app`, the
- * candidate `name:`, `config:` and its nested keys). A positive allowlist is
- * what makes an `insert`/`disabled`/`override`/unknown row fail instead of
- * relying on an enumeration of patch operation names.
+ * The profile user patch layer must be EXACTLY the empty list.
+ *
+ * This check runs on the freshly generated profile BEFORE the first TUI boot,
+ * so the only acceptable layer is `[]` (comments and blank lines allowed).
+ * Any row — insert, disabled, override (top-level or nested), a foreign or even
+ * the candidate's own config row, an unknown key — proves something wrote a
+ * user patch, which is outside the smoke's declared composition. Comparing the
+ * normalized content against the expected `[]` is stricter than enumerating
+ * patch operations, and it does not claim to tolerate shapes it never saw.
  * @param text - the raw cordis.patch.yml content.
- * @returns the offending lines (empty = the layer is clean).
+ * @returns the offending lines (empty = the layer is the expected empty list).
  */
 function userPatchViolations(text) {
   const lines = text
     .split(/\r?\n/u)
     .map(line => line.trim())
     .filter(line => line !== '' && !line.startsWith('#'))
-  const violations = []
-  for (const line of lines) {
-    if (line === '[]') continue
-    if (line === '- id: tui-app') continue
-    if (/^name:\s*["']@xmoon76\/dsh-pi-tui["']$/u.test(line)) continue
-    // A nested config key/value of the allowed row, or the row's own config map.
-    if (/^config:$/u.test(line)) continue
-    if (line.startsWith('- ')) { violations.push(line); continue }
-    // Any other line is either a nested config value of the allowed row or a
-    // patch operation/unknown key. The operations are rejected BY NAME here so
-    // an indented `override:` cannot hide inside the allowed row either.
-    if (/^(?:insert|insertAfter|insertBefore|disabled|override|patch|group|intercept|isolate|name|id):/u.test(line)) {
-      violations.push(line)
-    }
-  }
-  return violations
+  return lines.filter(line => line !== '[]')
 }
 
 /** Find the durable JSONL artifact of one session under $DSH_HOME/sessions.
@@ -411,10 +422,11 @@ async function main() {
         fail('INFRA_INSTALL_FAILURE', `run ${name} must not pass a --patch overlay: ${JSON.stringify(extraArgs)}`)
       }
       const launcher = join(workDir, `run-${name}.sh`)
+      const exitCodeFile = join(workDir, `${name}.exit-code`)
       // --profile first (a launcher flag); extra args (like --session <id>)
       // follow as the booted app's inner arguments.
-      writeLauncher(launcher, [...dsh, '--profile', 'pi-tui', ...extraArgs], env)
-      return { launcher, tuiLog: join(workDir, `${name}.tui.log`) }
+      writeLauncher(launcher, [...dsh, '--profile', 'pi-tui', ...extraArgs], env, exitCodeFile)
+      return { launcher, tuiLog: join(workDir, `${name}.tui.log`), exitCodeFile }
     }
 
     // --- Scenario A: start → /new → /exit -------------------------------
@@ -426,6 +438,7 @@ async function main() {
         session: `${sessionPrefix}-a`,
         launcher: runA.launcher,
         tuiLog: runA.tuiLog,
+        exitCodeFile: runA.exitCodeFile,
         env,
         steps: async (tmux) => {
           tmux.send('/new')
@@ -463,6 +476,7 @@ async function main() {
         session: `${sessionPrefix}-b`,
         launcher: runB.launcher,
         tuiLog: runB.tuiLog,
+        exitCodeFile: runB.exitCodeFile,
         env,
         steps: async (tmux) => {
           await waitUntil('resumed session id visible', STEP_TIMEOUT_MS, () => {
@@ -490,20 +504,23 @@ async function main() {
         session: `${sessionPrefix}-c`,
         launcher: runC.launcher,
         tuiLog: runC.tuiLog,
+        exitCodeFile: runC.exitCodeFile,
         env,
         steps: async (tmux) => {
-          tmux.send('/new')
-          tmux.send('Enter')
-          await waitUntil('first /new committed', STEP_TIMEOUT_MS, () => tmux.capture().match(/session\s+session-[0-9a-f-]{8,}/u) !== null, 'C_NEW_FAILURE')
-          tmux.send('/new')
-          tmux.send('Enter')
-          // Wait until the visible session id CHANGES (the second fresh
-          // session was committed and repainted the status card).
           const currentSessionId = (pane) => stripAnsi(pane).match(/session\s+(session-[0-9a-f-]{8,})/u)?.[1]
+          tmux.send('/new')
+          tmux.send('Enter')
+          await waitUntil('first /new committed', STEP_TIMEOUT_MS, () => currentSessionId(tmux.capture()) !== undefined, 'C_NEW_FAILURE')
+          // The FIRST id is captured on the committed frame itself, BEFORE the
+          // second command is sent: reading it afterwards could observe the
+          // second /new already committed and then wait forever for a change.
           const first = currentSessionId(tmux.capture())
+          if (first === undefined) fail('C_NEW_FAILURE', 'the first /new did not expose its committed session id')
+          tmux.send('/new')
+          tmux.send('Enter')
           await waitUntil('second /new committed', STEP_TIMEOUT_MS, () => {
             const next = currentSessionId(tmux.capture())
-            return first !== undefined && next !== undefined && next !== first
+            return next !== undefined && next !== first
           }, 'C_NEW_FAILURE')
           tmux.send('/exit')
           tmux.send('Enter')
@@ -538,6 +555,7 @@ async function main() {
         session: `${sessionPrefix}-d`,
         launcher: runD.launcher,
         tuiLog: runD.tuiLog,
+        exitCodeFile: runD.exitCodeFile,
         env,
         steps: async (tmux) => { tmux.send('/exit'); tmux.send('Enter') },
       })
@@ -561,7 +579,7 @@ async function main() {
   }
 }
 
-export { assertProfileComposition, countSessionArtifacts, EXPECTED_BUNDLES, userPatchViolations }
+export { assertCleanDshExit, assertProfileComposition, countSessionArtifacts, EXPECTED_BUNDLES, userPatchViolations, writeLauncher }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
   main().catch(error => {
