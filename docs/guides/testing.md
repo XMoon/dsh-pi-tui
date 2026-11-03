@@ -300,6 +300,50 @@ Host/Client split-process development work must run it manually against the
 actual candidate tarball and record the package SHA, DSH version, command, and
 PASS/FAIL (or `NOT_RUN`).
 
+### The split-process qualification lanes
+
+```sh
+pnpm smoke:split-process -- <candidate.tgz>
+pnpm smoke:split-upgrade -- --old <old.tgz> --new <new.tgz> [--evidence <file>]
+```
+
+Both lanes install packaged payloads, start a real Host and a real Client over
+a PTY, and prove the same contracts, so they share the same input rule. The
+DSH runtime of a run is the exact `@deepseek-ai/dsh-agent` development pin of
+this checkout, and every artifact must declare that SAME pin in its own
+`package/package.json` — not a range, not a floor, and not the version a file
+name suggests. The production Client refuses a replacement target pinned to a
+different runtime, so an artifact built against another DSH version can never
+produce the behaviour these lanes assert. Such a pairing stops before any work
+root, install or process exists and is reported as `INPUT_UNQUALIFIED` with
+the role, both exact versions and the reason: it is an invalid test pairing,
+not a product regression, and the fix is to rebuild the artifact against the
+current pin.
+
+A default run is diagnosable without any environment variable. Both lanes
+announce the qualified artifact identity at startup and one checkpoint per
+phase on stderr; on failure they print a bounded summary and write exactly one
+default-retained artifact — a `failure.json` in a fresh private directory under
+the OS temp root (directory `0700`, file `0600`), never inside the work root
+the lane deletes during cleanup. The report is a whitelist projection of the
+lane's own facts (lane, category, checkpoint, wait label, elapsed, target pin,
+artifact name/version/SHA, expected and observed notice, recent checkpoints,
+per-process exit and official event names). Terminal bytes, captured stderr,
+record contents, session text, cookies, tokens and connect URLs are not in
+that projection and must never be added to it. A passing run writes no report.
+
+`SPLIT_PROCESS_SMOKE_KEEP=1` and `SPLIT_UPGRADE_KEEP=1` preserve the isolated
+work root for forensics. That directory holds the real profile, session logs
+and private telemetry of the run, so it stays local: never attach or upload
+it as evidence. `--evidence` writes the lane's JSON result — the PASS document
+keeps its schema, and a failure writes the same safe failure projection
+instead — and its path is outside the work root.
+
+Record a lane result exactly as the lane reports it: the candidate and old
+package SHA256 values, the exact DSH pin, the command, and the per-lane
+PASS/FAIL with the checkpoint a failure reached. Synthetic manifest-only
+tarballs are input-preflight fixtures; they never qualify a pairing.
+
 A single file:
 
 ```sh
