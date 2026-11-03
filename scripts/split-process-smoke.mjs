@@ -527,24 +527,30 @@ export class SurfaceEntryProcess {
     })
   }
 
+  /**
+   * The COMPOSER box text of one viewport.
+   *
+   * The input box is drawn between its top and bottom rule; the SECOND-TO-LAST
+   * rule is used as the box top so the footer rule below it is not mistaken for
+   * the box. Returns `undefined` when the frame has no box.
+   */
+  composerOf(viewport) {
+    const separators = []
+    for (let index = 0; index < viewport.length; index += 1) {
+      if (/^─+$/u.test(viewport[index].trim())) separators.push(index)
+    }
+    if (separators.length === 0) return undefined
+    const top = separators.length >= 2 ? separators[separators.length - 2] : separators[separators.length - 1]
+    const bottom = separators.length >= 2 ? separators[separators.length - 1] : viewport.length
+    return viewport.slice(top + 1, bottom).join('\n')
+  }
+
   /** Wait until the COMPOSER line (after the last separator) holds the text. */
   async waitForComposerDraft(text, timeoutMs = 30_000) {
     const started = Date.now()
     while (Date.now() - started < timeoutMs) {
-      const viewport = await this.viewport()
-      const separators = []
-      for (let index = 0; index < viewport.length; index += 1) {
-        if (/^─+$/u.test(viewport[index].trim())) separators.push(index)
-      }
-      if (separators.length > 0) {
-        // The input box is drawn between its top and bottom rule; use the
-        // SECOND-TO-LAST rule so the footer rule below it is not mistaken for
-        // the box top.
-        const top = separators.length >= 2 ? separators[separators.length - 2] : separators[separators.length - 1]
-        const bottom = separators.length >= 2 ? separators[separators.length - 1] : viewport.length
-        const composer = viewport.slice(top + 1, bottom).join('\n')
-        if (composer.includes('❯') && composer.includes(text)) return
-      }
+      const composer = this.composerOf(await this.viewport())
+      if (composer !== undefined && composer.includes('❯') && composer.includes(text)) return
       if (this.exited) {
         const unread = this.finalRecordRead('composer draft')
         throw unread ?? new SplitSmokeWaitError('PROCESS_EXITED', {
@@ -561,6 +567,34 @@ export class SurfaceEntryProcess {
     throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
       code: 'COMPOSER_WAIT_TIMEOUT',
       waitLabel: 'composer draft',
+      processRole: this.role,
+      elapsedMs: Date.now() - started,
+      process: this,
+    })
+  }
+
+  /** The current composer text, or `undefined` when no box is painted. */
+  async composerText() {
+    return this.composerOf(await this.viewport())
+  }
+
+  /**
+   * Clear a restored draft through the REAL editor: one backspace per character,
+   * then wait until the text is gone from the composer. Used where a case must
+   * send a SECOND independent prompt on the same process.
+   */
+  async clearComposerDraft(text, timeoutMs = 30_000) {
+    const started = Date.now()
+    if (text !== '') this.send('\x7f'.repeat(text.length))
+    while (Date.now() - started < timeoutMs) {
+      const composer = await this.composerText()
+      if (composer !== undefined && !composer.includes(text)) return
+      await sleep(50)
+    }
+    const unread = this.finalRecordRead('composer cleared')
+    throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
+      code: 'COMPOSER_CLEAR_TIMEOUT',
+      waitLabel: 'composer cleared',
       processRole: this.role,
       elapsedMs: Date.now() - started,
       process: this,
@@ -2088,7 +2122,10 @@ async function main() {
     const c5Exit = await c5.waitForExit(30_000)
     assert(c5Exit.code === 0, `T12 C5 SIGTERM exit was ${JSON.stringify(c5Exit)}`)
     assert(alive(hostReady.pid), 'T12 Host died on Client SIGTERM')
-    trace('t12', { sigterm: 'pass', ptyHup: 'NOT_RUN (Linux PTY limitation declared)' })
+    // This record covers ONLY the SIGTERM half. The real PTY master-close
+    // (HUP-class) positive is the separate `t12-pty-hup` record later in this
+    // lane; it must never be inferred from here.
+    trace('t12', { sigterm: 'pass', ptyHup: 'separate t12-pty-hup case' })
 
     // T17a: non-destructive installed-payload drift. Appending a harmless
     // comment changes the Client's recomputed build fingerprint while the
@@ -2661,9 +2698,21 @@ async function main() {
     // drives the ONE real tty surface Client over the SAME authenticated Host:
     // create/open/switch Sessions and prove a real Host commit reaches the
     // painted transcript, then exit/kill/reconnect without touching the Host.
-    // T34 (writer pre-dispatch stop), T35 (post-write ACK drop) and T36 (private
-    // PiFile/TerminalProgress business read) have no faithful qualification seam
-    // in this surface lane yet; they are recorded as NOT_VERIFIED, never as pass.
+    // T34 (writer pre-dispatch stop), T35 post-write ACK drop and T36 (private
+    // PiFile/terminal-progress business reads) run before the continuity cases.
+    // The private PiFile business reads (T36) resolve files in the Host
+    // WORKSPACE, which is the installed profile: `t36notes.md` is inside the
+    // official provider's search tree, and `dist/` is a directory the OFFICIAL
+    // provider EXCLUDES while the Host explicit-path scanner still serves it —
+    // that difference makes the scoped witness discriminating. Both are created
+    // BEFORE the Host starts, so the official workspace index sees them.
+    writeFileSync(join(profileDir, 't36notes.md'), 'private file reference\n', { mode: 0o600 })
+    mkdirSync(join(profileDir, 'dist'), { recursive: true })
+    writeFileSync(join(profileDir, 'dist', 't36only-scoped.js'), 'x\n', { mode: 0o600 })
+    // The `~/` shorthand must expand to the HOST's home — the isolated home in
+    // this lane, never the operator's. One known file there turns the absolute
+    // answer into a real sink instead of a vacuous "some absolute path".
+    writeFileSync(join(home, 't36home-note.md'), 'private home reference\n', { mode: 0o600 })
     const surfaceHost = new EntryProcess('host', entries.host, base)
     const surfaceHostReady = await surfaceHost.waitFor(record => record.m4a0 === 'ready', 'T27 surface Host ready', 180_000)
     const surfaceHostPid = surfaceHostReady.pid
@@ -2796,10 +2845,24 @@ async function main() {
       assert(privateProof.terminalKind === 'snapshot', 'T36 the terminal-progress watch did not open with a snapshot')
       assert(privateProof.owners?.sessions === 1 && privateProof.privateNamespaces === 2,
         'T36 the private proof observed a duplicate/absent Domain owner')
+      // Migrated from the retired built-bundle smoke: the private endpoint's
+      // Host workspace semantics over the REAL authenticated split wire.
+      assert(privateProof.bareOfficial === true,
+        `T36 the bare query did not reach the official Host provider (observed ${String(privateProof.bareCount)} items)`)
+      assert(privateProof.officialEmpty === true,
+        'T36 an authoritative official [] did not stay empty')
+      assert(privateProof.scopedOk === true && privateProof.scopedHostScanner === true,
+        `T36 the explicit-path scope did not reach the Host scanner (observed ${String(privateProof.scopedCount)} items)`)
+      assert(privateProof.homeAbsolute === true,
+        'T36 the HOME shorthand did not answer absolute Host paths')
       trace('t36', {
         sessionId: privateProof.sessionId,
         fileOk: privateProof.fileOk,
         fileKind: privateProof.fileKind,
+        bareOfficial: privateProof.bareOfficial,
+        officialEmpty: privateProof.officialEmpty,
+        scopedHostScanner: privateProof.scopedHostScanner,
+        homeAbsolute: privateProof.homeAbsolute,
         terminalKind: privateProof.terminalKind,
         owners: privateProof.owners,
       })
@@ -2854,6 +2917,18 @@ async function main() {
           180_000,
         )
         stopping.signalBusiness('SIGTERM')
+        // Ordering, not sleep: the barrier must be released only AFTER the
+        // Client ADMITTED the signal (its own `signal` record). Signalling and
+        // releasing back-to-back races the OS signal delivery against the
+        // hold's 20ms poll — the assembly could legally finish and publish a
+        // real `ready` before the signal was ever admitted, which is a
+        // different (correct) outcome than this case's claim. T59 uses the
+        // same admitted-signal gate for its mid-HMR stop.
+        await stopping.waitFor(
+          record => record.m4a0 === 'signal' && record.signal === 'SIGTERM',
+          `${traceName} ${stage} stop signal admitted`,
+          30_000,
+        )
         writeFileSync(barrier, 'release\n', { mode: 0o600 })
         const stopped = await stopping.waitForExit(60_000)
         assert(stopped.code === 0, `${traceName} ${stage} stop exit was ${JSON.stringify(stopped)}`)
@@ -3149,6 +3224,111 @@ async function main() {
       assert(alive(surfaceHostPid), 'T37 the Host died on the Client exit')
       await c3.dispose()
 
+      // T61: ONE write parked in the REAL prompt serializer while the official
+      // Connection generation is replaced by a physical mux drop. The stale
+      // captured generation must not dispatch (Host durable log: zero
+      // occurrences, no `indeterminate` notice), the draft returns exactly once,
+      // and a NEW write on the rolled-over generation must commit exactly once —
+      // the fence refuses the superseded write without poisoning the carrier.
+      {
+        const barrier = join(workDir, 't61-serializer-barrier')
+        rmSync(barrier, { force: true })
+        const staleToken = 't61-stale-generation'
+        const liveToken = 't61-live-generation'
+        const stalePriors = hostUserTexts(hostSessionEvents(dshHome, sessionA) ?? [])
+          .filter(text => text === staleToken).length
+        assert(stalePriors === 0, 'T61 the stale token already exists in the Host durable log')
+        const parked = new SurfaceEntryProcess(entries.client, {
+          ...base,
+          workDir,
+          env: {
+            ...base.env,
+            SPLIT_PROCESS_CLIENT_SESSION: sessionA,
+            SPLIT_PROCESS_CLIENT_HOLD_SERIALIZE: barrier,
+          },
+        })
+        surfaceClients.push(parked)
+        const parkedReady = await parked.waitFor(record => record.m4a0 === 'ready', 'T61 parked Client ready', 180_000)
+        assert(parkedReady.sessionOpen === true && parkedReady.openSessionId === sessionA,
+          'T61 the parked Client did not open the retained Session')
+        const generationBefore = parkedReady.generationId
+        assert(typeof generationBefore === 'number', 'T61 the Client never observed an official transport generation')
+        parked.send(`${staleToken}\r`)
+        // The write really reached the serializer (not merely "Enter was sent").
+        const heldAt = await parked.waitFor(
+          record => record.m4b2s === 'qualification' && record.op === 'serialize-held',
+          'T61 serializer armed',
+          60_000,
+        )
+        assert(Number.isInteger(heldAt.revision), 'T61 the serializer hold did not name the pinned revision')
+        // ONE physical mux drop: the official Connection replaces the generation
+        // while the write is still parked.
+        parked.signalBusiness('SIGUSR1')
+        const rolledOver = await parked.waitFor(
+          record => record.m4b2s === 'surface-status'
+            && typeof record.generationId === 'number'
+            && record.generationId !== generationBefore
+            && record.sessionOpen === true
+            && record.openSessionId === sessionA,
+          'T61 generation rollover',
+          120_000,
+        )
+        assert(alive(surfaceHostPid), 'T61 the Host died on the mux rollover')
+        assertClientHostFacts(rolledOver.host, surfaceHostFacts, 'T61 after rollover')
+        writeFileSync(barrier, 'release\n', { mode: 0o600 })
+        await parked.waitForComposerDraft(staleToken, 60_000)
+        // A bounded window proves the refusal settled BEFORE dispatch: the Host
+        // persists immediately, so a dispatched write would already be visible.
+        await sleep(1_000)
+        assert(hostUserTexts(hostSessionEvents(dshHome, sessionA) ?? [])
+          .filter(text => text === staleToken).length === 0,
+        'T61 the superseded-generation write was dispatched to the Host')
+        assert(!(await parked.viewport()).join('\n').includes('indeterminate'),
+          'T61 the not-dispatched write was reported as indeterminate')
+        // Restored EXACTLY once: the composer holds the token once, not twice.
+        const restoredComposer = await parked.composerText()
+        assert(restoredComposer !== undefined, 'T61 the composer disappeared after the refusal')
+        const restoredOccurrences = restoredComposer.split(staleToken).length - 1
+        assert(restoredOccurrences === 1,
+          `T61 the draft was restored ${String(restoredOccurrences)} times, expected exactly once`)
+        // Same Client process, CURRENT generation: a fresh prompt must commit.
+        await parked.clearComposerDraft(staleToken)
+        parked.send(`${liveToken}\r`)
+        const liveCommit = await (async () => {
+          const deadline = Date.now() + 120_000
+          while (Date.now() < deadline) {
+            const texts = hostUserTexts(hostSessionEvents(dshHome, sessionA) ?? [])
+            const count = texts.filter(text => text === liveToken).length
+            if (count >= 1) return count
+            await sleep(100)
+          }
+          return 0
+        })()
+        assert(liveCommit === 1, `T61 expected exactly ONE Host commit on the new generation, got ${String(liveCommit)}`)
+        assert(hostUserTexts(hostSessionEvents(dshHome, sessionA) ?? [])
+          .filter(text => text === staleToken).length === 0,
+        'T61 the superseded write was replayed after the new-generation commit')
+        await parked.waitForScreen('stub answer', 'T61 new-generation answer')
+        assert(alive(surfaceHostPid), 'T61 the Host died on the new-generation write')
+        // The surface section predates the C1 helpers, so this case uses the
+        // same inline exit idiom as T29/T31/T33/T37 above.
+        parked.send('/exit\r')
+        const parkedExit = await parked.waitForExit(60_000)
+        assert(parkedExit.code === 0 && parkedExit.signal === null,
+          `T61 parked Client exit was ${JSON.stringify(parkedExit)}`)
+        await parked.dispose()
+        trace('t61', {
+          oldGeneration: generationBefore,
+          newGeneration: rolledOver.generationId,
+          source: 'real-websocket-drop',
+          staleWrite: 'not-dispatched',
+          oldHostWrites: 0,
+          newHostWrites: 1,
+          draftRestoredOnce: true,
+          hostIdentityKept: true,
+        })
+      }
+
       // T39: a missing official Client Domain module means NO surface ready;
       // the failure is loud and the Host stays alive. (The Host-side missing
       // Session row is T26b and still runs above.)
@@ -3261,6 +3441,56 @@ async function main() {
     const hostIdentityFacts = async host => (await hostStatus(host)).localHost
     const assertHostIdentityKept = async (host, before, label) => {
       assertIdentityFields(await hostIdentityFacts(host), before, label)
+    }
+    /**
+     * The Loader row identities that carry Host authority or a Host-only
+     * business service. Their live `fiber.uid` is the fact a Client-only surface
+     * revision must not change: a re-mounted row would publish a new fiber.
+     */
+    const PROTECTED_HOST_ROWS = [
+      'agent',
+      'session',
+      'job-controller',
+      'typert-gateway',
+      'split-host-connection',
+      'split-host-api-remotes',
+      'split-host-file-upload',
+      'split-host-session-stats',
+      'split-host-turn-outline',
+      'split-host-session-controller',
+      'split-host-settings-controller',
+      'split-host-session-log-download',
+      'split-host-pi-tui-runtime',
+      'pi-tui-performance-host',
+      'pi-tui-visual-tools',
+    ]
+    /** `id -> live Loader fiber UID` for the ACTIVE protected rows only. */
+    const hostRowFiberUids = async host => {
+      const status = await hostStatus(host)
+      const rows = new Map()
+      for (const entry of status.entries ?? []) {
+        if (!PROTECTED_HOST_ROWS.includes(entry.id)) continue
+        rows.set(entry.id, { state: entry.state, fiberUid: entry.fiberUid })
+      }
+      return rows
+    }
+    /**
+     * Every protected Host row must still be ACTIVE on the SAME fiber. The UID
+     * is mandatory: a lane that only compares row ids accepts a re-mounted
+     * Loader and would report a false "Host untouched".
+     */
+    const assertHostRowsKept = async (host, before, label) => {
+      const after = await hostRowFiberUids(host)
+      for (const id of PROTECTED_HOST_ROWS) {
+        const expected = before.get(id)
+        const actual = after.get(id)
+        assert(expected !== undefined, `${label}: row "${id}" was not active before the HMR`)
+        assert(Number.isInteger(expected.fiberUid), `${label}: row "${id}" reported no live Loader fiber UID`)
+        assert(actual !== undefined, `${label}: row "${id}" is no longer active after the HMR`)
+        assert(actual.state === 'active', `${label}: row "${id}" left the active state (${actual.state})`)
+        assert(Number.isInteger(actual.fiberUid) && actual.fiberUid === expected.fiberUid,
+          `${label}: row "${id}" was re-mounted (fiber ${String(expected.fiberUid)} -> ${String(actual.fiberUid)})`)
+      }
     }
 
     try {
@@ -4177,6 +4407,7 @@ async function main() {
         await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T57 initial turn/end')
         const before = await waitForSurfaceStatus(client, record => record.surfaceMounted === true && record.sessionOpen === true && record.openSessionId === sessionId, 'T57 initial surface')
         const hostBefore = await hostIdentityFacts(host)
+        const rowsBefore = await hostRowFiberUids(host)
         const beforePid = before.pid
         const beforeRootFiber = before.rootFiberUid
         const beforeGeneration = before.generationId
@@ -4203,9 +4434,10 @@ async function main() {
         }
         await client.waitForScreen('long-turn answer', 'T57 new TTY paint', 120_000)
         await assertHostIdentityKept(host, hostBefore, 'T57 Host identity')
+        await assertHostRowsKept(host, rowsBefore, 'T57 Host Loader rows')
         await exitC1Client(client, 'T57 Client')
         await stopC1Host(host)
-        trace('t57', { hostPid: ready.pid, clientPid: beforePid, sessionId, revisionBefore: beforeRevision, revisionAfter: after.surfaceRevision, sameContext: true, sameTransport: true, sessionWrapper: 're-adopted', newTty: true })
+        trace('t57', { hostPid: ready.pid, clientPid: beforePid, sessionId, revisionBefore: beforeRevision, revisionAfter: after.surfaceRevision, sameContext: true, sameTransport: true, sessionWrapper: 're-adopted', newTty: true, hostRows: 'same loader fibers', hostRowUids: PROTECTED_HOST_ROWS.length })
       }
 
       // T58: HMR while a real Host Job is running. The Host Job continues
@@ -4218,6 +4450,7 @@ async function main() {
         const job = await waitForC1WorkEvent(workRoot, event => event.kind === 'job-event' && event.event === 'registered', 'T58 running Job')
         assert(typeof job.jobId === 'string' && job.status === 'running', 'T58 no real running Host Job')
         const hostBefore = await hostIdentityFacts(host)
+        const rowsBefore = await hostRowFiberUids(host)
         client.signalBusiness('SIGUSR2')
         await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-start', 'T58 HMR start')
         await client.waitFor(record => record.m4b2s === 'qualification' && record.op === 'hmr-revision-retired', 'T58 HMR retired', 120_000)
@@ -4230,6 +4463,7 @@ async function main() {
           'T58 duplicate HMR retirement records')
         assert(alive(ready.pid), 'T58 the Host died during HMR')
         await assertHostIdentityKept(host, hostBefore, 'T58 Host after HMR')
+        await assertHostRowsKept(host, rowsBefore, 'T58 Host Loader rows')
         assert(readC1WorkEvents(workRoot).every(event => !(event.kind === 'job-event' && event.jobId === job.jobId && event.event === 'settled')),
           'T58 the HMR settled the running Host Job')
         writeFileSync(join(workRoot, 'job.release'), 'release\n', { mode: 0o600 })
@@ -4238,7 +4472,7 @@ async function main() {
         await client.waitForScreen('job accepted', 'T58 new surface Job readback', 120_000)
         await exitC1Client(client, 'T58 Client')
         await stopC1Host(host)
-        trace('t58', { hostPid: ready.pid, sessionId, jobId: job.jobId, hmrDuringJob: true, jobContinued: true, newSurfaceReadback: true })
+        trace('t58', { hostPid: ready.pid, sessionId, jobId: job.jobId, hmrDuringJob: true, jobContinued: true, newSurfaceReadback: true, hostRows: 'same loader fibers', hostRowUids: PROTECTED_HOST_ROWS.length })
       }
 
       // T59: HMR failure and stop-during-HMR both fail closed with exactly one
@@ -4298,6 +4532,288 @@ async function main() {
         await stopping.dispose()
         await stopC1Host(stopHost)
         trace('t59-stop', { hostPid: stopReady.pid, exit: stopExit.code, cleanupFailures: 0, hostAlive: true })
+      }
+
+      // ── Fatal Host conditions and signal dispositions (T62–T65) ──────────
+      /**
+       * Stop a Host this lane did not create through `startC1Host`: the one a
+       * Client spawns by itself through `ensureLocalHost` after the previous
+       * instance died. The official SIGTERM admission is the supported stop; the
+       * kernel seat and the launch material must be gone afterwards.
+       */
+      const stopSpawnedHost = async (hostPid, instanceId, label) => {
+        process.kill(hostPid, 'SIGTERM')
+        await waitGone(hostPid, 30_000)
+        assert(!alive(hostPid), `${label}: the spawned Host survived the official SIGTERM`)
+        await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 15_000)
+        const scopeDir = join(dshHome, 'run', 'dsh-pi-tui', scopeSuffix)
+        const launchPath = join(scopeDir, 'launch.json')
+        const instancePath = join(scopeDir, 'instance.json')
+        assert(!existsSync(launchPath), `${label}: the stopped Host left its launch material behind`)
+        if (existsSync(instancePath)) {
+          assert(readJson(instancePath)?.instanceId !== instanceId,
+            `${label}: the stopped Host left its own instance record behind`)
+        }
+      }
+      /** The live `dist/local-host.mjs` PIDs of THIS isolated DSH home. */
+      const liveHostPids = () => findIsolatedProcesses(dshHome).filter(pid => {
+        try {
+          return readFileSync(`/proc/${String(pid)}/cmdline`, 'utf8').includes('local-host.mjs')
+        } catch {
+          return false
+        }
+      })
+
+      // T62: a real SIGINT delivered to the Client BUSINESS PID (never to the
+      // `script(1)` wrapper) is the official 130 disposition: the seat is
+      // released, the Host keeps its live identity, and a fresh Client reads the
+      // existing Session history back. The Client never signals the Host.
+      {
+        // The `long-turn` fixture REQUIRES its barrier; release it immediately so
+        // the first Turn settles before the signal is sent.
+        const releaseBarrier = join(workDir, 't62-long-turn.release')
+        const { host, ready, workRoot } = await startC1Host('long-turn', 't62', { C1_HOLD_LONG_TURN: releaseBarrier })
+        const { client } = await startC1Client('T62 Client')
+        const sessionId = await openC1Session(client, 't62 prompt', 'T62')
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T62 held Turn')
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T62 settled Turn')
+        const hostBefore = await hostIdentityFacts(host)
+        const businessPid = client.records.find(record => record.m4a0 === 'ready')?.pid
+        assert(Number.isInteger(businessPid), 'T62 the Client never published its business PID')
+        client.signalBusiness('SIGINT')
+        const admitted = await client.waitFor(
+          record => record.m4a0 === 'signal' && record.signal === 'SIGINT',
+          'T62 Client SIGINT admitted',
+          30_000,
+        )
+        assert(admitted.pid === businessPid, 'T62 the SIGINT record did not come from the business PID')
+        const exit = await client.waitForExit(60_000)
+        assert(exit.code === 130 && exit.signal === null,
+          `T62 Client SIGINT exit was ${JSON.stringify(exit)}, expected code 130`)
+        await client.dispose()
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        assert(alive(ready.pid), 'T62 the Client SIGINT killed the Host')
+        await assertHostIdentityKept(host, hostBefore, 'T62 Host after Client SIGINT')
+        const { client: reader } = await startC1Client('T62 reader Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        await reader.waitForScreen('t62 prompt', 'T62 history readback')
+        await exitC1Client(reader, 'T62 reader Client')
+        await stopC1Host(host)
+        trace('t62', {
+          hostPid: ready.pid,
+          clientPid: businessPid,
+          signal: 'SIGINT',
+          exitCode: exit.code,
+          seatReleased: true,
+          hostIdentityKept: true,
+          historyReadback: true,
+        })
+      }
+
+      // T63: the DEFAULT keyboard exit chord driven through the REAL PTY. Both
+      // Ctrl+C and Ctrl+D require the SAME key twice inside the confirmation
+      // window; one press is never enough. These are typed bytes on the pty
+      // master, not signals. Ctrl+D needs an EMPTY draft (a non-empty draft turns
+      // it into the editor's forward-delete).
+      {
+        const releaseBarrier = join(workDir, 't63-long-turn.release')
+        const { host, ready, workRoot } = await startC1Host('long-turn', 't63', { C1_HOLD_LONG_TURN: releaseBarrier })
+        const hostBefore = await hostIdentityFacts(host)
+        const { client: ctrlC } = await startC1Client('T63 Ctrl+C Client')
+        const sessionId = await openC1Session(ctrlC, 't63 prompt', 'T63')
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T63 held Turn')
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T63 settled Turn')
+        ctrlC.send('\x03\x03')
+        const ctrlCExit = await ctrlC.waitForExit(60_000)
+        assert(ctrlCExit.code === 0 && ctrlCExit.signal === null,
+          `T63 Ctrl+C double press exit was ${JSON.stringify(ctrlCExit)}`)
+        await ctrlC.dispose()
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        assert(alive(ready.pid), 'T63 the Ctrl+C exit killed the Host')
+        await assertHostIdentityKept(host, hostBefore, 'T63 Host after Ctrl+C')
+
+        const { client: ctrlD } = await startC1Client('T63 Ctrl+D Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        await ctrlD.waitForScreen('t63 prompt', 'T63 history readback before Ctrl+D')
+        ctrlD.send('\x04\x04')
+        const ctrlDExit = await ctrlD.waitForExit(60_000)
+        assert(ctrlDExit.code === 0 && ctrlDExit.signal === null,
+          `T63 Ctrl+D double press exit was ${JSON.stringify(ctrlDExit)}`)
+        await ctrlD.dispose()
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        assert(alive(ready.pid), 'T63 the Ctrl+D exit killed the Host')
+        await assertHostIdentityKept(host, hostBefore, 'T63 Host after Ctrl+D')
+        const { client: recovered } = await startC1Client('T63 recovery Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        await recovered.waitForScreen('t63 prompt', 'T63 history readback after both exits')
+        await exitC1Client(recovered, 'T63 recovery Client')
+        await stopC1Host(host)
+        trace('t63', {
+          hostPid: ready.pid,
+          ctrlC: { presses: 2, exitCode: ctrlCExit.code, via: 'real pty typed input' },
+          ctrlD: { presses: 2, exitCode: ctrlDExit.code, via: 'real pty typed input', draft: 'empty' },
+          hostIdentityKept: true,
+          sessionPreserved: true,
+        })
+      }
+
+      // T64: a REAL SIGHUP is a process/terminal failure, NOT the official
+      // graceful stop (the Host registers no SIGHUP handler by contract). The
+      // attached Client must observe the official Connection loss without
+      // fabricating a settlement for the lost Turn; the dead instance is never
+      // revived, and stale discovery starts a NEW Host with a new identity.
+      {
+        const holdRelease = join(workDir, 't64-long-turn.release')
+        const { host, ready, workRoot } = await startC1Host('long-turn', 't64', { C1_HOLD_LONG_TURN: holdRelease })
+        const { client } = await startC1Client('T64 Client')
+        const sessionId = await openC1Session(client, 't64 prompt', 'T64')
+        const held = await waitForC1WorkEvent(workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T64 held Turn')
+        assert(held.agentStatus === 'running', `T64 the Host Agent was ${JSON.stringify(held.agentStatus)} while the Turn was held`)
+        await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/start', 'T64 turn/start')
+        const hostBefore = await hostIdentityFacts(host)
+        const hostPid = ready.pid
+        process.kill(hostPid, 'SIGHUP')
+        await waitGone(hostPid, 30_000)
+        assert(!alive(hostPid), 'T64 the Host survived a real SIGHUP')
+        const lost = await client.waitFor(
+          record => record.m4b2s === 'surface-status' && record.transport !== 'connected',
+          'T64 Client observed the official Connection loss',
+          60_000,
+        )
+        assert(lost.transport === 'disconnected' || lost.transport === 'connecting',
+          `T64 unexpected Client transport state after the HUP: ${JSON.stringify(lost.transport)}`)
+        // The lost Turn is never reported as settled, and no answer is invented.
+        const afterHup = hostSessionEvents(dshHome, sessionId) ?? []
+        assert(!afterHup.some(event => event.type === 'turn/end'),
+          'T64 the lost Turn was reported as settled after a Host SIGHUP')
+        assert(!hostAssistantHasText(afterHup, 'long-turn answer'),
+          'T64 an answer was fabricated for the Turn lost in a Host SIGHUP')
+        assert(!(await client.viewport()).join('\n').includes('long-turn answer'),
+          'T64 the Client painted a fabricated answer for the Turn lost in a Host SIGHUP')
+        // An ordinary carrier loss is retryable, not fatal: the Client is alive.
+        assert(!client.exited, 'T64 the Client treated an ordinary Host carrier loss as a fatal exit')
+        client.signalBusiness('SIGTERM')
+        const exit = await client.waitForExit(60_000)
+        assert(exit.code === 0 && exit.signal === null, `T64 Client cleanup exit was ${JSON.stringify(exit)}`)
+        assert(!client.records.some(record => record.m4a0 === 'cleanup-failure'),
+          'T64 the Client reported a cleanup failure after the Host SIGHUP')
+        await client.dispose()
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        // Stale discovery: a fresh Client must create a NEW instance, never
+        // revive the dead one, and must not claim the old Session is open.
+        const { client: fresh, ready: freshReady } = await startC1Client('T64 fresh Client')
+        const newHost = freshReady.host
+        assert(newHost.hostPid !== hostBefore.hostPid, 'T64 stale discovery reused the dead Host PID')
+        assert(newHost.instanceId !== hostBefore.instanceId, 'T64 stale discovery reused the dead Host instance')
+        assert(newHost.hostStarttime !== hostBefore.hostStarttime, 'T64 the new Host reuses the dead start identity')
+        assert(freshReady.sessionOpen === false, 'T64 a sessionless Client claimed an open Session across a Host replacement')
+        assert(JSON.stringify(liveHostPids()) === JSON.stringify([newHost.hostPid]),
+          `T64 expected exactly the new Host to be live, found ${JSON.stringify(liveHostPids())}`)
+        const newInstanceId = newHost.instanceId
+        fresh.signalBusiness('SIGTERM')
+        const freshExit = await fresh.waitForExit(60_000)
+        assert(freshExit.code === 0 && freshExit.signal === null,
+          `T64 fresh Client exit was ${JSON.stringify(freshExit)}`)
+        await fresh.dispose()
+        await stopSpawnedHost(newHost.hostPid, newInstanceId, 'T64 spawned Host')
+        trace('t64', {
+          hostPid,
+          signal: 'SIGHUP',
+          classification: 'process failure, not the official graceful stop',
+          clientObserved: lost.transport,
+          fabricatedSettlement: false,
+          clientExit: exit.code,
+          newHostPid: newHost.hostPid,
+          newInstanceId,
+          seatReleased: true,
+        })
+      }
+
+      // T65: a REAL SIGKILL of the Host while a Client is attached and the
+      // Session is open. The official Connection goes disconnected, the pending
+      // write never fakes success, the old `tuiMainView` does not survive across
+      // Hosts, and a cold resume reads the durable log truthfully without
+      // replaying the unknown write.
+      {
+        const holdRelease = join(workDir, 't65-long-turn.release')
+        const { host, ready, workRoot } = await startC1Host('long-turn', 't65', { C1_HOLD_LONG_TURN: holdRelease })
+        const { client } = await startC1Client('T65 Client')
+        const sessionId = await openC1Session(client, 't65 prompt', 'T65')
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T65 held Turn')
+        const hostBefore = await hostIdentityFacts(host)
+        const hostPid = ready.pid
+        process.kill(hostPid, 'SIGKILL')
+        await waitGone(hostPid, 30_000)
+        assert(!alive(hostPid), 'T65 the Host survived SIGKILL')
+        const lost = await client.waitFor(
+          record => record.m4b2s === 'surface-status' && record.transport !== 'connected',
+          'T65 Client observed the official Connection loss',
+          60_000,
+        )
+        assert(lost.transport === 'disconnected' || lost.transport === 'connecting',
+          `T65 unexpected Client transport state after the kill: ${JSON.stringify(lost.transport)}`)
+        const afterKill = hostSessionEvents(dshHome, sessionId) ?? []
+        assert(!afterKill.some(event => event.type === 'turn/end'),
+          'T65 the pending Turn was reported as settled after a Host SIGKILL')
+        assert(hostUserTexts(afterKill).filter(text => text === 't65 prompt').length === 1,
+          'T65 the accepted write was lost or duplicated by the Host SIGKILL')
+        assert(!client.exited, 'T65 the Client treated an ordinary Host carrier loss as a fatal exit')
+        client.signalBusiness('SIGTERM')
+        const exit = await client.waitForExit(60_000)
+        assert(exit.code === 0 && exit.signal === null, `T65 Client cleanup exit was ${JSON.stringify(exit)}`)
+        await client.dispose()
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        // No cross-Host continuity: a sessionless Client gets a NEW Host and no
+        // inherited Session; only one Host owner exists at a time.
+        const { client: fresh, ready: freshReady } = await startC1Client('T65 fresh Client')
+        const newHost = freshReady.host
+        assert(newHost.hostPid !== hostBefore.hostPid, 'T65 stale discovery reused the killed Host PID')
+        assert(newHost.instanceId !== hostBefore.instanceId, 'T65 stale discovery reused the killed Host instance')
+        assert(freshReady.sessionOpen === false, 'T65 the old tuiMainView survived across a Host replacement')
+        assert(JSON.stringify(liveHostPids()) === JSON.stringify([newHost.hostPid]),
+          `T65 expected exactly one live Host owner, found ${JSON.stringify(liveHostPids())}`)
+        const newInstanceId = newHost.instanceId
+        // ONE Client seat per scope: the sessionless Client must leave BEFORE the
+        // cold-resume Client can acquire the seat.
+        fresh.signalBusiness('SIGTERM')
+        const freshExit65 = await fresh.waitForExit(60_000)
+        assert(freshExit65.code === 0 && freshExit65.signal === null,
+          `T65 fresh Client exit was ${JSON.stringify(freshExit65)}`)
+        await fresh.dispose()
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        // A COLD resume of the same Session reads the durable history: the user
+        // write is there exactly once and NO answer is invented for the lost Turn.
+        const { client: resumed } = await startC1Client('T65 cold-resume Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        await resumed.waitForScreen('t65 prompt', 'T65 cold-resume history')
+        await sleep(500)
+        const afterResume = hostSessionEvents(dshHome, sessionId) ?? []
+        assert(hostUserTexts(afterResume).filter(text => text === 't65 prompt').length === 1,
+          'T65 the cold resume replayed the unknown write')
+        // The official Session open may record the ORPHANED Turn as a
+        // fail-closed settlement (an interrupted Turn is truthful recovery and
+        // is what the user must see). What it must never do is report that lost
+        // work as SUCCESS or invent an answer for it.
+        for (const settled of afterResume.filter(event => event.type === 'turn/end')) {
+          const kind = settled.data?.reason?.kind
+          assert(kind !== 'completed' && kind !== 'max-tokens',
+            `T65 the cold resume settled the lost Turn as ${String(kind)}`)
+        }
+        assert(!hostAssistantHasText(afterResume, 'long-turn answer'),
+          'T65 the cold resume fabricated an answer for the lost Turn')
+        assert(!(await resumed.viewport()).join('\n').includes('long-turn answer'),
+          'T65 the resumed surface painted a fabricated answer for the lost Turn')
+        await exitC1Client(resumed, 'T65 cold-resume Client')
+        await stopSpawnedHost(newHost.hostPid, newInstanceId, 'T65 spawned Host')
+        trace('t65', {
+          hostPid,
+          signal: 'SIGKILL',
+          clientObserved: lost.transport,
+          pendingTurnSettled: false,
+          unknownWriteReplayed: false,
+          crossHostViewContinuity: false,
+          newHostPid: newHost.hostPid,
+          newInstanceId,
+          singleHostOwner: true,
+        })
       }
 
     } finally {
@@ -4384,9 +4900,18 @@ async function main() {
       t44t48: 'pass',
       t49t55: 'pass (T49-T55, including detached pending UNKNOWN, real Gateway owner-stream eligibility, the old-peer protocol negatives and same-PID HMR pending question/approval)',
       t56t59: 'pass',
-      t60Status: 'PASS_REAL_SPLIT_PROCESS: T01-T60 split-process inventory and T26a restored identity completed; release gates pending the stage-final lane verdict',
+      t60Status: 'PASS_REAL_SPLIT_PROCESS: T01-T65 split-process inventory and T26a restored identity completed; release gates pending the stage-final lane verdict',
+      // T61-T65 are the M4 closure-gap cases added on top of the frozen
+      // T01-T60 inventory. They are listed explicitly so a later edit cannot
+      // silently drop one while T60 still claims the full inventory.
+      t61StaleGeneration: 'pass (real mux rollover, one stale write not dispatched, one new-generation commit)',
+      t62ClientSigint: 'pass (business PID SIGINT -> exit 130, seat released, Host identity kept)',
+      t63KeyboardExit: 'pass (real PTY double Ctrl+C and double Ctrl+D, empty draft)',
+      t64HostSighup: 'pass (process failure, no fabricated settlement, new Host instance on stale discovery)',
+      t65HostSigkill: 'pass (attached Client, no fake success, no cross-Host view continuity, no replayed write)',
+      t57t58HostRows: 'pass (every protected Host Loader row kept its live fiber UID across Client-only HMR)',
       t26aArtifactMissing: 'pass (current main real artifact-absent + restored authenticated identity)',
-      t12PtyHup: 'pass (real PTY master close)',
+      t12PtyHup: 'pass (real PTY master close, separate case)',
       releaseGates: 'not run by this smoke; stage-final lane records the separate release-gate verdict',
     })
 

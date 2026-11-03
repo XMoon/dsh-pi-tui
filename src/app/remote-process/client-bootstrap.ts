@@ -784,6 +784,10 @@ async function startSurfaceLocalClient(
         preflight: message => production.preflight(message),
         async serialize(message) {
           const serialized = await production.serialize(message)
+          // Qualification observation of the ONE hold point: a lane must know
+          // the write really reached the serializer instead of sleeping on the
+          // keystroke. Test-only — emitted only while the hold is configured.
+          composition.onQualification?.({ op: 'serialize-held', revision: revision.id })
           await waitForQualificationBarrier(holdPath)
           return serialized
         },
@@ -907,7 +911,23 @@ async function startSurfaceLocalClient(
           }
         }
         const sessionId = String(target)
-        const file = await remote.piTuiFileReferences.list(sessionId, 'notes')
+        // The private Host workspace semantics, driven through the ONE
+        // authenticated Client contribution (never a shadow RPC/scanner):
+        //   bare     -> the official provider's order
+        //   empty    -> an authoritative official [] stays empty
+        //   scoped   -> the Host scanner for an explicit path scope
+        //   home     -> ABSOLUTE Host paths
+        type FileListAnswer = { readonly ok: boolean; readonly value?: { readonly kind?: unknown, readonly items?: readonly { readonly path?: unknown }[] } }
+        const answerItems = (answer: FileListAnswer): readonly { readonly path?: unknown }[] =>
+          answer.ok && answer.value?.kind === 'ok' ? answer.value.items ?? [] : []
+        const file = await remote.piTuiFileReferences.list(sessionId, 't36notes')
+        const bareItems = answerItems(file)
+        const empty = await remote.piTuiFileReferences.list(sessionId, 't36-definitely-no-such-name')
+        const emptyItems = answerItems(empty)
+        const scoped = await remote.piTuiFileReferences.list(sessionId, 't36dist/t36only')
+        const scopedItems = answerItems(scoped)
+        const homeQuery = await remote.piTuiFileReferences.list(sessionId, '~/')
+        const homeItems = answerItems(homeQuery)
         const watch = remote.piTuiTerminalProgress.watch(sessionId)
         const iterator = watch[Symbol.asyncIterator]()
         let terminalKind: unknown
@@ -922,6 +942,18 @@ async function startSurfaceLocalClient(
           sessionId,
           fileOk: file.ok === true,
           fileKind: file.ok ? file.value?.kind : undefined,
+          // Bounded facts only: counts and fixed predicates, never paths or
+          // user text.
+          bareOfficial: bareItems.some(item => item.path === 't36notes.md'),
+          bareCount: bareItems.length,
+          officialEmpty: empty.ok === true && emptyItems.length === 0,
+          scopedOk: scoped.ok === true,
+          scopedHostScanner: scopedItems.some(item => item.path === 't36dist/t36only-scoped.js'),
+          scopedCount: scopedItems.length,
+          homeAbsolute: homeQuery.ok === true
+            && homeItems.length > 0
+            && homeItems.every(item => typeof item.path === 'string' && item.path.startsWith('/'))
+            && homeItems.some(item => typeof item.path === 'string' && item.path.endsWith('/t36home-note.md')),
           terminalKind,
           owners: status().owners,
           privateNamespaces: status().privateNamespaces,

@@ -43,7 +43,7 @@ import { LlmAdapter, createUserMessage, type GenerateOptions, type StreamChunk }
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 import { RemoteSessionLifecycle } from '../../src/runtime/remote/session-lifecycle-remote.ts'
-import { loadExperimentalRemoteRuntime } from '../../src/runtime/backend-loader.ts'
+import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import { createRemoteApplicationHostFixture } from '../support/remote-application-fixture.ts'
@@ -208,7 +208,7 @@ async function prepareTimeContextHost(
   const llm = new CapturingLlmAdapter()
   const host = await createRemoteApplicationHostFixture(life, 's3-time-context-preset', { llmAdapter: llm })
   if (options.plugin) await mountTimeContext(host.ctx, options.config ?? { timeZone: HOST_ZONE })
-  const runtime = await (await loadExperimentalRemoteRuntime()).createExperimentalRemoteRuntime({
+  const runtime = await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
   })

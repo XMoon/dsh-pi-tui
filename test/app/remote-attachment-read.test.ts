@@ -15,7 +15,8 @@ import test from 'node:test'
 import type { RemoteAttachmentSource, RemoteTransportLifetime } from '../../src/app/application-runtime.ts'
 import type { RemoteAttachmentReadResult } from '../../src/app/remote/child-view.ts'
 import { createRemotePresentationSource } from '../../src/app/remote/presentation-source.ts'
-import type { ExperimentalRemoteRuntime, RemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
+import type { RemoteBackendRuntime } from '../../src/app/remote/runtime.ts'
+import type { ExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import type { RemoteSessionReferenceLike } from '../../src/runtime/remote/session-reference.ts'
 
 interface AttachmentBinding {

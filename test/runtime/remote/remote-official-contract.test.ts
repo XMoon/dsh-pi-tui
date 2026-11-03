@@ -218,7 +218,7 @@ function officialContextFactFaces(): { breakdown: ContextBreakdownProjection; us
  * one-source face (the same sessions service, Remote namespaces and
  * Connection generation source feed every adapter). */
 function officialM3ASemanticsAssembly(
-  runtime: import('../../../src/app/remote/client-runtime.ts').RemoteClientRuntime,
+  runtime: import('../../support/m3-inprocess/client-runtime.ts').RemoteClientRuntime,
   options: { promptSerializer: import('../../../src/runtime/remote/session-writer-remote.ts').RemotePromptSerializer },
 ): ReturnType<typeof createRemoteM3ASemantics> {
   return createRemoteM3ASemantics(remoteM3ARuntimeSourceOf(runtime), options)

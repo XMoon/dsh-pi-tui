@@ -1,31 +1,27 @@
 /**
- * Experimental Remote-serving Host additive composition (M3-1).
+ * TEST_ONLY_M3_CARRIER: the retired M3 in-process Remote-serving Host
+ * composition.
  *
- * M3-ONLY. The production M4 Host composition is the built-in
+ * This module used to live in `src/app/remote/host-runtime.ts` and was never
+ * the production Host graph. The production M4 Host composition is the built-in
  * `@xmoon76/dsh-pi-tui/host-runtime` Loader row plus the official
- * Session-serving rows in the Host-only overlay; this module is retained only
- * for the old in-process L5 fixtures and is deleted with B2-S.
+ * Session-serving rows in the Host-only overlay.
  *
- * This module owns ONLY the M3-only additive official rows of the Remote
- * runtime: the official Connection/FileUpload/stats/outline/SessionController/
- * SettingsController/api-remotes/archive closure. It receives the
- * already-running ordinary pi-tui Host `Context` and exposes the narrow
- * in-process carrier that `client-runtime.ts` installs as the Client
- * Connection transport.
+ * It is kept ONLY because the historical L5/L6 suites need the in-process
+ * carrier to exercise transport-neutral Remote semantics. It
  *
- * The private PiFile/TerminalProgress services, their package contribution and
- * the Performance projection are NOT mounted here: the caller must have mounted
- * the built-in PiTui Host Runtime (and the Performance row) first, and this
- * function only verifies their readiness gates exist.
+ * - must never be imported by `src/**`,
+ * - must never enter the published `dist` graph,
+ * - must never be treated as a Host, Client, Writer or Gateway owner,
+ * - is not a second production composition of any kind.
  *
- * It does not boot a second Host Context, does not edit or emulate
- * `cordis.patch.yml`, and never touches the existing `jobController` row.
- * After disposal the Host Context is exactly as it was before.
+ * It mounts the M3-only ADDITIVE official rows on an already-running Host
+ * Context and exposes the narrow in-process carrier the test Client runtime
+ * installs as its Connection transport. The private PiFile/TerminalProgress
+ * services, their package contribution and the Performance projection are NOT
+ * mounted here.
  *
- * The composition is experimental and non-product in M3-1: structural
- * composition errors fail fast with a diagnostic naming the missing piece.
- *
- * @module app/remote/host-runtime
+ * @module test/support/m3-inprocess/host-runtime
  */
 
 import type { Context, Fiber } from '@deepseek-ai/cordis'
@@ -38,8 +34,8 @@ import FileUploads from '@deepseek-ai/dsh-client-file-upload'
 import * as sessionLogExport from '@deepseek-ai/dsh-session-log-export'
 import * as sessionStats from '@deepseek-ai/dsh-session-stats'
 import * as sessionTurnOutline from '@deepseek-ai/dsh-session-turn-outline'
-import { mergeCause } from './dispose-cause.ts'
-import { assertRemoteHostPrerequisites } from './host-prerequisites.ts'
+import { mergeCause } from '../../../src/app/remote/dispose-cause.ts'
+import { assertRemoteHostPrerequisites } from '../../../src/app/remote/host-prerequisites.ts'
 
 /**
  * Fixed private base URL used only to construct valid `Request` objects for

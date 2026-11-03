@@ -23,7 +23,7 @@ import * as connectionClient from '@deepseek-ai/dsh-client-connection/client'
 import * as gatewayClient from '@deepseek-ai/dsh-api-gateway/client'
 import * as typertClient from '@deepseek-ai/dsh-typert-registry/client'
 import { SessionId } from '@deepseek-ai/dsh-session'
-import { createRemoteHostRuntime, type InProcessHostCarrier } from '../../src/app/remote/host-runtime.ts'
+import { createRemoteHostRuntime, type InProcessHostCarrier } from '../support/m3-inprocess/host-runtime.ts'
 import { mountRemoteClientDomainPrerequisites } from '../../src/app/remote/client-runtime.ts'
 import { createSplitClientInteractionDelivery } from '../../src/app/remote-process/client-interaction-delivery.ts'
 import {

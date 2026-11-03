@@ -103,6 +103,33 @@ async function mountService(deps: PiTuiFileReferenceHostDeps): Promise<{
   return { service, ctx }
 }
 
+test('the REGISTERED Host descriptor carries STRICT codecs on both faces (migrated from the retired built-bundle smoke)', async (t) => {
+  // The retired `smoke:pi-tui-file-reference-built` located a built chunk and
+  // asserted that the endpoint is served by the handwritten EXPLICIT
+  // contribution (strict codecs) rather than by the source-mode `src-json`
+  // decorator fallback. That is a registration fact, not a wire fact, so it
+  // belongs here — over the REAL Typert registry the Host row mounts.
+  const life = testLifecycle(t)
+  const deps = hostDeps(life, {})
+  const ctx = new Context()
+  await ctx.plugin(TypertRegistry)
+  try {
+    // The explicit contribution is what puts the endpoint in the registry.
+    ctx.typert.register(PI_TUI_HOST_CONTRIBUTION)
+    const descriptor = ctx.typert.local.get('piTuiFileReferences/list')
+    assert.ok(descriptor !== undefined, 'the Host descriptor must be registered through the explicit contribution')
+    assert.equal(descriptor.id, '@xmoon76/dsh-pi-tui#piTuiFileReferences/list')
+    assert.equal(descriptor.namespace, 'piTuiFileReferences')
+    assert.equal(descriptor.method, 'list')
+    assert.ok(descriptor.parameters.every(parameter => parameter.codec.mode === 'strict'),
+      'every registered parameter codec must be STRICT (never a source-mode src-json codec)')
+    assert.equal(descriptor.result.mode, 'strict',
+      'the registered result codec must be STRICT (the decorator fallback synthesizes src-json)')
+  } finally {
+    await ctx.fiber.dispose()
+  }
+})
+
 test('the composition registers the endpoint in its OWN fiber and disposal withdraws it', async (t) => {
   const life = testLifecycle(t)
   const deps = hostDeps(life, {})

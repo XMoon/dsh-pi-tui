@@ -757,23 +757,19 @@ export function applyRunnerWithRuntime(
       })
       return constructedDirectRuntime
     }
-    // M3-4 PR1: the internal application runtime-selection seam. The selected
-    // core is the ONE common input the transport-neutral session runtime
-    // consumes (`owners`/`retirement`/`backend`); Direct-only helpers stay
-    // behind `directRuntime()`. Normal package `apply()` stays Direct: there
-    // is no CLI option, config field, env var, cordis.patch row or public
-    // root export that selects Remote — the seam above is the sole
-    // product-level Remote construction owner (through
-    // `runtime/backend-loader.ts`), and only internal/test M3-4 paths hand it
-    // a Remote composition input. The Direct factory runs INSIDE the seam, so
-    // a Remote selection constructs no Direct graph at all (plan §10.2).
+    // The internal application runtime-selection seam. The selected core is the
+    // ONE common input the transport-neutral session runtime consumes
+    // (`owners`/`retirement`/`backend`); Direct-only helpers stay behind
+    // `directRuntime()`. Normal package `apply()` stays Direct: there is no CLI
+    // option, config field, env var, cordis.patch row or public root export that
+    // selects Remote. The internal split Client passes its FULLY ASSEMBLED core
+    // as `preselected`; the Direct factory runs INSIDE the seam, so adopting a
+    // pre-selected Remote core constructs no Direct graph at all.
     const selectedRuntime = await selectApplicationRuntime({
       kind: 'direct',
       createDirect: createDirectApplication,
-      remote: undefined,
-      // M3-4 PR2 internal L6 composition: a pre-built Remote aggregate's
-      // selected core (the production path stays Direct — `apply` passes no
-      // override, so this stays `undefined` in every product boot).
+      // The internal split Client's pre-assembled core. The Direct root passes
+      // no override, so this stays `undefined` in every product boot.
       ...(override === undefined ? {} : { preselected: override.selected }),
     })
     /**

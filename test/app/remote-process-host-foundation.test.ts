@@ -159,21 +159,39 @@ test('the protected ten-row dependency assertion rejects a duplicated protected 
 
 interface FixtureRow {
   readonly options: { readonly id: string; readonly name: string; readonly disabled?: boolean }
-  readonly fiber?: { readonly state: number }
+  readonly fiber?: { readonly state: number; readonly uid?: number }
+}
+
+/**
+ * One distinct fake Loader fiber UID per row id. A status that caches,
+ * serializes or invents a UID therefore cannot match the live row object.
+ */
+const ROW_FIBER_UIDS = new Map<string, number>()
+
+function rowUid(id: string): number {
+  const known = ROW_FIBER_UIDS.get(id)
+  if (known !== undefined) return known
+  const next = 1000 + ROW_FIBER_UIDS.size
+  ROW_FIBER_UIDS.set(id, next)
+  return next
 }
 
 /** The baseline row set every Host-only Profile must expose as ACTIVE. */
 function baselineRows(): FixtureRow[] {
+  const active = (id: string, name: string, withUid = true): FixtureRow => ({
+    options: { id, name },
+    fiber: withUid ? { state: 2, uid: rowUid(id) } : { state: 2 },
+  })
   return [
-    { options: { id: 'agent', name: '@deepseek-ai/dsh-agent' }, fiber: { state: 2 } },
-    { options: { id: 'session', name: '@deepseek-ai/dsh-session' }, fiber: { state: 2 } },
-    { options: { id: 'job-controller', name: '@deepseek-ai/dsh-api-job-controller' }, fiber: { state: 2 } },
-    { options: { id: 'typert-gateway', name: '@deepseek-ai/dsh-api-gateway' }, fiber: { state: 2 } },
-    { options: { id: 'split-host-connection', name: '@deepseek-ai/dsh-client-connection' }, fiber: { state: 2 } },
-    { options: { id: 'split-host-api-remotes', name: '@deepseek-ai/dsh-api-remotes' }, fiber: { state: 2 } },
-    { options: { id: 'pi-tui-performance-host', name: '@xmoon76/dsh-pi-tui/performance-host' }, fiber: { state: 2 } },
-    { options: { id: 'pi-tui-visual-tools', name: '@xmoon76/dsh-pi-tui/visual-tools' }, fiber: { state: 2 } },
-    ...FOUNDATION_ROWS.map(({ id, name }) => ({ options: { id, name }, fiber: { state: 2 } })),
+    active('agent', '@deepseek-ai/dsh-agent'),
+    active('session', '@deepseek-ai/dsh-session'),
+    active('job-controller', '@deepseek-ai/dsh-api-job-controller'),
+    active('typert-gateway', '@deepseek-ai/dsh-api-gateway'),
+    active('split-host-connection', '@deepseek-ai/dsh-client-connection'),
+    active('split-host-api-remotes', '@deepseek-ai/dsh-api-remotes'),
+    active('pi-tui-performance-host', '@xmoon76/dsh-pi-tui/performance-host'),
+    active('pi-tui-visual-tools', '@xmoon76/dsh-pi-tui/visual-tools'),
+    ...FOUNDATION_ROWS.map(({ id, name }) => active(id, name)),
     ...['tui-app', 'pi-tui-extension-host', 'pi-tui-builtins'].map(id => ({
       options: { id, name: id, disabled: true },
     })),
@@ -224,6 +242,50 @@ test('the readiness audit passes only when every owner row and binding is real',
   for (const { owner, id } of FOUNDATION_ROWS) {
     assert.deepEqual(status.ownerEntries[owner], [id], `${owner} owner row mismatch`)
   }
+})
+
+test('the Host status reports the live Loader fiber UID of each row and never invents one', () => {
+  const status = collectHostEntryStatus(hostContext(baselineRows()), { profile: 'pi-tui' })
+  const byId = new Map(status.entries.map(entry => [entry.id, entry]))
+  // Positive: every ACTIVE row carries the UID of the live fiber object.
+  for (const { id } of FOUNDATION_ROWS) {
+    const entry = byId.get(id)
+    assert.ok(entry !== undefined, `${id} must appear in the Host status`)
+    assert.equal(entry.state, 'active')
+    assert.equal(entry.fiberUid, rowUid(id), `${id} must report its live Loader fiber UID`)
+  }
+  assert.equal(byId.get('agent')?.fiberUid, rowUid('agent'))
+  assert.equal(byId.get('pi-tui-performance-host')?.fiberUid, rowUid('pi-tui-performance-host'))
+  // Negative control: a row whose fiber object has no UID reports NO UID. The
+  // status must never substitute an index, a sequence number or a cached id.
+  const withoutUid = baselineRows().map(candidate => candidate.options.id === 'split-host-session-stats'
+    ? { ...candidate, fiber: { state: 2 } }
+    : candidate)
+  const degraded = collectHostEntryStatus(hostContext(withoutUid), { profile: 'pi-tui' })
+  const missing = degraded.entries.find(entry => entry.id === 'split-host-session-stats')
+  assert.equal(missing?.state, 'active')
+  assert.equal(missing?.fiberUid, undefined,
+    'a fiber without a UID must not be given a fabricated one')
+  // A row that never started has no fiber at all and therefore no UID.
+  assert.equal(degraded.entries.find(entry => entry.id === 'tui-app')?.fiberUid, undefined)
+})
+
+test('a duplicated or inactive protected row still fails even with fiber UIDs present', () => {
+  const duplicated = baselineRows().concat({
+    options: { id: 'split-host-turn-outline', name: 'duplicate' },
+    fiber: { state: 2, uid: rowUid('split-host-turn-outline') + 500 },
+  })
+  assert.throws(
+    () => collectHostEntryStatus(hostContext(duplicated), { profile: 'pi-tui' }),
+    /expected exactly one active turnOutline owner row/u,
+  )
+  const inactive = baselineRows().map(candidate => candidate.options.id === 'split-host-settings-controller'
+    ? { ...candidate, fiber: { state: 1, uid: rowUid('split-host-settings-controller') } }
+    : candidate)
+  assert.throws(
+    () => collectHostEntryStatus(hostContext(inactive), { profile: 'pi-tui' }),
+    /expected exactly one active settingsController owner row/u,
+  )
 })
 
 test('the Host status reports live terminal-progress subscribers, not a cached flag', () => {
