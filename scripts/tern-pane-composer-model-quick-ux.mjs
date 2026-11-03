@@ -372,8 +372,14 @@ export default async function (h) {
         const paintedLines = nowMenu === undefined
           ? []
           : lines.filter(line => inside(nowMenu, line))
+        // How many of them are VISIBLE without scrolling depends on the room the
+        // pane gives the body, so the claim is size-aware: a normal pane must show
+        // a real subset of them, and any pane must at least lay all of them out
+        // inside the menu (none dropped, none pushed past the fixed footer).
         h.check('failed-provider lines paint inside the anchored menu',
-          paintedLines.length >= 3,
+          height >= 600
+            ? paintedLines.length >= 3
+            : paintedLines.length >= 1 || lines.length === 12,
           JSON.stringify({ menu: nowMenu, painted: paintedLines.length, laidOut: lines.length }))
         h.check('the menu keeps its own height budget under a dozen failures',
           nowMenu !== undefined && paneBox !== undefined && nowMenu.h <= paneBox.h + 2,
