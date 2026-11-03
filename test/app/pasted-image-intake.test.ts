@@ -109,7 +109,7 @@ interface Harness {
   readonly reads: string[]
   /** Let every held read proceed; resolves after the owned tasks settled. */
   release(): Promise<void>
-  settle(): Promise<void>
+  drain(): Promise<void>
 }
 
 function harness(life: TestLifecycle, images = new DraftImageStore()): Harness {
@@ -204,7 +204,7 @@ test('a non-candidate paste is completely inert (no read, no pending, no error)'
   const life = testLifecycle(t)
   const h = harness(life)
   h.owner.accept(h.seat.paste('see /tmp/notes.txt '))
-  await h.settle()
+  await h.drain()
   assert.deepEqual(h.reads, [], 'the grammar gate ran before any filesystem read')
   assert.equal(h.images.size(), 0)
   assert.equal(h.owner.blocksDelivery(h.seat.composer.getDraft()), false)
@@ -216,7 +216,7 @@ test('a read failure keeps the pasted path and reports the basename once', async
   const h = harness(life)
   setImageReadForTest(async () => { throw new ImageInputError('Image file not found: shot.png') })
   h.owner.accept(h.seat.paste(`${h.imagePath} `))
-  await h.settle()
+  await h.drain()
   assert.ok(h.seat.composer.getDraft().includes(h.imagePath), 'the path text is never dropped')
   assert.equal(h.images.size(), 0, 'no bytes are staged for a failed read')
   assert.deepEqual(h.seat.composer.notices, [
