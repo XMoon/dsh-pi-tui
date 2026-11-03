@@ -101,6 +101,22 @@ export interface DisplayWelcomeFacts {
 }
 
 /**
+ * TSP-7 Welcome D: the display-only result of the ONE current Session
+ * projection, derived by `SurfaceRuntime.repaintTarget` from the Host blank
+ * authority plus the selected subject's complete fold. It is a presentation
+ * eligibility, never a Session fact: it carries no id, no history and no
+ * model, and a renderer that receives nothing treats it as `'hidden'`.
+ *
+ * - `'sessionless'` — the application formally committed the idle start
+ *   (no Session exists yet); the original `setWelcomeIdle(true)` source.
+ * - `'blank-session'` — the live MAIN subject's Host blank read is `true`
+ *   and its complete fold holds no turn.
+ * - `'hidden'` — anything else: a started turn, an unknown authority, a
+ *   viewed child, or a subject this commit does not speak for.
+ */
+export type DisplayWelcomeEligibility = 'sessionless' | 'blank-session' | 'hidden'
+
+/**
  * The renderer-facing display surface. Every member is a COMMIT of a fact the
  * application owner already derived; none of them queries the renderer back.
  */
@@ -123,6 +139,15 @@ export interface SurfaceDisplaySeam {
      * scope tracking may ignore it.
      */
     source?: object,
+    /**
+     * TSP-7 Welcome D: the display-only Welcome eligibility of the SAME
+     * subject this frame projects (`SurfaceRuntime.repaintTarget` is its only
+     * writer). Appended LAST so every existing implementation stays
+     * structurally compatible; a consumer that receives nothing reads it as
+     * `'hidden'` and never shows a Welcome of its own accord. PiTui does not
+     * consume it — its Welcome card keeps its long-standing owner.
+     */
+    welcomeEligibility?: DisplayWelcomeEligibility,
   ): void
 
   // ── Status facts and resets (session-presentation / event-routing owners) ──

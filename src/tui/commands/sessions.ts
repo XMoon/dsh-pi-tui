@@ -112,6 +112,15 @@ export interface SessionCommandRegistrars {
   registerTitle(): void
   registerFork(): void
   registerRewind(): void
+  /**
+   * TSP-7 Welcome D: the argument-free UI entry into the SAME `/sessions`
+   * Session Browser lifecycle the typed command runs — one shared
+   * `openSessionPicker`, one picker generation, one read owner, one switch
+   * route. It carries no query (the Welcome offers no filter affordance);
+   * the typed handler keeps passing its own invocation, so a
+   * `/sessions <query>` argument still seeds the Browser.
+   */
+  openSessions(): Promise<CommandResult>
 }
 
 /** Shorten a session id for read-only display rows, capped at 28 characters. */
@@ -986,12 +995,23 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     }
   }
 
+  /**
+   * TSP-7 Welcome D: the ONE `/sessions` open body. The typed command passes
+   * its own invocation (so a `/sessions <query>` argument still seeds the
+   * Browser); the Welcome's UI entry passes an empty one. Both are the SAME
+   * shared lifecycle — one picker generation, one read owner, one query and
+   * one switch route — never a second listing or a copied presenter.
+   */
+  const openSessionsBody = (
+    invocation: { rawInput: string; commandId?: string },
+  ): Promise<CommandResult> => openSessionPicker(invocation, { header: 'sessions' })
+
   const registerSessions = (): void => {
     registerTuiCommand({
       name: 'sessions',
       description: 'List, search, and switch persisted sessions',
       input: { hint: '[query]' },
-      handler: (invocation) => openSessionPicker(invocation, { header: 'sessions' }),
+      handler: (invocation) => openSessionsBody(invocation),
       aliases: ['resume'],
       // /resume keeps its direct-resume fast path (exact id, a session-
       // prefixed prefix, or the short id prefix) — resolved against the ONE
@@ -1215,5 +1235,14 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
     })
   }
 
-  return { registerSessions, registerNew, registerSearch, registerTitle, registerFork, registerRewind }
+  return {
+    registerSessions,
+    registerNew,
+    registerSearch,
+    registerTitle,
+    registerFork,
+    registerRewind,
+    // TSP-7 Welcome D: the argument-free UI entry over the SAME body.
+    openSessions: () => openSessionsBody({ rawInput: '' }),
+  }
 }

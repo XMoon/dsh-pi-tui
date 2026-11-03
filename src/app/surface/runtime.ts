@@ -189,7 +189,7 @@ import {
   type RoutedSessionEvent,
   type SurfaceEventRoutingSource,
 } from './event-routing.ts'
-import type { DisplayStatusFacts, SurfaceDisplaySeam, DisplayActivityFacts } from './display-seam.ts'
+import type { DisplayStatusFacts, SurfaceDisplaySeam, DisplayActivityFacts, DisplayWelcomeEligibility } from './display-seam.ts'
 import { pituiDisplaySeam } from './display-seam-pitui.ts'
 import { pituiTaskCenterPresentation } from './task-presentation-pitui.ts'
 import type { TaskCenterPresentationPort } from './task-presentation-port.ts'
@@ -308,6 +308,19 @@ export interface SurfaceInputBinding {
    * itself and never keeps optimistic state.
    */
   selectPermission(id: string): void
+  /**
+   * TSP-7 Welcome D: open the SAME registered `/sessions` Session Browser the
+   * typed command runs, from the Welcome's single Resume action. The
+   * composition root late-binds this to the command surface's registered entry
+   * BEFORE the renderer input is bound, so a click before the binding (or on a
+   * mount whose registration degraded) reaches a refused entry — never a
+   * renderer-side listing, session id or switch of its own. PiTui supplies no
+   * consumer.
+   */
+  openSessionBrowser(): void
+  /** Whether that `/sessions` UI entry is actually installed (registered, not
+   *  Host-owned) — the business-entry fact the Welcome button paints. */
+  sessionBrowserAvailable(): boolean
 }
 
 /**
@@ -678,6 +691,26 @@ export interface SurfaceRuntimeOptions {
     options(): readonly string[]
     select(id: string): void
   }
+  /**
+   * TSP-7 Welcome D: the ONE READ-ONLY Host blank-session authority the Welcome
+   * eligibility consumes (`backend.sessionReader.blank`). Injected by the
+   * composition root like the Model entries and consulted ONLY for the live
+   * MAIN subject of a renderer mount that presents the Welcome — the PiTui
+   * branch performs no read here. `undefined` from the authority means the
+   * Host fact is unknown, which is NEVER treated as blank.
+   */
+  readonly welcomeSessionBlank?: (sessionId: string) => boolean | undefined
+  /**
+   * TSP-7 Welcome D: the LATE-BOUND UI entry into the registered `/sessions`
+   * command (the Welcome's only action). Same assignment window, same loud
+   * placeholder contract and same owned-promise rule as
+   * {@link openModelQuick}; the command owns every read, switch and notice.
+   */
+  readonly openSessionBrowser?: () => void
+  /** TSP-7 Welcome D: whether that `/sessions` UI entry is actually installed
+   *  (registered, not Host-owned) — the real business-entry fact the Welcome
+   *  button paints, never the presence of a painted button. */
+  readonly sessionBrowserAvailable?: () => boolean
 }
 
 /**
@@ -1827,6 +1860,40 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
   // it returns undefined).
   let searchBindingForRepaint: (() => TranscriptSearchPresentation | undefined) | undefined
 
+  /**
+   * TSP-7 Welcome D: the display-only Welcome eligibility of ONE already
+   * SELECTED projection, computed at the SAME instant the repaint picked its
+   * subject so a frame can never pair one subject's fold with another's blank
+   * read.
+   *
+   * The ONE blank authority is the injected read-only `SessionReader.blank`
+   * port; `undefined` from it means the Host fact is unknown and is NEVER
+   * inferred from the projection, the window or a running state. The complete
+   * fold's turn index is the positive veto (a turn that exists hides the
+   * Welcome); an empty fold is never proof of blankness on its own.
+   *
+   * It answers `undefined` — the argument stays ABSENT — when this frame speaks
+   * for no subject the Welcome question can be asked about: no injected
+   * authority (an older/test composition), the PiTui branch (its WelcomeCard
+   * stays app-owned and gains no Host read here), or a surface that has no
+   * Session yet. The sessionless invitation is the application's OWN formal
+   * commit (`setWelcomeIdle(true)`); it is never reverse-derived from an empty
+   * `setTranscript`, and an empty projection must never HIDE what the app just
+   * formally committed.
+   */
+  const welcomeEligibilityFor = (
+    folder: TranscriptFolder,
+    turnCount: number,
+  ): DisplayWelcomeEligibility | undefined => {
+    const readBlank = options.welcomeSessionBlank
+    if (readBlank === undefined || app !== undefined) return undefined
+    const viewedChildId = routing().viewedChildId()
+    if (viewedChildId !== undefined) return 'hidden'
+    const sessionId = routing().currentSessionId()
+    if (sessionId === undefined || folder !== routing().mainFolder()) return undefined
+    return readBlank(sessionId) === true && turnCount === 0 ? 'blank-session' : 'hidden'
+  }
+
   /** Project one SELECTED target. The projection/geometry algorithms stay in
    *  `domain/transcript/**`; this is the repaint glue moved verbatim from the
    *  runner. */
@@ -1837,7 +1904,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     searchPresentation?: () => TranscriptSearchPresentation | undefined,
     onProjected?: () => void,
   ): void => {
-    controller.setTurns(folder.groupedTurns())
+    // The Welcome eligibility reuses THIS fold's complete turn index (the same
+    // call the window already needs), never a second history scan.
+    const groupedTurns = folder.groupedTurns()
+    controller.setTurns(groupedTurns)
     const endTurn = controller.endTurn()
     const projection = folder.window({
       maxTurns: controller.windowTurns,
@@ -1865,12 +1935,15 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         sourceIdentity: projectionTokenFor(folder),
       })
     }
+    // The Welcome eligibility rides THIS selection: computed BEFORE the
+    // commit, from the same instant as the subject/visual scoping.
+    const welcomeEligibility = welcomeEligibilityFor(folder, groupedTurns.length)
     displaySeam().setTranscript(projection.messages, activities, {
       ...controller.state(),
       firstTurn: projection.firstTurn,
       lastTurn: projection.lastTurn,
       hasNewer: projection.hasNewer,
-    }, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.(), projectionTokenFor(folder))
+    }, streamingToolPreviews, (searchPresentation ?? searchBindingForRepaint)?.(), projectionTokenFor(folder), welcomeEligibility)
     if (target === undefined) return
     // setTranscript can SYNCHRONOUSLY run plugin/modal callbacks that hand the
     // session to another owner. The pre-commit derivation is then stale: clear
@@ -2856,6 +2929,17 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             if (permissionUi === undefined) throw new Error('permission UI owner is not composed')
             permissionUi.select(id)
           },
+          // TSP-7 Welcome D: the late-bound `/sessions` UI entry, forwarded
+          // verbatim. Same loud-placeholder rule as the model entries: an
+          // unwired composition must not leave the Welcome action dead, and
+          // availability answers the real business-entry fact (false before
+          // the binding, never an optimistic true).
+          openSessionBrowser: () => {
+            const open = options.openSessionBrowser
+            if (open === undefined) throw new Error('the session browser command entry is not wired in this composition')
+            open()
+          },
+          sessionBrowserAvailable: () => options.sessionBrowserAvailable?.() ?? false,
         }
         inputBindTarget = mounted
         return

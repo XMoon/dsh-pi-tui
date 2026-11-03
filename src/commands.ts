@@ -998,6 +998,16 @@ export function registerTuiCommands(
    * under exactly the same degradation as `openModelPicker`.
    */
   openModelQuick?(): Promise<CommandResult>
+  /**
+   * TSP-7 Welcome D: the argument-free UI entry into the SAME registered
+   * `/sessions` Session Browser lifecycle the typed command runs — the Welcome
+   * screen's single Resume action calls this, never a renderer-owned listing,
+   * session id or switch. Undefined when the `/sessions` registration itself
+   * degraded (a Host-owned same-name command): the UI opener then does not
+   * exist and the Welcome paints its disabled form through the command
+   * surface's own availability fact.
+   */
+  openSessionBrowser?(): Promise<CommandResult>
 } {
   const { ctx, app } = runner
   // PR3-A: `app` is undefined while a non-PiTui renderer owns the terminal
@@ -2432,6 +2442,16 @@ export function registerTuiCommands(
           // minted from the SAME registrar instance — no second command, no
           // second catalog owner.
           openModelQuick: (): Promise<CommandResult> => modelCommands.openModelQuick(),
+        }),
+    // TSP-7 Welcome D: the narrow argument-free UI entry over the SAME
+    // registered `/sessions` body — the Welcome screen's only action. The
+    // identical rule as `/model` above: a Host-owned duplicate name leaves the
+    // entry undefined, so the Welcome paints its disabled form instead of
+    // bypassing the Host route with a second listing of its own.
+    ...(registrationFailures.some(failure => failure.startsWith('/sessions:'))
+      ? {}
+      : {
+          openSessionBrowser: (): Promise<CommandResult> => sessionCommands.openSessions(),
         }),
     takeCommandDraftDisposition: (commandId?: string): CommandDraftDisposition | undefined => {
       if (commandId !== undefined) {

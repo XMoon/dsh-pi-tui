@@ -58,7 +58,7 @@ test('production /model: a pane with the picker but without the Reader kinds sti
   assert.ok(session)
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
-  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
+  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
   assert.equal(renderer.modelPresentation, undefined, 'the native model UI fails closed')
   assert.equal(picker(pane), undefined)
 })
@@ -443,7 +443,7 @@ async function mounted(
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {}, openModelQuick() {},
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
   })
   assert.ok(renderer.modelPresentation)
   const writes: unknown[] = []
@@ -1116,7 +1116,7 @@ test('native Model: proven refusal stays usable, uncertain settlement closes, su
   assert.ok(session)
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit() {}, onFatal: (e) => assert.fail(String(e)) })
   t.after(() => renderer.dispose())
-  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
+  renderer.bindInput({ exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput() {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true })
   assert.ok(renderer.modelPresentation)
   // The panel opens INSIDE the loop below, so the resize is delivered before any
   // handle exists. The catalogue owns the ONE write at every width.
@@ -2570,7 +2570,7 @@ async function mountedEffortEntry(
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {}, openModelQuick() {},
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
   })
   const writes: unknown[] = []
   let retries = 0
@@ -3360,7 +3360,7 @@ test('native Model: a pane without the base picker kinds is still refused (kv ch
   t.after(() => renderer.dispose())
   renderer.bindInput({
     exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput() {},
-    listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
+    listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true
   })
   assert.equal(renderer.modelPresentation, undefined, 'the missing BASE kinds still fail closed')
 })

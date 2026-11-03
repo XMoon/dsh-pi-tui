@@ -203,6 +203,8 @@ async function mountComposerActions(options: {
     reopenContinuedQuestion: () => false,
     openModelPicker: entry => { calls.modelEntries.push(entry) },
     openModelQuick: () => { calls.quickEntries.push(calls.quickEntries.length + 1) },
+    openSessionBrowser: () => {},
+    sessionBrowserAvailable: () => true,
     modelPickerAvailable: () => options.modelPickerAvailable ?? true,
   })
   let current = snapshotFor({})

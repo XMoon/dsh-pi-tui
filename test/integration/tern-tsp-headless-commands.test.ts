@@ -45,10 +45,93 @@ function hostInboxHas(fixture: DirectTspFixture, sessionId: string, marker: stri
     .some(item => JSON.stringify(item).includes(marker))
 }
 
-/** The current Session id(s) the dock welcome card carries (hydration signal). */
-function welcomeSessionIds(fixture: DirectTspFixture): string[] {
-  const prefix = 'dock.welcome-'
-  return wireNodes(fixture.pane).filter(node => node.id.startsWith(prefix)).map(node => node.id.slice(prefix.length))
+/**
+ * The live Host Agents this Direct surface owns, by Session id.
+ *
+ * AUTHORITY: the real Host `agents` registry. The retired Dock line only
+ * DISPLAYED the id of whatever the application already owned; the registry is
+ * that ownership at its owner — a `/new`/`/fork`/first-submit puts the Agent
+ * here, and the retirement takes it away. It answers `[]` while the runner is
+ * sessionless, which the retired line proved only by its absence.
+ */
+function liveAgentIds(fixture: DirectTspFixture): string[] {
+  const agents = fixture.ctx.get('agents') as unknown as { list(): readonly { session: { id: string } }[] }
+  return agents.list().map(agent => agent.session.id)
+}
+
+/**
+ * The projection scope the renderer presents (`s3`), or `undefined` while Main
+ * holds something that paints no scoped transcript row — the D Welcome empty
+ * state or the hydration frame. It identifies WHICH subject is presented, never
+ * which Session it is: the id comes from the store or the Agent registry.
+ */
+function projectionScopeId(fixture: DirectTspFixture): string | undefined {
+  for (const node of wireNodes(fixture.pane)) {
+    const match = /main\.(s\d+)-/u.exec(node.id)
+    if (match !== null) return match[1]
+  }
+  return undefined
+}
+
+/** Whether Main currently presents the TSP-7 Welcome D empty state: a
+ *  sessionless or blank main subject. NEVER a Session identity witness. */
+function welcomeMainPresented(fixture: DirectTspFixture): boolean {
+  return wireNodes(fixture.pane).some(node => node.id.startsWith('main.welcome-'))
+}
+
+/** Whether Main currently presents the hydration frame: the switch has NOT
+ *  committed and the composer input is still fenced. */
+function hydrationFramePresented(fixture: DirectTspFixture): boolean {
+  return wireNodes(fixture.pane).some(node => node.id === 'main.loading')
+}
+
+/**
+ * Whether a NEW main subject has been formally committed since `frameMark`.
+ *
+ * AUTHORITY: the renderer's own presentation commit
+ * (`src/tui/tsp/session.ts`): a switch paints the hydration frame first, and the
+ * frame that retires it in favour of the incoming subject's OWN Main — a fresh
+ * `main.s<N>-…` transcript scope for a subject with content, the Welcome D
+ * empty state for a blank one — is the commit that also lifts the composer input
+ * fence (`hydrating = false` and `scopeEpoch += 1` are the same commit). So this
+ * is the wire fact the retired Dock line was standing in for as a WAIT, and it
+ * is strictly about presentation, never about an id.
+ */
+function subjectCommitted(fixture: DirectTspFixture, frameMark: number, previousScope: string | undefined): boolean {
+  if (hydrationFramePresented(fixture)) return false
+  const scope = projectionScopeId(fixture)
+  if (scope !== undefined && scope !== previousScope) return true
+  // A BLANK incoming subject paints the Welcome with no scoped row at all, so it
+  // is only distinguishable from the previous empty state by the hydration frame
+  // the switch really painted in between.
+  return welcomeMainPresented(fixture)
+    && fixture.pane.frames().slice(frameMark).some(frame => frame.ops.some(op => op[0] === 'add' && op[1] === 'main.loading'))
+}
+
+/**
+ * Wait until the REAL persisted Session store (the official
+ * `sessionPersistence.list()` seam) holds NEW rows beyond `known` matching
+ * `expect`, and return them.
+ *
+ * AUTHORITY: the durable store the production create/flush path writes — the
+ * row IS the Session. This replaces "read the id off the Dock's welcome line":
+ * the retired line could only ever show an id the store already held, so the
+ * store is the same fact with the rendering step removed.
+ */
+async function waitForNewSessionHeaders(
+  fixture: DirectTspFixture,
+  label: string,
+  known: readonly string[],
+  expect: (rows: Array<{ id: string; parentSession?: string; cwd?: string }>) => boolean = rows => rows.length === 1,
+  timeoutMs = 25_000,
+): Promise<Array<{ id: string; parentSession?: string; cwd?: string }>> {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const fresh = (await sessionHeaders(fixture)).filter(row => !known.includes(row.id))
+    if (expect(fresh)) return fresh
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`)
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
 }
 
 /** The live DOCK notice lines (never the transcript command card). */
@@ -118,16 +201,44 @@ function sessionTitle(fixture: DirectTspFixture, sessionId: string): string | un
   return titles.get(session)?.title
 }
 
-/** Start one real prompt turn and wait for it to settle. */
+/**
+ * Start one real prompt turn and return the Session id it created.
+ *
+ * The id comes from the REAL Session store (the turn's create is the store's new
+ * row), and the wait is the renderer's own subject commit — both are the
+ * authorities the retired Dock welcome line used to stand in for, one level
+ * closer to the producer.
+ */
 async function seedTurn(fixture: DirectTspFixture, text: string): Promise<string> {
   const before = fixture.modelCalls()
+  const known = (await sessionHeaders(fixture)).map(row => row.id)
+  const frameMark = fixture.pane.frames().length
+  const scopeBefore = projectionScopeId(fixture)
   await submitInput(fixture, text)
   await waitFor('the real model turn to run', () => fixture.modelCalls() > before, 25_000)
-  await waitFor('the current Session owner to hydrate', () => welcomeSessionIds(fixture).length === 1, 25_000)
+  const fresh = await waitForNewSessionHeaders(fixture, 'the turn\'s Session in the real store', known)
+  await waitFor('the turn\'s Subject to become the presented Main', () => subjectCommitted(fixture, frameMark, scopeBefore), 25_000)
   await directSettle(1_200)
-  const id = welcomeSessionIds(fixture)[0]
-  assert.ok(id !== undefined)
-  return id
+  assert.equal(fresh.length, 1, 'the turn created exactly ONE Session')
+  return fresh[0]!.id
+}
+
+/**
+ * Run the registered `/new` through the REAL composer and wait for both
+ * authorities the retired Dock welcome line used to stand in for: the real
+ * Session store gained exactly one NEW row (that row's id IS the new owner), and
+ * the renderer committed it as the presented Main (the frame that also lifts the
+ * composer input fence, so the next gesture cannot be dropped).
+ */
+async function createSessionViaNew(fixture: DirectTspFixture): Promise<string> {
+  const known = (await sessionHeaders(fixture)).map(row => row.id)
+  const frameMark = fixture.pane.frames().length
+  const scopeBefore = projectionScopeId(fixture)
+  await submitInput(fixture, '/new')
+  const fresh = await waitForNewSessionHeaders(fixture, 'the /new Session in the real store', known)
+  await waitFor('the /new Subject to become the presented Main', () => subjectCommitted(fixture, frameMark, scopeBefore), 25_000)
+  assert.equal(fresh.length, 1, '/new created exactly ONE Session')
+  return fresh[0]!.id
 }
 
 // ── A01: /new ───────────────────────────────────────────────────────────────
@@ -137,20 +248,20 @@ test('/new creates and hydrates a real new Session without a model turn', async 
   const fixture = await createDirectTspFixture(life, { deltas: ['A01'] })
   try {
     await directSettle(4_000)
-    assert.deepEqual(welcomeSessionIds(fixture), [], 'the runner boots sessionless')
-    await submitInput(fixture, '/new')
-    await waitFor('the first Session hydration', () => welcomeSessionIds(fixture).length === 1, 25_000)
-    const first = welcomeSessionIds(fixture)[0]!
+    // Sessionless is a POSITIVE state, not the absence of one text line: the real
+    // store holds no Session, the Host registry owns no live Agent, and Main
+    // presents the sessionless Welcome empty state.
+    assert.deepEqual((await sessionHeaders(fixture)).map(row => row.id), [],
+      'the runner boots with no Session in the real store')
+    assert.deepEqual(liveAgentIds(fixture), [], 'the runner boots with no live owner Agent')
+    assert.ok(welcomeMainPresented(fixture), 'the sessionless boot presents the Welcome D empty state in Main')
+    const first = await createSessionViaNew(fixture)
     assert.equal(fixture.modelCalls(), 0, '/new never starts a model turn')
     assert.deepEqual((await sessionHeaders(fixture)).map(row => row.id), [first],
       'exactly ONE Session was created (no extra preceding Session)')
     // A SECOND /new publishes a DIFFERENT owner.
-    await submitInput(fixture, '/new')
-    await waitFor('the second Session owner', () => {
-      const ids = welcomeSessionIds(fixture)
-      return ids.length === 1 && ids[0] !== first
-    }, 25_000)
-    const second = welcomeSessionIds(fixture)[0]!
+    const second = await createSessionViaNew(fixture)
+    assert.notEqual(second, first, 'the second /new published a DIFFERENT owner')
     const headers = await sessionHeaders(fixture)
     assert.equal(headers.length, 2, 'both Sessions are persisted')
     assert.ok(headers.some(row => row.id === second))
@@ -172,7 +283,8 @@ test('sessionless /fork refuses and creates no Session', async (t) => {
       dockNotices(fixture).some(text => text.includes('no conversation to fork from')), 25_000)
     assert.equal(dockNotices(fixture).filter(text => text.includes('no conversation to fork from')).length, 1,
       'the sessionless refusal is reported EXACTLY once on the Dock (no duplicate notice)')
-    assert.deepEqual(welcomeSessionIds(fixture), [], 'a refused /fork publishes no owner')
+    assert.deepEqual(liveAgentIds(fixture), [], 'a refused /fork publishes no owner Agent')
+    assert.ok(welcomeMainPresented(fixture), 'the refused /fork leaves the sessionless Welcome empty state presented')
     assert.deepEqual(await sessionHeaders(fixture), [], 'a refused /fork creates no Session')
     assert.equal(fixture.modelCalls(), 0, 'a refused /fork never reaches the model')
   } finally {
@@ -186,14 +298,17 @@ test('/fork forks the current conversation and publishes the child owner', async
   try {
     await waitForInputDelivery(fixture.pane)
     const source = await seedTurn(fixture, 'seed the fork source')
+    const frameMark = fixture.pane.frames().length
+    const scopeBefore = projectionScopeId(fixture)
     await submitInput(fixture, '/fork')
-    await waitFor('the fork child owner', () => {
-      const ids = welcomeSessionIds(fixture)
-      return ids.length === 1 && ids[0] !== source
-    }, 30_000)
-    const child = welcomeSessionIds(fixture)[0]!
+    // The child's identity is the store's NEW row (the official fork create), and
+    // the wire commit says it really became the presented Main.
+    const fresh = await waitForNewSessionHeaders(fixture, 'the fork child Session', [source], rows => rows.length === 1, 30_000)
+    await waitFor('the fork child to become the presented Main', () => subjectCommitted(fixture, frameMark, scopeBefore), 30_000)
+    const child = fresh[0]!
+    assert.notEqual(child.id, source, 'the fork published a DIFFERENT Session')
     const headers = await sessionHeaders(fixture)
-    const childRow = headers.find(row => row.id === child)
+    const childRow = headers.find(row => row.id === child.id)
     assert.ok(childRow !== undefined, 'the fork child is persisted')
     assert.equal(childRow.parentSession, source, 'the child carries the official parent lineage')
   } finally {
@@ -303,9 +418,18 @@ test('bare /title and bare /rename report the blank-Session refusal on the TSP D
     officialServices: { sessionTitle: true },
   })
   try {
+    await waitForInputDelivery(fixture.pane)
     await directSettle(4_000)
-    assert.deepEqual(welcomeSessionIds(fixture), ['b2a-blank-title'],
+    // The runner OWNING the persisted blank Session is the Host registry's fact:
+    // exactly one live Agent, and it is this Session. The retired Dock line only
+    // displayed an id the registry already owned, so this is the same claim with
+    // the rendering step removed.
+    assert.deepEqual(liveAgentIds(fixture), ['b2a-blank-title'],
       'the runner resumed the persisted blank Session')
+    // …and the presentation side of the same commit: a resumed Session with no
+    // turn is the blank main subject the Welcome D owns.
+    assert.ok(welcomeMainPresented(fixture) && !hydrationFramePresented(fixture),
+      'the resumed blank Session is the committed main subject (no hydration frame left)')
     await submitInput(fixture, '/title')
     await waitFor('the no-conversation notice', () =>
       dockNotices(fixture).some(text => text.includes('no conversation yet — title left as-is')), 25_000)
@@ -384,8 +508,7 @@ test('/copy without an assistant message fails visibly and copies nothing', asyn
   const fixture = await createDirectTspFixture(life, { deltas: ['UNUSED'] })
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, '/new')
-    await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    await createSessionViaNew(fixture)
     await submitInput(fixture, '/copy')
     // The refusal's existing owner is the Direct command card (the TSP renderer
     // paints it), so it must be visible without a supplementary Dock line.
@@ -460,8 +583,7 @@ test('sessionless /yolo reports the unavailable official permission writer', asy
   const fixture = await createDirectTspFixture(life, { deltas: ['A07'] })
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, '/new')
-    await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    await createSessionViaNew(fixture)
     await submitInput(fixture, '/yolo')
     // No permission-presets service is composed in this fixture: the REAL
     // writer reports `unavailable`, the handler returns the ORIGINAL message
@@ -484,9 +606,7 @@ test('/yolo applies danger-full-access through the official permission writer', 
   })
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, '/new')
-    await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
-    const sessionId = welcomeSessionIds(fixture)[0]!
+    const sessionId = await createSessionViaNew(fixture)
     const permissions = fixture.ctx.get('permissionPresets') as unknown as { names: readonly string[] }
     assert.ok(permissions.names.includes('danger-full-access'),
       'the official preset table offers danger-full-access')
@@ -513,8 +633,7 @@ test('/logout <reference> is refused on the TSP renderer and never mutates the c
   const ref = 'DEEPSEEK_API_KEY'
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, '/new')
-    await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    await createSessionViaNew(fixture)
     const credentials = fixture.ctx.get('credentials') as unknown as {
       set(ref: string, value: string): Promise<void>
       resolve(ref: string): Promise<{ readonly value?: string } | undefined>
@@ -544,8 +663,7 @@ test('a composition without the credentials service reports the refusal and muta
   const fixture = await createDirectTspFixture(life, { deltas: ['A08-PORT'], withoutCredentials: true })
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, '/new')
-    await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    await createSessionViaNew(fixture)
     await submitInput(fixture, '/logout deepseek')
     await waitFor('the unavailable-port card', () =>
       fixture.pane.output.text().includes('credentials service unavailable'), 25_000)
@@ -577,8 +695,7 @@ test('the TSP refusal never reaches a throwing credential port', async (t) => {
   const originalUnset = prototype.unset
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, '/new')
-    await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    await createSessionViaNew(fixture)
     await service.set(ref, secret)
     prototype.unset = () => { throw new Error('controlled credential unset failure') }
     await submitInput(fixture, '/logout deepseek')
@@ -601,8 +718,7 @@ test('bare /logout is refused by the gate — no picker, no credential mutation'
   const ref = 'DEEPSEEK_API_KEY'
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, '/new')
-    await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    await createSessionViaNew(fixture)
     const credentials = fixture.ctx.get('credentials') as unknown as {
       set(ref: string, value: string): Promise<void>
       resolve(ref: string): Promise<unknown>
@@ -636,8 +752,7 @@ test('/logout with an unresolvable target reports the real unknown-target error'
   const fixture = await createDirectTspFixture(life, { deltas: ['A11'] })
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, '/new')
-    await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    await createSessionViaNew(fixture)
     // A hyphenated target can be neither a route nor an env-var-shaped
     // reference: the handler's own resolver reports it (never the bare UI),
     // and the Direct command card carries the message.
@@ -673,7 +788,10 @@ test('every remaining PiTui-only builtin stays refused with the draft restored',
       assert.equal(composerText(fixture), line, `${line} restores its draft`)
       await clearComposer(fixture)
     }
-    assert.deepEqual(welcomeSessionIds(fixture), [], 'no refused builtin created a Session')
+    // The store is the authority for "no Session was created" — a refused
+    // builtin publishes no row, and the sessionless Welcome keeps Main.
+    assert.deepEqual((await sessionHeaders(fixture)).map(row => row.id), [], 'no refused builtin created a Session')
+    assert.deepEqual(liveAgentIds(fixture), [], 'no refused builtin created an owner Agent')
     assert.equal(fixture.modelCalls(), 0, 'no refused builtin reached the model')
   } finally {
     await fixture.settle()
@@ -697,7 +815,7 @@ test('a sessionless /image with no argument shows ONE error-marked refusal and c
   assert.equal(refusalLines.length, 1, 'exactly ONE refusal notice, never a duplicate')
   assert.ok(refusalLines[0]!.startsWith('! '),
     `the refusal is classified as an error: ${JSON.stringify(refusalLines)}`)
-  assert.deepEqual(welcomeSessionIds(fixture), [], 'the refused intake created no Session')
+  assert.deepEqual((await sessionHeaders(fixture)).map(row => row.id), [], 'the refused intake created no Session')
   assert.equal(fixture.modelCalls(), 0, 'the refused intake never reached the model')
 })
 
@@ -712,7 +830,7 @@ test('a sessionless /attach with no argument shows ONE error-marked refusal and 
   assert.equal(refusalLines.length, 1, 'exactly ONE refusal notice, never a duplicate')
   assert.ok(refusalLines[0]!.startsWith('! '),
     `the refusal is classified as an error: ${JSON.stringify(refusalLines)}`)
-  assert.deepEqual(welcomeSessionIds(fixture), [], 'the refused intake created no Session')
+  assert.deepEqual((await sessionHeaders(fixture)).map(row => row.id), [], 'the refused intake created no Session')
   assert.equal(fixture.modelCalls(), 0, 'the refused intake never reached the model')
 })
 
@@ -740,7 +858,7 @@ test('a real /attach of a regular file stages metadata and inserts the canonical
     (composerText(fixture) ?? '').includes('[file #1 ('), 25_000)
   assert.ok(!fixture.pane.output.text().includes('not available in TSP'),
     'the Client-local intake is admitted instead of refused')
-  assert.deepEqual(welcomeSessionIds(fixture), [], 'the intake created no Session')
+  assert.deepEqual((await sessionHeaders(fixture)).map(row => row.id), [], 'the intake created no Session')
   assert.equal(fixture.modelCalls(), 0, 'the intake never reached the model')
 })
 
@@ -752,7 +870,7 @@ test('a real /attach of a missing path reports the real Client-local error and s
   await waitFor('the not-found notice', () =>
     dockNotices(fixture).some(text => text.includes('File not found: no-such-file-here.bin')), 25_000)
   assert.equal(composerText(fixture), '', 'no canonical token was inserted for a failed probe')
-  assert.deepEqual(welcomeSessionIds(fixture), [], 'a failed intake created no Session')
+  assert.deepEqual((await sessionHeaders(fixture)).map(row => row.id), [], 'a failed intake created no Session')
   assert.equal(fixture.modelCalls(), 0)
 })
 
@@ -770,8 +888,7 @@ test('/logout <flow-route> is refused truthfully while no flow provider is insta
   })
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, '/new')
-    await waitFor('the session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
+    await createSessionViaNew(fixture)
     const authorization = fixture.ctx.get('authorization') as unknown as { list(): readonly unknown[] }
     assert.deepEqual([...authorization.list()], [],
       'no authorization flow provider is installed in this environment')
@@ -933,9 +1050,15 @@ test('a /copy success that outlives its Session is not announced on the replacem
     const captured = readFileSync(capturePath, 'utf8')
     assert.ok(captured.includes('F5-COPY-TEXT'),
       'the blocked helper really received A\'s assistant text (the copy pinned A)')
+    // The switch's two authorities: the Host registry owns B as a live Agent
+    // (the retired Dock line only displayed the id it already owned), and the
+    // renderer committed B as the presented Main.
+    const switchFrameMark = fixture.pane.frames().length
+    const switchScopeBefore = projectionScopeId(fixture)
     releaseResume()
     await waitFor('the replacement Session to become current', () =>
-      welcomeSessionIds(fixture).includes('f5-target-b'), 30_000)
+      liveAgentIds(fixture).includes('f5-target-b')
+      && subjectCommitted(fixture, switchFrameMark, switchScopeBefore), 30_000)
     writeFileSync(releasePath, '')
     // The helper writes `exited` just before it returns 0, so waiting for it
     // proves the copy policy (and therefore the handler) really completed.
@@ -943,7 +1066,7 @@ test('a /copy success that outlives its Session is not announced on the replacem
     await directSettle(600)
     assert.ok(!dockNotices(fixture).some(text => text.includes('copied last assistant message')),
       'the late success is not announced on the replacement owner')
-    assert.ok(welcomeSessionIds(fixture).includes('f5-target-b'),
+    assert.ok(liveAgentIds(fixture).includes('f5-target-b'),
       'the switch really completed (the stale outcome was fenced, not the switch)')
     // POSITIVE CONTROL: on the SAME (now current) Session the success notice
     // still appears exactly once — the fence is not an unconditional silence.
@@ -1154,9 +1277,9 @@ test('Busy Esc preserves the REAL Direct Host pending inbox while a REAL admitte
   })
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, 'opener marker')
-    await waitFor('the real Direct session', () => welcomeSessionIds(fixture).length === 1, 25_000)
-    const oldId = welcomeSessionIds(fixture)[0]!
+    // The turn's own Session: the store's new row is its id and the wire commit
+    // is the presentation — the two facts the retired Dock line conflated.
+    const oldId = await seedTurn(fixture, 'opener marker')
     const agents = fixture.ctx.get('agents') as unknown as {
       get(id: SessionId): {
         readonly status: string
@@ -1213,8 +1336,11 @@ test('Busy Esc preserves the REAL Direct Host pending inbox while a REAL admitte
       create: (options: { sessionId: string }) => Promise<unknown>
     }
     const originalCreate = realAgents.create
+    /** The ids the PRODUCTION create call received (one-to-one with `order`). */
+    const createdIds: string[] = []
     realAgents.create = async function (this: unknown, options) {
       order.push(`create:${options.sessionId}`)
+      createdIds.push(options.sessionId)
       return originalCreate.call(this, options)
     }
     life.defer(() => {
@@ -1277,13 +1403,18 @@ test('Busy Esc preserves the REAL Direct Host pending inbox while a REAL admitte
       'the REAL Direct Host pending inbox preserves the queued occurrence across the control cancel')
 
     // Release the real writer: drain -> old flush -> child create/commit.
+    const childFrameMark = fixture.pane.frames().length
+    const childScopeBefore = projectionScopeId(fixture)
     releaseSlow()
     await transition
-    await waitFor('the /new child session', () => {
-      const ids = welcomeSessionIds(fixture)
-      return ids.length === 1 && ids[0] !== oldId
-    }, 25_000)
-    const newId = welcomeSessionIds(fixture)[0]!
+    // The child's identity is the REAL Host create call's own argument (one-to-one
+    // with the `order` log above) — the production authority the retired Dock line
+    // merely displayed — and the wire commit is the fact that this new subject
+    // became the presented Main.
+    await waitFor('the /new child create issued by the real Host', () => createdIds.length === 1, 25_000)
+    const newId = createdIds[0]!
+    await waitFor('the /new child to become the presented Main', () =>
+      subjectCommitted(fixture, childFrameMark, childScopeBefore), 25_000)
     assert.notEqual(newId, oldId)
     assert.ok(order.includes(`flush:${oldId}`), `the old session must be flushed: ${JSON.stringify(order)}`)
     assert.ok(order.includes(`create:${newId}`), `the child session must be created: ${JSON.stringify(order)}`)
@@ -1323,9 +1454,9 @@ test('a BUSY TSP /new submit runs the TUI navigation command, never Queue/Steer'
   })
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, 'busy /new opener')
-    await waitFor('the real Direct session', () => welcomeSessionIds(fixture).length === 1, 25_000)
-    const oldId = welcomeSessionIds(fixture)[0]!
+    // The turn's own Session: the store's new row is its id and the wire commit
+    // is the presentation — the two facts the retired Dock line conflated.
+    const oldId = await seedTurn(fixture, 'busy /new opener')
     await waitFor('the real turn running', () => {
       const agents = fixture.ctx.get('agents') as unknown as {
         get(id: SessionId): { readonly status: string } | undefined
@@ -1336,6 +1467,8 @@ test('a BUSY TSP /new submit runs the TUI navigation command, never Queue/Steer'
 
     // The REAL busy Composer submit: if the line were misrouted as a queue or
     // steer prompt it would enter the Host inbox and later start a model turn.
+    const newFrameMark = fixture.pane.frames().length
+    const newScopeBefore = projectionScopeId(fixture)
     await submitInput(fixture, '/new')
     assert.equal(hostInboxHas(fixture, oldId, '/new'), false,
       'the /new line must never enter the Host queue or steering inbox')
@@ -1343,14 +1476,15 @@ test('a BUSY TSP /new submit runs the TUI navigation command, never Queue/Steer'
 
     // The navigation stop cancels the held turn: the fresh Session is created
     // WITHOUT waiting for the hold to be released (a `/new` never waits for
-    // the old Turn to finish naturally).
-    await waitFor('the /new child session while the old stream is still held', () => {
-      const ids = welcomeSessionIds(fixture)
-      return ids.length === 1 && ids[0] !== oldId
-    }, 25_000)
+    // the old Turn to finish naturally). The child's id is the store's new row;
+    // the wire commit is the frame that published it as the presented Main.
+    const fresh = await waitForNewSessionHeaders(fixture,
+      'the /new child Session in the real store while the old stream is still held', [oldId])
+    await waitFor('the /new child to become the presented Main', () =>
+      subjectCommitted(fixture, newFrameMark, newScopeBefore), 25_000)
     assert.equal(fixture.cancellations(), 1,
       'the navigation stop is the cancellation that ended the held old turn')
-    const newId = welcomeSessionIds(fixture)[0]!
+    const newId = fresh[0]!.id
     assert.notEqual(newId, oldId)
     assert.equal(fixture.modelCalls(), modelCallsBefore,
       'the /new line never became a queued prompt that started a second model turn')
@@ -1377,9 +1511,9 @@ test('a BUSY TSP /new with a genuine Host /new keeps the Host sink', async (t) =
   })
   try {
     await waitForInputDelivery(fixture.pane)
-    await submitInput(fixture, 'busy host /new opener')
-    await waitFor('the real Direct session', () => welcomeSessionIds(fixture).length === 1, 25_000)
-    const oldId = welcomeSessionIds(fixture)[0]!
+    // The turn's own Session: the store's new row is its id and the wire commit
+    // is the presentation — the two facts the retired Dock line conflated.
+    const oldId = await seedTurn(fixture, 'busy host /new opener')
     await waitFor('the real turn running', () => {
       const agents = fixture.ctx.get('agents') as unknown as {
         get(id: SessionId): { readonly status: string } | undefined
@@ -1390,8 +1524,13 @@ test('a BUSY TSP /new with a genuine Host /new keeps the Host sink', async (t) =
 
     await submitInput(fixture, '/new')
     await waitFor('the genuine Host /new sink', () => calls.length === 1, 25_000)
-    assert.deepEqual(welcomeSessionIds(fixture), [oldId],
+    // No second Session exists in the real store and the same Agent still owns
+    // the surface: the TUI navigation handler never ran (the retired Dock line
+    // would simply have shown the old id again).
+    assert.deepEqual((await sessionHeaders(fixture)).map(row => row.id), [oldId],
       'the TUI /new navigation handler must not create a second Session when the Host wins')
+    assert.deepEqual(liveAgentIds(fixture), [oldId],
+      'the genuine Host winner left the original owner Agent in place')
     assert.equal(hostInboxHas(fixture, oldId, '/new'), false,
       'the genuine Host /new line must never become a queued prompt')
     assert.equal(fixture.modelCalls(), modelCallsBefore, 'the genuine Host /new must not start a model turn')
@@ -1447,10 +1586,17 @@ test('a real ask_user_question tool call settles ASK_ABORTED on the /new navigat
   try {
     await waitForInputDelivery(fixture.pane)
     // A real user turn: the model answers with the tool call, the Host executes
-    // it and the official Question request blocks on the TUI answerer.
+    // it and the official Question request blocks on the TUI answerer. The turn's
+    // Session is the store's new row (its id) and the wire commit is its
+    // presentation. `seedTurn` is NOT used here: the scripted TOOL-CALL stream
+    // never increments the adapter's call counter, so the model-call wait would
+    // never be satisfied by this adapter shape.
+    const askFrameMark = fixture.pane.frames().length
+    const askScopeBefore = projectionScopeId(fixture)
     await submitInput(fixture, 'ask me before you continue')
-    await waitFor('the Session owner', () => welcomeSessionIds(fixture).length === 1, 25_000)
-    const oldId = welcomeSessionIds(fixture)[0]!
+    const askRows = await waitForNewSessionHeaders(fixture, 'the Question turn\'s Session in the real store', [])
+    assert.equal(askRows.length, 1, 'the Question turn created exactly ONE Session')
+    const oldId = askRows[0]!.id
     await waitFor('the live official Question form', () => fixture.pane.output.text().includes('Which target?'), 30_000)
     const agents = fixture.ctx.get('agents') as unknown as {
       get(id: SessionId): { readonly status: string } | undefined
@@ -1467,6 +1613,8 @@ test('a real ask_user_question tool call settles ASK_ABORTED on the /new navigat
     }
     const newDefinition = commands.find(undefined, 'new')
     assert.ok(newDefinition, 'the real TUI /new handler is registered')
+    const childFrameMark = fixture.pane.frames().length
+    const childScopeBefore = projectionScopeId(fixture)
     const transition = Promise.resolve(newDefinition.handler({
       commandId: 'cmd-nav-question',
       agent: undefined,
@@ -1478,10 +1626,10 @@ test('a real ask_user_question tool call settles ASK_ABORTED on the /new navigat
     // The navigation stop cancelled the running owner: the REAL tool call's
     // signal aborted, the official request settled (the form leaves the seat),
     // and the cancelled Turn reached its durable terminal boundary.
-    await waitFor('the /new child session', () => {
-      const ids = welcomeSessionIds(fixture)
-      return ids.length === 1 && ids[0] !== oldId
-    }, 25_000)
+    const fresh = await waitForNewSessionHeaders(fixture, 'the /new child Session in the real store', [oldId])
+    const childId = fresh[0]!.id
+    await waitFor('the /new child to become the presented Main', () =>
+      subjectCommitted(fixture, childFrameMark, childScopeBefore), 25_000)
     const liveModalCount = (): number => {
       const live = new Set<string>()
       for (const frame of fixture.pane.frames()) {
@@ -1506,10 +1654,9 @@ test('a real ask_user_question tool call settles ASK_ABORTED on the /new navigat
     assert.equal(end?.reason?.reason?.kind, 'user',
       'the abort cause is the user navigation stop, not a shutdown cancel')
     // No fabricated answer was ever dispatched: the request died by its own
-    // cancellation lifetime, and the new Session owns the surface.
-    const ids = welcomeSessionIds(fixture)
-    assert.equal(ids.length, 1)
-    assert.notEqual(ids[0], oldId)
+    // cancellation lifetime, and the new Session owns the surface alone.
+    assert.deepEqual(liveAgentIds(fixture), [childId],
+      'the replacement Session is the ONLY live owner Agent (the old one is retired)')
   } finally {
     await fixture.settle()
   }

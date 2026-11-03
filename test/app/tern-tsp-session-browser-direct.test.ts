@@ -68,7 +68,7 @@ test('REAL_DIRECT_HEADLESS: persisted main Session → DirectSessionReader → p
       noteUserInput() {},
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
-      openModelPicker() {}, openModelQuick() {},
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
     })
     const browserPresentation = renderer.sessionBrowserPresentation
     assert.ok(browserPresentation)
@@ -184,7 +184,7 @@ test('REAL_DIRECT_HEADLESS: cross-workspace persisted Fork lineage reaches the p
       noteUserInput() {},
       listContinuedQuestions: () => [],
       reopenContinuedQuestion: () => false,
-      openModelPicker() {}, openModelQuick() {},
+      openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
     })
     const browserPresentation = renderer.sessionBrowserPresentation
     assert.ok(browserPresentation)

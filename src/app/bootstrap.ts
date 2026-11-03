@@ -653,6 +653,25 @@ export function applyRunnerWithRuntime(
      * the same dependency direction and time order as the Model picker seam.
      */
     let permissionUiOwner: Pick<StatusRuntime, 'permissionOptions' | 'selectPermission'> | undefined
+    /**
+     * TSP-7 Welcome D: the ONE late-bound READ-ONLY blank authority the
+     * Welcome eligibility consumes. Declared with the same lexical scope as
+     * `surface` (which is created before the backend exists) and bound right
+     * after `selectedRuntime.backend` below. An unbound read is a wrong
+     * startup order, so it FAILS LOUDLY — it is never read as "blank".
+     */
+    let welcomeSessionBlankOwner: ((sessionId: string) => boolean | undefined) | undefined
+    /**
+     * TSP-7 Welcome D: the ONE late-bound `/sessions` UI entry (the Welcome's
+     * Resume action), armed in exactly the same window as
+     * {@link openRegisteredModelQuick} through the same `runOwned` seam. The
+     * registered command owns every listing, switch, notice and settlement;
+     * this slot only opens it.
+     */
+    let openRegisteredSessionBrowser: (() => void) | undefined
+    /** TSP-7 Welcome D: the real `/sessions` business-entry availability,
+     *  late-bound with the opener above. */
+    let sessionBrowserAvailableOwner: (() => boolean) | undefined
     const surface = createSurfaceRuntime<SessionEvent>({
       tuiVersion: bundleVersion(),
       notificationPresentation,
@@ -702,6 +721,22 @@ export function applyRunnerWithRuntime(
           permissionUiOwner.selectPermission(id)
         },
       },
+      // TSP-7 Welcome D: the READ-ONLY blank authority (bound from the backend
+      // below). The surface alone decides whether a commit needs it, so the
+      // PiTui path performs no Host read here; an unbound slot is a startup
+      // order bug and fails loudly rather than guessing `true`.
+      welcomeSessionBlank: sessionId => {
+        if (welcomeSessionBlankOwner === undefined) throw new Error('the welcome blank authority is not bound')
+        return welcomeSessionBlankOwner(sessionId)
+      },
+      // TSP-7 Welcome D: the `/sessions` UI entry the Welcome's Resume action
+      // calls. Before the arming below the slot is empty, so a click reaches
+      // the loud placeholder and never a fabricated Browser request.
+      openSessionBrowser: () => {
+        if (openRegisteredSessionBrowser === undefined) throw new Error('session browser command not registered')
+        openRegisteredSessionBrowser()
+      },
+      sessionBrowserAvailable: () => sessionBrowserAvailableOwner?.() ?? false,
     })
 
     // The live Agent is declared before the TUI-facing facade so every read
@@ -1067,6 +1102,13 @@ export function applyRunnerWithRuntime(
     // assembly owned by `runtime/direct/backend-direct.ts`); this runner only
     // consumes it.
     const backend = selectedRuntime.backend
+    // TSP-7 Welcome D: the Welcome eligibility's ONE blank authority is the
+    // same semantic `SessionReader.blank` read the `/preset` affordance already
+    // consumes (Direct: the official turn-boundary projection; Remote: the
+    // official Client session-summary bit). Bound here, AFTER the backend
+    // exists and BEFORE the surface can mount, so no repaint can read an
+    // unbound slot; the surface alone decides whether a commit needs it.
+    welcomeSessionBlankOwner = sessionId => backend.sessionReader.blank(sessionId)
     // A5b-2: the settings owner (footer settings + USER-layer trust, the
     // display-preset mutation/persistence, user keybindings and the boot
     // display/theme application).
@@ -3797,6 +3839,18 @@ export function applyRunnerWithRuntime(
       })
     }
     modelPickerAvailableOwner = () => command.modelPickerAvailable()
+    // TSP-7 Welcome D: the Welcome's Resume action rides the SAME registered
+    // `/sessions` command surface, the SAME owned-task wiring and the same
+    // arming window (before `bindRendererInput()` can deliver the first bound
+    // click). The command owns the listing, the switch and every notice; this
+    // entry only opens it.
+    openRegisteredSessionBrowser = () => {
+      runOwned('welcome session browser UI entry', () => command.openSessionBrowser(), {
+        diag,
+        sessionId: () => ownership.currentSessionId(),
+      })
+    }
+    sessionBrowserAvailableOwner = () => command.sessionBrowserAvailable()
     // PR4 §2.2: the DIRECT branch's Host command catalog arrives through the
     // pre-mount prefetch above; the REMOTE branch has no Direct agent to
     // prefetch, so a RESUMED session installs its authoritative Host catalog
