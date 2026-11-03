@@ -1071,12 +1071,13 @@ test('the fixture and session waits classify their timeout instead of INFRA_FAIL
   assert.equal(workProof.category, 'WAIT_TIMEOUT')
   assert.equal(workProof.code, 'WORK_PROOF_WAIT_TIMEOUT')
   assert.equal(workProof.waitLabel, 'a fixture proof')
-  assert.equal(workProof.elapsedMs, 120)
+  assert.ok(workProof.elapsedMs >= 120, `the timeout reports the real elapsed time, got ${String(workProof.elapsedMs)}`)
+  assert.ok(workProof.elapsedMs < 5_000, 'and not an unrelated budget')
   const session = await rejection(() => waitForHostSessionEvent(empty, 'session-x', () => false, 'a Session event', 120))
   assert.equal(session.category, 'WAIT_TIMEOUT')
   assert.equal(session.code, 'SESSION_EVENT_WAIT_TIMEOUT')
   assert.equal(session.waitLabel, 'a Session event')
-  assert.equal(session.elapsedMs, 120)
+  assert.ok(session.elapsedMs >= 120 && session.elapsedMs < 5_000)
 })
 
 test('the surface-status wait classifies its timeout against the Client', async () => {
@@ -1086,6 +1087,15 @@ test('the surface-status wait classifies its timeout against the Client', async 
   assert.equal(error.code, 'SURFACE_STATUS_WAIT_TIMEOUT')
   assert.equal(error.processRole, 'surface-client')
   assert.equal(error.waitLabel, 'a surface status')
+  assert.ok(error.elapsedMs >= 120 && error.elapsedMs < 5_000)
+  // A Client that died while the status never arrived fails fast and by its own
+  // category: reporting `timeoutMs` here would hide the early exit.
+  const dead = { role: 'surface-client', records: [], exited: true }
+  const exited = await rejection(() => waitForSurfaceStatus(dead, () => false, 'a surface status', 5_000))
+  assert.equal(exited.category, 'PROCESS_EXITED')
+  assert.equal(exited.code, 'PROCESS_EXITED_BEFORE_STATUS')
+  assert.ok(exited.elapsedMs < 1_000,
+    `an early exit must not consume the whole budget, got ${String(exited.elapsedMs)}`)
 })
 
 test('the ready race separates an early exit from a timeout', async () => {
@@ -1101,12 +1111,13 @@ test('the ready race separates an early exit from a timeout', async () => {
   assert.equal(exitedError.code, 'READY_RACE_EXITED')
   assert.equal(exitedError.waitLabel, 'a ready contender')
   assert.ok(Number.isInteger(exitedError.elapsedMs), 'the exit category still carries an elapsed time')
+  assert.ok(exitedError.elapsedMs < 5_000, 'measured, not the budget')
   // A live-but-never-ready contender is a genuine timeout.
   const live = [{ role: 'host-2', exited: false, records: [], exitResult: undefined }]
   const timeoutError = await rejection(() => waitForAnyReady(live, 'a ready contender', 120))
   assert.equal(timeoutError.category, 'WAIT_TIMEOUT')
   assert.equal(timeoutError.code, 'READY_RACE_TIMEOUT')
-  assert.equal(timeoutError.elapsedMs, 120)
+  assert.ok(timeoutError.elapsedMs >= 120 && timeoutError.elapsedMs < 5_000)
 })
 
 test('no bounded wait in either lane still throws a bare Error', () => {
