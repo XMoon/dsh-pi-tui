@@ -2,11 +2,14 @@
 
 This document owns the long-lived Host/Client boundary: locality, the semantic
 port contract, Direct/Remote equivalence, currentness/identity rules and the
-qualification tiers. Direct remains the production backend; Remote is the
-experimental in-process official wire with no public selector. An internal,
-Linux-only split-process entry (`dist/local-host.mjs` / `dist/local-client.mjs`)
-qualifies the same npm package over an authenticated loopback HTTP/WebSocket
-carrier; it is not a package export, bin, backend selector or Session surface.
+qualification tiers. Direct remains the production backend. Remote is the
+internal, Linux-only split-process backend: two real OS processes
+(`dist/local-host.mjs` / `dist/local-client.mjs`) over an authenticated loopback
+HTTP/WebSocket carrier, entered through ONE lazy Client edge
+(`app/remote-process/local-client-entry.ts -> app/bootstrap.ts`) after the
+official PluginPackages resolution. It is not a package export, bin, backend
+selector or Session surface. The former in-process composition is retired from
+`src/**` into a test-only carrier and composes no production graph.
 
 The current Host-coupling allowlist is
 `scripts/client-boundary-baseline.json`, enforced by

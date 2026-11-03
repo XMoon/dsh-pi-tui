@@ -23,7 +23,7 @@ Every production module belongs to exactly one owner layer:
 | `src/app/command/**` | Application command authority, catalog and execution |
 | `src/app/surface/**` | Mounted surface and application-presentation ownership |
 | `src/app/plugin-manager/**` | Plugin Manager application state, policy, controller and model |
-| `src/app/direct/**`, `src/app/remote/**` | Direct-only and experimental Remote composition/owners |
+| `src/app/direct/**`, `src/app/remote/**` | Direct-only and internal split-process Remote composition/owners |
 | `src/runtime/**` | Transport-neutral semantic ports/contracts and Direct/Remote adapters |
 | `src/runtime/process/**` | Process-lifetime primitives: detached/owned tasks, diagnostics, synchronous disposal, total error observation |
 | `src/domain/**` | Transport/UI-neutral semantic models, policies, folds and derived state |
@@ -98,10 +98,10 @@ application owners never import the bootstrap composition zone
 application owners never import src/tui/** implementation
 src/domain/** never imports src/app/**, src/tui/**, src/client/** or
   experimental Remote composition
-src/client/** never imports experimental Remote composition
+src/client/** never imports the internal Remote composition
 src/tui/transcript/** never imports PiTui, Tern, TuiApp, theme/icons, the
   renderer registry or another concrete TUI mechanics module
-Remote is reached through one sanctioned lazy boundary
+Remote is reached through ONE sanctioned lazy Client edge
 Direct remains the production/default backend
 ```
 
@@ -211,12 +211,15 @@ duplicates it (see [`../tsp/overview.md`](../tsp/overview.md)).
 
 ## Direct and Remote
 
-Direct is the current production/default provider. Remote is the experimental
-in-process official wire. Both implement the same transport-neutral semantic
-contracts defined by `src/runtime/**`; the contract is never derived from the
-Direct implementation shape. The experimental Remote composition is reached only
-through the one sanctioned dynamic boundary (`src/runtime/backend-loader.ts` →
-`src/app/remote/runtime.ts`).
+Direct is the current production/default provider. Remote is the internal,
+Linux-only split-process backend with no public selector: a real Host process and
+a real Client process, each composing its own Context. Both implement the same
+transport-neutral semantic contracts defined by `src/runtime/**`; the contract is
+never derived from the Direct implementation shape. The Remote Client composes
+through ONE sanctioned lazy edge (`app/remote-process/local-client-entry.ts ->
+app/bootstrap.ts`) over the shared `src/app/remote/application-stage.ts`; there is
+no runtime backend loader, and the former in-process composition exists only as a
+test-only carrier under `test/support/m3-inprocess/**`.
 
 Locality, semantic-port ownership, currentness/generation fences and the
 Direct/Remote test contract are owned by [host-client.md](./host-client.md).
