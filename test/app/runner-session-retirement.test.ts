@@ -1650,6 +1650,7 @@ test('an in-flight PRE-COMMIT flush overtaken by the shutdown is classified as s
   await settle()
   releaseFlush()
   const result = await transition as { kind: string; text?: string }
+  // Bounded microtask drain: the appExit-triggered disposal settles.
   await settle()
   // The takeover must NOT be reported as a transition failure carrying the
   // closed-handle error: DSH's close drains the materialized old session
@@ -1731,6 +1732,7 @@ test('the committed child is checkpointed BEFORE the abort-aware child quiesce (
   await settle()
   releaseChildQuiesce()
   await transition
+  // Bounded microtask drain: the appExit-triggered disposal settles.
   await settle()
   assert.equal(harness.retirementEvents.filter(event => event === `dispose:${created.id}`).length, 1,
     'the committed child must still be retired exactly once')
