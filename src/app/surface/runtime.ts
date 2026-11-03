@@ -1891,7 +1891,14 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     if (viewedChildId !== undefined) return 'hidden'
     const sessionId = routing().currentSessionId()
     if (sessionId === undefined || folder !== routing().mainFolder()) return undefined
-    return readBlank(sessionId) === true && turnCount === 0 ? 'blank-session' : 'hidden'
+    if (readBlank(sessionId) !== true) return 'hidden'
+    // A turn the fold KNOWS began vetoes the empty state even while the
+    // authority still claims blank. `groupedTurns` counts only turns that have
+    // produced displayable cards, so a Remote summary whose snapshot has not
+    // refreshed yet would otherwise keep the Welcome — and its live Resume
+    // action — over a Session that already started. The `turn/start` alone is
+    // the missing witness, and the fold records it as turn ACTIVITY.
+    return turnCount === 0 && folder.turnActivities().size === 0 ? 'blank-session' : 'hidden'
   }
 
   /** Project one SELECTED target. The projection/geometry algorithms stay in

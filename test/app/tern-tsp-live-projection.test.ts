@@ -1949,6 +1949,33 @@ test('W05: the blank authority plus an empty fold reaches the mounted TSP Main a
   }
 })
 
+test('W06: a started turn with no displayable row yet vetoes the empty state while the authority still claims blank', async () => {
+  // The reachable Remote intermediate: the listed session summary still answers
+  // `blank:true` (its snapshot has not refreshed), while the fold has already
+  // applied a real `turn/start` that has produced NO displayable row. The
+  // grouped turn index is still empty here — it counts turns that yielded
+  // cards — so the veto must read the fold's real turn ACTIVITY instead.
+  const harness = await mountPreparingHarness({ nativeEl: true, sessionBlank: () => true })
+  try {
+    harness.surface.paintNow()
+    await awaitWire(() => welcomeOnWire(harness), 'the blank subject to present the Welcome')
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.surface.paintNow()
+    // The witness is the PAINTED result, not the recorded argument: wait until
+    // the frame that lifted the Welcome is on the wire.
+    await awaitWire(() => !welcomeOnWire(harness), 'the started turn to retire the painted Welcome')
+    assert.deepEqual(harness.committedEligibilities.at(-1), 'hidden',
+      'and the surface committed the veto, rather than the renderer painting around a stale invitation')
+    assert.equal(messageRowOnWire(harness), false,
+      'the hide needed no displayable row at all — the turn ACTIVITY is the evidence')
+    // The action left with the state: no Welcome action node survives anywhere.
+    assert.equal(liveWireIds(harness.tern.output.text()).some(id => id.includes('welcome-resume')), false,
+      'the Resume action is not painted on a subject that has already started')
+  } finally {
+    await harness.dispose()
+  }
+})
+
 test('W06: a turn in the complete fold vetoes the empty state even when the authority still claims blank', async () => {
   // The Remote shape this veto exists for: the listed summary still says
   // `blank:true` while the complete fold already carries the turn. The veto
