@@ -294,11 +294,19 @@ the same projection without painting it. The hydration reseed reconciles them:
   CWD-level consecutive dedupe anchor, so a later run member can legitimately
   append: its row is simply re-emitted from the snapshot.) The mirror keeps its unchanged duplicate rule, so an input identical
   to the outgoing Session's last row is still recalled after the reseed;
-- EVERY accepted Enter — each editor seat, a sessionless or local command, a
-  `!`/`!!` shell line — becomes an occurrence with its own internal OCCURRENCE
-  TOKEN that rides its submission into the persistence record. The token — never
-  the text — is what attributes a settlement to exactly one occurrence, so
-  repeated identical submissions stay distinguishable (`a → b → a` keeps both
+- EVERY Enter the mounted renderer ACCEPTS into its recall — each editor seat,
+  a sessionless or local command — becomes an occurrence with its own internal
+  OCCURRENCE TOKEN that rides its submission into the persistence record.
+  Acceptance is the renderer's, on top of the shared History policy
+  (`shouldRememberInput`: staged attachments, an in-flight pasted path): PiTui
+  accepts a `!`/`!!` shell line like any other input (its shell really runs and
+  its row is stored verbatim so ↑ re-runs the branch), while the TSP renderer
+  declines `!` lines because its user-shell is refused outright by the
+  submission controller — a line that can never run must not sit in the recall.
+  Declining the occurrence never declines the BUSINESS submission: the input
+  still takes the original submit path and the controller still owns it. The
+  token — never the text — is what attributes a settlement to exactly one
+  occurrence, so repeated identical submissions stay distinguishable (`a → b → a` keeps both
   `a`s), and no occurrence is discarded before the final seed compresses
   adjacent duplicates;
 - the write owner reports EVERY settled submission, in APPEND ORDER, through
