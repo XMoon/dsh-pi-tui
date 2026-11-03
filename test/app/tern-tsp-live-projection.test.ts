@@ -2023,15 +2023,17 @@ test('W07: a viewed child never borrows the main subject\'s Welcome, and leaving
 
 test('W06: a zero-row window over a non-empty fold is unreachable through the public controller, so the veto cannot be window-derived', () => {
   // The plan's W06 asks for "the window re-selected to zero rows". This proves
-  // the state itself: EVERY window selection the production controller accepts
+  // the state itself: every window selection the production controller ACCEPTS
   // over a fold that has turns paints at least one row, and the only accepted
   // re-selections are anchors inside the fold's own turn index. A test that
   // fabricated an empty window would be constructing a state production cannot
   // reach, so the claim is carried here instead: the veto input is the fold's
   // turn index, and no reachable window state can make a non-empty fold look
-  // empty. `anchorAt` refuses a turn outside the index, `moveOlder`/`turnOlder`
-  // refuse at the oldest turn, and `setTurns([])` resets to `latest` rather
-  // than producing an empty history window.
+  // empty. Every public operation of `TranscriptWindowController` is walked
+  // below — `setTurns`, `latest`, `resetToLatest`, `anchorAt`, `moveOlder`,
+  // `turnOlder`, `turnNewer`, `moveNewer` — including the ones that must be
+  // REFUSED (`anchorAt` outside the index at both ends, the older moves at the
+  // oldest turn, the newer moves from `latest`).
   const events = (offset: number) => [
     ev('turn/start', { turn: 1 + offset }, offset * 10),
     userMessage(1 + offset * 10, `user-w${offset}`, `the ${offset}nd turn`),
@@ -2046,17 +2048,39 @@ test('W06: a zero-row window over a non-empty fold is unreachable through the pu
       const endTurn = controller.endTurn()
       return folder.window({ maxTurns: controller.windowTurns, ...(endTurn === undefined ? {} : { endTurn }) }).messages.length
     }
-    assert.ok(projected() > 0, 'the live window shows a row')
+    const nonEmpty = (where: string): void => {
+      assert.ok(projected() > 0, `${where}: the window still paints at least one row`)
+    }
+    nonEmpty('latest')
     // Re-anchor onto every turn the fold actually has: none is empty.
     for (const turn of folder.groupedTurns()) {
       assert.equal(controller.anchorAt(turn), true, `anchorAt(${turn}) is a real re-selection`)
-      assert.ok(projected() > 0, `the window anchored at turn ${turn} still shows a row`)
+      nonEmpty(`anchorAt(${turn})`)
     }
-    // And the refusals: an anchor outside the index never re-selects anything.
+    // Refused re-selections change nothing, so they cannot empty the window.
     assert.equal(controller.anchorAt(9999), false, 'a turn the fold never had is refused')
+    assert.equal(controller.anchorAt(0), false, 'a turn below the index is refused')
+    nonEmpty('after the refused anchors')
+    // Walk the whole older/newer ladder, both by page and by single turn.
     controller.latest()
-    while (controller.moveOlder()) assert.ok(projected() > 0, 'every older page still shows a row')
-    assert.ok(projected() > 0, 'the oldest reachable window is never empty')
+    nonEmpty('latest again')
+    while (controller.moveOlder()) nonEmpty('moveOlder page')
+    while (controller.turnOlder()) nonEmpty('turnOlder step')
+    assert.equal(controller.turnOlder(), false, 'the oldest turn is reached')
+    nonEmpty('the oldest reachable window')
+    while (controller.turnNewer()) nonEmpty('turnNewer step')
+    while (controller.moveNewer()) nonEmpty('moveNewer page')
+    nonEmpty('the newest reachable window')
+    // The two reset spellings are both covered: `latest()` and the Host
+    // handler alias `resetToLatest()` reach the same live-tail state.
+    assert.equal(controller.anchorAt(folder.groupedTurns()[0]!), true, 're-anchored for the reset alias')
+    assert.equal(controller.resetToLatest(), true, 'resetToLatest() is a real transition from history')
+    nonEmpty('resetToLatest()')
+    // A swapped-in empty index is the ONE way to a zero-row fold — and there
+    // the veto correctly reports no history, so it is not the window lying.
+    controller.setTurns([])
+    assert.equal(controller.state().mode, 'latest', 'setTurns([]) resets to latest, never an empty history window')
+    nonEmpty('after setTurns([]) on a fold that still has turns')
   }
 })
 
