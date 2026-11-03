@@ -299,6 +299,9 @@ test('the lane setup shares the report and cleanup boundary with the run', () =>
   assert.match(cleanup, /if \(workDir === undefined\) \{/u, 'a missing work root must not break the cleanup')
   assert.match(cleanup, /else if \(!KEEP\) rmSync\(workDir/u)
   assert.match(cleanup, /if \(dshHome !== undefined\) killIsolatedProcesses\(dshHome\)/u)
+  // The FAILPOINT proof reads the same scene, so it needs the same guard: an
+  // undefined root must not reach a second read of the isolated process list.
+  assert.match(cleanup, /if \(FAILPOINT !== undefined && dshHome !== undefined\) \{/u)
 })
 
 test('the split-process lane reports every failure through the shared safe projection', () => {

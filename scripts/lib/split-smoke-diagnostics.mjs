@@ -496,6 +496,20 @@ export function forensicErrorText(error, limit = 2_000) {
  * `KEEP`, where the operator already kept the private scene.
  */
 const ASSERT_HELPER_FRAMES = /^(?:assert|assertEqual|assertNotEqual|assertDeepEqual|assertMatch|laneAssertionError|SplitSmokeAssertionError)$/u
+
+/**
+ * The ONLY files whose stack frames may become an `assertion` locator.
+ *
+ * The shape check alone would trust any `.mjs` frame, including a helper, a
+ * vendored module or a forged path a caller managed to get onto the stack. The
+ * locator is meant to point at the lane's own assertion, so the basename must be
+ * one of the lanes this module serves; every other frame is skipped and, when
+ * nothing trusted remains, the field is simply omitted (fail closed).
+ */
+export const LANE_SOURCE_FILES = new Set([
+  'split-process-smoke.mjs',
+  'split-process-upgrade-smoke.mjs',
+])
 const STACK_FRAME = /^at (?:async )?(?:(?<fn>[A-Za-z0-9_$.<>| ]+?) \()?(?<path>[^\s()]+):(?<line>\d+):\d+\)?$/u
 const SAFE_BASENAME = /^[A-Za-z0-9._-]{1,64}\.mjs$/u
 
@@ -504,13 +518,18 @@ export class SplitSmokeAssertionError extends Error {
     super(`ASSERTION_FAILED: ${message}`)
     this.name = 'SplitSmokeAssertionError'
     this.category = 'ASSERTION_FAILED'
-    this.assertion = laneAssertionSite(this.constructor)
+    this.assertion = laneAssertionSite(this.constructor, facts.sources)
     this.checkpoint = facts.checkpoint
   }
 }
 
-/** The caller's `<basename>:<line>` for a failure thrown from a lane assert helper. */
-export function laneAssertionSite(holder) {
+/**
+ * The caller's `<basename>:<line>` for a failure thrown from a lane assert
+ * helper, restricted to a trusted source set (`sources`, defaulting to the lane
+ * scripts). `holder` hides the error constructor's own frame.
+ */
+export function laneAssertionSite(holder, sources) {
+  const trusted = sources ?? LANE_SOURCE_FILES
   const site = new Error()
   if (holder !== undefined) Error.captureStackTrace?.(site, holder)
   const frames = String(site.stack ?? '').split('\n').slice(1)
@@ -522,7 +541,8 @@ export function laneAssertionSite(holder) {
     if (ASSERT_HELPER_FRAMES.test(fn)) continue
     const file = String(groups.path ?? groups.bare ?? '').split('/').pop()
     const line = Number(groups.line)
-    if (!SAFE_BASENAME.test(file) || !Number.isInteger(line) || line <= 0) continue
+    if (!SAFE_BASENAME.test(file) || !trusted.has(file)) continue
+    if (!Number.isInteger(line) || line <= 0) continue
     return `${file}:${line}`
   }
   return undefined
