@@ -153,6 +153,19 @@ function quickMenuNode(
     }
     for (const row of section.rows) body.push(quickItem(row, onIntent))
   }
+  // A provider that failed to read is inert CONTEXT about the list, so it lives
+  // INSIDE the scrolling body: its count comes from the directory and is not
+  // bounded, and the fixed Back/search/Full chrome must stay reachable whatever
+  // that count is (a short pane with a dozen failed providers is reachable).
+  for (const failure of panel.failures) {
+    body.push(html.div({
+      key: failure.key,
+      role: QUIET_COMPOSER_ROLES.quickFailure,
+      title: failure.detail,
+      aria: failure.label,
+      attrs: { 'data-detail': failure.detail } as Readonly<Record<string, string>>,
+    }, failure.label))
+  }
   return html.div(
     {
       key: `composer-quick-menu-${panel.serial}`,
@@ -168,6 +181,11 @@ function quickMenuNode(
           cursor: panel.cursor,
           placeholder: 'Search models…',
           aria: 'Search models',
+          // A pointer click on an UNFOCUSED field is a `focus` event, not a key:
+          // without this the panel would keep browsing the list while the client
+          // believes the caret is in the search box. The SDK dispatches it from the
+          // view it last rendered, so a stale frame's click resolves to nothing.
+          onFocus: () => onIntent({ kind: 'focus-search', revision: panel.revision }),
         })]
       : []),
     ...(panel.notice === undefined
@@ -181,13 +199,7 @@ function quickMenuNode(
     ...(panel.empty === undefined
       ? []
       : [html.div({ key: `q${panel.serial}-empty`, role: QUIET_COMPOSER_ROLES.quickEmpty }, panel.empty)]),
-    ...panel.failures.map(failure => html.div({
-      key: failure.key,
-      role: QUIET_COMPOSER_ROLES.quickFailure,
-      title: failure.detail,
-      aria: failure.label,
-      attrs: { 'data-detail': failure.detail } as Readonly<Record<string, string>>,
-    }, failure.label)),
+
     html.div(
       { key: `q${panel.serial}-footer`, role: QUIET_COMPOSER_ROLES.quickFooter },
       quickItem(panel.footer, onIntent),
@@ -334,13 +346,15 @@ export const QUIET_COMPOSER_STYLES = `
     position: relative;
     flex-shrink: 0;
   }
+  /* The two dropdown triggers carry the menu's own soft rounding, so a hover
+     paints a rounded block instead of a square one beside the round Send. */
   [data-role='dsh.composer.permission'] {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    padding: 4px 2px;
+    padding: 4px 8px;
     border: 0;
-    border-radius: 0;
+    border-radius: 8px;
     background: transparent;
     color: var(--t2);
     font-family: var(--sans);
@@ -420,9 +434,9 @@ export const QUIET_COMPOSER_STYLES = `
     gap: 4px;
     min-width: 0;
     flex-shrink: 1;
-    padding: 4px 2px;
+    padding: 4px 8px;
     border: 0;
-    border-radius: 0;
+    border-radius: 8px;
     background: transparent;
     color: var(--t1);
     font-family: var(--sans);
@@ -468,7 +482,13 @@ export const QUIET_COMPOSER_STYLES = `
     gap: 2px;
     width: 300px;
     max-width: min(320px, calc(100vw - 24px));
-    max-height: min(440px, 65vh);
+    /* The budget must fit the space ABOVE the trigger inside the pane, not just
+       a fraction of the viewport: measured on the client, the shortest supported
+       pane (900x360) leaves ~224px above the trigger, and a 65vh menu overflowed
+       the top of the pane and cut Back and the search field. 55vh keeps the whole
+       anchored menu inside the pane at every supported size and still caps at
+       440px on a normal one. */
+    max-height: min(440px, 55vh);
     padding: 4px;
     border: 1px solid var(--l2);
     border-radius: 8px;

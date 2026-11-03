@@ -909,9 +909,6 @@ test('Q15 a partial read keeps every usable group and states the failed provider
   await waitUntil('the model page mounted', () => menuNode(pane, 'search') !== undefined)
   // The failure line's KEY is a container token (panel serial + index): an
   // external provider id never reaches a node key, so the line is addressed by
-  // what it paints, exactly like the client does.
-  // The failure line's KEY is a container token (panel serial + index): an
-  // external provider id never reaches a node key, so the line is addressed by
   // its own painted text, exactly like the client does.
   const failure = menuNodes(pane).find(node => String(node.p['text'] ?? '') === 'Gamma · unavailable')
   assert.ok(failure, 'the failed provider is shown as inert context')
@@ -942,6 +939,123 @@ test('Q15 an empty search says so and offers no invisible row', async (t) => {
   pane.key('\u001b')
   await waitUntil('Escape cleared the query first', () => String(menuNode(pane, 'search')?.p['text'] ?? 'x') === '')
   assert.equal(menuMounted(pane), true, 'the clear is not a dismissal')
+})
+
+// ── The three interaction gaps the external review found on the shipped menu.
+// Each case is written so the PRE-fix code fails it, not just the post-fix one.
+
+test('Q13 a leftover filter never swallows Escape after a pointer Back', async (t) => {
+  const m = await mountedQuick()
+  t.after(() => { void m.dispose() })
+  const { pane } = m
+  await m.openAndHydrate({ provider: 'alpha', model: 'a-one', reasoningEffort: 'high' })
+  click(pane, menuAction(pane, 'o0'))
+  await waitUntil('the model page mounted', () => menuNode(pane, 'search') !== undefined)
+  pane.key('deepseek')
+  await waitUntil('the filter took effect', () =>
+    String(menuNode(pane, 'search')?.p['text'] ?? '') === 'deepseek')
+  // Back by POINTER keeps the read (and with it the filter): the panel returns to
+  // a root that still carries a non-empty query.
+  click(pane, menuAction(pane, 'back'))
+  await waitUntil('the root returned', () => menuNode(pane, 'search') === undefined)
+  assert.equal(bodyLabels(pane).some(label => label.startsWith('Model ')), true)
+  // The first Escape must therefore be the dismissal the user is looking for, not
+  // a filter clear the root page cannot perform (which the old ladder produced,
+  // consumed the key, and painted nothing).
+  pane.key('\u001b')
+  await waitUntil('Escape on the root closed the menu', () => !menuMounted(pane))
+  assert.equal(m.counts.cancels, 0, 'and it still never reaches the Agent cancel')
+})
+
+test('Q13 Escape on a failed read steps back instead of dying on the filter', async (t) => {
+  const m = await mountedQuick()
+  t.after(() => { void m.dispose() })
+  const { pane } = m
+  await m.openAndHydrate({ provider: 'alpha', model: 'a-one', reasoningEffort: 'high' })
+  click(pane, menuAction(pane, 'o0'))
+  await waitUntil('the model page mounted', () => menuNode(pane, 'search') !== undefined)
+  pane.key('zz')
+  await waitUntil('the query is set', () => String(menuNode(pane, 'search')?.p['text'] ?? '') === 'zz')
+  // The read turns to an error while a filter is in place: the field is no longer
+  // an editing target, so Escape must navigate rather than try to clear it.
+  m.handle().setLoadError('the model directory is unreachable')
+  await waitUntil('the failed read painted its notice', () =>
+    text(pane, menuNode(pane, 'notice')).includes('unreachable'))
+  pane.key('\u001b')
+  await waitUntil('Escape returned to the root', () => menuNode(pane, 'search') === undefined)
+  assert.equal(menuMounted(pane), true, 'a step back is not a dismissal')
+  pane.key('\u001b')
+  await waitUntil('the next Escape closed the menu', () => !menuMounted(pane))
+})
+
+test('Q13 a pointer click on the search field takes the search zone back', async (t) => {
+  const m = await mountedQuick()
+  t.after(() => { void m.dispose() })
+  const { pane } = m
+  await m.openAndHydrate({ provider: 'alpha', model: 'a-one', reasoningEffort: 'high' })
+  click(pane, menuAction(pane, 'o0'))
+  await waitUntil('the model page mounted', () => menuNode(pane, 'search') !== undefined)
+  const search = menuNode(pane, 'search')
+  assert.ok(search, 'the model page mounts the native search field')
+  const searchId = search!.id
+  assert.equal(frameOps(pane, 'focus').at(-1), searchId,
+    'entering the page puts the caret in the field')
+  pane.key('\t')
+  await waitUntil('Tab moved the caret off the field', () => frameOps(pane, 'focus').at(-1) === 'null')
+  // A click on an UNFOCUSED field is a client `focus` event, not a key. With no
+  // route for it the panel keeps browsing the list while the client believes the
+  // caret is in the box, so the next keystroke edits nothing.
+  pane.event({ ev: 'focus', sf: pane.frames().at(-1)!.sf, id: searchId })
+  await waitUntil('the focus event brought the caret back to the field', () =>
+    frameOps(pane, 'focus').at(-1) === searchId)
+  pane.key('Bet')
+  await waitUntil('typing edits the filter again', () =>
+    String(menuNode(pane, 'search')?.p['text'] ?? '') === 'Bet')
+})
+
+test('Q15 many failed providers scroll with the body and never push out the fixed footer', async (t) => {
+  const m = await mountedQuick()
+  t.after(() => { void m.dispose() })
+  const { pane } = m
+  await m.openAndHydrate({ provider: 'alpha', model: 'a-one', reasoningEffort: 'high' })
+  // A directory where a dozen providers failed to read: that count is external
+  // data with no bound, so it may not live in the menu's fixed chrome.
+  const many: ModelDirectoryDto = {
+    default: { provider: 'alpha', model: 'a-one' },
+    routableProviders: ['alpha'],
+    groups: [{
+      id: 'alpha',
+      name: 'Alpha Provider',
+      models: [{ id: 'a-one', name: 'Alpha One' }, { id: 'a-two', name: 'Alpha Two' }],
+    }],
+    failures: Array.from({ length: 12 }, (_unused, index) => ({
+      id: `down-${index}`,
+      name: `Provider ${index}`,
+      message: 'unreachable',
+    })),
+  }
+  m.handle().setDirectory({
+    directory: many,
+    current: { provider: 'alpha', model: 'a-one', reasoningEffort: 'high' },
+  })
+  click(pane, menuAction(pane, 'o0'))
+  await waitUntil('the model page mounted', () => menuNode(pane, 'search') !== undefined)
+  const scroller = menuNodes(pane).find(node => nodeKey(node).endsWith('-scroller'))
+  assert.ok(scroller, 'the scrolling body exists')
+  const failures = menuNodes(pane).filter(node => /-failure-\d+$/.test(nodeKey(node)))
+  assert.equal(failures.length, 12, 'every failed provider is stated')
+  for (const failure of failures) {
+    assert.equal(failure.id.startsWith(`${scroller!.id}.`), true,
+      'a failed provider line scrolls INSIDE the body, never in the fixed chrome')
+  }
+  const footer = menuNodes(pane).find(node => nodeKey(node).endsWith('-footer'))
+  assert.ok(footer, 'the fixed footer container exists')
+  assert.equal(footer!.id.startsWith(`${scroller!.id}.`), false,
+    'and it sits outside the scrolling region, so no failure count can push it out')
+  const search = menuNode(pane, 'search')
+  assert.ok(search)
+  assert.equal(search!.id.startsWith(`${scroller!.id}.`), false,
+    'the search field is fixed chrome too')
 })
 
 test('Q16 a pane without the native input kind keeps the full panel, never a fake menu', async (t) => {
