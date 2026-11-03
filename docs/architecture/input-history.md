@@ -206,9 +206,10 @@ Two intentional trade-offs of the bounded window:
 
 ### Recall-order contract (trap: get this backwards and ↑ shows the OLDEST entry)
 
-The file is oldest-first; `TuiApp.resetInputHistory` takes **newest-first**
-(`seedInputHistory` iterates it reversed into the editor, whose recall list
-is newest-first). The runner therefore reverses the loaded entries before
+The file is oldest-first; the recall API (`SurfaceDisplaySeam.resetInputHistory`,
+implemented by each renderer's adapter over the shared kernel) takes
+**newest-first**, and the PiTui adapter seeds its editor reversed so the ↑/↓
+list ends newest-first. The runner therefore reverses the loaded entries before
 seeding. The first `↑` must recall the MOST RECENT submission — this is
 pinned by `test/tui/input-experience.test.ts` ("seeded input history recalls
 entries with the up arrow") and `test/client/tui-app.test.ts`.
@@ -261,9 +262,15 @@ task (`runDetached` invokes its factory synchronously and `appendFileSync` runs
 there); the ORDERING between the submission body and the reseed is what races,
 never the append.
 
-`TuiApp` therefore keeps the open scope's SCOPE-BOUND TEMPORARY SUBMISSIONS as
-the scope's TRUE submission sequence (newest first), and the hydration reseed
-reconciles them:
+The open scope's SCOPE-BOUND TEMPORARY SUBMISSIONS are kept as the scope's TRUE
+submission sequence (newest first) in ONE Client-local pure kernel,
+`src/client/history/recall-scope.ts` (`createHistoryRecallScope()`): no IO, no
+renderer, no SDK, no Session reader. Every mounted renderer owns exactly ONE
+instance and commits the same three signals into it through the existing
+`SurfaceDisplaySeam` (`beginInputHistoryScope` / `resetInputHistory` /
+`settleScopeInput`); the PiTui adapter additionally mirrors the kernel's
+snapshot into its editor stack, and a renderer that presents no recall UI keeps
+the same projection without painting it. The hydration reseed reconciles them:
 
 - the scope is OPEN FROM CONSTRUCTION: the SESSIONLESS POOL is a real scope (a
   deferred start, and the Remote startup resume whose `remote.read` await leaves
@@ -275,7 +282,8 @@ reconciles them:
   ordinary transition, the fork adoption and the first-session creation. A
   REPLACED owner's entries are dropped with the scope, so Session A's input can
   never cross into Session B's recall;
-- `rememberInput()` records every accepted input in the scope while it is open —
+- `rememberInput()` → `HistoryRecallScope.rememberAccepted()` records every
+  accepted input in the scope while it is open —
   it never compresses a repeat away, because only the FINAL seed can see where
   another writer's row lands between two identical submissions. The scope's own
   cap counts RUNS of consecutive identical text, exactly like the editor/mirror
@@ -316,8 +324,8 @@ reconciles them:
   append boundary it recorded — after the rows that preceded it and before those
   that followed, whether or not their own settlements survived the cap (only a skip
   whose whole boundary lies outside the covered window falls at its end);
-- `resetInputHistory(entries, owner)` commits that owner's reseed from that
-  evidence alone, in ONE linear pass (the frozen plan bounds it at O(100)):
+- `HistoryRecallScope.reset(entries, owner)` commits that owner's reseed from
+  that evidence alone, in ONE linear pass (the frozen plan bounds it at O(100)):
   occurrence token → rank is built once, the snapshot's newest written-count rows
   ARE the owner's appends in reverse (a count watermark, never text matching), and
   a single ordered cursor interleaves the occurrences the window does not carry —
@@ -334,7 +342,10 @@ are replaced by the new owner's projection at the commit above.
 
 No second history authority is created: the per-cwd JSONL stays the snapshot
 authority, and the write policy (trim, empty / consecutive-repeat / attachment
-skips, cwd `lastHistoryContent`, the `sessionId` field) is unchanged.
+skips, cwd `lastHistoryContent`, the `sessionId` field) is unchanged. The kernel
+is a short-lived projection of the reports those owners already make — it reads
+no file, opens no subscription, decides no persistence, and is not a Session or
+cwd authority; a new mount starts from its own boot seed.
 
 ## Migration
 

@@ -34,6 +34,7 @@ import type { StreamingToolPreview } from './streaming-tool-preparing.ts'
 import type { StatusPatch } from '../../domain/status/types.ts'
 import type { TranscriptMessage, TurnActivity } from '../../domain/transcript/types.ts'
 import type { TranscriptWindowState } from '../../domain/transcript/window.ts'
+import type { HistoryScopeSettlement } from '../../client/history/recall-scope.ts'
 import type { StatusData, DisplaySubjectPresentation } from '../../tui-app.ts'
 
 /**
@@ -207,8 +208,12 @@ export interface SurfaceDisplaySeam {
    * sites consult this before merging.
    */
   retainsStaleDraftRestore(): boolean
-  /** Replace the editor input-history recall rows (editor-only; a read-only
-   * renderer ignores the rows but still records the reset).
+  /** Replace the recall projection with the CURRENT workspace's rows. Each
+   * renderer owns ONE Client-local recall kernel
+   * (`src/client/history/recall-scope.ts`) and commits the reset into it; the
+   * PiTui adapter additionally mirrors the kernel's snapshot into its editor's
+   * ↑/↓ stack. Neither one renders, clears a draft nor opens a second
+   * persistence owner.
    * @param entries - the current Session's rows, most recent first.
    * @param owner - the owner whose hydration committed this reseed. Omitted
    *   for the sessionless boot seed, which only seeds the recall pool. */
@@ -216,8 +221,8 @@ export interface SurfaceDisplaySeam {
   /** Open the editor-recall scope of the owner a Session commit section is
    * publishing (or creating): the following {@link resetInputHistory} for that
    * owner must reconcile the inputs accepted since the publication
-   * (scope-bound temporary submissions) instead of dropping them. A read-only
-   * renderer records nothing. */
+   * (scope-bound temporary submissions) instead of dropping them. Every
+   * mounted renderer records it in its own kernel. */
   beginInputHistoryScope(owner: string | undefined): void
   /** Record ONE settlement of the open editor-recall scope, IN APPEND ORDER:
    * called from the SAME synchronous stack as the append (or from the policy
@@ -225,12 +230,7 @@ export interface SurfaceDisplaySeam {
    * settlement to exactly one accepted submission; the order is the file's row
    * order, which is what the following {@link resetInputHistory} maps.
    * @param settlement - the settled occurrence's facts. */
-  settleScopeInput(settlement: {
-    readonly token?: number
-    readonly owner: string | undefined
-    readonly outcome: 'written' | 'skipped'
-    readonly text: string
-  }): void
+  settleScopeInput(settlement: HistoryScopeSettlement): void
   /** Clear the search result readout (chrome-only; harmless on TSP). */
   setSearchResult(index: number, count: number): void
 

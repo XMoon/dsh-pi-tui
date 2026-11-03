@@ -236,8 +236,14 @@ export interface SurfaceInputBinding {
    * (`ApplicationEvents.events.onSubmit`), so a TSP Enter rides the ONE
    * `SubmissionController` — never a renderer-owned writer. The renderer
    * clears the composer BEFORE this call (§3.4 ordering).
+   *
+   * TSP I-A: `scopeToken` is the accepted submission's OCCURRENCE token from
+   * the renderer's recall kernel, forwarded verbatim into the existing
+   * submission entry so the write owner can settle exactly that occurrence;
+   * `undefined` whenever the recall did not accept the input (refused by the
+   * History policy, blank, or a shell line TSP does not present).
    */
-  submit(text: string, request: ComposerSubmitRequest): void
+  submit(text: string, request: ComposerSubmitRequest, scopeToken?: number): void
   /** The draft-steer entry (B2): `ApplicationEvents.events.onSteer`. */
   steer(text: string): void
   /**
@@ -261,6 +267,15 @@ export interface SurfaceInputBinding {
    * retry notice was shown); the draft/caret/Undo stay untouched.
    */
   admitPastedPathDelivery(text: string): boolean
+  /**
+   * TSP I-A: the HISTORY-eligibility predicate for one admitted draft — the
+   * SAME `ApplicationEvents.shouldRememberInput` policy PiTui's
+   * `TuiApp.rememberInput` consults (staged attachments, a pasted path whose
+   * read is still in flight). It answers ONLY whether this input may enter the
+   * plain-text recall; it is NOT the business submit admission (the submission
+   * controller owns that, and still receives the submission either way).
+   */
+  shouldRememberInput(text: string): boolean
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
   /**
@@ -2887,7 +2902,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         pendingInputBinding = {
           exit: () => deps.events.onExit(),
           cancel: () => deps.events.onCancel?.(),
-          submit: (text, request) => deps.events.onSubmit(text, request),
+          submit: (text, request, scopeToken) => deps.events.onSubmit(text, request, scopeToken),
           // `onSteer` is optional on the events table (the capability is
           // guarded at construction): an absent one leaves the gesture a
           // committed no-op rather than a fabricated submission.
@@ -2903,6 +2918,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
             displaySeam().notify(PASTE_PENDING_NOTICE, 'info')
             return false
           },
+          // TSP I-A: the recall-eligibility read, projected from the SAME
+          // application policy PiTui's `rememberInput` consults. An events
+          // table without the predicate accepts (the predicate is an
+          // attachment/paste REFUSAL, and its absence means nothing to
+          // refuse) — exactly the PiTui `?.(text) === false` shape.
+          shouldRememberInput: (text) => deps.events.shouldRememberInput?.(text) !== false,
           noteUserInput: () => deps.events.onUserInput?.(),
           // PR3-B B3 (§3.8): the Alt+Q continued-Question read/reopen cross
           // through the SAME interaction owner. They are bound here but can

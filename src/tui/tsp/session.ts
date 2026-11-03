@@ -43,6 +43,7 @@ import type { Key, Node, ScrollTo, Session, SessionInput, Surface, Tree, TspEven
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { StatusSnapshot, StatusSnapshotReader } from '../../domain/status/types.ts'
 import type { ComposerSubmitRequest } from '../../tui-app.ts'
+import { createHistoryRecallScope } from '../../client/history/recall-scope.ts'
 import type {
   DisplayDockNotice,
   DisplayStatusFacts,
@@ -215,8 +216,23 @@ export interface TspInputHandlers {
    * renderer snapshots the draft, CLEARS the composer BEFORE the callback
    * (so a synchronous failure restoration merges into the empty/current
    * draft), and never applies a stale pre-callback snapshot afterwards.
+   *
+   * TSP I-A: `scopeToken` is the OCCURRENCE this mount's recall kernel
+   * assigned to the accepted input (see `historyRecall`), forwarded verbatim
+   * into the SAME existing submission entry so the write owner settles exactly
+   * that occurrence. It is `undefined` when the recall refused the input — the
+   * submission itself is unaffected and still runs its original path.
    */
-  submit(text: string, request: ComposerSubmitRequest): void
+  submit(text: string, request: ComposerSubmitRequest, scopeToken?: number): void
+  /**
+   * TSP I-A: the HISTORY-eligibility read for one already-delivery-admitted
+   * draft — the SAME `ApplicationEvents.shouldRememberInput` policy PiTui's
+   * `TuiApp.rememberInput` consults (staged attachments, a pasted path whose
+   * read is still in flight). It answers ONLY whether this input may enter the
+   * plain-text recall; the business submit admission stays with the submission
+   * controller, which receives the submission either way.
+   */
+  shouldRememberInput(text: string): boolean
   /**
    * PR3-B B2: the draft-steer entry (`events.onSteer`) with the same
    * before-callback ordering; the submission controller owns the outcome.
@@ -2392,6 +2408,20 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     render()
   }
 
+  /**
+   * TSP I-A: the ONE Client-local input-recall kernel of THIS mount (see
+   * `src/client/history/recall-scope.ts`). It is mount-private, never a module
+   * global: the recall projection, the OPEN scope's occurrences, the write
+   * owner's settlements and the hydration reseed reconcile all live here, and
+   * the mount's Enter/Send occurrences are tokened from it. It holds no
+   * persistence, no Session identity, no timer and no subscription — the row
+   * owner (`InputHistory.persist`) and the publication authority
+   * (`SessionRuntime`) stay where they are and only REPORT into this kernel
+   * through the existing display seam. I-A therefore adds NO visible recall
+   * surface: ↑/↓ belongs to I-B.
+   */
+  const historyRecall = createHistoryRecallScope()
+
   const display: SurfaceDisplaySeam = {
     setTranscript,
     commitDisplaySubject() {
@@ -2512,14 +2542,25 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // composer — the stale-settle sites skip the merge and notify instead.
       return false
     },
-    resetInputHistory() {
-      // Editor-only; no recall surface exists on the read-only renderer.
+    resetInputHistory(entries, owner) {
+      // TSP I-A: a real kernel commit, NOT the old no-op. This records the
+      // reseed/reconcile into THIS mount's recall projection only: no render,
+      // no draft/caret touch, no seat or Focus change, no second read of the
+      // history file. I-B is what will make the projection visible.
+      if (disposed) return
+      historyRecall.reset(entries, owner)
     },
-    beginInputHistoryScope() {
-      // Editor-only; no recall surface exists on the read-only renderer.
+    beginInputHistoryScope(owner) {
+      // TSP I-A: the formal Session publication the application already owns.
+      // Pure kernel state; nothing here is inferred from a received Session id.
+      if (disposed) return
+      historyRecall.begin(owner)
     },
-    settleScopeInput() {
-      // Editor-only; no recall surface exists on the read-only renderer.
+    settleScopeInput(settlement) {
+      // TSP I-A: the row owner's synchronous append/skip report, in append
+      // order. Kernel state only — a settlement never re-renders or re-seats.
+      if (disposed) return
+      historyRecall.settle(settlement)
     },
     setSearchResult() {
       // Search chrome is PiTui-only (input-gated); nothing to present.
@@ -2742,8 +2783,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // flight must not be delivered as text, and the refusal must keep the
     // live draft/caret — the same gate the app's submit/steer owners enforce.
     if (!handlers.admitPastedPathDelivery(serializedDraft)) return
+    // TSP I-A: the recall OCCURRENCE is taken here — AFTER the one delivery
+    // admission (a refused paste leaves no occurrence behind) and BEFORE the
+    // clear, from the same snapshot this submission was admitted from.
+    // `shouldRememberInput` is the EXISTING application policy (staged
+    // attachments / an in-flight pasted path), never a second admission here.
+    // The local `!` exclusion is not a shell decision: this renderer's
+    // user-shell is refused outright by the submission controller (no row, no
+    // Session, the draft restored), so accepting such a line into the recall
+    // would advertise a submission that cannot run. The submission itself
+    // still takes its ORIGINAL path either way.
+    const scopeToken = serializedDraft.startsWith('!') || !handlers.shouldRememberInput(serializedDraft)
+      ? undefined
+      : historyRecall.rememberAccepted(serializedDraft)
     composer.setDraft('')
-    handlers.submit(serializedDraft, gesture)
+    handlers.submit(serializedDraft, gesture, scopeToken)
   }
 
   /**
