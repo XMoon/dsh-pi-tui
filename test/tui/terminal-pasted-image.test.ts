@@ -24,6 +24,7 @@ import {
   PASTE_PENDING_NOTICE,
   createPastedImageIntakeOwner,
   type PastedImageIntakeOwner,
+  type PastedPathReceipt,
 } from '../../src/app/surface/pasted-image-intake.ts'
 
 const { started: startedApps, disposeAll: disposeStartedApps } = createAppLifecycleGuard<TuiApp>()
@@ -59,6 +60,7 @@ interface PasteHarness {
   readonly submitted: { readonly text: string; readonly request: string }[]
   readonly steered: string[]
   readonly reads: string[]
+  readonly receipts: PastedPathReceipt[]
   /** Let every held read for `path` (default: all) proceed. */
   release(path?: string): Promise<void>
 }
@@ -77,6 +79,7 @@ function harness(life: TestLifecycle, hOptions: HarnessOptions = {}): PasteHarne
   const submitted: { text: string; request: string }[] = []
   const steered: string[] = []
   const reads: string[] = []
+  const receipts: PastedPathReceipt[] = []
   const gates: { path: string; release: () => void }[] = []
   setImageReadForTest(async (rawPath, cwd, limits, cap) => {
     reads.push(rawPath)
@@ -108,7 +111,10 @@ function harness(life: TestLifecycle, hOptions: HarnessOptions = {}): PasteHarne
     onSteer: (text) => { steered.push(text) },
     // The composition root routes the renderer receipt to the ONE intake
     // owner (the same wiring ApplicationEvents performs in production).
-    onTerminalPastedPath: (receipt) => owner.accept(receipt),
+    onTerminalPastedPath: (receipt) => {
+      receipts.push(receipt)
+      owner.accept(receipt)
+    },
   }, { terminalPastedPath: owner, ...hOptions.options })
   appRef = app
   app.start()
@@ -124,6 +130,7 @@ function harness(life: TestLifecycle, hOptions: HarnessOptions = {}): PasteHarne
     submitted,
     steered,
     reads,
+    receipts,
     release: async (path) => {
       const index = path === undefined
         ? gates.length - 1
@@ -332,4 +339,58 @@ test('deleting the pending path clears the block and the next Enter submits norm
   await h.release()
   await h.vt.waitForRender()
   assert.equal(h.images.size(), 0, 'the stale read converts nothing after its span was deleted')
+})
+
+test('an edit INSIDE the pasted path retires the lease: the old span is never attached', async (t) => {
+  const life = testLifecycle(t)
+  const h = harness(life)
+  paste(h.vt, `${h.imagePath} `)
+  await waitFor(() => h.app.getDraft().includes(h.imagePath))
+  // Move the caret before the path's final "png" (4 cells left from the end:
+  // the separator, then "g", "n", "p").
+  for (let step = 0; step < 4; step += 1) h.vt.sendInput('\x1b[D')
+  await h.vt.waitForRender()
+  // Paste duplicate text INSIDE the path. The resulting text is also
+  // explainable as an insertion after the separator, but the real edit is
+  // inside the path, so the lease must die and nothing may attach.
+  paste(h.vt, 'png')
+  await waitFor(() => h.app.getDraft() === `${h.imagePath}png `)
+  assert.equal(h.receipts.length, 1, 'the non-candidate inside paste creates no second lease')
+
+  await h.release()
+  await h.vt.waitForRender()
+  assert.equal(h.images.size(), 0, 'the modified path must never become an attachment')
+  assert.equal(h.app.getDraft(), `${h.imagePath}png `, 'the user text is preserved verbatim')
+})
+
+test('repeated plain-text pastes create no lease and run no image work', async (t) => {
+  const life = testLifecycle(t)
+  const h = harness(life)
+  paste(h.vt, 'hello ')
+  paste(h.vt, 'world ')
+  paste(h.vt, 'again ')
+  await waitFor(() => h.app.getDraft() === 'hello world again ')
+  assert.equal(h.receipts.length, 0, 'a non-candidate paste never registers a tracked range')
+  assert.deepEqual(h.reads, [])
+  assert.equal(h.images.size(), 0)
+})
+
+test('deleting the pasted path and typing the same path again never revives the old lease', async (t) => {
+  const life = testLifecycle(t)
+  const h = harness(life)
+  paste(h.vt, `${h.imagePath} `)
+  await waitFor(() => h.app.getDraft().includes(h.imagePath))
+  // Delete the path and its separator through real editor edits.
+  for (let step = 0; step < h.imagePath.length + 1; step += 1) h.vt.sendInput('\x7f')
+  await waitFor(() => h.app.getDraft() === '')
+  // Type the identical path by hand: this is NOT a paste, so no new lease may
+  // be created, and the retired lease must never claim the typed copy.
+  h.vt.sendInput(`${h.imagePath} `)
+  await waitFor(() => h.app.getDraft() === `${h.imagePath} `)
+
+  await h.release()
+  await h.vt.waitForRender()
+  assert.equal(h.images.size(), 0, 'the old lease never reclaims a manually typed copy')
+  assert.equal(h.receipts.length, 1, 'typing is not a terminal paste')
+  assert.equal(h.app.getDraft(), `${h.imagePath} `, 'the typed text stays ordinary content')
 })

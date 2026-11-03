@@ -7,17 +7,19 @@
  * `indexOf(path)` nor the path string itself is an identity — a copied or
  * repeated path would land the replacement on the wrong occurrence.
  *
- * This module owns the only identity that is real: the span the editor
- * actually inserted (measured from the before/after document + caret around
- * the one atomic paste) and the subsequent real edits of that same editor. A
- * range stays alive only while the editor still holds the same bytes at the
- * same identity; any edit that can cover it retires it. The tracker is a
- * SHORT-LIVED local mutation fact — it is not a second draft, and the editor
- * text/Undo history remain the authority.
+ * The identity is the span the editor actually inserted plus every REAL
+ * mutation of that same editor. A longest-common-prefix/suffix inference is
+ * NOT enough: two different edits can produce the same text (`/tmp/a.png `
+ * with `png` inserted inside the path and `png` inserted after the trailing
+ * separator are indistinguishable from the text alone). This module therefore
+ * consumes EXACT splices: the TSP composer reports the position it mutated,
+ * and the PiTui host proves the one splice at the editor's real pre-edit caret
+ * ({@link proveCaretEdit}). Any change that cannot be proven exactly retires
+ * every lease — the tracker never guesses a position.
  * @module @xmoon76/dsh-pi-tui/tui/interaction/pasted-path-range
  */
 
-import { PASTE_CANDIDATE_MAX_LENGTH } from '../../client/media/image/pasted-path.ts'
+import { PASTE_CANDIDATE_MAX_LENGTH, candidateImagePathFromPaste } from '../../client/media/image/pasted-path.ts'
 
 /** One tracked document interval: the expected bytes and where they live. */
 export interface PasteRangeSpan {
@@ -27,6 +29,13 @@ export interface PasteRangeSpan {
   readonly end: number
   /** The exact bytes the interval must still hold to stay alive. */
   readonly expected: string
+}
+
+/** One EXACT raw-text splice: `old[start..oldEnd)` became `new[start..newEnd)`. */
+export interface PasteTextEdit {
+  readonly start: number
+  readonly oldEnd: number
+  readonly newEnd: number
 }
 
 /**
@@ -39,6 +48,9 @@ export interface PasteRangeSpan {
  * proven to be exactly `pastedText` (optionally with that one leading space) —
  * a large-paste marker, control-character filtering, a line-ending rewrite —
  * no span is returned, so a candidate paste never guesses offsets.
+ *
+ * Only a body the candidate grammar accepts yields a span: a plain text paste
+ * must not create a lease that would then track every later edit.
  * @param beforeText - the raw document before the paste.
  * @param beforeCursor - the flat caret offset before the paste.
  * @param afterText - the raw document after the paste.
@@ -53,9 +65,7 @@ export function pastedBodySpan(
   pastedText: string,
 ): PasteRangeSpan | undefined {
   if (pastedText === '') return undefined
-  // A body the candidate grammar can never accept is not tracked at all:
-  // retaining it would force a full-body slice comparison on every later editor
-  // edit for a conversion that can never happen.
+  if (candidateImagePathFromPaste(pastedText) === undefined) return undefined
   if (pastedText.length > PASTE_CANDIDATE_MAX_LENGTH) return undefined
   if (beforeCursor < 0 || beforeCursor > beforeText.length) return undefined
   if (afterCursor < beforeCursor || afterCursor > afterText.length) return undefined
@@ -80,23 +90,70 @@ export function pastedBodySpan(
   return { start, end: start + path.length, expected: path }
 }
 
-/**
- * The short-lived ranges of ONE composer. Callers register the span of a
- * paste right after the editor accepted it, feed every subsequent REAL
- * document change through {@link observe}, and retire all ranges at any
- * programmatic replacement (session restore, seat handoff, forced clear) —
- * a restored draft that happens to contain the same path is NOT the original
- * paste and must never be claimed.
- */
-/** The tracker's mutable live copy of one span. */
-interface TrackedSpan {
-  start: number
-  end: number
-  readonly expected: string
+/** Whether `edit` is a syntactically valid single splice of `beforeText`. */
+function isSingleSplice(beforeText: string, edit: PasteTextEdit, afterText: string): boolean {
+  if (!Number.isInteger(edit.start) || !Number.isInteger(edit.oldEnd) || !Number.isInteger(edit.newEnd)) return false
+  if (edit.start < 0 || edit.oldEnd < edit.start || edit.newEnd < edit.start) return false
+  if (edit.oldEnd > beforeText.length || edit.newEnd > afterText.length) return false
+  if (edit.newEnd - edit.start !== afterText.length - beforeText.length + (edit.oldEnd - edit.start)) return false
+  const spliced = beforeText.slice(0, edit.start) + afterText.slice(edit.start, edit.newEnd) + beforeText.slice(edit.oldEnd)
+  return spliced === afterText
 }
 
+/**
+ * Prove the ONE splice that turned `beforeText` into `afterText`, anchored at
+ * the editor's REAL pre-edit caret. The four editor gestures that act at the
+ * caret (insert, delete-before, delete-after, replace-at-caret) are tested;
+ * an ambiguous proof, a multi-splice result or a missing anchor returns
+ * `undefined`, so the caller retires the leases instead of guessing.
+ *
+ * This is not the ambiguous common-prefix/suffix inference: the candidate
+ * start is the actual caret (or a caret-adjacent deletion), and a plain
+ * insertion of the same bytes elsewhere can never masquerade as it.
+ */
+export function proveCaretEdit(
+  beforeText: string,
+  beforeCursor: number,
+  afterText: string,
+): PasteTextEdit | undefined {
+  if (beforeCursor < 0 || beforeCursor > beforeText.length) return undefined
+  if (beforeText === afterText) return undefined
+  const delta = afterText.length - beforeText.length
+  const candidates: PasteTextEdit[] = []
+  const push = (edit: PasteTextEdit): void => {
+    if (!isSingleSplice(beforeText, edit, afterText)) return
+    const key = `${edit.start}:${edit.oldEnd}:${edit.newEnd}`
+    if (!candidates.some(candidate => `${candidate.start}:${candidate.oldEnd}:${candidate.newEnd}` === key)) candidates.push(edit)
+  }
+  // Insertion at the caret.
+  if (delta > 0) push({ start: beforeCursor, oldEnd: beforeCursor, newEnd: beforeCursor + delta })
+  // Deletion ENDING at the caret (Backspace) and STARTING at the caret (Delete).
+  if (delta < 0) {
+    push({ start: beforeCursor + delta, oldEnd: beforeCursor, newEnd: beforeCursor + delta })
+    push({ start: beforeCursor, oldEnd: beforeCursor - delta, newEnd: beforeCursor })
+  }
+  // Replacement at the caret (e.g. an accepted completion): keep the common
+  // suffix after the caret and splice the differing middle.
+  let suffix = 0
+  const suffixLimit = Math.min(beforeText.length - beforeCursor, afterText.length - beforeCursor)
+  while (suffix < suffixLimit && beforeText[beforeText.length - 1 - suffix] === afterText[afterText.length - 1 - suffix]) {
+    suffix += 1
+  }
+  push({
+    start: beforeCursor,
+    oldEnd: beforeText.length - suffix,
+    newEnd: afterText.length - suffix,
+  })
+  return candidates.length === 1 ? candidates[0] : undefined
+}
+
+/**
+ * The short-lived ranges of ONE composer. The owner registers a paste span
+ * right after the editor accepted it, feeds every REAL mutation as an exact
+ * splice, and retires all ranges at any programmatic or unprovable change.
+ */
 export class PasteRangeTracker {
-  private readonly ranges = new Map<number, TrackedSpan>()
+  private readonly ranges = new Map<number, { start: number; end: number; expected: string }>()
   private nextId = 1
   private currentText = ''
 
@@ -110,54 +167,48 @@ export class PasteRangeTracker {
     return id
   }
 
-  /** Feed ONE real document change (the raw text after it). */
-  observe(nextText: string): void {
-    const previous = this.currentText
-    if (nextText === previous) return
-    this.currentText = nextText
-    if (this.ranges.size === 0) return
-    // The single splice a real editor mutation produces: the longest common
-    // prefix, then a NON-OVERLAPPING longest common suffix.
-    let prefix = 0
-    const prefixLimit = Math.min(previous.length, nextText.length)
-    while (prefix < prefixLimit && previous[prefix] === nextText[prefix]) prefix += 1
-    let suffix = 0
-    const suffixLimit = Math.min(previous.length - prefix, nextText.length - prefix)
-    while (
-      suffix < suffixLimit
-      && previous[previous.length - 1 - suffix] === nextText[nextText.length - 1 - suffix]
-    ) {
-      suffix += 1
+  /** Feed ONE EXACT editor splice and `nextText` the editor produced. A splice
+   *  that does not reproduce `nextText` is not trusted: every lease is
+   *  retired and the text adopted. */
+  applyEdit(edit: PasteTextEdit, nextText: string): void {
+    if (!isSingleSplice(this.currentText, edit, nextText)) {
+      this.reset(nextText)
+      return
     }
-    const oldEnd = previous.length - suffix
-    const delta = (nextText.length - suffix) - oldEnd
+    const delta = edit.newEnd - edit.oldEnd
     for (const [id, range] of this.ranges) {
+      const insertion = edit.oldEnd === edit.start
       let alive = true
-      if (oldEnd === prefix) {
-        // Pure insertion at `prefix`.
-        if (prefix <= range.start) {
+      if (insertion) {
+        if (edit.start <= range.start) {
           // Inserted at/left of the range: shift it. A character typed at the
           // LEFT boundary belongs BEFORE the anchor.
           range.start += delta
           range.end += delta
-        } else if (prefix < range.end) {
-          // Inserted inside the anchor: its bytes changed.
+        } else if (edit.start < range.end) {
+          // Inserted INSIDE the anchor: its bytes changed.
           alive = false
         }
-        // else: inserted at/right of the range end — the range is unchanged.
-      } else if (oldEnd <= range.start) {
+        // else: inserted at/right of the range end — unchanged.
+      } else if (edit.oldEnd <= range.start) {
         range.start += delta
         range.end += delta
-      } else if (prefix >= range.end) {
+      } else if (edit.start >= range.end) {
         // Change entirely after the range: unchanged.
       } else {
         alive = false
       }
       if (alive && nextText.slice(range.start, range.end) !== range.expected) alive = false
-      // A dead lease is permanent and is dropped now: it can never revive and
-      // must not accumulate across a long session's pastes.
       if (!alive) this.ranges.delete(id)
     }
+    this.currentText = nextText
+  }
+
+  /** Adopt `nextText` after a programmatic/unprovable change: every lease is
+   *  retired (a lease never revives). */
+  reset(nextText: string): void {
+    this.ranges.clear()
+    this.currentText = nextText
   }
 
   /** The live span for `id`, or `undefined` when retired/replaced. */

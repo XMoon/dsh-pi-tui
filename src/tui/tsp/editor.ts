@@ -144,19 +144,23 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
   const replaceText = (next: string): void => {
     // A programmatic whole-document replacement is NOT the paste that made
     // the old text: retire every lease even when the same path bytes reappear.
-    pasteRanges.retireAll()
-    pasteRanges.observe(next)
+    pasteRanges.reset(next)
     text = next
     cursor = boundaryCursor(next, next.length)
     sinks.onChanged()
   }
   /** Insert at the caret (reducer/port): normalize after any cluster merge. */
   const insert = (fragment: string): void => {
+    const insertionPoint = cursor
     text = text.slice(0, cursor) + fragment + text.slice(cursor)
     // The fragment may MERGE with the following cluster (a combining mark or
     // ZWJ suffix): the caret lands at the END of the cluster it now sits in.
     cursor = boundaryCursor(text, cursor + fragment.length)
-    pasteRanges.observe(text)
+    // The EXACT splice the composer just performed — never an inferred one.
+    pasteRanges.applyEdit(
+      { start: insertionPoint, oldEnd: insertionPoint, newEnd: insertionPoint + fragment.length },
+      text,
+    )
     sinks.onChanged()
   }
 
@@ -170,8 +174,7 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
     clearDraftStateOnly: () => {
       // PR3-B §7.3 (B2 F1): PURE STATE — no `onChanged`, no render. See the
       // interface doc; the next committed frame carries the emptied editor.
-      pasteRanges.retireAll()
-      pasteRanges.observe('')
+      pasteRanges.reset('')
       text = ''
       cursor = 0
     },
@@ -190,8 +193,13 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
       if (cursor >= span.end) nextCursor += placeholder.length - path.length
       else if (cursor > span.start) nextCursor = span.start + placeholder.length
       const next = text.slice(0, span.start) + placeholder + text.slice(span.end)
+      // The replacement is ONE known splice: apply it to every lease, then
+      // retire this one (a replacement never keeps its own identity).
+      pasteRanges.applyEdit(
+        { start: span.start, oldEnd: span.end, newEnd: span.start + placeholder.length },
+        next,
+      )
       pasteRanges.retire(id)
-      pasteRanges.observe(next)
       text = next
       cursor = boundaryCursor(next, nextCursor)
       sinks.onChanged()
@@ -241,24 +249,26 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
           // Both endpoints cluster-aligned: the cut start is the previous
           // cluster's start; the cut end is the (aligned) caret itself.
           const start = previousGraphemeStart(text, cursor)
+          const caret = cursor
           text = text.slice(0, start) + text.slice(cursor)
           // The deletion may MERGE the clusters on both sides of the cut
           // (removing a separator between two regional indicators fuses them
           // into ONE flag cluster): re-normalize the caret onto the new
           // boundary so it can never sit inside the merged cluster.
           cursor = boundaryCursor(text, start)
-          pasteRanges.observe(text)
+          pasteRanges.applyEdit({ start, oldEnd: caret, newEnd: start }, text)
           sinks.onChanged()
           return { kind: 'edited' }
         }
         case 'delete': {
           if (cursor >= text.length) return { kind: 'none' }
+          const cutStart = cursor
           const end = nextGraphemeEnd(text, cursor)
           text = text.slice(0, cursor) + text.slice(end)
           // Same merge-after-cut hazard as backspace (the clusters around the
           // removed one may fuse): keep the caret boundary-aligned.
           cursor = boundaryCursor(text, cursor)
-          pasteRanges.observe(text)
+          pasteRanges.applyEdit({ start: cutStart, oldEnd: end, newEnd: cutStart }, text)
           sinks.onChanged()
           return { kind: 'edited' }
         }

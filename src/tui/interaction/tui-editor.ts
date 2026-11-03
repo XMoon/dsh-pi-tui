@@ -58,7 +58,7 @@ export interface TuiEditorRenderLayout {
  *  guess offsets. */
 export interface TuiEditorPasteCommit {
   readonly text: string
-  readonly span: PasteRangeSpan | undefined
+  readonly span: PasteRangeSpan
 }
 
 /** The flat UTF-16 caret offset of one editor position. */
@@ -209,6 +209,16 @@ export class TuiEditor extends Editor {
    *  can register the paste's exact span against the CURRENT raw text. Shell
    *  modes and shell-mode normalization never fire it. */
   onBracketedPasteCommitted?: (commit: TuiEditorPasteCommit) => void
+  /** The REAL editor state immediately before one input event mutates it.
+   *  The host proves the input's exact splice from this anchor (never from a
+   *  text-diff guess). Fired only for the OUTERMOST input event, so a residual
+   *  chunk processed inside it never re-anchors. */
+  onInputStart?: (state: { readonly text: string; readonly cursor: number }) => void
+  /** The outermost input event finished: the anchor it announced must not be
+   *  reused by a later ASYNC editor change. */
+  onInputEnd?: () => void
+  /** Re-entrancy depth of handleInput (the residual paste chunks re-enter). */
+  private inputDepth = 0
 
   constructor(tui: TUI, theme: EditorTheme, options: TuiEditorOptions = {}) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -436,6 +446,21 @@ export class TuiEditor extends Editor {
   }
 
   override handleInput(data: string): void {
+    const outermost = this.inputDepth === 0
+    if (outermost) {
+      this.onInputStart?.({ text: this.getText(), cursor: flatCursorOffset(this.getLines(), this.getCursor()) })
+    }
+    this.inputDepth += 1
+    try {
+      this.handleInputCore(data)
+    } finally {
+      this.inputDepth -= 1
+      if (outermost) this.onInputEnd?.()
+    }
+  }
+
+  /** The input event body; {@link handleInput} owns the host mutation anchor. */
+  private handleInputCore(data: string): void {
     // A bracketed-paste marker split across input chunks (real terminals
     // keep markers whole, but a chunk boundary must not lose them):
     // stitch a buffered marker prefix onto this chunk, and buffer a
@@ -747,7 +772,9 @@ export class TuiEditor extends Editor {
       // The fork's own insertion is the ONLY evidence this span may rest on:
       // the before/after document + caret prove exactly which bytes THIS paste
       // inserted (the fork may prepend one readability space; a large paste
-      // becomes a marker and fails the proof).
+      // becomes a marker and fails the proof). A body that is not a candidate
+      // (or not provable) never reaches the host at all, so plain text creates
+      // no lease.
       const span = pastedBodySpan(
         beforeText,
         beforeCursor,
@@ -755,7 +782,7 @@ export class TuiEditor extends Editor {
         flatCursorOffset(this.getLines(), this.getCursor()),
         content,
       )
-      this.onBracketedPasteCommitted({ text: content, span })
+      if (span !== undefined) this.onBracketedPasteCommitted({ text: content, span })
     }
     const remaining = data.slice(end + '\x1b[201~'.length)
     if (remaining !== '') residuals.push(remaining)
