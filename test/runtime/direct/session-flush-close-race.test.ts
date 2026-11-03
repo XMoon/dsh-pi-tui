@@ -35,6 +35,7 @@ interface JsonlHandle {
 
 interface JsonlPersistence {
   create(header: unknown, options?: unknown): Promise<JsonlHandle>
+  open(id: string, access: string): Promise<unknown>
   list(): Promise<ReadonlyArray<{ header: { id: string } }>>
 }
 
@@ -92,7 +93,9 @@ test('close() does NOT materialize a never-appended empty session (it only drain
     'close() must not be treated as a durability owner for a fresh empty session')
 
   // A SECOND empty session proves the positive control on the same backend:
-  // the explicit flush IS what materializes the artifact.
+  // the explicit flush IS what materializes the artifact, and the session is
+  // RESUMABLE afterwards — this is the whole point of checkpointing at the
+  // commit, before any long await can be overtaken by a close.
   const flushedId = 'session-flush-empty'
   const flushed = await persistence.create(header(root, flushedId))
   await flushed.flush()
@@ -100,6 +103,8 @@ test('close() does NOT materialize a never-appended empty session (it only drain
   const after = await persistence.list()
   assert.equal(after.some(snapshot => snapshot.header.id === flushedId), true,
     'an explicit flush materializes the empty session, which is the checkpoint contract')
+  const reopened = await persistence.open(flushedId, 'read')
+  assert.ok(reopened !== undefined, 'the checkpointed empty session must be reopenable (resumable)')
 })
 
 test('a flush issued while the handle is open still SUCCEEDS when no close intervenes', async (t) => {

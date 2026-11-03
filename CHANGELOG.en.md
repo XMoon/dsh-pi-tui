@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Fixed the exit race that logged `retire phase failed phase=flush: flush on a closed handle` after `/new` followed by `/exit`: exit/HMR/parked-session retirements no longer issue an explicit flush against a write handle DSH has already started closing — final durability is settled by `AgentHandle.dispose` joining DSH's close/drain. Ordinary session switches keep the explicit old-owner flush, and a newly committed empty session now establishes its resumable persistence boundary immediately after the commit (failures are clearly reported, never silent).
+- Fixed the exit race that logged `retire phase failed phase=flush: flush on a closed handle` after `/new` followed by `/exit`: exit/HMR/parked-session retirements no longer issue an explicit flush against a write handle DSH has already started closing — final durability is settled by `AgentHandle.dispose` joining DSH's close/drain. Ordinary session switches keep the explicit old-owner flush, and a newly committed empty session now establishes its resumable persistence boundary right after the commit, before any long drain can be overtaken by a shutdown (failures are clearly reported, never silent).
 
 ## [0.5.5] - 2026-11-03
 
