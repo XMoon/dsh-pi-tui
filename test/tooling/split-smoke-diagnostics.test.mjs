@@ -812,8 +812,9 @@ test('an unknown error code is never reported, and never changes the category', 
     ['split-upgrade', readFileSync(UPGRADE_SCRIPT, 'utf8')],
     ['the shared module', readFileSync(LIB, 'utf8')],
   ]) {
-    // A waiter failure site: fail('<category>', '<code>').
-    for (const match of source.matchAll(/\bfail\(\s*'([A-Z_]+)'\s*,\s*'([A-Z0-9_]+)'/gu)) {
+    // A waiter failure site: fail('<category>', '<code>') or, where the read must
+    // happen first, settleOrFail('<category>', '<code>').
+    for (const match of source.matchAll(/\b(?:fail|settleOrFail)\(\s*'([A-Z_]+)'\s*,\s*'([A-Z0-9_]+)'/gu)) {
       assert.ok(FAILURE_CATEGORIES.includes(match[1]), `${name} raises an undeclared category: ${match[1]}`)
       assert.ok(declared.has(match[2]), `${name} raises an undeclared code: ${match[2]}`)
       raised.add(match[2])
@@ -943,14 +944,19 @@ test('an assertion failure is locatable without quoting its message', () => {
   assert.match(String(error.assertion), /^split-smoke-diagnostics\.test\.mjs:\d+$/u)
   const reportedLine = Number(error.assertion.split(':')[1])
   assert.ok(reportedLine > 0 && reportedLine <= readFileSync(import.meta.filename, 'utf8').split('\n').length)
-  const report = projectFailureReport({ lane: 'split-process', category: error.category, assertion: error.assertion })
-  assert.equal(report.assertion, error.assertion, 'the report keeps the locator')
+  // The extractor proved the mechanism above; the PUBLISHED report only accepts
+  // a locator from a trusted lane source, so the reporting half uses one.
+  const published = 'split-process-smoke.mjs:4321'
+  const report = projectFailureReport({ lane: 'split-process', category: error.category, assertion: published })
+  assert.equal(report.assertion, published, 'the report keeps a trusted locator')
   const stderr = captureStderr(() => {
     process.stderr.write(`${formatFailureSummary(report, '/tmp/none')}\n`)
-    process.stderr.write(`SPLIT_PROCESS_SMOKE_FAILURE: ${safeFailureSummary(error)}\n`)
+    process.stderr.write(`SPLIT_PROCESS_SMOKE_FAILURE: ${safeFailureSummary(Object.assign(
+      new SplitSmokeAssertionError('x'), { assertion: published },
+    ))}\n`)
   })
-  assert.match(stderr, /assertion: split-smoke-diagnostics\.test\.mjs:\d+/u)
-  assert.match(stderr, /ASSERTION_FAILED at split-smoke-diagnostics\.test\.mjs:\d+/u)
+  assert.match(stderr, /assertion: split-process-smoke\.mjs:4321/u)
+  assert.match(stderr, /ASSERTION_FAILED at split-process-smoke\.mjs:4321/u)
   // Locating the check must not smuggle the assertion text back into the output.
   for (const sentinel of ['COOKIE_SENTINEL', 'secret.invalid', 'host role mismatch']) {
     assert.ok(!stderr.includes(sentinel), `the default output leaked the assertion text: ${sentinel}`)
@@ -1022,6 +1028,31 @@ test('a forged or unusable frame never becomes a locator', () => {
   }
 })
 
+test('the report only accepts a locator from a trusted lane source', () => {
+  // A real lane file is accepted (shape + source).
+  assert.equal(projectFailureReport({ lane: 'split-process', assertion: 'split-process-smoke.mjs:12' }).assertion,
+    'split-process-smoke.mjs:12')
+  assert.equal(projectFailureReport({ lane: 'split-upgrade', assertion: 'split-process-upgrade-smoke.mjs:99' }).assertion,
+    'split-process-upgrade-smoke.mjs:99')
+  // A well-shaped locator naming anything else is refused by the PROJECTION,
+  // not only by the stack extractor: an error that merely carries an
+  // `assertion` property must not smuggle a foreign file into the report.
+  for (const foreign of ['foreign.mjs:123', 'split-smoke-diagnostics.test.mjs:7', 'another-lane.mjs:1']) {
+    assert.equal(projectFailureReport({ lane: 'split-process', assertion: foreign }).assertion, undefined,
+      `the projection must refuse ${foreign}`)
+  }
+  // And the summary line respects the same rule.
+  assert.ok(!safeFailureSummary(Object.assign(new Error('x'), {
+    category: 'ASSERTION_FAILED', assertion: 'foreign.mjs:123',
+  })).includes('foreign.mjs'))
+  // Production reporting ignores an `.assertion` property unless the locator was
+  // derived by the assertion class itself.
+  const forged = Object.assign(new Error('forged'), { category: 'ASSERTION_FAILED', assertion: 'split-process-smoke.mjs:42' })
+  const diagnostics = createSmokeDiagnostics({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', marker: 'T' })
+  const report = diagnostics.reportFailure(forged)
+  assert.equal(report.assertion, undefined, 'an arbitrary error may not contribute a locator')
+})
+
 test('both lanes raise locatable assertions through the shared class', () => {
   for (const file of [PROCESS_SCRIPT, UPGRADE_SCRIPT]) {
     assert.match(readFileSync(file, 'utf8'),
@@ -1081,7 +1112,18 @@ test('the fixture and session waits classify their timeout instead of INFRA_FAIL
 })
 
 test('the surface-status wait classifies its timeout against the Client', async () => {
-  const client = { role: 'surface-client', records: [], exited: false }
+  /** A contract-shaped SurfaceEntryProcess: the poller's own read is injectable. */
+  const fakeSurface = ({ records = [], exited = false, lateRead }) => ({
+    role: 'surface-client',
+    records,
+    exited,
+    finalRecordRead(label) {
+      // Mirrors the real contract: one synchronous read of the complete tail.
+      if (lateRead !== undefined) lateRead(this, label)
+      return undefined
+    },
+  })
+  const client = fakeSurface({})
   const error = await rejection(() => waitForSurfaceStatus(client, () => false, 'a surface status', 120))
   assert.equal(error.category, 'WAIT_TIMEOUT')
   assert.equal(error.code, 'SURFACE_STATUS_WAIT_TIMEOUT')
@@ -1090,12 +1132,48 @@ test('the surface-status wait classifies its timeout against the Client', async 
   assert.ok(error.elapsedMs >= 120 && error.elapsedMs < 5_000)
   // A Client that died while the status never arrived fails fast and by its own
   // category: reporting `timeoutMs` here would hide the early exit.
-  const dead = { role: 'surface-client', records: [], exited: true }
+  const dead = fakeSurface({ exited: true })
   const exited = await rejection(() => waitForSurfaceStatus(dead, () => false, 'a surface status', 5_000))
   assert.equal(exited.category, 'PROCESS_EXITED')
   assert.equal(exited.code, 'PROCESS_EXITED_BEFORE_STATUS')
   assert.ok(exited.elapsedMs < 1_000,
     `an early exit must not consume the whole budget, got ${String(exited.elapsedMs)}`)
+})
+
+test('a status written just before the close is read, not reported missing', async () => {
+  // The poller stops on close, so the LAST line may still be unread when the
+  // Client exits: the wait must take the final synchronous read before it
+  // concludes the status never arrived.
+  const late = { m4b2s: 'surface-status', sessionOpen: true }
+  const client = {
+    role: 'surface-client',
+    records: [],
+    exited: true,
+    finalRecordRead() {
+      this.records = [late]
+      return undefined
+    },
+  }
+  const status = await waitForSurfaceStatus(client, record => record.sessionOpen === true, 'a surface status', 5_000)
+  assert.equal(status, late, 'the late-written status must satisfy the wait')
+})
+
+test('a final record read that fails is an infrastructure failure, not a timeout', async () => {
+  const client = {
+    role: 'surface-client',
+    records: [],
+    exited: true,
+    finalRecordRead(label) {
+      return new SplitSmokeWaitError('INFRA_FAILURE', {
+        code: 'RECORD_READ_FAILED',
+        waitLabel: label,
+        processRole: this.role,
+      })
+    },
+  }
+  const error = await rejection(() => waitForSurfaceStatus(client, () => false, 'a surface status', 5_000))
+  assert.equal(error.category, 'INFRA_FAILURE')
+  assert.equal(error.code, 'RECORD_READ_FAILED')
 })
 
 test('the ready race separates an early exit from a timeout', async () => {
@@ -1118,6 +1196,35 @@ test('the ready race separates an early exit from a timeout', async () => {
   assert.equal(timeoutError.category, 'WAIT_TIMEOUT')
   assert.equal(timeoutError.code, 'READY_RACE_TIMEOUT')
   assert.ok(timeoutError.elapsedMs >= 120 && timeoutError.elapsedMs < 5_000)
+})
+
+test('a ready race that lost every contender still reports them', async () => {
+  // The close callback removes exited processes from the lane's live set, so a
+  // report built afterwards would show no process for the failure that involves
+  // all of them.
+  const contenders = Array.from({ length: 10 }, (_unused, index) => ({
+    role: `host-${String(index)}`,
+    exited: true,
+    records: [{ m4a0: 'failure', code: 'HOST_START_TIMEOUT' }],
+    exitResult: { code: 1, signal: null },
+  }))
+  const error = await rejection(() => waitForAnyReady(contenders, 'a ready contender', 50))
+  assert.equal(error.category, 'PROCESS_EXITED')
+  const report = projectFailureReport({
+    lane: 'split-process',
+    category: error.category,
+    reason: error.code,
+    waitLabel: error.waitLabel,
+    processes: error.processSummaries ?? [],
+  })
+  assert.ok(report.processes !== undefined, 'the exited contenders must survive into the report')
+  assert.equal(report.processes.length, 8, 'the projection still caps at 8 processes')
+  for (const handle of report.processes) {
+    assert.equal(handle.exited, true)
+    assert.equal(handle.exitCode, 1)
+    assert.deepEqual(handle.events, [{ m4a0: 'failure' }], 'only official event names, never records')
+  }
+  assert.ok(!JSON.stringify(report).includes('HOST_START_TIMEOUT'), 'the record payload stays out')
 })
 
 test('no bounded wait in either lane still throws a bare Error', () => {
