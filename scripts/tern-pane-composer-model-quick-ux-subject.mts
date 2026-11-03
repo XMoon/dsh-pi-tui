@@ -107,6 +107,24 @@ function directoryFor(name: string): ModelDirectoryDto {
       failures: [],
     }
   }
+  // A directory where a dozen providers failed to read: the failure count is
+  // external data with no bound, and this case proves it can never push the
+  // fixed Full entry out of the anchored menu in a short pane.
+  if (name === 'manyfail') {
+    return {
+      default: { provider: 'alpha', model: 'a-one' },
+      routableProviders: ['alpha', 'beta'],
+      groups: [
+        { id: 'alpha', name: 'Alpha Provider', models: [{ id: 'a-one', name: 'Alpha One' }] },
+        { id: 'beta', name: 'Beta Provider', models: [{ id: 'b-one', name: 'Beta One' }] },
+      ],
+      failures: Array.from({ length: 12 }, (_unused, index) => ({
+        id: `down-${index}`,
+        name: `Provider ${index}`,
+        message: `provider down-${index} is unreachable`,
+      })),
+    }
+  }
   // root / effort / write / reject / full / keys: the normal directory.
   return {
     default: { provider: 'beta', model: 'b-one' },
@@ -127,7 +145,7 @@ function directoryFor(name: string): ModelDirectoryDto {
 }
 
 function currentFor(name: string): { provider: string; model: string; reasoningEffort?: string } {
-  if (name === 'noeffort' || name === 'partial') return { provider: 'alpha', model: 'a-one' }
+  if (name === 'noeffort' || name === 'partial' || name === 'manyfail') return { provider: 'alpha', model: 'a-one' }
   if (name === 'long') return { provider: 'alpha', model: 'a-one', reasoningEffort: 'low' }
   if (name === 'models') return { provider: 'alpha', model: 'many-01' }
   return { provider: 'alpha', model: 'a-one', reasoningEffort: 'high' }

@@ -144,6 +144,9 @@ export type QuickMenuIntent =
   | { readonly kind: 'browse'; readonly delta: -1 | 1; readonly revision: number }
   | { readonly kind: 'tab'; readonly delta: -1 | 1; readonly revision: number }
   | { readonly kind: 'query'; readonly query: string; readonly cursor: number; readonly revision: number }
+  /** The client focused the search field (a pointer click on an unfocused one
+   *  sends this instead of any key): the panel's own zone follows the caret. */
+  | { readonly kind: 'focus-search'; readonly revision: number }
   | { readonly kind: 'close'; readonly revision: number }
 
 /** The root page's two highlight tokens (they name neither a model nor a
@@ -621,7 +624,14 @@ export class TspModelQuickMenu {
       // While a write is admitted, Escape is a consumed dismissal only: it never
       // cancels the dispatched write and never restates an older result.
       if (panel.phase === 'pending') return { kind: 'close', revision }
-      if (panel.query !== '') return { kind: 'query', query: '', cursor: 0, revision }
+      // Clearing the search is a step ONLY where the search field is the live
+      // editing target: the Model page in a non-error phase. A leftover query
+      // must never swallow Escape on the root or the Effort page (and not on a
+      // failed read either, where the field offers no edit), because the
+      // dismissal below is the step the user is actually looking for.
+      if (panel.page === 'models' && panel.phase !== 'error' && panel.query !== '') {
+        return { kind: 'query', query: '', cursor: 0, revision }
+      }
       if (panel.page !== 'root') return { kind: 'back', revision }
       return { kind: 'close', revision }
     }
@@ -755,6 +765,16 @@ export class TspModelQuickMenu {
         panel.cursor = intent.cursor
         alignHighlight(panel)
         this.change(panel)
+        return
+      case 'focus-search':
+        // The caret went where the user clicked: take the search zone back so the
+        // next keystroke edits the filter instead of browsing the list. Under an
+        // admitted write the panel owns nothing, so the zone stays put.
+        if (panel.page !== 'models' || panel.phase === 'pending') return
+        if (panel.zone === 'search') return
+        panel.zone = 'search'
+        this.change(panel)
+        this.setFocus()
         return
       case 'choose-model': {
         // The row must be one the CURRENT frame really offers, by full identity.

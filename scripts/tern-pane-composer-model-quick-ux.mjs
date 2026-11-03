@@ -182,7 +182,7 @@ export default async function (h) {
     `title=${JSON.stringify(title)} label=${JSON.stringify(label)}`)
   // The cases whose fixture declares NO effort have nothing to abbreviate; the
   // claim below is about the narrow pane's clamped effort, not about them.
-  if (testCase !== 'noeffort' && testCase !== 'partial') {
+  if (testCase !== 'noeffort' && testCase !== 'partial' && testCase !== 'manyfail') {
     h.check('the tooltip keeps the unabbreviated effort value the clamped label drops',
       /· (high|low|medium)$/.test(title.replace(' — model and reasoning effort', ''))
       || testCase === 'models',
@@ -301,11 +301,13 @@ export default async function (h) {
       JSON.stringify(seen))
   }
 
-  if (['models', 'long', 'effort', 'write', 'reject', 'full'].includes(testCase)) {
+  if (['models', 'long', 'effort', 'write', 'reject', 'full', 'manyfail', 'escape', 'focusclick']
+    .includes(testCase)) {
     if (await choose('Model ')) {
       await h.sleep(500)
       const page = h.snapshot()
-      const field = page.nodes.find(node => node.tag === 'input' || String(node.class ?? '').includes('sf-in'))
+      const field = page.nodes.find(node => node.tag === 'input'
+        || String(node.class ?? '').split(' ').includes('sf-input'))
       h.check('the Model page searches through a native input field', field !== undefined,
         JSON.stringify(page.nodes.filter(node => node.tag === 'input').map(node => node.tag)))
       const painted = menuPainted(page)
@@ -313,7 +315,8 @@ export default async function (h) {
       h.check('provider group heads come from the directory order',
         painted.includes(expectedHead), painted.slice(0, 260))
       const seen = menuLabels(page)
-      const expectedRow = testCase === 'models' ? 'Model Number 01' : testCase === 'long' ? 'Beta One' : 'Alpha Two'
+      const expectedRow = testCase === 'models' ? 'Model Number 01'
+        : testCase === 'long' ? 'Beta One' : testCase === 'manyfail' ? 'Beta One' : 'Alpha Two'
       h.check('the model rows are painted from the directory read',
         seen.some(label => label.includes(expectedRow)), JSON.stringify(seen))
       h.check('the subpage keeps its fixed Back row and Full footer',
@@ -346,6 +349,85 @@ export default async function (h) {
           boxOf(editorNode(h.snapshot())).y === editorBefore.y,
           JSON.stringify(boxOf(editorNode(h.snapshot()))))
         h.measure('long-label-paint', menuLabels(h.snapshot()).join(' | ').slice(0, 240))
+      }
+      if (testCase === 'manyfail') {
+        // A dozen failed providers is external data with no bound. The fixed
+        // chrome must survive it: the failure lines scroll INSIDE the body, the
+        // menu never outgrows its own height budget, and the Full entry stays
+        // painted inside the pane (this is the 900x360 short-pane case).
+        const now = h.snapshot()
+        const nowMenu = menuBox(now)
+        const paneBox = boxOf(now.nodes.find(node => String(node.class ?? '').split(' ').includes('tn-pane')))
+        const lines = now.nodes
+          .filter(node => String(node.text ?? '').includes('unavailable') || /Provider \d+ · /.test(String(node.text ?? '')))
+          .map(node => boxOf(node))
+        h.check('every failed provider is stated in the menu', lines.length >= 12,
+          `${lines.length} failure lines painted`)
+        // The client's tree reports a scrolled-out row at its LAYOUT position,
+        // outside the scroller's clip, so a claim about every row's rect would be
+        // a claim about clipping the tree cannot make. Which container a row
+        // belongs to is the structural claim and the automated wire case owns it
+        // (the failure nodes are children of the scroller node); here the claim
+        // is that a real subset of them paints inside the anchored menu box.
+        const paintedLines = nowMenu === undefined
+          ? []
+          : lines.filter(line => inside(nowMenu, line))
+        h.check('failed-provider lines paint inside the anchored menu',
+          paintedLines.length >= 3,
+          JSON.stringify({ menu: nowMenu, painted: paintedLines.length, laidOut: lines.length }))
+        h.check('the menu keeps its own height budget under a dozen failures',
+          nowMenu !== undefined && paneBox !== undefined && nowMenu.h <= paneBox.h + 2,
+          JSON.stringify({ menu: nowMenu, pane: paneBox }))
+        h.check('the fixed Full footer is still inside the pane under a dozen failures',
+          paneBox !== undefined && inside(paneBox, boxOf(footerRow(now))),
+          JSON.stringify({ footer: boxOf(footerRow(now)), pane: paneBox }))
+        h.measure('manyfail-lines', String(lines.length))
+        h.capture(`${testCase}-${width}x${height}-${appearance}-failures`, 'a dozen failed providers inside the anchored menu')
+      }
+      if (testCase === 'escape') {
+        // Type a filter, leave the page with the POINTER (Back keeps the filter),
+        // then press Escape on the root: it must close the menu, not be swallowed
+        // by a clear the root page cannot perform.
+        await h.key('z', 350)
+        await h.key('z', 350)
+        const typed = h.snapshot()
+        h.check('the search field holds what was typed', menuPainted(typed).includes('zz'),
+          menuPainted(typed).slice(0, 200))
+        if (await choose('‹ Model & Effort')) {
+          await h.sleep(400)
+          const root = h.snapshot()
+          h.check('Back returned to the root with the menu still open', menuMounted(root) &&
+            menuLabels(root).some(label => label.includes('Reasoning Effort')),
+            JSON.stringify(menuLabels(root)))
+          await h.key('Escape', 600)
+          const closed = h.snapshot()
+          h.check('Escape on the root closes the menu instead of dying on the filter',
+            !menuMounted(closed), JSON.stringify(allLabels(closed)))
+          h.check('closing the menu never cancels the Agent', countEvents(h, 'cancels') === 0,
+            String(countEvents(h, 'cancels')))
+        }
+      }
+      if (testCase === 'focusclick') {
+        // Tab leaves the field for the list; a POINTER click on the now-unfocused
+        // field is a client focus event, not a key. Typing after it must edit the
+        // filter again — otherwise the client thinks the caret is in the box while
+        // the panel is still browsing rows.
+        await h.key('Tab', 400)
+        const before = h.snapshot()
+        const field = before.nodes.find(node => String(node.class ?? '').split(' ').includes('sf-input'))
+        h.check('the model page still paints its native search field after Tab', field !== undefined)
+        if (field !== undefined) {
+          const at = boxOf(field)
+          await h.clickAt(at.cx, at.cy)
+          await h.sleep(400)
+          await h.key('B', 350)
+          await h.key('e', 350)
+          await h.key('t', 350)
+          const after = h.snapshot()
+          h.check('a pointer click on the field restores the typing target',
+            menuPainted(after).includes('Bet'), menuPainted(after).slice(0, 220))
+          h.capture(`${testCase}-${width}x${height}-${appearance}-refocus`, 'the filter edited again after a pointer click')
+        }
       }
       if (testCase === 'effort') {
         if (await choose('‹ Model & Effort')) {
