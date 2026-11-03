@@ -502,7 +502,7 @@ function installSideBuild(dir, tarball, env, targetDshVersion) {
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, '.npmrc'), 'registry=https://registry.npmjs.org\n', { mode: 0o600 })
   writeFileSync(join(dir, 'package.json'), JSON.stringify({
-    name: 'c2d-side-by-side-build',
+    name: 'split-upgrade-side-build',
     private: true,
     version: '1.0.0',
     dependencies: {
@@ -639,10 +639,15 @@ export async function waitForReloadNotice(client, expectedText, label, fromRecor
   })
   for (;;) {
     const viewport = await client.viewport()
-    // 1. The painted frame is the only PASS authority.
-    if (viewport.join('\n').includes(expectedText)) return expected
-    // 2. A DIFFERENT fixed notice is already decisive.
-    const unexpected = classifyReloadNotices(viewport).find(type => type !== expected)
+    // ONE painted-frame read drives both decisions, and both use the product's
+    // fixed notice ROW shape: a composer line, a prompt echo or any other row
+    // that merely contains the same words can neither PASS this wait nor fail
+    // it — only a real `✗`/`ℹ Client reload …` notice row is evidence.
+    const painted = classifyReloadNotices(viewport)
+    // 1. A painted frame carrying THIS notice is the only PASS authority.
+    if (painted.includes(expected)) return expected
+    // 2. Any other fixed notice row is already decisive.
+    const unexpected = painted.find(type => type !== expected)
     if (unexpected !== undefined) throw fail('UNEXPECTED_RELOAD_REFUSAL', 'PAINTED_NOTICE_MISMATCH', unexpected)
     // 3. A refusal of this action that can never paint the expected notice ends
     //    the wait now; an agreeing refusal still has to reach the screen.
@@ -711,7 +716,7 @@ export async function waitForAcceptedHandoff(client, pid, label, fromRecordIndex
 }
 
 /**
- * M4 PR4 U08: the PRODUCTION manual `/reload-client` command over the real
+ * U08: the PRODUCTION manual `/reload-client` command over the real
  * PTY, in a SECOND completely isolated profile/home round (U07's round is
  * untouched).
  *
@@ -909,7 +914,7 @@ async function runUserCommandReloadRound(context) {
 
   checkpoint('U08/positive-reexec')
   // ── U08 positive: the PRODUCTION `/reload-client` command drives the SAME
-  //    PR3 reexec/handoff chain into the newly installed build ─────────────
+  //    production reexec/handoff chain into the newly installed build ──────
   const reloadRequestFrom = reloadClient.records.length
   reloadClient.send('/reload-client\r')
   const reloadRequested = await waitForAcceptedHandoff(
@@ -1051,7 +1056,7 @@ async function runUserCommandReloadRound(context) {
 }
 
 /**
- * M4 PR4 U08 negative 3: the installed replacement target is OFFICIALLY
+ * U08 negative 3: the installed replacement target is OFFICIALLY
  * removed while a Client is live. The command's process preflight resolves the
  * PROFILE-installed package (never a qualification override), finds nothing,
  * refuses with its fixed notice, and keeps the live surface, its Client seat,
@@ -1172,7 +1177,7 @@ async function runUnavailableTargetRound(context) {
 }
 
 /**
- * M4 PR4 U09: TARGET-SOURCE ISOLATION with BOTH entries live in ONE process.
+ * U09: TARGET-SOURCE ISOLATION with BOTH entries live in ONE process.
  *
  * A qualification-born Client (probe flag + a side-by-side override package)
  * also exposes the public manual `/reload-client` command. The manual command
@@ -1458,7 +1463,7 @@ async function main() {
   const hosts = []
   const clients = []
   const evidence = {
-    lane: 'M4-C2-D split-process upgrade safety',
+    lane: 'split-process upgrade safety',
     status: 'RUNNING',
     dshVersion: targetDshVersion,
     old: {
@@ -1561,8 +1566,8 @@ async function main() {
     const clientAReady = await clientA.waitFor(record => record.m4a0 === 'ready', 'Client A ready', 240_000)
     const clientAAuth = await clientA.waitFor(record => record.m4a0 === 'host-authenticated', 'Client A authenticated Host', 60_000)
     assertIdentityKept(clientAAuth.host, hostABefore, 'Client A authenticated Host')
-    clientA.send('c2d-upgrade-hold\r')
-    await clientA.waitForScreen('c2d-upgrade-hold', 'Client A prompt painted', 120_000)
+    clientA.send('cross-build-hold\r')
+    await clientA.waitForScreen('cross-build-hold', 'Client A prompt painted', 120_000)
     const sessionStatus = await clientA.waitFor(
       record => record.m4b2s === 'surface-status' && record.sessionOpen === true && typeof record.openSessionId === 'string',
       'Client A open Session',
@@ -1727,7 +1732,7 @@ async function main() {
     assertEqual(c1Ready.host?.instanceId, hostABefore.instanceId)
     assertEqual(c1Ready.sessionOpen, true)
     assertEqual(c1Ready.openSessionId, sessionId)
-    await clientA.waitForScreen('c2d-upgrade-hold', 'the replacement surface painted the admitted prompt', 120_000)
+    await clientA.waitForScreen('cross-build-hold', 'the replacement surface painted the admitted prompt', 120_000)
     // While C1 runs, the OLD PID is only the waiting parent; C1 holds the ONE
     // kernel Client seat and the old Client owns nothing.
     assertEqual(await seatIsFree(clientSeatName), false, 'the replacement Client does not hold the Client seat')
@@ -1747,7 +1752,7 @@ async function main() {
     const promptsAfterReexec = (hostSessionEvents(dshHome, sessionId) ?? [])
       .filter(event => event.type === 'user/message'
         && event.data?.source?.kind === 'user'
-        && JSON.stringify(event.data?.content ?? []).includes('c2d-upgrade-hold'))
+        && JSON.stringify(event.data?.content ?? []).includes('cross-build-hold'))
     assertEqual(promptsAfterReexec.length, 1,
       `the reexec handoff replayed or duplicated the admitted prompt: ${JSON.stringify(promptsAfterReexec)}`)
     assertNoSecret('replacement Client records', JSON.stringify(clientA.records), [oldToken, oldCookie])
@@ -1986,7 +1991,7 @@ async function main() {
     const promptsAfterChildFailure = (hostSessionEvents(dshHome, sessionId) ?? [])
       .filter(event => event.type === 'user/message'
         && event.data?.source?.kind === 'user'
-        && JSON.stringify(event.data?.content ?? []).includes('c2d-upgrade-hold'))
+        && JSON.stringify(event.data?.content ?? []).includes('cross-build-hold'))
     assertEqual(promptsAfterChildFailure.length, 1, 'the failed replacement Client replayed the admitted prompt')
     await clientA2.dispose()
     evidence.reexecRefusals.childFailure = {
@@ -2119,7 +2124,7 @@ async function main() {
       180_000,
     )
     assert(crossBuildSurfaceStatus.openSessionId === sessionId, 'cross-build surface opened another Session')
-    await crossBuildSurface.waitForScreen('c2d-upgrade-hold', 'cross-build surface painted the admitted prompt', 120_000)
+    await crossBuildSurface.waitForScreen('cross-build-hold', 'cross-build surface painted the admitted prompt', 120_000)
     assert(alive(hostAReady.pid), 'Host A died while the cross-build surface was attached')
     assert(readProcessStarttime(hostAReady.pid) === hostABefore.hostStarttime,
       'Host A starttime changed while the cross-build surface was attached')
@@ -2174,7 +2179,7 @@ async function main() {
     assert(released.sessionId === sessionId, 'Host A Turn completion names another Session')
     await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'Host A turn/end after the cross-build attaches')
     const durableEvents = hostSessionEvents(dshHome, sessionId) ?? []
-    assert(durableEvents.some(event => event.type === 'user/message' && JSON.stringify(event).includes('c2d-upgrade-hold')),
+    assert(durableEvents.some(event => event.type === 'user/message' && JSON.stringify(event).includes('cross-build-hold')),
       'the durable Session lost the admitted prompt')
     evidence.work.completedAfterCrossBuild = true
 
@@ -2230,25 +2235,25 @@ async function main() {
       env: { ...base.env, SPLIT_PROCESS_CLIENT_SESSION: sessionId },
     })
     clients.push(clientB2)
-    const clientB2Ready = await clientB2.waitFor(record => record.m4a0 === 'ready', 'new Client B2 ready', 240_000)
-    const newAuth = await clientB2.waitFor(record => record.m4a0 === 'host-authenticated', 'new Client B2 authenticated Host', 60_000)
+    const clientB2Ready = await clientB2.waitFor(record => record.m4a0 === 'ready', 'second new-build Client ready', 240_000)
+    const newAuth = await clientB2.waitFor(record => record.m4a0 === 'host-authenticated', 'second new-build Client authenticated Host', 60_000)
     const newHost = safeIdentity(newAuth.host)
     assert(newHost.scopeId === hostABefore.scopeId, 'the new Host changed the canonical scope id')
     assert(newHost.instanceId !== hostABefore.instanceId, 'the new Host reused the old instance id')
     assert(newHost.hostPid !== hostABefore.hostPid, 'the new Host reused the old PID')
     assert(newHost.hostStarttime !== hostABefore.hostStarttime, 'the new Host reused the old starttime')
     assert(newHost.buildId === newBuildId, 'the new Host did not publish the new production buildId')
-    assert(clientB2Ready.transport === 'connected', `new Client B2 transport was ${JSON.stringify(clientB2Ready.transport)}`)
-    assert(clientB2Ready.host?.instanceId === newHost.instanceId, 'new Client B2 ready record names another Host')
-    await clientB2.waitForScreen('c2d-upgrade-hold', 'new Client B2 durable Session readback', 120_000)
+    assert(clientB2Ready.transport === 'connected', `second new-build Client transport was ${JSON.stringify(clientB2Ready.transport)}`)
+    assert(clientB2Ready.host?.instanceId === newHost.instanceId, 'second new-build Client ready record names another Host')
+    await clientB2.waitForScreen('cross-build-hold', 'second new-build Client durable Session readback', 120_000)
     const resumedStatus = await clientB2.waitFor(
       record => record.m4b2s === 'surface-status' && record.openSessionId === sessionId,
-      'new Client B2 resumed the durable Session',
+      'second new-build Client resumed the durable Session',
       120_000,
     )
-    assert(resumedStatus.openSessionId === sessionId, 'new Client B2 did not resume the persisted Session id')
+    assert(resumedStatus.openSessionId === sessionId, 'second new-build Client did not resume the persisted Session id')
     const resumedDurable = hostSessionEvents(dshHome, sessionId) ?? []
-    assert(resumedDurable.some(event => event.type === 'user/message' && JSON.stringify(event).includes('c2d-upgrade-hold')),
+    assert(resumedDurable.some(event => event.type === 'user/message' && JSON.stringify(event).includes('cross-build-hold')),
       'the durable Session history lost the admitted prompt after the new Host boot')
     assert(resumedDurable.some(event => event.type === 'turn/start'), 'the durable Session history lost the Turn start')
     assert(resumedDurable.some(event => event.type === 'turn/end'), 'the durable Session history lost the Turn end')
@@ -2282,7 +2287,7 @@ async function main() {
       clientB2.send('/exit\r')
       return await clientB2.waitForExit(60_000)
     })()
-    assert(clientB2Exit.code === 0 && clientB2Exit.signal === null, `new Client B2 exit was ${JSON.stringify(clientB2Exit)}`)
+    assert(clientB2Exit.code === 0 && clientB2Exit.signal === null, `second new-build Client exit was ${JSON.stringify(clientB2Exit)}`)
     await clientB2.dispose()
     assert(alive(newHost.hostPid), 'the new Host died when its Client exited')
     // Stop the new Host through the same explicit owner-governed path. The

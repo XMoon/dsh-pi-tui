@@ -1,5 +1,5 @@
 /**
- * M4-C2-D split-process upgrade smoke wiring guard.
+ * Split-process upgrade smoke wiring guard.
  *
  * The real dual-artifact lane is `scripts/split-process-upgrade-smoke.mjs`.
  * It needs two genuinely packaged `.tgz` payloads and a real installation of
@@ -58,7 +58,7 @@ test('the upgrade smoke proves cross-build compatibility instead of a build refu
   assert.match(source, /SurfaceEntryProcess/u)
   assert.match(source, /SPLIT_PROCESS_CLIENT_SESSION: sessionId/u)
   assert.match(source, /sessionOpen === true && record\.openSessionId === sessionId/u)
-  assert.match(source, /waitForScreen\('c2d-upgrade-hold'/u)
+  assert.match(source, /waitForScreen\('cross-build-hold'/u)
   assert.match(source, /crossBuildClient/u)
   assert.match(source, /crossBuildSurface/u)
   assert.match(source, /cross-build-compatible/u)
@@ -124,7 +124,7 @@ test('both Client peer owners are real and every upgrade root is isolated', () =
 test('the upgrade lane qualifies BOTH artifact pins against the exact DSH runtime before any setup', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   assert.match(source, /requireExactSmokeDshPin,[\s\S]*?\} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u,
-    'the exact-pin rule is shared with the T lane, not restated per script')
+    'the exact-pin rule is shared with the split-process lane, not restated per script')
   const main = source.slice(source.indexOf('async function main()'))
   const inspectOld = main.indexOf("inspectArtifact(options.old, 'old')")
   const inspectNew = main.indexOf("inspectArtifact(options.new, 'new')")
@@ -187,7 +187,7 @@ test('the upgrade lane owns the real Client reexec handoff and its two live nega
   assert.match(source, /function installSideBuild/u)
 })
 
-test('M4 PR4 U08 drives the PRODUCTION /reload-client command through the real PTY', () => {
+test('the PRODUCTION /reload-client command is driven through the real PTY, not a signal', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const start = source.indexOf('async function runUserCommandReloadRound')
   const targetInvalid = source.indexOf('async function runUnavailableTargetRound')
@@ -242,7 +242,7 @@ test('M4 PR4 U08 drives the PRODUCTION /reload-client command through the real P
   assert.match(source, /runUnavailableTargetRound\(\{/u)
 })
 
-test('M4 PR4 U09 proves the manual command ignores a live qualification target override', () => {
+test('the manual reload ignores a live qualification target override and resolves the active profile', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const start = source.indexOf('async function runReloadSourceIsolationRound')
   const end = source.indexOf('async function main()')
@@ -268,7 +268,7 @@ test('M4 PR4 U09 proves the manual command ignores a live qualification target o
   assert.match(source, /runReloadSourceIsolationRound\(\{/u)
 })
 
-test('the U lane reports every failure with a bounded default projection', () => {
+test('the split-upgrade lane reports every failure with a bounded default projection', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   assert.match(source, /import \{[\s\S]*createSmokeDiagnostics,[\s\S]*\} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u)
   assert.match(source, /diagnostics = createSmokeDiagnostics\(\{[\s\S]{0,300}lane: 'split-upgrade'/u)
@@ -334,16 +334,26 @@ test('the reload waits fail early on a refusal yet still PASS only on a painted 
   const source = readFileSync(SCRIPT, 'utf8')
   assert.match(source, /export async function waitForReloadNotice\(client, expectedText, label, fromRecordIndex/u)
   assert.match(source, /export async function waitForAcceptedHandoff\(client, pid, label, fromRecordIndex/u)
-  // PASS authority #1: the real PTY viewport, checked FIRST inside the loop.
+  // PASS authority #1: the real PTY viewport, classified into the product's
+  // FIXED NOTICE ROW SHAPE, checked FIRST inside the loop.
   const noticeWait = source.slice(
     source.indexOf('export async function waitForReloadNotice'),
     source.indexOf('const IGNORED_REASON_TYPES'),
   )
-  assert.ok(noticeWait.indexOf('const viewport = await client.viewport()') < noticeWait.indexOf('if (viewport.join(\'\\n\').includes(expectedText)) return'),
-    'the painted viewport must be the first and only PASS check')
-  assert.ok(noticeWait.indexOf('if (viewport.join(\'\\n\').includes(expectedText)) return')
-    < noticeWait.indexOf("record?.m4r !== 'handoff-request-rejected'"),
-    'telemetry may only ever shorten a wait, never satisfy it')
+  const firstViewport = noticeWait.indexOf('const viewport = await client.viewport()')
+  const shapeClassify = noticeWait.indexOf('const painted = classifyReloadNotices(viewport)')
+  const paintPass = noticeWait.indexOf('if (painted.includes(expected)) return expected')
+  const rejectionScan = noticeWait.indexOf("record?.m4r !== 'handoff-request-rejected'")
+  assert.ok(firstViewport >= 0 && shapeClassify >= 0 && paintPass >= 0 && rejectionScan >= 0,
+    'the wait must read the viewport, classify the fixed notice shape, then check the painted PASS and the rejection scan')
+  assert.ok(firstViewport < shapeClassify && shapeClassify < paintPass,
+    'the painted frame must be classified into the fixed notice shape before anything can PASS')
+  assert.ok(paintPass < rejectionScan, 'telemetry may only ever shorten a wait, never satisfy it')
+  // A bare substring of the expected wording is NOT a PASS criterion: a prompt
+  // echo or composer line carrying the same bytes must not satisfy the wait.
+  assert.doesNotMatch(noticeWait, /includes\(expectedText\)/u,
+    'the notice wait must not PASS on a raw viewport substring')
+
   // PASS authority #2: an accepted handoff must be THIS PID's own record.
   const handoffWait = source.slice(
     source.indexOf('export async function waitForAcceptedHandoff'),
@@ -381,7 +391,7 @@ test('the reload waits fail early on a refusal yet still PASS only on a painted 
   // reload notices and must not be routed through the refusal classifier.
   assert.match(source, /waitForScreen\(holdPrompt, 'U08 old Client painted the admitted prompt', 120_000\)/u)
   assert.match(source, /waitForScreen\(holdPrompt, 'U09 the replacement painted the admitted prompt', 120_000\)/u)
-  assert.match(source, /waitForScreen\('c2d-upgrade-hold'/u)
+  assert.match(source, /waitForScreen\('cross-build-hold'/u)
   // The untouched safety assertions around the converted waits still exist.
   assert.match(source, /waitForClearedComposer\(reloadOldClient, '\[image #', 'U08 staged placeholder cleared'\)/u)
   assert.match(source, /assertOldSurfaceKept/u)

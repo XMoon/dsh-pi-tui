@@ -1,5 +1,5 @@
 /**
- * M4-A0 split-process smoke wiring guard.
+ * Split-process smoke wiring guard.
  *
  * The real OS qualification lives in `scripts/split-process-smoke.mjs` and is
  * driven by the dedicated CI split-process job on an npm release tag. An
@@ -105,7 +105,7 @@ test('a completed waitForExit does not leave its deadline holding the process', 
 test('the candidate pin is qualified against the exact DSH runtime before any setup', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   assert.match(source, /requireExactSmokeDshPin,[\s\S]*?\} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u,
-    'the exact-pin rule is shared with the U lane, not restated per script')
+    'the exact-pin rule is shared with the split-upgrade lane, not restated per script')
   const main = source.slice(source.indexOf('async function main()'))
   const validate = main.indexOf('const candidateManifest = validateCandidateTarball(tarball)')
   const sha = main.indexOf('candidateSha256 = createHash(')
@@ -124,7 +124,7 @@ test('the candidate pin is qualified against the exact DSH runtime before any se
   assert.doesNotMatch(source, /function validateCandidateTarball/u)
 })
 
-test('the upgraded smoke carries every B1/B2-HF gate and the critical negative controls', () => {
+test('the upgraded smoke carries every inventory gate and the critical negative controls', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40', 'T41', 'T42', 'T43', 'T44', 'T45', 'T46', 'T47', 'T48', 'T49', 'T50', 'T51', 'T52', 'T53', 'T54', 'T55', 'T56', 'T57', 'T58', 'T59', 'T60']) {
     assert.match(source, new RegExp(`\\b${gate}\\b`, 'u'), `missing ${gate}`)
@@ -178,10 +178,10 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     'C1_HOLD_LONG_TURN',
     'C1_HOLD_TOOL',
     'C1_HOLD_CHILD',
-    'c2a-goal-armed',
-    'c2a-goal-round',
-    'c2a-maintenance',
-    'c2a-schedule',
+    'goal-armed',
+    'goal-round',
+    'maintenance-sweep',
+    'host-schedule',
     'C1_TIMED_QUESTION',
     'C1_SCENARIO',
     'C1_WORK_ROOT',
@@ -282,7 +282,7 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     'the artifact-absence control must reject an enclosing profiles manifest carrying the candidate package name')
 })
 
-test('the default failure diagnostics are wired into the T lane, not merely available', () => {
+test('the split-process lane reports every failure through the shared safe projection', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   // Startup identity and checkpoints are ON by default; the explicit trace file
   // keeps writing exactly what it wrote before.
@@ -292,6 +292,7 @@ test('the default failure diagnostics are wired into the T lane, not merely avai
   assert.match(source, /if \(TRACE_PATH === undefined \|\| TRACE_PATH === ''\) return[\s\S]{0,220}writeFileSync\(traceFd, `\$\{JSON\.stringify\(\{ ts: Date\.now\(\), event, \.\.\.fields \}\)\}\\n`\)/u,
     'the SPLIT_PROCESS_TRACE file keeps its existing content and trigger')
   assert.match(source, /diagnostics = createSmokeDiagnostics\(\{[\s\S]{0,200}lane: 'split-process'/u)
+  assert.match(source, /marker: 'T'/u)
   // The report is built while the processes are still alive, BEFORE the finally
   // kills them and deletes the work root.
   const main = source.slice(source.indexOf('async function main()'))
