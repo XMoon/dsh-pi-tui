@@ -269,6 +269,12 @@ with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
   `ready` is the evidence. The TSP renderer keeps its existing
   post-classification refusal and adds no native reload UI.
 
+  An accepted Client reload may cancel in-flight Client-local attachment intake
+  (`/attach`, `/image`, or inline attachment staging) and artifact saves
+  (`/export`, `/transcript`). These operations are not protected as unsettled
+  Host writes. Uncommitted results are discarded; already committed artifacts
+  remain intact. The user may retry the cancelled operation after reload.
+
 
 ### Local protocol and version evolution
 
