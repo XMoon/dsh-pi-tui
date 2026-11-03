@@ -1457,6 +1457,7 @@ async function main() {
   let sideBuildPackagePath
   let scratch
   let env
+  let evidence
   const hosts = []
   const clients = []
   evidence = {

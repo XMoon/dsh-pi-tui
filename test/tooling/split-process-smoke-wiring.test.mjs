@@ -282,6 +282,21 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     'the artifact-absence control must reject an enclosing profiles manifest carrying the candidate package name')
 })
 
+test('the lane declares every setup local it later assigns', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const main = source.slice(source.indexOf('async function main()'))
+  // A bare assignment to an undeclared name is a ReferenceError, and only the
+  // REAL lane reaches this code, so the declarations are pinned here.
+  for (const name of ['distribution', 'workDir', 'home', 'dshHome', 'harnessDir',
+    'scratch', 'env', 'isolatedScopeId']) {
+    const declared = main.search(new RegExp(`let ${name}$`, 'mu'))
+    assert.ok(declared >= 0, `the setup must declare \`${name}\``)
+    const assigned = main.search(new RegExp(`^\\s*${name} = `, 'mu'))
+    assert.ok(assigned < 0 || assigned > declared,
+      `\`${name}\` must be declared before its first assignment`)
+  }
+})
+
 test('the lane setup shares the report and cleanup boundary with the run', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const main = source.slice(source.indexOf('async function main()'))
