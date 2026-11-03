@@ -256,7 +256,7 @@ const openingRow = (id = 'job-a'): JobInspectorState => ({
 
 // ── A-01: the pure typed projection ─────────────────────────────────────────
 
-test('A-01 the projector separates connecting / observed / empty / gap+error+settled / unavailable', () => {
+test('the projector separates connecting / observed / empty / gap+error+settled / unavailable', () => {
   // (1) no snapshot yet: the opener identity is a FALLBACK, the phase is
   // connecting and no retained output is claimed.
   const connecting = deriveJobInspectorView(openingRow())
@@ -321,7 +321,7 @@ test('A-01 the projector separates connecting / observed / empty / gap+error+set
   assert.equal(unavailable.settled, false)
 })
 
-test('A-01b the panel header keeps status/gap/error visible and its Action Bar is the last row at every budget', () => {
+test('the panel header keeps status/gap/error visible and its Action Bar is the last row at every budget', () => {
   const budgets = [
     { width: 80, rows: 8 },
     { width: 80, rows: 24 },
@@ -414,7 +414,7 @@ test('A-01b the panel header keeps status/gap/error visible and its Action Bar i
   }
 })
 
-test('A-01c the Action Bar drops the Stop verb (never Esc back) when the capability dies', () => {
+test('the Action Bar drops the Stop verb (never Esc back) when the capability dies', () => {
   let live = true
   let closes = 0
   const panel = new JobInspectorPanel(openingRow(), {
@@ -445,7 +445,7 @@ test('A-01c the Action Bar drops the Stop verb (never Esc back) when the capabil
   panel.dispose()
 })
 
-test('A-01d a long Job identity and a long error text never hide the status or the independent markers', () => {
+test('a long Job identity and a long error text never hide the status or the independent markers', () => {
   const longId = `job-${'x'.repeat(120)}`
   const panel = new JobInspectorPanel(
     {
@@ -484,7 +484,7 @@ test('A-01d a long Job identity and a long error text never hide the status or t
   panel.dispose()
 })
 
-test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, notice included', () => {
+test('the ONE chrome plan keeps the Action Bar on screen at every height, notice included', () => {
   const flags = (): JobInspectorState => ({
     ...openingRow(),
     observed: {
@@ -552,7 +552,7 @@ test('A-01e the ONE chrome plan keeps the Action Bar on screen at every height, 
 })
 
 // ── A-02: the real Task Browser → Job workspace → same browser ─────────────
-test('A-02 selecting a Job in the real Task Browser opens the fullscreen Job workspace and Esc returns to the SAME browser', async () => {
+test('selecting a Job in the real Task Browser opens the fullscreen Job workspace and Esc returns to the SAME browser', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -600,7 +600,7 @@ test('A-02 selecting a Job in the real Task Browser opens the fullscreen Job wor
 
 // ── A-03/A-04: the paused return surface and the user's display mode ────────
 
-test('A-03 regular → Job → regular: the SAME main screen restarts, the draft/cursor and the browser selection survive, and no display preference is written', async () => {
+test('regular → Job → regular: the SAME main screen restarts, the draft/cursor and the browser selection survive, and no display preference is written', async () => {
   let fullscreenChanges = 0
   const { vt, app } = startApp({}, { onFullscreenChange: () => { fullscreenChanges += 1 } })
   const screens = recordScreenStarts()
@@ -638,7 +638,7 @@ test('A-03 regular → Job → regular: the SAME main screen restarts, the draft
   app.stop()
 })
 
-test('A-04 transcript fullscreen → Job → fullscreen: the SAME alt screen restarts with its NON-DEFAULT scroll state, and the user preference changes exactly once', async () => {
+test('transcript fullscreen → Job → fullscreen: the SAME alt screen restarts with its NON-DEFAULT scroll state, and the user preference changes exactly once', async () => {
   let fullscreenChanges = 0
   const { vt, app } = startApp({}, { onFullscreenChange: () => { fullscreenChanges += 1 } })
   const screens = recordScreenStarts()
@@ -696,7 +696,7 @@ test('A-04 transcript fullscreen → Job → fullscreen: the SAME alt screen res
 
 // ── A-05: ONE observer, live pushes, gated Stop ─────────────────────────────
 
-test('A-05 ONE observer pushes every snapshot into the painted workspace and Stop runs through the port once under its live gate', async () => {
+test('ONE observer pushes every snapshot into the painted workspace and Stop runs through the port once under its live gate', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -730,7 +730,7 @@ test('A-05 ONE observer pushes every snapshot into the painted workspace and Sto
   app.stop()
 })
 
-test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own notice row) with no optimistic state change', async () => {
+test('a Stop settlement failure is visible INSIDE the workspace (its own notice row) with no optimistic state change', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -809,7 +809,7 @@ test('A-05c a Stop settlement failure is visible INSIDE the workspace (its own n
   app.stop()
 })
 
-test('A-05b a failed observation open still opens the workspace with the reason visible and Esc usable', async () => {
+test('a failed observation open still opens the workspace with the reason visible and Esc usable', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   harness.observation.openFailure = 'no job controller'
@@ -831,7 +831,7 @@ test('A-05b a failed observation open still opens the workspace with the reason 
 
 // ── A-06: real terminal budgets and resize ──────────────────────────────────
 
-test('A-06 the workspace re-budgets with the LIVE terminal: tail and Action Bar stay visible on short/narrow/large screens', async () => {
+test('the workspace re-budgets with the LIVE terminal: tail and Action Bar stay visible on short/narrow/large screens', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -867,7 +867,7 @@ test('A-06 the workspace re-budgets with the LIVE terminal: tail and Action Bar 
 
 // ── A-07: same-session replacement and closure re-entry ─────────────────────
 
-test('A-07 a same-session A → B replacement releases each observer once and a re-entrant open inside A\'s close owns the final workspace', async () => {
+test('a same-session A → B replacement releases each observer once and a re-entrant open inside A\'s close owns the final workspace', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -890,7 +890,7 @@ test('A-07 a same-session A → B replacement releases each observer once and a 
   app.stop()
 })
 
-test('A-07b a re-entrant Job open inside the closing workspace\'s onClose wins over the outer replacement', async () => {
+test('a re-entrant Job open inside the closing workspace\'s onClose wins over the outer replacement', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b', 'job-c'] })
   await flush()
@@ -943,7 +943,7 @@ test('A-07b a re-entrant Job open inside the closing workspace\'s onClose wins o
 
 // ── A-08: every external close path ─────────────────────────────────────────
 
-test('A-08 the parent browser close, resetTasks, the explicit observer release and TUI dispose all close the workspace exactly once', async () => {
+test('the parent browser close, resetTasks, the explicit observer release and TUI dispose all close the workspace exactly once', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -989,7 +989,7 @@ test('A-08 the parent browser close, resetTasks, the explicit observer release a
   assert.deepEqual(harness.observation.forJob('job-a'), [1, 1, 1, 1], 'disposal releases the workspace observer once')
 })
 
-test('A-08b a Job workspace requested while a blocking modal owns the surface is REFUSED without a half screen', async () => {
+test('a Job workspace requested while a blocking modal owns the surface is REFUSED without a half screen', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1021,7 +1021,7 @@ test('A-08b a Job workspace requested while a blocking modal owns the surface is
 
 // ── A-09: blocking-owner pre-emption while the Job is open ──────────────────
 
-test('A-09 a Question / Approval / Save request arriving while the Job is open leaves the workspace BEFORE it can swallow the keys', async () => {
+test('a Question / Approval / Save request arriving while the Job is open leaves the workspace BEFORE it can swallow the keys', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1048,7 +1048,7 @@ test('A-09 a Question / Approval / Save request arriving while the Job is open l
   app.stop()
 })
 
-test('A-09b an Approval arriving while the Job is open leaves the workspace and really receives the keys', async () => {
+test('an Approval arriving while the Job is open leaves the workspace and really receives the keys', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1074,7 +1074,7 @@ test('A-09b an Approval arriving while the Job is open leaves the workspace and 
   app.stop()
 })
 
-test('A-09c a Save Location prompt arriving while the Job is open leaves the workspace and really receives the keys', async () => {
+test('a Save Location prompt arriving while the Job is open leaves the workspace and really receives the keys', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1108,7 +1108,7 @@ test('A-09c a Save Location prompt arriving while the Job is open leaves the wor
   app.stop()
 })
 
-test('A-09d a Question presented BY the workspace close callback queues the older request instead of overwriting it', async () => {
+test('a Question presented BY the workspace close callback queues the older request instead of overwriting it', async () => {
   const { vt, app } = startApp()
   let innerQuestion: Promise<unknown> | undefined
   let reentered = false
@@ -1151,7 +1151,7 @@ test('A-09d a Question presented BY the workspace close callback queues the olde
   app.stop()
 })
 
-test('A-09e a Save Location request whose abandonment callback presents a Question is REFUSED, never mounted over it', async () => {
+test('a Save Location request whose abandonment callback presents a Question is REFUSED, never mounted over it', async () => {
   const { vt, app } = startApp()
   let innerQuestion: Promise<unknown> | undefined
   let reentered = false
@@ -1189,7 +1189,7 @@ test('A-09e a Save Location request whose abandonment callback presents a Questi
   app.stop()
 })
 
-test('A-09k an ALREADY-aborted Approval never preempts the Job workspace', async () => {
+test('an ALREADY-aborted Approval never preempts the Job workspace', async () => {
   const { vt, app } = startApp()
   const handle = app.openJobInspector({
     initial: openingRow(),
@@ -1217,7 +1217,7 @@ test('A-09k an ALREADY-aborted Approval never preempts the Job workspace', async
   app.stop()
 })
 
-test('A-09f the effective exit request keeps its Host admission inside the workspace', async () => {
+test('the effective exit request keeps its Host admission inside the workspace', async () => {
   let exits = 0
   const { vt, app } = startApp({}, { onExit: () => { exits += 1 } })
   const handle = app.openJobInspector({
@@ -1243,7 +1243,7 @@ test('A-09f the effective exit request keeps its Host admission inside the works
   app.stop()
 })
 
-test('A-09g a throwing workspace close never truncates the stop teardown', async () => {
+test('a throwing workspace close never truncates the stop teardown', async () => {
   const { vt, app } = startApp()
   const stops: TuiMainScreen[] = []
   const originalStop = TuiMainScreen.prototype.stop
@@ -1272,7 +1272,7 @@ test('A-09g a throwing workspace close never truncates the stop teardown', async
   }
 })
 
-test('A-09h a workspace leased BY the close callback during stop() is refused: no lease, no observer and no input owner survives', async () => {
+test('a workspace leased BY the close callback during stop() is refused: no lease, no observer and no input owner survives', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -1335,7 +1335,7 @@ test('A-09h a workspace leased BY the close callback during stop() is refused: n
   app.stop()
 })
 
-test('A-09i a workspace leased BY the abandonment callback while a blocking owner arrives is refused: the Question is visible and owns the keyboard', async () => {
+test('a workspace leased BY the abandonment callback while a blocking owner arrives is refused: the Question is visible and owns the keyboard', async () => {
   const failures: unknown[] = []
   const { vt, app } = startApp({}, {
     // The failure channel of `routeTerminalSettlementFailure`: the abandonment
@@ -1401,7 +1401,7 @@ test('A-09i a workspace leased BY the abandonment callback while a blocking owne
   app.stop()
 })
 
-test('A-09j a leader-bound effective exit still leaves the TUI while every other leader action stays blocked', async () => {
+test('a leader-bound effective exit still leaves the TUI while every other leader action stays blocked', async () => {
   let exits = 0
   let tasksOpened = 0
   const { vt, app } = startApp({}, { onExit: () => { exits += 1 } })
@@ -1467,7 +1467,7 @@ test('A-09j a leader-bound effective exit still leaves the TUI while every other
 
 // ── A-10: read-only workspace ───────────────────────────────────────────────
 
-test('A-10 ordinary keys and host shortcuts are inert inside the workspace and never touch the editor, transcript or browser; the effective Find opens ONLY the Job Find', async () => {
+test('ordinary keys and host shortcuts are inert inside the workspace and never touch the editor, transcript or browser; the effective Find opens ONLY the Job Find', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1526,7 +1526,7 @@ test('A-10 ordinary keys and host shortcuts are inert inside the workspace and n
 
 // ── A-11: the legacy sibling path is untouched ──────────────────────────────
 
-test('A-11 the standalone output viewer stays the legacy overlay and never becomes a Job workspace', async () => {
+test('the standalone output viewer stays the legacy overlay and never becomes a Job workspace', async () => {
   const { vt, app } = startApp()
   let closes = 0
   const closer = app.openOutputViewer({
@@ -1553,7 +1553,7 @@ test('A-11 the standalone output viewer stays the legacy overlay and never becom
 
 // ── A-12: failure propagation and re-entry ──────────────────────────────────
 
-test('A-12 a throwing workspace open releases the observation once, retires the viewer token and rethrows the real error', async () => {
+test('a throwing workspace open releases the observation once, retires the viewer token and rethrows the real error', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -1586,7 +1586,7 @@ test('A-12 a throwing workspace open releases the observation once, retires the 
   app.stop()
 })
 
-test('A-12b a throwing workspace onClose still releases the screen and panel once and restores the return surface', async () => {
+test('a throwing workspace onClose still releases the screen and panel once and restores the return surface', async () => {
   const { vt, app } = startApp()
   const screens = recordScreenStarts()
   const panelDisposals: number[] = []
@@ -1623,7 +1623,7 @@ test('A-12b a throwing workspace onClose still releases the screen and panel onc
   app.stop()
 })
 
-test('A-12d a REAL failing Job screen start unwinds: the observation is released once, the return surface is restarted and the terminal owner is restored', async () => {
+test('a REAL failing Job screen start unwinds: the observation is released once, the return surface is restarted and the terminal owner is restored', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -1674,7 +1674,7 @@ test('A-12d a REAL failing Job screen start unwinds: the observation is released
   app.stop()
 })
 
-test('A-12e a REAL failing Job screen stop never strands the panel, the return surface or the observation', async () => {
+test('a REAL failing Job screen stop never strands the panel, the return surface or the observation', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1723,7 +1723,7 @@ test('A-12e a REAL failing Job screen stop never strands the panel, the return s
   app.stop()
 })
 
-test('A-12c a second workspace lease is refused while one is open, and a disposed surface refuses both', async () => {
+test('a second workspace lease is refused while one is open, and a disposed surface refuses both', async () => {
   const { vt, app } = startApp()
   const handle = app.openJobInspector({
     initial: openingRow(),
@@ -1754,7 +1754,7 @@ test('A-12c a second workspace lease is refused while one is open, and a dispose
   }), /disposed surface/)
 })
 
-test('A-13 entering the Job workspace re-samples the observation its predecessor lost', async () => {
+test('entering the Job workspace re-samples the observation its predecessor lost', async () => {
   const saved = {
     NO_COLOR: process.env.NO_COLOR,
     FORCE_COLOR: process.env.FORCE_COLOR,

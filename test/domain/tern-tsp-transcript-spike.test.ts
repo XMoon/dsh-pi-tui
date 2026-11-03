@@ -1320,7 +1320,7 @@ function toolRows(folder: TranscriptFolder): Extract<TranscriptMessage, { kind: 
   )
 }
 
-test('B2-T01: a real PTC dispatch nests under its own root and never joins the Work top level', () => {
+test('a real PTC dispatch nests under its own root and never joins the Work top level', () => {
   const readArgs = { file_path: 'src/a.ts' }
   const folder = new TranscriptFolder()
   folder.apply([
@@ -1354,7 +1354,7 @@ test('B2-T01: a real PTC dispatch nests under its own root and never joins the W
   assert.equal(flatten(view).filter(node => node.kind === 'tool').length, 2)
 })
 
-test('B2-T02: ordered child calls carry per-child status; a child failure never fails the parent', () => {
+test('ordered child calls carry per-child status; a child failure never fails the parent', () => {
   const readArgs = { file_path: 'src/a.ts' }
   const bashArgs = { command: 'pnpm test', description: 'Run tests' }
   const writeArgs = { file_path: 'src/b.ts', content: 'hello' }
@@ -1428,7 +1428,7 @@ test('B2-T02: ordered child calls carry per-child status; a child failure never 
   }
 })
 
-test('B2-T03: two run_code roots in one Work keep separate subtrees and stable SDK ids', () => {
+test('two run_code roots in one Work keep separate subtrees and stable SDK ids', () => {
   const readArgs = { file_path: 'src/a.ts' }
   const writeArgs = { file_path: 'src/b.ts', content: 'hello' }
   const folder = new TranscriptFolder()
@@ -1494,7 +1494,7 @@ test('B2-T03: two run_code roots in one Work keep separate subtrees and stable S
   }
 })
 
-test('B2-T04: a three-level tree attaches every direct child to the correct parent node id', () => {
+test('a three-level tree attaches every direct child to the correct parent node id', () => {
   const childArgs = { command: 'make', description: 'Build project' }
   const grandchildArgs = { file_path: 'nested.ts' }
   const folder = new TranscriptFolder()
@@ -1528,7 +1528,7 @@ test('B2-T04: a three-level tree attaches every direct child to the correct pare
   assert.equal(flatten(view).filter(node => node.kind === 'tool').length, 3)
 })
 
-test('B2-T05: merged Read, ordinary, orphan and tool-not-started rows keep their pre-B2 view', () => {
+test('merged Read, ordinary, orphan and tool-not-started rows keep their pre-B2 view', () => {
   const bashArgs = { command: 'pnpm test', description: 'Run tests' }
   const folder = new TranscriptFolder()
   folder.apply([
@@ -1575,7 +1575,7 @@ test('B2-T05: merged Read, ordinary, orphan and tool-not-started rows keep their
   assert.equal(nodeOf(view, `${neverNode.id}.provenance`).props['text'], 'not started')
 })
 
-test('B2-T06: an orphan PTC start/settle shows nothing until the parent arrives, then exactly once', () => {
+test('an orphan PTC start/settle shows nothing until the parent arrives, then exactly once', () => {
   const bashArgs = { command: 'ls', description: 'List files' }
   const orphanStart = ptcStart(0, 'code-1', 'code-1', 'code-1:code:1', 'bash', bashArgs)
   const orphanSettle = ptcSettle(1, 'code-1', 'code-1', 'code-1:code:1', 'bash', bashArgs, 'file.txt')
@@ -1607,7 +1607,7 @@ test('B2-T06: an orphan PTC start/settle shows nothing until the parent arrives,
     'replaying the same durable events adds no duplicate child')
 })
 
-test('B2-T07: a new projection source gets a fresh scope, never the old source ids', () => {
+test('a new projection source gets a fresh scope, never the old source ids', () => {
   const readArgs = { file_path: 'src/a.ts' }
   const build = (): TranscriptFolder => {
     const folder = new TranscriptFolder()
@@ -1640,7 +1640,7 @@ test('B2-T07: a new projection source gets a fresh scope, never the old source i
     'the new scope renders the same content, never a cached stale tree')
 })
 
-test('B2-T08: hostile child name/args/result are sanitized; the Folder values stay raw', () => {
+test('hostile child name/args/result are sanitized; the Folder values stay raw', () => {
   const hostileName = 'Read\nEvil\u001b]0;pwn\u0007'
   const hostileArgs = { q: 'safe-args\u009b2J\u007fneedle-args' }
   const hostileResult = 'safe-start\u001b]52;c;YXR0YWNr\u0007needle-text\u009b2J\u007fend'
@@ -1677,7 +1677,7 @@ test('B2-T08: hostile child name/args/result are sanitized; the Folder values st
   assert.ok(resultText.includes('safe-start') && resultText.includes('needle-text'))
 })
 
-test('B2-T09: a parent with children keeps its arguments/result bytes, status and target kind', () => {
+test('a parent with children keeps its arguments/result bytes, status and target kind', () => {
   const targetPresenter = toolPresenterFrom(name => name === 'run_code' || name === 'read'
     ? {
         presentCall: () => ({
@@ -1739,7 +1739,7 @@ test('B2-T09: a parent with children keeps its arguments/result bytes, status an
     'no childless row is wrapped')
 })
 
-test('B2-T10: 64 direct children plus a four-level chain render in order without truncation', (t) => {
+test('64 direct children plus a four-level chain render in order without truncation', (t) => {
   const events: SessionEvent[] = [ev('turn/start', { turn: 1 }, 0), runCodeCall(1, 'code-1')]
   let seq = 2
   for (let index = 1; index <= 64; index += 1) {
@@ -1875,7 +1875,7 @@ function encoding(view: View): string {
   return JSON.stringify(view.regions)
 }
 
-test('B3-T01: an absent or empty Preparing snapshot renders the baseline byte for byte', () => {
+test('an absent or empty Preparing snapshot renders the baseline byte for byte', () => {
   const messages: TranscriptMessage[] = [workTool(1, 'call-1'), { kind: 'user', turn: 0, text: 'go' }]
   const baseline = View.from({ main: transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys()) })
   const absent = View.from({ main: transcriptView(projectTranscriptStructure(messages), new TranscriptNodeKeys(), {}) })
@@ -1885,7 +1885,7 @@ test('B3-T01: an absent or empty Preparing snapshot renders the baseline byte fo
   assert.equal(preparingRows(empty).length, 0, 'no Preparing row exists')
 })
 
-test('B3-T02: an anonymous delta renders ONE plain text row and no status at all', () => {
+test('an anonymous delta renders ONE plain text row and no status at all', () => {
   const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
   const baseline = viewWithPreviews(messages, [])
   const view = viewWithPreviews(messages, [preview({ turn: 1, argumentBytes: 7 })])
@@ -1907,7 +1907,7 @@ test('B3-T02: an anonymous delta renders ONE plain text row and no status at all
   assert.ok(!props.includes('elapsed'), 'no elapsed timer')
 })
 
-test('B3-T03: a known name, the owner summary and the exact byte count are shown as they are', () => {
+test('a known name, the owner summary and the exact byte count are shown as they are', () => {
   const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
   const view = viewWithPreviews(messages, [preview({
     turn: 1,
@@ -1929,7 +1929,7 @@ test('B3-T03: a known name, the owner summary and the exact byte count are shown
   assert.equal(source.argumentBytes, 23)
 })
 
-test('B3-T04: more streamed bytes update the row in place — the node id never changes', () => {
+test('more streamed bytes update the row in place — the node id never changes', () => {
   const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
   const keys = new TranscriptNodeKeys()
   const before = viewWithPreviews(messages, [preview({ turn: 1, callId: 'call-bash', name: 'bash', argumentBytes: 23 })], keys)
@@ -1948,7 +1948,7 @@ test('B3-T04: more streamed bytes update the row in place — the node id never 
   assert.equal(textOps[0]![1], `${afterRow.id}.bytes`, 'the byte text node carries the update')
 })
 
-test('B3-T05: a late call id replaces the anonymous row — one row, new id, stable durable ids', () => {
+test('a late call id replaces the anonymous row — one row, new id, stable durable ids', () => {
   const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
   const keys = new TranscriptNodeKeys()
   const before = viewWithPreviews(messages, [preview({ turn: 1, step: 2, index: 0, argumentBytes: 23 })], keys)
@@ -1967,7 +1967,7 @@ test('B3-T05: a late call id replaces the anonymous row — one row, new id, sta
     'the Work section id is untouched')
 })
 
-test('B3-T06: parallel previews render one row each, in index order, with no aggregation', () => {
+test('parallel previews render one row each, in index order, with no aggregation', () => {
   const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
   const view = viewWithPreviews(messages, [
     preview({ turn: 1, callId: 'call-b', name: 'bash', summary: 'second', argumentBytes: 43, index: 1 }),
@@ -1983,7 +1983,7 @@ test('B3-T06: parallel previews render one row each, in index order, with no agg
   assert.ok(!props.includes('+2'), 'no aggregate count')
 })
 
-test('B3-T07: only the LAST open Work adopts the rows — an older Work is never reopened', () => {
+test('only the LAST open Work adopts the rows — an older Work is never reopened', () => {
   const messages: TranscriptMessage[] = [workTool(1, 'call-a'), contextRow(1), workTool(1, 'call-b')]
   const blocks = projectTranscriptStructure(messages)
   assert.deepEqual(blocks.map(block => block.kind), ['work', 'message', 'work'], 'the fixture is Work, Context, Work')
@@ -1996,7 +1996,7 @@ test('B3-T07: only the LAST open Work adopts the rows — an older Work is never
   assert.notEqual(rows[0]!.parent, sections[0]!.id, 'the older Work gained no child')
 })
 
-test('B3-T08: without an open Work the rows stand alone after the transcript', () => {
+test('without an open Work the rows stand alone after the transcript', () => {
   const withTail: TranscriptMessage[] = [workTool(1, 'call-a'), { kind: 'user', turn: 0, text: 'and now?' }]
   const tailView = viewWithPreviews(withTail, [preview({ turn: 1, callId: 'call-bash', name: 'bash', argumentBytes: 23 })])
   const tailRows = preparingRows(tailView)
@@ -2012,7 +2012,7 @@ test('B3-T08: without an open Work the rows stand alone after the transcript', (
   assert.equal(preparingRows(noWorkView)[0]!.parent, 'main', 'the row stands alone')
 })
 
-test('B3-T09: previews of several turns keep their own groups — never the first turn for all', () => {
+test('previews of several turns keep their own groups — never the first turn for all', () => {
   const messages: TranscriptMessage[] = [workTool(1, 'call-a'), workTool(2, 'call-b')]
   const view = viewWithPreviews(messages, [
     preview({ turn: 2, callId: 'call-bash', name: 'bash', argumentBytes: 23, index: 0 }),
@@ -2030,7 +2030,7 @@ test('B3-T09: previews of several turns keep their own groups — never the firs
   assert.equal(standalone.id, 'main.preparing-call-read', 'the standalone row is scope-keyed at the top level')
 })
 
-test('B3-T10: a hostile or workspace path summary is displayed safely and relatively', () => {
+test('a hostile or workspace path summary is displayed safely and relatively', () => {
   const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
   const hostile = 'safe\u001b]52;c;LEAK\u0007\u001b[2Jline\u000bsecond'
   const view = viewWithPreviews(messages, [
@@ -2050,7 +2050,7 @@ test('B3-T10: a hostile or workspace path summary is displayed safely and relati
   assert.ok(props.includes('28 B'), 'the byte count survives')
 })
 
-test('B3-T11: the formal tool call replaces the Preparing row in the same frame', () => {
+test('the formal tool call replaces the Preparing row in the same frame', () => {
   const keys = new TranscriptNodeKeys()
   const existing = workTool(1, 'call-1')
   const preparing = viewWithPreviews([existing], [preview({ turn: 1, callId: 'call-bash', name: 'bash', argumentBytes: 23 })], keys)
@@ -2067,7 +2067,7 @@ test('B3-T11: the formal tool call replaces the Preparing row in the same frame'
     'no Preparing text remains')
 })
 
-test('B3-T12: the owner\'s anonymous-to-named update is ONE row, never a double draw', () => {
+test('the owner\'s anonymous-to-named update is ONE row, never a double draw', () => {
   const messages: TranscriptMessage[] = [workTool(1, 'call-1')]
   const previews = new Map<string, StreamingToolPreview>()
   upsertStreamingToolPreview(previews, { callId: '', turn: 1, step: 0, index: 0, argumentsDelta: '{"comm' }, toolSummaryKeys)

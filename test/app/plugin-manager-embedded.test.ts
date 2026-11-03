@@ -69,7 +69,7 @@ async function yieldToRail(harness: WorkspaceHarness): Promise<void> {
 
 // ── T05: the frozen breakpoint table ────────────────────────────────────────
 
-test('T05 every breakpoint projects the frozen plugin columns in all three stages', async () => {
+test('every breakpoint projects the frozen plugin columns in all three stages', async () => {
   const widths = [44, 72, 75, 76, 80, 95, 96, 100, 107, 108, 119, 120, 140]
   // §8.2 mandates BOTH heights for every listed width and all three stages.
   for (const height of [24, 40] as const) {
@@ -145,7 +145,7 @@ test('T05 every breakpoint projects the frozen plugin columns in all three stage
 
 // ── T06: vertical degradation ───────────────────────────────────────────────
 
-test('T06 short frames keep the truthful last-row bar and drop the optional rows first', async () => {
+test('short frames keep the truthful last-row bar and drop the optional rows first', async () => {
   for (const [columns, rows] of [[80, 3], [80, 5], [80, 8], [80, 10], [120, 3], [120, 5], [120, 8], [120, 10]] as const) {
     const harness = await open({ columns, rows })
     await contentFocus(harness)
@@ -178,7 +178,7 @@ test('T06 short frames keep the truthful last-row bar and drop the optional rows
 
 // ── T07: the input-focus matrix ─────────────────────────────────────────────
 
-test('T07 the focus matrix runs real keys and never rebuilds or re-reads the page', async () => {
+test('the focus matrix runs real keys and never rebuilds or re-reads the page', async () => {
   const harness = await open({ columns: 120, rows: 24 })
   const page = harness.panel
   const reads = harness.snapshotCalls()
@@ -267,7 +267,7 @@ function wheel(harness: WorkspaceHarness, row: number, column: number, down = tr
 
 // ── T08: wheel routing ──────────────────────────────────────────────────────
 
-test('T08 the wheel scrolls the pane under the pointer and header/bar/gutter are inert', async () => {
+test('the wheel scrolls the pane under the pointer and header/bar/gutter are inert', async () => {
   const harness = await open({ columns: 120, rows: 12 })
   const split = harness.panel.contentLayout()
   assert.equal(split.dual, true, 'the 120x12 content focus paints the adjacent pair')
@@ -306,7 +306,7 @@ test('T08 the wheel scrolls the pane under the pointer and header/bar/gutter are
   harness.app.dispose()
 })
 
-test('T08 the wheel over the Categories rail scrolls the rail on a short frame', async () => {
+test('the wheel over the Categories rail scrolls the rail on a short frame', async () => {
   const harness = await open({ columns: 120, rows: 12 })
   await yieldToRail(harness)
   // Home returns the rail window to its first row, so the wheel below really
@@ -399,7 +399,7 @@ async function openInstall(harness: WorkspaceHarness): Promise<void> {
   assert.equal(harness.panel.currentView(), 'install', 'the install editor must be open')
 }
 
-test('T09 below the body floor only the REAL Esc is admitted and advertised', async () => {
+test('below the body floor only the REAL Esc is admitted and advertised', async () => {
   const harness = await open({ columns: 120, rows: 24 })
   harness.vt.resize(120, 2)
   await harness.waitForFrame()
@@ -428,7 +428,7 @@ test('T09 below the body floor only the REAL Esc is admitted and advertised', as
   harness.app.dispose()
 })
 
-test('T09 a zero-row search edit drops the apply and keeps only the real Esc', async () => {
+test('a zero-row search edit drops the apply and keeps only the real Esc', async () => {
   const harness = await open({ columns: 140, rows: 40 })
   harness.vt.sendInput('/')
   await harness.waitForFrame()
@@ -458,7 +458,7 @@ test('T09 a zero-row search edit drops the apply and keeps only the real Esc', a
   harness.app.dispose()
 })
 
-test('T09 a same-category rail click never steals a plugin sub-view Esc gradient', async () => {
+test('a same-category rail click never steals a plugin sub-view Esc gradient', async () => {
   // Details is the ONE plugin sub-view that paints the Categories rail beside
   // the content; install/confirm/diagnostics own the full width by contract, so
   // the rail click is not physically reachable there (asserted below).
@@ -509,7 +509,7 @@ test('T09 a same-category rail click never steals a plugin sub-view Esc gradient
   root.app.dispose()
 })
 
-test('T09 the dual wheel routes by the pointer pane and the pair gutter is inert', async () => {
+test('the dual wheel routes by the pointer pane and the pair gutter is inert', async () => {
   const harness = await open({ columns: 120, rows: 12 })
   const split = harness.panel.contentLayout()
   assert.equal(split.dual, true, '120x12 keeps the List|Details pair')
@@ -556,7 +556,7 @@ test('T09 the dual wheel routes by the pointer pane and the pair gutter is inert
   harness.app.dispose()
 })
 
-test('T09 an App notice between press and release refuses the Host mutation', async () => {
+test('an App notice between press and release refuses the Host mutation', async () => {
   // 80x10: the notice takes a row, the risk no longer fits and the REPAINTED
   // frame withholds Remove; the stale release must not write before it.
   const stale = await open({ columns: 80, rows: 10 })
@@ -714,7 +714,7 @@ test('T09 an App notice between press and release refuses the Host mutation', as
   railCase.app.dispose()
 })
 
-test('T09 a Controller install-phase change between press and release refuses the old action', async () => {
+test('a Controller install-phase change between press and release refuses the old action', async () => {
   const harness = await open({
     columns: 120,
     rows: 24,
@@ -760,7 +760,7 @@ test('T09 a Controller install-phase change between press and release refuses th
   harness.app.dispose()
 })
 
-test('T09 a real Port invalidation while the press is held refuses the old release', async () => {
+test('a real Port invalidation while the press is held refuses the old release', async () => {
   // The harness wires the PRODUCTION `PluginManagerPort.subscribeInvalidation`
   // subscription: `invalidate()` is the Host's own invalidation signal, which
   // makes the Controller reread the authoritative inventory.
@@ -786,7 +786,7 @@ test('T09 a real Port invalidation while the press is held refuses the old relea
   harness.app.dispose()
 })
 
-test('T09 a plugin sub-view change under a held rail press refuses the old release', async () => {
+test('a plugin sub-view change under a held rail press refuses the old release', async () => {
   // §3.4/§4.4: a Plugin sub-view change (Details -> List via the page's own Esc)
   // must invalidate a root gesture recorded against the rail. The wide
   // projection and the content box are UNCHANGED across that transition, so the
@@ -823,7 +823,7 @@ test('T09 a plugin sub-view change under a held rail press refuses the old relea
   harness.app.dispose()
 })
 
-test('T09 a same-view filter or selection change under a held rail press refuses the old release', async () => {
+test('a same-view filter or selection change under a held rail press refuses the old release', async () => {
   // §3.4: the fence must cover child changes INSIDE the same view — the page
   // stays `list`, keeps its yield status, and its projection/rail targets do not
   // move, but its filter and selection (and therefore its own hit map) changed.
@@ -856,7 +856,7 @@ test('T09 a same-view filter or selection change under a held rail press refuses
   }
 })
 
-test('T09 the 119<->120 and 75<->76 width boundaries refuse a straddling gesture', async () => {
+test('the 119<->120 and 75<->76 width boundaries refuse a straddling gesture', async () => {
   // 119 -> 120: the rail APPEARS, so the plugin content starts at x=24 instead
   // of x=0 while the pressed screen cell keeps the same number.
   const toWide = await open({ columns: 119, rows: 24 })
@@ -928,7 +928,7 @@ test('T09 the 119<->120 and 75<->76 width boundaries refuse a straddling gesture
   collapse.app.dispose()
 })
 
-test('T09 resize, focus yield, filter edit and external disposal refuse the old release', async () => {
+test('resize, focus yield, filter edit and external disposal refuse the old release', async () => {
   // Press -> resize (120x8 -> 120x7 keeps the child grant but moves the box
   // top) -> release.
   const resizeCase = await open({ columns: 120, rows: 8 })
@@ -1103,7 +1103,7 @@ test('T09 resize, focus yield, filter edit and external disposal refuse the old 
   disposed.app.dispose()
 })
 
-test('T03 the narrow Plugins Right path mounts the page once (44 and 75 columns)', async () => {
+test('the narrow Plugins Right path mounts the page once (44 and 75 columns)', async () => {
   // §8.1 T03 also names `Right`: on a narrow frame a rail selection mounts
   // nothing, and the FIRST Right mounts the page once and reads the inventory
   // once. The existing 72-column case covers the Models page, which is a different
@@ -1136,7 +1136,7 @@ test('T03 the narrow Plugins Right path mounts the page once (44 and 75 columns)
   }
 })
 
-test('T03 a 75-column production page mounts lazily from the Categories rail', async () => {
+test('a 75-column production page mounts lazily from the Categories rail', async () => {
   // §8.1 T03: below 76 columns the Settings lease opens on the rail; merely
   // SELECTING Plugins must not build the page or read the Host inventory. The
   // FIRST production-page mount happens when the content takes the keyboard.
@@ -1190,7 +1190,7 @@ test('T03 a 75-column production page mounts lazily from the Categories rail', a
   harness.app.dispose()
 })
 
-test('T07 Tab never crosses levels from Confirm, Install or Diagnostics', async () => {
+test('Tab never crosses levels from Confirm, Install or Diagnostics', async () => {
   // §3.3: every non-List sub-state keeps its own local keys; Tab/Shift+Tab must
   // never climb back to the Categories rail.
   const confirm = await open({ columns: 120, rows: 24 })
@@ -1233,7 +1233,7 @@ test('T07 Tab never crosses levels from Confirm, Install or Diagnostics', async 
   diagnostics.app.dispose()
 })
 
-test('T08 the 76..119 Categories+List preview reprojects the mouse after the focus switch', async () => {
+test('the 76..119 Categories+List preview reprojects the mouse after the focus switch', async () => {
   // §3.3/§3.4: with the rail focused at 76..119 the projection is
   // Categories | List and the content starts at x=24. Enter/Tab/a preview click
   // move the keyboard into the List, and the NEXT frame is List | Details with
@@ -1270,7 +1270,7 @@ ${harness.view()}`)
   harness.app.dispose()
 })
 
-test('T09 a Host invalidation before the repaint refuses the held rail press', async () => {
+test('a Host invalidation before the repaint refuses the held rail press', async () => {
   // §3.4 Press -> Host invalidate: the Controller's read generation and state
   // change BEFORE the queued repaint runs, so the page's synchronous revision is
   // still old. The root fence must use the page's LIVE currentness.
@@ -1294,7 +1294,7 @@ test('T09 a Host invalidation before the repaint refuses the held rail press', a
   harness.app.dispose()
 })
 
-test('T09 a no-op wheel never cancels a legal rail click', async () => {
+test('a no-op wheel never cancels a legal rail click', async () => {
   // RFL-012: a wheel that cannot move the window must not bump the page's
   // gesture revision, or a legitimate rail press would be refused with no
   // visible change to justify it.
@@ -1318,7 +1318,7 @@ test('T09 a no-op wheel never cancels a legal rail click', async () => {
   harness.app.dispose()
 })
 
-test('T09 a SECOND invalidation while already stale still refuses the held rail press', async () => {
+test('a SECOND invalidation while already stale still refuses the held rail press', async () => {
   // RFL-011 follow-up: a boolean "is the frame current?" cannot tell two stale
   // states apart. The comparable live identity must change with each read.
   const harness = await open({ columns: 120, rows: 24 })
@@ -1342,7 +1342,7 @@ test('T09 a SECOND invalidation while already stale still refuses the held rail 
   harness.app.dispose()
 })
 
-test('T09 a wheel at the END of a scroll window never cancels a legal rail click', async () => {
+test('a wheel at the END of a scroll window never cancels a legal rail click', async () => {
   // RFL-012 follow-up: the lower bound was guarded, but the END of the window
   // still bumped (the paint clamps the offset back), so a held rail click was
   // refused with no visible movement.
@@ -1373,7 +1373,7 @@ test('T09 a wheel at the END of a scroll window never cancels a legal rail click
   harness.app.dispose()
 })
 
-test('T09 a catch-up repaint of state that was already live keeps a held rail press valid', async () => {
+test('a catch-up repaint of state that was already live keeps a held rail press valid', async () => {
   // RFL-011 follow-up: the identity must be SEMANTIC. A repaint that only catches
   // up with a change made BEFORE the press must not invalidate it, or the user's
   // legitimate rail click is lost for no visible reason.
@@ -1394,7 +1394,7 @@ test('T09 a catch-up repaint of state that was already live keeps a held rail pr
   harness.app.dispose()
 })
 
-test('T09 the Detail wheel reaches the real bottom produced by the painter', async () => {
+test('the Detail wheel reaches the real bottom produced by the painter', async () => {
   // RFL-013: the wheel bound must come from the SAME painter the frame uses, or
   // the last facts/actions can never be scrolled into view. Drive the page's own
   // pointer entry directly so the assertion is about the bound, not about which
@@ -1442,7 +1442,7 @@ test('T09 the Detail wheel reaches the real bottom produced by the painter', asy
   harness.app.dispose()
 })
 
-test('T09 a change-and-revert under a held rail press still refuses the old release', async () => {
+test('a change-and-revert under a held rail press still refuses the old release', async () => {
   // RFL-011 follow-up: comparing the semantic VALUE at press and release misses a
   // change that reverts (Down then Up restores the same selection). The monotonic
   // semantic generation must catch it.
@@ -1470,7 +1470,7 @@ test('T09 a change-and-revert under a held rail press still refuses the old rele
   harness.app.dispose()
 })
 
-test('T09 a Confirmation selection key at either end never bumps', async () => {
+test('a Confirmation selection key at either end never bumps', async () => {
   // RFL-012: Up on the first choice (or Down on the last) must not bump, or a
   // held pointer action on the confirmation is revoked with no visible change.
   const harness = await open({ columns: 120, rows: 24 })
@@ -1496,7 +1496,7 @@ test('T09 a Confirmation selection key at either end never bumps', async () => {
   harness.app.dispose()
 })
 
-test('T09 a background install phase round-trip under a held rail press refuses the release', async () => {
+test('a background install phase round-trip under a held rail press refuses the release', async () => {
   // RFL-011 follow-up: an ASYNC Controller transition that RETURNS to the same
   // phase value must still fence the gesture. No local key was pressed, so the
   // Controller's monotonic transition count is the only term that can see it.
@@ -1588,7 +1588,7 @@ test("T09 editing the install spec revokes the page's own held Inspect action", 
   harness.app.dispose()
 })
 
-test('T09 an immaterial install wheel never advances the semantic generation', async () => {
+test('an immaterial install wheel never advances the semantic generation', async () => {
   // RFL-012: the install wheel bump must depend on the window really moving.
   const harness = await open({ columns: 120, rows: 24 })
   // The editor's own body row (Spec/Registry form) is the wheel target; an UP
@@ -1604,7 +1604,7 @@ test('T09 an immaterial install wheel never advances the semantic generation', a
   harness.app.dispose()
 })
 
-test('T09 a blank Host log chunk never advances the Controller generation', async () => {
+test('a blank Host log chunk never advances the Controller generation', async () => {
   // RFL-012 follow-up: an empty/blank log chunk is not a presentation change, so
   // it must not advance the monotonic transition count and revoke a held gesture.
   const harness = await open({ columns: 120, rows: 24 })
@@ -1636,7 +1636,7 @@ test('T09 a blank Host log chunk never advances the Controller generation', asyn
   harness.app.dispose()
 })
 
-test('T09 a phase round-trip under a held Install action refuses the page release', async () => {
+test('a phase round-trip under a held Install action refuses the page release', async () => {
   // RFL-016: the ROOT fence compares the Controller's monotonic transitions, but
   // the PAGE's own press/release gate compared only the painted frame. A phase
   // round trip that returns to its press-time value and does not repaint must
@@ -1697,7 +1697,7 @@ test('T09 a phase round-trip under a held Install action refuses the page releas
   harness.app.dispose()
 })
 
-test('T09 a page action is refused until the changed grant really paints', async () => {
+test('a page action is refused until the changed grant really paints', async () => {
   // RFL-017 / §4.2: `setViewport` revokes the previous frame's grants, so until
   // the frame that installs the NEW grant paints, only the real Esc may act.
   //
@@ -1727,7 +1727,7 @@ test('T09 a page action is refused until the changed grant really paints', async
   harness.app.dispose()
 })
 
-test('T09 rail keys are refused until the yield paints the new projection', async () => {
+test('rail keys are refused until the yield paints the new projection', async () => {
   // RFL-017: yielding out of the plugin content changes the direct page's
   // projection at 76..119 columns. Until the frame for it paints, a rail key must
   // not move or activate a category the user cannot see yet.
@@ -1753,7 +1753,7 @@ test('T09 rail keys are refused until the yield paints the new projection', asyn
   harness.app.dispose()
 })
 
-test('T09 narrow rail keys and Backspace wait for the destination frame', async () => {
+test('narrow rail keys and Backspace wait for the destination frame', async () => {
   // RFL-017: at narrow widths a yield leaves NO page grant to arm (`syncPluginFrame`
   // returns early because the page is not painted in that projection), yet the
   // Categories frame has not painted either — so the ROOT needs its own guard.
@@ -1800,7 +1800,7 @@ test('T09 narrow rail keys and Backspace wait for the destination frame', async 
   bs.app.dispose()
 })
 
-test('T09 narrow rail -> content refuses page keys until the content frame paints', async () => {
+test('narrow rail -> content refuses page keys until the content frame paints', async () => {
   // RFL-017 reverse direction: at narrow widths the page stays mounted while the
   // rail has the focus, and its local grant can be IDENTICAL across the transfer,
   // so the page's own query stays false. The root must fence the keys it would
@@ -1830,7 +1830,7 @@ test('T09 narrow rail -> content refuses page keys until the content frame paint
   harness.app.dispose()
 })
 
-test('T09 the stale rail refuses a NEW mouse gesture until the projection paints', async () => {
+test('the stale rail refuses a NEW mouse gesture until the projection paints', async () => {
   // RFL-024: the keyboard path checks `rootProjectionAwaitingPaint()`, the mouse did
   // not. At 76..119 columns a rail -> content focus transfer changes the projection,
   // and the OLD rail cells are still on screen when the transfer's key is consumed.
@@ -1882,7 +1882,7 @@ test('T09 the stale rail refuses a NEW mouse gesture until the projection paints
   control.app.dispose()
 })
 
-test('T09 Shift+Tab does not yield while a changed grant awaits its paint', async () => {
+test('Shift+Tab does not yield while a changed grant awaits its paint', async () => {
   // §4.2 covers the key the ROOT intercepts itself, not only the keys it forwards:
   // the root's Shift+Tab handler runs before `syncPluginFrame()` and would
   // otherwise bypass the page's prepaint gate.
@@ -1915,7 +1915,7 @@ test('T09 Shift+Tab does not yield while a changed grant awaits its paint', asyn
   harness.app.dispose()
 })
 
-test('T02 the rail preview on the PRODUCTION page: Enter, Right and Tab only transfer focus', async () => {
+test('the rail preview on the PRODUCTION page: Enter, Right and Tab only transfer focus', async () => {
   // §8.1 T02: at 80 and 120 columns, moving the rail onto Plugins shows the REAL
   // plugin List while the keyboard stays on Categories, and Enter / Right / Tab
   // each transfer ONLY the focus — no Host mutation, no second inventory read, no
@@ -1966,7 +1966,7 @@ test('T02 the rail preview on the PRODUCTION page: Enter, Right and Tab only tra
 
 // ── T10: notices, palette and CJK identities ────────────────────────────────
 
-test('T15 a pending Host mutation settling after the Settings parent close never renders the disposed page', async () => {
+test('a pending Host mutation settling after the Settings parent close never renders the disposed page', async () => {
   // §8.3 T15: the REAL Settings lease is closed while the official install is
   // still in flight; the late settlement must not repaint the disposed page.
   let settleInstall!: (fact: PluginChangeFact) => void
@@ -2008,7 +2008,7 @@ test('T15 a pending Host mutation settling after the Settings parent close never
   harness.app.dispose()
 })
 
-test('T10 the plugin Host notice and the ONE root App notice never overwrite each other', async () => {
+test('the plugin Host notice and the ONE root App notice never overwrite each other', async () => {
   const harness = await open({ columns: 120, rows: 24 })
   harness.controller.explain('plugin inventory is stale; the Host read failed')
   harness.app.notify('context measurement failed for this turn', 'error')
@@ -2025,7 +2025,7 @@ test('T10 the plugin Host notice and the ONE root App notice never overwrite eac
   harness.app.dispose()
 })
 
-test('T10 the shared pane header follows the live palette and long CJK identities stay whole', async () => {
+test('the shared pane header follows the live palette and long CJK identities stay whole', async () => {
   setTheme('dark')
   const dark = await open({ columns: 100, rows: 24, bundles: [bundle({ name: '插件包-中文名称-超长测试包', source: 'file:/tmp/cjk', enabled: false })] })
   const darkPrimary = currentPalette.primary

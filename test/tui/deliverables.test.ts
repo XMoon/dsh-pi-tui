@@ -1413,7 +1413,7 @@ test('B01/B03/B04: a real SGR drag inside the modal copies the modal text, never
   app.stop()
 })
 
-test('B07: Details, [Copy path] and press→drag each keep their own gesture under the opt-in', async () => {
+test('Details, [Copy path] and press→drag each keep their own gesture under the opt-in', async () => {
   const copied: string[] = []
   const labels: string[] = []
   const reads: number[] = []
@@ -1562,7 +1562,7 @@ test('B07: Details, [Copy path] and press→drag each keep their own gesture und
   startedApps.delete(appC)
   appC.dispose()
 })
-test('B08: closing the modal drops its selection, and a later release cannot copy it', async () => {
+test('closing the modal drops its selection, and a later release cannot copy it', async () => {
   const copied: string[] = []
   const { vt, app } = selectionApp(copied)
   const view = await viewport(vt)
@@ -1586,7 +1586,7 @@ test('B08: closing the modal drops its selection, and a later release cannot cop
   app.stop()
 })
 
-test('B05: a background gesture is LIVE before it reaches the modal, and the modal cancels it', async () => {
+test('a background gesture is LIVE before it reaches the modal, and the modal cancels it', async () => {
   const copied: string[] = []
   const { vt, app } = selectionApp(copied)
   const view = await viewport(vt)
@@ -1615,7 +1615,7 @@ test('B05: a background gesture is LIVE before it reaches the modal, and the mod
   assert.equal(copied.length, 0, 'a background gesture dragged into the modal never copies')
   app.stop()
 })
-test('B02: a double-click inside the modal selects the visible word, and a single click only selects the row', async () => {
+test('a double-click inside the modal selects the visible word, and a single click only selects the row', async () => {
   const copied: string[] = []
   const { vt, app } = selectionApp(copied)
   const view = await viewport(vt)
@@ -1655,7 +1655,7 @@ test('B02: a double-click inside the modal selects the visible word, and a singl
   app.stop()
 })
 
-test('B03: a wide CJK/emoji path copies whole graphemes, never a half-wide cell', async () => {
+test('a wide CJK/emoji path copies whole graphemes, never a half-wide cell', async () => {
   const copied: string[] = []
   const vt = new VirtualTerminal(100, 30)
   const snapshot = {
@@ -1698,7 +1698,7 @@ test('B03: a wide CJK/emoji path copies whole graphemes, never a half-wide cell'
   app.stop()
 })
 
-test('B10: the selectable rectangle tracks the frozen geometry matrix in all three presets', async () => {
+test('the selectable rectangle tracks the frozen geometry matrix in all three presets', async () => {
   // The frozen PR A matrix (design-language §12.2): the modal is a centered
   // percentage window, so its painted placement — and therefore the selectable
   // rectangle — must follow it exactly at every size.
@@ -1769,7 +1769,7 @@ test('B10: the selectable rectangle tracks the frozen geometry matrix in all thr
   }
 })
 
-test('B09: a very long preview line selects without an eager whole-page wrap or a second Host read', async () => {
+test('a very long preview line selects without an eager whole-page wrap or a second Host read', async () => {
   const copied: string[] = []
   const vt = new VirtualTerminal(100, 30)
   const reads: number[] = []
@@ -1895,7 +1895,7 @@ function columnOf(lines: readonly string[], row: number, needle: string): number
   return visibleWidth(line.slice(0, characterIndex))
 }
 
-test('B01: a real SGR drag over the Details `Host:` line copies that line, never the raw path route', async () => {
+test('a real SGR drag over the Details `Host:` line copies that line, never the raw path route', async () => {
   const copied: string[] = []
   const reads: number[] = []
   const { vt, app, path } = previewApp(copied, reads)
@@ -1922,7 +1922,7 @@ test('B01: a real SGR drag over the Details `Host:` line copies that line, never
   app.stop()
 })
 
-test('B03: multi-line preview drag copies line by line, keeps indentation/TAB, and the painted highlight MATCHES the copy', async () => {
+test('multi-line preview drag copies line by line, keeps indentation/TAB, and the painted highlight MATCHES the copy', async () => {
   const copied: string[] = []
   const reads: number[] = []
   const { vt, app } = previewApp(copied, reads, {
@@ -2000,7 +2000,7 @@ test('B03: multi-line preview drag copies line by line, keeps indentation/TAB, a
   app.stop()
 })
 
-test('B04: a drag out of EACH of the four frame edges stays inside the content rectangle', async () => {
+test('a drag out of EACH of the four frame edges stays inside the content rectangle', async () => {
   const edges = ['left', 'right', 'top', 'bottom'] as const
   for (const edge of edges) {
     const copied: string[] = []
@@ -2098,7 +2098,7 @@ test('B04: a drag out of EACH of the four frame edges stays inside the content r
     app.dispose()
   }
 })
-test('B06: exactly ONE production site passes the selection opt-in, so no other overlay can inherit it', async () => {
+test('exactly ONE production site passes the selection opt-in, so no other overlay can inherit it', async () => {
   const { readFileSync, readdirSync, statSync } = await import('node:fs')
   const { join } = await import('node:path')
   const root = new URL('../../', import.meta.url).pathname
@@ -2133,7 +2133,7 @@ test('B06: exactly ONE production site passes the selection opt-in, so no other 
   assert.deepEqual(offenders, [], `only the Delivered files overlay may opt in: ${JSON.stringify(offenders)}`)
 })
 
-test('B06: the X058 search box keeps the opaque barrier (it never opts in)', async () => {
+test('the X058 search box keeps the opaque barrier (it never opts in)', async () => {
   const copied: string[] = []
   const vt = new VirtualTerminal(120, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
@@ -2163,7 +2163,7 @@ test('B06: the X058 search box keeps the opaque barrier (it never opts in)', asy
   assert.equal(copied.length, 0, `the search box keeps the opaque barrier (saw ${JSON.stringify(copied)})`)
   app.stop()
 })
-test('B09: the folded 2 MiB page at 12 and 40 columns stays lazily wrapped across repeated drags', async () => {
+test('the folded 2 MiB page at 12 and 40 columns stays lazily wrapped across repeated drags', async () => {
   for (const columns of [12, 40]) {
     const copied: string[] = []
     const reads: number[] = []
@@ -2244,7 +2244,7 @@ test('B09: the folded 2 MiB page at 12 and 40 columns stays lazily wrapped acros
     app.dispose()
   }
 })
-test('B02: the product path keeps `/` and `-` inside a double-clicked word', async () => {
+test('the product path keeps `/` and `-` inside a double-clicked word', async () => {
   const copied: string[] = []
   const vt = new VirtualTerminal(100, 30)
   const snapshot = {
@@ -2294,7 +2294,7 @@ test('B02: the product path keeps `/` and `-` inside a double-clicked word', asy
   app.stop()
 })
 
-test('B08: a page change and the filter seat each retire a selection that was LIVE', async () => {
+test('a page change and the filter seat each retire a selection that was LIVE', async () => {
   // (a) PAGE change (Enter → Details repaints the panel).
   {
     const copied: string[] = []
@@ -2353,7 +2353,7 @@ test('B08: a page change and the filter seat each retire a selection that was LI
     app.dispose()
   }
 })
-test('B02: a double-click on the Details `Host:` path keeps its `/` separator inside the word', async () => {
+test('a double-click on the Details `Host:` path keeps its `/` separator inside the word', async () => {
   const copied: string[] = []
   const reads: number[] = []
   const { vt, app } = previewApp(copied, reads, { path: '/ws/reports/2026/report-final.md' })
@@ -2383,7 +2383,7 @@ test('B02: a double-click on the Details `Host:` path keeps its `/` separator in
   app.stop()
 })
 
-test('B08: resize, close→reopen and a screen swap each retire a selection that was LIVE', async () => {
+test('resize, close→reopen and a screen swap each retire a selection that was LIVE', async () => {
   // (a) RESIZE: the modal is rebound at a fresh placement.
   {
     const copied: string[] = []
@@ -2477,7 +2477,7 @@ test('B08: resize, close→reopen and a screen swap each retire a selection that
   }
 })
 
-test('B08: switching the selected Turn really changes the list and retires a LIVE selection', async () => {
+test('switching the selected Turn really changes the list and retires a LIVE selection', async () => {
   const copied: string[] = []
   const vt = new VirtualTerminal(100, 30)
   const snapshot = {
@@ -2538,7 +2538,7 @@ test('B08: switching the selected Turn really changes the list and retires a LIV
   app.stop()
 })
 
-test('B06: a seat-frame Question is untouched — its selection matches the pre-PR baseline', async () => {
+test('a seat-frame Question is untouched — its selection matches the pre-PR baseline', async () => {
   const copied: string[] = []
   const vt = new VirtualTerminal(120, 40)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
@@ -2589,7 +2589,7 @@ test('B06: a seat-frame Question is untouched — its selection matches the pre-
   app.stop()
 })
 
-test('B06: a real managed plugin overlay never becomes a selection source (no opt-in)', async () => {
+test('a real managed plugin overlay never becomes a selection source (no opt-in)', async () => {
   const copied: string[] = []
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
@@ -2641,7 +2641,7 @@ test('B06: a real managed plugin overlay never becomes a selection source (no op
   app.stop()
 })
 
-test('B08: terminal focus-out and stop each retire an overlay-origin selection that was LIVE', async () => {
+test('terminal focus-out and stop each retire an overlay-origin selection that was LIVE', async () => {
   // (a) FOCUS-OUT: the terminal reports the window lost focus.
   {
     const copied: string[] = []
@@ -2699,7 +2699,7 @@ test('B08: terminal focus-out and stop each retire an overlay-origin selection t
   }
 })
 
-test('B08: a REAL subject identity switch retires an overlay-origin selection that was LIVE', async () => {
+test('a REAL subject identity switch retires an overlay-origin selection that was LIVE', async () => {
   // The REAL application owner decides currentness: no injected boolean. Two
   // real folders with the IDENTICAL path and Turn shape, so only the sampled
   // subject identity can tell them apart (runtime.ts `captureProjectionTarget`).

@@ -367,7 +367,7 @@ const HOSTILE = '\x1b]52;c;UFdORUQ=\x07echo ok\x1b[2J'
 const hostileFree = (text: string): boolean =>
   !text.includes(']52;c;') && !text.includes('UFdORUQ=') && !text.includes('\x1b[2J')
 
-test('S-01 a hostile Job label is projected to one safe row in the list, the detail and the Stop confirmation', () => {
+test('a hostile Job label is projected to one safe row in the list, the detail and the Stop confirmation', () => {
   const item: TaskPanelItem = { ...job('job:hostile'), label: `bash · ${HOSTILE}` }
   let stopped: string | undefined
   const panel = new TaskBrowserPanel([item], 10, {
@@ -404,7 +404,7 @@ test('S-01 a hostile Job label is projected to one safe row in the list, the det
   panel.dispose()
 })
 
-test('S-01b a long hostile-bearing label is really truncated to a narrow grant, still safely', () => {
+test('a long hostile-bearing label is really truncated to a narrow grant, still safely', () => {
   // 50 readable cells + a sentinel + the hostile sequence: at 60 columns the
   // row must actually DROP the tail (proving truncation really ran), while
   // never emitting the Host bytes; at 160 columns the same label is long
@@ -432,7 +432,7 @@ test('S-01b a long hostile-bearing label is really truncated to a narrow grant, 
   panel.dispose()
 })
 
-test('S-04 the projection preserves ordinary text, one-row geometry and theme ANSI', () => {
+test('the projection preserves ordinary text, one-row geometry and theme ANSI', () => {
   const item: TaskPanelItem = { ...job('job:plain'), label: 'bash · 构建 🚀 done' }
   const panel = new TaskBrowserPanel([item], 10, {
     mode: 'full', enableSearch: true, header: 'Tasks',
@@ -460,7 +460,7 @@ test('S-04 the projection preserves ordinary text, one-row geometry and theme AN
   two.dispose()
 })
 
-test('S-04 the Task Center chrome (header, refresh banner, no-match text) is projected too', () => {
+test('the Task Center chrome (header, refresh banner, no-match text) is projected too', () => {
   const listed = new TaskBrowserPanel([{ ...job('job:a'), label: 'bash · build' }], 10, {
     mode: 'full', enableSearch: true, header: `Tasks · ${HOSTILE}`,
     refreshError: `catalog failed · ${HOSTILE}`,

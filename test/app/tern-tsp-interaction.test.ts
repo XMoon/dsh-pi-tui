@@ -2153,7 +2153,7 @@ test('clicking the ALREADY selected option still hides the keyboard cursor witho
   }
 })
 
-test('RFL-004: a masked multi-select page toggles its visible options on pointer, in source order', async () => {
+test('a masked multi-select page toggles its visible options on pointer, in source order', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2201,7 +2201,7 @@ test('RFL-004: a masked multi-select page toggles its visible options on pointer
   }
 })
 
-test('RFL-003: a masked page WITH options opens on option navigation, not on text editing', async () => {
+test('a masked page WITH options opens on option navigation, not on text editing', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2246,7 +2246,7 @@ function overlayIdOfAnswer(harness: Harness): string {
   return wireNodes(harness.pane).find(node => node.k === 'input' && node.id.endsWith('.answer'))?.id ?? 'none'
 }
 
-test('F5: a masked page with options shows the keyboard cursor and hides it on a pointer pick', async () => {
+test('a masked page with options shows the keyboard cursor and hides it on a pointer pick', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2275,7 +2275,7 @@ test('F5: a masked page with options shows the keyboard cursor and hides it on a
   }
 })
 
-test('F5: the cursor line names the MULTI-select keys (space toggle, enter continue)', async () => {
+test('the cursor line names the MULTI-select keys (space toggle, enter continue)', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2301,7 +2301,7 @@ test('F5: the cursor line names the MULTI-select keys (space toggle, enter conti
   }
 })
 
-test('F6: a `(recommended)` suffix keeps its mark on the native form', async () => {
+test('a `(recommended)` suffix keeps its mark on the native form', async () => {
   const harness = await mountNativeHarness()
   try {
     const suffix = harness.renderer.interaction.askQuestions(
@@ -2320,7 +2320,7 @@ test('F6: a `(recommended)` suffix keeps its mark on the native form', async () 
   }
 })
 
-test('F6: `intent.approve` recommends the same way the suffix does', async () => {
+test('`intent.approve` recommends the same way the suffix does', async () => {
   // A separate harness: one seat shows one request at a time, so a queued
   // second ask would never be painted for the assertion to read.
   const harness = await mountNativeHarness()
@@ -2343,7 +2343,7 @@ test('F6: `intent.approve` recommends the same way the suffix does', async () =>
   }
 })
 
-test('F6: the safe form restores the recommendation mark for a masked page', async () => {
+test('the safe form restores the recommendation mark for a masked page', async () => {
   const harness = await mountNativeHarness()
   try {
     const masked = harness.renderer.interaction.askQuestions(
@@ -2362,7 +2362,7 @@ test('F6: the safe form restores the recommendation mark for a masked page', asy
   }
 })
 
-test('F6: the recommended answer value is still the ORIGINAL label', async () => {
+test('the recommended answer value is still the ORIGINAL label', async () => {
   const harness = await mountNativeHarness()
   try {
     const answers = harness.renderer.interaction.askQuestions(
@@ -2382,7 +2382,7 @@ test('F6: the recommended answer value is still the ORIGINAL label', async () =>
   }
 })
 
-test('P3: a 10th option advertises no keycap it cannot honour', async () => {
+test('a 10th option advertises no keycap it cannot honour', async () => {
   const harness = await mountNativeHarness()
   try {
     const options = Array.from({ length: 10 }, (_unused, index) => ({ label: `opt-${index}` }))
@@ -2404,7 +2404,7 @@ test('P3: a 10th option advertises no keycap it cannot honour', async () => {
   }
 })
 
-test('F7: on a masked page WITH options, Enter selects the highlighted option and Next skips — never both', async () => {
+test('on a masked page WITH options, Enter selects the highlighted option and Next skips — never both', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2434,7 +2434,7 @@ test('F7: on a masked page WITH options, Enter selects the highlighted option an
   }
 })
 
-test('F7: a free-text page keeps its ⏎ keycap, because Enter really commits the text', async () => {
+test('a free-text page keeps its ⏎ keycap, because Enter really commits the text', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2457,7 +2457,7 @@ test('F7: a free-text page keeps its ⏎ keycap, because Enter really commits th
   }
 })
 
-test('F7: clicking Next on an unanswered masked page with options skips the question', async () => {
+test('clicking Next on an unanswered masked page with options skips the question', async () => {
   const harness = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2488,7 +2488,7 @@ test('F7: clicking Next on an unanswered masked page with options skips the ques
   }
 })
 
-test('F7b: after Esc leaves the edit, Next no longer claims ⏎ (Enter re-enters the edit)', async () => {
+test('after Esc leaves the edit, Next no longer claims ⏎ (Enter re-enters the edit)', async () => {
   const runtime = await mountNativeHarness()
   const recorder = statusOf()
   try {
@@ -2527,7 +2527,7 @@ test('F7b: after Esc leaves the edit, Next no longer claims ⏎ (Enter re-enters
   }
 })
 
-test('F7b: the same Esc→Enter rule holds on a MASKED free-text page', async () => {
+test('the same Esc→Enter rule holds on a MASKED free-text page', async () => {
   const runtime = await mountNativeHarness()
   const recorder = statusOf()
   try {

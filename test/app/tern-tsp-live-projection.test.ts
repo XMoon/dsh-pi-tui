@@ -1669,7 +1669,7 @@ function deliverAssistantInput(
   return true
 }
 
-test('B3-L01: a live tool-call delta reaches the mounted TSP renderer as ONE Preparing row', async () => {
+test('a live tool-call delta reaches the mounted TSP renderer as ONE Preparing row', async () => {
   const harness = await mountPreparingHarness()
   try {
     harness.route(ev('turn/start', { turn: 1 }, 0))
@@ -1708,7 +1708,7 @@ test('B3-L01: a live tool-call delta reaches the mounted TSP renderer as ONE Pre
   }
 })
 
-test('B3-L02: the retry, the attempt, the step end and the turn end each clear the row', async () => {
+test('the retry, the attempt, the step end and the turn end each clear the row', async () => {
   const harness = await mountPreparingHarness()
   try {
     harness.route(ev('turn/start', { turn: 1 }, 0))
@@ -1755,7 +1755,7 @@ test('B3-L02: the retry, the attempt, the step end and the turn end each clear t
   }
 })
 
-test('B3-L03: a retired Agent\'s delta never reaches the preview owner', async () => {
+test('a retired Agent\'s delta never reaches the preview owner', async () => {
   const harness = await mountPreparingHarness()
   try {
     harness.route(ev('turn/start', { turn: 1 }, 0))

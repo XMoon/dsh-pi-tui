@@ -182,7 +182,7 @@ async function seedTaskFacts(fixture: DirectTspFixture): Promise<{ readonly jobI
 
 // ── E01: the registered `/tasks` really opens the Work Hub ──────────────────
 
-test('E01: /tasks from the real editor reaches the ONE TaskRuntime and mounts the native Work Hub', async (t) => {
+test('/tasks from the real editor reaches the ONE TaskRuntime and mounts the native Work Hub', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // The capability opt-in advertises `picker`/`row`/`overlay`/`text` + `scroll`
@@ -223,7 +223,7 @@ test('E01: /tasks from the real editor reaches the ONE TaskRuntime and mounts th
 
 // ── E02: the registered alias `/subagents` rides the SAME opener ────────────
 
-test('E02: the registered /subagents alias opens the same Hub and no second browser', async (t) => {
+test('the registered /subagents alias opens the same Hub and no second browser', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
@@ -257,7 +257,7 @@ test('E02: the registered /subagents alias opens the same Hub and no second brow
 
 // ── E03: select a real row and read it, then return to the SAME Hub ────────
 
-test('E03: Enter opens ONE Reader for the current row and Back returns to the same Hub', async (t) => {
+test('Enter opens ONE Reader for the current row and Back returns to the same Hub', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
@@ -307,7 +307,7 @@ test('E03: Enter opens ONE Reader for the current row and Back returns to the sa
 
 // ── E05: a pane without the capability refuses the command, draft restored ─
 
-test('E05: a lean pane refuses /tasks, restores the draft, opens no Hub and no Screen', async (t) => {
+test('a lean pane refuses /tasks, restores the draft, opens no Hub and no Screen', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // The DEFAULT fixture HELLO has no `picker`/`row`/`text`/`scroll`: the real
@@ -332,7 +332,7 @@ test('E05: a lean pane refuses /tasks, restores the draft, opens no Hub and no S
 
 // ── E06: a genuine Host `/tasks` keeps its own sink (never captured) ───────
 
-test('E06: a genuine Host command named tasks keeps its Host sink and never opens the Hub', async (t) => {
+test('a genuine Host command named tasks keeps its Host sink and never opens the Hub', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const calls: string[] = []
@@ -359,7 +359,7 @@ test('E06: a genuine Host command named tasks keeps its Host sink and never open
   }
 })
 
-test('E06b: a genuine Host command named subagents keeps its Host sink on the alias spelling', async (t) => {
+test('a genuine Host command named subagents keeps its Host sink on the alias spelling', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const calls: string[] = []
@@ -387,7 +387,7 @@ test('E06b: a genuine Host command named subagents keeps its Host sink on the al
 
 // ── E04: partial feeds state only what the real source really has ──────────
 
-test('E04: a Job-only roster shows the real Job and invents no descendant row', async (t) => {
+test('a Job-only roster shows the real Job and invents no descendant row', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // The parent Session carries NO `subagent/catalog` entry: the descendant half
@@ -453,7 +453,7 @@ test('an empty roster states the real empty Hub and invents no work item', async
 
 // ── E12: the Work Hub is read-only over the REAL business sinks ────────────
 
-test('E12: reading every real row never stops a Job, interrupts a subagent or calls onSelect', async (t) => {
+test('reading every real row never stops a Job, interrupts a subagent or calls onSelect', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   const fixture = await createDirectTspFixture(life, {
@@ -561,7 +561,7 @@ test('/tasks with NO Session creates the Session through the real submission pat
 
 // ── An extension contribution cannot claim a TUI builtin's name at all ──────
 
-test('E06c: the REAL extension service REFUSES a contribution named tasks, so no extension winner can exist', async (t) => {
+test('the REAL extension service REFUSES a contribution named tasks, so no extension winner can exist', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   // The name conflict is rejected by the extension service itself (it returns a
@@ -584,7 +584,7 @@ test('E06c: the REAL extension service REFUSES a contribution named tasks, so no
   )
 })
 
-test('E06d: the same conflict rule covers the /subagents alias spelling', async (t) => {
+test('the same conflict rule covers the /subagents alias spelling', async (t) => {
   const { testLifecycle } = await import('../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
   await assert.rejects(

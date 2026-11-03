@@ -456,7 +456,7 @@ test('addendum physical matrix preserves below widgets, two-row Footer, multilin
 
 // ── D-T01: the same contribution paints on both roots ────────────────────
 
-test('D-T01: an above widget paints adjacent to the editor in regular AND fullscreen', async () => {
+test('an above widget paints adjacent to the editor in regular AND fullscreen', async () => {
   const h = makeHarness(120, 40)
   registerWidget(h.ledger, 'input.widget.above', 'a1', 'ABOVE-SENTINEL-1')
   await settle()
@@ -480,7 +480,7 @@ test('D-T01: an above widget paints adjacent to the editor in regular AND fullsc
 
 // ── D-T02: below-only zone ──────────────────────────────────────────────
 
-test('D-T02: a below-only widget paints between the editor and the footer in both modes', async () => {
+test('a below-only widget paints between the editor and the footer in both modes', async () => {
   const h = makeHarness(120, 40)
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'BELOW-SENTINEL-2')
   await settle()
@@ -530,7 +530,7 @@ for (const [cols, rows] of [[80, 24], [200, 60]] as const) {
 
 // ── D-T04: zero grant under real pressure ───────────────────────────────
 
-test('D-T04: an 80x8 fullscreen retires both widget zones without clipping the editor or the footer', async () => {
+test('an 80x8 fullscreen retires both widget zones without clipping the editor or the footer', async () => {
   const h = makeHarness(80, 8)
   registerWidget(h.ledger, 'input.widget.above', 'a1', 'ABOVE-SENTINEL-4')
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'BELOW-SENTINEL-4')
@@ -562,7 +562,7 @@ test('D-T04: an 80x8 fullscreen retires both widget zones without clipping the e
 
 // ── D-T05 / D-T06: actual demand, above-first priority ──────────────────
 
-test('D-T05: at 80x10 a below-only widget uses the single spare row (an empty above zone cannot reserve it)', async () => {
+test('at 80x10 a below-only widget uses the single spare row (an empty above zone cannot reserve it)', async () => {
   const h = makeHarness(80, 10)
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'BELOW-SPARE-5')
   h.app.setFullscreen(true)
@@ -576,7 +576,7 @@ test('D-T05: at 80x10 a below-only widget uses the single spare row (an empty ab
   assertFooterPainted(h, lines)
 })
 
-test('D-T06: at 80x10 with both zones the above demand takes the single spare row and the below zone yields', async () => {
+test('at 80x10 with both zones the above demand takes the single spare row and the below zone yields', async () => {
   const h = makeHarness(80, 10)
   registerWidget(h.ledger, 'input.widget.above', 'a1', 'ABOVE-WINS-6')
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'BELOW-YIELDS-6')
@@ -595,7 +595,7 @@ test('D-T06: at 80x10 with both zones the above demand takes the single spare ro
 
 // ── D-T07: zero -> nonzero across resizes ───────────────────────────────
 
-test('D-T07: a fullscreen 120x40 -> 80x8 -> 200x60 resize sequence retires and restores widgets without re-registering', async () => {
+test('a fullscreen 120x40 -> 80x8 -> 200x60 resize sequence retires and restores widgets without re-registering', async () => {
   const h = makeHarness(120, 40)
   registerWidget(h.ledger, 'input.widget.above', 'a1', 'RESIZE-ABOVE-7')
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'RESIZE-BELOW-7')
@@ -626,7 +626,7 @@ test('D-T07: a fullscreen 120x40 -> 80x8 -> 200x60 resize sequence retires and r
 
 // ── D-T08: width-only resize with CJK content ───────────────────────────
 
-test('D-T08: a width-only 120 -> 44 resize re-wraps CJK widget content inside the new width', async () => {
+test('a width-only 120 -> 44 resize re-wraps CJK widget content inside the new width', async () => {
   const h = makeHarness(120, 40)
   // 120 cells of CJK: ONE physical row at 120 columns and several at 44, so
   // the outlet row COUNT is the discriminator (a stale 120-column bake would
@@ -667,7 +667,7 @@ test('D-T08: a width-only 120 -> 44 resize re-wraps CJK widget content inside th
 
 // ── D-T09: repeated mode swaps ──────────────────────────────────────────
 
-test('D-T09: three regular<->fullscreen swaps keep one copy, one host attachment and one registration per zone', async () => {
+test('three regular<->fullscreen swaps keep one copy, one host attachment and one registration per zone', async () => {
   const h = makeHarness(120, 40)
   registerWidget(h.ledger, 'input.widget.above', 'a1', 'SWAP-ABOVE-9')
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'SWAP-BELOW-9')
@@ -698,7 +698,7 @@ test('D-T09: three regular<->fullscreen swaps keep one copy, one host attachment
 
 // ── D-T10: replace / dispose / re-register ──────────────────────────────
 
-test('D-T10: replace, dispose and re-register propagate to the fullscreen paint', async () => {
+test('replace, dispose and re-register propagate to the fullscreen paint', async () => {
   const h = makeHarness(120, 40)
   const handle = registerWidget(h.ledger, 'input.widget.above', 'a1', 'REPLACE-OLD-10')
   h.app.setFullscreen(true)
@@ -729,7 +729,7 @@ test('D-T10: replace, dispose and re-register propagate to the fullscreen paint'
 
 // ── D-T11: two owners, same local id ────────────────────────────────────
 
-test('D-T11: two owners sharing a local widget id stay independent in fullscreen', async () => {
+test('two owners sharing a local widget id stay independent in fullscreen', async () => {
   const h = makeHarness(120, 40)
   const ownerA = registerWidget(h.ledger, 'input.widget.above', 'status', 'OWNER-A-TEXT-11', { owner: 'owner-a' })
   const ownerB = registerWidget(h.ledger, 'input.widget.above', 'status', 'OWNER-B-TEXT-11', { owner: 'owner-b' })
@@ -753,7 +753,7 @@ test('D-T11: two owners sharing a local widget id stay independent in fullscreen
 
 // ── D-T12: empty contributions and zero grants ──────────────────────────
 
-test('D-T12: a zero grant and an empty contribution project nothing, and the live registration survives', () => {
+test('a zero grant and an empty contribution project nothing, and the live registration survives', () => {
   const { host, ledger } = makeBareHost()
   host.setWidgetRowsAbove(0)
   assert.equal(outlet(host, 'above'), '', 'an empty zone stays empty at a zero grant')
@@ -785,7 +785,7 @@ test('D-T12: a zero grant and an empty contribution project nothing, and the liv
 
 // ── D-T13: input ownership ──────────────────────────────────────────────
 
-test('D-T13: fullscreen typing and submit reach the editor, never the widget', async () => {
+test('fullscreen typing and submit reach the editor, never the widget', async () => {
   const h = makeHarness(120, 40)
   registerWidget(h.ledger, 'input.widget.above', 'a1', 'PASSIVE-WIDGET-13')
   h.app.setFullscreen(true)
@@ -809,7 +809,7 @@ test('D-T13: fullscreen typing and submit reach the editor, never the widget', a
 
 // ── D-T14: blocking modals keep precedence ──────────────────────────────
 
-test('D-T14: a fullscreen Question then Approval still capture input while widgets stay passive background', async () => {
+test('a fullscreen Question then Approval still capture input while widgets stay passive background', async () => {
   const h = makeHarness(120, 40)
   registerWidget(h.ledger, 'input.widget.above', 'a1', 'BACKGROUND-WIDGET-14')
   h.app.setFullscreen(true)
@@ -906,7 +906,7 @@ for (const [rows, widgetRows] of [[12, 2], [10, 0]] as const) {
 
 // ── D-T16: no widget -> no cost, no phantom rows ────────────────────────
 
-test('D-T16: with no widget registered, fullscreen scrolling keeps the zones empty and never re-budgets them', async () => {
+test('with no widget registered, fullscreen scrolling keeps the zones empty and never re-budgets them', async () => {
   const h = makeHarness(120, 40)
   h.app.setTranscript(Array.from({ length: 40 }, (_, index) => ({
     kind: 'assistant' as const,
@@ -940,7 +940,7 @@ test('D-T16: with no widget registered, fullscreen scrolling keeps the zones emp
 
 // ── D-T17: theme change and owner unload ────────────────────────────────
 
-test('D-T17: a theme switch re-bakes the widget palette in both modes and an unload clears it', async () => {
+test('a theme switch re-bakes the widget palette in both modes and an unload clears it', async () => {
   const h = makeHarness(120, 40)
   const above = registerWidget(h.ledger, 'input.widget.above', 'a1', 'THEME-WIDGET-17')
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'THEME-BELOW-17')
@@ -979,7 +979,7 @@ test('D-T17: a theme switch re-bakes the widget palette in both modes and an unl
   assert.equal(rowsWith(painted(h.vt), 'THEME-BELOW-17').length, 1, 'the surviving zone keeps painting')
 })
 
-test('D-T17b: the compiled widget tree is reused within one theme revision and recompiled across a theme switch', async () => {
+test('the compiled widget tree is reused within one theme revision and recompiled across a theme switch', async () => {
   const h = makeHarness(120, 40)
   registerWidget(h.ledger, 'input.widget.above', 'a1', 'TREE-WIDGET-17B')
   h.app.setFullscreen(true)
@@ -1031,7 +1031,7 @@ interface StableWidgetService {
   attachSurface(bridge: { subscribe(listener: (state: unknown) => void): () => void }, capabilities: ReadonlySet<string>, surfaceId: string): void
 }
 
-test('D-T18: the real Stable extension service paints a registered widget on the alt screen and removes it there on unload', async () => {
+test('the real Stable extension service paints a registered widget on the alt screen and removes it there on unload', async () => {
   const ctx = new Context()
   let harness: WidgetHarness | undefined
   try {
@@ -1089,7 +1089,7 @@ test('D-T18: the real Stable extension service paints a registered widget on the
 
 // ── D-T20: LIVE protected-chrome height changes (review F1) ─────────────
 
-test('D-T20: a live multi-line draft re-derives the fullscreen grant instead of clipping the footer', async () => {
+test('a live multi-line draft re-derives the fullscreen grant instead of clipping the footer', async () => {
   const h = makeHarness(80, 12)
   registerRows(h.ledger, 'input.widget.above', 'a1', ['GRANT-ROW-1', 'GRANT-ROW-2', 'GRANT-ROW-3'])
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'GRANT-BELOW-20')
@@ -1123,7 +1123,7 @@ test('D-T20: a live multi-line draft re-derives the fullscreen grant instead of 
   assertFooterPainted(h, painted(h.vt))
 })
 
-test('D-T20b: a Todo panel expansion in fullscreen re-derives the widget grant', async () => {
+test('a Todo panel expansion in fullscreen re-derives the widget grant', async () => {
   const h = makeHarness(80, 14)
   h.app.setTodoSummary([
     { content: 'first todo', status: 'in_progress' },
@@ -1154,7 +1154,7 @@ test('D-T20b: a Todo panel expansion in fullscreen re-derives the widget grant',
 
 // ── D-T21: pointer geometry includes the widget footprint (review F2) ────
 
-test('D-T21: a fullscreen Question option click resolves against the widget footprint', async () => {
+test('a fullscreen Question option click resolves against the widget footprint', async () => {
   const h = makeHarness(80, 30)
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'POINTER-BELOW-21')
   h.app.setFullscreen(true)
@@ -1176,7 +1176,7 @@ test('D-T21: a fullscreen Question option click resolves against the widget foot
   assert.equal(answers[0]?.selected[0], 'OPTION-B', 'the click selects the option the user pointed at')
 })
 
-test('D-T21b: a widget row is not a fullscreen Todo pointer target', async () => {
+test('a widget row is not a fullscreen Todo pointer target', async () => {
   const h = makeHarness(80, 24)
   h.app.setTodoSummary([
     { content: 'first todo', status: 'in_progress' },
@@ -1217,7 +1217,7 @@ test('D-T21b: a widget row is not a fullscreen Todo pointer target', async () =>
 // `handleQuestionKey`, which ends in `TuiApp.requestRender()` and would mask a
 // bypassed budget sync, so a key-driven test cannot prove the fix.
 
-test('D-T22: a Question frame replacing the seat under a capturing overlay re-derives the grant', async () => {
+test('a Question frame replacing the seat under a capturing overlay re-derives the grant', async () => {
   const h = makeHarness(80, 14)
   registerWidget(h.ledger, 'input.widget.above', 'a1', 'MODAL-ABOVE-22')
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'MODAL-BELOW-22')
@@ -1262,7 +1262,7 @@ test('D-T22: a Question frame replacing the seat under a capturing overlay re-de
   assert.equal(rowsWith(painted(h.vt), 'MODAL-BELOW-22').length, 1, 'the abort-driven restore re-derives the roomier grant')
 })
 
-test('D-T23: a queued Question handover re-derives the grant for the new frame height', async () => {
+test('a queued Question handover re-derives the grant for the new frame height', async () => {
   const h = makeHarness(80, 20)
   registerRows(h.ledger, 'input.widget.above', 'a1', ['ABOVE-23-1', 'ABOVE-23-2', 'ABOVE-23-3'])
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'BELOW-23')
@@ -1309,7 +1309,7 @@ test('D-T23: a queued Question handover re-derives the grant for the new frame h
   assert.equal(outlet(h.host, 'below'), 'BELOW-23')
 })
 
-test('D-T24: a Save Location prompt re-derives the grant on enter and on restore', async () => {
+test('a Save Location prompt re-derives the grant on enter and on restore', async () => {
   const h = makeHarness(80, 14)
   registerWidget(h.ledger, 'input.widget.above', 'a1', 'SAVE-ABOVE-24')
   registerWidget(h.ledger, 'input.widget.below', 'b1', 'SAVE-BELOW-24')
@@ -1354,7 +1354,7 @@ test('D-T24: a Save Location prompt re-derives the grant on enter and on restore
   assert.equal(rowsWith(painted(h.vt), 'SAVE-BELOW-24').length, 1, 'the abort-driven restore re-derives the roomier grant')
 })
 
-test('D-T25: a right-click paste that shrinks the Save Location frame re-derives the grant before its completion resolves', async () => {
+test('a right-click paste that shrinks the Save Location frame re-derives the grant before its completion resolves', async () => {
   // The Save Location prompt's suggestion list is cleared SYNCHRONOUSLY on
   // input while the replacement scan is still pending
   // (src/tui/interaction/save-location.ts refreshSuggestions), so the frame

@@ -804,7 +804,7 @@ test('24 distinct transcript images: the newest visible paints, and scrolling ba
 
 // ── Image-8 / I8-2B: the four Direct SIXEL product journeys ───────────────
 
-test('E2-01: /view-image LIST→Viewer→Esc back→same list→Esc close restores the main screen', async (t) => {
+test('/view-image LIST→Viewer→Esc back→same list→Esc close restores the main screen', async (t) => {
   const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
   const bytesById = new Map<string, Uint8Array>([
     ['att-e2-01-png', png],
@@ -863,7 +863,7 @@ test('E2-01: /view-image LIST→Viewer→Esc back→same list→Esc close restor
   assert.ok(!terminal.writes.join('').includes(dcs), 'the closed Viewer raster is never replayed')
 })
 
-test('E2-02: a fullscreen transcript body click opens the direct Viewer; text/blank cells stay inert', async (t) => {
+test('a fullscreen transcript body click opens the direct Viewer; text/blank cells stay inert', async (t) => {
   const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
   const ref: TranscriptImageRef = { attachmentId: 'att-e2-02', mediaType: 'image/png', bytes: png.byteLength, width: 80, height: 40, name: 'bands.png' }
   const { terminal, app } = await startSixelApp(t, {
@@ -908,7 +908,7 @@ test('E2-02: a fullscreen transcript body click opens the direct Viewer; text/bl
   assert.ok(!restored.includes('Image · bands.png'), 'the Viewer chrome is gone after Esc')
 })
 
-test('E2-03: JPEG and WebP refs paint their derived PNG while keeping the ORIGINAL metadata', async (t) => {
+test('JPEG and WebP refs paint their derived PNG while keeping the ORIGINAL metadata', async (t) => {
   const reads = new Map<string, number>()
   let conversions = 0
   const bytesById = new Map<string, Uint8Array>([
@@ -974,7 +974,7 @@ test('E2-03: JPEG and WebP refs paint their derived PNG while keeping the ORIGIN
   await waitViewport(terminal, '🖼️ photo.jpg · 120×80', 'the transcript after closing the list')
 })
 
-test('E2-04: the Viewer grant survives the frozen resize matrix and a Main↔Alt round trip', async (t) => {
+test('the Viewer grant survives the frozen resize matrix and a Main↔Alt round trip', async (t) => {
   const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
   const ref: TranscriptImageRef = { attachmentId: 'att-e2-04', mediaType: 'image/png', bytes: png.byteLength, width: 80, height: 40, name: 'bands.png' }
   let reads = 0
@@ -1064,7 +1064,7 @@ test('E2-04: the Viewer grant survives the frozen resize matrix and a Main↔Alt
   await waitViewport(terminal, 'bands.png', 'the main transcript after leaving Alt')
 })
 
-test('E2-05: a real SVG tool card paints admitted pixels, and malformed SVG paints text only', async (t) => {
+test('a real SVG tool card paints admitted pixels, and malformed SVG paints text only', async (t) => {
   const rasterWidths: number[] = []
   const svgLoader = new SvgRasterLoader(async (source, options) => {
     rasterWidths.push(options.targetWidth)
@@ -1191,7 +1191,7 @@ test('E2-05: a real SVG tool card paints admitted pixels, and malformed SVG pain
   assert.equal(paintedRasters(terminal).length, beforeBad, 'malformed SVG emits no trusted DCS')
 })
 
-test('E2-05 negative: a failed SVG raster reports its own reason before the DCS wait', async (t) => {
+test('negative: a failed SVG raster reports its own reason before the DCS wait', async (t) => {
   const rasterFailure = new Error('SVG rasterization exceeded 3000 ms')
   const svgLoader = new SvgRasterLoader(async () => { throw rasterFailure })
   const { terminal, app } = await startSixelApp(t, {
@@ -1240,7 +1240,7 @@ test('E2-05 negative: a failed SVG raster reports its own reason before the DCS 
     'the loader error settles the wait immediately instead of consuming the 30 s raster budget')
 })
 
-test('E2-06: a published Assistant SIXEL figure exposes the committed hit and its exact boundaries', async (t) => {
+test('a published Assistant SIXEL figure exposes the committed hit and its exact boundaries', async (t) => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
   const svgLoader = new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options))
   const { terminal, app } = await startSixelApp(t, {
@@ -1365,7 +1365,7 @@ test('E2-06: a published Assistant SIXEL figure exposes the committed hit and it
   assert.equal(bodyRecord.body.paintedVisualHits(innerWidth)[0]?.thumbnailBody, undefined,
     'the revoked publication body offers no pixel hit')
 })
-test('E2-07: the SIXEL SVG Viewer Preview/Source/Copy/resize/release path', async (t) => {
+test('the SIXEL SVG Viewer Preview/Source/Copy/resize/release path', async (t) => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/><text x="4" y="20" font-size="12" fill="#ffffff">Gateway</text></svg>'
   const rasterWidths: number[] = []
   const copies: string[] = []
@@ -1445,7 +1445,7 @@ test('E2-07: the SIXEL SVG Viewer Preview/Source/Copy/resize/release path', asyn
   assert.equal(rasterWidths.length, widthsAtClose, 'no raster starts after the Viewer closes')
 })
 
-test('E2-07 source safety: the Viewer sanitizes Source while Copy keeps the raw bytes', async (t) => {
+test('source safety: the Viewer sanitizes Source while Copy keeps the raw bytes', async (t) => {
   const hostile = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><!-- \u001b]52;c;SGVsbG8=\u0007 --><rect width="64" height="32" fill="#3b82f6"/></svg>'
   const copies: string[] = []
   const svgLoader = new SvgRasterLoader(async (source, options) => rasterizeSvg(source, options))
@@ -1478,7 +1478,7 @@ test('E2-07 source safety: the Viewer sanitizes Source while Copy keeps the raw 
   await waitViewport(terminal, 'hostile', 'the transcript after the Source-only Viewer')
 })
 
-test('E2-08: SVG Viewer width variants, page switching, close/reopen and crop stay bounded', async (t) => {
+test('SVG Viewer width variants, page switching, close/reopen and crop stay bounded', async (t) => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32" fill="#3b82f6"/></svg>'
   const rasterWidths: number[] = []
   const svgLoader = new SvgRasterLoader(async (source, options) => {
@@ -1570,7 +1570,7 @@ test('E2-08: SVG Viewer width variants, page switching, close/reopen and crop st
   terminal.sendInput('\x1b')
   await waitViewportGone(terminal, 'SVG · Service topology', 'the reopened SVG Viewer to close')
 })
-test('E2-09: a long 24-image transcript fills the registry, then re-encodes old images and the SVG Viewer', async (t) => {
+test('a long 24-image transcript fills the registry, then re-encodes old images and the SVG Viewer', async (t) => {
   const pngs: Uint8Array[] = []
   for (let index = 0; index < 24; index += 1) {
     pngs.push(await pngFromRgba(fill(80, 40, (x, y) => (y < 20 ? [255, (index * 7) % 255, x % 2 === 0 ? 0 : 8, 255] : [0, 0, 255, 255])), 80, 40))
@@ -1661,7 +1661,7 @@ test('E2-09: a long 24-image transcript fills the registry, then re-encodes old 
   await waitViewport(terminal, 'Service topology', 'the transcript after the SVG Viewer')
 })
 
-test('E2 positive override: PI_IMAGE_PROTOCOL=sixel paints Direct SIXEL while static detection says Kitty', async (t) => {
+test('positive override: PI_IMAGE_PROTOCOL=sixel paints Direct SIXEL while static detection says Kitty', async (t) => {
   const previous = {
     protocol: process.env.PI_IMAGE_PROTOCOL,
     termProgram: process.env.TERM_PROGRAM,
@@ -1694,7 +1694,7 @@ test('E2 positive override: PI_IMAGE_PROTOCOL=sixel paints Direct SIXEL while st
   assert.ok(pixelAt(decoded, 4, 4)[0] > 180, 'the SIXEL raster carries the source pixels')
 })
 
-test('E2 negative override: PI_IMAGE_PROTOCOL=sixel without DA1 stays text and never falls back to Kitty', async (t) => {
+test('negative override: PI_IMAGE_PROTOCOL=sixel without DA1 stays text and never falls back to Kitty', async (t) => {
   const previous = {
     protocol: process.env.PI_IMAGE_PROTOCOL,
     termProgram: process.env.TERM_PROGRAM,
@@ -1742,7 +1742,7 @@ test('E2 negative override: PI_IMAGE_PROTOCOL=sixel without DA1 stays text and n
   assert.equal(wire.includes('\x1b_G'), false, 'no Kitty fallback without DA1')
 })
 
-test('E2 cross-protocol: explicit legacy modes never emit the other static protocol bytes', async (t) => {
+test('cross-protocol: explicit legacy modes never emit the other static protocol bytes', async (t) => {
   const previous = process.env.PI_IMAGE_PROTOCOL
   t.after(() => {
     if (previous === undefined) delete process.env.PI_IMAGE_PROTOCOL
@@ -1784,7 +1784,7 @@ test('E2 cross-protocol: explicit legacy modes never emit the other static proto
   }
 })
 
-test('E2 negative: PI_IMAGE_PROTOCOL=none fails closed with no raster, read or encode', async (t) => {
+test('negative: PI_IMAGE_PROTOCOL=none fails closed with no raster, read or encode', async (t) => {
   const previous = process.env.PI_IMAGE_PROTOCOL
   process.env.PI_IMAGE_PROTOCOL = 'none'
   t.after(() => {
@@ -1817,7 +1817,7 @@ test('E2 negative: PI_IMAGE_PROTOCOL=none fails closed with no raster, read or e
   await waitViewport(terminal, 'denied.png', 'the transcript after the denied Viewer')
 })
 
-test('E2-02 negative: an unsupported raster and a narrow layout expose no image body hit', async (t) => {
+test('negative: an unsupported raster and a narrow layout expose no image body hit', async (t) => {
   const png = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
   const gifRef: TranscriptImageRef = { attachmentId: 'att-e2-gif', mediaType: 'image/gif', bytes: png.byteLength, width: 80, height: 40, name: 'anim.gif' }
   const { terminal, app } = await startSixelApp(t, {
@@ -1954,7 +1954,7 @@ function observePendingCropClick(
   }
 }
 
-test('E2-10a: a real top-cropped transcript image maps the visible rows and opens the direct Viewer', async (t) => {
+test('a real top-cropped transcript image maps the visible rows and opens the direct Viewer', async (t) => {
   const png = await bandedBandsPng()
   const ref: TranscriptImageRef = {
     attachmentId: 'att-e2-topcrop-image', mediaType: 'image/png', bytes: png.byteLength,
@@ -2180,7 +2180,7 @@ test('E2-10a: a real top-cropped transcript image maps the visible rows and open
   await waitViewport(terminal, 'filler 0', 'the transcript after the restored Viewer')
 })
 
-test('E2-10b: a real top-cropped Assistant SVG maps the visible pixel rows and keeps the action row separate', async (t) => {
+test('a real top-cropped Assistant SVG maps the visible pixel rows and keeps the action row separate', async (t) => {
   const bands = Array.from({ length: 12 }, (_, band) =>
     `<rect x="0" y="${band * 25}" width="500" height="25" fill="rgb(${band * 20},${255 - band * 20},${(band * 37) % 255})"/>`).join('')
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 300">${bands}</svg>`
@@ -2398,7 +2398,7 @@ function transcriptBracketed(ref: TranscriptImageRef): TranscriptFolder {
   return folder
 }
 
-test('E2-10c: a bottom-cropped image hit survives resize, a capturing overlay and a Screen switch', async (t) => {
+test('a bottom-cropped image hit survives resize, a capturing overlay and a Screen switch', async (t) => {
   const png = await bandedBandsPng()
   const ref: TranscriptImageRef = {
     attachmentId: 'att-e2-bottomcrop', mediaType: 'image/png', bytes: png.byteLength,

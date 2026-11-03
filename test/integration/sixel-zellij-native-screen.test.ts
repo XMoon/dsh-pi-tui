@@ -521,7 +521,7 @@ async function nextSvgRaster(
 
 // ── Z01b/Z06b/Z08b: explicit preference and the strict WT auto filter ──────
 
-test('Z01b: auto strict WT ignores the startup Kitty OK and paints SIXEL through the real TuiApp', async (t) => {
+test('auto strict WT ignores the startup Kitty OK and paints SIXEL through the real TuiApp', async (t) => {
   const h = await startZellijSixelApp(t, {
     deferSettle: true,
     environment: {
@@ -547,7 +547,7 @@ test('Z01b: auto strict WT ignores the startup Kitty OK and paints SIXEL through
   assert.ok(decodeSixel(paintedRasters(h.terminal).at(-1)!).width > 0)
 })
 
-test('Z06b: explicit sixel sends no Kitty query and paints through the same real product chain', async (t) => {
+test('explicit sixel sends no Kitty query and paints through the same real product chain', async (t) => {
   const h = await startZellijSixelApp(t, {
     deferSettle: true,
     environment: { PI_IMAGE_PROTOCOL: 'sixel' },
@@ -564,7 +564,7 @@ test('Z06b: explicit sixel sends no Kitty query and paints through the same real
   assert.equal(h.terminal.writes.join('').includes('\x1b_G'), false, 'no Kitty bytes at all')
 })
 
-test('Z08b: explicit kitty overrides the strict WT auto filter and keeps only Kitty', async (t) => {
+test('explicit kitty overrides the strict WT auto filter and keeps only Kitty', async (t) => {
   const h = await startZellijSixelApp(t, {
     deferSettle: true,
     environment: {
@@ -582,7 +582,7 @@ test('Z08b: explicit kitty overrides the strict WT auto filter and keeps only Ki
 
 // ── ZE01: Kitty timeout + DA1 positive paints one real SIXEL DCS ──────────
 
-test('ZE01: a Draft PNG paints through the Zellij SIXEL chain after the Kitty timeout', async (t) => {
+test('a Draft PNG paints through the Zellij SIXEL chain after the Kitty timeout', async (t) => {
   const h = await startZellijSixelApp(t, { kitty: 'timeout' })
   const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [255, 0, 0, 255] : [0, 0, 255, 255])), 80, 40)
   const image = h.store.add({ bytes: png, mediaType: 'image/png', width: 80, height: 40, name: 'bands.png' })
@@ -606,7 +606,7 @@ test('ZE01: a Draft PNG paints through the Zellij SIXEL chain after the Kitty ti
 
 // ── ZE02: a live Kitty OK keeps the old Kitty path and emits zero SIXEL ───
 
-test('ZE02: a live Kitty OK keeps the Native path and emits zero SIXEL DCS', async (t) => {
+test('a live Kitty OK keeps the Native path and emits zero SIXEL DCS', async (t) => {
   const h = await startZellijSixelApp(t, { kitty: 'ok', da1: true })
   const ref = imageRef('att-zellij-kitty', 'kitty.png', 'image/png')
   h.app.setTranscript(transcriptOf(ref).messages())
@@ -620,7 +620,7 @@ test('ZE02: a live Kitty OK keeps the Native path and emits zero SIXEL DCS', asy
 
 // ── ZE03: Main and Fullscreen Alt share the one SIXEL owner ────────────────
 
-test('ZE03: Main transcript and Fullscreen Alt paint through the same Zellij SIXEL owner', async (t) => {
+test('Main transcript and Fullscreen Alt paint through the same Zellij SIXEL owner', async (t) => {
   const red = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
   const green = await pngFromRgba(fill(80, 40, () => [0, 220, 0, 255]), 80, 40)
   const bytesById = new Map([['att-ze03-red', red], ['att-ze03-green', green]])
@@ -654,7 +654,7 @@ test('ZE03: Main transcript and Fullscreen Alt paint through the same Zellij SIX
 
 // ── ZE06b: a tall image is bounded by the real Screen crop ────────────────
 
-test('ZE06b: a tall transcript image is cropped inside the real fullscreen viewport', async (t) => {
+test('a tall transcript image is cropped inside the real fullscreen viewport', async (t) => {
   const tall = await pngFromRgba(fill(80, 400, (x, y) => {
     const n = (x * 11 + y * 7) % 256
     return [n, (n * 3) & 255, (n * 5) & 255, 255]
@@ -688,7 +688,7 @@ test('ZE06b: a tall transcript image is cropped inside the real fullscreen viewp
 
 // ── ZE07: transparent first band width/color ──────────────────────────────
 
-test('ZE07: a fully transparent first band keeps its declared width and the second band color', async (t) => {
+test('a fully transparent first band keeps its declared width and the second band color', async (t) => {
   const png = await pngFromRgba(fill(80, 40, (_x, y) => (y < 20 ? [0, 0, 0, 0] : [255, 0, 0, 255])), 80, 40)
   const h = await startZellijSixelApp(t)
   const image = h.store.add({ bytes: png, mediaType: 'image/png', width: 80, height: 40, name: 'transparent.png' })
@@ -707,7 +707,7 @@ test('ZE07: a fully transparent first band keeps its declared width and the seco
 
 // ── ZE09: removing the source leaves no DCS replay ────────────────────────
 
-test('ZE09: removing a Zellij SIXEL image replays no old DCS and keeps text clean', async (t) => {
+test('removing a Zellij SIXEL image replays no old DCS and keeps text clean', async (t) => {
   const png = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
   const h = await startZellijSixelApp(t)
   const image = h.store.add({ bytes: png, mediaType: 'image/png', width: 80, height: 40, name: 'red.png' })
@@ -723,7 +723,7 @@ test('ZE09: removing a Zellij SIXEL image replays no old DCS and keeps text clea
 
 // ── ZE12: a Viewer opened while pending upgrades in place ─────────────────
 
-test('ZE12: a Viewer opened while the pane is still negotiating paints after the SIXEL settle', async (t) => {
+test('a Viewer opened while the pane is still negotiating paints after the SIXEL settle', async (t) => {
   const png = await pngFromRgba(fill(80, 40, () => [0, 220, 0, 255]), 80, 40)
   const h = await startZellijSixelApp(t, { deferSettle: true })
   const ref = imageRef('att-ze12-viewer', 'viewer.png', 'image/png')
@@ -755,7 +755,7 @@ test('ZE12: a Viewer opened while the pane is still negotiating paints after the
 
 // ── ZE04: JPEG/WebP product consumers ─────────────────────────────────────
 
-test('ZE04: Draft JPEG/WebP and the transcript image Viewer keep their product paths', async (t) => {
+test('Draft JPEG/WebP and the transcript image Viewer keep their product paths', async (t) => {
   const h = await startZellijSixelApp(t)
   const jpeg = h.store.add({
     bytes: new Uint8Array(SAMPLE_JPEG),
@@ -795,7 +795,7 @@ test('ZE04: Draft JPEG/WebP and the transcript image Viewer keep their product p
 
 // ── ZE05: the Assistant SVG thumbnail and Viewer Preview ──────────────────
 
-test('ZE05: an Assistant SVG thumbnail and the SVG Viewer Preview paint through the same SIXEL owner', async (t) => {
+test('an Assistant SVG thumbnail and the SVG Viewer Preview paint through the same SIXEL owner', async (t) => {
   // The fixture's own rasterizer seam: the loader the app actually uses, with
   // the real requested widths recorded. Nothing here replaces the native child —
   // `rasterizeSvg` still runs, so the pixels this case asserts are real.
@@ -910,7 +910,7 @@ test('negative control: a terminal SVG raster failure settles the SIXEL DCS wait
 
 // ── ZE06: resize and Main↔Alt keep one owner and no stale worker ───────────
 
-test('ZE06: a resize and Main↔Alt round-trip re-sample the same Zellij SIXEL owner', async (t) => {
+test('a resize and Main↔Alt round-trip re-sample the same Zellij SIXEL owner', async (t) => {
   const png = await pngFromRgba(fill(80, 40, () => [255, 0, 0, 255]), 80, 40)
   const h = await startZellijSixelApp(t)
   const image = h.store.add({ bytes: png, mediaType: 'image/png', width: 80, height: 40, name: 'red.png' })
@@ -961,7 +961,7 @@ function longTranscriptWithImage(ref: ImageAttachmentRefLike): TranscriptFolder 
 
 // ── ZE08: a real auto scrollbar keeps a non-overlapping SIXEL image ───────
 
-test('ZE08: an auto scrollbar keeps a non-overlapping Zellij SIXEL image visible', async (t) => {
+test('an auto scrollbar keeps a non-overlapping Zellij SIXEL image visible', async (t) => {
   const h = await startZellijSixelApp(t)
   const ref = imageRef('att-ze08-scrollbar', 'scrollbar.png', 'image/png')
   h.app.setTranscript(longTranscriptWithImage(ref).messages())
@@ -989,7 +989,7 @@ test('ZE08: an auto scrollbar keeps a non-overlapping Zellij SIXEL image visible
 
 // ── ZE11: hard-off and non-Zellij topologies never fall into SIXEL ────────
 
-test('ZE11: PI_IMAGE_PROTOCOL=none and nested multiplexers create no negotiated SIXEL', async (t) => {
+test('PI_IMAGE_PROTOCOL=none and nested multiplexers create no negotiated SIXEL', async (t) => {
   for (const entry of [
     { name: 'none', PI_IMAGE_PROTOCOL: 'none' },
     { name: '0', PI_IMAGE_PROTOCOL: '0' },
@@ -1023,7 +1023,7 @@ test('ZE11: PI_IMAGE_PROTOCOL=none and nested multiplexers create no negotiated 
 
 // ── ZE09b: a real revoke clears the product click body ─────────────────────
 
-test('ZE09b: a real DA1 revoke clears the Zellij image body and click footprint', async (t) => {
+test('a real DA1 revoke clears the Zellij image body and click footprint', async (t) => {
   const h = await startZellijSixelApp(t)
   const ref = imageRef('att-ze09b-ghost', 'ghost.png', 'image/png')
   h.app.setTranscript(transcriptOf(ref).messages())
@@ -1052,7 +1052,7 @@ test('ZE09b: a real DA1 revoke clears the Zellij image body and click footprint'
 
 // ── ZE10: a revoke during an in-flight encode leaves no raster ─────────────
 
-test('ZE10: a revoke during an in-flight Zellij encode registers no raster after settle', async (t) => {
+test('a revoke during an in-flight Zellij encode registers no raster after settle', async (t) => {
   const noise = await pngFromRgba(fill(800, 600, (x, y) => {
     const n = (x * 7 + y * 13) % 256
     return [(n * 37) & 255, (n * 97) & 255, (n * 131) & 255, 255]

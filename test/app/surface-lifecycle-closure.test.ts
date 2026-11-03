@@ -260,7 +260,7 @@ function attachTasks(app: TuiApp, options: { jobIds?: readonly string[]; childId
 
 // ── A-01..A-03: the OutputViewer physical/returned/Esc closure ──────────────
 
-test('A-01 Esc finalizes the output viewer once, removes it, and stops its refresh timer', async () => {
+test('Esc finalizes the output viewer once, removes it, and stops its refresh timer', async () => {
   const { vt, app } = startApp()
   // The owned panel release is the timer owner: count it (pass-through double).
   let panelDisposals = 0
@@ -305,7 +305,7 @@ test('A-01 Esc finalizes the output viewer once, removes it, and stops its refre
   }
 })
 
-test('A-02 the returned closer is idempotent and a self-reentrant onClose cannot loop', async () => {
+test('the returned closer is idempotent and a self-reentrant onClose cannot loop', async () => {
   const { vt, app } = startApp()
   let panelDisposals = 0
   const originalPanelDispose = OutputViewerPanel.prototype.dispose
@@ -336,7 +336,7 @@ test('A-02 the returned closer is idempotent and a self-reentrant onClose cannot
   }
 })
 
-test('A-03 a fullscreen swap finalizes a non-remountable viewer once and never a remountable lease', async () => {
+test('a fullscreen swap finalizes a non-remountable viewer once and never a remountable lease', async () => {
   // Phase 3B / B3-A: the Ctrl+R History surface is an EDITOR-SEAT tenant, not an
   // overlay node, so the managed graph holds only the real overlays — and the
   // tenant still survives the swap on the shared seat mount.
@@ -390,7 +390,7 @@ test('A-03 a fullscreen swap finalizes a non-remountable viewer once and never a
 
 // ── A-04..A-10: the TaskRuntime parent/child ownership closure ──────────────
 
-test('A-04 a parent-only browser close releases the Job child observer once; the Job screen never destroys the browser', async () => {
+test('a parent-only browser close releases the Job child observer once; the Job screen never destroys the browser', async () => {
   const { vt, app } = startApp()
   // Count the real panel release (its 1s elapsed tick lives in the panel):
   // the owning frame must dispose it exactly once, on any close path.
@@ -452,7 +452,7 @@ test('A-04 a parent-only browser close releases the Job child observer once; the
   }
 })
 
-test('A-05 a display-mode switch is refused while the Job screen owns the surface, and the physical browser disposal still retires once afterwards', async () => {
+test('a display-mode switch is refused while the Job screen owns the surface, and the physical browser disposal still retires once afterwards', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -494,7 +494,7 @@ test('A-05 a display-mode switch is refused while the Job screen owns the surfac
   app.stop()
 })
 
-test('A-06 the Workflow-scoped Full browser preserves the dataset scope across a close/reopen cycle', async () => {
+test('the Workflow-scoped Full browser preserves the dataset scope across a close/reopen cycle', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'], childIds: ['child-1', 'child-2'] })
   await flush()
@@ -533,7 +533,7 @@ ${JSON.stringify(scoped.visibleItems!().map(i => i.value))}`)
   app.stop()
 })
 
-test('A-06b the Full browser carries its presentation state across an overlay round-trip', async () => {
+test('the Full browser carries its presentation state across an overlay round-trip', async () => {
   // B4-B: the Quick→Full promotion is retired with the modal Quick. The
   // surviving contract: the Full browser keeps its OWN presentation state
   // (type filter, selection) across a Job-detail overlay round-trip.
@@ -560,7 +560,7 @@ test('A-06b the Full browser carries its presentation state across an overlay ro
   app.stop()
 })
 
-test('A-07 a same-session Job A → B replacement releases each observer once and B survives A\'s late close', async () => {
+test('a same-session Job A → B replacement releases each observer once and B survives A\'s late close', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -605,7 +605,7 @@ test('A-07 a same-session Job A → B replacement releases each observer once an
   app.stop()
 })
 
-test('A-07b a reentrant replacement inside a viewer finalizer wins over the outer replacement', async () => {
+test('a reentrant replacement inside a viewer finalizer wins over the outer replacement', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b', 'job-c'] })
   await flush()
@@ -657,7 +657,7 @@ test('A-07b a reentrant replacement inside a viewer finalizer wins over the oute
   app.stop()
 })
 
-test('A-08 a browser retired inside its own retire callback cannot touch the replacement', async () => {
+test('a browser retired inside its own retire callback cannot touch the replacement', async () => {
   const { vt, app } = startApp()
   const reasons: string[] = []
   let reentered = false
@@ -700,7 +700,7 @@ test('A-08 a browser retired inside its own retire callback cannot touch the rep
   app.stop()
 })
 
-test('A-08b TaskRuntime: a browser opened by a plugin focus callback during the close wins over the retired browser\'s navigation tails', async () => {
+test('TaskRuntime: a browser opened by a plugin focus callback during the close wins over the retired browser\'s navigation tails', async () => {
   // Phase 1 — the Esc (cancel) tail. A REAL advanced-interactive overlay owns
   // the pre-browser focus: closing the Full browser restores plugin focus, and
   // the plugin's onFocus synchronously opens a NEWER browser with its own Job
@@ -795,7 +795,7 @@ test('A-08b TaskRuntime: a browser opened by a plugin focus callback during the 
   }
 })
 
-test('A-08c TaskRuntime: a synchronous session reset during the close retires the pending navigation tail', async () => {
+test('TaskRuntime: a synchronous session reset during the close retires the pending navigation tail', async () => {
   // B4-B: the Quick → Full promotion is retired, so the probed "pending
   // Esc restore into Quick" no longer exists. The surviving contract: a
   // synchronous resetTasks() fired from an overlay focus hook (the physical
@@ -838,7 +838,7 @@ test('A-08c TaskRuntime: a synchronous session reset during the close retires th
   app.stop()
 })
 
-test('A-08d TaskRuntime: a stale browser\'s late close cannot clear the replacement\'s slot, scope or child', async () => {
+test('TaskRuntime: a stale browser\'s late close cannot clear the replacement\'s slot, scope or child', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'], childIds: ['child-1', 'child-2'] })
   await flush()
@@ -886,7 +886,7 @@ test('A-08d TaskRuntime: a stale browser\'s late close cannot clear the replacem
   app.stop()
 })
 
-test('A-09 resetTasks is idempotent: one observer release, one browser disposal, reusable afterwards', async () => {
+test('resetTasks is idempotent: one observer release, one browser disposal, reusable afterwards', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -915,7 +915,7 @@ test('A-09 resetTasks is idempotent: one observer release, one browser disposal,
   app.stop()
 })
 
-test('A-09b a throwing Job finalizer cannot strand the browser disposal during a session reset', async () => {
+test('a throwing Job finalizer cannot strand the browser disposal during a session reset', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -948,7 +948,7 @@ test('A-09b a throwing Job finalizer cannot strand the browser disposal during a
   app.stop()
 })
 
-test('A-09c a throwing browser hide cannot strand the reset mirrors or the dataset scope', async () => {
+test('a throwing browser hide cannot strand the reset mirrors or the dataset scope', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'], childIds: ['child-1', 'child-2'] })
   await flush()
@@ -994,7 +994,7 @@ test('A-09c a throwing browser hide cannot strand the reset mirrors or the datas
   app.stop()
 })
 
-test('A-10 TuiApp.dispose and the explicit observer release are order-independent and release once', async () => {
+test('TuiApp.dispose and the explicit observer release are order-independent and release once', async () => {
   // Order 1: the physical teardown finalizes the viewer first.
   {
     const { vt, app } = startApp()
@@ -1030,7 +1030,7 @@ test('A-10 TuiApp.dispose and the explicit observer release are order-independen
 
 // ── A-11..A-13: failure propagation and callback chaining ───────────────────
 
-test('A-11 a throwing owned-child dispose still finalizes once, preserves the error, and aggregates two failures', async () => {
+test('a throwing owned-child dispose still finalizes once, preserves the error, and aggregates two failures', async () => {
   const { vt, app } = startApp()
   const originalDispose = OutputViewerPanel.prototype.dispose
   const disposeError = new Error('panel dispose boom')
@@ -1115,7 +1115,7 @@ test('A-11 a throwing owned-child dispose still finalizes once, preserves the er
   app.stop()
 })
 
-test('A-12 a late Sign-in notice onClose cannot clear the CURRENT notice handle', async () => {
+test('a late Sign-in notice onClose cannot clear the CURRENT notice handle', async () => {
   // Phase 1 — Esc, a notice SWAP (a re-attempt) and the explicit attempt close.
   {
     const { vt, app } = startApp()
@@ -1227,7 +1227,7 @@ test('A-12 a late Sign-in notice onClose cannot clear the CURRENT notice handle'
   }
 })
 
-test('A-14 a viewer disposed during its own mount never starts its refresh timer', async () => {
+test('a viewer disposed during its own mount never starts its refresh timer', async () => {
   const { vt, app } = startApp()
   // A REAL plugin overlay owns the keyboard first. The new viewer's mount focus
   // transition blurs it, and its onBlur swaps the screen — which physically
@@ -1279,7 +1279,7 @@ test('A-14 a viewer disposed during its own mount never starts its refresh timer
   app.stop()
 })
 
-test('A-13 a throwing owner retire and a throwing parent hide are both attempted; no ghost child remains', async () => {
+test('a throwing owner retire and a throwing parent hide are both attempted; no ghost child remains', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()

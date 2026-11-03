@@ -423,7 +423,7 @@ async function settle(): Promise<void> {
 
 // ── A-04: cold hydration + live delta on the same node ──────────────────────
 
-test('A-04: cold hydration renders the first frame; tool settle and live delta update in place', async () => {
+test('cold hydration renders the first frame; tool settle and live delta update in place', async () => {
   const harness = await mountTspHarness()
   try {
     harness.route(ev('turn/start', { turn: 1 }, 0))
@@ -460,7 +460,7 @@ test('A-04: cold hydration renders the first frame; tool settle and live delta u
 
 // ── A-05: the REAL owner gap — Loading survives the old fold's repaint ──────
 
-test('A-05: after the generation bump the Loading fence drops the OLD fold repaint (production gap)', async () => {
+test('after the generation bump the Loading fence drops the OLD fold repaint (production gap)', async () => {
   const harness = await mountTspHarness()
   try {
     harness.route(ev('turn/start', { turn: 1 }, 0))
@@ -503,7 +503,7 @@ test('A-05: after the generation bump the Loading fence drops the OLD fold repai
 
 // ── A-06: a replacement scope gets a FRESH SDK namespace ─────────────────────
 
-test('A-06: a same-id fold replacement re-scopes into a fresh node namespace', async () => {
+test('a same-id fold replacement re-scopes into a fresh node namespace', async () => {
   const harness = await mountTspHarness()
   try {
     harness.route(ev('turn/start', { turn: 1 }, 0))
@@ -549,7 +549,7 @@ test('A-06: a same-id fold replacement re-scopes into a fresh node namespace', a
 
 // ── A-07: dispose closes the surface and session once, restores raw mode ────
 
-test('A-07: dispose closes the SDK surface (x keep:false) and the session exactly once', async () => {
+test('dispose closes the SDK surface (x keep:false) and the session exactly once', async () => {
   const harness = await mountTspHarness()
   const session = harness.session
   try {
@@ -578,7 +578,7 @@ test('A-07: dispose closes the SDK surface (x keep:false) and the session exactl
   }
 })
 
-test('A-07b: SurfaceRuntime retires all native presenter getters on dispose', async () => {
+test('SurfaceRuntime retires all native presenter getters on dispose', async () => {
   const harness = await mountTspHarness({ sessionBrowserCapabilities: true })
   const session = harness.session
   try {
@@ -599,7 +599,7 @@ test('A-07b: SurfaceRuntime retires all native presenter getters on dispose', as
 
 // ── B3-A3: the Task Center capability is the NEGOTIATED pane truth ──────────
 
-test('A-07c: the default HELLO (no picker/row/text/scroll) declares no Task Center', async () => {
+test('the default HELLO (no picker/row/text/scroll) declares no Task Center', async () => {
   const harness = await mountTspHarness()
   const session = harness.session
   try {
@@ -612,7 +612,7 @@ test('A-07c: the default HELLO (no picker/row/text/scroll) declares no Task Cent
   }
 })
 
-test('A-07d: a fully negotiated HELLO declares the Task Center and STILL no Viewer', async () => {
+test('a fully negotiated HELLO declares the Task Center and STILL no Viewer', async () => {
   // The Session Browser opt-in advertises exactly the negotiated vocabulary the
   // Hub + Reader need (`picker`, `row`, `text`, `overlay` and `scroll`; `col` is
   // base), so the display seam's ONE capability truth flips — and nothing else
@@ -634,7 +634,7 @@ test('A-07d: a fully negotiated HELLO declares the Task Center and STILL no View
 
 // ── The exit intent: B1 semantics (q is text; Ctrl+D exits only empty) ──────
 
-test('A-04b: exit routes Ctrl+C and empty-draft Ctrl+D; a typed q is editor text', async () => {
+test('exit routes Ctrl+C and empty-draft Ctrl+D; a typed q is editor text', async () => {
   assert.equal(isQuitKey({ name: 'q' }), false, 'the PR3-A bare q quit retired with the composer')
   assert.equal(isQuitKey({ name: 'c', ctrl: true }), true)
   assert.equal(isQuitKey({ name: 'd', ctrl: true }), false,
@@ -803,7 +803,7 @@ test('a hostile notice never reaches the TSP wire raw', async () => {
 
 // ── A-09 (F4): many notices never collide on an SDK node key ────────────────
 
-test('A-09: repeated notices keep unique dock keys (no SDK duplicate-key ViewError)', async () => {
+test('repeated notices keep unique dock keys (no SDK duplicate-key ViewError)', async () => {
   const harness = await mountTspHarness()
   try {
     for (let index = 0; index < 8; index += 1) {
@@ -833,7 +833,7 @@ test('A-09: repeated notices keep unique dock keys (no SDK duplicate-key ViewErr
 
 // ── A-10 (F5): the pending-input presentation is actually VISIBLE ────────────
 
-test('A-10: the joined pending presentation (queued + tail) renders in the dock', async () => {
+test('the joined pending presentation (queued + tail) renders in the dock', async () => {
   const harness = await mountTspHarness()
   try {
     harness.surface.display.setPendingInputPresentation({
@@ -868,7 +868,7 @@ test('A-10: the joined pending presentation (queued + tail) renders in the dock'
   }
 })
 
-test('A-10b: an idle authoritative queue explains the next-prompt wake; local-only/running do not', async () => {
+test('an idle authoritative queue explains the next-prompt wake; local-only/running do not', async () => {
   const harness = await mountTspHarness()
   const lastFrame = (wire: string): string => wire.slice(wire.lastIndexOf('_tsp;f;') + 1)
   try {
@@ -927,7 +927,7 @@ test('A-10b: an idle authoritative queue explains the next-prompt wake; local-on
 
 // ── A-11 (F6): a mounted input-loop failure is FATAL, not a normal exit ─────
 
-test('A-11: a real SDK iterator failure routes the SAME error to the FATAL intent', async () => {
+test('a real SDK iterator failure routes the SAME error to the FATAL intent', async () => {
   const tern = new ScriptedTern()
   const session = await openSession(tern)
   let fatal: unknown
@@ -1072,7 +1072,7 @@ function focusOps(tern: ScriptedTern): string[] {
   return tern.frames.flatMap(frame => frame.ops.filter(op => op[0] === 'focus').map(op => String(op[1])))
 }
 
-test('A-15a: a local-surface protocol error is diagnosed exactly once and changes nothing else', async () => {
+test('a local-surface protocol error is diagnosed exactly once and changes nothing else', async () => {
   const tern = new ScriptedTern()
   const { renderer, diagnostics, notifications, business, fatals } = await mountDiagnosed(tern)
   try {
@@ -1102,7 +1102,7 @@ test('A-15a: a local-surface protocol error is diagnosed exactly once and change
   }
 })
 
-test('A-15b: optional `sf`/`s`/`op` are never fabricated, and a foreign surface is not attributed', async () => {
+test('optional `sf`/`s`/`op` are never fabricated, and a foreign surface is not attributed', async () => {
   const tern = new ScriptedTern()
   const { renderer, diagnostics, notifications, business, fatals } = await mountDiagnosed(tern)
   try {
@@ -1129,7 +1129,7 @@ test('A-15b: optional `sf`/`s`/`op` are never fabricated, and a foreign surface 
   }
 })
 
-test('A-15c: an error that ALSO carries an optional `id` is still an error, never a business route', async () => {
+test('an error that ALSO carries an optional `id` is still an error, never a business route', async () => {
   const tern = new ScriptedTern()
   const { renderer, diagnostics, notifications, business, fatals } = await mountDiagnosed(tern)
   try {
@@ -1155,7 +1155,7 @@ test('A-15c: an error that ALSO carries an optional `id` is still an error, neve
   }
 })
 
-test('A-15d: a protocol error during an open modal is diagnosed without settling it or re-asserting focus', async () => {
+test('a protocol error during an open modal is diagnosed without settling it or re-asserting focus', async () => {
   const tern = new ScriptedTern()
   const { renderer, diagnostics, notifications, business, fatals } = await mountDiagnosed(tern)
   try {
@@ -1187,7 +1187,7 @@ test('A-15d: a protocol error during an open modal is diagnosed without settling
   }
 })
 
-test('A-15e: under a modal the LEGAL focus route still re-asserts focus, while an `error` does not', async () => {
+test('under a modal the LEGAL focus route still re-asserts focus, while an `error` does not', async () => {
   const tern = new ScriptedTern()
   const { renderer, diagnostics, notifications, business, fatals } = await mountDiagnosed(tern)
   try {
@@ -1225,7 +1225,7 @@ test('A-15e: under a modal the LEGAL focus route still re-asserts focus, while a
 
 // ── A-12 (F7): a failed mount closes the already-connected SDK session ─────
 
-test('A-12: a rejected mount closes the connected SDK session once (no leaked tty owner)', async () => {
+test('a rejected mount closes the connected SDK session once (no leaked tty owner)', async () => {
   const tern = new ScriptedTern()
   const session = await openSession(tern)
   let closes = 0
@@ -1252,7 +1252,7 @@ test('A-12: a rejected mount closes the connected SDK session once (no leaked tt
   }
 })
 
-test('A-12c: a secondary tty-restoration failure never replaces the primary mount error', async () => {
+test('a secondary tty-restoration failure never replaces the primary mount error', async () => {
   const tern = new ScriptedTern()
   const session = await openSession(tern)
   let closes = 0
@@ -1285,7 +1285,7 @@ test('A-12c: a secondary tty-restoration failure never replaces the primary moun
   }
 })
 
-test('A-12d: a mounted teardown preserves BOTH close failures (never truncates the first)', async () => {
+test('a mounted teardown preserves BOTH close failures (never truncates the first)', async () => {
   const tern = new ScriptedTern()
   const session = await openSession(tern)
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {}, onFatal: () => {} })
@@ -1314,7 +1314,7 @@ test('A-12d: a mounted teardown preserves BOTH close failures (never truncates t
   }
 })
 
-test('A-12b: the PRODUCTION connector handshake releases a mount a REAL surface.start rejected', async () => {
+test('the PRODUCTION connector handshake releases a mount a REAL surface.start rejected', async () => {
   const tern = new ScriptedTern()
   const session = await openSession(tern)
   let closes = 0
@@ -1357,7 +1357,7 @@ test('A-12b: the PRODUCTION connector handshake releases a mount a REAL surface.
 
 // ── A-13 (F3): the hydrate-tail reset never clears hydrated facts ───────────
 
-test('A-13: the hydrate-tail reset keeps committed status facts and an explicit undefined title clears', async () => {
+test('the hydrate-tail reset keeps committed status facts and an explicit undefined title clears', async () => {
   const harness = await mountTspHarness()
   try {
     harness.surface.display.commitStatusFacts({ sessionTitle: 'AUTHORITATIVE_TITLE', working: true, planMode: true, busy: true })
@@ -1413,7 +1413,7 @@ test('A-13: the hydrate-tail reset keeps committed status facts and an explicit 
 
 // ── A-14 (F9): the semantic patch reaches the SHARED StatusStore ────────────
 
-test('A-14: surface.commitStatus writes the shared StatusStore on the TSP branch', async () => {
+test('surface.commitStatus writes the shared StatusStore on the TSP branch', async () => {
   const harness = await mountTspHarness()
   try {
     harness.surface.commitStatus(
@@ -1432,7 +1432,7 @@ test('A-14: surface.commitStatus writes the shared StatusStore on the TSP branch
 
 // ── A-08: modals at the read-only renderer fail closed, observably ──────────
 
-test('A-08: the read-only renderer advertises no modals and the dock notice is observable', async () => {
+test('the read-only renderer advertises no modals and the dock notice is observable', async () => {
   const harness = await mountTspHarness()
   try {
     assert.equal(harness.surface.display.supportsModals, false)
@@ -1445,7 +1445,7 @@ test('A-08: the read-only renderer advertises no modals and the dock notice is o
   }
 })
 
-test('A-08b: the interaction owner registers fail-closed answerers on a modal-less renderer', async () => {
+test('the interaction owner registers fail-closed answerers on a modal-less renderer', async () => {
   // The REAL interaction runtime over the TSP display seam: an approval ask
   // resolves 'unavailable' (the official no-answerer outcome — never an
   // implicit allow) and a question delegates to next() (the Host lifecycle).
@@ -1692,7 +1692,7 @@ async function awaitWireFact(predicate: () => boolean, label: string, timeoutMs 
 
 // ── B2-L6: the routed PTC subtree reaches the mounted production renderer ──
 
-test('B2-L6: a routed PTC child start/settle reaches the mounted renderer wire', async () => {
+test('a routed PTC child start/settle reaches the mounted renderer wire', async () => {
   const harness = await mountTspHarness()
   const codeArgs = { code: 'print(1)', description: 'Inspect project and run tests' }
   const readArgs = { file_path: 'src/a.ts' }
