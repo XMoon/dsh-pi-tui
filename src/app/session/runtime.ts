@@ -560,24 +560,19 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // (the abort path may have swapped it), matching the pre-cutover read.
           const flushOwner = core.owner()
           if (flushOwner === undefined) return
-          try {
-            await deps.retirement.flush(flushOwner)
-          } catch (error) {
-            // The flush can be OVERTAKEN by a shutdown while it is in flight:
-            // DSH's flush re-checks the handle's `closing` inside its chained
-            // turn, so a close() that starts after the flush was issued refuses
-            // it (asserted against the installed backend in
-            // test/runtime/direct/session-flush-close-race). For a session that
-            // already has events, that close drains them durably, which is
-            // DSH's own `flushAll` rule and a different durability owner — not
-            // a pi-tui flush failure. The authoritative discriminator is the
-            // lifecycle fact, never the error text.
-            if (deps.lifecycleSignal.aborted) {
-              deps.diag.info('old-owner flush superseded by shutdown', { error: safeErrorMessage(error) })
-              return
-            }
-            throw error
+          if (deps.lifecycleSignal.aborted) {
+            // The exit already began: issuing an explicit flush now would race
+            // the close that owns durability. The flush is therefore NOT
+            // ATTEMPTED — which is different from swallowing its failure: once
+            // issued, any rejection is a real, reported failure (the shutdown
+            // close settlement is the only authority that can own durability).
+            deps.diag.info('old-owner flush skipped: the lifecycle already aborted')
+            return
           }
+          // A rejection here is NEVER reclassified by the lifecycle flag: the
+          // flush may have failed on its own (a persistence listener's real
+          // I/O error), and an aborted lifecycle does not prove otherwise.
+          await deps.retirement.flush(flushOwner)
           // ONLY an OBSERVED settle proves the old Turn idle; 'unobservable'
           // (a rolled Remote binding / missing attachment) is not idle.
           if (idle === false) steps.onOldOwnerQuiesced?.()
@@ -689,6 +684,31 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         },
       retireOld: async () => {
         const retired: string[] = []
+        // The committed owner was mapped once in the commit section; a
+        // successful commit always published one (the commit section fails
+        // fast otherwise).
+        const nextOwner = committedOwner
+        if (nextOwner === undefined) throw new Error('committed transition child has no owned Session generation')
+        // D2 durability checkpoint — the FIRST post-commit step, before the OLD
+        // owner's retirement and before the abort-aware child quiesce. The
+        // order is load-bearing: DSH's close drains what was appended but does
+        // not materialize an empty, never-appended session (asserted against
+        // the installed backend in test/runtime/direct/session-flush-close-race),
+        // and a shutdown closes the handle concurrently with this transaction.
+        // Both of the steps below are unbounded awaits (the OLD owner's
+        // descendant drain and the child quiesce), so a checkpoint behind
+        // either of them can be overtaken by an exit that closes the handle
+        // first. Only the COMMIT-time `nextOwner` is flushed — never a re-read
+        // of the current owner (a newer transition may already have replaced
+        // it). A failure does NOT roll the child back or fail the transition:
+        // it is recorded here, and the surface warns when it is still reachable.
+        let committedDurabilityFailure: string | undefined
+        try {
+          await deps.retirement.flush(nextOwner)
+        } catch (error) {
+          committedDurabilityFailure = safeErrorMessage(error)
+          retired.push(`committed child flush: ${committedDurabilityFailure}`)
+        }
         // Retire the OLD owner through the retirement port (which owns the
         // official close order): the pre-commit quiesce already idled + flushed,
         // so this covers the window where the old owner was re-woken by a
@@ -701,31 +721,6 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             // SessionWriteLease still guards the session cross-process).
             retired.push(`old ${failure.phase}: ${failure.error}`)
           }
-        }
-        // The committed owner was mapped once in the commit section; a
-        // successful commit always published one (the commit section fails
-        // fast otherwise).
-        const nextOwner = committedOwner
-        if (nextOwner === undefined) throw new Error('committed transition child has no owned Session generation')
-        // D2 durability checkpoint — IMMEDIATELY after the commit, BEFORE the
-        // abort-aware child quiesce and before any surface work. The order is
-        // load-bearing: DSH's close drains what was appended but does not
-        // materialize an empty, never-appended session (asserted against the
-        // installed backend in test/runtime/direct/session-flush-close-race),
-        // and a shutdown closes the handle concurrently with this transaction.
-        // Issuing the checkpoint here means the artifact exists before the one
-        // long await below can be overtaken by an exit; a checkpoint parked
-        // behind it could lose the session entirely. Only the COMMIT-time
-        // `nextOwner` is flushed — never a re-read of the current owner (a
-        // newer transition may already have replaced it). A failure does NOT
-        // roll the child back or fail the transition: it is recorded here, and
-        // the surface warns when it is still reachable.
-        let committedDurabilityFailure: string | undefined
-        try {
-          await deps.retirement.flush(nextOwner)
-        } catch (error) {
-          committedDurabilityFailure = safeErrorMessage(error)
-          retired.push(`committed child flush: ${committedDurabilityFailure}`)
         }
         try {
           // The child quiesce is abort-aware too: an exit during this
@@ -740,8 +735,17 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             // retirement takes over. Skip the surface init AND the switch
             // report (the `finally` still clears the opening journal).
             retired.push('child quiesce aborted by lifecycle')
-            // The warning below is unreachable on this path (the surface is
-            // disposed), so a checkpoint failure must still reach the log.
+            // The surface warning below is unreachable on this path (the
+            // surface is disposed), so EVERY recorded post-commit failure —
+            // the committed child's checkpoint and the OLD owner's retirement —
+            // must still reach the diagnostics instead of dying with the early
+            // return. An aborted lifecycle never proves a failure benign.
+            if (retired.length > 0) {
+              deps.diag.error('transition retire failed (child committed)', {
+                to: committedSessionId,
+                failures: retired,
+              })
+            }
             if (committedDurabilityFailure !== undefined) {
               deps.diag.error('committed session durability checkpoint failed', {
                 session: committedSessionId,

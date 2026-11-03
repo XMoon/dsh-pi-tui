@@ -146,15 +146,16 @@ export async function retireDirectOwnedSession(
   }
   await runPhase('dispose', deps.disposeOwner, failures)
   // The semantic outcome the consumer needs: which failure (if any) broke
-  // final durability. A recorded live-Host flush failure is always the answer.
-  // Otherwise durability belongs to the shutdown close/drain: either this was a
-  // shutdown retirement, or the live-Host regime ended while the flush phase
-  // was in flight (the adapter classifies that takeover without recording a
-  // failure, and the dispose phase that joined the close decides). The
-  // consumer never has to know this implementation's phases.
-  const flushFailure = failures.find(failure => failure.phase === 'flush')
+  // final durability. It is decided by the regime that owns durability when
+  // the phases finished: a live-Host retirement answers with its explicit
+  // flush, a shutdown retirement (or one whose live-Host regime ended while
+  // the flush was in flight) answers with the dispose phase — the verifiable
+  // close settlement. A flush failure that occurred during a takeover is NEVER
+  // dropped from `failures`; it simply does not get to claim durability that
+  // the close owns, so the surface still reports the failing phase.
   const shutdownDurability = deps.mode === 'shutdown' || !deps.isLiveHost()
-  const durabilityFailure = flushFailure
-    ?? (shutdownDurability ? failures.find(failure => failure.phase === 'dispose') : undefined)
+  const durabilityFailure = shutdownDurability
+    ? failures.find(failure => failure.phase === 'dispose')
+    : failures.find(failure => failure.phase === 'flush')
   return { failures, durabilityFailure }
 }
