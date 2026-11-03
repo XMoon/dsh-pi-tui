@@ -175,6 +175,13 @@ export default async function (h) {
         h.check(`${id}: the action states the ${disabledExpected ? 'unavailable reason' : 'Browser it opens'} in its own tooltip`,
           disabledExpected ? title.includes('/sessions') : title === 'Open the existing Session Browser',
           JSON.stringify({ title, tag: resume.tag }))
+        // The client's OWN class projection is the observable that the disabled
+        // form is not an actionable control: an operable button carries the
+        // action class, the refused one does not.
+        const classes = String(resume.class ?? '').split(' ')
+        h.check(`${id}: the client paints the action ${disabledExpected ? 'WITHOUT' : 'WITH'} its actionable class`,
+          disabledExpected ? !classes.includes('sf-act') : classes.includes('sf-act'),
+          JSON.stringify({ class: resume.class }))
       }
 
       const mascot = paintedMascot(snap, assets)
