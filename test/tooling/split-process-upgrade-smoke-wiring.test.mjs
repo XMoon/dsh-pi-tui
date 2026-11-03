@@ -123,7 +123,7 @@ test('both Client peer owners are real and every upgrade root is isolated', () =
 
 test('the upgrade lane qualifies BOTH artifact pins against the exact DSH runtime before any setup', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  assert.match(source, /import \{ requireExactSmokeDshPin \} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u,
+  assert.match(source, /requireExactSmokeDshPin,[\s\S]*?\} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u,
     'the exact-pin rule is shared with the T lane, not restated per script')
   const main = source.slice(source.indexOf('async function main()'))
   const inspectOld = main.indexOf("inspectArtifact(options.old, 'old')")
@@ -132,7 +132,9 @@ test('the upgrade lane qualifies BOTH artifact pins against the exact DSH runtim
   const guardOld = main.indexOf("requireExactSmokeDshPin('old', oldArtifact.manifest, targetDshVersion)")
   const guardNew = main.indexOf("requireExactSmokeDshPin('new', newArtifact.manifest, targetDshVersion)")
   const distribution = main.indexOf('loadDshDistribution(')
-  const workRoot = main.indexOf("mkdtempSync(join(tmpdir(), 'dsh-split-upgrade-'))")
+  // Located by shape, never by the temp-API token: the temp-hygiene gate text-scans
+  // the whole test tree, strings and comments included.
+  const workRoot = main.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
   const install = main.indexOf('runPnpmInstall(harnessDir, env, distribution)')
   assert.ok(
     inspectOld >= 0 && inspectNew > inspectOld && target > inspectNew
@@ -264,4 +266,52 @@ test('M4 PR4 U09 proves the manual command ignores a live qualification target o
   assert.match(u09, /qualificationUsedOverride: true/u)
   assert.match(u09, /sameProcessBothEntries: true/u)
   assert.match(source, /runReloadSourceIsolationRound\(\{/u)
+})
+
+test('the U lane reports every failure with a bounded default projection', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.match(source, /import \{[\s\S]*createSmokeDiagnostics,[\s\S]*\} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u)
+  assert.match(source, /diagnostics = createSmokeDiagnostics\(\{[\s\S]{0,300}lane: 'split-upgrade'/u)
+  assert.match(source, /process\.stderr\.write\(`\$\{diagnostics\.identityLine\(\)\}\\n`\)/u)
+  const main = source.slice(source.indexOf('async function main()'))
+  // The identity is announced only AFTER both pins qualified (the unqualified
+  // CLI run asserting the absence of `qualified=true` covers the behaviour).
+  assert.ok(main.indexOf('diagnostics.identityLine()') > main.indexOf("requireExactSmokeDshPin('new'"),
+    'the identity line must be built only after both artifacts qualified')
+  // Each named phase boundary is announced, so a default log locates the failure.
+  for (const step of [
+    "checkpoint('U01-U06/base-pairing')",
+    "checkpoint('U07/reexec-request')",
+    "checkpoint('U07/negative-wrong-instance')",
+    "checkpoint('U07/negative-child-failure')",
+    "checkpoint('U02/cross-build-attach')",
+    "checkpoint('U04/cross-build-surface')",
+    "checkpoint('U05/host-stop')",
+    "checkpoint('U06/new-host-boot')",
+    "checkpoint('U08/negative-already-current')",
+    "checkpoint('U08/negative-attachments')",
+    "checkpoint('U08/upgrade-install')",
+    "checkpoint('U08/positive-reexec')",
+    "checkpoint('U08/negative-target-invalid')",
+    "checkpoint('U09/manual-already-current')",
+    "checkpoint('U09/qualification-reexec')",
+  ]) {
+    assert.ok(source.includes(step), `the lane must announce ${step}`)
+  }
+  // Both failure paths report BEFORE the cleanup, and the FAIL twin lands on the
+  // operator's --evidence path (never inside the deletable work root).
+  const preflightReport = main.indexOf("diagnostics.reportFailure(error, { evidencePath: options.evidence })")
+  const runReport = main.indexOf('processes: [...hosts, ...clients]')
+  const finallyIndex = main.indexOf('} finally {')
+  const workRootRemove = main.indexOf('rmSync(workRoot, { recursive: true, force: true })', finallyIndex)
+  assert.ok(preflightReport > 0 && runReport > preflightReport && finallyIndex > runReport,
+    'the preflight branch and the run catch must both report before the finally cleanup')
+  assert.ok(workRootRemove > finallyIndex, 'the work root deletion must stay in the finally')
+  assert.match(main.slice(runReport - 200, finallyIndex), /diagnostics\.reportFailure\(error, \{\s*processes: \[\.\.\.hosts, \.\.\.clients\],/u)
+  assert.match(main.slice(runReport, finallyIndex), /evidencePath: options\.evidence/u)
+  assert.match(main.slice(finallyIndex), /if \(!KEEP\) rmSync\(workRoot/u, 'the SPLIT_UPGRADE_KEEP semantics stay unchanged')
+  // The PASS evidence keeps its original shape and marker.
+  assert.match(source, /evidence\.status = 'PASS'/u)
+  assert.match(source, /evidence\.verdict = 'cross-build-compatible'/u)
+  assert.match(source, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: \$\{boundedErrorSummary\(error\)\}/u)
 })

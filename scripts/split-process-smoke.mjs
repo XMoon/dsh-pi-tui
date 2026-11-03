@@ -77,7 +77,13 @@ import {
   validateCandidateTarball,
 } from './pi2dsh-compat-smoke.mjs'
 import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
-import { requireExactSmokeDshPin } from './lib/split-smoke-diagnostics.mjs'
+import {
+  boundedErrorSummary,
+  createSmokeDiagnostics,
+  requireExactSmokeDshPin,
+  smokeArtifactIdentity,
+  SplitSmokeWaitError,
+} from './lib/split-smoke-diagnostics.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const TRACE_PATH = process.env.SPLIT_PROCESS_TRACE
@@ -89,12 +95,20 @@ const FAILPOINT = process.env.SPLIT_PROCESS_SMOKE_FAIL_AFTER
 let traceFd
 let sequence = 0
 let statusSequence = 0
+/** This run's bounded diagnostics (checkpoints + one default failure report). */
+let diagnostics
 const activeProcesses = new Set()
 /** Detached processes this round owns: PID -> its kernel starttime (if known). */
 const trackedProcesses = new Map()
 
-/** Append one sanitized qualification event. Never pass a secret here. */
+/**
+ * One qualification checkpoint. The event NAME is always remembered (bounded to
+ * a fixed length) and announced on stderr, so a default run is diagnosable
+ * without `SPLIT_PROCESS_TRACE`; the fields stay out of the default output and
+ * are written to the explicit trace file exactly as before. Never pass a secret.
+ */
 function trace(event, fields = {}) {
+  diagnostics?.checkpoint(event)
   if (TRACE_PATH === undefined || TRACE_PATH === '') return
   if (traceFd === undefined) {
     mkdirSync(dirname(resolve(TRACE_PATH)), { recursive: true })
@@ -235,25 +249,34 @@ export class EntryProcess {
     if (existing !== undefined) return Promise.resolve(existing)
     return new Promise((resolveWait, reject) => {
       const started = Date.now()
+      const settle = (record) => {
+        clearInterval(interval)
+        clearTimeout(timer)
+        resolveWait(record)
+      }
+      const fail = (category, code) => {
+        clearInterval(interval)
+        clearTimeout(timer)
+        // Only the fixed label, the elapsed time and this process's bounded
+        // summary travel in the error: never captured stderr or record bytes.
+        reject(new SplitSmokeWaitError(category, {
+          code,
+          waitLabel: label,
+          processRole: this.role,
+          elapsedMs: Date.now() - started,
+          process: this,
+        }))
+      }
       const poll = () => {
         const record = this.records.find(predicate)
         if (record !== undefined) {
-          clearInterval(interval)
-          clearTimeout(timer)
-          resolveWait(record)
+          settle(record)
           return
         }
-        if (this.exited) {
-          clearInterval(interval)
-          clearTimeout(timer)
-          reject(new Error(`${this.role}: exited before ${label}; records=${JSON.stringify(this.records.slice(-4))}; stderr=${this.stderr.slice(-1500)}`))
-        }
+        if (this.exited) fail('PROCESS_EXITED', 'PROCESS_EXITED_BEFORE_RECORD')
       }
       const interval = setInterval(poll, 20)
-      const timer = setTimeout(() => {
-        clearInterval(interval)
-        reject(new Error(`${this.role}: timed out after ${String(Date.now() - started)}ms waiting for ${label}; records=${JSON.stringify(this.records.slice(-3))}; stderr=${this.stderr.slice(-2000)}`))
-      }, timeoutMs)
+      const timer = setTimeout(() => fail('WAIT_TIMEOUT', 'RECORD_WAIT_TIMEOUT'), timeoutMs)
       poll()
     })
   }
@@ -262,7 +285,13 @@ export class EntryProcess {
     let timer
     const deadline = new Promise((_resolve, reject) => {
       timer = setTimeout(() => {
-        reject(new Error(`${this.role}: process did not exit within ${String(timeoutMs)}ms`))
+        reject(new SplitSmokeWaitError('WAIT_TIMEOUT', {
+          code: 'PROCESS_EXIT_TIMEOUT',
+          waitLabel: 'process exit',
+          processRole: this.role,
+          elapsedMs: timeoutMs,
+          process: this,
+        }))
       }, timeoutMs)
     })
     // A pending deadline is a live handle: without clearing it the whole smoke
@@ -380,32 +409,50 @@ export class SurfaceEntryProcess {
     if (existing !== undefined) return Promise.resolve(existing)
     return new Promise((resolveWait, reject) => {
       const started = Date.now()
-      const poll = () => {
-        if (this.recordError !== undefined) {
-          cleanup()
-          reject(this.recordError)
-          return
-        }
-        const record = this.records.find(predicate)
-        if (record !== undefined) {
-          cleanup()
-          resolveWait(record)
-          return
-        }
-        if (this.exited) {
-          cleanup()
-          reject(new Error(`${this.role}: exited before ${label}; records=${JSON.stringify(this.records.slice(-4))}; stderr=${this.stderr.slice(-1500)}; raw=${JSON.stringify(this.raw.slice(-1200))}`))
-        }
-      }
-      const interval = setInterval(poll, 20)
-      const timer = setTimeout(() => {
-        cleanup()
-        reject(new Error(`${this.role}: timed out after ${String(Date.now() - started)}ms waiting for ${label}; records=${JSON.stringify(this.records.slice(-3))}; raw=${JSON.stringify(this.raw.slice(-2000))}`))
-      }, timeoutMs)
+      let settled = false
       const cleanup = () => {
         clearInterval(interval)
         clearTimeout(timer)
       }
+      const finish = (error, record) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        if (error !== undefined && error !== null) reject(error)
+        else resolveWait(record)
+      }
+      // A bounded wait failure: the fixed label, the elapsed time and this
+      // process's projection — never `raw`, `stderr` or the record bytes.
+      const fail = (category, code) => finish(new SplitSmokeWaitError(category, {
+        code,
+        waitLabel: label,
+        processRole: this.role,
+        elapsedMs: Date.now() - started,
+        process: this,
+      }))
+      // Before a timeout or an early exit is reported, take ONE synchronous
+      // read of the complete JSONL tail: the 25ms poller and the failure
+      // snapshot must never disagree about the last records.
+      const settleOrFail = (category, code) => {
+        const unread = this.finalRecordRead(label)
+        if (unread !== undefined) {
+          finish(unread)
+          return
+        }
+        const record = this.records.find(predicate)
+        if (record !== undefined) finish(undefined, record)
+        else fail(category, code)
+      }
+      const poll = () => {
+        if (this.recordError !== undefined) fail('INFRA_FAILURE', 'RECORD_READ_FAILED')
+        else if (this.exited) settleOrFail('PROCESS_EXITED', 'PROCESS_EXITED_BEFORE_RECORD')
+        else {
+          const record = this.records.find(predicate)
+          if (record !== undefined) finish(undefined, record)
+        }
+      }
+      const interval = setInterval(poll, 20)
+      const timer = setTimeout(() => settleOrFail('WAIT_TIMEOUT', 'RECORD_WAIT_TIMEOUT'), timeoutMs)
       poll()
     })
   }
@@ -422,6 +469,25 @@ export class SurfaceEntryProcess {
     return lines
   }
 
+  /**
+   * One final synchronous JSONL read before a wait gives up, so the poller and
+   * the failure snapshot cannot disagree about the record tail. A malformed line
+   * stays a real failure; its bytes never enter the reported context.
+   */
+  finalRecordRead(label) {
+    try {
+      this.readRecords()
+    } catch {
+      return new SplitSmokeWaitError('INFRA_FAILURE', {
+        code: 'RECORD_READ_FAILED',
+        waitLabel: label,
+        processRole: this.role,
+        process: this,
+      })
+    }
+    return undefined
+  }
+
   /** Wait until the PAINTED frame contains the text (escape-aware). */
   async waitForScreen(needle, label, timeoutMs = 60_000) {
     const started = Date.now()
@@ -429,12 +495,25 @@ export class SurfaceEntryProcess {
       const viewport = await this.viewport()
       if (viewport.join('\n').includes(needle)) return
       if (this.exited) {
-        throw new Error(`${this.role}: exited while waiting for the ${label} frame; raw=${JSON.stringify(this.raw.slice(-2000))}`)
+        const unread = this.finalRecordRead(label)
+        throw unread ?? new SplitSmokeWaitError('PROCESS_EXITED', {
+          code: 'PROCESS_EXITED_BEFORE_FRAME',
+          waitLabel: label,
+          processRole: this.role,
+          elapsedMs: Date.now() - started,
+          process: this,
+        })
       }
       await sleep(50)
     }
-    const viewport = await this.viewport()
-    throw new Error(`${this.role}: timed out waiting for the ${label} frame; viewport=${JSON.stringify(viewport)}`)
+    const unread = this.finalRecordRead(label)
+    throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
+      code: 'FRAME_WAIT_TIMEOUT',
+      waitLabel: label,
+      processRole: this.role,
+      elapsedMs: Date.now() - started,
+      process: this,
+    })
   }
 
   /** Wait until the COMPOSER line (after the last separator) holds the text. */
@@ -456,12 +535,25 @@ export class SurfaceEntryProcess {
         if (composer.includes('❯') && composer.includes(text)) return
       }
       if (this.exited) {
-        throw new Error(`${this.role}: exited while waiting for the composer draft; raw=${JSON.stringify(this.raw.slice(-2000))}`)
+        const unread = this.finalRecordRead('composer draft')
+        throw unread ?? new SplitSmokeWaitError('PROCESS_EXITED', {
+          code: 'PROCESS_EXITED_BEFORE_COMPOSER',
+          waitLabel: 'composer draft',
+          processRole: this.role,
+          elapsedMs: Date.now() - started,
+          process: this,
+        })
       }
       await sleep(50)
     }
-    const viewport = await this.viewport()
-    throw new Error(`${this.role}: timed out waiting for the composer draft ${JSON.stringify(text)}; viewport=${JSON.stringify(viewport)}`)
+    const unread = this.finalRecordRead('composer draft')
+    throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
+      code: 'COMPOSER_WAIT_TIMEOUT',
+      waitLabel: 'composer draft',
+      processRole: this.role,
+      elapsedMs: Date.now() - started,
+      process: this,
+    })
   }
 
   /** Send terminal input to the Client through the pty master. */
@@ -481,7 +573,13 @@ export class SurfaceEntryProcess {
     let timer
     const deadline = new Promise((_resolve, reject) => {
       timer = setTimeout(() => {
-        reject(new Error(`${this.role}: process did not exit within ${String(timeoutMs)}ms`))
+        reject(new SplitSmokeWaitError('WAIT_TIMEOUT', {
+          code: 'PROCESS_EXIT_TIMEOUT',
+          waitLabel: 'process exit',
+          processRole: this.role,
+          elapsedMs: timeoutMs,
+          process: this,
+        }))
       }, timeoutMs)
     })
     return Promise.race([this.exit, deadline]).finally(() => clearTimeout(timer))
@@ -1020,10 +1118,26 @@ async function main() {
   /** The exact candidate artifact this run qualifies; re-read at the end. */
   const candidateSha256 = createHash('sha256').update(readFileSync(tarball)).digest('hex')
   const targetDshVersion = npmDshVersion()
+  diagnostics = createSmokeDiagnostics({
+    lane: 'split-process',
+    heading: 'SPLIT_PROCESS_SMOKE',
+    marker: 'T',
+    runtimeDshPin: targetDshVersion,
+    artifacts: [smokeArtifactIdentity('candidate', candidateManifest, candidateSha256)],
+  })
   // Input qualification BEFORE any install: the candidate must declare this
   // checkout's exact DSH runtime pin, the same rule the production Client
   // reexec preflight applies to a replacement target.
-  requireExactSmokeDshPin('candidate', candidateManifest, targetDshVersion)
+  try {
+    requireExactSmokeDshPin('candidate', candidateManifest, targetDshVersion)
+  } catch (error) {
+    // No process exists yet: the report is the safe input identity only.
+    diagnostics.reportFailure(error)
+    throw error
+  }
+  // The startup identity is announced only AFTER preflight qualified it.
+  process.stderr.write(`${diagnostics.identityLine()}\n`)
+  diagnostics.checkpoint('preflight/candidate-input')
   const distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
   const workDir = mkdtempSync(join(tmpdir(), 'dsh-split-process-'))
   const home = join(workDir, 'home')
@@ -4194,6 +4308,12 @@ async function main() {
     })
 
     console.log(`split-process B1/B2-S authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}`)
+  } catch (error) {
+    // Report BEFORE the cleanup below: the failure projection must read the
+    // still-live process handles, and the work root must still exist while the
+    // report is built. The original error is rethrown so the lane still fails.
+    diagnostics.reportFailure(error, { processes: [...activeProcesses] })
+    throw error
   } finally {
     // A failed assertion must not leave a live Host/Client probe behind; each
     // entry is its own process group leader (`detached: true`).
@@ -4234,7 +4354,10 @@ async function main() {
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => {
-    console.error(`SPLIT_PROCESS_SMOKE_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
+    // One concise final line. The structured report (written BEFORE the work
+    // root was deleted) owns the diagnosis; this line never appends terminal
+    // bytes, captured stderr or record contents.
+    console.error(`SPLIT_PROCESS_SMOKE_FAILURE: ${boundedErrorSummary(error)}`)
     process.exitCode = 1
   })
 }

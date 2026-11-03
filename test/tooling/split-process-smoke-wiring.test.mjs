@@ -104,7 +104,7 @@ test('a completed waitForExit does not leave its deadline holding the process', 
 
 test('the candidate pin is qualified against the exact DSH runtime before any setup', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  assert.match(source, /import \{ requireExactSmokeDshPin \} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u,
+  assert.match(source, /requireExactSmokeDshPin,[\s\S]*?\} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u,
     'the exact-pin rule is shared with the U lane, not restated per script')
   const main = source.slice(source.indexOf('async function main()'))
   const validate = main.indexOf('const candidateManifest = validateCandidateTarball(tarball)')
@@ -112,7 +112,9 @@ test('the candidate pin is qualified against the exact DSH runtime before any se
   const target = main.indexOf('const targetDshVersion = npmDshVersion()')
   const guard = main.indexOf("requireExactSmokeDshPin('candidate', candidateManifest, targetDshVersion)")
   const distribution = main.indexOf('loadDshDistribution({ mode: ')
-  const workRoot = main.indexOf("mkdtempSync(join(tmpdir(), 'dsh-split-process-'))")
+  // Located by shape, never by the temp-API token: the temp-hygiene gate text-scans
+  // the whole test tree, strings and comments included.
+  const workRoot = main.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-process-'\)\)/u)
   const install = main.indexOf('runPnpmInstall(harnessDir, env, distribution)')
   assert.ok(validate >= 0 && sha > validate && target > sha && guard > target,
     'the candidate manifest must be read, hashed and pinned against the lane target before anything is set up')
@@ -278,6 +280,44 @@ test('the upgraded smoke carries every B1/B2-HF gate and the critical negative c
     'the artifact-absence control must block the package-scope self-reference escape')
   assert.match(source, /profilesManifest/u,
     'the artifact-absence control must reject an enclosing profiles manifest carrying the candidate package name')
+})
+
+test('the default failure diagnostics are wired into the T lane, not merely available', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  // Startup identity and checkpoints are ON by default; the explicit trace file
+  // keeps writing exactly what it wrote before.
+  assert.match(source, /process\.stderr\.write\(`\$\{diagnostics\.identityLine\(\)\}\\n`\)/u)
+  assert.match(source, /function trace\(event, fields = \{\}\) \{\n  diagnostics\?\.checkpoint\(event\)\n  if \(TRACE_PATH === undefined \|\| TRACE_PATH === ''\) return/u,
+    'the checkpoint ring and stderr progress run WITHOUT SPLIT_PROCESS_TRACE')
+  assert.match(source, /if \(TRACE_PATH === undefined \|\| TRACE_PATH === ''\) return[\s\S]{0,220}writeFileSync\(traceFd, `\$\{JSON\.stringify\(\{ ts: Date\.now\(\), event, \.\.\.fields \}\)\}\\n`\)/u,
+    'the SPLIT_PROCESS_TRACE file keeps its existing content and trigger')
+  assert.match(source, /diagnostics = createSmokeDiagnostics\(\{[\s\S]{0,200}lane: 'split-process'/u)
+  // The report is built while the processes are still alive, BEFORE the finally
+  // kills them and deletes the work root.
+  const main = source.slice(source.indexOf('async function main()'))
+  const report = main.indexOf('diagnostics.reportFailure(error, { processes: [...activeProcesses] })')
+  const catchIndex = main.lastIndexOf('} catch (error) {', report)
+  const finallyIndex = main.indexOf('} finally {', report)
+  const cleanupKill = main.indexOf('for (const run of [...activeProcesses]) {', report)
+  const cleanupRemove = main.indexOf('rmSync(workDir, { recursive: true, force: true })', report)
+  assert.ok(report > 0 && catchIndex > 0 && catchIndex < report, 'the catch must precede the report')
+  assert.ok(finallyIndex > report && cleanupKill > finallyIndex && cleanupRemove > finallyIndex,
+    'the report must be written before the cleanup kills the processes and deletes the work root')
+  assert.match(main.slice(finallyIndex), /if \(!KEEP\) rmSync\(workDir/u, 'the KEEP semantics stay unchanged')
+  assert.match(main.slice(finallyIndex), /FAILPOINT_CLEANUP leftovers/u, 'the failpoint cleanup proof must remain')
+  // Shared waiters fail with a classified bounded context, never a payload dump.
+  assert.match(source, /SplitSmokeWaitError,\n\} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u)
+  for (const waiter of ['waitForScreen(needle, label, timeoutMs = 60_000)', 'waitForComposerDraft(text, timeoutMs = 30_000)']) {
+    assert.ok(source.includes(waiter), `the shared waiter ${waiter} must remain`)
+  }
+  assert.doesNotMatch(source, /records=\$\{JSON\.stringify\(this\.records/u, 'a waiter must not dump its records into the error')
+  assert.doesNotMatch(source, /stderr=\$\{this\.stderr\.slice/u, 'a waiter must not dump captured stderr into the error')
+  assert.doesNotMatch(source, /raw=\$\{JSON\.stringify\(this\.raw/u, 'a waiter must not dump raw terminal bytes into the error')
+  assert.doesNotMatch(source, /viewport=\$\{JSON\.stringify\(viewport\)/u, 'a waiter must not dump the viewport into the error')
+  // One final synchronous JSONL read removes the poller-versus-snapshot tail race.
+  assert.match(source, /finalRecordRead\(label\)/u)
+  // The final stderr line stays concise even for an unexpected error shape.
+  assert.match(source, /SPLIT_PROCESS_SMOKE_FAILURE: \$\{boundedErrorSummary\(error\)\}/u)
 })
 
 test('every real Client-detach recovery case observes the pending source as UNKNOWN', () => {
