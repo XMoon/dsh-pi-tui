@@ -78,6 +78,7 @@ import {
 } from './pi2dsh-compat-smoke.mjs'
 import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
 import {
+  boundedName,
   createSmokeDiagnostics,
   emitInputFailure,
   forensicErrorText,
@@ -4345,12 +4346,16 @@ async function main() {
       }
       let seatsOk = true
       if (isolatedScopeId !== undefined) {
+        const seatName = `\0dsh-pi-tui-h-${isolatedScopeId.slice(0, 40)}`
+        const clientSeatName = `\0dsh-pi-tui-c-${isolatedScopeId.slice(0, 40)}`
         try {
-          await seatFree(`\0dsh-pi-tui-h-${isolatedScopeId.slice(0, 40)}`, 15_000)
-          await seatFree(`\0dsh-pi-tui-c-${isolatedScopeId.slice(0, 40)}`, 15_000)
-        } catch (error) {
+          await seatFree(seatName, 15_000)
+          await seatFree(clientSeatName, 15_000)
+        } catch {
+          // The verdict is the fact; the thrown seat text (an abstract socket
+          // name derived from this run's scope) is not default output.
           seatsOk = false
-          console.error(`FAILPOINT_SEAT_FAILURE: ${error instanceof Error ? error.message : String(error)}`)
+          console.error(`FAILPOINT_SEAT_FAILURE seat=${boundedName(seatName)} the Seat stayed owned; see the preserved work root under KEEP`)
         }
       }
       console.error(`FAILPOINT_CLEANUP leftovers=${String(leftovers.length)} seats=${seatsOk ? 'free' : 'busy'}`)

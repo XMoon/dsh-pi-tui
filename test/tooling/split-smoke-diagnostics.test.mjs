@@ -26,7 +26,9 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { npmDshVersion } from '../../scripts/lib/dsh-distribution.mjs'
 import {
   classifyHandoffRejection,
+  FAILURE_CATEGORIES,
   forensicErrorText,
+  LANE_ERROR_CODES,
   safeFailureSummary,
   classifyReloadNoticeLine,
   classifyReloadNotices,
@@ -37,11 +39,12 @@ import {
   SplitSmokeInputError,
   SplitSmokeWaitError,
 } from '../../scripts/lib/split-smoke-diagnostics.mjs'
-import { waitForAcceptedHandoff, waitForReloadNotice } from '../../scripts/split-process-upgrade-smoke.mjs'
+import { waitForAcceptedHandoff, waitForReloadNotice, writeRequestedEvidence } from '../../scripts/split-process-upgrade-smoke.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const UPGRADE_SCRIPT = join(ROOT, 'scripts', 'split-process-upgrade-smoke.mjs')
 const PROCESS_SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
+const LIB = join(ROOT, 'scripts', 'lib', 'split-smoke-diagnostics.mjs')
 const PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
 const DSH_AGENT = '@deepseek-ai/dsh-agent'
 const TARGET_PIN = npmDshVersion()
@@ -253,7 +256,10 @@ function failureHandles(count, records) {
   }))
 }
 
-test('the report holds only the whitelisted fields inside its fixed budgets', () => {
+test('the report holds only the whitelisted fields inside its fixed budgets', (t) => {
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-report-root-')
+  process.env.TMPDIR = privateTmp
+  t.after(() => { delete process.env.TMPDIR })
   const diagnostics = createSmokeDiagnostics({
     lane: 'split-upgrade',
     heading: 'SPLIT_PROCESS_UPGRADE_SMOKE',
@@ -289,7 +295,10 @@ test('the report holds only the whitelisted fields inside its fixed budgets', ()
   }
 })
 
-test('the default report and stderr summary never carry payload', () => {
+test('the default report and stderr summary never carry payload', (t) => {
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-report-root-')
+  process.env.TMPDIR = privateTmp
+  t.after(() => { delete process.env.TMPDIR })
   const diagnostics = createSmokeDiagnostics({
     lane: 'split-process',
     heading: 'SPLIT_PROCESS_SMOKE',
@@ -698,4 +707,100 @@ test('an existing --evidence file is replaced on a private inode, never rewritte
   assert.equal(statSync(evidence).mode & 0o777, 0o600, 'the FAIL twin must land private')
   assert.equal(JSON.parse(readFileSync(evidence, 'utf8')).category, 'INPUT_UNQUALIFIED')
   assert.deepEqual(readdirSync(dir).filter(name => name.includes('.tmp')), [], 'no temp file may survive')
+})
+
+test('every default lane output line is either a fixed marker or a whitelisted field', () => {
+  // The failpoint cleanup proof is a qualification-only diagnostic path: it must
+  // report the leftover count and the Seat verdict, never the thrown message.
+  const tSource = readFileSync(PROCESS_SCRIPT, 'utf8')
+  assert.match(tSource, /console\.error\(`FAILPOINT_SEAT_FAILURE seat=\$\{boundedName\(seatName\)\} the Seat stayed owned/u)
+  assert.doesNotMatch(tSource, /FAILPOINT_SEAT_FAILURE: \$\{error/u)
+  assert.match(tSource, /console\.error\(`FAILPOINT_CLEANUP leftovers=/u)
+  // And the two default failure lines stay fixed-shape for both lanes.
+  for (const source of [tSource, readFileSync(UPGRADE_SCRIPT, 'utf8')]) {
+    assert.match(source, /SMOKE_FAILURE: \$\{safeFailureSummary\(error\)\}/u)
+    assert.match(source, /SMOKE_FORENSICS: \$\{forensicErrorText\(error\)\}/u)
+  }
+})
+
+test('one real lane failure leaves exactly one report and one evidence twin', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-smoke-report-count-')
+  const result = runLane(UPGRADE_SCRIPT, [
+    '--old', syntheticTarball(dir, 'old', manifestOf('0.5.5-old.1', OTHER_PIN)),
+    '--new', syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN)),
+  ], dir)
+  assert.notEqual(result.status, 0)
+  const reports = readdirSync(dir, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && entry.name.startsWith('dsh-pi-tui-smoke-failure-'))
+  assert.equal(reports.length, 1, `one failure must leave one report directory: ${String(reports.length)}`)
+  const reportPath = join(dir, reports[0].name, 'failure.json')
+  assert.deepEqual(
+    readdirSync(join(dir, reports[0].name)),
+    ['failure.json'],
+    'the private report directory holds the report and nothing else',
+  )
+})
+
+test('an unknown error code is never reported, and never changes the category', () => {
+  const foreign = Object.assign(new Error('a parser or library message'), {
+    code: 'COOKIE_SENTINEL https://secret.invalid/x TOKEN_SENTINEL',
+  })
+  assert.equal(safeFailureSummary(foreign), 'INFRA_FAILURE')
+  const report = projectFailureReport({ lane: 'split-upgrade', category: 'INFRA_FAILURE', reason: foreign.code })
+  assert.equal(report.reason, undefined, 'an unknown code must not become reported text')
+  assert.equal(projectFailureReport({ lane: 'split-upgrade', reason: 'MADE_UP_REASON' }).reason, undefined)
+  // Declared codes survive, and every code the lanes actually use is declared.
+  assert.equal(safeFailureSummary(Object.assign(new Error('x'), { code: 'FRAME_WAIT_TIMEOUT' })),
+    'INFRA_FAILURE: FRAME_WAIT_TIMEOUT')
+  // Every code the lanes can raise must be declared, or it silently disappears
+  // from the report. Scanned at the waiter call sites, not on any `code:` text.
+  const declared = new Set(LANE_ERROR_CODES)
+  let scanned = 0
+  for (const [name, source] of [['T', readFileSync(PROCESS_SCRIPT, 'utf8')], ['U', readFileSync(UPGRADE_SCRIPT, 'utf8')]]) {
+    // A waiter failure site: fail('<category>', '<code>').
+    for (const match of source.matchAll(/\bfail\(\s*'([A-Z_]+)'\s*,\s*'([A-Z0-9_]+)'/gu)) {
+      scanned += 1
+      assert.ok(FAILURE_CATEGORIES.includes(match[1]), `${name} raises an undeclared category: ${match[1]}`)
+      assert.ok(declared.has(match[2]), `${name} raises an undeclared code: ${match[2]}`)
+    }
+    // A direct construction: the facts object names its code next to its label.
+    for (const match of source.matchAll(/code: '([A-Z0-9_]+)',\s*\n\s*waitLabel:/gu)) {
+      scanned += 1
+      assert.ok(declared.has(match[1]), `${name} reports an undeclared code: ${match[1]}`)
+    }
+  }
+  assert.ok(scanned >= 14, `the call-site scan found only ${String(scanned)} codes; the guard went vacuous`)
+  // The other direction: a declared code nobody raises is dead vocabulary.
+  const allSources = [
+    readFileSync(PROCESS_SCRIPT, 'utf8'),
+    readFileSync(UPGRADE_SCRIPT, 'utf8'),
+    readFileSync(LIB, 'utf8'),
+  ].join('\n')
+  assert.deepEqual(
+    LANE_ERROR_CODES.filter(code => !allSources.includes(`'${code}'`)),
+    [],
+    'every declared code must be raised by some lane path',
+  )
+})
+
+test('a PASS that cannot land its requested evidence document fails instead', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-evidence-unwritable-')
+  const readOnly = join(dir, 'read-only')
+  mkdirSync(readOnly, { mode: 0o500 })
+  try {
+    const stderr = captureStderr(() => assert.throws(
+      () => writeRequestedEvidence(join(readOnly, 'evidence.json'), { status: 'PASS' }),
+      error => error.category === 'INFRA_FAILURE' && error.code === 'EVIDENCE_WRITE_FAILED',
+    ))
+    assert.match(stderr, /DIAGNOSTIC_WRITE_FAILURE/u, 'the write failure is still announced')
+    assert.ok(!stderr.includes(readOnly), `the path must not be echoed:\n${stderr}`)
+  } finally {
+    chmodSync(readOnly, 0o700)
+  }
+  // And the announcement order makes it impossible to print PASS first.
+  const source = readFileSync(UPGRADE_SCRIPT, 'utf8')
+  assert.ok(source.indexOf('writeRequestedEvidence(options.evidence, evidence)') < source.indexOf("'SPLIT_UPGRADE_SMOKE_PASS"),
+    'the PASS marker may only be written after the requested evidence document landed')
 })

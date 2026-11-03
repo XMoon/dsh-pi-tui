@@ -89,6 +89,54 @@ const RELOAD_NOTICE_LINE = /^\s*(?:✗|ℹ) Client reload (?:skipped|blocked|fai
 /** The three official telemetry event keys a report may name. */
 const EVENT_KEYS = Object.freeze(['m4a0', 'm4r', 'm4b2s'])
 
+/**
+ * The CLOSED set of stable codes the lanes may ever report as a `reason`.
+ *
+ * `error.code` is not trustworthy text: a parser, a filesystem call or a foreign
+ * library can set it to anything. Only a code declared here is ever projected;
+ * an unknown one leaves the report at the category, so a stray `code` field can
+ * neither reach the default report nor change its classification. The tooling
+ * guard test proves every code literal the lanes use appears in this set.
+ */
+export const LANE_ERROR_CODES = Object.freeze([
+  'INPUT_DSH_PIN_MISSING_OR_INVALID',
+  'INPUT_DSH_PIN_MISMATCH',
+  'RECORD_READ_FAILED',
+  'RECORD_WAIT_TIMEOUT',
+  'PROCESS_EXITED_BEFORE_RECORD',
+  'PROCESS_EXIT_TIMEOUT',
+  'PROCESS_EXITED_BEFORE_FRAME',
+  'FRAME_WAIT_TIMEOUT',
+  'PROCESS_EXITED_BEFORE_COMPOSER',
+  'COMPOSER_WAIT_TIMEOUT',
+  'COMPOSER_CLEAR_TIMEOUT',
+  'NOTICE_WAIT_TIMEOUT',
+  'PROCESS_EXITED_BEFORE_NOTICE',
+  'PAINTED_NOTICE_MISMATCH',
+  'PROCESS_REFUSED_RELOAD',
+  'PROCESS_IGNORED_RELOAD',
+  'HANDOFF_WAIT_TIMEOUT',
+  'PROCESS_EXITED_BEFORE_HANDOFF',
+  'EVIDENCE_WRITE_FAILED',
+])
+
+/** A POSIX errno NAME (`EACCES`, `ENOENT`, …) is a fixed vocabulary. */
+const ERRNO_NAME = /^E[A-Z]{2,12}$/u
+
+function laneCodeOrUndefined(value) {
+  return LANE_ERROR_CODES.includes(value) ? value : undefined
+}
+
+function errnoOrUndefined(value) {
+  return typeof value === 'string' && ERRNO_NAME.test(value) ? value : undefined
+}
+
+/** The only diagnostic detail a write failure may ever print: its errno name. */
+function writeFailureLine(error) {
+  const code = errnoOrUndefined(error?.code)
+  return code === undefined ? 'DIAGNOSTIC_WRITE_FAILURE' : `DIAGNOSTIC_WRITE_FAILURE: ${code}`
+}
+
 const MAX_CHECKPOINTS = 24
 const MAX_PROCESSES = 8
 const MAX_PROCESS_EVENTS = 8
@@ -103,7 +151,7 @@ function bounded(value, limit) {
   return clean === '' ? undefined : clean
 }
 
-function boundedName(value) {
+export function boundedName(value) {
   return bounded(value, MAX_NAME_CHARS)
 }
 
@@ -152,7 +200,7 @@ export class SplitSmokeWaitError extends Error {
     ].filter(part => part !== undefined).join(': '))
     this.name = 'SplitSmokeWaitError'
     this.category = FAILURE_CATEGORIES.includes(category) ? category : 'INFRA_FAILURE'
-    this.code = boundedName(facts.code)
+    this.code = laneCodeOrUndefined(facts.code)
     this.waitLabel = label
     this.processRole = role
     this.elapsedMs = Number.isInteger(facts.elapsedMs) ? facts.elapsedMs : undefined
@@ -334,7 +382,9 @@ export function projectFailureReport(input = {}) {
     status: 'FAIL',
     category: FAILURE_CATEGORIES.includes(input.category) ? input.category : 'INFRA_FAILURE',
   }
-  const reason = boundedName(input.reason)
+  // The code whitelist has exactly one home: an unknown `code` leaves the report
+  // at its category instead of becoming reported text.
+  const reason = laneCodeOrUndefined(input.reason)
   if (reason !== undefined) report.reason = reason
   const checkpoint = boundedName(input.checkpoint)
   if (checkpoint !== undefined) report.checkpoint = checkpoint
@@ -383,7 +433,7 @@ export function failureCategoryOf(error) {
  */
 export function safeFailureSummary(error) {
   const category = failureCategoryOf(error)
-  const reason = boundedName(error?.code)
+  const reason = laneCodeOrUndefined(error?.code)
   return reason === undefined ? category : `${category}: ${reason}`
 }
 
@@ -414,7 +464,7 @@ export function writePrivateReport(path, value) {
     return true
   } catch (error) {
     try { rmSync(tempPath, { force: true }) } catch { /* the original failure still owns the exit */ }
-    process.stderr.write(`DIAGNOSTIC_WRITE_FAILURE: ${boundedName(error?.code ?? error?.name) ?? 'unknown'}\n`)
+    process.stderr.write(`${writeFailureLine(error)}\n`)
     return false
   }
 }
@@ -433,7 +483,7 @@ export function writeFailureReport(report) {
     chmodSync(path, 0o600)
     return path
   } catch (error) {
-    process.stderr.write(`DIAGNOSTIC_WRITE_FAILURE: ${boundedName(error?.code ?? error?.name) ?? 'unknown'}\n`)
+    process.stderr.write(`${writeFailureLine(error)}\n`)
     return undefined
   }
 }
@@ -477,7 +527,7 @@ export function emitInputFailure({ lane, heading, error, reason, evidencePath })
   const report = projectFailureReport({
     lane,
     category: failureCategoryOf(error),
-    reason: reason ?? boundedName(error?.code),
+    reason: reason ?? error?.code,
   })
   const path = writeFailureReport(report)
   process.stderr.write(`${heading}_FAILURE\n${formatFailureSummary(report, path)}\n`)
@@ -527,7 +577,7 @@ export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, a
       const report = projectFailureReport({
         lane,
         category: extra.category ?? failureCategoryOf(error),
-        reason: extra.reason ?? boundedName(error?.code),
+        reason: extra.reason ?? error?.code,
         checkpoint: extra.checkpoint ?? steps.at(-1)?.name,
         waitLabel: extra.waitLabel ?? error?.waitLabel,
         elapsedMs: extra.elapsedMs ?? error?.elapsedMs,
