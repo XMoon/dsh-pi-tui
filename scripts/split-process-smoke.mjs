@@ -851,6 +851,29 @@ export async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs =
 }
 
 /** Wait for one durable Host Session event matching the predicate. */
+/**
+ * Wait for one durable Host Session event that satisfies `predicate` AND appears
+ * at or after the durable index `afterIndex` (a snapshot taken BEFORE the action
+ * under test). A Session that already carries earlier turns needs this: a bare
+ * `turn/end` wait would happily match history and report a fact the new write
+ * never produced.
+ */
+export async function waitForHostSessionEventAfter(dshHome, sessionId, afterIndex, predicate, label, timeoutMs = 60_000) {
+  const started = Date.now()
+  const deadline = started + timeoutMs
+  while (Date.now() < deadline) {
+    const events = hostSessionEvents(dshHome, sessionId)
+    const event = events === undefined ? undefined : events.slice(afterIndex).find(predicate)
+    if (event !== undefined) return event
+    await sleep(50)
+  }
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'SESSION_EVENT_WAIT_TIMEOUT',
+    waitLabel: label,
+    elapsedMs: Date.now() - started,
+  })
+}
+
 export async function waitForHostSessionEvent(dshHome, sessionId, predicate, label, timeoutMs = 60_000) {
   const started = Date.now()
   const deadline = started + timeoutMs
@@ -2885,7 +2908,9 @@ async function main() {
       assert(privateProof.bareOfficial === true,
         `T36 the bare query did not reach the official Host provider (observed ${String(privateProof.bareCount)} items)`)
       assert(privateProof.officialEmpty === true,
-        'T36 an authoritative official [] did not stay empty')
+        'T36 an authoritative official [] did not stay empty (a business error is never an empty answer)')
+      assert(privateProof.officialExcludesDist === true,
+        `T36 the official bare route did not authoritatively exclude dist/ (kind ${String(privateProof.officialExcludesDistKind)})`)
       assert(privateProof.scopedOk === true && privateProof.scopedHostScanner === true,
         `T36 the explicit-path scope did not reach the Host scanner (observed ${String(privateProof.scopedCount)} items)`)
       assert(privateProof.homeAbsolute === true,
@@ -3324,6 +3349,10 @@ async function main() {
           `T61 the draft was restored ${String(restoredOccurrences)} times, expected exactly once`)
         // Same Client process, CURRENT generation: a fresh prompt must commit.
         await parked.clearComposerDraft(staleToken)
+        // Watermark: this Session already carries earlier turns from this lane, so a
+        // bare `turn/end` wait could match HISTORY. Every fact below must be a NEW
+        // durable event, i.e. one with an index at or after this snapshot.
+        const beforeLive = (hostSessionEvents(dshHome, sessionA) ?? []).length
         parked.send(`${liveToken}\r`)
         const liveCommit = await (async () => {
           const deadline = Date.now() + 120_000
@@ -3339,7 +3368,15 @@ async function main() {
         // Ordering witness, not a timer: the new generation's turn ENDS after the
         // stale refusal, and the Host durable log still carries zero stale
         // writes — a dispatched superseded write would be ordered before it.
-        await waitForHostSessionEvent(dshHome, sessionA, event => event.type === 'turn/end', 'T61 new-generation turn/end', 120_000)
+        const liveTurnEnd = await waitForHostSessionEventAfter(
+          dshHome,
+          sessionA,
+          beforeLive,
+          event => event.type === 'turn/end',
+          'T61 new-generation turn/end',
+          120_000,
+        )
+        assert(liveTurnEnd !== undefined, 'T61 the new generation wrote no turn/end at all')
         assert(hostUserTexts(hostSessionEvents(dshHome, sessionA) ?? [])
           .filter(text => text === staleToken).length === 0,
         'T61 the superseded write was dispatched or replayed')
@@ -4577,13 +4614,29 @@ async function main() {
        * kernel seat and the launch material must be gone afterwards.
        */
       const stopSpawnedHost = async (hostPid, instanceId, label) => {
+        // The instance files live under the FULL 64-character scope id; ONLY the
+        // Linux abstract-socket NAME is truncated to 40 characters. Asserting the
+        // absence of those files under the socket suffix would silently inspect a
+        // directory that never exists. Both the presence check (while the Host is
+        // still running) and the absence check (after the official stop) therefore
+        // use the real scope directory, and the truncated spelling is asserted to
+        // be a NON-directory so this confusion cannot come back.
+        assert(typeof isolatedScopeId === 'string' && isolatedScopeId.length === 64,
+          `${label}: the lane never learned the full 64-character scope id`)
+        const scopeDir = join(dshHome, 'run', 'dsh-pi-tui', isolatedScopeId)
+        assert(existsSync(scopeDir), `${label}: the full-scope run directory is missing`)
+        assert(!existsSync(join(dshHome, 'run', 'dsh-pi-tui', isolatedScopeId.slice(0, 40))),
+          `${label}: a truncated 40-character scope directory must never exist`)
+        const instancePath = join(scopeDir, 'instance.json')
+        const launchPath = join(scopeDir, 'launch.json')
+        assert(existsSync(instancePath),
+          `${label}: the running spawned Host published no instance record to reclaim`)
+        assert(existsSync(launchPath),
+          `${label}: the running spawned Host published no launch material to reclaim`)
         process.kill(hostPid, 'SIGTERM')
         await waitGone(hostPid, 30_000)
         assert(!alive(hostPid), `${label}: the spawned Host survived the official SIGTERM`)
         await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 15_000)
-        const scopeDir = join(dshHome, 'run', 'dsh-pi-tui', scopeSuffix)
-        const launchPath = join(scopeDir, 'launch.json')
-        const instancePath = join(scopeDir, 'instance.json')
         assert(!existsSync(launchPath), `${label}: the stopped Host left its launch material behind`)
         if (existsSync(instancePath)) {
           assert(readJson(instancePath)?.instanceId !== instanceId,
@@ -4851,8 +4904,13 @@ async function main() {
           'T65 cold-resume orphan settlement',
           120_000,
         )
-        assert(recovered.data?.reason?.kind !== 'completed',
-          'T65 the cold resume settled the lost Turn as completed')
+        // The official crash-recovery closer settles an orphaned turn with its own
+        // reason. "Not completed" would also accept an absent/unknown reason, so the
+        // exact taxonomy is asserted, on the Session's ONE open turn.
+        assert(recovered.data?.reason?.kind === 'interrupted',
+          `T65 the cold resume settled the lost Turn as ${String(recovered.data?.reason?.kind)}`)
+        assert((hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'turn/start').length === 1,
+          'T65 the recovered settlement does not belong to the single lost Turn')
         const afterResume = hostSessionEvents(dshHome, sessionId) ?? []
         assert(hostUserTexts(afterResume).filter(text => text === 't65 prompt').length === 1,
           'T65 the cold resume replayed the unknown write')
@@ -4940,7 +4998,10 @@ async function main() {
         const { client: resumed } = await startC1Client('T66 cold-resume Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
         await resumed.waitForScreen(unknownToken, 'T66 cold-resume history')
         const recovered = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T66 cold-resume orphan settlement', 120_000)
-        assert(recovered.data?.reason?.kind !== 'completed', 'T66 the cold resume reported the lost Turn as completed')
+        assert(recovered.data?.reason?.kind === 'interrupted',
+          `T66 the cold resume settled the unknown write's Turn as ${String(recovered.data?.reason?.kind)}`)
+        assert((hostSessionEvents(dshHome, sessionId) ?? []).filter(event => event.type === 'turn/start').length === 1,
+          'T66 the recovered settlement does not belong to the single lost Turn')
         assert(!(await resumed.viewport()).join('\n').includes('long-turn answer'),
           'T66 the cold resume painted a fabricated answer')
         const afterResume = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
