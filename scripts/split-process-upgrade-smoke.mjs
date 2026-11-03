@@ -74,14 +74,17 @@ import {
 } from './pi2dsh-compat-smoke.mjs'
 import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
 import {
-  boundedErrorSummary,
   classifyHandoffRejection,
   classifyReloadNotices,
   createSmokeDiagnostics,
+  emitInputFailure,
+  forensicErrorText,
   reloadNoticeTypeForText,
   requireExactSmokeDshPin,
+  safeFailureSummary,
   smokeArtifactIdentity,
   SplitSmokeWaitError,
+  writePrivateReport,
 } from './lib/split-smoke-diagnostics.mjs'
 import { EntryProcess, SurfaceEntryProcess, hostSessionEvents, waitForHostSessionEvent, writeC1WorkFixture } from './split-process-smoke.mjs'
 
@@ -1365,40 +1368,55 @@ async function runReloadSourceIsolationRound(context) {
 }
 
 async function main() {
-  const options = parseUpgradeArguments(process.argv.slice(2))
-  if (options.help === true) {
-    process.stdout.write(`${usage()}\n`)
-    return
-  }
-  const oldArtifact = inspectArtifact(options.old, 'old')
-  const newArtifact = inspectArtifact(options.new, 'new')
-  if (oldArtifact.sha256 === newArtifact.sha256) {
-    throw new Error('split upgrade smoke: --old and --new must be different packaged bytes')
-  }
-  if (oldArtifact.manifest.version === newArtifact.manifest.version) {
-    throw new Error('split upgrade smoke: --old and --new must carry different package versions')
-  }
-  const targetDshVersion = npmDshVersion()
-  diagnostics = createSmokeDiagnostics({
-    lane: 'split-upgrade',
-    heading: 'SPLIT_PROCESS_UPGRADE_SMOKE',
-    marker: 'U',
-    runtimeDshPin: targetDshVersion,
-    artifacts: [
-      smokeArtifactIdentity('old', oldArtifact.manifest, oldArtifact.sha256),
-      smokeArtifactIdentity('new', newArtifact.manifest, newArtifact.sha256),
-    ],
-  })
-  // Input qualification BEFORE any install (the same exact-pin rule the
-  // production Client reexec preflight applies): a differently pinned artifact
-  // is an invalid test pairing, not a product result to observe.
+  // Argument parsing and artifact inspection share one input failure boundary:
+  // nothing exists yet, so every failure here — a bad pairing as well as a
+  // refused pin — gets the same fixed safe projection, including the
+  // `--evidence` FAIL twin.
+  let options
+  let oldArtifact
+  let newArtifact
+  let targetDshVersion
   try {
+    options = parseUpgradeArguments(process.argv.slice(2))
+    if (options.help === true) {
+      process.stdout.write(`${usage()}\n`)
+      return
+    }
+    oldArtifact = inspectArtifact(options.old, 'old')
+    newArtifact = inspectArtifact(options.new, 'new')
+    if (oldArtifact.sha256 === newArtifact.sha256) {
+      throw new Error('split upgrade smoke: --old and --new must be different packaged bytes')
+    }
+    if (oldArtifact.manifest.version === newArtifact.manifest.version) {
+      throw new Error('split upgrade smoke: --old and --new must carry different package versions')
+    }
+    targetDshVersion = npmDshVersion()
+    diagnostics = createSmokeDiagnostics({
+      lane: 'split-upgrade',
+      heading: 'SPLIT_PROCESS_UPGRADE_SMOKE',
+      marker: 'U',
+      runtimeDshPin: targetDshVersion,
+      artifacts: [
+        smokeArtifactIdentity('old', oldArtifact.manifest, oldArtifact.sha256),
+        smokeArtifactIdentity('new', newArtifact.manifest, newArtifact.sha256),
+      ],
+    })
+    // Input qualification BEFORE any install (the same exact-pin rule the
+    // production Client reexec preflight applies): a differently pinned artifact
+    // is an invalid test pairing, not a product result to observe.
     requireExactSmokeDshPin('old', oldArtifact.manifest, targetDshVersion)
     requireExactSmokeDshPin('new', newArtifact.manifest, targetDshVersion)
   } catch (error) {
-    // The preflight happens before any work root exists, so this report is the
-    // safe input identity alone and never reads a process.
-    diagnostics.reportFailure(error, { evidencePath: options.evidence })
+    if (diagnostics === undefined) {
+      emitInputFailure({
+        lane: 'split-upgrade',
+        heading: 'SPLIT_PROCESS_UPGRADE_SMOKE',
+        error,
+        evidencePath: options?.evidence,
+      })
+    } else {
+      diagnostics.reportFailure(error, { evidencePath: options.evidence })
+    }
     throw error
   }
   // The startup identity is announced only AFTER preflight qualified it.
@@ -2284,7 +2302,9 @@ async function main() {
     process.stdout.write(`${JSON.stringify(evidence, null, 2)}\n`)
     process.stdout.write('SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)\n')
     if (options.evidence !== undefined) {
-      writeFileSync(options.evidence, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 })
+      // Same private-write contract as the FAIL twin: replace the target on a
+      // fresh `0600` inode instead of relying on an existing file's mode.
+      writePrivateReport(options.evidence, evidence)
     }
   } catch (error) {
     // Report BEFORE the cleanup below: the projection reads the still-live
@@ -2312,9 +2332,13 @@ async function main() {
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => {
-    // One concise final line; the structured report (written BEFORE the work
-    // root was deleted) owns the diagnosis.
-    process.stderr.write(`SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: ${boundedErrorSummary(error)}\n`)
+    // One concise final line: the fixed category and its stable code. The
+    // structured report (written BEFORE the work root was deleted) owns the
+    // safe diagnosis; an `Error.message` of any origin is never copied here.
+    process.stderr.write(`SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: ${safeFailureSummary(error)}\n`)
+    // Forensics stay explicit: `KEEP` is the operator's own preserved-scene
+    // mode, and this is the only path that prints the raw error text.
+    if (KEEP) process.stderr.write(`SPLIT_PROCESS_UPGRADE_SMOKE_FORENSICS: ${forensicErrorText(error)}\n`)
     process.exitCode = 1
   })
 }

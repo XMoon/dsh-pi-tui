@@ -108,8 +108,8 @@ test('the candidate pin is qualified against the exact DSH runtime before any se
     'the exact-pin rule is shared with the U lane, not restated per script')
   const main = source.slice(source.indexOf('async function main()'))
   const validate = main.indexOf('const candidateManifest = validateCandidateTarball(tarball)')
-  const sha = main.indexOf('const candidateSha256 =')
-  const target = main.indexOf('const targetDshVersion = npmDshVersion()')
+  const sha = main.indexOf('candidateSha256 = createHash(')
+  const target = main.indexOf('targetDshVersion = npmDshVersion()')
   const guard = main.indexOf("requireExactSmokeDshPin('candidate', candidateManifest, targetDshVersion)")
   const distribution = main.indexOf('loadDshDistribution({ mode: ')
   // Located by shape, never by the temp-API token: the temp-hygiene gate text-scans
@@ -317,7 +317,13 @@ test('the default failure diagnostics are wired into the T lane, not merely avai
   // One final synchronous JSONL read removes the poller-versus-snapshot tail race.
   assert.match(source, /finalRecordRead\(label\)/u)
   // The final stderr line stays concise even for an unexpected error shape.
-  assert.match(source, /SPLIT_PROCESS_SMOKE_FAILURE: \$\{boundedErrorSummary\(error\)\}/u)
+  // The default final line is the fixed classification only; the raw error text
+  // appears in one place, and only when the operator asked for a kept scene.
+  assert.match(source, /SPLIT_PROCESS_SMOKE_FAILURE: \$\{safeFailureSummary\(error\)\}/u)
+  assert.match(source, /if \(KEEP\) console\.error\(`SPLIT_PROCESS_SMOKE_FORENSICS: \$\{forensicErrorText\(error\)\}`\)/u)
+  assert.doesNotMatch(source, /SPLIT_PROCESS_SMOKE_FAILURE: \$\{error instanceof Error \? error\.message/u)
+  // A failure before the collector existed still leaves one safe report.
+  assert.match(main, /if \(diagnostics === undefined\) emitInputFailure\(\{ lane: 'split-process'/u)
 })
 
 test('every real Client-detach recovery case observes the pending source as UNKNOWN', () => {

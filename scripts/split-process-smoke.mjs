@@ -78,9 +78,11 @@ import {
 } from './pi2dsh-compat-smoke.mjs'
 import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
 import {
-  boundedErrorSummary,
   createSmokeDiagnostics,
+  emitInputFailure,
+  forensicErrorText,
   requireExactSmokeDshPin,
+  safeFailureSummary,
   smokeArtifactIdentity,
   SplitSmokeWaitError,
 } from './lib/split-smoke-diagnostics.mjs'
@@ -1119,26 +1121,32 @@ function clientStatus(client) {
 }
 
 async function main() {
-  const tarball = resolveTarball(candidateArgument(process.argv.slice(2)))
-  const candidateManifest = validateCandidateTarball(tarball)
+  // The input phase has its own failure boundary: nothing exists yet, so the
+  // lane may only emit the fixed safe projection (identity when the manifest
+  // was readable, processes when none exist).
+  let tarball
+  let targetDshVersion
   /** The exact candidate artifact this run qualifies; re-read at the end. */
-  const candidateSha256 = createHash('sha256').update(readFileSync(tarball)).digest('hex')
-  const targetDshVersion = npmDshVersion()
-  diagnostics = createSmokeDiagnostics({
-    lane: 'split-process',
-    heading: 'SPLIT_PROCESS_SMOKE',
-    marker: 'T',
-    runtimeDshPin: targetDshVersion,
-    artifacts: [smokeArtifactIdentity('candidate', candidateManifest, candidateSha256)],
-  })
-  // Input qualification BEFORE any install: the candidate must declare this
-  // checkout's exact DSH runtime pin, the same rule the production Client
-  // reexec preflight applies to a replacement target.
+  let candidateSha256
   try {
+    tarball = resolveTarball(candidateArgument(process.argv.slice(2)))
+    const candidateManifest = validateCandidateTarball(tarball)
+    candidateSha256 = createHash('sha256').update(readFileSync(tarball)).digest('hex')
+    targetDshVersion = npmDshVersion()
+    diagnostics = createSmokeDiagnostics({
+      lane: 'split-process',
+      heading: 'SPLIT_PROCESS_SMOKE',
+      marker: 'T',
+      runtimeDshPin: targetDshVersion,
+      artifacts: [smokeArtifactIdentity('candidate', candidateManifest, candidateSha256)],
+    })
+    // Input qualification BEFORE any install: the candidate must declare this
+    // checkout's exact DSH runtime pin, the same rule the production Client
+    // reexec preflight applies to a replacement target.
     requireExactSmokeDshPin('candidate', candidateManifest, targetDshVersion)
   } catch (error) {
-    // No process exists yet: the report is the safe input identity only.
-    diagnostics.reportFailure(error)
+    if (diagnostics === undefined) emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error })
+    else diagnostics.reportFailure(error)
     throw error
   }
   // The startup identity is announced only AFTER preflight qualified it.
@@ -4360,10 +4368,13 @@ async function main() {
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => {
-    // One concise final line. The structured report (written BEFORE the work
-    // root was deleted) owns the diagnosis; this line never appends terminal
-    // bytes, captured stderr or record contents.
-    console.error(`SPLIT_PROCESS_SMOKE_FAILURE: ${boundedErrorSummary(error)}`)
+    // One concise final line: the fixed category and its stable code. The
+    // structured report (written BEFORE the work root was deleted) owns the
+    // safe diagnosis; an `Error.message` of any origin is never copied here.
+    console.error(`SPLIT_PROCESS_SMOKE_FAILURE: ${safeFailureSummary(error)}`)
+    // Forensics stay explicit: `KEEP` is the operator's own preserved-scene
+    // mode, and this is the only path that prints the raw error text.
+    if (KEEP) console.error(`SPLIT_PROCESS_SMOKE_FORENSICS: ${forensicErrorText(error)}`)
     process.exitCode = 1
   })
 }

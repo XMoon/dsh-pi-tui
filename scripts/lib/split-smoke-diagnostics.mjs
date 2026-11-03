@@ -20,7 +20,7 @@
  * @module split-smoke-diagnostics
  */
 
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -372,28 +372,48 @@ export function failureCategoryOf(error) {
 }
 
 /**
- * The one concise final stderr line for a lane failure.
+ * The ONE concise final stderr line: the fixed category and its stable code.
  *
- * A classified waiter/input error is already a bounded projection, so it prints
- * verbatim. Any other error (a lane assertion or an install/environment
- * failure) is one collapsed printable line inside a fixed budget: the lane's
- * final summary stays readable without becoming a dump of terminal bytes,
- * captured stderr or an arbitrary `Error.message`.
+ * No `Error.message` of any origin reaches the default output — not a lane
+ * assertion, not a tar or parser failure, not a classified waiter error. The
+ * text of a waiter error is itself a projection of whitelisted fields, but the
+ * same fields already appear in the structured block the lane printed, so the
+ * final line adds nothing but the classification. Anything beyond that is
+ * forensics, and forensics is the operator's explicit `KEEP` run.
  */
-export function boundedErrorSummary(error, limit = 400) {
-  if (error instanceof SplitSmokeWaitError || error instanceof SplitSmokeInputError) {
-    return error.message
-  }
-  return bounded(error instanceof Error ? error.message : String(error ?? ''), limit) ?? '(no message)'
+export function safeFailureSummary(error) {
+  const category = failureCategoryOf(error)
+  const reason = boundedName(error?.code)
+  return reason === undefined ? category : `${category}: ${reason}`
 }
 
-/** Write the private `0600` report file; a diagnostic write never replaces the real failure. */
-function writePrivateJson(path, value) {
+/**
+ * The explicit forensic detail, printed ONLY when the operator already asked
+ * for the preserved work root (`KEEP`). The default and CI path never calls it.
+ */
+export function forensicErrorText(error, limit = 2_000) {
+  const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error ?? '')
+  return bounded(text, limit) ?? '(no detail)'
+}
+
+/**
+ * Write the private `0600` report file.
+ *
+ * The target is REPLACED, never rewritten in place: `writeFileSync({mode})`
+ * does not tighten the mode of an inode that already exists, and an existing
+ * symlink would be followed into whatever it points at. Writing an exclusive
+ * sibling and renaming it gives the reader one complete file with the private
+ * mode on a fresh inode. A diagnostic write never replaces the real failure.
+ */
+export function writePrivateReport(path, value) {
+  const tempPath = `${path}.${String(process.pid)}.tmp`
   try {
-    writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
-    chmodSync(path, 0o600)
+    writeFileSync(tempPath, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
+    chmodSync(tempPath, 0o600)
+    renameSync(tempPath, path)
     return true
   } catch (error) {
+    try { rmSync(tempPath, { force: true }) } catch { /* the original failure still owns the exit */ }
     process.stderr.write(`DIAGNOSTIC_WRITE_FAILURE: ${boundedName(error?.code ?? error?.name) ?? 'unknown'}\n`)
     return false
   }
@@ -444,6 +464,25 @@ export function formatFailureSummary(report, reportPath) {
   }
   add('report', reportPath)
   return lines.join('\n')
+}
+
+/**
+ * Emit the fixed failure projection for a lane error raised BEFORE its
+ * diagnostics collector existed (bad arguments, an unreadable or unnameable
+ * artifact, a missing pin source). There are no artifacts, processes or
+ * checkpoints to project, so none are invented: the report holds the lane, the
+ * category, the stable code and the target pin the lane could know.
+ */
+export function emitInputFailure({ lane, heading, error, reason, evidencePath }) {
+  const report = projectFailureReport({
+    lane,
+    category: failureCategoryOf(error),
+    reason: reason ?? boundedName(error?.code),
+  })
+  const path = writeFailureReport(report)
+  process.stderr.write(`${heading}_FAILURE\n${formatFailureSummary(report, path)}\n`)
+  if (evidencePath !== undefined) writePrivateReport(evidencePath, report)
+  return report
 }
 
 /**
@@ -503,7 +542,7 @@ export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, a
       })
       const path = writeFailureReport(report)
       process.stderr.write(`${heading}_FAILURE\n${formatFailureSummary(report, path)}\n`)
-      if (evidencePath !== undefined) writePrivateJson(evidencePath, report)
+      if (evidencePath !== undefined) writePrivateReport(evidencePath, report)
       return report
     },
   }
