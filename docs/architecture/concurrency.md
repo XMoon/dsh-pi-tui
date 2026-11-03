@@ -646,8 +646,11 @@ behind the quiesce await can therefore be stranded by the very exit it must
 survive. The checkpoint uses the commit-time owner only — never a re-read —
 and a failure never rolls the child back or misreports the switch: the
 surface warns "session committed, durability checkpoint failed" with the
-original error (and the diagnostic channel records it when the surface is
-already disposed).
+original error. Both the diagnostic and that single notice are emitted AT
+the failure itself, before the next unbounded await, because the OLD owner's
+retirement and the child quiesce can outlive the process's shutdown budget; a
+later summary re-logs the failure as part of the transaction but never
+re-reports it as a second durability failure.
 
 A flush can also be OVERTAKEN while it is in flight: DSH re-checks the
 handle's closing state inside the flush's own turn, so a `close()` that
@@ -656,18 +659,20 @@ may conclude from that:
 
 - An explicit flush is not ISSUED once the lifecycle has aborted (the exit
   owns durability then). This is a decision before the call, never a
-  re-reading of its failure.
+  re-reading of its failure: refusing to START a shutdown flush and hiding a
+  failure of one already started are different rules and never merge.
 - Once a flush HAS been issued, a rejection is always recorded and
   reported. The lifecycle flag is not evidence about the cause:
   `sessions.flush` awaits every `session/flush` listener, so the failure can
   be a real persistence I/O error rather than a close takeover, and an
-  aborted lifecycle does not distinguish them. Durability is attributed by
-  the regime that owns it when the phases finish — the live-Host flush while
-  the Host is live, otherwise the shutdown dispose that joins the close —
-  but the failing phase stays in the report and reaches the user (or the
-  diagnostics when the surface is gone), including on the aborted
-  post-commit early return. No error is reclassified by error text, and no
-  error is swallowed because the lifecycle happens to be aborting.
+  aborted lifecycle does not distinguish them. A recorded flush failure
+  therefore always owns durability for the report — a later successful
+  close proves only the close's own drain, never that every listener
+  succeeded. Only when no flush failure happened does the shutdown dispose
+  decide (durability unconfirmed). The failing phase stays in the report and
+  reaches the user (or the diagnostics when the surface is gone), including
+  on the aborted post-commit early return. No error is reclassified by error
+  text or by the lifecycle flag.
 
 A never-materialized session is the exception the checkpoint placement above
 exists for: the close cannot be its durability owner, which is why the

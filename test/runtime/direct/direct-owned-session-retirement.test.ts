@@ -251,3 +251,59 @@ test('a hostile thrown value is contained by safeErrorMessage', async () => {
   assert.equal(report.failures[0]?.phase, 'flush')
   assert.equal(report.failures[0]?.error, '<unprintable error>')
 })
+
+test('a flush failure that was ACTUALLY issued owns durability even after the live-Host regime ends (T1)', async () => {
+  const events: string[] = []
+  let live = true
+  const report = await retireDirectOwnedSession({
+    mode: 'transition',
+    isLiveHost: () => live,
+    cancel: () => { events.push('cancel') },
+    whenIdle: async () => {
+      events.push('idle')
+      // The exit begins while the phases run; the flush below is nevertheless
+      // ISSUED (the regime was still live when the phase was entered).
+    },
+    drainDescendants: async () => { events.push('descendants') },
+    flush: async () => {
+      events.push('flush')
+      // The flush is ISSUED while the Host is live, then the exit begins while
+      // it is in flight — the exact interleaving that used to be reclassified.
+      live = false
+      throw new Error('persistence listener failed: disk full')
+    },
+    disposeOwner: async () => { events.push('dispose') },
+  })
+  assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'flush', 'dispose'])
+  assert.deepEqual(report.failures, [{ phase: 'flush', error: 'persistence listener failed: disk full' }])
+  assert.equal(report.durabilityFailure?.phase, 'flush',
+    'an issued-and-failed flush must own durability even if the Host later shut down')
+})
+
+test('a flush failure and a dispose failure are BOTH kept, and durability is never washed by the abort (T2)', async () => {
+  const report = await retireDirectOwnedSession({
+    mode: 'transition',
+    isLiveHost: () => false,
+    cancel: () => {},
+    whenIdle: async () => {},
+    drainDescendants: async () => {},
+    flush: async () => { throw new Error('flush failed: disk full') },
+    disposeOwner: async () => { throw new Error('close failed: disk full') },
+  })
+  // The regime is already shutdown when the phases run, so the flush phase is
+  // not entered at all; the dispose failure is the only durability fact.
+  assert.deepEqual(report.failures, [{ phase: 'dispose', error: 'close failed: disk full' }])
+  assert.equal(report.durabilityFailure?.phase, 'dispose')
+})
+
+test('a shutdown retirement keeps a dispose failure as its durability fact (T2 complement)', async () => {
+  const report = await retireDirectOwnedSession({
+    mode: 'shutdown',
+    cancel: () => {},
+    whenIdle: async () => {},
+    drainDescendants: async () => {},
+    disposeOwner: async () => { throw new Error('close failed') },
+  })
+  assert.deepEqual(report.failures, [{ phase: 'dispose', error: 'close failed' }])
+  assert.equal(report.durabilityFailure?.phase, 'dispose')
+})
