@@ -269,6 +269,27 @@ test('the manual reload ignores a live qualification target override and resolve
   assert.match(source, /runReloadSourceIsolationRound\(\{/u)
 })
 
+test('the upgrade lane declares every setup local it later assigns', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const main = source.slice(source.indexOf('async function main()'))
+  // A bare assignment to an undeclared name is a ReferenceError at run time and
+  // only the REAL lane reaches this code, so pin the declarations here.
+  for (const name of ['distribution', 'workRoot', 'home', 'dshHome', 'harnessDir',
+    'sideBuildDir', 'sideBuildPackagePath', 'scratch', 'env', 'evidence']) {
+    assert.match(main, new RegExp(`let ${name}$`, 'mu'),
+      `the setup must declare \`${name}\` before assigning it`)
+    assert.match(main, new RegExp(`^\\s*${name} = `, 'mu'),
+      `the setup must assign \`${name}\` inside the boundary`)
+  }
+  // The declaration must precede the first assignment for each of them.
+  for (const name of ['distribution', 'workRoot', 'dshHome', 'evidence']) {
+    const declared = main.search(new RegExp(`let ${name}$`, 'mu'))
+    const assigned = main.search(new RegExp(`^\\s*${name} = `, 'mu'))
+    assert.ok(declared >= 0 && assigned > declared,
+      `\`${name}\` must be declared before its first assignment`)
+  }
+})
+
 test('the upgrade setup shares the report and cleanup boundary with the run', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   const main = source.slice(source.indexOf('async function main()'))
