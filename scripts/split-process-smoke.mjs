@@ -388,7 +388,13 @@ export class SurfaceEntryProcess {
     }, 25)
   }
 
-  /** Parse only COMPLETE lines: the entry appends while this polls. */
+  /**
+   * Parse only COMPLETE lines: the entry appends while this polls.
+   *
+   * A malformed line stays a real failure with its own text here — this private
+   * `recordPath` JSONL is the record authority, and the bounded default report
+   * never copies it.
+   */
   readRecords() {
     if (!existsSync(this.recordPath)) return
     const text = readFileSync(this.recordPath, 'utf8')
