@@ -38,6 +38,12 @@ test('the TSP composer inserts verbatim at the caret', () => {
   )
 })
 
+test('a paste body beyond the candidate bound proves no span (no unbounded tracking)', () => {
+  const body = `/tmp/${'a'.repeat(1000)}.png `
+  assert.ok(body.length > 1000)
+  assert.equal(pastedBodySpan('', 0, body, body.length, body), undefined)
+})
+
 test('a transformed insertion (large-paste marker / control filtering) proves no span', () => {
   const before = ''
   const after = '[paste #1 1234 chars]'

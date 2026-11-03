@@ -28,11 +28,31 @@ const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif']
  *  so a candidate can never be a paste-marker insertion. */
 export const PASTE_CANDIDATE_MAX_LENGTH = 1000
 
-/** Whether `text` contains an ASCII control character. */
+/** Whether `text` contains a control character (Unicode Cc: C0, DEL and C1). */
 function hasControlCharacter(text: string): boolean {
   for (let index = 0; index < text.length; index += 1) {
     const code = text.charCodeAt(index)
-    if (code < 0x20 || code === 0x7f) return true
+    if (code < 0x20 || (code >= 0x7f && code <= 0x9f)) return true
+  }
+  return false
+}
+
+/**
+ * Whether an interior ` /` starts a SECOND absolute path.
+ *
+ * A paste of several space-separated file paths must not be read as one
+ * image, but the frozen grammar interprets the body verbatim and accepts
+ * interior spaces as part of a single POSIX path. Only a ` /` whose PREFIX is
+ * itself an absolute path with a candidate image extension marks another
+ * path (`/tmp/a.png /tmp/b.png`); a legal single path whose directory name
+ * ends with a space (`/tmp/foo /bar.png`) stays one path.
+ */
+function startsSecondAbsoluteImagePath(path: string): boolean {
+  let index = path.indexOf(' /')
+  while (index !== -1) {
+    const prefix = path.slice(0, index)
+    if (prefix.startsWith('/') && !prefix.startsWith('//') && hasImageExtension(prefix)) return true
+    index = path.indexOf(' /', index + 1)
   }
   return false
 }
@@ -73,11 +93,10 @@ export function candidateImagePathFromPaste(text: string): { path: string } | un
   if (path === '' || path.endsWith(PASTE_SEPARATOR)) return undefined
   // Absolute POSIX path only: a protocol-relative `//host/...` is a URL.
   if (!path.startsWith('/') || path.startsWith('//')) return undefined
-  // Several space-separated absolute paths are ONE terminal paste body too.
-  // A space immediately before a `/` starts a new path component that looks
-  // like a second absolute path — the concatenated-path shape — while ordinary
-  // interior spaces (CJK, "My Documents") are followed by a name character.
-  if (path.includes(' /')) return undefined
+  // Several space-separated absolute image paths are ONE terminal paste body
+  // too; see {@link startsSecondAbsoluteImagePath} for the precise rule that
+  // never rejects a legal interior space.
+  if (startsSecondAbsoluteImagePath(path)) return undefined
   if (!hasImageExtension(path)) return undefined
   return { path }
 }

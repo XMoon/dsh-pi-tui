@@ -212,7 +212,11 @@ export function createPastedImageIntakeOwner(deps: PastedImageIntakeDeps): Paste
     blocksDelivery: (text) => {
       if (disposed || text === '') return false
       for (const entry of pending) {
-        if (text.includes(entry.path) && entry.receipt.hasLivePath(entry.path)) return true
+        // The SAME currentness fence the commit uses: an entry whose seat,
+        // composer, generation or session moved can never convert any more, so
+        // it must not block a later delivery that merely repeats the literal
+        // path in a new seat/session.
+        if (text.includes(entry.path) && current(entry)) return true
       }
       return false
     },

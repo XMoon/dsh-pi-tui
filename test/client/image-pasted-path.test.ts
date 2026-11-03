@@ -50,8 +50,19 @@ test('a body ending with two spaces is not the terminal separator shape', () => 
   assert.equal(candidateImagePathFromPaste('/tmp/a.png  '), undefined)
 })
 
-test('a newline, CR, NUL, ESC or tab anywhere refuses the candidate', () => {
-  for (const body of ['/tmp/a.png\n', '/tmp/a.png\r', '/tmp/a\0.png ', '/tmp/a\x1b.png ', '/tmp/a\tb.png ']) {
+test('a newline, CR, NUL, ESC, tab or a C1 control anywhere refuses the candidate', () => {
+  for (const body of [
+    '/tmp/a.png\n',
+    '/tmp/a.png\r',
+    '/tmp/a\0.png ',
+    '/tmp/a\x1b.png ',
+    '/tmp/a\tb.png ',
+    // Unicode Cc: DEL and the C1 range (NEL, APC/PM/ST ...) are control
+    // characters too, not path text.
+    '/tmp/a\x7f.png ',
+    '/tmp/a\u0085.png ',
+    '/tmp/a\u009f.png ',
+  ]) {
     assert.equal(candidateImagePathFromPaste(body), undefined, JSON.stringify(body))
   }
 })
@@ -61,8 +72,15 @@ test('a paste that also carries prose is not a candidate', () => {
   assert.equal(candidateImagePathFromPaste('/tmp/a.png and b '), undefined)
 })
 
-test('several space-separated absolute paths in one paste body are not one image file', () => {
+test('several space-separated absolute IMAGE paths in one paste body are not one file', () => {
   assert.equal(candidateImagePathFromPaste('/tmp/a.png /tmp/b.png '), undefined)
+  assert.equal(candidateImagePathFromPaste('/tmp/a.png /tmp/nested/b.webp '), undefined)
+})
+
+test('a legal single path whose directory ends with a space keeps its interior space', () => {
+  // The frozen grammar interprets the body verbatim: `/tmp/foo ` is a legal
+  // directory name and `/bar.png` its file — never two shell words.
+  assert.deepEqual(candidateImagePathFromPaste('/tmp/foo /bar.png '), { path: '/tmp/foo /bar.png' })
   assert.deepEqual(candidateImagePathFromPaste('/tmp/a b.png '), { path: '/tmp/a b.png' })
 })
 

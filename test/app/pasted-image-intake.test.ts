@@ -235,6 +235,41 @@ test('the delivery predicate ignores text that does not carry the pending path',
   await h.release()
 })
 
+test('a stale pending entry never blocks a later delivery of the same literal path: generation moved', async (t) => {
+  const life = testLifecycle(t)
+  const h = harness(life)
+  h.owner.accept(h.seat.paste(`${h.imagePath} `))
+  assert.equal(h.owner.blocksDelivery(h.seat.composer.getDraft()), true,
+    'the CURRENT pending entry blocks while its read is in flight')
+  // A session/ownership transition moves the generation: the entry can never
+  // convert any more (the commit fence rejects it), so it must not block.
+  h.authority.generation += 1
+  assert.equal(h.owner.blocksDelivery(h.seat.composer.getDraft()), false,
+    'a generation-moved entry must not block a same-literal-path delivery')
+  await h.release()
+  assert.equal(h.images.size(), 0, 'and the stale read still converts nothing')
+})
+
+test('a stale pending entry never blocks a later delivery of the same literal path: composer replaced', async (t) => {
+  const life = testLifecycle(t)
+  const h = harness(life)
+  h.owner.accept(h.seat.paste(`${h.imagePath} `))
+  h.authority.composer = new FakeComposer()
+  assert.equal(h.owner.blocksDelivery(`restored ${h.imagePath} `), false,
+    'an entry captured on another composer object must not block the new one')
+  await h.release()
+})
+
+test('a stale pending entry never blocks a later delivery of the same literal path: seat lost', async (t) => {
+  const life = testLifecycle(t)
+  const h = harness(life)
+  h.owner.accept(h.seat.paste(`${h.imagePath} `))
+  h.seat.current = false
+  assert.equal(h.owner.blocksDelivery(h.seat.composer.getDraft()), false,
+    'an entry whose seat is no longer current must not block')
+  await h.release()
+})
+
 test('typing after the paste while the read is in flight preserves the typed text', async (t) => {
   const life = testLifecycle(t)
   const h = harness(life)
