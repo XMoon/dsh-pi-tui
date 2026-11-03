@@ -2908,7 +2908,7 @@ async function main() {
       assert(privateProof.bareOfficial === true,
         `T36 the bare query did not reach the official Host provider (observed ${String(privateProof.bareCount)} items)`)
       assert(privateProof.officialEmpty === true,
-        'T36 an authoritative official [] did not stay empty (a business error is never an empty answer)')
+        `T36 an authoritative official [] did not stay empty (ok=${String(privateProof.emptyOk)} kind=${String(privateProof.emptyKind)})`)
       assert(privateProof.officialExcludesDist === true,
         `T36 the official bare route did not authoritatively exclude dist/ (kind ${String(privateProof.officialExcludesDistKind)})`)
       assert(privateProof.scopedOk === true && privateProof.scopedHostScanner === true,

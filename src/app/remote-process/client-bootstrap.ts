@@ -961,6 +961,10 @@ async function startSurfaceLocalClient(
           bareCount: bareItems.length,
           // BOTH halves must be a real `ok` answer with a real array: a business
           // error or `unavailable` is not an empty authoritative result.
+          // Bounded diagnostics: the business kind and the ok flag make a future
+          // failure decidable without another run (never paths or user text).
+          emptyOk: empty.ok === true,
+          emptyKind: empty.ok ? empty.value?.kind : undefined,
           officialEmpty: emptyItems !== undefined && emptyItems.length === 0,
           officialExcludesDist: officialExcludesDistItems !== undefined
             && officialExcludesDistItems.length === 0,
