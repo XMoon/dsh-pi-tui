@@ -85,6 +85,7 @@ import {
   requireExactSmokeDshPin,
   safeFailureSummary,
   smokeArtifactIdentity,
+  SplitSmokeAssertionError,
   SplitSmokeWaitError,
 } from './lib/split-smoke-diagnostics.mjs'
 
@@ -121,7 +122,7 @@ function trace(event, fields = {}) {
 }
 
 function assert(condition, message) {
-  if (!condition) throw new Error(`ASSERTION_FAILED: ${message}`)
+  if (!condition) throw new SplitSmokeAssertionError(message)
 }
 
 /** Quote one argument for the `sh -c` command string system `script(1)` runs. */
@@ -1153,17 +1154,27 @@ async function main() {
   // The startup identity is announced only AFTER preflight qualified it.
   process.stderr.write(`${diagnostics.identityLine()}\n`)
   diagnostics.checkpoint('preflight/candidate-input')
-  const distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
-  const workDir = mkdtempSync(join(tmpdir(), 'dsh-split-process-'))
-  const home = join(workDir, 'home')
-  const dshHome = join(workDir, 'dsh-home')
-  const harnessDir = join(workDir, 'harness')
-  const scratch = join(workDir, 'scratch')
-  for (const directory of [home, dshHome, harnessDir, scratch]) mkdirSync(directory, { recursive: true })
-  writeFileSync(join(workDir, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
-  const env = isolatedEnvironment(workDir, home, dshHome, join(workDir, 'evidence.json'))
+  // The setup itself is inside the same failure boundary: a `mkdtemp`, `mkdir`
+  // or `writeFileSync` failure must still leave the safe report AND still remove
+  // whatever root was already created, instead of escaping past the cleanup.
+  let distribution
+  let workDir
+  let home
+  let dshHome
+  let harnessDir
+  let scratch
+  let env
   let isolatedScopeId
   try {
+    distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
+    workDir = mkdtempSync(join(tmpdir(), 'dsh-split-process-'))
+    home = join(workDir, 'home')
+    dshHome = join(workDir, 'dsh-home')
+    harnessDir = join(workDir, 'harness')
+    scratch = join(workDir, 'scratch')
+    for (const directory of [home, dshHome, harnessDir, scratch]) mkdirSync(directory, { recursive: true })
+    writeFileSync(join(workDir, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
+    env = isolatedEnvironment(workDir, home, dshHome, join(workDir, 'evidence.json'))
     // The qualification work dir must be a real OS temp root outside this
     // checkout: an ancestor `node_modules` would otherwise lend the Client
     // peer set that the isolated installation must supply itself (issue #476).
@@ -4336,7 +4347,7 @@ async function main() {
       try { process.kill(-run.child.pid, 'SIGKILL') } catch { /* already gone */ }
     }
     for (const [pid, starttime] of trackedProcesses) killTracked(pid, starttime, 'SIGKILL')
-    killIsolatedProcesses(dshHome)
+    if (dshHome !== undefined) killIsolatedProcesses(dshHome)
     if (FAILPOINT !== undefined) {
       let leftovers = findIsolatedProcesses(dshHome)
       for (let attempt = 0; attempt < 100 && leftovers.length > 0; attempt += 1) {
@@ -4366,7 +4377,9 @@ async function main() {
       closeSync(traceFd)
       traceFd = undefined
     }
-    if (!KEEP) rmSync(workDir, { recursive: true, force: true })
+    if (workDir === undefined) {
+      // Nothing was created: setup failed before the work root existed.
+    } else if (!KEEP) rmSync(workDir, { recursive: true, force: true })
     else console.error(`preserved split-process environment: ${workDir}`)
   }
 }

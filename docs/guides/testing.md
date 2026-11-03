@@ -326,9 +326,11 @@ phase on stderr; on failure they print a fixed summary and write exactly one
 default-retained artifact — a `failure.json` in a fresh private directory under
 the OS temp root (directory `0700`, file `0600`), never inside the work root
 the lane deletes during cleanup. The report and that summary carry only
-whitelisted fields (lane, category, stable code, checkpoint, wait label,
-elapsed, target pin, artifact name/version/SHA, expected and observed notice,
-recent checkpoints, per-process exit and official event names). No
+whitelisted fields (lane, category, stable code, checkpoint, assertion site, wait
+label, elapsed, target pin, artifact name/version/SHA, expected and observed
+notice, recent checkpoints, per-process exit and official event names). A failed
+lane assertion is locatable through its own `<file>.mjs:<line>` site, which is
+the only part of it the default output may carry. No
 `Error.message` is ever copied into the default output — the lane assertion,
 the tool failure and the parser text all stay out of it — so terminal bytes,
 captured stderr, record contents, session text, cookies, tokens and connect

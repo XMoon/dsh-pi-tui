@@ -30,8 +30,11 @@ import {
   classifyHandoffRejection,
   FAILURE_CATEGORIES,
   forensicErrorText,
+  formatFailureSummary,
   LANE_ERROR_CODES,
   safeFailureSummary,
+  SplitSmokeAssertionError,
+  writeFailureReport,
   classifyReloadNoticeLine,
   classifyReloadNotices,
   createSmokeDiagnostics,
@@ -218,7 +221,7 @@ test('the process lane refuses a candidate with another exact pin before any ins
 // ── The default failure report ──────────────────────────────────────────────
 
 const REPORT_KEYS = [
-  'schemaVersion', 'lane', 'status', 'category', 'reason', 'checkpoint', 'waitLabel',
+  'schemaVersion', 'lane', 'status', 'category', 'reason', 'checkpoint', 'assertion', 'waitLabel',
   'elapsedMs', 'runtimeDshPin', 'artifacts', 'expected', 'observed', 'progress', 'processes',
 ]
 
@@ -858,4 +861,124 @@ test('a PASS that cannot land its requested evidence document fails instead', (t
   const source = readFileSync(UPGRADE_SCRIPT, 'utf8')
   assert.ok(source.indexOf('writeRequestedEvidence(options.evidence, evidence)') < source.indexOf("'SPLIT_UPGRADE_SMOKE_PASS"),
     'the PASS marker may only be written after the requested evidence document landed')
+})
+
+// ── Round 8: the reviewer's four P2 findings ────────────────────────────────
+
+test('an event value outside the official names is omitted, never truncated into the report', () => {
+  const report = projectFailureReport({
+    lane: 'split-process',
+    category: 'ASSERTION_FAILED',
+    processes: [{
+      role: 'host',
+      exited: false,
+      records: [
+        { m4a0: 'COOKIE_SENTINEL', m4r: 'https://secret.invalid/x', m4b2s: 'TOKEN_SENTINEL' },
+        { m4a0: 'ready', m4r: 'handoff-request-rejected', m4b2s: 'surface-status' },
+      ],
+    }],
+  })
+  const text = JSON.stringify(report)
+  for (const sentinel of ['COOKIE_SENTINEL', 'TOKEN_SENTINEL', 'secret.invalid']) {
+    assert.ok(!text.includes(sentinel), `an unknown event value must never be reported: ${sentinel}`)
+  }
+  assert.deepEqual(report.processes[0].events, [
+    { m4a0: 'ready', m4r: 'handoff-request-rejected', m4b2s: 'surface-status' },
+  ], 'official names survive; the record carrying only unknown names is dropped')
+  // The same rule holds on stderr, not only in the JSON.
+  const written = writeFailureReport(report)
+  const stderr = captureStderr(() => {
+    process.stderr.write(`${formatFailureSummary(report, written)}\n`)
+  })
+  assert.ok(!/SENTINEL|secret\.invalid/u.test(stderr), `stderr leaked an event value:\n${stderr}`)
+  rmSync(dirname(written), { recursive: true, force: true })
+})
+
+test('a reexec is attributed to the NEWEST Client identity in the same record stream', () => {
+  const stream = [
+    { m4a0: 'ready', pid: 1000 },
+    { m4a0: 'client-started', pid: 2000 },
+  ]
+  const beforeReplacementReady = projectFailureReport({
+    processes: [{ role: 'surface-client', exited: false, records: stream }],
+  })
+  assert.equal(beforeReplacementReady.processes[0].pid, 2000,
+    'the replacement Client is named as soon as it starts; the handed-off PID is not')
+  const afterReplacementReady = projectFailureReport({
+    processes: [{ role: 'surface-client', exited: false, records: [...stream, { m4a0: 'ready', pid: 2000 }] }],
+  })
+  assert.equal(afterReplacementReady.processes[0].pid, 2000)
+  const noReexec = projectFailureReport({
+    processes: [{ role: 'surface-client', exited: false, records: [{ m4a0: 'ready', pid: 1000 }, { m4a0: 'status' }] }],
+  })
+  assert.equal(noReexec.processes[0].pid, 1000, 'a single-Client stream still reports its own PID')
+})
+
+test('an assertion failure is locatable without quoting its message', () => {
+  function laneAssert(condition, message) {
+    if (!condition) throw new SplitSmokeAssertionError(message)
+  }
+  function laneAssertEqual(actual, expected, message) {
+    laneAssert(actual === expected, message ?? `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
+  }
+  const error = (() => {
+    try {
+      laneAssertEqual(1, 2, 'COOKIE_SENTINEL host role mismatch https://secret.invalid/x')
+    } catch (caught) {
+      return caught
+    }
+    return assert.fail('the assertion must fail')
+  })()
+  assert.equal(error.category, 'ASSERTION_FAILED')
+  // The site is THIS call line, not the helper frames.
+  assert.match(String(error.assertion), /^split-smoke-diagnostics\.test\.mjs:\d+$/u)
+  const report = projectFailureReport({ lane: 'split-process', category: error.category, assertion: error.assertion })
+  assert.equal(report.assertion, error.assertion, 'the report keeps the locator')
+  const stderr = captureStderr(() => {
+    process.stderr.write(`${formatFailureSummary(report, '/tmp/none')}\n`)
+    process.stderr.write(`SPLIT_PROCESS_SMOKE_FAILURE: ${safeFailureSummary(error)}\n`)
+  })
+  assert.match(stderr, /assertion: split-smoke-diagnostics\.test\.mjs:\d+/u)
+  assert.match(stderr, /ASSERTION_FAILED at split-smoke-diagnostics\.test\.mjs:\d+/u)
+  // Locating the check must not smuggle the assertion text back into the output.
+  for (const sentinel of ['COOKIE_SENTINEL', 'secret.invalid', 'host role mismatch']) {
+    assert.ok(!stderr.includes(sentinel), `the default output leaked the assertion text: ${sentinel}`)
+  }
+  // Both lanes raise their assertions through this helper, so every check site
+  // (not just the ones that also wait) stays locatable.
+  for (const file of [PROCESS_SCRIPT, UPGRADE_SCRIPT]) {
+    assert.match(readFileSync(file, 'utf8'),
+      /function assert\(condition, message\) \{\n\s*if \(!condition\) throw new SplitSmokeAssertionError\(message\)\n\}/u,
+      `${basename(file)} must raise locatable assertions`)
+  }
+})
+
+test('a setup failure is reported and leaves no half-created scene behind', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-smoke-setup-failure-')
+  const source = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  // A candidate that PASSES the pin preflight, so the failure lands in setup.
+  const candidate = syntheticTarball(dir, 'candidate', manifestOf(source.version, TARGET_PIN))
+  const locked = join(dir, 'locked-tmp')
+  mkdirSync(locked, { mode: 0o500 })
+  const started = Date.now()
+  let result
+  try {
+    result = spawnSync(process.execPath, [PROCESS_SCRIPT, candidate], {
+      encoding: 'utf8', timeout: 10_000, env: { ...process.env, TMPDIR: locked },
+    })
+  } finally {
+    chmodSync(locked, 0o700)
+  }
+  assert.equal(result.signal, null, `the lane must fail by itself: ${result.error?.message}`)
+  assert.notEqual(result.status, 0)
+  assert.ok(Date.now() - started < 10_000)
+  // The report write also cannot land, and that is announced as an errno only —
+  // the failure itself never turns into silence or into a payload dump.
+  assert.match(result.stderr, /SPLIT_PROCESS_SMOKE_FAILURE\n/u, `the fixed block must print:\n${result.stderr}`)
+  assert.match(result.stderr, /category: INFRA_FAILURE/u)
+  assert.match(result.stderr, /DIAGNOSTIC_WRITE_FAILURE: E[A-Z]+/u)
+  assert.match(result.stderr, /SPLIT_PROCESS_SMOKE_FAILURE: INFRA_FAILURE$/mu)
+  assert.ok(!/ENOENT|EACCES: |syscall|errno:/.test(result.stderr), `a system error text leaked:\n${result.stderr}`)
+  assert.deepEqual(readdirSync(locked), [], 'no work root may survive the setup failure')
 })
