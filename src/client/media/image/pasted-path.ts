@@ -37,26 +37,6 @@ function hasControlCharacter(text: string): boolean {
   return false
 }
 
-/**
- * Whether an interior ` /` starts a SECOND absolute path.
- *
- * A paste of several space-separated file paths must not be read as one
- * image, but the frozen grammar interprets the body verbatim and accepts
- * interior spaces as part of a single POSIX path. Only a ` /` whose PREFIX is
- * itself an absolute path with a candidate image extension marks another
- * path (`/tmp/a.png /tmp/b.png`); a legal single path whose directory name
- * ends with a space (`/tmp/foo /bar.png`) stays one path.
- */
-function startsSecondAbsoluteImagePath(path: string): boolean {
-  let index = path.indexOf(' /')
-  while (index !== -1) {
-    const prefix = path.slice(0, index)
-    if (prefix.startsWith('/') && !prefix.startsWith('//') && hasImageExtension(prefix)) return true
-    index = path.indexOf(' /', index + 1)
-  }
-  return false
-}
-
 /** Whether the basename's extension is one of the image candidates. */
 function hasImageExtension(path: string): boolean {
   const slash = path.lastIndexOf('/')
@@ -93,10 +73,11 @@ export function candidateImagePathFromPaste(text: string): { path: string } | un
   if (path === '' || path.endsWith(PASTE_SEPARATOR)) return undefined
   // Absolute POSIX path only: a protocol-relative `//host/...` is a URL.
   if (!path.startsWith('/') || path.startsWith('//')) return undefined
-  // Several space-separated absolute image paths are ONE terminal paste body
-  // too; see {@link startsSecondAbsoluteImagePath} for the precise rule that
-  // never rejects a legal interior space.
-  if (startsSecondAbsoluteImagePath(path)) return undefined
+  // The body is interpreted verbatim as ONE POSIX path: no shell-word split,
+  // so any interior spaces (including a directory whose name itself ends with
+  // an image extension, e.g. `/tmp/foo.png /bar.png`) belong to the candidate.
+  // Whether that complete path exists on this Client is the intake's
+  // authoritative decision, never the grammar's.
   if (!hasImageExtension(path)) return undefined
   return { path }
 }
