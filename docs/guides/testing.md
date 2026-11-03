@@ -329,8 +329,10 @@ the lane deletes during cleanup. The report and that summary carry only
 whitelisted fields (lane, category, stable code, checkpoint, assertion site, wait
 label, elapsed, target pin, artifact name/version/SHA, expected and observed
 notice, recent checkpoints, per-process exit and official event names). A failed
-lane assertion is locatable through its own `<file>.mjs:<line>` site, which is
-the only part of it the default output may carry. No
+lane assertion is locatable through its own `<lane>.mjs:<line>` site — the only
+part of it the default output may carry; the site is derived from the real stack,
+restricted to the lane scripts themselves, and omitted entirely when nothing
+trusted can be read. No
 `Error.message` is ever copied into the default output — the lane assertion,
 the tool failure and the parser text all stay out of it — so terminal bytes,
 captured stderr, record contents, session text, cookies, tokens and connect

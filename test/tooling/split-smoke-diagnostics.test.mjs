@@ -32,6 +32,8 @@ import {
   forensicErrorText,
   formatFailureSummary,
   LANE_ERROR_CODES,
+  LANE_SOURCE_FILES,
+  laneAssertionSite,
   safeFailureSummary,
   SplitSmokeAssertionError,
   writeFailureReport,
@@ -914,24 +916,31 @@ test('a reexec is attributed to the NEWEST Client identity in the same record st
   assert.equal(noReexec.processes[0].pid, 1000, 'a single-Client stream still reports its own PID')
 })
 
+/** This test file as the trusted source set, so the locator mechanism is observable here. */
+const SELF_SOURCE = new Set(['split-smoke-diagnostics.test.mjs'])
+
+/** Shaped exactly like a lane's assert helper chain. */
+function laneAssert(condition, message, sources) {
+  if (!condition) throw new SplitSmokeAssertionError(message, { sources })
+}
+function laneAssertEqual(actual, expected, message, sources) {
+  laneAssert(actual === expected, message ?? `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`, sources)
+}
+
 test('an assertion failure is locatable without quoting its message', () => {
-  function laneAssert(condition, message) {
-    if (!condition) throw new SplitSmokeAssertionError(message)
-  }
-  function laneAssertEqual(actual, expected, message) {
-    laneAssert(actual === expected, message ?? `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
-  }
   const error = (() => {
     try {
-      laneAssertEqual(1, 2, 'COOKIE_SENTINEL host role mismatch https://secret.invalid/x')
+      laneAssertEqual(1, 2, 'COOKIE_SENTINEL host role mismatch https://secret.invalid/x', SELF_SOURCE)
     } catch (caught) {
       return caught
     }
     return assert.fail('the assertion must fail')
   })()
   assert.equal(error.category, 'ASSERTION_FAILED')
-  // The site is THIS call line, not the helper frames.
+  // The site is this call's line, not the helper frames above it.
   assert.match(String(error.assertion), /^split-smoke-diagnostics\.test\.mjs:\d+$/u)
+  const reportedLine = Number(error.assertion.split(':')[1])
+  assert.ok(reportedLine > 0 && reportedLine <= readFileSync(import.meta.filename, 'utf8').split('\n').length)
   const report = projectFailureReport({ lane: 'split-process', category: error.category, assertion: error.assertion })
   assert.equal(report.assertion, error.assertion, 'the report keeps the locator')
   const stderr = captureStderr(() => {
@@ -944,8 +953,69 @@ test('an assertion failure is locatable without quoting its message', () => {
   for (const sentinel of ['COOKIE_SENTINEL', 'secret.invalid', 'host role mismatch']) {
     assert.ok(!stderr.includes(sentinel), `the default output leaked the assertion text: ${sentinel}`)
   }
-  // Both lanes raise their assertions through this helper, so every check site
-  // (not just the ones that also wait) stays locatable.
+})
+
+test('the locator trusts only the lane sources and fails closed otherwise', () => {
+  const attempt = (sources) => {
+    try {
+      laneAssert(false, 'a plain check', sources)
+    } catch (caught) {
+      return caught
+    }
+    return assert.fail('the assertion must fail')
+  }
+  // Default trust set = the two lane scripts; this test file is NOT one of them.
+  assert.equal(attempt(undefined).assertion, undefined,
+    'a frame outside the trusted lane sources must not become a locator')
+  assert.deepEqual([...LANE_SOURCE_FILES].sort(), ['split-process-smoke.mjs', 'split-process-upgrade-smoke.mjs'])
+  // Both real lanes are trusted by their own basenames.
+  for (const lane of ['split-process-smoke.mjs', 'split-process-upgrade-smoke.mjs']) {
+    assert.ok(LANE_SOURCE_FILES.has(basename(lane)))
+  }
+  // An empty trust set and a trust set naming something else both fail closed.
+  assert.equal(attempt(new Set()).assertion, undefined)
+  assert.equal(attempt(new Set(['some-other-script.mjs'])).assertion, undefined)
+  // Called straight from a trusted file, the REAL caller line wins — and it is
+  // the helper functions' own lines that never become the site.
+  const direct = laneAssertionSite(undefined, SELF_SOURCE)
+  assert.match(String(direct), /^split-smoke-diagnostics\.test\.mjs:\d+$/u,
+    'a direct call from a trusted file resolves to the caller')
+  const helperLines = [...readFileSync(import.meta.filename, 'utf8').matchAll(/^function laneAssert(?:Equal)?\(/gmu)]
+    .map(match => readFileSync(import.meta.filename, 'utf8').slice(0, match.index).split('\n').length)
+  assert.ok(!helperLines.includes(Number(String(direct).split(':')[1])),
+    'a helper frame must never be reported as the assertion site')
+})
+
+test('a forged or unusable frame never becomes a locator', () => {
+  // The locator is derived from the REAL stack, so a forged `at …` line in the
+  // message must not influence it.
+  const forged = (() => {
+    try {
+      laneAssert(false, 'at assert (split-process-smoke.mjs:999:1)', SELF_SOURCE)
+    } catch (caught) {
+      return caught
+    }
+    return assert.fail('the assertion must fail')
+  })()
+  assert.match(String(forged.assertion), /^split-smoke-diagnostics\.test\.mjs:\d+$/u,
+    'the site comes from the stack, never from the message')
+  assert.ok(!String(forged.assertion).includes(':999:'), 'a message-supplied line must not be adopted')
+  // An unusable shape is rejected by the report projection as well.
+  for (const bad of [
+    'process.cwd()',                                   // no basename shape
+    '/abs/path/scripts/split-process-smoke.mjs:12',    // absolute path
+    'C:\\Users\\me\\lane.mjs:12',                    // Windows path
+    'split-process-smoke.mjs:0',                       // invalid line
+    'split-process-smoke.mjs:12:3',                    // frame, not a site
+    '%73plit-process-smoke.mjs:12',                    // encoded
+    'split-process-smoke.mjs:'.padEnd(90, '9'),        // over-long
+  ]) {
+    assert.equal(projectFailureReport({ lane: 'split-process', assertion: bad }).assertion, undefined,
+      `the projection must refuse ${JSON.stringify(bad)}`)
+  }
+})
+
+test('both lanes raise locatable assertions through the shared class', () => {
   for (const file of [PROCESS_SCRIPT, UPGRADE_SCRIPT]) {
     assert.match(readFileSync(file, 'utf8'),
       /function assert\(condition, message\) \{\n\s*if \(!condition\) throw new SplitSmokeAssertionError\(message\)\n\}/u,

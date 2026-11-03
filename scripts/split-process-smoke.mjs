@@ -4348,7 +4348,10 @@ async function main() {
     }
     for (const [pid, starttime] of trackedProcesses) killTracked(pid, starttime, 'SIGKILL')
     if (dshHome !== undefined) killIsolatedProcesses(dshHome)
-    if (FAILPOINT !== undefined) {
+    if (FAILPOINT !== undefined && dshHome !== undefined) {
+      // The failpoint proof reads this run's isolated scene: with no scene (a
+      // setup failure before the root existed) there is nothing to prove, and
+      // the guard must cover every read in this branch, not only the kill.
       let leftovers = findIsolatedProcesses(dshHome)
       for (let attempt = 0; attempt < 100 && leftovers.length > 0; attempt += 1) {
         await sleep(50)
