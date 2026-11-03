@@ -174,7 +174,6 @@ const calls = {
   submits: [] as string[],
   settled: [] as string[],
 }
-let settleWrite: ((outcome: string) => void) | undefined
 
 /* ------------------------------------------------------------- production mount */
 
@@ -215,18 +214,40 @@ function openQuickPanel(): void {
     apply: (next) => {
       calls.applies.push(next)
       note({ apply: next })
-      // The write stays in flight until the case's settle control resolves it,
-      // so the flow can observe the pending frame on the real client.
+      // The settlement is a scripted Host outcome for THIS case, recorded on the
+      // events file: `write` and `reject` stay pending long enough for the flow
+      // to capture the pending frame and prove no second dispatch, then settle
+      // committed / refused. A committed settle also pushes the new projection
+      // (the stand-in below) so the flow can see the Composer relabel from the
+      // authoritative value instead of from the clicked row.
+      const outcome = testCase === 'reject' ? 'rejected' : 'committed'
+      const delay = testCase === 'write' || testCase === 'reject' ? 2600 : 250
       return new Promise((resolve) => {
-        settleWrite = (outcome: string) => {
+        setTimeout(() => {
           calls.settled.push(outcome)
           note({ settled: outcome })
           resolve(outcome as never)
-        }
-        if (testCase !== 'write' && testCase !== 'reject') {
-          // Non-write cases settle immediately: nothing there waits on a Host.
-          setTimeout(() => settleWrite?.('committed'), 250)
-        }
+          if (outcome === 'committed') {
+            // A stand-in for the Host's pushed Session selection event: the
+            // committed projection, never this panel's request, is what relabels
+            // the Composer. Declared here so the record states what it is.
+            note({ projectionStandIn: 'the Host selection push is simulated; the real durable write is qualified by the automated Direct suite' })
+            current = {
+              ...current,
+              composition: {
+                model: {
+                  provider: next.provider,
+                  id: next.model,
+                  displayName: displayNameFor(next.model),
+                  ...(next.reasoningEffort === undefined
+                    ? {}
+                    : { reasoningEffort: next.reasoningEffort }),
+                },
+              },
+            } as unknown as StatusSnapshot
+            renderer.display.commitDisplaySubject({}, {}, undefined)
+          }
+        }, delay)
       })
     },
     runOwned: (label, task, options) => {
@@ -239,9 +260,6 @@ function openQuickPanel(): void {
   note({ opened: calls.quickOpens })
   handle.setLoading()
   setTimeout(() => handle?.setDirectory({ directory, current: selection }), 150)
-  if (testCase === 'partial') {
-    // The partial read is the directory's own failure list; nothing extra to do.
-  }
 }
 
 renderer.bindInput({

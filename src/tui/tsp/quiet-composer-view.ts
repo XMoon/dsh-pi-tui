@@ -518,16 +518,25 @@ export const QUIET_COMPOSER_STYLES = `
     color: var(--t1);
     font-weight: 500;
   }
+  /* The row's own text is the thing that must survive a narrow anchor: a model
+     name truncates here. The right-hand summary is secondary, so IT truncates
+     first and never eats the row's label (measured on the pinned client: with a
+     non-shrinking value the 300px menu dropped the leading word entirely). */
   [data-role='dsh.composer.quick-menu'] [data-role='dsh.composer.quick-label'] {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    flex-shrink: 1;
   }
   [data-role='dsh.composer.quick-menu'] [data-role='dsh.composer.quick-value'] {
     color: var(--t3);
-    flex-shrink: 0;
+    min-width: 0;
+    max-width: 45%;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
+    flex-shrink: 1;
   }
   [data-role='dsh.composer.quick-search'] {
     margin: 2px 4px;
