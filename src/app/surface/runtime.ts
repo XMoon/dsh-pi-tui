@@ -1868,9 +1868,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    *
    * The ONE blank authority is the injected read-only `SessionReader.blank`
    * port; `undefined` from it means the Host fact is unknown and is NEVER
-   * inferred from the projection, the window or a running state. The complete
-   * fold's turn index is the positive veto (a turn that exists hides the
-   * Welcome); an empty fold is never proof of blankness on its own.
+   * inferred from the projection, the window or a running state. The fold's own
+   * turn knowledge is the positive veto (a turn it has seen hides the Welcome),
+   * and an empty fold is never proof of blankness on its own. The veto reads
+   * BOTH turn facts because they answer different questions: the grouped index
+   * covers turns that produced displayable cards, the activity map covers a
+   * `turn/start` that has produced none yet.
    *
    * It answers `undefined` — the argument stays ABSENT — when this frame speaks
    * for no subject the Welcome question can be asked about: no injected
