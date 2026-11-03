@@ -150,6 +150,8 @@ async function mount(
     submit: () => { throw new Error('Reader input must never reach the composer submit path') },
     steer() {},
     pasteMedia: () => {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true,
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

@@ -25,6 +25,7 @@ import { connect as sdkConnect, concatBytes, ui } from '@stencil-hq/tern'
 import type { Op, Session, TermInput, TermOutput } from '@stencil-hq/tern'
 import { createTspComposer, type TspComposer } from '../../src/tui/tsp/editor.ts'
 import { mountTspRenderer, type TspRenderer } from '../../src/tui/tsp/session.ts'
+import type { PastedPathReceipt } from '../../src/app/surface/pasted-image-intake.ts'
 
 const ENCODER = new TextEncoder()
 const DECODER = new TextDecoder()
@@ -393,6 +394,8 @@ interface PaneHarness {
   cancels(): number
   /** PR4: how many times the Ctrl+V media intent reached the application. */
   pasteMedia(): number
+  /** Every real bracketed-paste receipt forwarded to the application. */
+  pastedPaths(): readonly PastedPathReceipt[]
   dispose(): Promise<void>
 }
 
@@ -411,6 +414,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
   let userInputs = 0
   let cancelCount = 0
   let pasteMediaCalls = 0
+  const pastedPaths: PastedPathReceipt[] = []
   const renderer = mountTspRenderer(session, { copyVisual: async () => false,
     requestExit: () => { exitCount += 1 },
   })
@@ -423,6 +427,8 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
       submit: () => {},
       steer: () => {},
       pasteMedia: () => { pasteMediaCalls += 1 },
+      pastedPath: (receipt) => { pastedPaths.push(receipt) },
+      admitPastedPathDelivery: () => true,
       noteUserInput: () => { userInputs += 1 }, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
     })
   }
@@ -435,6 +441,7 @@ async function mountPane(options: { withHandshake?: string; bind?: boolean } = {
     userInputs: () => userInputs,
     cancels: () => cancelCount,
     pasteMedia: () => pasteMediaCalls,
+    pastedPaths: () => pastedPaths,
     frames: () => framesOf(tern.output.text()),
     dispose: () => renderer.dispose(),
   }
@@ -534,7 +541,7 @@ test('one accepted edit calls Surface.render exactly ONCE (no double render)', a
     return surface
   }
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => {} })
-  renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
+  renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
   await settle()
   const baseline = renderCalls
   tern.input.type('h')
@@ -592,6 +599,8 @@ test('a bound Enter submits the snapshot and clears the composer BEFORE the call
     submit: (text, request) => { submissions.push({ text, request, draftAtCallback: renderer.composer.getDraft() }) },
     steer: () => {},
     pasteMedia: () => {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true,
     noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
   })
   await settle()
@@ -635,7 +644,7 @@ test('a PRE-BIND Enter is held and submits at the bind, never before it', async 
     renderer.bindInput({
       exit: () => {}, cancel: () => {},
       submit: (text: string) => { heldSubmits.push(text) },
-      steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
+      steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
     })
     await settle()
     assert.deepEqual(heldSubmits, ['draft text'] as string[], 'the held keys replayed in order: the text then the submit')
@@ -739,11 +748,11 @@ test('keys before the bind are HELD, then consumed exactly once at the bind', as
     assert.equal(lastEditorProps(harness.frames())?.text, '', 'a pre-bind key never edits the composer')
     assert.equal(harness.userInputs(), 0, 'no user activity is observed before the bind')
     // The bind consumes the held keys ONCE, in arrival order.
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
     await settle()
     assert.equal(lastEditorProps(harness.frames())?.text, 'held', 'the bind consumed the held keys')
     // A second bind is refused — exactly ONE input owner.
-    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} }),
+    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} }),
       /already bound/, 'a second bind throws')
   } finally {
     await harness.dispose()
@@ -758,7 +767,7 @@ test('a dispose before the bind discards the held keys unconsumed', async () => 
   await harness.session.close()
   const framesBefore = harness.frames().length
   // A late bind after dispose is refused; the held keys died with the renderer.
-  assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} }), /disposed/)
+  assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} }), /disposed/)
   harness.tern.input.type('late')
   await settle()
   assert.equal(harness.frames().length, framesBefore, 'nothing renders after dispose — the queue was discarded')
@@ -776,7 +785,7 @@ test('the bound exit handler routes the composer exit gesture', async () => {
   let boundExits = 0
   let boundCancels = 0
   const renderer = mountTspRenderer(session, { copyVisual: async () => false, requestExit: () => { rendererExits += 1 } })
-  renderer.bindInput({ exit: () => { boundExits += 1 }, cancel: () => { boundCancels += 1 }, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
+  renderer.bindInput({ exit: () => { boundExits += 1 }, cancel: () => { boundCancels += 1 }, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
   await settle()
   try {
     tern.input.type('a')
@@ -839,7 +848,7 @@ test('a held key orders the pre-bind Ctrl+D — no exit before the bind replays 
     assert.equal(harness.exitCount(), 0, 'no pre-bind exit while the held key makes the draft non-empty')
     // The bind replays 'a' then Ctrl+D in order: 'a' applies, Ctrl+D meets a
     // NON-empty draft and is an editor no-op — still no exit.
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
     await settle()
     assert.equal(harness.exitCount(), 0, 'the replayed Ctrl+D saw the applied draft and did not exit')
     const editor = lastEditorProps(harness.frames())
@@ -879,7 +888,7 @@ test('a pre-bind input flood fails loud ONCE and still replays the held prefix',
     await settle()
     const wire = harness.tern.output.text()
     assert.ok(wire.includes('were dropped'), 'the overflow is observable (fail loud), not a silent drop')
-    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
+    harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} })
     await settle()
     const editor = lastEditorProps(harness.frames())
     assert.equal(editor?.text, 'a'.repeat(128), 'the held PREFIX (the bounded queue) still replayed at the bind')
@@ -969,6 +978,8 @@ test('a Ctrl+V held before the bind is replayed ONCE at the bind', async () => {
     harness.renderer.bindInput({
       exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {},
       pasteMedia: () => { pastes += 1 },
+      pastedPath: () => {},
+      admitPastedPathDelivery: () => true,
       noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
     })
     // The shared render wait: it covers the SDK frame/delivery the assertion
@@ -995,6 +1006,8 @@ test('a dispose before the bind discards a held Ctrl+V unconsumed', async () => 
   assert.throws(() => harness.renderer.bindInput({
     exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {},
     pasteMedia: () => { pastes += 1 },
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true,
     noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
   }), /disposed/)
   assert.equal(pastes, 0, 'a paste held across disposal never reaches the application')
@@ -1046,4 +1059,87 @@ test('Ctrl+V during session hydration is dropped, not held for the new subject',
     await harness.dispose()
     await harness.session.close()
   }
+})
+
+// ── Real bracketed pasted image file paths (Tern/Hedr) ──────────────────────
+
+test('a real bracketed paste of an image path forwards ONE receipt whose tracked span replaces the token', async () => {
+  const path = '/home/xmoon/.cache/tern/pastes/a07fa8e58c3d1059.png'
+  const harness = await mountPane()
+  try {
+    harness.tern.input.type(`\u001b[200~${path} \u001b[201~`)
+    // The shared render wait: it covers the SDK frame/delivery the assertions
+    // read, not a guessed readiness window.
+    await settle()
+
+    assert.equal(harness.pasteMedia(), 0, 'a bracketed paste is never the Ctrl+V clipboard probe')
+    assert.equal(harness.pastedPaths().length, 1, 'exactly ONE application receipt per real paste')
+    const receipt = harness.pastedPaths()[0]!
+    assert.equal(receipt.text, `${path} `, 'the receipt carries the COMPLETE paste body')
+    assert.equal(receipt.seatCurrent(), true)
+    assert.equal(receipt.hasLivePath(path), true, 'the proven raw span still holds the path')
+    assert.equal(receipt.hasLivePath('/tmp/other.png'), false)
+    assert.equal(lastEditorProps(harness.frames())?.text, `${path} `,
+      'the path stays ordinary editable text while the read is in flight')
+
+    assert.equal(receipt.replacePastedPath(path, '[image #1 (1920×1080)]'), true)
+    await settle()
+    assert.equal(lastEditorProps(harness.frames())?.text, '[image #1 (1920×1080)] ',
+      'the controlled frame carries the canonical token; the separator space stays text')
+
+    harness.tern.input.type(' 这是啥')
+    await settle()
+    assert.equal(lastEditorProps(harness.frames())?.text, '[image #1 (1920×1080)]  这是啥',
+      'typed text after the token is preserved')
+    assert.equal(receipt.replacePastedPath(path, '[image #2 (1×1)]'), false,
+      'the lease retired after its ONE replacement')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a paste during the hydration window is dropped and never forwarded', async () => {
+  const harness = await mountPane()
+  try {
+    harness.renderer.display.beginSessionHydration()
+    await settle()
+    harness.tern.input.type('\u001b[200~/tmp/shot.png \u001b[201~')
+    await settle()
+    assert.equal(harness.pastedPaths().length, 0,
+      'the outgoing subject never claims a pasted image path')
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a paste while a modal seat owns the keys is never forwarded', async () => {
+  const harness = await mountPane()
+  const pending = harness.renderer.interaction.askQuestions(
+    [{ id: 'q1', question: 'Proceed?', options: [{ label: 'yes' }, { label: 'no' }] }],
+    undefined,
+    undefined,
+    false,
+  )
+  pending.catch(() => {})
+  try {
+    await settle()
+    harness.tern.input.type('\u001b[200~/tmp/shot.png \u001b[201~')
+    await settle()
+    assert.equal(harness.pastedPaths().length, 0, 'the modal seat consumed the paste')
+    assert.equal(harness.pasteMedia(), 0)
+  } finally {
+    await harness.dispose()
+    await harness.session.close()
+  }
+})
+
+test('a disposed renderer forwards no receipt for a late paste', async () => {
+  const harness = await mountPane()
+  await harness.dispose()
+  harness.tern.input.type('\u001b[200~/tmp/shot.png \u001b[201~')
+  await settle()
+  assert.equal(harness.pastedPaths().length, 0)
+  await harness.session.close()
 })

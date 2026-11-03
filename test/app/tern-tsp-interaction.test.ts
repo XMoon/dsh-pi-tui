@@ -160,6 +160,8 @@ async function mountHarness(options: {
     submit: text => { submits.push(text) },
     steer: () => {},
     pasteMedia: () => {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true,
     noteUserInput: () => {},
     listContinuedQuestions: () => harness.continued,
     reopenContinuedQuestion: (sessionId, callId) => {

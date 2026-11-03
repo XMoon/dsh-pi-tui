@@ -52,6 +52,7 @@ import { DirectSubmissionPresentation, type SubmissionPresentationSource } from 
 import { mergeDraft, refuseByTransitionFence } from './steer.ts'
 import type { ComposerSubmitRequest } from '../../tui-app.ts'
 import type { SubmissionComposerPort } from './composer-port.ts'
+import { PASTE_PENDING_NOTICE } from '../surface/pasted-image-intake.ts'
 import { SessionScopeSupersededError, type LiveSessionScope } from '../session/scope.ts'
 import type { SessionSubject } from '../session/subject.ts'
 import { deliverBusy, executeHostCommandSubmission, pullBackQueue, steer, type PendingQueueRecall, type PromptSubmission, type SteerSubmissionAgent, type SteerSubmissionDeps } from '../submission/runtime.ts'
@@ -196,6 +197,14 @@ export interface SubmissionControllerDeps<ExactAgent extends SubmissionAgentLike
     readonly images: DraftImageStore
     readonly files: DraftFileStore
   }
+  /**
+   * The ONE pasted-image delivery admission (read-only): true while `text`
+   * still carries a terminal pasted image path whose attachment read is in
+   * flight. The editor-side pre-clear gates refuse the normal gestures; this
+   * is the final fail-closed check for a caller that bypassed them, BEFORE
+   * any history/session/queue/writer work. Absent = no such entry.
+   */
+  readonly pendingPastedPath?: (text: string) => boolean
   /** The status owner seam (the history cwd read). */
   readonly status: { sessionCwd(): string }
   /** The mounted-surface pending-input refresh. */
@@ -1589,6 +1598,15 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
     request: ComposerSubmitRequest = 'enter',
     scopeToken?: number,
   ): void => {
+    // Fail-closed pasted-image gate: a caller that bypassed the editor's
+    // pre-clear admission must still not deliver a path whose image is being
+    // attached. Refuse BEFORE any history/session/command/shell/writer work
+    // and hand the user's draft back for a retry.
+    if (deps.pendingPastedPath?.(text) === true) {
+      deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
+      deps.app().notify(PASTE_PENDING_NOTICE, 'info')
+      return
+    }
     // P0 (empty-submission semantics): an EMPTY serialized wire form is
     // a silent no-op — no history write, no session creation, no
     // followup/steer, no attachment admission, no queue mutation. Judged on
@@ -2101,6 +2119,13 @@ export function createSubmissionController<ExactAgent extends SubmissionAgentLik
    * messages stay queued until an empty-draft sweep).
    */
   const steerDraft = (text: string, options?: { readonly consumeDraft?: boolean }): void => {
+    // The same fail-closed gate, BEFORE the persist facts are consumed and
+    // before any queue/inbox write.
+    if (deps.pendingPastedPath?.(text) === true) {
+      deps.app().setEditorText(mergeDraft(deps.app().getDraft(), text))
+      deps.app().notify(PASTE_PENDING_NOTICE, 'info')
+      return
+    }
     const persist = makeSteerPersist(text)
     // The editor is cleared ONLY when the caller asks this owner to consume the
     // draft — and only AFTER the persist facts are snapshotted (timestamp +

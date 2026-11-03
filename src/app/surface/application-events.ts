@@ -58,6 +58,7 @@ import { viewerCanonicalizeScope } from './viewer-submission.ts'
 import type { SubagentPromptOutcome, SubagentViewerSubmitRequest } from '../../runtime/subagent-port.ts'
 import type { SessionForkOutcome } from '../session/runtime.ts'
 import type { SubmissionController } from '../submission/controller.ts'
+import type { PastedImageIntakeOwner } from './pasted-image-intake.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { ClientActions } from './client-actions.ts'
 import type { SettingsRuntime } from './settings-runtime.ts'
@@ -186,6 +187,9 @@ export interface ApplicationEventsDeps {
     readonly images: DraftImageStore
     readonly files: DraftFileStore
   }
+  /** The ONE intake owner of a terminal bracketed pasted image file path
+   *  (the real paste entry, distinct from the Ctrl+V clipboard entry). */
+  readonly pastedImageIntake: PastedImageIntakeOwner
   /** The deployment image policy (the Host attachments service `imageLimits`),
    *  re-read per paste. Direct only: on Remote this is `undefined`, so the
    *  paste intake uses the Client's own caps and the exact Session's official
@@ -458,8 +462,16 @@ export function createApplicationEvents(deps: ApplicationEventsDeps): Applicatio
     // The in-process EDITOR history must never recall a multimodal line after
     // its drafts were consumed — the placeholders would re-send as plain text
     // (the persisted JSONL history has the same guard; review finding: the
-    // memory side was missing it).
-    shouldRememberInput: (text) => !draftHasAttachments(text, deps.drafts.images, deps.drafts.files),
+    // memory side was missing it). A path whose attachment read is still in
+    // flight is equally transient: recalling it would later re-send the raw
+    // local path as ordinary text.
+    shouldRememberInput: (text) => !draftHasAttachments(text, deps.drafts.images, deps.drafts.files)
+      && !deps.pastedImageIntake.blocksDelivery(text),
+    // A REAL terminal bracketed paste (a different input source from Ctrl+V):
+    // the renderer proved the pasted span; the ONE intake owner decides
+    // whether it is an image file path, reads/stages it and replaces exactly
+    // that span.
+    onTerminalPastedPath: (receipt) => deps.pastedImageIntake.accept(receipt),
     // Ctrl+V (plan M3): probe the clipboard ONCE per paste — an image lands as
     // a draft placeholder, plain text as an editor insert, unsupported/empty
     // silently (a text paste must never error).

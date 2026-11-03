@@ -27,6 +27,7 @@
 
 import type { Key } from '@stencil-hq/tern'
 import type { SubmitPendingDetail } from '../../app/submission/ack.ts'
+import { PasteRangeTracker, type PasteRangeSpan } from '../interaction/pasted-path-range.ts'
 
 /** The composer's editor state snapshot (cursor in UTF-16 code units). */
 export interface TspComposerState {
@@ -125,6 +126,10 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
   let text = ''
   let cursor = 0
   let focused = false
+  // The short-lived paste-range leases of THIS composer: the only identity
+  // an asynchronous read may replace. Every real text mutation feeds it
+  // BEFORE the render/application sink observes the frame.
+  const pasteRanges = new PasteRangeTracker()
 
   const state = (): TspComposerState => ({ text, cursor, focused })
   const setFocused = (next: boolean): void => { focused = next }
@@ -137,6 +142,10 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
    * land with the caret at 0, where Backspace does nothing.
    */
   const replaceText = (next: string): void => {
+    // A programmatic whole-document replacement is NOT the paste that made
+    // the old text: retire every lease even when the same path bytes reappear.
+    pasteRanges.retireAll()
+    pasteRanges.observe(next)
     text = next
     cursor = boundaryCursor(next, next.length)
     sinks.onChanged()
@@ -147,6 +156,7 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
     // The fragment may MERGE with the following cluster (a combining mark or
     // ZWJ suffix): the caret lands at the END of the cluster it now sits in.
     cursor = boundaryCursor(text, cursor + fragment.length)
+    pasteRanges.observe(text)
     sinks.onChanged()
   }
 
@@ -160,8 +170,32 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
     clearDraftStateOnly: () => {
       // PR3-B §7.3 (B2 F1): PURE STATE — no `onChanged`, no render. See the
       // interface doc; the next committed frame carries the emptied editor.
+      pasteRanges.retireAll()
+      pasteRanges.observe('')
       text = ''
       cursor = 0
+    },
+    registerPastedPathSpan: (span) => pasteRanges.add(span),
+    hasLivePath: (id, path) => pasteRanges.live(id)?.expected === path,
+    replacePastedPathOccurrence: (id, path, placeholder) => {
+      const span = pasteRanges.live(id)
+      if (span === undefined || span.expected !== path) return false
+      if (text.slice(span.start, span.end) !== path) {
+        pasteRanges.retire(id)
+        return false
+      }
+      // The caret keeps its position RELATIVE to the surrounding text; a
+      // caret inside the token lands after the placeholder.
+      let nextCursor = cursor
+      if (cursor >= span.end) nextCursor += placeholder.length - path.length
+      else if (cursor > span.start) nextCursor = span.start + placeholder.length
+      const next = text.slice(0, span.start) + placeholder + text.slice(span.end)
+      pasteRanges.retire(id)
+      pasteRanges.observe(next)
+      text = next
+      cursor = boundaryCursor(next, nextCursor)
+      sinks.onChanged()
+      return true
     },
     notify: (message, kind) => sinks.notify(message, kind),
     setSubmitPending: detail => sinks.setSubmitPending(detail),
@@ -213,6 +247,7 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
           // into ONE flag cluster): re-normalize the caret onto the new
           // boundary so it can never sit inside the merged cluster.
           cursor = boundaryCursor(text, start)
+          pasteRanges.observe(text)
           sinks.onChanged()
           return { kind: 'edited' }
         }
@@ -223,6 +258,7 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
           // Same merge-after-cut hazard as backspace (the clusters around the
           // removed one may fuse): keep the caret boundary-aligned.
           cursor = boundaryCursor(text, cursor)
+          pasteRanges.observe(text)
           sinks.onChanged()
           return { kind: 'edited' }
         }
@@ -306,6 +342,20 @@ export interface TspComposer {
    * un-editable, so the outgoing text is never submittable meanwhile.
    */
   clearDraftStateOnly(): void
+  /**
+   * Register the proven raw span of ONE completed bracketed paste. Returns
+   * the lease id, or undefined when the current document does not hold those
+   * bytes (the caller must not claim the paste).
+   */
+  registerPastedPathSpan(span: PasteRangeSpan): number | undefined
+  /** Whether lease `id` still holds exactly `path`. */
+  hasLivePath(id: number, path: string): boolean
+  /**
+   * Replace ONE live pasted-path span with the canonical image placeholder —
+   * ONE atomic edit, ONE `onChanged`. A retired/replaced span returns false
+   * and never touches another occurrence of the same path.
+   */
+  replacePastedPathOccurrence(id: number, path: string, placeholder: string): boolean
   /** Apply ONE decoded SDK key through the fixed editor-local reducer. */
   applyKey(key: Key): TspComposerEdit
 }

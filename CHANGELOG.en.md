@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Terminal image-file pastes are attached automatically.** Pasting a local
+  image file into the composer of a terminal such as Tern or Hedr now reads the
+  image and replaces the path with the standard `[image #N (W×H)]` token, with
+  no manual `/image`. While the file is still being read, Enter / Send / steer
+  is refused with a retry notice; a failed read keeps the path text. Both the
+  PiTui and TSP renderers support it, and images keep flowing through the
+  existing draft and submission chain.
+
 ## [0.5.5] - 2026-11-03
 
 ### Installation and version pairing

@@ -295,6 +295,8 @@ async function mountedQuick(options: {
     submit: () => { counts.submits += 1 },
     steer() {},
     pasteMedia() {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true,
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

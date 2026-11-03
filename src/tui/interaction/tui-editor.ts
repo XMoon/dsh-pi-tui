@@ -28,6 +28,7 @@ import { color } from '../theme/runtime.ts'
 import { classifyFileCompletionContext } from '../file-completion/context.ts'
 import { FILE_ARGUMENT_COMMANDS } from '../../domain/file-completion/path-argument-commands.ts'
 import { editorModeFromHistoryEntry, type EditorInputMode } from './editor-input-mode.ts'
+import { pastedBodySpan, type PasteRangeSpan } from './pasted-path-range.ts'
 import { extractInlineSkillPrefix } from './autocomplete/skill-reference.ts'
 
 /** Host render-routing options for the host editor. */
@@ -47,6 +48,24 @@ export interface TuiEditorRenderLayout {
    * never builds a second visual wrap map.
    */
   readonly downEligible: boolean
+}
+
+/** ONE completed bracketed paste the host editor accepted as ordinary text.
+ *  The body is the complete paste content (mode prefix already stripped); the
+ *  span is the provable raw-text interval of the pasted file path — `undefined`
+ *  when the editor did not insert the body verbatim (a large-paste marker,
+ *  control-character filtering, shell-mode normalization), so a host can never
+ *  guess offsets. */
+export interface TuiEditorPasteCommit {
+  readonly text: string
+  readonly span: PasteRangeSpan | undefined
+}
+
+/** The flat UTF-16 caret offset of one editor position. */
+function flatCursorOffset(lines: readonly string[], cursor: { line: number; col: number }): number {
+  let offset = 0
+  for (let line = 0; line < cursor.line; line += 1) offset += (lines[line] ?? '').length + 1
+  return offset + cursor.col
 }
 
 export interface TuiEditorOptions {
@@ -185,6 +204,11 @@ export class TuiEditor extends Editor {
   /** The host observes the layout facts computed by the actual Editor render;
    *  this is not a paint-completion hook (render may also be measured). */
   onVisualLayoutRendered?: (layout: TuiEditorRenderLayout) => void
+  /** ONE real bracketed paste finished inserting ordinary prompt-mode text.
+   *  Fired synchronously after the fork's atomic paste insertion, so the host
+   *  can register the paste's exact span against the CURRENT raw text. Shell
+   *  modes and shell-mode normalization never fire it. */
+  onBracketedPasteCommitted?: (commit: TuiEditorPasteCommit) => void
 
   constructor(tui: TUI, theme: EditorTheme, options: TuiEditorOptions = {}) {
     // paddingX: 2 reserves the left two cells for the mode prompt painted
@@ -716,7 +740,23 @@ export class TuiEditor extends Editor {
       content = content.slice(1)
     }
     if (mode !== 'prompt') this.setInputMode(mode)
+    const beforeText = this.getText()
+    const beforeCursor = flatCursorOffset(this.getLines(), this.getCursor())
     if (content !== '') super.handleInput(`\x1b[200~${content}\x1b[201~`)
+    if (mode === 'prompt' && this.inputMode === 'prompt' && content !== '' && this.onBracketedPasteCommitted !== undefined) {
+      // The fork's own insertion is the ONLY evidence this span may rest on:
+      // the before/after document + caret prove exactly which bytes THIS paste
+      // inserted (the fork may prepend one readability space; a large paste
+      // becomes a marker and fails the proof).
+      const span = pastedBodySpan(
+        beforeText,
+        beforeCursor,
+        this.getText(),
+        flatCursorOffset(this.getLines(), this.getCursor()),
+        content,
+      )
+      this.onBracketedPasteCommitted({ text: content, span })
+    }
     const remaining = data.slice(end + '\x1b[201~'.length)
     if (remaining !== '') residuals.push(remaining)
     return residuals

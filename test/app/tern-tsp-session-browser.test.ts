@@ -147,6 +147,8 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     submit: () => assert.fail('the read-only Browser must capture Enter'),
     steer() {},
     pasteMedia: () => {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true,
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

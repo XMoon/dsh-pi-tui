@@ -84,6 +84,10 @@ export interface SurfaceLifecycleDeps {
   readonly cancelDeferredStatus: () => void
   readonly disposeFooterCommand: () => void
   readonly disposeLocalShell: () => void
+  /** Retire every in-flight terminal pasted-image read before the draft
+   *  stores are cleared: a stale read must never write a staged image or a
+   *  replacement token into a dying surface. */
+  readonly disposePastedImageIntake: () => void
   /** The memoized session-retirement coordinator (settles before the transport). */
   readonly retireOwnedSession: () => Promise<SessionRetirementReport>
   /** The selected runtime's transport disposer (awaited after the retirement). */
@@ -133,6 +137,7 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
     cancelDeferredStatus,
     disposeFooterCommand,
     disposeLocalShell,
+    disposePastedImageIntake,
     retireOwnedSession,
     disposeSelectedTransport,
     registerDisposal,
@@ -211,6 +216,9 @@ export function createSurfaceLifecycle(deps: SurfaceLifecycleDeps): SurfaceLifec
       // follows this step. Late-bound (`viewerRef`): a startup failure can run
       // this cleanup before the viewer owner exists (TDZ guard).
       () => disposeViewer(),
+      // The pasted-image intake retires BEFORE its draft store: a pending
+      // read must not stage bytes or replace a token after the stores go.
+      () => disposePastedImageIntake(),
       () => clearDraftImages(),
       () => clearDraftFiles(),
       // Abort any in-flight catalog refresh: its late result must never

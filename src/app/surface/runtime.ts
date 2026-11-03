@@ -112,6 +112,11 @@ import {
 import { runSyncDisposalSteps } from '../../runtime/process/disposal.ts'
 import type { CompactionPhase } from './compaction-presentation.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
+import {
+  PASTE_PENDING_NOTICE,
+  type PastedImageIntakePort,
+  type PastedPathReceipt,
+} from './pasted-image-intake.ts'
 import type { ModelPresentation } from '../command/model-presentation.ts'
 import type { PresetPresentation } from '../command/preset-presentation.ts'
 import type { SessionBrowserPresentation } from '../command/session-browser-presentation.ts'
@@ -242,6 +247,20 @@ export interface SurfaceInputBinding {
    * renderer never probes the clipboard itself.
    */
   pasteMedia(): void
+  /**
+   * ONE real bracketed paste (`Key{name:'paste'}`) was inserted into the main
+   * composer as text. A DIFFERENT source from {@link pasteMedia}: the
+   * terminal sent the text, the OS clipboard was never read. The application
+   * intake owner applies the image-file-path grammar, reads/stages the file
+   * and replaces the exact tracked span; a non-candidate paste is inert.
+   */
+  pastedPath(receipt: PastedPathReceipt): void
+  /**
+   * The pasted-image delivery admission, consulted BEFORE the composer draft
+   * is cleared. false = a pasted path in `text` is still being attached (the
+   * retry notice was shown); the draft/caret/Undo stay untouched.
+   */
+  admitPastedPathDelivery(text: string): boolean
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
   /**
@@ -462,6 +481,13 @@ export interface SurfaceRendererMount {
 export interface SurfaceMountDeps {
   /** The application input contract (session/submission/command owners). */
   readonly events: TuiAppEvents
+  /**
+   * The ONE application intake owner of a terminal bracketed pasted image
+   * file path. The PiTui branch injects it into `TuiApp` directly; the TSP
+   * branch routes real paste receipts and the delivery admission through the
+   * renderer input binding. Absent keeps pasted paths ordinary text.
+   */
+  readonly terminalPastedPath?: PastedImageIntakePort
   /**
    * PR3-A (experimental): an already-connected renderer mount that owns the
    * terminal instead of the default PiTui process mount. When present, no
@@ -2451,6 +2477,7 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
     draftImagePreviewLiveDraft: deps.draftImagePreviewLiveDraft,
     draftImagePreviewReserve: deps.draftImagePreviewReserve,
     draftImagePreviewUndo: deps.draftImagePreviewUndo,
+    ...(deps.terminalPastedPath === undefined ? {} : { terminalPastedPath: deps.terminalPastedPath }),
     // Fullscreen OSC 8 link clicks + the Windows right-click paste.
     openExternalUrl: deps.openExternalUrl,
     readClipboardText: deps.readClipboardText,
@@ -2787,6 +2814,12 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
           // table, so an events object without it leaves the gesture a
           // committed no-op). The renderer never probes the OS clipboard.
           pasteMedia: () => deps.events.onClipboardPaste?.(),
+          pastedPath: (receipt) => deps.events.onTerminalPastedPath?.(receipt),
+          admitPastedPathDelivery: (text) => {
+            if (deps.terminalPastedPath?.blocksDelivery(text) !== true) return true
+            displaySeam().notify(PASTE_PENDING_NOTICE, 'info')
+            return false
+          },
           noteUserInput: () => deps.events.onUserInput?.(),
           // PR3-B B3 (§3.8): the Alt+Q continued-Question read/reopen cross
           // through the SAME interaction owner. They are bound here but can

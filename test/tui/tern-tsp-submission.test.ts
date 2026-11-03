@@ -93,6 +93,8 @@ async function mountPane(
     /** Lifecycle-intent recorders for the default binding (cancel/exit). */
     onCancel?: () => void
     onExit?: () => void
+    /** The pasted-image delivery admission (default: always admitted). */
+    admitPastedPathDelivery?: () => boolean
   } = {},
 ): Promise<Harness> {
   const input = new FakeInput()
@@ -127,6 +129,8 @@ async function mountPane(
       submit: (text, request) => onSubmit(text, request),
       steer: () => {},
       pasteMedia: () => {},
+      pastedPath: () => {},
+      admitPastedPathDelivery: () => options.admitPastedPathDelivery?.() ?? true,
       noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
     })
   }
@@ -259,6 +263,36 @@ test('an accepted submit leaves an empty composer, so a second Enter cannot doub
   }
 })
 
+// ── The pasted-image delivery gate (before the clear) ───────────────────────
+
+test('a submit while a pasted image path is still attaching is refused before the clear', async () => {
+  let admit = false
+  const submissions: string[] = []
+  const harness = await mountPane((text) => { submissions.push(text) }, {
+    admitPastedPathDelivery: () => admit,
+  })
+  try {
+    harness.input.type('/tmp/shot.png ')
+    await awaitTyped(harness, '/tmp/shot.png ')
+    harness.input.type('\r')
+    await settle()
+    assert.deepEqual(submissions, [], 'no submit reaches the application while the read is in flight')
+    assert.equal(harness.renderer.composer.getDraft(), '/tmp/shot.png ',
+      'the draft survives the refusal (no clear, no lost paste span)')
+    assert.equal(lastComposerText(harness.output.text()), '/tmp/shot.png ',
+      'the refused gesture never clears the controlled composer')
+
+    admit = true
+    harness.input.type('\r')
+    await awaitFact(() => submissions.length === 1, 'the retried submit')
+    assert.deepEqual(submissions, ['/tmp/shot.png '],
+      'the retry delivers the same draft once the attachment settled')
+    assert.equal(harness.renderer.composer.getDraft(), '')
+  } finally {
+    await harness.dispose()
+  }
+})
+
 // ── The session/hydration input fence (§3.4 row 1) ──────────────────────────
 
 test('the hydration window accepts NO composer key and never submits', async () => {
@@ -325,7 +359,7 @@ test('a key HELD across a generation bump cannot submit when the bind replays it
     harness.renderer.bindInput({
       exit: () => {}, cancel: () => {},
       submit: (text) => { submissions.push(text) },
-      steer: () => {}, pasteMedia: () => {}, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
+      steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
     })
     await settle()
     assert.deepEqual(submissions, [], 'the held Enter did NOT cross the hydration fence at the replay')

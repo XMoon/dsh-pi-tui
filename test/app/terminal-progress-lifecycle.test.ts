@@ -3001,6 +3001,7 @@ function disposeThroughProductionLifecycle(h: SurfaceHarness): () => void {
     cancelDeferredStatus: () => {},
     disposeFooterCommand: () => {},
     disposeLocalShell: () => {},
+    disposePastedImageIntake: () => {},
     retireOwnedSession: async () => ({}) as never,
     disposeSelectedTransport: async () => {},
     registerDisposal: () => {},

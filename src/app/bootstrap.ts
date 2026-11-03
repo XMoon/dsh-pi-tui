@@ -57,6 +57,7 @@ import type { StatusRuntime } from './surface/status-runtime.ts'
 import { createInputHistory } from './surface/input-history.ts'
 import { createSettingsRuntime } from './surface/settings-runtime.ts'
 import { createApplicationEvents, type ApplicationEventsOwner } from './surface/application-events.ts'
+import { createPastedImageIntakeOwner } from './surface/pasted-image-intake.ts'
 import { createClientActions } from './surface/client-actions.ts'
 import { createModelSelectionOwner } from './command/model-selection.ts'
 import { createCommandSurface, type CommandSurface } from './command/surface.ts'
@@ -2377,6 +2378,22 @@ export function applyRunnerWithRuntime(
     // submit time.
     const draftImages = new DraftImageStore()
     const draftFiles = new DraftFileStore()
+    // The ONE application intake owner of a terminal bracketed pasted image
+    // file path (Tern/Hedr paste a local path as text; Ctrl+V is a different
+    // input source and keeps its own owner). Client-local by contract: the
+    // file is read on THIS machine and never through a Host path.
+    const pastedImageIntake = createPastedImageIntakeOwner({
+      drafts: { get images() { return draftImages }, get files() { return draftFiles } },
+      composer: () => surface.composer,
+      clientCwd: () => cwd,
+      imageLimits: () => directImageLimits(),
+      lifecycle: {
+        generation: () => ownership.generation(),
+        currentSessionId: () => ownership.currentSessionId(),
+        isCleanedUp: () => cleanedUp,
+        runOwned: (label, task, options) => runOwned(label, task, { ...options, diag }),
+      },
+    })
     // All command/fork/rewind lifecycle calls share this composition-root
     // bridge so no child-creation path can bypass the runner lifetime.
     const lifecycleAgents: TuiCommandRunner['agents'] = {
@@ -2468,6 +2485,7 @@ export function applyRunnerWithRuntime(
       cancelDeferredStatus: () => status.cancelDeferred(),
       disposeFooterCommand: () => settings.disposeFooterCommand(),
       disposeLocalShell: () => localShell.dispose(),
+      disposePastedImageIntake: () => pastedImageIntake.dispose(),
       retireOwnedSession: sessionRuntime.retireOwnedSession,
       disposeSelectedTransport,
       registerDisposal: (dispose) => { ctx.effect(function* () { yield dispose }) },
@@ -2665,6 +2683,9 @@ export function applyRunnerWithRuntime(
         get images() { return draftImages },
         get files() { return draftFiles },
       },
+      // The final fail-closed pasted-image delivery gate (the editor-side
+      // pre-clear admission is the normal one; this catches a bypass).
+      pendingPastedPath: (text) => pastedImageIntake.blocksDelivery(text),
       status: { sessionCwd: () => status.sessionCwd() },
       surface: { refreshPendingInput: () => surface.refreshPendingInput() },
       history: {
@@ -2792,6 +2813,7 @@ export function applyRunnerWithRuntime(
       settings,
       client: clientActions,
       drafts: { get images() { return draftImages }, get files() { return draftFiles } },
+      pastedImageIntake,
       imageLimits: () => directImageLimits() as Parameters<typeof checkImageLimits>[2] | undefined,
       rewind: {
         // PR4 §4: the whole-log picker authority + the loadThrough detail
@@ -2995,6 +3017,7 @@ export function applyRunnerWithRuntime(
     try {
       surface.start({
       events: applicationEvents.events,
+      terminalPastedPath: pastedImageIntake,
       ...(rendererMount === undefined ? {} : { renderer: rendererMount }),
       workspaceRoot: cwd,
       // The structural icon palette: read ONCE at startup from the persisted
