@@ -271,15 +271,19 @@ test('W01: the Welcome states the product name, the ONE action and the fixed tip
   t.after(() => m.dispose())
   await idle(m)
   const texts = m.nodes('main.').map(node => String(node.p.text ?? '')).filter(text => text !== '')
+  // The icon is the CLIENT's own glyph (`ui.icon`), so it is not a painted
+  // text run this suite may spell out: the copy is the name, the committed
+  // version, the action label and arrow, and the fixed tip.
   assert.deepEqual(texts, [
     ...whaleRowsOnWire(m),
     'dsh-pi-tui',
     VERSION_LINE,
-    '↶',
     'Resume session',
     '›',
     'Tip: Type / to browse commands.',
-  ], 'the painted text is exactly the D copy, in order, with no extra line')
+  ], 'the painted copy is exactly the D text, in order, with no extra line')
+  assert.equal(m.nodes('main.').some(node => node.k === 'icon' && String(node.p.name) === 'history'), true,
+    'the action leads with the client icon vocabulary, not a hand-painted glyph')
 })
 
 test('W02: a blank-session commit shows the same Welcome and takes the version from the committed status snapshot', async (t) => {

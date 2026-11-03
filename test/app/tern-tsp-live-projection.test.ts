@@ -1414,6 +1414,19 @@ interface PreparingHarness {
   readonly tern: ScriptedTern
   /** The PRODUCTION preview map the surface reads. */
   readonly previews: Map<string, StreamingToolPreview>
+  /**
+   * The eligibility argument each commit carried, in commit order. Recorded by
+   * wrapping the PRODUCTION consumer's own `setTranscript` (the mounted
+   * renderer's seam) and calling the saved unbound original through the
+   * instance, so the witness is the argument the surface really committed —
+   * not a guess from the painted sink, which the renderer's own content veto
+   * can also explain.
+   */
+  readonly committedEligibilities: Array<'sessionless' | 'blank-session' | 'hidden' | undefined>
+  /** The ONE bounded display-window controller of the main subject. Exposed so
+   *  a case can re-select the window and prove the Welcome eligibility does not
+   *  read it (the eligibility reads the complete fold's turn index). */
+  readonly window: TranscriptWindowController
   /** Mount a viewed child as the display subject (the Welcome D W07 switch). */
   viewChild(): TranscriptFolder
   /** Leave the viewed child and return to the main subject. */
@@ -1445,6 +1458,12 @@ async function mountPreparingHarness(welcome: {
   readonly sessionBlank?: (sessionId: string) => boolean | undefined
   /** Advertise `el` so the mounted renderer takes the styled Welcome path. */
   readonly nativeEl?: boolean
+  /**
+   * The bounded display window's turn count. The Welcome eligibility NEVER
+   * reads it (it reads the complete fold's turn index), so a case can shrink
+   * the window under a longer history and prove the two are not the same fact.
+   */
+  readonly windowTurns?: number
 } = {}): Promise<PreparingHarness> {
   const tern = new ScriptedTern(welcome.nativeEl === true
     ? { ...PREPARING_HELLO, kinds: [...PREPARING_HELLO.kinds, 'el'] }
@@ -1452,7 +1471,7 @@ async function mountPreparingHarness(welcome: {
   const { session } = await openTern(tern)
   const folder = new TranscriptFolder()
   const stats = new StatsFolder()
-  const controller = new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 })
+  const controller = new TranscriptWindowController({ windowTurns: welcome.windowTurns ?? 20, stepTurns: 10 })
   const previews = new Map<string, StreamingToolPreview>()
   /** The live Agent registry: the identity the assistant stream carries. */
   const agents = new Map<string, object>()
@@ -1582,11 +1601,22 @@ async function mountPreparingHarness(welcome: {
   })
 
   const agent = registerAgent({ session: { id: SESSION_ID } })
+  // The eligibility witness: patch the consumer instance the mount created and
+  // keep passing every argument through unchanged.
+  const committedEligibilities: Array<'sessionless' | 'blank-session' | 'hidden' | undefined> = []
+  const consumer = mountedRenderer!
+  const originalSetTranscript = consumer.display.setTranscript
+  consumer.display.setTranscript = ((...args: Parameters<typeof originalSetTranscript>) => {
+    committedEligibilities.push(args[6])
+    return originalSetTranscript.apply(consumer.display, args)
+  }) as typeof originalSetTranscript
 
   return {
     surface,
     tern,
     previews,
+    window: controller,
+    committedEligibilities,
     viewChild() {
       const child = new TranscriptFolder()
       viewed = { id: CHILD_ID, folder: child, window: new TranscriptWindowController({ windowTurns: 20, stepTurns: 10 }) }
@@ -1934,6 +1964,42 @@ test('W06: a turn in the complete fold vetoes the empty state even when the auth
     await awaitWire(() => messageRowOnWire(harness), 'the real row to reach the wire')
     assert.equal(welcomeOnWire(harness), false,
       'the fold\'s turn vetoed the stale blank claim: no Welcome came back')
+    // The decisive witness is the argument the surface COMMITTED, taken from
+    // the production consumer's own method: one turn in the fold must answer
+    // `'hidden'`, so the veto is the authority's decision and not only a
+    // presentation-side accident of the painted frame.
+    assert.deepEqual(harness.committedEligibilities.at(-1), 'hidden',
+      `the repaint committed the veto itself: ${JSON.stringify(harness.committedEligibilities)}`)
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('W06: the veto reads the complete fold, so a bounded window that shows nothing of the history never re-presents the empty state', async () => {
+  // A one-turn window over a two-turn history: the projection is a strict
+  // subset of the fold, and the plan's rule is that the subset is never the
+  // authority. The blank claim stays `true` throughout, so the ONLY fact that
+  // can keep the Welcome away is the fold's own turn index.
+  const harness = await mountPreparingHarness({ nativeEl: true, sessionBlank: () => true, windowTurns: 1 })
+  try {
+    harness.surface.paintNow()
+    await awaitWire(() => welcomeOnWire(harness), 'the empty subject to present the Welcome')
+    harness.route(ev('turn/start', { turn: 1 }, 0))
+    harness.route(userMessage(1, 'user-1', 'The oldest turn of the history.'))
+    harness.route(ev('turn/start', { turn: 2 }, 1))
+    harness.route(userMessage(2, 'user-2', 'The newest turn of the history.'))
+    harness.surface.paintNow()
+    await awaitWire(() => messageRowOnWire(harness), 'the bounded window to paint a row')
+    assert.equal(welcomeOnWire(harness), false, 'a fold with turns never re-becomes the empty state')
+    assert.deepEqual(harness.committedEligibilities.at(-1), 'hidden',
+      'the veto came from the complete fold, not from the one-turn window it painted')
+    // And re-anchoring the ONE-turn window onto the OLDER turn keeps it away:
+    // the window's contents are not the eligibility input.
+    assert.equal(harness.window.anchorAt(1), true, 'the window re-anchors onto the older turn')
+    harness.surface.paintNow()
+    await awaitWire(() => !harness.window.isLatest(), 'the window to leave the live tail')
+    assert.equal(welcomeOnWire(harness), false,
+      're-selecting the bounded window never brings the Welcome back')
   } finally {
     await harness.dispose()
   }
@@ -1950,6 +2016,57 @@ test('W07: a viewed child never borrows the main subject\'s Welcome, and leaving
     harness.exitChild()
     harness.surface.paintNow()
     await awaitWire(() => welcomeOnWire(harness), 'the main blank subject to present its own Welcome again')
+  } finally {
+    await harness.dispose()
+  }
+})
+
+test('W16: the Remote session-summary blank bit drives the same repaint chain, including the UNKNOWN case', async () => {
+  // The authority is the REAL Remote port object, not a boolean the fixture
+  // pre-computed: `RemoteSessionReader.blank()` reads the official Client
+  // session-summary snapshot, and the snapshot's `phase` is what makes an
+  // answer UNKNOWN. The surface, the fold, the repaint and the mounted
+  // renderer are the production ones.
+  const { RemoteSessionReader } = await import('../../src/runtime/remote/session-reader-remote.ts')
+  const { createObservableGenerationHarness } = await import('../support/remote-generation.ts')
+  const generations = createObservableGenerationHarness()
+  const rows: Record<string, { id: string; updatedAt: number; running: boolean; blank?: boolean }> = {
+    'session-live-pr2': { id: SESSION_ID, updatedAt: 10, running: false, blank: true },
+  }
+  let phase: 'ready' | 'loading' = 'ready'
+  const source = {
+    list: {
+      getSnapshot: () => ({ ids: Object.keys(rows), byId: rows, phase }),
+      refresh: async () => {},
+      subscribe: () => () => {},
+    },
+    bindings: { getSnapshot: () => ({ byId: {} }), subscribe: () => () => {} },
+  } as never
+  const reader = new RemoteSessionReader(source, generations.source)
+  assert.equal(reader.blank(SESSION_ID), true, 'the port answers blank for the listed row')
+
+  const harness = await mountPreparingHarness({ nativeEl: true, sessionBlank: id => reader.blank(id) })
+  try {
+    harness.surface.paintNow()
+    await awaitWire(() => welcomeOnWire(harness), 'the Remote-blank subject to present the Welcome')
+    assert.deepEqual(harness.committedEligibilities.at(-1), 'blank-session',
+      'the eligibility came from the Remote port read')
+
+    // The summary flips to non-blank: the next authorized repaint retires it.
+    rows[SESSION_ID] = { id: SESSION_ID, updatedAt: 20, running: false, blank: false }
+    harness.surface.paintNow()
+    await awaitWire(() => !welcomeOnWire(harness), 'the non-blank summary to retire the Welcome')
+    assert.deepEqual(harness.committedEligibilities.at(-1), 'hidden')
+
+    // UNKNOWN: the list is not ready, so the bit is not a fact. The Welcome
+    // must stay away — an unknown authority is never read as blank.
+    rows[SESSION_ID] = { id: SESSION_ID, updatedAt: 30, running: false, blank: true }
+    phase = 'loading'
+    assert.equal(reader.blank(SESSION_ID), undefined, 'the port answers undefined while loading')
+    harness.surface.paintNow()
+    await awaitWire(() => harness.committedEligibilities.at(-1) === 'hidden',
+      'the unknown authority to answer hidden')
+    assert.equal(welcomeOnWire(harness), false, 'an UNKNOWN blank bit never shows the empty state')
   } finally {
     await harness.dispose()
   }

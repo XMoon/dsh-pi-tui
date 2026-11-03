@@ -158,7 +158,13 @@ function styledWelcome(input: WelcomeViewInput): Node {
             : { 'aria-label': 'Resume session', 'aria-disabled': 'true', disabled: 'disabled' } as Readonly<Record<string, string>>,
           ...(input.resumeAvailable ? { onClick: () => input.onResume() } : {}),
         },
-          html.span({ key: 'welcome-resume-icon', role: ROLES.resumeIcon }, '↶'),
+          // The icon is the CLIENT's own icon vocabulary, never a hand-painted
+        // glyph: `↶` is already the icon registry's `context-recall` mark and
+        // the design language forbids one glyph carrying two meanings in one
+        // family (docs/architecture/design-language.md §4.4 + the width gate),
+        // so painting it here would add an unregistered second meaning. The
+        // Quiet Composer's Permission icon is the same existing mechanism.
+        ui.icon({ key: 'welcome-resume-icon', role: ROLES.resumeIcon, name: 'history' }),
           html.span({ key: 'welcome-resume-label', role: ROLES.resumeLabel }, 'Resume session'),
           html.span({ key: 'welcome-resume-arrow', role: ROLES.resumeArrow }, '›'),
         ),
