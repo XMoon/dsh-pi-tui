@@ -102,6 +102,26 @@ test('a completed waitForExit does not leave its deadline holding the process', 
   )
 })
 
+test('the candidate pin is qualified against the exact DSH runtime before any setup', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.match(source, /import \{ requireExactSmokeDshPin \} from '\.\/lib\/split-smoke-diagnostics\.mjs'/u,
+    'the exact-pin rule is shared with the U lane, not restated per script')
+  const main = source.slice(source.indexOf('async function main()'))
+  const validate = main.indexOf('const candidateManifest = validateCandidateTarball(tarball)')
+  const sha = main.indexOf('const candidateSha256 =')
+  const target = main.indexOf('const targetDshVersion = npmDshVersion()')
+  const guard = main.indexOf("requireExactSmokeDshPin('candidate', candidateManifest, targetDshVersion)")
+  const distribution = main.indexOf('loadDshDistribution({ mode: ')
+  const workRoot = main.indexOf("mkdtempSync(join(tmpdir(), 'dsh-split-process-'))")
+  const install = main.indexOf('runPnpmInstall(harnessDir, env, distribution)')
+  assert.ok(validate >= 0 && sha > validate && target > sha && guard > target,
+    'the candidate manifest must be read, hashed and pinned against the lane target before anything is set up')
+  assert.ok(distribution > guard && workRoot > guard && install > workRoot,
+    'an unqualified candidate may not load the distribution, create a work root or install')
+  // The shared validator keeps its own public semantics for every other caller.
+  assert.doesNotMatch(source, /function validateCandidateTarball/u)
+})
+
 test('the upgraded smoke carries every B1/B2-HF gate and the critical negative controls', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   for (const gate of ['T01', 'T02', 'T03', 'T04', 'T05', 'T06', 'T07', 'T08', 'T09', 'T10', 'T11', 'T12', 'T13', 'T14', 'T15', 'T16', 'T17', 'T18', 'T19', 'T20', 'T21', 'T22', 'T23', 'T24', 'T25', 'T26', 'T27', 'T28', 'T29', 'T30', 'T31', 'T32', 'T33', 'T34', 'T35', 'T36', 'T37', 'T38', 'T39', 'T40', 'T41', 'T42', 'T43', 'T44', 'T45', 'T46', 'T47', 'T48', 'T49', 'T50', 'T51', 'T52', 'T53', 'T54', 'T55', 'T56', 'T57', 'T58', 'T59', 'T60']) {

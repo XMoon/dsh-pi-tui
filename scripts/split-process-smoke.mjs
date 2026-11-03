@@ -77,6 +77,7 @@ import {
   validateCandidateTarball,
 } from './pi2dsh-compat-smoke.mjs'
 import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
+import { requireExactSmokeDshPin } from './lib/split-smoke-diagnostics.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 const TRACE_PATH = process.env.SPLIT_PROCESS_TRACE
@@ -1015,10 +1016,14 @@ function clientStatus(client) {
 
 async function main() {
   const tarball = resolveTarball(candidateArgument(process.argv.slice(2)))
-  validateCandidateTarball(tarball)
+  const candidateManifest = validateCandidateTarball(tarball)
   /** The exact candidate artifact this run qualifies; re-read at the end. */
   const candidateSha256 = createHash('sha256').update(readFileSync(tarball)).digest('hex')
   const targetDshVersion = npmDshVersion()
+  // Input qualification BEFORE any install: the candidate must declare this
+  // checkout's exact DSH runtime pin, the same rule the production Client
+  // reexec preflight applies to a replacement target.
+  requireExactSmokeDshPin('candidate', candidateManifest, targetDshVersion)
   const distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
   const workDir = mkdtempSync(join(tmpdir(), 'dsh-split-process-'))
   const home = join(workDir, 'home')
