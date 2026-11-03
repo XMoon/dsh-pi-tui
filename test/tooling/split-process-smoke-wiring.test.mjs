@@ -282,6 +282,25 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     'the artifact-absence control must reject an enclosing profiles manifest carrying the candidate package name')
 })
 
+test('the lane setup shares the report and cleanup boundary with the run', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const main = source.slice(source.indexOf('async function main()'))
+  // Pin qualification must still happen BEFORE anything is created on disk.
+  const guard = main.indexOf("requireExactSmokeDshPin('candidate'")
+  const root = main.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-process-'\)\)/u)
+  const setupTry = main.indexOf('let isolatedScopeId', guard)
+  assert.ok(guard > 0 && root > guard, 'no setup may run before the input is qualified')
+  assert.ok(setupTry > 0 && setupTry < root,
+    'the setup must already be inside the try that owns the report and the cleanup')
+  // The cleanup must tolerate a scene that never got created, and must remove a
+  // root that was created before a later setup step failed.
+  const finallyIndex = main.indexOf('} finally {', root)
+  const cleanup = main.slice(finallyIndex)
+  assert.match(cleanup, /if \(workDir === undefined\) \{/u, 'a missing work root must not break the cleanup')
+  assert.match(cleanup, /else if \(!KEEP\) rmSync\(workDir/u)
+  assert.match(cleanup, /if \(dshHome !== undefined\) killIsolatedProcesses\(dshHome\)/u)
+})
+
 test('the split-process lane reports every failure through the shared safe projection', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   // Startup identity and checkpoints are ON by default; the explicit trace file
@@ -381,7 +400,8 @@ test('the Client peer set is installed into the profile that actually runs it', 
 
   // The work dir is a real OS temp root, and the checkout-ancestor escape is
   // rejected explicitly instead of silently falling back to the project temp.
-  assert.match(source, /const workDir = [A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-process-'\)\)/u)
+  // Assigned inside the setup boundary, but still an OS temp root outside the checkout.
+  assert.match(source, /workDir = [A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-process-'\)\)/u)
   assert.match(source, /relative\(realpathSync\(PACKAGE_ROOT\), realpathSync\(workDir\)\)/u)
   assert.match(source, /workDirFromCheckout\.startsWith\(`\.\.\$\{sep\}`\)/u)
 

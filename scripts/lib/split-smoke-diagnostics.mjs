@@ -86,8 +86,28 @@ const RELOAD_NOTICE_BY_TEXT = new Map([
 /** The product notice row shape: the `✗`/`ℹ` mark, then `Client reload `. */
 const RELOAD_NOTICE_LINE = /^\s*(?:✗|ℹ) Client reload (?:skipped|blocked|failed|is available|is unavailable)/u
 
-/** The three official telemetry event keys a report may name. */
+/**
+ * The three official telemetry event keys a report may name, and the CLOSED set
+ * of event NAMES each key may carry. The values come from the entries the lanes
+ * launch (`src/app/remote-process/**`), not from a guess: an event name outside
+ * its set is omitted rather than truncated into the report, so a hostile or
+ * drifted record cannot put arbitrary text into the default output.
+ */
 const EVENT_KEYS = Object.freeze(['m4a0', 'm4r', 'm4b2s'])
+const EVENT_NAMES = Object.freeze({
+  m4a0: new Set(['cleanup', 'cleanup-failure', 'client-started', 'context-ready', 'control-error',
+    'control-failure', 'diag', 'failure', 'host-authenticated', 'host-seat-conflict',
+    'peer-answer-sent', 'peer-frame', 'peer-interaction', 'peer-question-answer',
+    'peer-stale-result-sent', 'profile-booted', 'qualification', 'ready', 'signal', 'status',
+    'stop-repeat-ignored', 'stop-requested', 'transport-ready']),
+  m4r: new Set(['handoff-failed', 'handoff-parent-exit', 'handoff-request-ignored',
+    'handoff-request-rejected', 'handoff-requested', 'handoff-restored']),
+  m4b2s: new Set(['client-closed', 'qualification', 'surface-status']),
+})
+
+function eventNameOrUndefined(key, value) {
+  return EVENT_NAMES[key].has(value) ? value : undefined
+}
 
 /**
  * The CLOSED set of stable codes the lanes may ever report as a `reason`.
@@ -308,13 +328,22 @@ function projectProcess(handle) {
   for (const record of records.slice(-MAX_PROCESS_EVENTS)) {
     const event = {}
     for (const key of EVENT_KEYS) {
-      const value = boundedName(record?.[key])
+      const value = eventNameOrUndefined(key, record?.[key])
       if (value !== undefined) event[key] = value
     }
     if (Object.keys(event).length > 0) events.push(event)
   }
-  const identity = records.find(record => record?.m4a0 === 'ready')
-    ?? records.find(record => record?.m4a0 === 'client-started')
+  // A reexec leaves BOTH Clients' records in the SAME stream, so the identity a
+  // report names must be the NEWEST one: the oldest `ready` would blame the
+  // replacement's failure on the PID that already handed off.
+  let identity
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const name = records[index]?.m4a0
+    if (name === 'ready' || name === 'client-started') {
+      identity = records[index]
+      break
+    }
+  }
   const summary = {
     role: boundedName(handle.role),
     exited: handle.exited === true,
@@ -388,6 +417,10 @@ export function projectFailureReport(input = {}) {
   if (reason !== undefined) report.reason = reason
   const checkpoint = boundedName(input.checkpoint)
   if (checkpoint !== undefined) report.checkpoint = checkpoint
+  // The assertion locator is a `<basename>:<line>` shape, never free text.
+  if (/^[A-Za-z0-9._-]{1,64}\.mjs:[1-9][0-9]{0,6}$/u.test(String(input.assertion ?? ''))) {
+    report.assertion = input.assertion
+  }
   const waitLabel = bounded(input.waitLabel, MAX_LABEL_CHARS)
   if (waitLabel !== undefined) report.waitLabel = waitLabel
   if (Number.isInteger(input.elapsedMs)) report.elapsedMs = input.elapsedMs
@@ -434,7 +467,11 @@ export function failureCategoryOf(error) {
 export function safeFailureSummary(error) {
   const category = failureCategoryOf(error)
   const reason = laneCodeOrUndefined(error?.code)
-  return reason === undefined ? category : `${category}: ${reason}`
+  const head = reason === undefined ? category : `${category}: ${reason}`
+  const at = /^[A-Za-z0-9._-]{1,64}\.mjs:[1-9][0-9]{0,6}$/u.test(String(error?.assertion ?? ''))
+    ? ` at ${error.assertion}`
+    : ''
+  return `${head}${at}`
 }
 
 /**
@@ -444,6 +481,51 @@ export function safeFailureSummary(error) {
 export function forensicErrorText(error, limit = 2_000) {
   const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error ?? '')
   return bounded(text, limit) ?? '(no detail)'
+}
+
+/**
+ * A lane assertion that can be LOCATED without being quoted.
+ *
+ * `ASSERTION_FAILED` was previously an ordinary `Error`, so once the message was
+ * kept out of the default output (rightly: it interpolates records and tool
+ * text) a failed check became `ASSERTION_FAILED` and nothing else. This carries
+ * the one locator that is safe to publish — the calling file's BASENAME and its
+ * line number — derived from the stack and filtered against the lane's own
+ * assert helpers, so it names the check site rather than a helper frame. The
+ * message itself stays out of the default report and is printed only under
+ * `KEEP`, where the operator already kept the private scene.
+ */
+const ASSERT_HELPER_FRAMES = /^(?:assert|assertEqual|assertNotEqual|assertDeepEqual|assertMatch|laneAssertionError|SplitSmokeAssertionError)$/u
+const STACK_FRAME = /^at (?:async )?(?:(?<fn>[A-Za-z0-9_$.<>| ]+?) \()?(?<path>[^\s()]+):(?<line>\d+):\d+\)?$/u
+const SAFE_BASENAME = /^[A-Za-z0-9._-]{1,64}\.mjs$/u
+
+export class SplitSmokeAssertionError extends Error {
+  constructor(message, facts = {}) {
+    super(`ASSERTION_FAILED: ${message}`)
+    this.name = 'SplitSmokeAssertionError'
+    this.category = 'ASSERTION_FAILED'
+    this.assertion = laneAssertionSite(this.constructor)
+    this.checkpoint = facts.checkpoint
+  }
+}
+
+/** The caller's `<basename>:<line>` for a failure thrown from a lane assert helper. */
+export function laneAssertionSite(holder) {
+  const site = new Error()
+  if (holder !== undefined) Error.captureStackTrace?.(site, holder)
+  const frames = String(site.stack ?? '').split('\n').slice(1)
+  for (const frame of frames) {
+    const m = STACK_FRAME.exec(frame.trim())
+    if (m === null) continue
+    const groups = m.groups ?? {}
+    const fn = (groups.fn ?? '').trim().split(/\s+/).at(-1) ?? ''
+    if (ASSERT_HELPER_FRAMES.test(fn)) continue
+    const file = String(groups.path ?? groups.bare ?? '').split('/').pop()
+    const line = Number(groups.line)
+    if (!SAFE_BASENAME.test(file) || !Number.isInteger(line) || line <= 0) continue
+    return `${file}:${line}`
+  }
+  return undefined
 }
 
 /**
@@ -497,6 +579,7 @@ export function formatFailureSummary(report, reportPath) {
   add('category', report.category)
   add('reason', report.reason)
   add('checkpoint', report.checkpoint)
+  add('assertion', report.assertion)
   add('wait', report.waitLabel)
   add('elapsedMs', report.elapsedMs)
   add('runtimeDshPin', report.runtimeDshPin)
@@ -528,6 +611,7 @@ export function emitInputFailure({ lane, heading, error, reason, evidencePath })
     lane,
     category: failureCategoryOf(error),
     reason: reason ?? error?.code,
+    assertion: error?.assertion,
   })
   const path = writeFailureReport(report)
   process.stderr.write(`${heading}_FAILURE\n${formatFailureSummary(report, path)}\n`)
@@ -579,6 +663,7 @@ export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, a
         category: extra.category ?? failureCategoryOf(error),
         reason: extra.reason ?? error?.code,
         checkpoint: extra.checkpoint ?? steps.at(-1)?.name,
+        assertion: extra.assertion ?? error?.assertion,
         waitLabel: extra.waitLabel ?? error?.waitLabel,
         elapsedMs: extra.elapsedMs ?? error?.elapsedMs,
         expected: extra.expected ?? error?.expected,

@@ -272,12 +272,12 @@ async function main() {
     tmux.send('/exit')
     await new Promise(resolveDelay => setTimeout(resolveDelay, 600))
     tmux.send('Enter')
-    await waitUntil('profile exit', 30_000, () => !tmux.has(), 'P1_PROFILE_DISPOSE_FAILURE')
+    await waitUntil('profile exit', 30_000, () => !tmux.has(), 'PROFILE_DISPOSE_FAILURE')
     console.log(`job-controller isolated-profile smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (job-controller composed, follow non-consuming)`)
   } finally {
     tmux?.stop()
     if (process.env.DSH_JOB_CONTROLLER_PROFILE_KEEP !== '1') rmSync(workDir, { recursive: true, force: true })
-    else console.error(`preserved P1 profile environment: ${workDir}`)
+    else console.error(`preserved job-controller profile environment: ${workDir}`)
   }
 }
 

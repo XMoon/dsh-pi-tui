@@ -83,6 +83,7 @@ import {
   requireExactSmokeDshPin,
   safeFailureSummary,
   smokeArtifactIdentity,
+  SplitSmokeAssertionError,
   SplitSmokeWaitError,
   writePrivateReport,
 } from './lib/split-smoke-diagnostics.mjs'
@@ -104,7 +105,7 @@ function checkpoint(name) {
 }
 
 function assert(condition, message) {
-  if (!condition) throw new Error(`ASSERTION_FAILED: ${message}`)
+  if (!condition) throw new SplitSmokeAssertionError(message)
 }
 
 function canonicalAssertValue(value) {
@@ -1444,25 +1445,21 @@ async function main() {
   // The startup identity is announced only AFTER preflight qualified it.
   process.stderr.write(`${diagnostics.identityLine()}\n`)
   diagnostics.checkpoint('preflight/artifacts')
-  const distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
-  const workRoot = mkdtempSync(join(tmpdir(), 'dsh-split-upgrade-'))
-  const home = join(workRoot, 'home')
-  const dshHome = join(workRoot, 'dsh-home')
-  const harnessDir = join(workRoot, 'harness')
-  // A sibling of the active profile, never a child: its own pnpm project must
-  // not discover or rewrite the running old profile, while DSH's `profiles/**`
-  // interception still applies to its installed Client build.
-  const sideBuildDir = join(dshHome, 'profiles', 'split-upgrade-side-build')
-  // Known before the install exists: the old Client receives this absolute
-  // root as its qualification target and only reads it at the reexec trigger.
-  const sideBuildPackagePath = join(sideBuildDir, 'node_modules', EXPECTED_PACKAGE_NAME)
-  const scratch = join(workRoot, 'scratch')
-  for (const directory of [home, dshHome, harnessDir, scratch]) mkdirSync(directory, { recursive: true })
-  writeFileSync(join(workRoot, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
-  const env = isolatedEnvironment(workRoot, home, dshHome, join(workRoot, 'evidence.json'))
+  // The setup is inside the same failure boundary as the run: a temp-root,
+  // `mkdir` or `writeFileSync` failure still produces the safe report and still
+  // removes the partially created scene, instead of skipping the cleanup.
+  let distribution
+  let workRoot
+  let home
+  let dshHome
+  let harnessDir
+  let sideBuildDir
+  let sideBuildPackagePath
+  let scratch
+  let env
   const hosts = []
   const clients = []
-  const evidence = {
+  evidence = {
     lane: 'split-process upgrade safety',
     status: 'RUNNING',
     dshVersion: targetDshVersion,
@@ -1480,6 +1477,22 @@ async function main() {
   }
 
   try {
+    distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
+    workRoot = mkdtempSync(join(tmpdir(), 'dsh-split-upgrade-'))
+    home = join(workRoot, 'home')
+    dshHome = join(workRoot, 'dsh-home')
+    harnessDir = join(workRoot, 'harness')
+    // A sibling of the active profile, never a child: its own pnpm project must
+    // not discover or rewrite the running old profile, while DSH's `profiles/**`
+    // interception still applies to its installed Client build.
+    sideBuildDir = join(dshHome, 'profiles', 'split-upgrade-side-build')
+    // Known before the install exists: the old Client receives this absolute
+    // root as its qualification target and only reads it at the reexec trigger.
+    sideBuildPackagePath = join(sideBuildDir, 'node_modules', EXPECTED_PACKAGE_NAME)
+    scratch = join(workRoot, 'scratch')
+    for (const directory of [home, dshHome, harnessDir, scratch]) mkdirSync(directory, { recursive: true })
+    writeFileSync(join(workRoot, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
+    env = isolatedEnvironment(workRoot, home, dshHome, join(workRoot, 'evidence.json'))
     // The upgrade work root must be a real OS temp root outside this checkout:
     // an ancestor `node_modules` would otherwise lend the Client peer set that
     // each isolated installation must own itself (issue #476).
@@ -2347,9 +2360,11 @@ async function main() {
       await stopHostForCleanup(host).catch(() => undefined)
       killProcessGroup(host)
     }
-    killIsolatedProcesses(dshHome)
+    if (dshHome !== undefined) killIsolatedProcesses(dshHome)
     for (const extraHome of extraIsolatedHomes) killIsolatedProcesses(extraHome)
-    if (!KEEP) rmSync(workRoot, { recursive: true, force: true })
+    if (workRoot === undefined) {
+      // Nothing to remove: the setup failed before any work root existed.
+    } else if (!KEEP) rmSync(workRoot, { recursive: true, force: true })
     else process.stderr.write(`preserved split-upgrade environment: ${workRoot}\n`)
   }
 }

@@ -74,7 +74,8 @@ test('both Client peer owners are real and every upgrade root is isolated', () =
   const source = readFileSync(SCRIPT, 'utf8')
   // The work root is a real OS temp root outside the checkout; a repo-local
   // split-upgrade-* root would borrow the checkout's node_modules (issue #476).
-  assert.match(source, /const workRoot = [A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
+  // Assigned inside the setup boundary, but still an OS temp root outside the checkout.
+  assert.match(source, /workRoot = [A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
   assert.match(source, /relative\(realpathSync\(PACKAGE_ROOT\), realpathSync\(workRoot\)\)/u)
   assert.match(source, /workRootFromCheckout\.startsWith\(`\.\.\$\{sep\}`\)/u)
   assert.doesNotMatch(source, /join\(PACKAGE_ROOT, 'temp', 'split-upgrade-'\)/u)
@@ -106,7 +107,7 @@ test('both Client peer owners are real and every upgrade root is isolated', () =
   // The side-build is a sibling profile project with its own exact peer
   // closure, never a child of the active profile and never a second DSH or
   // Cordis family.
-  assert.match(source, /const sideBuildDir = join\(dshHome, 'profiles', 'split-upgrade-side-build'\)/u)
+  assert.match(source, /sideBuildDir = join\(dshHome, 'profiles', 'split-upgrade-side-build'\)/u)
   assert.match(source, /function installSideBuild\(dir, tarball, env, targetDshVersion\)/u)
   assert.match(source, /installSideBuild\(sideBuildDir, newArtifact\.path, env, targetDshVersion\)/u)
   const sideBuildSource = source.slice(
@@ -266,6 +267,22 @@ test('the manual reload ignores a live qualification target override and resolve
   assert.match(u09, /qualificationUsedOverride: true/u)
   assert.match(u09, /sameProcessBothEntries: true/u)
   assert.match(source, /runReloadSourceIsolationRound\(\{/u)
+})
+
+test('the upgrade setup shares the report and cleanup boundary with the run', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const main = source.slice(source.indexOf('async function main()'))
+  const guard = main.indexOf("requireExactSmokeDshPin('new'")
+  const root = main.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
+  const setupTry = main.indexOf('const hosts = []', guard)
+  assert.ok(guard > 0 && root > guard, 'no setup may run before both pins are qualified')
+  assert.ok(setupTry > 0 && setupTry < root,
+    'the setup must already be inside the try that owns the report and the cleanup')
+  const finallyIndex = main.indexOf('} finally {', root)
+  const cleanup = main.slice(finallyIndex)
+  assert.match(cleanup, /if \(workRoot === undefined\) \{/u, 'a missing work root must not break the cleanup')
+  assert.match(cleanup, /else if \(!KEEP\) rmSync\(workRoot/u)
+  assert.match(cleanup, /if \(dshHome !== undefined\) killIsolatedProcesses\(dshHome\)/u)
 })
 
 test('the split-upgrade lane reports every failure with a bounded default projection', () => {
