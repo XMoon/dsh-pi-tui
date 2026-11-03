@@ -161,6 +161,11 @@ anything else (a started turn, an unknown read, a
   stays its route. The mascot rows come from the ONE shared whale asset
   (`src/tui/components/welcome-whale.ts`), picked once per renderer mount and
   never re-picked by a repaint, a resize or a status commit.
+- Each negotiated capability gates exactly the node it enables and nothing
+  else: `el`+`styles` unlock the styled stage, the `icon` kind alone unlocks
+  the action's leading icon, and the Browser's own picker vocabulary decides
+  whether the action is operable at all. A pane missing one of them keeps the
+  rest and is never sent a node it cannot paint.
 
 ## Surface, frame and lifecycle invariants
 
