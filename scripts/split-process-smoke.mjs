@@ -3351,18 +3351,18 @@ async function main() {
           C1_UNOWNED_JOB_ARM: join(workDir, 'unowned-job-arm.arm'),
         })
         writeFileSync(join(workDir, 'unowned-job-arm.arm'), 'arm\n', { mode: 0o600 })
-        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'unowned-job-created', 'C2A unowned job created', 120_000)
+        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'unowned-job-created', 'unowned job created', 120_000)
         const runningLiveness = (await hostStatus(host)).liveness
-        assert(runningLiveness?.verdict === 'BLOCKED', `C2A the unowned Job did not block: ${JSON.stringify(runningLiveness)}`)
-        assert(runningLiveness.reasons?.includes('job-running'), 'C2A the unowned Job did not contribute job-running')
-        assert(runningLiveness.sourceStates?.jobs === 'ACTIVE', 'C2A the unowned Job did not make the jobs source ACTIVE')
+        assert(runningLiveness?.verdict === 'BLOCKED', `the unowned Job did not block: ${JSON.stringify(runningLiveness)}`)
+        assert(runningLiveness.reasons?.includes('job-running'), 'the unowned Job did not contribute job-running')
+        assert(runningLiveness.sourceStates?.jobs === 'ACTIVE', 'the unowned Job did not make the jobs source ACTIVE')
         writeFileSync(join(workRoot, 'unowned-job.release'), 'release\n', { mode: 0o600 })
-        await waitForC1WorkEvent(workRoot, event => event.kind === 'unowned-job-released' && event.jobId === created.jobId, 'C2A unowned job released', 120_000)
-        await waitForC1WorkEvent(workRoot, event => event.kind === 'job-event' && event.event === 'settled' && event.jobId === created.jobId, 'C2A unowned job settled', 120_000)
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'unowned-job-released' && event.jobId === created.jobId, 'unowned job released', 120_000)
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'job-event' && event.event === 'settled' && event.jobId === created.jobId, 'unowned job settled', 120_000)
         const settledLiveness = (await hostStatus(host)).liveness
         assert(!settledLiveness.reasons?.includes('job-running') && !settledLiveness.reasons?.includes('job-stopping'),
-          `C2A a settled unowned Job left a ghost reason: ${JSON.stringify(settledLiveness)}`)
-        assert(settledLiveness.sourceStates?.jobs === 'IDLE', `C2A the unowned Job source did not return to IDLE: ${JSON.stringify(settledLiveness.sourceStates)}`)
+          `a settled unowned Job left a ghost reason: ${JSON.stringify(settledLiveness)}`)
+        assert(settledLiveness.sourceStates?.jobs === 'IDLE', `the unowned Job source did not return to IDLE: ${JSON.stringify(settledLiveness.sourceStates)}`)
         await stopC1Host(host)
         trace('unowned-job-arm', { hostPid: ready.pid, jobId: created.jobId, runningVerdict: runningLiveness.verdict, settledJobsState: settledLiveness.sourceStates.jobs })
       }
@@ -3392,38 +3392,38 @@ async function main() {
         assert(driverRows.length === 1
             && driverRows[0].state === 'absent'
             && driverRows[0].name === '@deepseek-ai/dsh-goal-round-driver',
-          `C2A the armed-Goal Host did not carry exactly one never-mounted goal-round-driver row: ${JSON.stringify(driverRows)}`)
+          `the armed-Goal Host did not carry exactly one never-mounted goal-round-driver row: ${JSON.stringify(driverRows)}`)
         // Only the driver is isolated: the Goal service row stays ACTIVE, so
         // this Host still reads a real official Goal source.
         assert(ready.entries.some(entry => entry.id === 'goal'
             && entry.name === '@deepseek-ai/dsh-goal'
             && entry.state === 'active'),
-          'C2A the armed-Goal Host lost the real Goal service row instead of only its round driver')
-        const { client } = await startC1Client('C2A goal-armed C1')
-        const sessionId = await openC1Session(client, 'c2a goal-armed prompt', 'C2A goal-armed')
-        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-created', 'C2A goal-armed goal created', 120_000)
-        assert(created.goalPhase === 'active' && created.activation === 'armed', `C2A goal-armed goal was not armed: ${JSON.stringify(created)}`)
+          'the armed-Goal Host lost the real Goal service row instead of only its round driver')
+        const { client } = await startC1Client('goal-armed C1')
+        const sessionId = await openC1Session(client, 'goal-armed prompt', 'goal-armed')
+        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-created', 'goal-armed goal created', 120_000)
+        assert(created.goalPhase === 'active' && created.activation === 'armed', `goal-armed goal was not armed: ${JSON.stringify(created)}`)
         const goalLiveness = (await hostStatus(host)).liveness
-        assert(goalLiveness?.verdict === 'BLOCKED', `C2A the armed Goal did not block: ${JSON.stringify(goalLiveness)}`)
-        assert(goalLiveness.reasons?.includes('goal-armed'), 'C2A the armed Goal did not contribute goal-armed')
-        assert(goalLiveness.sourceStates?.goal === 'ACTIVE', 'C2A the goal source is not ACTIVE')
+        assert(goalLiveness?.verdict === 'BLOCKED', `the armed Goal did not block: ${JSON.stringify(goalLiveness)}`)
+        assert(goalLiveness.reasons?.includes('goal-armed'), 'the armed Goal did not contribute goal-armed')
+        assert(goalLiveness.sourceStates?.goal === 'ACTIVE', 'the goal source is not ACTIVE')
         // The Goal is the sole blocking source: the Agent itself is idle with
         // an empty inbox, so neither of its live-work reasons may appear.
-        assert(goalLiveness.sourceStates?.agent !== 'ACTIVE', `C2A the Agent was ACTIVE beside the armed Goal: ${JSON.stringify(goalLiveness.sourceStates)}`)
+        assert(goalLiveness.sourceStates?.agent !== 'ACTIVE', `the Agent was ACTIVE beside the armed Goal: ${JSON.stringify(goalLiveness.sourceStates)}`)
         assert(!goalLiveness.reasons?.includes('agent-running') && !goalLiveness.reasons?.includes('agent-inbox'),
-          `C2A the Agent contributed a blocking reason beside the armed Goal: ${JSON.stringify(goalLiveness.reasons)}`)
+          `the Agent contributed a blocking reason beside the armed Goal: ${JSON.stringify(goalLiveness.reasons)}`)
         // The C1 Host mounts one active test-only file-URL Loader row through
         // `c1Work.patchPath`. Reading the REAL `context.loader` must surface it
         // as an unqualified Host source; the reflect-store probe this replaced
         // silently missed every active Loader row on the real Host path.
-        assert(goalLiveness.sourceStates?.other === 'UNKNOWN', 'C2A the active test-only Loader row was not observed through the real Loader')
-        assert(goalLiveness.reasons?.includes('unqualified-host-source'), 'C2A the unqualified Host source reason is missing')
+        assert(goalLiveness.sourceStates?.other === 'UNKNOWN', 'the active test-only Loader row was not observed through the real Loader')
+        assert(goalLiveness.reasons?.includes('unqualified-host-source'), 'the unqualified Host source reason is missing')
         // The create is the only Goal transition this Host could have made: no
         // automatic round, so no pause/block/disarm inside the observation.
         const armedMutations = readC1WorkEvents(workRoot).filter(event => event.kind === 'goal-changed')
         assert(armedMutations.length === 1 && armedMutations[0].goalId === created.goalId && armedMutations[0].operation === 'create',
-          `C2A the isolated armed Goal moved out of the created state: ${JSON.stringify(armedMutations)}`)
-        await exitC1Client(client, 'C2A goal-armed C1')
+          `the isolated armed Goal moved out of the created state: ${JSON.stringify(armedMutations)}`)
+        await exitC1Client(client, 'goal-armed C1')
         await stopC1Host(host)
         trace('goal-armed', {
           hostPid: ready.pid,
@@ -3451,30 +3451,30 @@ async function main() {
         assert(driverRows.length === 1
             && driverRows[0].state === 'active'
             && driverRows[0].name === '@deepseek-ai/dsh-goal-round-driver',
-          `C2A the goal-round Host did not mount exactly one active goal-round-driver row: ${JSON.stringify(driverRows)}`)
-        const { client } = await startC1Client('C2A goal-round C1')
-        const sessionId = await openC1Session(client, 'c2a goal-round prompt', 'C2A goal-round')
-        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-created', 'C2A goal-round goal created', 120_000)
-        assert(created.goalPhase === 'active' && created.activation === 'armed', `C2A goal-round goal was not armed: ${JSON.stringify(created)}`)
-        const round = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-round-observed', 'C2A goal round reserved', 120_000)
-        assert(round.goalId === created.goalId, 'C2A the reserved goal round names a different Goal')
-        assert(round.revision === created.revision, `C2A the reserved goal round names revision ${JSON.stringify(round.revision)}`)
-        assert(round.round === 1, `C2A the first automatic goal round was ${JSON.stringify(round.round)}`)
-        assert(round.agentStatus === 'idle', `C2A the goal round was reserved while the Agent was ${JSON.stringify(round.agentStatus)}`)
+          `the goal-round Host did not mount exactly one active goal-round-driver row: ${JSON.stringify(driverRows)}`)
+        const { client } = await startC1Client('goal-round C1')
+        const sessionId = await openC1Session(client, 'goal-round prompt', 'goal-round')
+        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-created', 'goal-round goal created', 120_000)
+        assert(created.goalPhase === 'active' && created.activation === 'armed', `goal-round goal was not armed: ${JSON.stringify(created)}`)
+        const round = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-round-observed', 'goal round reserved', 120_000)
+        assert(round.goalId === created.goalId, 'the reserved goal round names a different Goal')
+        assert(round.revision === created.revision, `the reserved goal round names revision ${JSON.stringify(round.revision)}`)
+        assert(round.round === 1, `the first automatic goal round was ${JSON.stringify(round.round)}`)
+        assert(round.agentStatus === 'idle', `the goal round was reserved while the Agent was ${JSON.stringify(round.agentStatus)}`)
         // The reservation is durable: the official loop admitted this exact
         // round as a Session `user/message`, which is what consumes the budget.
         const admitted = await waitForHostSessionEvent(dshHome, sessionId,
-          event => event.type === 'user/message' && event.data?.source?.kind === 'goal', 'C2A goal round admitted', 120_000)
+          event => event.type === 'user/message' && event.data?.source?.kind === 'goal', 'goal round admitted', 120_000)
         assert(String(admitted.data.source.goalId) === created.goalId
             && admitted.data.source.revision === created.revision
             && admitted.data.source.round === round.round,
-          `C2A the durable goal round disagrees with the reservation: ${JSON.stringify(admitted.data.source)}`)
+          `the durable goal round disagrees with the reservation: ${JSON.stringify(admitted.data.source)}`)
         // Then the driver ends the armed state at the round limit instead of
         // reserving another round: the recorded transition names the reason.
-        const blocked = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-changed' && event.operation === 'block', 'C2A goal round-limit block', 120_000)
+        const blocked = await waitForC1WorkEvent(workRoot, event => event.kind === 'goal-changed' && event.operation === 'block', 'goal round-limit block', 120_000)
         assert(String(blocked.goalId) === created.goalId && blocked.blockCode === 'round-limit' && blocked.goalPhase === 'blocked' && blocked.activation === 'disarmed',
-          `C2A the Goal did not leave the armed state at its round limit: ${JSON.stringify(blocked)}`)
-        await exitC1Client(client, 'C2A goal-round C1')
+          `the Goal did not leave the armed state at its round limit: ${JSON.stringify(blocked)}`)
+        await exitC1Client(client, 'goal-round C1')
         await stopC1Host(host)
         trace('goal-round', {
           hostPid: ready.pid,
@@ -3491,17 +3491,17 @@ async function main() {
       // rc.4 has no synchronous maintenance getter, so UNKNOWN is correct.
       {
         const { host, ready, workRoot } = await startC1Host('maintenance', 'maintenance-sweep')
-        const { client } = await startC1Client('C2A maintenance C1')
-        const sessionId = await openC1Session(client, 'c2a maintenance prompt', 'C2A maintenance')
-        const maintenance = await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'running', 'C2A maintenance running', 120_000)
-        assert(maintenance.agentStatus === 'idle', `C2A maintenance ran while the Agent was ${JSON.stringify(maintenance.agentStatus)}`)
+        const { client } = await startC1Client('maintenance C1')
+        const sessionId = await openC1Session(client, 'maintenance prompt', 'maintenance')
+        const maintenance = await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'running', 'maintenance running', 120_000)
+        assert(maintenance.agentStatus === 'idle', `maintenance ran while the Agent was ${JSON.stringify(maintenance.agentStatus)}`)
         const maintenanceLiveness = (await hostStatus(host)).liveness
-        assert(maintenanceLiveness?.verdict === 'UNKNOWN', `C2A maintenance did not leave the Host UNKNOWN: ${JSON.stringify(maintenanceLiveness)}`)
-        assert(maintenanceLiveness.verdict !== 'OBSERVED_QUIESCENT', 'C2A maintenance was reported as quiescent')
-        assert(maintenanceLiveness.reasons?.includes('agent-maintenance-unproven'), 'C2A the maintenance gap is not reported')
+        assert(maintenanceLiveness?.verdict === 'UNKNOWN', `maintenance did not leave the Host UNKNOWN: ${JSON.stringify(maintenanceLiveness)}`)
+        assert(maintenanceLiveness.verdict !== 'OBSERVED_QUIESCENT', 'maintenance was reported as quiescent')
+        assert(maintenanceLiveness.reasons?.includes('agent-maintenance-unproven'), 'the maintenance gap is not reported')
         writeFileSync(join(workRoot, 'maintenance.release'), 'release\n', { mode: 0o600 })
-        await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'settled', 'C2A maintenance settled', 120_000)
-        await exitC1Client(client, 'C2A maintenance C1')
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'settled', 'maintenance settled', 120_000)
+        await exitC1Client(client, 'maintenance C1')
         await stopC1Host(host)
         trace('maintenance-sweep', { hostPid: ready.pid, sessionId, agentStatus: maintenance.agentStatus, verdict: maintenanceLiveness.verdict })
       }
@@ -3515,19 +3515,19 @@ async function main() {
         operations.push({ insert: [{ id: 'host-schedule', name: '@deepseek-ai/dsh-schedule' }] })
         writeFileSync(schedulePatch, JSON.stringify(operations, null, 2), { mode: 0o600 })
         const { host, ready, workRoot } = await startC1Host('schedule', 'host-schedule', { SPLIT_PROCESS_EXTRA_PATCH: schedulePatch })
-        const { client } = await startC1Client('C2A schedule C1')
-        const sessionId = await openC1Session(client, 'c2a schedule prompt', 'C2A schedule')
-        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'schedule-created' && event.status === 'active', 'C2A schedule created', 120_000)
-        await exitC1Client(client, 'C2A schedule C1')
+        const { client } = await startC1Client('schedule C1')
+        const sessionId = await openC1Session(client, 'schedule prompt', 'schedule')
+        const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'schedule-created' && event.status === 'active', 'schedule created', 120_000)
+        await exitC1Client(client, 'schedule C1')
         const activeLiveness = (await hostStatus(host)).liveness
-        assert(activeLiveness?.verdict === 'BLOCKED', `C2A the active Schedule task did not block: ${JSON.stringify(activeLiveness)}`)
-        assert(activeLiveness.reasons?.includes('schedule-active'), 'C2A the active Schedule task did not contribute schedule-active')
-        assert(activeLiveness.sourceStates?.schedule === 'ACTIVE', 'C2A the schedule source is not ACTIVE')
+        assert(activeLiveness?.verdict === 'BLOCKED', `the active Schedule task did not block: ${JSON.stringify(activeLiveness)}`)
+        assert(activeLiveness.reasons?.includes('schedule-active'), 'the active Schedule task did not contribute schedule-active')
+        assert(activeLiveness.sourceStates?.schedule === 'ACTIVE', 'the schedule source is not ACTIVE')
         writeFileSync(join(workRoot, 'schedule.delete'), 'delete\n', { mode: 0o600 })
-        await waitForC1WorkEvent(workRoot, event => event.kind === 'schedule-deleted' && event.deleted === true, 'C2A schedule deleted', 120_000)
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'schedule-deleted' && event.deleted === true, 'schedule deleted', 120_000)
         const deletedLiveness = (await hostStatus(host)).liveness
-        assert(!deletedLiveness.reasons?.includes('schedule-active'), `C2A a deleted Schedule task left an active reason: ${JSON.stringify(deletedLiveness)}`)
-        assert(deletedLiveness.sourceStates?.schedule === 'IDLE', `C2A the schedule source did not return to IDLE: ${JSON.stringify(deletedLiveness.sourceStates)}`)
+        assert(!deletedLiveness.reasons?.includes('schedule-active'), `a deleted Schedule task left an active reason: ${JSON.stringify(deletedLiveness)}`)
+        assert(deletedLiveness.sourceStates?.schedule === 'IDLE', `the schedule source did not return to IDLE: ${JSON.stringify(deletedLiveness.sourceStates)}`)
         await stopC1Host(host)
         trace('host-schedule', { hostPid: ready.pid, sessionId, scheduleId: created.scheduleId, activeVerdict: activeLiveness.verdict, deletedScheduleState: deletedLiveness.sourceStates.schedule })
       }
