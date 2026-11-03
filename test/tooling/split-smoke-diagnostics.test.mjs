@@ -32,6 +32,7 @@ import {
   forensicErrorText,
   formatFailureSummary,
   LANE_ERROR_CODES,
+  isLaneSourceFile,
   LANE_SOURCE_FILES,
   laneAssertionSite,
   safeFailureSummary,
@@ -968,9 +969,14 @@ test('the locator trusts only the lane sources and fails closed otherwise', () =
   assert.equal(attempt(undefined).assertion, undefined,
     'a frame outside the trusted lane sources must not become a locator')
   assert.deepEqual([...LANE_SOURCE_FILES].sort(), ['split-process-smoke.mjs', 'split-process-upgrade-smoke.mjs'])
+  // The default trust set is data, not a Set a caller can widen.
+  assert.ok(Object.isFrozen(LANE_SOURCE_FILES), 'the exported list must be frozen')
+  assert.equal(typeof LANE_SOURCE_FILES.add, 'undefined', 'there must be no mutator to widen the trust set')
+  assert.equal(isLaneSourceFile('split-process-smoke.mjs'), true)
+  assert.equal(isLaneSourceFile('foreign.mjs'), false)
   // Both real lanes are trusted by their own basenames.
   for (const lane of ['split-process-smoke.mjs', 'split-process-upgrade-smoke.mjs']) {
-    assert.ok(LANE_SOURCE_FILES.has(basename(lane)))
+    assert.ok(isLaneSourceFile(basename(lane)))
   }
   // An empty trust set and a trust set naming something else both fail closed.
   assert.equal(attempt(new Set()).assertion, undefined)

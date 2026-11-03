@@ -274,10 +274,16 @@ test('the upgrade setup shares the report and cleanup boundary with the run', ()
   const main = source.slice(source.indexOf('async function main()'))
   const guard = main.indexOf("requireExactSmokeDshPin('new'")
   const root = main.search(/[A-Za-z]+Sync\(join\(tmpdir\(\), 'dsh-split-upgrade-'\)\)/u)
-  const setupTry = main.indexOf('const hosts = []', guard)
+  // The REAL `try {` index, so moving the setup back out of it fails the guard.
+  const setupTry = main.indexOf('try {', guard)
+  const distributionLoad = main.indexOf('distribution = loadDshDistribution(', guard)
   assert.ok(guard > 0 && root > guard, 'no setup may run before both pins are qualified')
-  assert.ok(setupTry > 0 && setupTry < root,
-    'the setup must already be inside the try that owns the report and the cleanup')
+  assert.ok(setupTry > guard, 'the reporting/cleanup try must follow both pin guards')
+  assert.ok(root > setupTry, 'the work root must be created INSIDE the reporting/cleanup try')
+  assert.ok(distributionLoad > setupTry,
+    'the distribution load must be inside the reporting/cleanup try, not before it')
+  assert.ok(main.indexOf('if (workRoot === undefined) {', root) > 0,
+    'the finally must tolerate a root that never appeared')
   const finallyIndex = main.indexOf('} finally {', root)
   const cleanup = main.slice(finallyIndex)
   assert.match(cleanup, /if \(workRoot === undefined\) \{/u, 'a missing work root must not break the cleanup')
