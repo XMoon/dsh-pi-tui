@@ -219,10 +219,15 @@ export default async function (h) {
     h.check('the menu is right-aligned with its trigger, not with the Send button',
       rightDelta <= TOLERANCE_PX,
       `rightDelta=${rightDelta.toFixed(1)} menuRight=${menu.right.toFixed(1)} triggerRight=${triggerNow.right.toFixed(1)} sendRight=${sendBefore.right.toFixed(1)}`)
+    // The claim is about the PANE, so it is measured against the pane box the
+    // client reports: a GUI window clamps its own minimum size, so the requested
+    // pixel size is not the pane's width.
+    const paneBoxForMenu = boxOf(after.nodes.find(node => String(node.class ?? '').split(' ').includes('tn-pane')) ?? { rect: [0, 0, width, height] })
     h.check('the floating menu stays inside the visible pane at this size',
-      menu.x >= -TOLERANCE_PX && menu.y >= -TOLERANCE_PX
-      && menu.right <= width + TOLERANCE_PX && menu.bottom <= height + TOLERANCE_PX,
-      JSON.stringify(menu))
+      menu.x >= paneBoxForMenu.x - TOLERANCE_PX && menu.y >= paneBoxForMenu.y - TOLERANCE_PX
+      && menu.right <= paneBoxForMenu.right + TOLERANCE_PX
+      && menu.bottom <= paneBoxForMenu.bottom + TOLERANCE_PX,
+      JSON.stringify({ menu, pane: paneBoxForMenu }))
   }
   const editorAfter = boxOf(editorNode(after))
   h.check('covering the editor moves no Composer layout box',

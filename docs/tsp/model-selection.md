@@ -262,9 +262,9 @@ share the same projection; neither owns a second catalogue/writer.
 - The +25%/+50% matrix and the exact sheet-density breakpoint are not claimed as
   passing.
 - The quick menu's own sizes are fixed CSS limits inside the trigger's anchor
-  (no measured re-layout, no geometry state machine). The verified pane sizes are
-  the documented product sizes below; a smaller window or a larger UI font is not
-  claimed as passing.
+  (no measured re-layout, no geometry state machine). The pane sizes its contract
+  is verified at are 1280×800, 900×700, 400×600 and 900×360; a smaller window or a
+  larger UI font is not claimed as passing.
 
 ## Real-pane verification
 
