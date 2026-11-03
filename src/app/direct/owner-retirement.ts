@@ -174,15 +174,20 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
       // the CURRENT owner, so neither the exit pre-cancel nor the lifecycle-abort
       // listener can have cancelled it. It therefore keeps the plain cancel and
       // is deliberately outside `shutdownCancelledAgents` (see plan §8.7).
+      // Parked owners are drained only at EXIT, inside the same root teardown
+      // that may already be closing their JSONL write handle, so this is a
+      // SHUTDOWN-mode retirement: DSH's AgentHandle.dispose joins the durable
+      // close/drain and no explicit flush races it.
+      mode: 'shutdown',
       cancel: () => agent.cancel({ kind: 'user' }),
       whenIdle: () => agent.whenIdle(),
       drainDescendants: () => deps.drainContinuableDescendants(agent),
-      flush: () => deps.flushSession(agent.session),
       disposeOwner: () => handle.dispose(),
     })
 
   const retireTransition = (agent: Agent, handle: AgentHandle): Promise<RetirementReport> =>
     retireDirectOwnedSession({
+      mode: 'transition',
       cancel: () => cancelRetiredOwner(agent),
       whenIdle: () => agent.whenIdle(),
       drainDescendants: () => deps.drainContinuableDescendants(agent),
@@ -193,6 +198,15 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
   const retireShutdown = (agent: Agent, handle: AgentHandle): Promise<RetirementReport> => {
     deps.diag.info('retire start', { session: agent.session.id })
     return retireDirectOwnedSession({
+      // SHUTDOWN mode: by the time this retirement runs, `appExit` has started
+      // the root/owner fiber teardown, and the DSH agent loop / JSONL backend
+      // may already be closing this session's write handle (its
+      // `session/disposed` listener and its own unload close sweep). A second
+      // explicit `sessions.flush` here is exactly the
+      // `flush on a closed handle` race; the durable settlement is DSH's
+      // `AgentHandle.dispose()` joining the handle close/drain. No exception
+      // special-casing compensates for this — the phase is simply not run.
+      mode: 'shutdown',
       cancel: () => {
         // The exactly-once shutdown cancel already covered THIS exact Agent
         // (the ordinary interactive path, or the lifecycle-abort listener that
@@ -213,10 +227,6 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
       drainDescendants: () => {
         deps.diag.info('retire descendants', { session: agent.session.id })
         return deps.drainContinuableDescendants(agent)
-      },
-      flush: () => {
-        deps.diag.info('retire flush', { session: agent.session.id })
-        return deps.flushSession(agent.session)
       },
       disposeOwner: async () => {
         deps.diag.info('retire dispose', { session: agent.session.id })

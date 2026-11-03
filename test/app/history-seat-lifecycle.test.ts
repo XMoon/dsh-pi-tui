@@ -291,6 +291,7 @@ function buildSessionFixture(life: TestLifecycle, options: {
     },
     withdrawReplacedPresentation: () => {},
     reportSwitchFailure: () => {},
+    warnCommittedDurability: () => {},
     launchComposition: async () => ({ composition: {} }),
     setResumeFailure: () => {},
     reportFirstSessionCreateFailure: () => {},

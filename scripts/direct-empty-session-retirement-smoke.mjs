@@ -1,0 +1,445 @@
+#!/usr/bin/env node
+/**
+ * Direct empty-session retirement smoke: prove, against a REAL isolated
+ * `dsh --profile pi-tui` install (official dsh + dsh-base + the candidate
+ * tarball only), that session transitions and exits never flush an already
+ * closing JSONL handle and that a freshly committed empty `/new` session is
+ * really durable.
+ *
+ * Scenarios (all model-free, event-driven):
+ *   A. start → /new → /exit          : no closed-handle retirement error; the
+ *      empty session is resumable through the official reader (`--session`).
+ *   B. resume → /exit                : the resumed session exits clean again.
+ *   C. start → /new → /new → /exit   : the first /new's old-owner transition
+ *      flush still runs; no writer error on either retirement.
+ *   D. start → /exit (no session)    : nothing created, nothing flushed.
+ *
+ * Usage: node scripts/direct-empty-session-retirement-smoke.mjs <candidate.tgz>
+ *        pnpm smoke:direct-empty-retirement -- <candidate.tgz>
+ *
+ * The tarball argument is REQUIRED: falling back to the published package
+ * would test the wrong artifact. Set DSH_EMPTY_RETIREMENT_KEEP=1 to preserve
+ * the isolated environment for debugging.
+ * @module direct-empty-session-retirement-smoke
+ */
+
+import { createHash } from 'node:crypto'
+import { spawnSync } from 'node:child_process'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { basename, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import {
+  candidateArgument,
+  dshInvocation,
+  installPlugin,
+  isolatedEnvironment,
+  requireExactVersion,
+  resolveTarball,
+  run,
+  runDsh,
+  runPnpmInstall,
+  validateCandidateTarball,
+} from './pi2dsh-compat-smoke.mjs'
+import { loadDshDistribution, npmDshVersion } from './lib/dsh-distribution.mjs'
+
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
+const PACKAGE_ROOT = resolve(SCRIPT_DIR, '..')
+const BOOT_TIMEOUT_MS = 120_000
+const STEP_TIMEOUT_MS = 60_000
+/** The negative diagnostics the retirement must never produce. */
+const FORBIDDEN_DIAGNOSTICS = [
+  'retire phase failed',
+  'SessionHandleClosedError',
+  'flush on a closed handle',
+  'UnhandledPromiseRejection',
+]
+
+function fail(phase, message) {
+  throw Object.assign(new Error(message), { phase })
+}
+
+function commandOutput(result) {
+  return [result.stdout, result.stderr, result.error?.message]
+    .filter(value => typeof value === 'string' && value.length > 0)
+    .join('\n')
+    .trim()
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'\\''`)}'`
+}
+
+function sha256(path) {
+  return createHash('sha256').update(readFileSync(path)).digest('hex')
+}
+
+function readOptionalJson(path) {
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return undefined
+  }
+}
+
+async function waitUntil(label, timeoutMs, probe, phase) {
+  const deadline = Date.now() + timeoutMs
+  let last
+  while (Date.now() < deadline) {
+    last = await probe()
+    if (last) return last
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 250))
+  }
+  fail(phase, `${label} timed out after ${timeoutMs}ms (last: ${String(last).slice(0, 400)})`)
+}
+
+function dirname(path) {
+  const index = path.lastIndexOf('/')
+  return index <= 0 ? '/' : path.slice(0, index)
+}
+
+/** All pi-tui diagnostic logs under the isolated $DSH_HOME/logs. */
+function piTuiLogs(dshHome) {
+  const logsDir = join(dshHome, 'logs')
+  if (!existsSync(logsDir)) return []
+  return readdirSync(logsDir)
+    .filter(name => name.startsWith('pi-tui-') && name.endsWith('.log'))
+    .map(name => ({ name, text: readFileSync(join(logsDir, name), 'utf8') }))
+}
+
+/** The machine-checkable facts the smoke must record up front. */
+function environmentFacts(tarball, harnessDir, env, targetDshVersion) {
+  const family = {}
+  const packagesDir = join(harnessDir, 'node_modules', '@deepseek-ai')
+  if (existsSync(packagesDir)) {
+    for (const name of readdirSync(packagesDir)) {
+      const manifest = readOptionalJson(join(packagesDir, name, 'package.json'))
+      if (manifest?.version !== undefined) family[name] = manifest.version
+    }
+  }
+  return {
+    uname: commandOutput(run('uname', ['-a'], { env })),
+    node: process.version,
+    dsh: targetDshVersion,
+    installedFamily: family,
+    candidateTarball: basename(tarball),
+    candidateSha256: sha256(tarball),
+  }
+}
+
+function writeLauncher(path, invocation, env) {
+  const lines = [
+    '#!/bin/sh',
+    'set -eu',
+    `export HOME=${shellQuote(env.HOME)}`,
+    `export DSH_HOME=${shellQuote(env.DSH_HOME)}`,
+    'export TERM="${TERM:-xterm-256color}"',
+    // --profile is a LAUNCHER flag: it must come FIRST, because everything
+    // after the first unrecognized token is handed to the booted app verbatim.
+    `exec ${invocation.map(shellQuote).join(' ')}`,
+    '',
+  ]
+  writeFileSync(path, lines.join('\n'), { encoding: 'utf8', mode: 0o700 })
+}
+
+/** One driven TUI run in its own tmux session; `steps` receives the driver. */
+async function driveTuiRun(label, options) {
+  const { socket, session, launcher, tuiLog, env } = options
+  const started = run('tmux', [
+    'new-session', '-d', '-s', session, '-x', '100', '-y', '30',
+    `script -qefc ${shellQuote(launcher)} ${shellQuote(tuiLog)}`,
+  ], { env })
+  if (started.status !== 0) fail(`${label.toUpperCase()}_BOOT_FAILURE`, `TUI could not start:\n${commandOutput(started)}`)
+  const tmux = {
+    // Include recent scrollback: a transient command notice can scroll out of
+    // the visible pane when the next frame repaints.
+    capture: () => commandOutput(run('tmux', ['capture-pane', '-p', '-S', '-500', '-t', session], { env })),
+    has: () => run('tmux', ['has-session', '-t', session], { env }).status === 0,
+    send: (text) => { run('tmux', ['send-keys', '-t', session, text], { env }) },
+    stop: () => { run('tmux', ['kill-session', '-t', session], { env }) },
+  }
+  try {
+    await waitUntil(`${label} first frame`, BOOT_TIMEOUT_MS, () => tmux.has() && tmux.capture().includes('❯'), `${label.toUpperCase()}_BOOT_FAILURE`)
+    await options.steps(tmux)
+    // The process exit is the barrier that all log producers stopped.
+    await waitUntil(`${label} exit`, STEP_TIMEOUT_MS, () => !tmux.has(), `${label.toUpperCase()}_EXIT_FAILURE`)
+    return readFileSync(tuiLog, 'utf8')
+  } finally {
+    tmux.stop()
+  }
+}
+
+/** Assert the negative diagnostics are absent from every produced log. */
+function assertNoRetirementErrors(label, texts) {
+  for (const { name, text } of texts) {
+    for (const diagnostic of FORBIDDEN_DIAGNOSTICS) {
+      if (text.includes(diagnostic)) {
+        fail(`${label.toUpperCase()}_RETIREMENT_FAILURE`, `${label}: forbidden diagnostic "${diagnostic}" present in ${name}`)
+      }
+    }
+  }
+}
+
+/** The session ids the TUI exit banner offered for resume, newest last. */
+function committedSessionIdsFromLog(logText) {
+  const ids = []
+  for (const match of logText.matchAll(/--session (session-[0-9a-f-]{8,})/gu)) {
+    ids.push(match[1])
+  }
+  return ids
+}
+
+/** Find the durable JSONL artifact of one session under $DSH_HOME/sessions.
+ * The official persistence layout is one directory per session id (nested
+ * under an encoded-cwd directory); the durable log is a NON-EMPTY
+ * `session.v4.jsonl.zstd` file inside it. A directory without a materialized
+ * log is not durable evidence. */
+function findSessionArtifact(sessionsRoot, sessionId) {
+  if (!existsSync(sessionsRoot)) return undefined
+  for (const entry of readdirSync(sessionsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const sessionDir = join(sessionsRoot, entry.name, sessionId)
+    if (!existsSync(sessionDir)) continue
+    const files = readdirSync(sessionDir)
+    const durable = files.find(name => /^session\.v\d+\.jsonl(\.zstd)?$/u.test(name))
+    if (durable === undefined) continue
+    const stat = statSync(join(sessionDir, durable))
+    if (stat.size > 0) return join(sessionDir, durable)
+  }
+  return undefined
+}
+
+/** Count every durable session artifact under the sessions root. */
+function countSessionArtifacts(sessionsRoot) {
+  if (!existsSync(sessionsRoot)) return 0
+  let count = 0
+  for (const entry of readdirSync(sessionsRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    for (const sessionEntry of readdirSync(join(sessionsRoot, entry.name), { withFileTypes: true })) {
+      if (!sessionEntry.isDirectory()) continue
+      const files = readdirSync(join(sessionsRoot, entry.name, sessionEntry.name))
+      if (files.some(name => /^session\.v\d+\.jsonl(\.zstd)?$/u.test(name))) count += 1
+    }
+  }
+  return count
+}
+
+/** Strip ANSI escapes so pane text can be matched with plain regexes. */
+function stripAnsi(text) {
+  return text.replace(/\[[0-9;?]*[a-zA-Z]/gu, '').replace(/\][^\\]*\\/gu, '')
+}
+
+async function main() {
+  const args = process.argv.slice(2)
+  const explicit = candidateArgument(args)
+  if (explicit === undefined) {
+    fail('INFRA_INSTALL_FAILURE', 'the candidate tarball path is a required argument (no published-package fallback)')
+  }
+  const tarball = resolveTarball(explicit)
+  validateCandidateTarball(tarball)
+  const targetDshVersion = npmDshVersion()
+  const workDir = mkdtempSync(join(PACKAGE_ROOT, 'temp', 'direct-empty-retirement-'))
+  const home = join(workDir, 'home')
+  const dshHome = join(workDir, 'dsh-home')
+  const harnessDir = join(workDir, 'harness')
+  for (const dir of [home, dshHome, harnessDir]) mkdirSync(dir, { recursive: true })
+  writeFileSync(join(workDir, 'npmrc'), 'registry=https://registry.npmjs.org\n', 'utf8')
+  const env = isolatedEnvironment(workDir, home, dshHome, join(workDir, 'compat-evidence.json'))
+
+  let completed = false
+  try {
+    writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
+      name: 'dsh-empty-retirement-harness',
+      private: true,
+      type: 'module',
+      dependencies: { '@deepseek-ai/dsh': targetDshVersion },
+    }, null, 2) + '\n', 'utf8')
+    runPnpmInstall(harnessDir, env, loadDshDistribution({ mode: 'npm', version: targetDshVersion }))
+    const dsh = dshInvocation(harnessDir)
+    const version = runDsh(dsh, ['--version'], harnessDir, env)
+    if (version.status !== 0) fail('INFRA_INSTALL_FAILURE', `installed DSH --version failed:\n${commandOutput(version)}`)
+    requireExactVersion('DSH', commandOutput(version).split(/\r?\n/u).find(line => line.trim() !== '')?.trim(), targetDshVersion)
+
+    installPlugin(dsh, tarball, harnessDir, env, false)
+    // The official profile requires the base bundle; the candidate tarball is
+    // the ONLY other plugin (no probes, no business plugins, no model mock).
+    const bundles = runDsh(dsh, ['plugin', '--profile', 'pi-tui', 'list'], harnessDir, env)
+    if (bundles.status !== 0) fail('INFRA_INSTALL_FAILURE', `plugin list failed:\n${commandOutput(bundles)}`)
+    const bundleLines = commandOutput(bundles).split(/\r?\n/u).filter(line => line.trim() !== '')
+
+    const facts = environmentFacts(tarball, harnessDir, env, targetDshVersion)
+    console.log(JSON.stringify({
+      ...facts,
+      pluginList: bundleLines,
+      dshHome: env.DSH_HOME,
+      tuiLogsDir: join(dshHome, 'logs'),
+    }, null, 2))
+
+    const socket = `empty-retire-${process.pid}`
+    const makeRun = (name, extraArgs = []) => {
+      const launcher = join(workDir, `run-${name}.sh`)
+      // --profile first (a launcher flag); extra args (like --session <id>)
+      // follow as the booted app's inner arguments.
+      writeLauncher(launcher, [...dsh, '--profile', 'pi-tui', ...extraArgs], env)
+      return { launcher, tuiLog: join(workDir, `${name}.tui.log`) }
+    }
+
+    // --- Scenario A: start → /new → /exit -------------------------------
+    const runA = makeRun('a-new-exit')
+    let logA
+    try {
+      logA = await driveTuiRun('a', {
+        socket,
+        session: `${socket}-a`,
+        launcher: runA.launcher,
+        tuiLog: runA.tuiLog,
+        env,
+        steps: async (tmux) => {
+          tmux.send('/new')
+          tmux.send('Enter')
+          await waitUntil('/new committed', STEP_TIMEOUT_MS, () => tmux.capture().match(/session\s+session-[0-9a-f-]{8,}/u) !== null, 'A_NEW_FAILURE')
+          tmux.send('/exit')
+          tmux.send('Enter')
+        },
+      })
+    } finally { /* logs stay until the evidence check below */ }
+    assertNoRetirementErrors('a', [{ name: basename(runA.tuiLog), text: logA }, ...piTuiLogs(dshHome)])
+
+    // The committed empty session id, cross-checked against the OFFICIAL
+    // persistence artifacts (one session directory + a non-empty durable
+    // log file under $DSH_HOME/sessions) before the resume proof.
+    const idsA = committedSessionIdsFromLog(logA)
+    const emptySessionId = idsA.at(-1)
+    if (emptySessionId === undefined) {
+      fail('A_DURABILITY_FAILURE', `no committed session id found in the TUI log:\n${logA.slice(-2000)}`)
+    }
+    const sessionsRoot = join(dshHome, 'sessions')
+    const sessionArtifact = findSessionArtifact(sessionsRoot, emptySessionId)
+    if (sessionArtifact === undefined) {
+      fail('A_DURABILITY_FAILURE', `no durable session artifact for the committed empty session ${emptySessionId} under ${sessionsRoot}`)
+    }
+
+    // --- Scenario B: resume the empty session through the official reader ---
+    // The resume must SUCCEED (the TUI boots with the SAME session id in its
+    // status card): that is the official reader accepting the artifact.
+    const runB = makeRun('b-resume-exit', ['--session', emptySessionId])
+    let logB
+    try {
+      logB = await driveTuiRun('b', {
+        socket,
+        session: `${socket}-b`,
+        launcher: runB.launcher,
+        tuiLog: runB.tuiLog,
+        env,
+        steps: async (tmux) => {
+          await waitUntil('resumed session id visible', STEP_TIMEOUT_MS, () => {
+            const pane = stripAnsi(tmux.capture())
+            const match = pane.match(/session\s+(session-[0-9a-f-]{8,})/u)
+            return match?.[1] === emptySessionId
+          }, 'B_RESUME_FAILURE')
+          tmux.send('/exit')
+          tmux.send('Enter')
+        },
+      })
+    } finally { /* evidence checked immediately */ }
+    assertNoRetirementErrors('b', [{ name: basename(runB.tuiLog), text: logB }, ...piTuiLogs(dshHome)])
+    if (!stripAnsi(logB).includes(emptySessionId)) {
+      fail('B_RESUME_FAILURE', `the resumed TUI never displayed the empty session id ${emptySessionId}`)
+    }
+
+    // --- Scenario C: start → /new → /new → /exit -------------------------
+    const artifactsBeforeC = countSessionArtifacts(sessionsRoot)
+    const runC = makeRun('c-new-new-exit')
+    let logC
+    try {
+      logC = await driveTuiRun('c', {
+        socket,
+        session: `${socket}-c`,
+        launcher: runC.launcher,
+        tuiLog: runC.tuiLog,
+        env,
+        steps: async (tmux) => {
+          tmux.send('/new')
+          tmux.send('Enter')
+          await waitUntil('first /new committed', STEP_TIMEOUT_MS, () => tmux.capture().match(/session\s+session-[0-9a-f-]{8,}/u) !== null, 'C_NEW_FAILURE')
+          tmux.send('/new')
+          tmux.send('Enter')
+          // Wait until the visible session id CHANGES (the second fresh
+          // session was committed and repainted the status card).
+          const currentSessionId = (pane) => stripAnsi(pane).match(/session\s+(session-[0-9a-f-]{8,})/u)?.[1]
+          const first = currentSessionId(tmux.capture())
+          await waitUntil('second /new committed', STEP_TIMEOUT_MS, () => {
+            const next = currentSessionId(tmux.capture())
+            return first !== undefined && next !== undefined && next !== first
+          }, 'C_NEW_FAILURE')
+          tmux.send('/exit')
+          tmux.send('Enter')
+        },
+      })
+    } finally { /* evidence checked immediately */ }
+    assertNoRetirementErrors('c', [{ name: basename(runC.tuiLog), text: logC }, ...piTuiLogs(dshHome)])
+    // Both /new commits of this run are durable: the run created exactly TWO
+    // new session artifacts (the exit banner names only the LAST one).
+    const artifactsAfterC = countSessionArtifacts(sessionsRoot)
+    if (artifactsAfterC - artifactsBeforeC !== 2) {
+      fail('C_TRANSITION_FAILURE', `expected two new durable sessions from /new → /new, saw ${artifactsAfterC - artifactsBeforeC} (before ${artifactsBeforeC}, after ${artifactsAfterC})`)
+    }
+    const idsC = committedSessionIdsFromLog(logC)
+    if (idsC.length < 1) {
+      fail('C_TRANSITION_FAILURE', `the /new → /new exit banner named no session: ${JSON.stringify(idsC)}`)
+    }
+    for (const id of idsC) {
+      if (findSessionArtifact(sessionsRoot, id) === undefined) {
+        fail('C_TRANSITION_FAILURE', `no durable session artifact for ${id} after /new → /new → /exit`)
+      }
+    }
+
+    // --- Scenario D: start → /exit with no session (negative control) ----
+    // A sessionless exit must not materialize any NEW session artifact.
+    const sessionsBefore = countSessionArtifacts(sessionsRoot)
+    const runD = makeRun('d-exit-only')
+    let logD
+    try {
+      logD = await driveTuiRun('d', {
+        socket,
+        session: `${socket}-d`,
+        launcher: runD.launcher,
+        tuiLog: runD.tuiLog,
+        env,
+        steps: async (tmux) => { tmux.send('/exit'); tmux.send('Enter') },
+      })
+    } finally { /* evidence checked immediately */ }
+    assertNoRetirementErrors('d', [{ name: basename(runD.tuiLog), text: logD }, ...piTuiLogs(dshHome)])
+    const sessionsAfter = countSessionArtifacts(sessionsRoot)
+    if (sessionsAfter === sessionsBefore) {
+      // No new artifact: nothing was created by the no-session exit.
+      console.log(`Direct empty-session retirement smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}`)
+      completed = true
+      return
+    }
+    fail('D_NEGATIVE_CONTROL_FAILURE', `a no-session exit changed the session artifact count: ${sessionsBefore} -> ${sessionsAfter}`)
+  } finally {
+    if (process.env.DSH_EMPTY_RETIREMENT_KEEP !== '1') {
+      if (completed || process.env.DSH_EMPTY_RETIREMENT_KEEP !== 'debug') rmSync(workDir, { recursive: true, force: true })
+      else console.error(`preserved isolated environment for debugging: ${workDir}`)
+    } else {
+      console.error(`preserved isolated environment: ${workDir}`)
+    }
+  }
+}
+
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
+  main().catch(error => {
+    console.error(`DSH_EMPTY_RETIREMENT_FAILURE[${error?.phase ?? 'UNKNOWN'}]: ${error instanceof Error ? error.message : String(error)}`)
+    process.exitCode = 1
+  })
+}

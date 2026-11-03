@@ -1,6 +1,7 @@
 /**
  * Headless tests for the Direct owned-session retirement helper: the fixed
- * order `cancel → idle → descendants → flush → dispose` and the failure
+ * mode orders — transition `cancel → idle → descendants → flush → dispose`,
+ * shutdown `cancel → idle → descendants → dispose` — and the failure
  * containment contract (a failed phase is recorded and the NEXT phase still
  * runs — a skipped dispose would re-create a handle leak).
  * @module @xmoon76/dsh-pi-tui/direct-owned-session-retirement.test
@@ -15,6 +16,7 @@ import {
 
 /** A recording retirement surface; every phase can be made to fail. */
 function retirementHarness(options: {
+  mode?: 'transition' | 'shutdown'
   cancelError?: unknown
   idleError?: unknown
   drainError?: unknown
@@ -28,58 +30,89 @@ function retirementHarness(options: {
   const fail = (error: unknown): void => {
     if (error !== undefined) throw error
   }
-  return {
-    deps: {
-      cancel: () => {
-        events.push('cancel')
-        fail(options.cancelError)
-      },
-      whenIdle: async () => {
-        events.push('idle')
-        fail(options.idleError)
-      },
-      drainDescendants: async () => {
-        events.push('descendants')
-        fail(options.drainError)
-      },
-      flush: async () => {
-        events.push('flush')
-        fail(options.flushError)
-      },
-      disposeOwner: async () => {
-        events.push('dispose')
-        fail(options.disposeError)
-      },
+  const common = {
+    cancel: () => {
+      events.push('cancel')
+      fail(options.cancelError)
     },
-    events,
+    whenIdle: async () => {
+      events.push('idle')
+      fail(options.idleError)
+    },
+    drainDescendants: async () => {
+      events.push('descendants')
+      fail(options.drainError)
+    },
+    disposeOwner: async () => {
+      events.push('dispose')
+      fail(options.disposeError)
+    },
   }
+  const deps = options.mode === 'shutdown'
+    ? { mode: 'shutdown' as const, ...common }
+    : {
+        mode: 'transition' as const,
+        ...common,
+        flush: async () => {
+          events.push('flush')
+          fail(options.flushError)
+        },
+      }
+  return { deps, events }
 }
 
-test('the fixed retirement order is cancel → idle → descendants → flush → dispose', async () => {
+test('the transition retirement order is cancel → idle → descendants → flush → dispose', async () => {
   const { deps, events } = retirementHarness()
   const report = await retireDirectOwnedSession(deps)
   assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'flush', 'dispose'])
   assert.deepEqual(report.failures, [], 'a clean retirement reports no failures')
 })
 
-test('a throwing cancel is recorded and the remaining phases still run', async () => {
+test('the shutdown retirement order is cancel → idle → descendants → dispose (no flush)', async () => {
+  const { deps, events } = retirementHarness({ mode: 'shutdown' })
+  const report = await retireDirectOwnedSession(deps)
+  assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'dispose'],
+    'shutdown must NOT run an explicit flush phase')
+  assert.deepEqual(report.failures, [], 'a clean retirement reports no failures')
+})
+
+test('a throwing cancel is recorded and the remaining phases still run (transition)', async () => {
   const { deps, events } = retirementHarness({ cancelError: new Error('cancel exploded') })
   const report = await retireDirectOwnedSession(deps)
   assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'flush', 'dispose'])
   assert.deepEqual(report.failures, [{ phase: 'cancel', error: 'cancel exploded' }])
 })
 
-test('a rejecting whenIdle is recorded and descendants/flush/dispose still run', async () => {
-  const { deps, events } = retirementHarness({ idleError: new Error('idle exploded') })
+test('a throwing cancel is recorded and the remaining phases still run (shutdown)', async () => {
+  const { deps, events } = retirementHarness({ mode: 'shutdown', cancelError: new Error('cancel exploded') })
   const report = await retireDirectOwnedSession(deps)
-  assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'flush', 'dispose'])
-  assert.deepEqual(report.failures, [{ phase: 'idle', error: 'idle exploded' }])
+  assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'dispose'])
+  assert.deepEqual(report.failures, [{ phase: 'cancel', error: 'cancel exploded' }])
 })
 
-test('a rejecting drain is recorded and flush/dispose still run', async () => {
+test('a rejecting whenIdle is recorded and the remaining phases still run (both modes)', async () => {
+  for (const mode of ['transition', 'shutdown'] as const) {
+    const { deps, events } = retirementHarness({ mode, idleError: new Error('idle exploded') })
+    const report = await retireDirectOwnedSession(deps)
+    const expected = mode === 'transition'
+      ? ['cancel', 'idle', 'descendants', 'flush', 'dispose']
+      : ['cancel', 'idle', 'descendants', 'dispose']
+    assert.deepEqual(events, expected)
+    assert.deepEqual(report.failures, [{ phase: 'idle', error: 'idle exploded' }])
+  }
+})
+
+test('a rejecting drain is recorded and flush/dispose still run (transition)', async () => {
   const { deps, events } = retirementHarness({ drainError: new Error('drain exploded') })
   const report = await retireDirectOwnedSession(deps)
   assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'flush', 'dispose'])
+  assert.deepEqual(report.failures, [{ phase: 'descendants', error: 'drain exploded' }])
+})
+
+test('a rejecting drain is recorded and dispose still runs (shutdown)', async () => {
+  const { deps, events } = retirementHarness({ mode: 'shutdown', drainError: new Error('drain exploded') })
+  const report = await retireDirectOwnedSession(deps)
+  assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'dispose'])
   assert.deepEqual(report.failures, [{ phase: 'descendants', error: 'drain exploded' }])
 })
 
@@ -88,19 +121,63 @@ test('a rejecting flush is recorded and dispose still runs (no handle leak)', as
   const report = await retireDirectOwnedSession(deps)
   assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'flush', 'dispose'])
   assert.deepEqual(report.failures, [{ phase: 'flush', error: 'flush exploded' }])
+  assert.equal(report.durabilityFailure?.phase, 'flush',
+    'the transition durability failure is the flush failure')
 })
 
-test('a rejecting dispose is recorded and the report still settles', async () => {
+test('a rejecting dispose is recorded and the report still settles (transition)', async () => {
   const { deps, events } = retirementHarness({ disposeError: new Error('dispose exploded') })
   const report = await retireDirectOwnedSession(deps)
   assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'flush', 'dispose'])
   assert.deepEqual(report.failures, [{ phase: 'dispose', error: 'dispose exploded' }])
+  assert.equal(report.durabilityFailure, undefined,
+    'a transition dispose failure is NOT the flush durability failure')
 })
 
-test('multiple phase failures are all recorded, never aggregated into a throw', async () => {
+test('a rejecting dispose is the shutdown durability failure (durability unconfirmed)', async () => {
+  const { deps, events } = retirementHarness({ mode: 'shutdown', disposeError: new Error('dispose exploded') })
+  const report = await retireDirectOwnedSession(deps)
+  assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'dispose'])
+  assert.deepEqual(report.failures, [{ phase: 'dispose', error: 'dispose exploded' }])
+  assert.equal(report.durabilityFailure?.phase, 'dispose',
+    'the shutdown durability failure is the dispose failure')
+})
+
+test('shutdown with idle+descendants+dispose failures: every phase runs, failures keep order and identity', async () => {
+  const { deps, events } = retirementHarness({
+    mode: 'shutdown',
+    idleError: new Error('idle exploded'),
+    drainError: new Error('drain exploded'),
+    disposeError: new Error('dispose exploded'),
+  })
+  const report = await retireDirectOwnedSession(deps)
+  assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'dispose'])
+  assert.deepEqual(report.failures, [
+    { phase: 'idle', error: 'idle exploded' },
+    { phase: 'descendants', error: 'drain exploded' },
+    { phase: 'dispose', error: 'dispose exploded' },
+  ])
+  assert.equal(report.durabilityFailure?.phase, 'dispose',
+    'the durability failure points at dispose, not the earlier phases')
+})
+
+test('shutdown idle/drain failures with a successful dispose report NO durability failure', async () => {
+  const { deps } = retirementHarness({
+    mode: 'shutdown',
+    idleError: new Error('idle exploded'),
+    drainError: new Error('drain exploded'),
+  })
+  const report = await retireDirectOwnedSession(deps)
+  assert.equal(report.durabilityFailure, undefined,
+    'a successful dispose confirmed the durable close; earlier phase failures stay listed')
+  assert.equal(report.failures.length, 2)
+})
+
+test('transition with idle+drain+flush+dispose failures all recorded, never aggregated into a throw', async () => {
   const { deps, events } = retirementHarness({
     idleError: new Error('idle exploded'),
     drainError: new Error('drain exploded'),
+    flushError: new Error('flush exploded'),
     disposeError: new Error('dispose exploded'),
   })
   const report = await retireDirectOwnedSession(deps)
@@ -108,8 +185,11 @@ test('multiple phase failures are all recorded, never aggregated into a throw', 
   assert.deepEqual(report.failures, [
     { phase: 'idle', error: 'idle exploded' },
     { phase: 'descendants', error: 'drain exploded' },
+    { phase: 'flush', error: 'flush exploded' },
     { phase: 'dispose', error: 'dispose exploded' },
   ])
+  assert.equal(report.durabilityFailure?.phase, 'flush',
+    'the transition durability failure stays the flush failure')
 })
 
 test('a hostile thrown value is contained by safeErrorMessage', async () => {

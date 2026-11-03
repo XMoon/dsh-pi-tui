@@ -65,8 +65,13 @@ Startup and exit (`src/index.ts` root catch, `src/app/bootstrap/exit.ts`) protec
 step individually (diag, cleanup, hint, exit), so no throw can skip
 teardown or leak a rejection. The Direct owned-session retirement
 (`src/runtime/direct/owned-session-retirement.ts`) is equally total: every
-phase failure is recorded and the remaining phases still run, so a hostile
-rejection can never skip the final flush or the handle dispose.
+phase failure is recorded and the remaining phases still run. Which phases
+run depends on the retirement MODE (the mode orders live in
+`docs/architecture/concurrency.md`): a live-Host transition executes the
+explicit durable flush before the dispose, while shutdown/HMR/parked
+retirements rely on DSH's close/drain settlement and run no explicit flush —
+a hostile rejection can never skip the remaining phases of either mode,
+least of all the handle dispose.
 
 ## Host fork settlement
 
