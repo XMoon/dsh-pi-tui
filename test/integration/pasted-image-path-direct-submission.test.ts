@@ -89,6 +89,8 @@ test('a real bracketed paste of a local PNG path becomes a durable Direct image 
     assert.ok(readTspBlobMessages(fixture.pane.output.text()).length > 0, 'the preview blob channel ran')
   } finally {
     recorder.detach()
+    // The fixture's own bounded teardown: wait for the real disposal instead
+    // of a guessed sleep. This bounded window is the fixture's own cleanup.
     await fixture.settle()
   }
 })

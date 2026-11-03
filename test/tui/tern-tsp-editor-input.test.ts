@@ -1083,11 +1083,15 @@ test('a real bracketed paste of an image path forwards ONE receipt whose tracked
       'the path stays ordinary editable text while the read is in flight')
 
     assert.equal(receipt.replacePastedPath(path, '[image #1 (1920×1080)]'), true)
+    // The shared render wait: it covers the SDK frame the assertion reads,
+    // not a guessed readiness window.
     await settle()
     assert.equal(lastEditorProps(harness.frames())?.text, '[image #1 (1920×1080)] ',
       'the controlled frame carries the canonical token; the separator space stays text')
 
     harness.tern.input.type(' 这是啥')
+    // The shared render wait: it covers the SDK frame the assertion reads,
+    // not a guessed readiness window.
     await settle()
     assert.equal(lastEditorProps(harness.frames())?.text, '[image #1 (1920×1080)]  这是啥',
       'typed text after the token is preserved')
@@ -1103,8 +1107,12 @@ test('a paste during the hydration window is dropped and never forwarded', async
   const harness = await mountPane()
   try {
     harness.renderer.display.beginSessionHydration()
+    // The shared render wait: it covers the SDK frame the assertion reads,
+    // not a guessed readiness window.
     await settle()
     harness.tern.input.type('\u001b[200~/tmp/shot.png \u001b[201~')
+    // The shared render wait: it covers the SDK frame the assertion reads,
+    // not a guessed readiness window.
     await settle()
     assert.equal(harness.pastedPaths().length, 0,
       'the outgoing subject never claims a pasted image path')
@@ -1124,8 +1132,12 @@ test('a paste while a modal seat owns the keys is never forwarded', async () => 
   )
   pending.catch(() => {})
   try {
+    // The shared render wait: it covers the SDK frame the assertion reads,
+    // not a guessed readiness window.
     await settle()
     harness.tern.input.type('\u001b[200~/tmp/shot.png \u001b[201~')
+    // The shared render wait: it covers the SDK frame the assertion reads,
+    // not a guessed readiness window.
     await settle()
     assert.equal(harness.pastedPaths().length, 0, 'the modal seat consumed the paste')
     assert.equal(harness.pasteMedia(), 0)
@@ -1139,6 +1151,8 @@ test('a disposed renderer forwards no receipt for a late paste', async () => {
   const harness = await mountPane()
   await harness.dispose()
   harness.tern.input.type('\u001b[200~/tmp/shot.png \u001b[201~')
+  // The shared render wait: it covers the SDK frame the assertion reads,
+  // not a guessed readiness window.
   await settle()
   assert.equal(harness.pastedPaths().length, 0)
   await harness.session.close()
