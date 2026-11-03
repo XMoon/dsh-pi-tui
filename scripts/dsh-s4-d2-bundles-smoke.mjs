@@ -313,7 +313,7 @@ function runNetworkLoop(bundle, evidence) {
     }
   } finally {
     if (process.env.S4_D2_KEEP === '1') {
-      console.error(`kept S4-D2 smoke environment: ${workDir}`)
+      console.error(`kept the optional-bundles qualification environment: ${workDir}`)
       writeFileSync(join(workDir, 'off.dump.yml'), evidence.network?.offDump ?? '')
       writeFileSync(join(workDir, 'on.dump.yml'), evidence.network?.onDump ?? '')
       writeFileSync(join(workDir, 'off-again.dump.yml'), evidence.network?.offAgainDump ?? '')
