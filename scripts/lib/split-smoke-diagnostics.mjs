@@ -191,6 +191,16 @@ function sha256OrUndefined(value) {
   return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value) ? value : undefined
 }
 
+/**
+ * The locator an error may PUBLISH: only the class that derived one may
+ * contribute it. A plain error carrying an `assertion` property would otherwise
+ * name a lane file it never resolved. This is the single producer rule both
+ * reporting paths (`emitInputFailure`, the run collector) must use.
+ */
+function publishedAssertionOf(error) {
+  return error instanceof SplitSmokeAssertionError ? error.assertion : undefined
+}
+
 /** A locator is reportable only when its shape AND its source are trusted. */
 function assertionSiteOrUndefined(value) {
   if (typeof value !== 'string' || !ASSERTION_SITE.test(value)) return undefined
@@ -659,7 +669,7 @@ export function emitInputFailure({ lane, heading, error, reason, evidencePath })
     lane,
     category: failureCategoryOf(error),
     reason: reason ?? error?.code,
-    assertion: error?.assertion,
+    assertion: publishedAssertionOf(error),
   })
   const path = writeFailureReport(report)
   process.stderr.write(`${heading}_FAILURE\n${formatFailureSummary(report, path)}\n`)
@@ -711,9 +721,7 @@ export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, a
         category: extra.category ?? failureCategoryOf(error),
         reason: extra.reason ?? error?.code,
         checkpoint: extra.checkpoint ?? steps.at(-1)?.name,
-        // Only the class that DERIVED a locator may contribute one; an arbitrary
-        // error carrying an `assertion` property is not a trusted producer.
-        assertion: extra.assertion ?? (error instanceof SplitSmokeAssertionError ? error.assertion : undefined),
+        assertion: extra.assertion ?? publishedAssertionOf(error),
         waitLabel: extra.waitLabel ?? error?.waitLabel,
         elapsedMs: extra.elapsedMs ?? error?.elapsedMs,
         expected: extra.expected ?? error?.expected,
