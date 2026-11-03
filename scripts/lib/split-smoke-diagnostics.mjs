@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Shared input qualification and failure diagnostics for the two split-process
- * smoke lanes (`split-process-smoke.mjs` T and `split-process-upgrade-smoke.mjs` U).
+ * smoke lanes: `split-process-smoke.mjs` and `split-process-upgrade-smoke.mjs`.
  *
  * Both lanes run against the ONE exact DSH runtime this checkout declares
  * (`npmDshVersion()`), so every packaged input must declare that same exact
@@ -570,7 +570,7 @@ export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, a
      * report; propagating the original error stays the lane's job, as does the
      * cleanup in its own `finally`.
      *
-     * `evidencePath` is the U lane's `--evidence` file: its FAIL twin holds the
+     * `evidencePath` is the split-upgrade lane's `--evidence` file: its FAIL twin holds the
      * same safe fields (`0600`). A missing path is simply no twin.
      */
     reportFailure(error, { processes = [], evidencePath, ...extra } = {}) {

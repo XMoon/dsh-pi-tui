@@ -1,8 +1,10 @@
 /**
- * Split-smoke input qualification and failure diagnostics guard (T and U lanes).
+ * Split-smoke input qualification and failure diagnostics guard for the two
+ * split-process lanes.
  *
- * The two real lanes (`scripts/split-process-smoke.mjs` and
- * `scripts/split-process-upgrade-smoke.mjs`) install packaged artifacts into an
+ * The two real lanes — the split-process lane (`scripts/split-process-smoke.mjs`,
+ * inventory T01-T60) and the split-upgrade lane (`scripts/split-process-upgrade-smoke.mjs`,
+ * inventory U01-U09) — install packaged artifacts into an
  * isolated profile and drive real Host/Client processes. Before any of that
  * happens they must reject an artifact whose own manifest declares a different
  * exact DSH runtime than the one this checkout pins: the production Client
@@ -18,7 +20,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -468,10 +470,42 @@ async function rejection(run) {
   assert.fail('the wait must fail')
 }
 
-test('waitForReloadNotice PASSES only on the painted notice', async () => {
+test('waitForReloadNotice PASSES only on the painted fixed notice row', async () => {
   const client = fakeClient({ painted: ['some row', `✗ ${ALREADY_CURRENT}`, 'another row'] })
   assert.equal(await waitForReloadNotice(client, ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS),
     'ALREADY_CURRENT')
+  // The info-marked form of the same fixed notice is equally real evidence.
+  assert.equal(await waitForReloadNotice(
+    fakeClient({ painted: [`ℹ ${ALREADY_CURRENT}`] }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS),
+    'ALREADY_CURRENT')
+})
+
+test('user text that repeats the notice wording can neither pass nor refuse the wait', async () => {
+  // The same bytes as the notice, on a row the product never paints as a notice:
+  // a prompt echo, an indented transcript row, a longer sentence that merely
+  // contains the notice, and the attachments wording inside the composer. None
+  // of them is a `✗`/`ℹ Client reload …` row, so the wait must run to its own
+  // deadline and report the timeout with nothing observed.
+  for (const painted of [
+    [`❯ ${ALREADY_CURRENT}`],
+    [`  ${ALREADY_CURRENT}`],
+    [`✗ Client reload skipped: this Client already runs the installed build, plus ${ALREADY_CURRENT}`],
+    ['u08-reload-client-hold', `echo ${ALREADY_CURRENT}`],
+    [`❯ ${ATTACHMENTS}`],
+  ]) {
+    const error = await rejection(() => waitForReloadNotice(
+      fakeClient({ painted }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+    ))
+    assert.equal(error.category, 'WAIT_TIMEOUT', `a non-notice row must not decide the wait: ${painted.join('|')}`)
+    assert.equal(error.expected, 'ALREADY_CURRENT')
+    assert.equal(error.observed, undefined, `a non-notice row must not be reported as observed: ${painted.join('|')}`)
+  }
+  // The real row still classifies, so this is a shape rule, not a ban.
+  const refused = await rejection(() => waitForReloadNotice(
+    fakeClient({ painted: [`✗ ${ATTACHMENTS}`] }), ALREADY_CURRENT, 'U08 already-current notice', 0, SHORT_WAIT_MS,
+  ))
+  assert.equal(refused.category, 'UNEXPECTED_RELOAD_REFUSAL')
+  assert.equal(refused.observed, 'ATTACHMENTS')
 })
 
 test('waitForReloadNotice fails a refusal that can never paint the expected notice', async () => {
@@ -726,9 +760,11 @@ test('every default lane output line is either a fixed marker or a whitelisted f
 test('one real lane failure leaves exactly one report and one evidence twin', (t) => {
   const life = testLifecycle(t)
   const dir = life.tempDir('split-smoke-report-count-')
+  const evidence = join(dir, 'evidence.json')
   const result = runLane(UPGRADE_SCRIPT, [
     '--old', syntheticTarball(dir, 'old', manifestOf('0.5.5-old.1', OTHER_PIN)),
     '--new', syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN)),
+    '--evidence', evidence,
   ], dir)
   assert.notEqual(result.status, 0)
   const reports = readdirSync(dir, { withFileTypes: true })
@@ -740,6 +776,12 @@ test('one real lane failure leaves exactly one report and one evidence twin', (t
     ['failure.json'],
     'the private report directory holds the report and nothing else',
   )
+  // The twin is a real second file on the operator's path with the same fields.
+  const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+  assert.deepEqual(JSON.parse(readFileSync(evidence, 'utf8')), report)
+  assert.notEqual(realpathSync(evidence), realpathSync(reportPath),
+    'the twin must live on the operator path, not inside the report directory')
+  assert.equal(readdirSync(dir).filter(name => name.includes('.tmp')).length, 0, 'no temp file may survive')
 })
 
 test('an unknown error code is never reported, and never changes the category', () => {
@@ -754,33 +796,46 @@ test('an unknown error code is never reported, and never changes the category', 
   assert.equal(safeFailureSummary(Object.assign(new Error('x'), { code: 'FRAME_WAIT_TIMEOUT' })),
     'INFRA_FAILURE: FRAME_WAIT_TIMEOUT')
   // Every code the lanes can raise must be declared, or it silently disappears
-  // from the report. Scanned at the waiter call sites, not on any `code:` text.
+  // from the report. Each scan targets an actual RAISE site shape, and the same
+  // scan collects the raised set used by the reverse check below.
   const declared = new Set(LANE_ERROR_CODES)
-  let scanned = 0
-  for (const [name, source] of [['T', readFileSync(PROCESS_SCRIPT, 'utf8')], ['U', readFileSync(UPGRADE_SCRIPT, 'utf8')]]) {
+  const raised = new Set()
+  for (const [name, source] of [
+    ['split-process', readFileSync(PROCESS_SCRIPT, 'utf8')],
+    ['split-upgrade', readFileSync(UPGRADE_SCRIPT, 'utf8')],
+    ['the shared module', readFileSync(LIB, 'utf8')],
+  ]) {
     // A waiter failure site: fail('<category>', '<code>').
     for (const match of source.matchAll(/\bfail\(\s*'([A-Z_]+)'\s*,\s*'([A-Z0-9_]+)'/gu)) {
-      scanned += 1
       assert.ok(FAILURE_CATEGORIES.includes(match[1]), `${name} raises an undeclared category: ${match[1]}`)
       assert.ok(declared.has(match[2]), `${name} raises an undeclared code: ${match[2]}`)
+      raised.add(match[2])
     }
-    // A direct construction: the facts object names its code next to its label.
+    // A direct waiter construction: the facts object names its code beside its label.
     for (const match of source.matchAll(/code: '([A-Z0-9_]+)',\s*\n\s*waitLabel:/gu)) {
-      scanned += 1
       assert.ok(declared.has(match[1]), `${name} reports an undeclared code: ${match[1]}`)
+      raised.add(match[1])
+    }
+    // The input guard's own constructor call.
+    for (const match of source.matchAll(/new SplitSmokeInputError\(\s*'([A-Z0-9_]+)'/gu)) {
+      assert.ok(declared.has(match[1]), `${name} throws an undeclared input code: ${match[1]}`)
+      raised.add(match[1])
+    }
+    // A thrown classified object: category and code are set together.
+    for (const match of source.matchAll(/category: '([A-Z_]+)',\s*\n?\s*code: '([A-Z0-9_]+)'/gu)) {
+      assert.ok(FAILURE_CATEGORIES.includes(match[1]), `${name} throws an undeclared category: ${match[1]}`)
+      assert.ok(declared.has(match[2]), `${name} throws an undeclared code: ${match[2]}`)
+      raised.add(match[2])
     }
   }
-  assert.ok(scanned >= 14, `the call-site scan found only ${String(scanned)} codes; the guard went vacuous`)
-  // The other direction: a declared code nobody raises is dead vocabulary.
-  const allSources = [
-    readFileSync(PROCESS_SCRIPT, 'utf8'),
-    readFileSync(UPGRADE_SCRIPT, 'utf8'),
-    readFileSync(LIB, 'utf8'),
-  ].join('\n')
+  assert.ok(raised.size >= 14, `the raise-site scan found only ${String(raised.size)} codes; the guard went vacuous`)
+  // The other direction, over the SAME collected raise sites: a declared code
+  // with no raise site is dead vocabulary. The declaration list itself is never
+  // accepted as evidence that anything raises a code.
   assert.deepEqual(
-    LANE_ERROR_CODES.filter(code => !allSources.includes(`'${code}'`)),
+    LANE_ERROR_CODES.filter(code => !raised.has(code)),
     [],
-    'every declared code must be raised by some lane path',
+    'every declared code must have a scanned raise site',
   )
 })
 

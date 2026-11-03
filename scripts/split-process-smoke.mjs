@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * M4-B1/B2-HF real-OS split-process authenticated-link smoke.
+ * Real-OS split-process authenticated-link smoke.
  *
  * Installs the candidate tarball into an isolated `pi-tui` profile using the
  * published exact DSH family, then drives the two internal process entries
- * from the installed package directory. The lane proves the A0 lifecycle
- * assertions that still hold plus the B1 gates:
+ * from the installed package directory. The lane proves the lifecycle
+ * assertions that still hold plus the first-launch gates:
  *
  *   T01 Host-only composition + official Connection/API-remotes owners
  *   T02 authenticated loopback HTTP + one real WebSocket `$events` generation
@@ -702,7 +702,7 @@ export function apply(ctx) { ctx.llm.registerAdapter(['stub'], new StubLlmAdapte
 }
 
 /**
- * The M4-C1 isolated Host workload overlay. The fixture file is copied into
+ * The isolated Host workload overlay. The fixture file is copied into
  * the installed profile so its official `@deepseek-ai/*` imports resolve from
  * that profile (never from the repository checkout), exactly like the stub
  * LLM row above. One row registers the scripted adapter; `agent-default-model`
@@ -749,7 +749,7 @@ export function writeC1WorkFixture(profileDir, workDir) {
 
 }
 
-/** Read every M4-C1 fixture proof line (an absent file is simply empty). */
+/** Read every host-workload fixture proof line (an absent file is simply empty). */
 function readC1WorkEvents(workRoot) {
   const path = join(workRoot, 'events.jsonl')
   if (!existsSync(path)) return []
@@ -770,7 +770,7 @@ async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs = 60_000
     if (event !== undefined) return event
     await sleep(25)
   }
-  throw new Error(`${label}: no M4-C1 work proof matched within ${String(timeoutMs)}ms; events=${JSON.stringify(readC1WorkEvents(workRoot).slice(-8))}`)
+  throw new Error(`${label}: no host-workload proof matched within ${String(timeoutMs)}ms; events=${JSON.stringify(readC1WorkEvents(workRoot).slice(-8))}`)
 }
 
 /** Wait for one durable Host Session event matching the predicate. */
@@ -1071,7 +1071,7 @@ async function seatIsFree(name) {
 function assertNoSecret(label, text, secrets) {
   for (const secret of secrets) {
     if (secret === undefined || secret === '') continue
-    assert(!text.includes(secret), `${label} leaked a B1 secret`)
+    assert(!text.includes(secret), `${label} leaked an authenticated-link secret`)
   }
 }
 
@@ -1225,8 +1225,8 @@ async function main() {
     assert(existsSync(join(profilePackage, 'dist', 'local-client.mjs')), 'candidate client entry missing from profile install')
     const entries = entryPaths(profilePackage)
     const manifest = readJson(join(profilePackage, 'package.json'))
-    assert(manifest.bin === undefined, 'B1 must not add a package bin')
-    assert(!Object.keys(manifest.exports ?? {}).some(name => /local-(host|client)/u.test(name)), 'B1 entries must stay internal')
+    assert(manifest.bin === undefined, 'the candidate must not add a package bin')
+    assert(!Object.keys(manifest.exports ?? {}).some(name => /local-(host|client)/u.test(name)), 'the internal entries must stay unexported')
     assert(manifest.dependencies?.ws === '8.21.3', 'the installed package must declare ws@8.21.3')
     const anchor = realpathSync(join(harnessDir, 'node_modules', '@deepseek-ai', 'dsh', 'package.json'))
     const mutationMode = process.env.SPLIT_PROCESS_SMOKE_MUTATION
@@ -1239,7 +1239,7 @@ async function main() {
         ? { SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch }
         : {}
     // The test-only offline Host LLM row is part of the isolated profile for
-    // this whole run: the B1 lanes never prompt, and the surface lanes need a
+    // this whole run: the link lanes never prompt, and the surface lanes need a
     // real Host-side model route to prove a committed prompt round trip. The
     // running-mutation env wins when present (those cases replace the overlay).
     const surfaceLlm = writeSurfaceLlmFixture(profileDir, workDir)
@@ -1280,7 +1280,7 @@ async function main() {
     const help = runDsh(dsh, ['--profile', 'pi-tui', '--help'], profileDir, env, 120_000)
     assert(help.status === 0, `Direct --help failed: ${help.stderr}`)
 
-    // §6 running mutations: these are real Host processes, not a unit fake.
+    // The running-state mutations below use real Host processes, not a unit fake.
     // (1) Re-enabling the Host-only TUI row after the overlay must make the
     // Host startup red; no ready record is allowed.
     writeFileSync(tuiMutationPatch, '- id: tui-app\n  disabled: false\n')
@@ -1603,7 +1603,7 @@ async function main() {
       gatewayOwners: hostReady.ownerEntries.typertGateway,
     })
 
-    // RFL-012: the Host must never treat SPLIT_PROCESS_SCRATCH as deletion
+    // The Host must never treat SPLIT_PROCESS_SCRATCH as deletion
     // authority. A second Host whose env names the live Host's own scratch or
     // a scope-outside host-scratch-* directory must exit on the seat conflict
     // without deleting either.
@@ -1617,11 +1617,11 @@ async function main() {
         ...base,
         env: { ...base.env, SPLIT_PROCESS_SCRATCH: target },
       })
-      const conflict = await foreign.waitFor(record => record.m4a0 === 'host-seat-conflict', 'RFL-012 foreign scratch seat conflict', 60_000)
-      assert(foreign.effectiveScratch === target, `RFL-012 foreign Host did not receive ${target}: ${foreign.effectiveScratch}`)
-      assert(conflict.error === 'HOST_ALREADY_OWNED', `RFL-012 foreign scratch conflict was ${JSON.stringify(conflict.error)}`)
+      const conflict = await foreign.waitFor(record => record.m4a0 === 'host-seat-conflict', 'foreign scratch Host seat conflict', 60_000)
+      assert(foreign.effectiveScratch === target, `the foreign Host did not receive the scratch it was launched with: ${target} != ${foreign.effectiveScratch}`)
+      assert(conflict.error === 'HOST_ALREADY_OWNED', `the foreign scratch conflict code was ${JSON.stringify(conflict.error)}`)
       const foreignExit = await foreign.waitForExit(30_000)
-      assert(foreignExit.code === 0, `RFL-012 foreign scratch exit was ${JSON.stringify(foreignExit)}`)
+      assert(foreignExit.code === 0, `the foreign scratch Host exit was ${JSON.stringify(foreignExit)}`)
     }
     assert(existsSync(mainScratch), 'a live Host scratch was deleted through SPLIT_PROCESS_SCRATCH')
     assert(existsSync(outsideScratch), 'a scope-outside directory was deleted through SPLIT_PROCESS_SCRATCH')
@@ -2317,20 +2317,20 @@ async function main() {
     assert(!missingHostRecords.some(record => record.m4a0 === 'cleanup-failure'), 'T17 missing host chunk falsely reported cleanup failure')
     trace('t17-host-chunk', { phase: 'after-boot', cleanup: 'completed' })
 
-    // RFL-010/F3: a real Client spawn whose Host fails before runProfile must
+    // A real Client spawn whose Host fails before runProfile must
     // remove only its own launcher-created scratch. The main Host is already
     // dead, so ensureLocalHost actually spawns a candidate.
     const removalFailure = new EntryProcess('host', entries.host, {
       ...base,
       env: { ...base.env, SPLIT_PROCESS_HOST_FORCE_SCRATCH_REMOVE_FAILURE: '1' },
     })
-    const removalReady = await waitForOutcome(removalFailure, 'RFL-014 scratch-removal-failure Host', 120_000)
-    assert(removalReady.m4a0 === 'ready', `RFL-014 Host did not become ready: ${JSON.stringify(removalReady)}`)
+    const removalReady = await waitForOutcome(removalFailure, 'scratch-removal-failure Host', 120_000)
+    assert(removalReady.m4a0 === 'ready', `the scratch-removal Host did not become ready: ${JSON.stringify(removalReady)}`)
     removalFailure.send({ op: 'shutdown' })
-    const removalCleanup = await removalFailure.waitFor(record => record.m4a0 === 'cleanup-failure', 'RFL-014 cleanup failure', 60_000)
-    assert(removalCleanup.step === 'scratch-remove', `RFL-014 cleanup step was ${JSON.stringify(removalCleanup.step)}`)
+    const removalCleanup = await removalFailure.waitFor(record => record.m4a0 === 'cleanup-failure', 'scratch removal cleanup failure', 60_000)
+    assert(removalCleanup.step === 'scratch-remove', `the scratch removal reported cleanup step ${JSON.stringify(removalCleanup.step)}`)
     const removalExit = await removalFailure.waitForExit(30_000)
-    assert(removalExit.code === 1, `RFL-014 Host exit was ${JSON.stringify(removalExit)}`)
+    assert(removalExit.code === 1, `the scratch removal Host exit was ${JSON.stringify(removalExit)}`)
     trace('t15-removal-failure', { step: removalCleanup.step, exit: removalExit.code })
 
     const preProfileScratch = scopeScratchDirs().length
@@ -2338,10 +2338,10 @@ async function main() {
       ...base,
       env: { ...base.env, SPLIT_PROCESS_HOST_FORCE_BOOT_FAILURE: 'before-profile' },
     })
-    const preProfileFailure = await preProfile.waitFor(record => record.m4a0 === 'failure', 'F3 pre-profile Host failure', 120_000)
+    const preProfileFailure = await preProfile.waitFor(record => record.m4a0 === 'failure', 'pre-profile Host failure', 120_000)
     const preProfileExit = await preProfile.waitForExit(30_000)
-    assert(preProfileExit.code === 1, `F3 pre-profile Client exit was ${JSON.stringify(preProfileExit)}`)
-    assert(preProfileFailure.code === 'HOST_START_TIMEOUT', `F3 pre-profile code was ${JSON.stringify(preProfileFailure.code ?? preProfileFailure.error)}`)
+    assert(preProfileExit.code === 1, `the pre-profile Client exit was ${JSON.stringify(preProfileExit)}`)
+    assert(preProfileFailure.code === 'HOST_START_TIMEOUT', `the pre-profile failure code was ${JSON.stringify(preProfileFailure.code ?? preProfileFailure.error)}`)
     assert(scopeScratchDirs().length === preProfileScratch, 'an early Host failure left its private scratch behind')
     assert(
       readFileSync(join(scopeDir, 'host.log'), 'utf8').includes('qualification forced pre-profile failure'),
@@ -2587,8 +2587,8 @@ async function main() {
     await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 10_000)
     trace('seats-free', { hostSeat: 'free', clientSeat: 'free' })
 
-    // ── M4-B2-S real surface qualification (T27–T39) ──────────────────────
-    // Everything above proves the B1 authenticated control/data link. This
+    // ── Real-surface qualification (T27–T39) ─────────────────────────────
+    // Everything above proves the authenticated control/data link. This
     // block starts a DEDICATED Host with the test-only offline LLM row and
     // drives the ONE real tty surface Client over the SAME authenticated Host:
     // create/open/switch Sessions and prove a real Host commit reaches the
@@ -2608,7 +2608,7 @@ async function main() {
     let sessionA
     let sessionB
     try {
-      // T27/T28: ONE real surface over the SAME B1 connection; sessionless
+      // T27/T28: ONE real surface over the SAME authenticated connection; sessionless
       // Welcome painted on the real pty, no JSON on the terminal.
       const c1 = new SurfaceEntryProcess(entries.client, {
         ...base,
@@ -3119,10 +3119,10 @@ async function main() {
         surface: 'T27-T39 + T41/T42/T43 pass',
       })
 
-    // ── M4-C1 continuity / interactions / Client-only HMR (T44–T60) ────────
+    // ── Continuity / interactions / Client-only HMR (T44–T60) ─────────────
     // Each scenario starts its OWN Host (one `C1_SCENARIO` per Host process)
     // and records its facts through the isolated fixture. The Client processes
-    // are real PTY surfaces over the official authenticated B1 transport.
+    // are real PTY surfaces over the official authenticated transport.
     const c1Work = writeC1WorkFixture(profileDir, workDir)
     const c1Hosts = []
     const c1Clients = []
@@ -3347,10 +3347,10 @@ async function main() {
       // Agent is involved; the observer must see the registry's unowned list
       // and event lifecycle directly.
       {
-        const { host, ready, workRoot } = await startC1Host('unowned-job', 'c2a-unowned-job', {
-          C1_UNOWNED_JOB_ARM: join(workDir, 'c2a-unowned-job.arm'),
+        const { host, ready, workRoot } = await startC1Host('unowned-job', 'unowned-job-arm', {
+          C1_UNOWNED_JOB_ARM: join(workDir, 'unowned-job-arm.arm'),
         })
-        writeFileSync(join(workDir, 'c2a-unowned-job.arm'), 'arm\n', { mode: 0o600 })
+        writeFileSync(join(workDir, 'unowned-job-arm.arm'), 'arm\n', { mode: 0o600 })
         const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'unowned-job-created', 'C2A unowned job created', 120_000)
         const runningLiveness = (await hostStatus(host)).liveness
         assert(runningLiveness?.verdict === 'BLOCKED', `C2A the unowned Job did not block: ${JSON.stringify(runningLiveness)}`)
@@ -3364,7 +3364,7 @@ async function main() {
           `C2A a settled unowned Job left a ghost reason: ${JSON.stringify(settledLiveness)}`)
         assert(settledLiveness.sourceStates?.jobs === 'IDLE', `C2A the unowned Job source did not return to IDLE: ${JSON.stringify(settledLiveness.sourceStates)}`)
         await stopC1Host(host)
-        trace('c2a-unowned-job', { hostPid: ready.pid, jobId: created.jobId, runningVerdict: runningLiveness.verdict, settledJobsState: settledLiveness.sourceStates.jobs })
+        trace('unowned-job-arm', { hostPid: ready.pid, jobId: created.jobId, runningVerdict: runningLiveness.verdict, settledJobsState: settledLiveness.sourceStates.jobs })
       }
 
       // Host liveness: ONE real armed Goal is the only thing that keeps this
@@ -3374,13 +3374,13 @@ async function main() {
       // round ends and the driver then blocks the Goal at `round-limit`. The
       // armed state would then be a transient window whose Host status depends
       // on when the read lands, so the driver's own reservation is qualified
-      // separately by the c2a-goal-round case below.
+      // separately by the goal-round case below.
       {
-        const armedPatch = join(workDir, 'c2a-goal-armed.patch.yml')
+        const armedPatch = join(workDir, 'goal-armed.patch.yml')
         const operations = parseYaml(readFileSync(c1Work.patchPath, 'utf8'))
         operations.push({ id: 'goal-round-driver', disabled: true })
         writeFileSync(armedPatch, JSON.stringify(operations, null, 2), { mode: 0o600 })
-        const { host, ready, workRoot } = await startC1Host('goal-armed', 'c2a-goal-armed', {
+        const { host, ready, workRoot } = await startC1Host('goal-armed', 'goal-armed', {
           SPLIT_PROCESS_EXTRA_PATCH: armedPatch,
         })
         // The readiness record's Loader rows are the authority that the
@@ -3425,7 +3425,7 @@ async function main() {
           `C2A the isolated armed Goal moved out of the created state: ${JSON.stringify(armedMutations)}`)
         await exitC1Client(client, 'C2A goal-armed C1')
         await stopC1Host(host)
-        trace('c2a-goal-armed', {
+        trace('goal-armed', {
           hostPid: ready.pid,
           sessionId,
           goalId: created.goalId,
@@ -3441,9 +3441,9 @@ async function main() {
       // a real Agent inbox round and that the one-round budget then ends the
       // armed state. It reads no Host liveness, because with this driver
       // mounted the armed Goal is transient by design; the stable armed-Goal
-      // liveness proof is the c2a-goal-armed case above.
+      // liveness proof is the goal-armed case above.
       {
-        const { host, ready, workRoot } = await startC1Host('goal-round', 'c2a-goal-round')
+        const { host, ready, workRoot } = await startC1Host('goal-round', 'goal-round')
         // Positive control for the armed case's row vocabulary: the same id,
         // name and `active` state are what the real driver mounts when the
         // overlay does not disable it.
@@ -3476,7 +3476,7 @@ async function main() {
           `C2A the Goal did not leave the armed state at its round limit: ${JSON.stringify(blocked)}`)
         await exitC1Client(client, 'C2A goal-round C1')
         await stopC1Host(host)
-        trace('c2a-goal-round', {
+        trace('goal-round', {
           hostPid: ready.pid,
           sessionId,
           goalId: created.goalId,
@@ -3490,7 +3490,7 @@ async function main() {
       // public Agent status stays idle. The observer must not claim quiescence;
       // rc.4 has no synchronous maintenance getter, so UNKNOWN is correct.
       {
-        const { host, ready, workRoot } = await startC1Host('maintenance', 'c2a-maintenance')
+        const { host, ready, workRoot } = await startC1Host('maintenance', 'maintenance-sweep')
         const { client } = await startC1Client('C2A maintenance C1')
         const sessionId = await openC1Session(client, 'c2a maintenance prompt', 'C2A maintenance')
         const maintenance = await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'running', 'C2A maintenance running', 120_000)
@@ -3503,18 +3503,18 @@ async function main() {
         await waitForC1WorkEvent(workRoot, event => event.kind === 'maintenance' && event.phase === 'settled', 'C2A maintenance settled', 120_000)
         await exitC1Client(client, 'C2A maintenance C1')
         await stopC1Host(host)
-        trace('c2a-maintenance', { hostPid: ready.pid, sessionId, agentStatus: maintenance.agentStatus, verdict: maintenanceLiveness.verdict })
+        trace('maintenance-sweep', { hostPid: ready.pid, sessionId, agentStatus: maintenance.agentStatus, verdict: maintenanceLiveness.verdict })
       }
 
       // Host liveness: the optional official Schedule row is mounted in an
       // isolated test-only overlay. An active task must block with zero
       // Clients; deleting it must clear the schedule-active contribution.
       {
-        const schedulePatch = join(workDir, 'c2a-schedule.patch.yml')
+        const schedulePatch = join(workDir, 'host-schedule.patch.yml')
         const operations = parseYaml(readFileSync(c1Work.patchPath, 'utf8'))
-        operations.push({ insert: [{ id: 'c2a-schedule', name: '@deepseek-ai/dsh-schedule' }] })
+        operations.push({ insert: [{ id: 'host-schedule', name: '@deepseek-ai/dsh-schedule' }] })
         writeFileSync(schedulePatch, JSON.stringify(operations, null, 2), { mode: 0o600 })
-        const { host, ready, workRoot } = await startC1Host('schedule', 'c2a-schedule', { SPLIT_PROCESS_EXTRA_PATCH: schedulePatch })
+        const { host, ready, workRoot } = await startC1Host('schedule', 'host-schedule', { SPLIT_PROCESS_EXTRA_PATCH: schedulePatch })
         const { client } = await startC1Client('C2A schedule C1')
         const sessionId = await openC1Session(client, 'c2a schedule prompt', 'C2A schedule')
         const created = await waitForC1WorkEvent(workRoot, event => event.kind === 'schedule-created' && event.status === 'active', 'C2A schedule created', 120_000)
@@ -3529,7 +3529,7 @@ async function main() {
         assert(!deletedLiveness.reasons?.includes('schedule-active'), `C2A a deleted Schedule task left an active reason: ${JSON.stringify(deletedLiveness)}`)
         assert(deletedLiveness.sourceStates?.schedule === 'IDLE', `C2A the schedule source did not return to IDLE: ${JSON.stringify(deletedLiveness.sourceStates)}`)
         await stopC1Host(host)
-        trace('c2a-schedule', { hostPid: ready.pid, sessionId, scheduleId: created.scheduleId, activeVerdict: activeLiveness.verdict, deletedScheduleState: deletedLiveness.sourceStates.schedule })
+        trace('host-schedule', { hostPid: ready.pid, sessionId, scheduleId: created.scheduleId, activeVerdict: activeLiveness.verdict, deletedScheduleState: deletedLiveness.sourceStates.schedule })
       }
 
       // T48: a real continuable Child survives the Client exit; the Child
@@ -4307,7 +4307,7 @@ async function main() {
     // NOT claimed by this script; the stage-final lane records their verdict
     // separately before the overall T60 status is final.
     assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
-      'T60 the candidate artifact changed during the M4-C1 qualification')
+      'T60 the candidate artifact changed during the split-process qualification')
     trace('t60', {
       candidate: basename(tarball),
       sha256: candidateSha256,
@@ -4322,7 +4322,7 @@ async function main() {
       releaseGates: 'not run by this smoke; stage-final lane records the separate release-gate verdict',
     })
 
-    console.log(`split-process B1/B2-S authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}`)
+    console.log(`split-process authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}`)
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the
@@ -4367,7 +4367,7 @@ async function main() {
       traceFd = undefined
     }
     if (!KEEP) rmSync(workDir, { recursive: true, force: true })
-    else console.error(`preserved split-process B1 environment: ${workDir}`)
+    else console.error(`preserved split-process environment: ${workDir}`)
   }
 }
 
