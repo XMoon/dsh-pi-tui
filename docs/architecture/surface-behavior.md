@@ -1099,6 +1099,21 @@ Attachment completion and intake are Client-local:
   unreferenced-draft prune runs against the live draft before a new image is
   staged. The platform probe, deployment image policy, Host attachment
   admission and Direct/Remote submission paths stay their own authorities.
+- A REAL terminal bracketed paste whose complete body is one absolute image file
+  path plus the terminal's single trailing ASCII space is a THIRD intake source,
+  distinct from `/attach`/`/image` and from the Ctrl+V OS-clipboard probe: the
+  pasted path first appears as ordinary editable text, the asynchronous read
+  stages the image in the SAME draft store, and the ONE proven paste span (never
+  an `indexOf` match) is replaced with the canonical placeholder through one
+  real undoable edit. The candidate grammar is strict — absolute POSIX, no
+  control characters, one trailing space, a case-insensitive
+  png/jpg/jpeg/webp/gif extension — while the file content remains the MIME,
+  size and dimension authority. Until the read settles, every submit/queue/steer
+  path refuses BEFORE clearing the draft or its Undo history and asks for a
+  retry; a failed read keeps the path text and reports the basename. Only the
+  default host composer and the TSP composer claim it: plugin replacement
+  editors and shell-mode pastes keep their raw paste semantics, and a non-image
+  paste is inert.
 - The attachment marker is always `🖼️ ` (U+1F5BC + U+FE0F + space), so its
   visible width is three cells; a font without an emoji face may show a gap
   (accepted).

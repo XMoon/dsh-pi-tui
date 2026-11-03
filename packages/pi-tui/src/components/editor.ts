@@ -444,6 +444,15 @@ export class Editor implements Component, Focusable {
 	private readonly pasteImagePlaceholders = new Map<number, { body: string; placeholders: readonly string[] }>();
 
 	public onSubmit?: (text: string) => void;
+	/** Pre-clear submit ADMISSION (dsh-pi-tui divergence X075): called with
+	 *  the expanded submitted value BEFORE {@link onBeforeSubmitClear} and
+	 *  before any draft/undo/paste-registry mutation. Returning `false` (or
+	 *  throwing) aborts THIS submit gesture as if it never started: the draft,
+	 *  caret, paste registry and Undo history stay exactly as they were, and
+	 *  no history row/ack/business dispatch happens. The host uses it for the
+	 *  one refusal that cannot be expressed after the clear: a terminal
+	 *  pasted image path whose attachment read is still in flight. */
+	public onMaySubmit?: (text: string) => boolean;
 	/** Called with the submitted text immediately BEFORE the draft/undo clear.
 	 *  The host reserves submission-time resources first and returns a ONE-SHOT
 	 *  release: it runs in a finally after the synchronous clear + onSubmit
@@ -1873,6 +1882,11 @@ export class Editor implements Component, Focusable {
 
 	private submitValue(): void {
 		const result = this.expandPasteMarkersSinglePass(this.state.lines.join("\n")).text.trim();
+		// Pre-clear admission (X075): a refused gesture must leave the live
+		// draft/Undo/paste registry untouched — the business owner's own gate
+		// runs too late, after this clear already destroyed the paste range and
+		// the Undo history it could be retried from.
+		if (this.onMaySubmit?.(result) === false) return;
 		// Host hook: reserve the submitted text's resources BEFORE the clear can
 		// retire the undo history. The returned release is the BRIDGE: it must
 		// outlive the synchronous clear + onSubmit dispatch (the business owner

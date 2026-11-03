@@ -359,7 +359,9 @@ import type { RendererRegistry } from './extension/internal/renderer-registry.ts
 import { OverlayBroker } from './tui/interaction/overlay-broker.ts'
 import { EditorSeatMount } from './tui/interaction/editor-seat.ts'
 import { EditorSeatHolder } from './tui/interaction/editor-seat-holder.ts'
-import { TuiEditor, type TuiEditorRenderLayout } from './tui/interaction/tui-editor.ts'
+import { TuiEditor, type TuiEditorPasteCommit, type TuiEditorRenderLayout } from './tui/interaction/tui-editor.ts'
+import { PasteRangeTracker } from './tui/interaction/pasted-path-range.ts'
+import { PASTE_PENDING_NOTICE, type PastedImageIntakePort, type PastedPathReceipt } from './app/surface/pasted-image-intake.ts'
 import { serializeEditorInput, serializedDraftHasPayload, shellPrefixForMode, type EditorInputMode } from './tui/interaction/editor-input-mode.ts'
 import type { EditorRegistry } from './extension/internal/editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
@@ -1074,6 +1076,16 @@ export interface TuiAppEventsBase {
    * the pre-pipeline behavior (the key falls through to the editor).
    */
   onClipboardPaste?: () => void
+  /**
+   * A REAL terminal bracketed paste was inserted into the default host
+   * composer as prompt text and may carry one local image file path (a
+   * DIFFERENT input source from {@link onClipboardPaste}: the terminal sent
+   * the path as text, the OS clipboard was never read). The application
+   * intake owner decides whether it is a candidate, reads/stages the image
+   * and replaces the exact tracked span; the renderer only forwards the
+   * receipt. Optional.
+   */
+  onTerminalPastedPath?: (receipt: PastedPathReceipt) => void
   /**
    * Whether a submitted line may enter the EDITOR history (both the
    * in-memory recall and the editor's own stack; the runner's persisted
@@ -1953,6 +1965,13 @@ export interface TuiAppOptions {
    * mutations and real history retirement — it keeps no mirror of either.
    */
   draftImagePreviewUndo?: import('./client/media/image/draft-store.ts').DraftImageUndoLeasePort
+  /**
+   * The ONE application intake owner of a terminal bracketed pasted image
+   * file path. The host editor forwards each proven paste receipt here and
+   * consults its read-only delivery predicate BEFORE any submit/steer clear;
+   * absent keeps the pasted path ordinary text (headless fixtures).
+   */
+  terminalPastedPath?: PastedImageIntakePort
   imageTheme?: import('./tui/components/media/image-thumbnail.ts').ImageThumbnailTheme
   /**
    * PR-D: the Client-local SVG raster cache. Wired by the mount composition
@@ -3009,6 +3028,11 @@ export class TuiApp {
   private readonly footerComposer: FooterComposer
   private readonly tui: TuiMainScreen
   private readonly editor: TuiEditor
+  /** The short-lived paste-range leases of the default host composer: the
+   *  only identity an async image read may replace. */
+  private readonly pasteRanges = new PasteRangeTracker()
+  /** @see TuiAppOptions.terminalPastedPath — the application intake owner. */
+  private readonly terminalPastedPath: PastedImageIntakePort | undefined
   /**
    * The surface GENERATION: incremented only when a genuinely NEW surface
    * attaches (a fresh TuiApp / SurfaceHost), never by start/stop, fullscreen
@@ -4753,6 +4777,16 @@ export class TuiApp {
     // its clear (onBeforeSubmitClear) and runs the returned release in a
     // finally after the synchronous clear + onSubmit dispatch. The host keeps
     // no array/counter of these — one gesture, one release.
+    this.editor.onMaySubmit = (text) => {
+      // The ONE refusal that must land BEFORE the fork clears: a pasted image
+      // path whose attachment read is still in flight. No clear, no Undo
+      // retirement, no history/ack/writer; the draft stays editable and the
+      // user retries after the read settles.
+      if (this.terminalPastedPath?.blocksDelivery(text) !== true) return true
+      this.notify(PASTE_PENDING_NOTICE, 'info')
+      return false
+    }
+    this.editor.onBracketedPasteCommitted = (commit) => { this.acceptHostPastedText(commit) }
     this.editor.onBeforeSubmitClear = (text) => this.draftImagePreviewReserve?.(text)
     this.editor.onSubmit = (text) => {
       const gesture: ComposerSubmitGesture = 'enter'
@@ -4823,6 +4857,10 @@ export class TuiApp {
       this.events.onSubmit(serialized, 'enter', scopeToken)
     }
     this.editor.onChange = () => {
+      // FIRST: the paste range leases track the editor's REAL document, so a
+      // subsequent edit shifts/invalidates them before any external callback
+      // (undo retention, seat subscribers) can act on a stale offset.
+      this.pasteRanges.observe(this.editor.getText())
       // Ordinary editor input is an intervening action, so it disarms a
       // pending exit confirmation. Ctrl+C clear-draft arms again after its
       // own setText mutation completes.
@@ -4873,6 +4911,7 @@ export class TuiApp {
     // M9: the editor seat holder — the atomic handoff + current occupant.
     // The host default editor is the adapter source; a plugin editor
     // (single-winner from the editor registry) can replace it.
+    this.terminalPastedPath = options.terminalPastedPath
     this.imageLoader = options.imageLoader
     this.imageScope = options.imageScope
     this.draftImageStoreForTest = options.draftImageStoreForTest
@@ -4894,7 +4933,10 @@ export class TuiApp {
       undo.registerUndoOwner(this.editor, placeholder => this.editor.retireDraftImageFromUndo(placeholder))
       // A REAL undo-history retirement (submit clear) releases this owner's
       // leases immediately; backend acceptance is irrelevant to the history.
-      this.editor.onUndoHistoryRetired = () => { undo.releaseUndoForOwner(this.editor) }
+      this.editor.onUndoHistoryRetired = () => {
+        this.pasteRanges.retireAll()
+        undo.releaseUndoForOwner(this.editor)
+      }
     }
     this.imageTheme = options.imageTheme
     this.svgRasterLoader = options.svgRasterLoader
@@ -4963,6 +5005,8 @@ export class TuiApp {
             // Paste markers are EXPANDED — the steer wire never carries
             // registry-bound marker text.
             const serialized = this.expandedSeatWireDraft()
+            // A pending pasted image path refuses the steer BEFORE its clear.
+            if (this.blocksPastedPathDelivery(serialized)) return true
             // Same scoped bridge as the Ctrl+S action: the clear's retention
             // reconcile must not evict an image the steer dispatch needs.
             const bridgeRelease = this.draftImagePreviewReserve?.(serialized)
@@ -5817,6 +5861,7 @@ export class TuiApp {
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
+    this.pasteRanges.retireAll()
     // M3-6 PR3: the final teardown is ONE ordered non-truncating batch. Every
     // independent resource is attempted even when a sibling throws; the
     // process live-TUI slot stays CLAIMED unless the WHOLE batch settles
@@ -7080,6 +7125,7 @@ export class TuiApp {
         // re-serialized here (serializeSeatDraft) and the mode reset with
         // the draft.
         const serialized = this.expandedSeatWireDraft()
+        if (this.blocksPastedPathDelivery(serialized)) return true
         // The SCOPED bridge: the clear below pushes an undo snapshot and fires
         // onChange, whose retention reconcile must never evict an image the
         // steer dispatch is about to hand to the business owner. Released after
@@ -15288,6 +15334,74 @@ export class TuiApp {
   }
 
   /**
+   * ONE completed bracketed paste of the default host composer.
+   *
+   * The renderer-side receipt is built from the paste's PROVEN raw span; the
+   * application intake owner then applies the candidate grammar, reads the
+   * file and replaces exactly that span. Viewer composers and shell modes are
+   * never claimed: the viewer's child prompt has no image delivery path, and
+   * shell words are the shell plane's authority. Plugin replacement editors
+   * never route their paste through this host editor, so they are untouched
+   * by construction.
+   */
+  private acceptHostPastedText(commit: TuiEditorPasteCommit): void {
+    if (commit.span === undefined || this.events.onTerminalPastedPath === undefined) return
+    if (this.disposed || this.viewerMode !== undefined) return
+    if (this.seatEditor().id !== 'host' || this.editor.getInputMode() !== 'prompt') return
+    const id = this.pasteRanges.add(commit.span)
+    if (id === undefined) return
+    const receipt: PastedPathReceipt = {
+      text: commit.text,
+      seatCurrent: () => !this.disposed
+        && this.viewerMode === undefined
+        && this.seatEditor().id === 'host'
+        && this.editor.getInputMode() === 'prompt',
+      hasLivePath: (path) => this.pasteRanges.live(id)?.expected === path,
+      replacePastedPath: (path, placeholder) => this.replacePastedPathSpan(id, path, placeholder),
+    }
+    this.events.onTerminalPastedPath?.(receipt)
+  }
+
+  /**
+   * Replace ONE live pasted-path span with the canonical image placeholder as
+   * a real Undoable edit (the fork's existing seam — no new editor API). The
+   * caret keeps its position RELATIVE to the surrounding text. Any failure of
+   * identity proof retires the lease and returns false: no other occurrence
+   * of the same path is ever touched.
+   */
+  private replacePastedPathSpan(id: number, path: string, placeholder: string): boolean {
+    const span = this.pasteRanges.live(id)
+    if (span === undefined || span.expected !== path) return false
+    const seat = this.seatEditor()
+    if (seat.id !== 'host' || seat.replaceTextUndoable === undefined) return false
+    const raw = seat.getText()
+    if (raw.slice(span.start, span.end) !== path || !raw.includes(path)) {
+      this.pasteRanges.retire(id)
+      return false
+    }
+    const cursor = seat.getCursor()
+    let nextCursor = cursor
+    if (cursor >= span.end) nextCursor += placeholder.length - path.length
+    else if (cursor > span.start) nextCursor = span.start + placeholder.length
+    const next = raw.slice(0, span.start) + placeholder + raw.slice(span.end)
+    this.pasteRanges.retire(id)
+    seat.replaceTextUndoable(next, nextCursor)
+    return true
+  }
+
+  /**
+   * The read-only delivery predicate every host submit/steer clear consults
+   * BEFORE clear/Undo retirement/history/ack/writer. A live pasted path whose
+   * attachment read is in flight refuses the delivery and announces the ONE
+   * retry notice; a plain prompt that does not carry that path is unaffected.
+   */
+  private blocksPastedPathDelivery(text: string): boolean {
+    if (this.terminalPastedPath?.blocksDelivery(text) !== true) return false
+    this.notify(PASTE_PENDING_NOTICE, 'info')
+    return true
+  }
+
+  /**
    * Insert text at the editor cursor — the image-placeholder insertion
    * path (`/image`, Ctrl+V). A replacement editor without cursor insertion
    * falls back to appending at the end of the draft; the host editor
@@ -16718,6 +16832,9 @@ export class TuiApp {
     // A replacement Editor seat is a new keyboard owner. Retire Quick before
     // the atomic handoff so focus restoration never targets the old seat.
     this.leaveTaskQuick()
+    // The outgoing seat's paste ranges are dead: the incoming editor holds a
+    // different document/Undo authority and must never inherit a span.
+    this.pasteRanges.retireAll()
     // Perform the atomic handoff (create → transfer → mount → dispose).
     // The registry revision rides along so a failed target's guard clears
     // on a same-id re-registration (round-1 finding 4).
@@ -17644,6 +17761,10 @@ export class TuiApp {
    * the raw text. The single decode point for every host restore path.
    */
   private setSeatSerializedInput(text: string): void {
+    // A programmatic whole-document replacement (session restore, viewer
+    // transfer, forced clear) is NOT the original paste: retire every lease
+    // before the text changes, even when the same path bytes reappear.
+    this.pasteRanges.retireAll()
     this.invalidateDraftPreviewCaches()
     const seat = this.seatEditor()
     if (seat.id === 'host') {
@@ -21830,6 +21951,9 @@ export class TuiApp {
     // placeholder expansion resolves it to real content blocks at
     // submission (plan §11.1).
     if (serialized.trim() === '' && this.events.isImageDraft?.() !== true) return
+    // A pasted image path still being attached must not be delivered as text:
+    // refuse BEFORE any clear/history/ack/writer and keep the live draft.
+    if (this.blocksPastedPathDelivery(serialized)) return
     this.clearNotify()
     if (target !== undefined && isViewerAccessInteractive(resolveViewerAccess(target.mode, target.access))) {
       // A plugin action inside an interactive viewer submits to the
@@ -21886,6 +22010,7 @@ export class TuiApp {
    *  seam when present; a Replacement Editor without it falls back to setText
    *  (which PUSHES undo). */
   private clearSubmittedDraft(): void {
+    this.pasteRanges.retireAll()
     const editor = this.seatEditor()
     if (editor.clearDraftAfterSubmit !== undefined) editor.clearDraftAfterSubmit()
     else editor.setText('')

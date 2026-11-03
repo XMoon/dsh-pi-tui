@@ -56,7 +56,9 @@ import type { SurfaceDraftImageOccurrence, SurfaceImageBinding } from '../../app
 import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
-import { createTspComposer, type TspComposer, type TspComposerEdit } from './editor.ts'
+import { createTspComposer, type TspComposer, type TspComposerEdit, type TspComposerState } from './editor.ts'
+import { pastedBodySpan } from '../interaction/pasted-path-range.ts'
+import type { PastedPathReceipt } from '../../app/surface/pasted-image-intake.ts'
 import { imageProtocolPreference } from '../graphics/image-protocol-preference.ts'
 import { clampMiddle } from './picker-text.ts'
 import { sanitizeDisplayText } from '../presentation/terminal-text.ts'
@@ -219,6 +221,21 @@ export interface TspInputHandlers {
    * stages an image and owns no media queue of its own.
    */
   pasteMedia(): void
+  /**
+   * ONE real bracketed paste (`Key{name:'paste'}`) was inserted into the main
+   * composer. The renderer already proved the raw text span; the application
+   * intake owner decides whether it is an image-file-path candidate, reads
+   * and stages it and replaces exactly that span. A different input source
+   * from {@link pasteMedia}.
+   */
+  pastedPath(receipt: PastedPathReceipt): void
+  /**
+   * The ONE pasted-image delivery admission, consulted BEFORE the composer
+   * draft is cleared: false means a pasted path in `text` is still being
+   * attached (the owner has already announced the retry notice), so the
+   * draft, caret and Undo stay untouched.
+   */
+  admitPastedPathDelivery(text: string): boolean
   /** Real user input on the editor seat (editable/submit keys). */
   noteUserInput(): void
   /**
@@ -2603,6 +2620,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   const submitComposerDraft = (handlers: TspInputHandlers, gesture: 'enter' | 'accelerated'): void => {
     handlers.noteUserInput()
     const serializedDraft = composer.getDraft()
+    // BEFORE the clear: a pasted image path whose attachment read is still in
+    // flight must not be delivered as text, and the refusal must keep the
+    // live draft/caret — the same gate the app's submit/steer owners enforce.
+    if (!handlers.admitPastedPathDelivery(serializedDraft)) return
     composer.setDraft('')
     handlers.submit(serializedDraft, gesture)
   }
@@ -3057,6 +3078,28 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     issueVisualCopy(target)
   }
 
+  /**
+   * ONE completed bracketed paste: prove the raw span the composer inserted
+   * and forward the receipt to the application intake owner. A paste whose
+   * insertion cannot be proven verbatim is never claimed, so a candidate span
+   * is never guessed from the draft text.
+   */
+  const acceptPastedPath = (before: TspComposerState, key: Key, handlers: TspInputHandlers): void => {
+    if (disposed || hydrating) return
+    const after = composer.state()
+    const pastedText = key.text ?? ''
+    const span = pastedBodySpan(before.text, before.cursor, after.text, after.cursor, pastedText)
+    if (span === undefined) return
+    const id = composer.registerPastedPathSpan(span)
+    if (id === undefined) return
+    handlers.pastedPath({
+      text: pastedText,
+      seatCurrent: () => !disposed && !hydrating,
+      hasLivePath: (path) => composer.hasLivePath(id, path),
+      replacePastedPath: (path, placeholder) => composer.replacePastedPathOccurrence(id, path, placeholder),
+    })
+  }
+
   const dispatchKey = (key: Key, handlers: TspInputHandlers): boolean => {
     // 1. The disposal fence: `disposed` is checked by the loop before this.
     // 2. B3-A2 §6.6: a temporary Screen that is still physically open or
@@ -3156,11 +3199,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     }
     // 5. The composer reducer owns everything else (Ctrl+D empty-exit,
     //    Enter gestures, paste, edits). A typed `q` is TEXT now.
+    const before = composer.state()
     const edit = composer.applyKey(key)
     if (edit.kind === 'submit') {
       submitComposerDraft(handlers, edit.gesture)
     }
-    if (edit.kind === 'edited') handlers.noteUserInput()
+    if (edit.kind === 'edited') {
+      handlers.noteUserInput()
+      // A REAL bracketed paste is the only input source that may claim an
+      // automatic image-file-path attachment. The span is measured from the
+      // composer's own before/after state — never from the draft text.
+      if (key.name === 'paste') acceptPastedPath(before, key, handlers)
+    }
     if (edit.kind === 'exit-empty') return true
     return false
   }

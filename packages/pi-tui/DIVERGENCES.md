@@ -87,8 +87,8 @@
 
 ## Summary
 
-- Records: 75
-- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 59, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
+- Records: 76
+- Statuses: `ABSORBED_UPSTREAM`: 4, `ACTIVE`: 60, `MOVED_TO_HOST`: 3, `REMOVED_UNUSED`: 6, `SUPERSEDED`: 3
 
 | ID | Status | Risk | Categories | Upstream equivalence |
 | --- | --- | --- | --- | --- |
@@ -167,6 +167,7 @@
 | X072 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 | X073 | ACTIVE | HIGH | HARD_HOST_API | NO |
 | X074 | ACTIVE | HIGH | HARD_HOST_API | NO |
+| X075 | ACTIVE | MEDIUM | HARD_HOST_API | NO |
 
 ## Divergences
 
@@ -6356,3 +6357,84 @@ The alternate screen's layout engine paints into a clipped viewport and its own 
 
 - Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
 - Notes: Image-8 I8-2A: the WT clear matrix proved a full-footprint per-row erase and that a sliced/relocated command paints outside its box; the layout clip and the alt-screen write order are fork-owned, so the host cannot satisfy the contract. Confirmed against the pinned v1.1.0 tree.
+
+### X075 — Pre-clear submit admission hook for the terminal pasted image path
+
+- Status: `ACTIVE`
+- Category: `HARD_HOST_API`
+- Risk: `MEDIUM`
+- Files: `src/components/editor.ts`
+- Last audited: `2026-11-03`
+- Baseline compared: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+
+#### Why it exists
+
+A terminal bracketed paste can carry a local image file path whose attachment read is still in flight when the user presses Enter. The submission must be refused BEFORE the editor clears: submitValue()'s existing order expands the value, clears the draft (retiring the Undo history and the paste registry) and only then fires onSubmit, so the business owner's own refusal runs after the state a retry needs is already gone. No existing public seam can veto the gesture first: onBeforeSubmitClear reserves resources but cannot cancel, and onSubmit is already too late. The host therefore needs exactly one narrow admission hook before the clear; no other fork API is added or changed.
+
+#### Changed surface
+
+- `public onMaySubmit?: (text: string) => boolean` — called by submitValue() with the same expanded, trimmed value onBeforeSubmitClear/onSubmit receive, BEFORE onBeforeSubmitClear and clearDraftAfterSubmit(). Returning false (or throwing) aborts the gesture: no clear, no Undo retirement, no paste-registry reset, no onSubmit dispatch, and no history/ack/business side effect. The host injects the read-only pasted-path delivery predicate; every other submit gesture is unchanged.
+
+#### Dependency map
+
+**Vendor internal**
+- submitValue() is the single submit point for the Enter binding, the mouse-complete/click submit path and the paste-marker submit remap (X037), so one hook covers every editor-owned submit gesture without per-key copies.
+- The hook runs after the submitted value is computed (paste markers expanded, trailing whitespace trimmed) and before onBeforeSubmitClear(), so the existing scoped-reservation bridge and the clear keep their exact order and release semantics (X064).
+- clearDraftAfterSubmit() and the standalone accelerated/plugin clear path (X064) are untouched: those callers make their own pre-clear admission decision (the host checks the same predicate before calling them).
+- Audit note: One optional callback; the fork stores no state and, with the hook absent, behaviour is byte-identical to upstream.
+
+**Inheritance / structural**
+- The Editor class keeps its constructor, fields and submit pipeline; the hook is an optional public property on the same instance.
+- No subclass override point changes: submitValue() stays private and its early return leaves every field exactly as it was.
+- Audit note: Additive optional property; no structural inheritance contract changes.
+
+**Host**
+- TuiApp assigns the hook on its own host editor and notifies the ONE retry notice itself; a replacement plugin editor never receives the hook and keeps its own submit semantics.
+- The host's other submit entry (submitDraft) performs the same read-only check before its own clear, so the two host-owned submit paths cannot drift.
+- Audit note: The hook is wired only on the default host composer; it never reaches the extension/editor public boundary.
+
+**Public / extension**
+- No exported name, package entry or extension type changes: the property is on the internal vendored Editor component, not on the extension-facing stable API.
+- A plugin replacement editor does not inherit the hook, so extension paste/submit behaviour is unchanged.
+- Audit note: No new public entry point.
+
+**Behavioral coupling**
+- With no hook, Enter submits exactly as before (expand, reserve, clear, dispatch).
+- A false return leaves the draft, caret, paste registry and Undo history untouched and never fires onSubmit or onBeforeSubmitClear.
+- A true return keeps the ordinary pipeline and dispatches exactly once.
+- The hook cannot run for a non-submit key or for the standalone clear path.
+- Audit note: The host's only false return is a terminal pasted image path whose attachment read is still in flight.
+
+#### Guarding tests
+
+- packages/pi-tui/test/editor.test.ts: 'onMaySubmit false aborts the submit before the clear and keeps draft and Undo history'
+- packages/pi-tui/test/editor.test.ts: 'onMaySubmit true keeps the ordinary submit: dispatch once and clear the draft'
+
+#### Upstream comparison
+
+- Baseline: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Semantic equivalence: `NO`
+- Reference snapshot: `earendil-works/pi@abe508e1b89912adde45528136c3221eb69acdd7`
+- Relevant upstream files:
+- src/components/editor.ts
+- Relevant issues/PRs:
+- None recorded; issue/PR state was not used as semantic proof.
+- Remaining semantic delta: Upstream Editor.submitValue expands the value, clears the draft/undo/paste registry and dispatches onSubmit with no veto point. The fork adds one optional onMaySubmit predicate consulted before the clear; a false return aborts the gesture with no state change. Every other submit rule (empty-value handling, history, paste expansion, onBeforeSubmitClear ordering, X037 submit remap) is unchanged.
+
+#### Retirement conditions
+
+- Retire when the upstream (or an existing host-visible seam) can veto a submit before the draft/undo clear, or when terminal pasted image paths no longer need a pre-clear delivery gate.
+- Retirement must re-run the onMaySubmit group in packages/pi-tui/test/editor.test.ts and the host-side pasted-image delivery tests.
+
+#### Replacement mapping
+
+- None recorded.
+
+#### Retirement evidence
+
+- None recorded.
+
+#### Audit record
+
+- Scope: `vendor-internal`, `inheritance-structural`, `host`, `public-extension`, `behavioral`, `tests`
+- Notes: Confirmed against the pinned v1.1.0 tree that submitValue() has no pre-clear veto and that onBeforeSubmitClear cannot cancel the gesture. The hook was authorized as the one necessary fork exception for the refused-while-attaching UX; all host-side delivery gates use the same read-only predicate.

@@ -244,6 +244,8 @@ async function mounted(
     submit: () => assert.fail('the picker must capture Enter'),
     steer() {},
     pasteMedia: () => {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true,
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

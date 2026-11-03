@@ -196,6 +196,8 @@ async function mountComposerActions(options: {
     submit: (text, request) => { calls.submits.push({ text, gesture: String(request) }) },
     steer() {},
     pasteMedia: () => {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true,
     noteUserInput: () => { calls.notes += 1 },
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

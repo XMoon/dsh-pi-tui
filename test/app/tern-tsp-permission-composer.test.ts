@@ -66,6 +66,8 @@ async function mountPermissionComposer(options: {
     submit() {},
     steer() {},
     pasteMedia() {},
+    pastedPath: () => {},
+    admitPastedPathDelivery: () => true,
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,

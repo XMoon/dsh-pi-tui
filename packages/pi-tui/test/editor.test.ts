@@ -2627,6 +2627,58 @@ describe("Editor component", () => {
 			editor.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
 			assert.strictEqual(editor.getText(), "di");
 		});
+
+		it("onMaySubmit false aborts the submit before the clear and keeps draft and Undo history", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = 0;
+			let reserveCalls = 0;
+			let retired = 0;
+			editor.onSubmit = () => {
+				submitted += 1;
+			};
+			editor.onBeforeSubmitClear = () => {
+				reserveCalls += 1;
+				return () => {};
+			};
+			editor.onUndoHistoryRetired = () => {
+				retired += 1;
+			};
+			editor.onMaySubmit = (text) => text !== "hold";
+
+			editor.handleInput("h");
+			editor.handleInput("o");
+			editor.handleInput("l");
+			editor.handleInput("d");
+			editor.handleInput("\r");
+
+			assert.strictEqual(editor.getText(), "hold", "the refused gesture leaves the live draft");
+			assert.strictEqual(submitted, 0, "a refused gesture never dispatches a submit");
+			assert.strictEqual(reserveCalls, 0, "the pre-clear reservation never runs for a refused gesture");
+			assert.strictEqual(retired, 0, "the refused gesture does not retire the Undo history");
+
+			// The Undo history is intact: undo still returns to the pre-typing text.
+			editor.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
+			assert.strictEqual(editor.getText(), "");
+		});
+
+		it("onMaySubmit true keeps the ordinary submit: dispatch once and clear the draft", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const seen: string[] = [];
+			editor.onMaySubmit = (text) => {
+				seen.push(text);
+				return true;
+			};
+			editor.onSubmit = (text) => {
+				seen.push(`submit:${text}`);
+			};
+
+			editor.handleInput("o");
+			editor.handleInput("k");
+			editor.handleInput("\r");
+
+			assert.deepStrictEqual(seen, ["ok", "submit:ok"], "the admission sees the same text the submit receives");
+			assert.strictEqual(editor.getText(), "", "an admitted submit still clears the draft");
+		});
 	});
 
 	describe("Autocomplete", () => {

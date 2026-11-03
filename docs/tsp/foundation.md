@@ -532,7 +532,10 @@ store.
 clipboard-paste entry that owns the OS probe FIFO, the image limits and the
 draft write. The renderer never probes the clipboard and owns no media queue. A
 bracketed text paste remains the editor's atomic text edit and is a different
-key. The existing hydration fence, modal seat and pre-bind held-key replay apply
+key; when its complete body is one terminal-local image file path, the renderer
+additionally forwards ONE `pastedPath` receipt over the proven paste span to
+the same application intake owner (never the clipboard probe), as specified in
+[surface behavior](../architecture/surface-behavior.md#attachments-and-input-completion). The existing hydration fence, modal seat and pre-bind held-key replay apply
 unchanged, so a paste during those windows reaches nothing.
 
 The headless lane mounts the production projections over one official inline
