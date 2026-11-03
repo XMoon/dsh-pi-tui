@@ -601,6 +601,41 @@ export class SurfaceEntryProcess {
     })
   }
 
+  /**
+   * Wait until a previously painted row DISAPPEARS (escape-aware). Used to
+   * observe the exit-confirmation window closing: the footer hint is the
+   * product's own armed state, so the wait is bounded by that real cue instead
+   * of a blind sleep.
+   */
+  async waitForScreenGone(needle, label, timeoutMs = 60_000) {
+    const started = Date.now()
+    while (Date.now() - started < timeoutMs) {
+      const viewport = await this.viewport()
+      if (!viewport.join('\n').includes(needle)) return
+      if (this.exited) {
+        // The process left while the row was still painted: that is the caller's
+        // negative-control failure, not a timeout.
+        const unread = this.finalRecordRead(label)
+        throw unread ?? new SplitSmokeWaitError('PROCESS_EXITED', {
+          code: 'PROCESS_EXITED_BEFORE_FRAME',
+          waitLabel: label,
+          processRole: this.role,
+          elapsedMs: Date.now() - started,
+          process: this,
+        })
+      }
+      await sleep(50)
+    }
+    const unread = this.finalRecordRead(label)
+    throw unread ?? new SplitSmokeWaitError('WAIT_TIMEOUT', {
+      code: 'FRAME_WAIT_TIMEOUT',
+      waitLabel: label,
+      processRole: this.role,
+      elapsedMs: Date.now() - started,
+      process: this,
+    })
+  }
+
   /** Send terminal input to the Client through the pty master. */
   send(data) {
     this.child.stdin.write(data)
@@ -3277,12 +3312,8 @@ async function main() {
         assertClientHostFacts(rolledOver.host, surfaceHostFacts, 'T61 after rollover')
         writeFileSync(barrier, 'release\n', { mode: 0o600 })
         await parked.waitForComposerDraft(staleToken, 60_000)
-        // A bounded window proves the refusal settled BEFORE dispatch: the Host
-        // persists immediately, so a dispatched write would already be visible.
-        await sleep(1_000)
-        assert(hostUserTexts(hostSessionEvents(dshHome, sessionA) ?? [])
-          .filter(text => text === staleToken).length === 0,
-        'T61 the superseded-generation write was dispatched to the Host')
+        // The restored draft IS the writer's own settlement: the outcome is final
+        // before the composer paints it, so no observation window is needed here.
         assert(!(await parked.viewport()).join('\n').includes('indeterminate'),
           'T61 the not-dispatched write was reported as indeterminate')
         // Restored EXACTLY once: the composer holds the token once, not twice.
@@ -3305,9 +3336,13 @@ async function main() {
           return 0
         })()
         assert(liveCommit === 1, `T61 expected exactly ONE Host commit on the new generation, got ${String(liveCommit)}`)
+        // Ordering witness, not a timer: the new generation's turn ENDS after the
+        // stale refusal, and the Host durable log still carries zero stale
+        // writes — a dispatched superseded write would be ordered before it.
+        await waitForHostSessionEvent(dshHome, sessionA, event => event.type === 'turn/end', 'T61 new-generation turn/end', 120_000)
         assert(hostUserTexts(hostSessionEvents(dshHome, sessionA) ?? [])
           .filter(text => text === staleToken).length === 0,
-        'T61 the superseded write was replayed after the new-generation commit')
+        'T61 the superseded write was dispatched or replayed')
         await parked.waitForScreen('stub answer', 'T61 new-generation answer')
         assert(alive(surfaceHostPid), 'T61 the Host died on the new-generation write')
         // The surface section predates the C1 helpers, so this case uses the
@@ -4624,7 +4659,21 @@ async function main() {
         await waitForC1WorkEvent(workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T63 held Turn')
         writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
         await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T63 settled Turn')
-        ctrlC.send('\x03\x03')
+        // The product's OWN armed-exit cue is painted in the footer; waiting for
+        // it (and then for it to expire) is what makes this a double-press proof
+        // instead of "the key exits":
+        //   1. ONE press arms and paints the hint, and does NOT exit;
+        //   2. the hint disappears when the confirmation window closes, and the
+        //      Client is still alive;
+        //   3. ONE more press arms again, and the NEXT one inside that window
+        //      exits through the real controller.
+        ctrlC.send('\x03')
+        await ctrlC.waitForScreen('again to exit', 'T63 Ctrl+C confirmation armed')
+        await ctrlC.waitForScreenGone('again to exit', 'T63 Ctrl+C confirmation expired')
+        assert(!ctrlC.exited, 'T63 a SINGLE Ctrl+C press already exited the Client')
+        ctrlC.send('\x03')
+        await ctrlC.waitForScreen('again to exit', 'T63 Ctrl+C confirmation re-armed')
+        ctrlC.send('\x03')
         const ctrlCExit = await ctrlC.waitForExit(60_000)
         assert(ctrlCExit.code === 0 && ctrlCExit.signal === null,
           `T63 Ctrl+C double press exit was ${JSON.stringify(ctrlCExit)}`)
@@ -4635,7 +4684,15 @@ async function main() {
 
         const { client: ctrlD } = await startC1Client('T63 Ctrl+D Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
         await ctrlD.waitForScreen('t63 prompt', 'T63 history readback before Ctrl+D')
-        ctrlD.send('\x04\x04')
+        // Ctrl+D needs an EMPTY draft (a non-empty draft turns it into the
+        // editor's forward-delete) and the SAME key twice inside the window.
+        ctrlD.send('\x04')
+        await ctrlD.waitForScreen('again to exit', 'T63 Ctrl+D confirmation armed')
+        await ctrlD.waitForScreenGone('again to exit', 'T63 Ctrl+D confirmation expired')
+        assert(!ctrlD.exited, 'T63 a SINGLE Ctrl+D press already exited the Client')
+        ctrlD.send('\x04')
+        await ctrlD.waitForScreen('again to exit', 'T63 Ctrl+D confirmation re-armed')
+        ctrlD.send('\x04')
         const ctrlDExit = await ctrlD.waitForExit(60_000)
         assert(ctrlDExit.code === 0 && ctrlDExit.signal === null,
           `T63 Ctrl+D double press exit was ${JSON.stringify(ctrlDExit)}`)
@@ -4784,7 +4841,18 @@ async function main() {
         // write is there exactly once and NO answer is invented for the lost Turn.
         const { client: resumed } = await startC1Client('T65 cold-resume Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
         await resumed.waitForScreen('t65 prompt', 'T65 cold-resume history')
-        await sleep(500)
+        // The OFFICIAL Session open records the orphaned Turn's settlement. Waiting
+        // for that durable record (not a timer) is what orders "after the resume,
+        // nothing else is pending".
+        const recovered = await waitForHostSessionEvent(
+          dshHome,
+          sessionId,
+          event => event.type === 'turn/end',
+          'T65 cold-resume orphan settlement',
+          120_000,
+        )
+        assert(recovered.data?.reason?.kind !== 'completed',
+          'T65 the cold resume settled the lost Turn as completed')
         const afterResume = hostSessionEvents(dshHome, sessionId) ?? []
         assert(hostUserTexts(afterResume).filter(text => text === 't65 prompt').length === 1,
           'T65 the cold resume replayed the unknown write')
@@ -4813,6 +4881,83 @@ async function main() {
           newHostPid: newHost.hostPid,
           newInstanceId,
           singleHostOwner: true,
+        })
+      }
+
+      // T66: the UNKNOWN-WRITE half of the Host-death contract. An ACK-dropped
+      // write is committed by the Host while the Client can only report
+      // `indeterminate`; the committing Host then dies. A later Host must read the
+      // durable log exactly once (never replay the unknown write), and no Host may
+      // ever report that write as a success it did not observe.
+      {
+        const releaseBarrier = join(workDir, 't66-long-turn.release')
+        const { host, ready, workRoot } = await startC1Host('long-turn', 't66', { C1_HOLD_LONG_TURN: releaseBarrier })
+        const { client } = await startC1Client('T66 Client', { SPLIT_PROCESS_CLIENT_DROP_PROMPT_ACK: '1' })
+        const unknownToken = 't66 unknown-write'
+        const sessionId = await openC1Session(client, unknownToken, 'T66')
+        // `waitForScreen` is a verdict helper: it throws unless the painted row
+        // appears, so a returned value would be a fiction. The painted
+        // `indeterminate` notice IS the observation.
+        await client.waitForScreen('indeterminate', 'T66 indeterminate notice', 120_000)
+        await waitForC1WorkEvent(workRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'T66 held Turn')
+        const hostBefore = await hostIdentityFacts(host)
+        const hostPid = ready.pid
+        const text = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
+          .filter(entry => entry === unknownToken).length
+        assert(text === 1, `T66 the Host did not commit the ACK-dropped write exactly once (${String(text)})`)
+        // The committing Host dies BEFORE the Turn settles: the write's outcome is
+        // now permanently unknown to every Client.
+        process.kill(hostPid, 'SIGKILL')
+        await waitGone(hostPid, 30_000)
+        assert(!alive(hostPid), 'T66 the Host survived SIGKILL')
+        const lost = await client.waitFor(
+          record => record.m4b2s === 'surface-status' && record.transport !== 'connected',
+          'T66 Client observed the official Connection loss',
+          60_000,
+        )
+        assert(lost.transport === 'disconnected' || lost.transport === 'connecting',
+          `T66 unexpected Client transport state after the kill: ${JSON.stringify(lost.transport)}`)
+        assert(!(await client.viewport()).join('\n').includes('long-turn answer'),
+          'T66 the Client painted a settlement for the write whose Host died')
+        client.signalBusiness('SIGTERM')
+        const exit = await client.waitForExit(60_000)
+        assert(exit.code === 0 && exit.signal === null, `T66 Client cleanup exit was ${JSON.stringify(exit)}`)
+        await client.dispose()
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        // A NEW Host on stale discovery, then a real cold resume of the SAME
+        // Session: the durable log must still carry the unknown write EXACTLY ONCE
+        // and no fabricated settlement.
+        const { client: fresh, ready: freshReady } = await startC1Client('T66 fresh Client')
+        const newHost = freshReady.host
+        assert(newHost.hostPid !== hostBefore.hostPid, 'T66 stale discovery reused the killed Host PID')
+        assert(freshReady.sessionOpen === false, 'T66 the dead Host view survived across the replacement')
+        const newInstanceId = newHost.instanceId
+        fresh.signalBusiness('SIGTERM')
+        const freshExit = await fresh.waitForExit(60_000)
+        assert(freshExit.code === 0 && freshExit.signal === null, `T66 fresh Client exit was ${JSON.stringify(freshExit)}`)
+        await fresh.dispose()
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        const { client: resumed } = await startC1Client('T66 cold-resume Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
+        await resumed.waitForScreen(unknownToken, 'T66 cold-resume history')
+        const recovered = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T66 cold-resume orphan settlement', 120_000)
+        assert(recovered.data?.reason?.kind !== 'completed', 'T66 the cold resume reported the lost Turn as completed')
+        assert(!(await resumed.viewport()).join('\n').includes('long-turn answer'),
+          'T66 the cold resume painted a fabricated answer')
+        const afterResume = hostUserTexts(hostSessionEvents(dshHome, sessionId) ?? [])
+          .filter(entry => entry === unknownToken).length
+        assert(afterResume === 1, `T66 the cold resume replayed the unknown write (${String(afterResume)} commits)`)
+        await exitC1Client(resumed, 'T66 cold-resume Client')
+        await stopSpawnedHost(newHost.hostPid, newInstanceId, 'T66 spawned Host')
+        trace('t66', {
+          hostPid,
+          signal: 'SIGKILL',
+          unknownWrite: 'indeterminate',
+          hostCommits: 1,
+          clientObserved: lost.transport,
+          replayedAfterResume: false,
+          fabricatedSettlement: false,
+          newHostPid: newHost.hostPid,
+          newInstanceId,
         })
       }
 
@@ -4900,7 +5045,7 @@ async function main() {
       t44t48: 'pass',
       t49t55: 'pass (T49-T55, including detached pending UNKNOWN, real Gateway owner-stream eligibility, the old-peer protocol negatives and same-PID HMR pending question/approval)',
       t56t59: 'pass',
-      t60Status: 'PASS_REAL_SPLIT_PROCESS: T01-T65 split-process inventory and T26a restored identity completed; release gates pending the stage-final lane verdict',
+      t60Status: 'PASS_REAL_SPLIT_PROCESS: T01-T66 split-process inventory and T26a restored identity completed; release gates pending the stage-final lane verdict',
       // T61-T65 are the M4 closure-gap cases added on top of the frozen
       // T01-T60 inventory. They are listed explicitly so a later edit cannot
       // silently drop one while T60 still claims the full inventory.
@@ -4909,6 +5054,7 @@ async function main() {
       t63KeyboardExit: 'pass (real PTY double Ctrl+C and double Ctrl+D, empty draft)',
       t64HostSighup: 'pass (process failure, no fabricated settlement, new Host instance on stale discovery)',
       t65HostSigkill: 'pass (attached Client, no fake success, no cross-Host view continuity, no replayed write)',
+      t66UnknownWrite: 'pass (ACK-lost write committed once, committing Host killed, cold resume reads it exactly once)',
       t57t58HostRows: 'pass (every protected Host Loader row kept its live fiber UID across Client-only HMR)',
       t26aArtifactMissing: 'pass (current main real artifact-absent + restored authenticated identity)',
       t12PtyHup: 'pass (real PTY master close, separate case)',

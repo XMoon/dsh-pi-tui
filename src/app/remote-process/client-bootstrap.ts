@@ -924,7 +924,7 @@ async function startSurfaceLocalClient(
         const bareItems = answerItems(file)
         const empty = await remote.piTuiFileReferences.list(sessionId, 't36-definitely-no-such-name')
         const emptyItems = answerItems(empty)
-        const scoped = await remote.piTuiFileReferences.list(sessionId, 't36dist/t36only')
+        const scoped = await remote.piTuiFileReferences.list(sessionId, 'dist/t36only')
         const scopedItems = answerItems(scoped)
         const homeQuery = await remote.piTuiFileReferences.list(sessionId, '~/')
         const homeItems = answerItems(homeQuery)
@@ -948,7 +948,13 @@ async function startSurfaceLocalClient(
           bareCount: bareItems.length,
           officialEmpty: empty.ok === true && emptyItems.length === 0,
           scopedOk: scoped.ok === true,
-          scopedHostScanner: scopedItems.some(item => item.path === 't36dist/t36only-scoped.js'),
+          // The scoped route materializes the candidate against the resolved
+          // display base, so the accepted value may be scope-relative
+          // (`dist/x`) or base-anchored (`/abs/.../dist/x`). The SINK is the file
+          // the Host scanner reached, expressed by its path suffix.
+          scopedHostScanner: scopedItems.some(item =>
+            typeof item.path === 'string'
+            && (item.path === 'dist/t36only-scoped.js' || item.path.endsWith('/dist/t36only-scoped.js'))),
           scopedCount: scopedItems.length,
           homeAbsolute: homeQuery.ok === true
             && homeItems.length > 0
