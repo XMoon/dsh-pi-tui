@@ -16,7 +16,7 @@
  * `TEST STAND-INS`: ephemeral profile/installation directories and local
  * package manifests; no public npm download and no network install.
  * `DELIBERATELY ABSENT`: live npm registries, credentials, a real external
- * bundle consumer and S4-D2/D3 Host/TUI feature qualification.
+ * bundle consumer and the Optional-bundle and later Host/TUI feature qualification.
  * @module @xmoon76/dsh-pi-tui/plugin-manager-catalog-rc2.test
  */
 

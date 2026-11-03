@@ -1,5 +1,5 @@
 /**
- * S4-D2 B01 — Agent Teams against the effective preset tool scopes over the
+ * B01 — Agent Teams against the effective preset tool scopes over the
  * real rc.2 Optional bundle patch (implementation plan §5 D2-3).
  *
  * REAL: the official `@deepseek-ai/dsh-experimental-agent-team` service, its
@@ -18,11 +18,11 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
   skippedInstallationReason,
-  startS4D2Host,
-  type S4D2BundleId,
+  startOptionalBundleHost,
+  type OptionalBundleId,
 } from '../support/optional-bundle-fixture.ts'
 
-const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile' satisfies S4D2BundleId
+const B01 = '@deepseek-ai/dsh-experimental-agent-team-profile' satisfies OptionalBundleId
 const skip = skippedInstallationReason([B01])
 const signal = new AbortController().signal
 let callCounter = 0
@@ -69,7 +69,7 @@ function toolCall(ctx: { tools: { execute(input: unknown): Promise<unknown> } },
 }> {
   return ctx.tools.execute({
     signal,
-    callId: ToolCallId(`s4-d2-team-${++callCounter}`),
+    callId: ToolCallId(`optional-bundle-team-${++callCounter}`),
     name,
     arguments: args,
     agent,
@@ -83,11 +83,11 @@ function resultText(result: { content?: readonly { type?: string; text?: string 
 test('Agent Teams: real patch scopes, four preset rosters and one Lead→teammate loop', { skip }, async t => {
   // B01-OFF baseline: the same four official presets without the Team bundle.
   // The real addition is then exactly the Team tool family, not a global claim.
-  const baseline = await startS4D2Host(t, { bundles: [], presets: true })
+  const baseline = await startOptionalBundleHost(t, { bundles: [], presets: true })
   const baselinePresets = baseline.ctx.get('agentPresets') as { select(agent: unknown, preset: string): Promise<unknown> }
   const baselineRosters = new Map<string, readonly string[]>()
   for (const preset of ['standard', 'ptc', 'minimal', 'cordis']) {
-    const agent = await baseline.createAgent(SessionId(`s4-d2-b01-base-${preset}`), {
+    const agent = await baseline.createAgent(SessionId(`optional-bundle-b01-base-${preset}`), {
       provider: 'scripted',
       model: 'review-model',
       cwd: join(baseline.root, 'work'),
@@ -97,11 +97,11 @@ test('Agent Teams: real patch scopes, four preset rosters and one Lead→teammat
   }
   await baseline.dispose()
 
-  const host = await startS4D2Host(t, { bundles: [B01], presets: true })
+  const host = await startOptionalBundleHost(t, { bundles: [B01], presets: true })
   const adapter = new TeammateAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
   const presets = host.ctx.get('agentPresets') as { select(agent: unknown, preset: string): Promise<unknown> }
-  const lead = await host.createAgent(SessionId('s4-d2-b01-lead'), {
+  const lead = await host.createAgent(SessionId('optional-bundle-b01-lead'), {
     provider: 'scripted',
     model: 'review-model',
     cwd: join(host.root, 'work'),
@@ -121,7 +121,7 @@ test('Agent Teams: real patch scopes, four preset rosters and one Lead→teammat
   // control: never use a global has() to claim every same-name tool vanished).
   const rosters = new Map<string, readonly string[]>()
   for (const [index, preset] of ['standard', 'ptc', 'minimal', 'cordis'].entries()) {
-    const agent = index === 0 ? lead : await host.createAgent(SessionId(`s4-d2-b01-${preset}`), {
+    const agent = index === 0 ? lead : await host.createAgent(SessionId(`optional-bundle-b01-${preset}`), {
       provider: 'scripted',
       model: 'review-model',
       cwd: join(host.root, 'work'),
@@ -244,7 +244,7 @@ test('Agent Teams: real patch scopes, four preset rosters and one Lead→teammat
 
   // NEGATIVE: a target that belongs to ANOTHER Team is not addressable from
   // this Lead's Team (cross-Team authorization is scoped by the roster).
-  const otherLead = await host.createAgent(SessionId('s4-d2-b01-lead-other'), {
+  const otherLead = await host.createAgent(SessionId('optional-bundle-b01-lead-other'), {
     provider: 'scripted',
     model: 'review-model',
     cwd: join(host.root, 'work'),

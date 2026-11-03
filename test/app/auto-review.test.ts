@@ -1,5 +1,5 @@
 /**
- * S4-D2 B03 — Auto Review Host qualification over the real rc.2 Optional
+ * B03 — Auto Review Host qualification over the real rc.2 Optional
  * bundle patch (implementation plan §5 D2-2).
  *
  * The REAL `@deepseek-ai/dsh-experimental-auto-review` plugin installs its
@@ -26,11 +26,11 @@ import { openWorkspace } from '../support/plugin-workspace-harness.ts'
 import {
   profileSelectsBundle,
   skippedInstallationReason,
-  startS4D2Host,
-  type S4D2BundleId,
+  startOptionalBundleHost,
+  type OptionalBundleId,
 } from '../support/optional-bundle-fixture.ts'
 
-const B03 = '@deepseek-ai/dsh-experimental-auto-review' satisfies S4D2BundleId
+const B03 = '@deepseek-ai/dsh-experimental-auto-review' satisfies OptionalBundleId
 const skip = skippedInstallationReason([B03])
 
 function textChunks(text: string): StreamChunk[] {
@@ -133,7 +133,7 @@ function resultText(result: { content?: readonly { type?: string; text?: string 
 }
 
 test('Auto Review: native allow/deny/ask/error and durable body evidence', { skip }, async t => {
-  const host = await startS4D2Host(t, { bundles: [B03], presets: false })
+  const host = await startOptionalBundleHost(t, { bundles: [B03], presets: false })
   const adapter = new ScriptedAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
   const approvalRequests: Array<{ outcome(): void }> = []
@@ -158,7 +158,7 @@ test('Auto Review: native allow/deny/ask/error and durable body evidence', { ski
     readonly script?: AgentScript[]
   }): Promise<{ agent: Agent; file: string; toolResult: Record<string, unknown> | undefined }> {
     const file = join(work, `${id}.txt`)
-    const agent = await host.createAgent(SessionId(`s4-d2-b03-${id}`), {
+    const agent = await host.createAgent(SessionId(`optional-bundle-b03-${id}`), {
       provider: 'scripted',
       model: 'review-model',
       cwd: work,
@@ -230,7 +230,7 @@ test('Auto Review: native allow/deny/ask/error and durable body evidence', { ski
 })
 
 test('Auto Review: started PTC inner tools are reviewed; the outer run_code is not', { skip }, async t => {
-  const host = await startS4D2Host(t, { bundles: [B03], presets: true })
+  const host = await startOptionalBundleHost(t, { bundles: [B03], presets: true })
   const adapter = new ScriptedAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
   const approval = host.ctx.get('approval') as { setPolicy(agent: unknown, policy: 'never'): void }
@@ -245,7 +245,7 @@ test('Auto Review: started PTC inner tools are reviewed; the outer run_code is n
 
   async function ptcScenario(id: string, review: ReviewScript, program?: string): Promise<{ agent: Agent; file: string }> {
     const file = join(work, `${id}.txt`)
-    const agent = await host.createAgent(SessionId(`s4-d2-b03-ptc-${id}`), {
+    const agent = await host.createAgent(SessionId(`optional-bundle-b03-ptc-${id}`), {
       provider: 'scripted',
       model: 'review-model',
       cwd: work,
@@ -289,7 +289,7 @@ test('Auto Review: started PTC inner tools are reviewed; the outer run_code is n
 })
 
 test('Auto Review: teardown migrates live Auto sessions to Full access and drains in-flight reviews', { skip }, async t => {
-  let host = await startS4D2Host(t, { bundles: [B03], presets: false })
+  let host = await startOptionalBundleHost(t, { bundles: [B03], presets: false })
   const adapter = new ScriptedAdapter()
   host.ctx.llm.registerAdapter(['scripted'], adapter)
   const permissions = host.ctx.get('permissionPresets') as {
@@ -298,8 +298,8 @@ test('Auto Review: teardown migrates live Auto sessions to Full access and drain
     current(session: unknown): string | null
   }
 
-  const autoAgent = await host.createAgent(SessionId('s4-d2-b03-auto'), { provider: 'scripted', model: 'review-model', cwd: join(host.root, 'work') })
-  const otherAgent = await host.createAgent(SessionId('s4-d2-b03-other'), { provider: 'scripted', model: 'review-model', cwd: join(host.root, 'work') })
+  const autoAgent = await host.createAgent(SessionId('optional-bundle-b03-auto'), { provider: 'scripted', model: 'review-model', cwd: join(host.root, 'work') })
+  const otherAgent = await host.createAgent(SessionId('optional-bundle-b03-other'), { provider: 'scripted', model: 'review-model', cwd: join(host.root, 'work') })
   permissions.set(autoAgent.session, 'auto')
   assert.equal(permissions.current(autoAgent.session), 'auto')
   assert.equal(permissions.current(otherAgent.session), 'workspace-write', 'a non-Auto session starts at the composition default')
@@ -352,8 +352,8 @@ async function waitFor(condition: () => boolean, turns = 200): Promise<void> {
 }
 
 test('/permission: the real Auto preset is visible and applies through the Direct port', { skip }, async t => {
-  const host = await startS4D2Host(t, { bundles: [B03], presets: false })
-  const sessionId = 's4-d2-b03-permission'
+  const host = await startOptionalBundleHost(t, { bundles: [B03], presets: false })
+  const sessionId = 'optional-bundle-b03-permission'
   const agent = await host.createAgent(SessionId(sessionId), { provider: 'scripted', model: 'review-model', cwd: join(host.root, 'work') })
   const config = new DirectPermissionConfig(host.ctx as never, id => id === sessionId ? agent : undefined)
   assert.ok(config.presetNames().includes('auto'), 'the real composed catalog exposes Auto to the Direct port')
@@ -364,8 +364,8 @@ test('/permission: the real Auto preset is visible and applies through the Direc
 })
 
 test('/permission: without the bundle the Auto id is not offered and cannot be applied', { skip }, async t => {
-  const host = await startS4D2Host(t, { bundles: [] })
-  const sessionId = 's4-d2-b03-permission-off'
+  const host = await startOptionalBundleHost(t, { bundles: [] })
+  const sessionId = 'optional-bundle-b03-permission-off'
   const agent = await host.createAgent(SessionId(sessionId), { provider: 'scripted', model: 'review-model', cwd: join(host.root, 'work') })
   const config = new DirectPermissionConfig(host.ctx as never, id => id === sessionId ? agent : undefined)
   assert.equal(config.presetNames().includes('auto'), false, 'Auto is advertised only while the real integration is mounted')
@@ -375,7 +375,7 @@ test('/permission: without the bundle the Auto id is not offered and cannot be a
 })
 
 test('real Host card → controller confirmation → real profile write', { skip }, async t => {
-  const host = await startS4D2Host(t, { bundles: [B03] })
+  const host = await startOptionalBundleHost(t, { bundles: [B03] })
   const beforePatch = existsSync(join(host.profileDir, 'cordis.patch.yml'))
     ? readFileSync(join(host.profileDir, 'cordis.patch.yml'), 'utf8')
     : ''
@@ -423,7 +423,7 @@ test('real Host card → controller confirmation → real profile write', { skip
 })
 
 test('real Host row disable: shared confirmation → real setPluginEnabled', { skip }, async t => {
-  const host = await startS4D2Host(t, { bundles: [B03] })
+  const host = await startOptionalBundleHost(t, { bundles: [B03] })
   const beforePatch = existsSync(join(host.profileDir, 'cordis.patch.yml'))
     ? readFileSync(join(host.profileDir, 'cordis.patch.yml'), 'utf8')
     : ''

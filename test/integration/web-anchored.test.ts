@@ -1,5 +1,5 @@
 /**
- * S4-D2 B02/B04/B06/B12 — web-anchored Optional bundle Host boundaries
+ * B02/B04/B06/B12 — web-anchored Optional bundle Host boundaries
  * (implementation plan §5 D2-7).
  *
  * No browser component is claimed as a PiTui surface. The test exercises the
@@ -17,14 +17,14 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import {
   skippedInstallationReason,
-  startS4D2Host,
-  type S4D2BundleId,
+  startOptionalBundleHost,
+  type OptionalBundleId,
 } from '../support/optional-bundle-fixture.ts'
 
-const B02 = '@deepseek-ai/dsh-experimental-voice-input-bundle' satisfies S4D2BundleId
-const B04 = '@deepseek-ai/dsh-experimental-inspector-profile' satisfies S4D2BundleId
-const B06 = '@deepseek-ai/dsh-experimental-cot-translation-bundle' satisfies S4D2BundleId
-const B12 = '@deepseek-ai/dsh-experimental-plugin-market-bundle' satisfies S4D2BundleId
+const B02 = '@deepseek-ai/dsh-experimental-voice-input-bundle' satisfies OptionalBundleId
+const B04 = '@deepseek-ai/dsh-experimental-inspector-profile' satisfies OptionalBundleId
+const B06 = '@deepseek-ai/dsh-experimental-cot-translation-bundle' satisfies OptionalBundleId
+const B12 = '@deepseek-ai/dsh-experimental-plugin-market-bundle' satisfies OptionalBundleId
 const skip = skippedInstallationReason([B02, B04, B06, B12])
 
 interface LocalServer {
@@ -56,7 +56,7 @@ async function localServer(handler: (request: IncomingMessage, response: ServerR
 }
 
 test('Voice: real speech registry/readiness, no model and no microphone claim', { skip }, async t => {
-  let host = await startS4D2Host(t, { bundles: [B02] })
+  let host = await startOptionalBundleHost(t, { bundles: [B02] })
   const speech = host.ctx.get('speechToText') as {
     snapshot(): {
       selection: { providerId: string; language: string }
@@ -88,7 +88,7 @@ test('Voice: real speech registry/readiness, no model and no microphone claim', 
 })
 
 test('Inspector: the web transport prerequisite is honestly pending, no capture in the TUI profile', { skip }, async t => {
-  const host = await startS4D2Host(t, { bundles: [B04] })
+  const host = await startOptionalBundleHost(t, { bundles: [B04] })
   assert.equal(host.ctx.get('inspector'), undefined, 'no inspector service is fabricated without webServer/connection')
   const entry = host.loaderEntries().find(candidate => candidate.id === 'experimental-inspector')
   assert.ok(entry !== undefined, 'the real inspector Loader row is present')
@@ -125,7 +125,7 @@ test('CoT translation: real translator route through a controlled endpoint, erro
     response.end(JSON.stringify([{ translations: [{ text: `TRANSLATED:${text[0]}` }] }]))
   })
   t.after(() => server.close())
-  const host = await startS4D2Host(t, {
+  const host = await startOptionalBundleHost(t, {
     bundles: [B06],
     patches: [{
       id: 'translator',
@@ -197,11 +197,11 @@ test('Plugin Market: real empty default, explicit offline index, unknown/invalid
   const brokenUrl = `${server.url}/broken.json`
   // The composition carries a USER-CONFIGURED source; the bundle itself ships
   // no default marketplace (verified below on a plain Host).
-  const plain = await startS4D2Host(t, { bundles: [B12] })
+  const plain = await startOptionalBundleHost(t, { bundles: [B12] })
   const plainMarket = plain.ctx.get('pluginMarket') as { listIndexes(): readonly unknown[] }
   assert.deepEqual(plainMarket.listIndexes(), [], 'there is no official default marketplace')
   await plain.dispose()
-  const host = await startS4D2Host(t, {
+  const host = await startOptionalBundleHost(t, {
     bundles: [B12],
     presets: true,
     patches: [{ id: 'plugin-market', config: { indexes: [indexUrl, brokenUrl], fetchTimeoutMs: 5_000 } }] as never,
@@ -228,13 +228,13 @@ test('Plugin Market: real empty default, explicit offline index, unknown/invalid
   // declares it. This is the real Creator/agent-scope boundary.
   assert.equal(host.ctx.tools.get('plugin_market'), undefined)
   const presets = host.ctx.get('agentPresets') as { select(agent: unknown, preset: string): Promise<unknown> }
-  const cordis = await host.createAgent(SessionId('s4-d2-b12-cordis'), { cwd: join(host.root, 'work') })
+  const cordis = await host.createAgent(SessionId('optional-bundle-b12-cordis'), { cwd: join(host.root, 'work') })
   await presets.select(cordis, 'cordis')
   assert.equal(host.hasTool('plugin_market', cordis), true,
     'the market tool is reachable in the cordis preset when the market service is mounted')
   const listed = await host.ctx.tools.execute({
     signal: new AbortController().signal,
-    callId: ToolCallId('s4-d2-b12-market'),
+    callId: ToolCallId('optional-bundle-b12-market'),
     name: 'plugin_market',
     arguments: { action: 'list_indexes' },
     agent: cordis,
@@ -245,7 +245,7 @@ test('Plugin Market: real empty default, explicit offline index, unknown/invalid
     'the Creator tool reads the SAME configured index source as the Host service')
   const plugins = await host.ctx.tools.execute({
     signal: new AbortController().signal,
-    callId: ToolCallId('s4-d2-b12-market-plugins'),
+    callId: ToolCallId('optional-bundle-b12-market-plugins'),
     name: 'plugin_market',
     arguments: { action: 'list_plugins', target: indexUrl, query: 'local' },
     agent: cordis,
@@ -253,11 +253,11 @@ test('Plugin Market: real empty default, explicit offline index, unknown/invalid
   assert.notEqual(plugins.isError, true)
   assert.match((plugins.content ?? []).map(block => block.text ?? '').join(''), /@vendor\/local-plugin/u,
     'the Creator tool lists the real plugin from the configured index')
-  const standard = await host.createAgent(SessionId('s4-d2-b12-standard'), { cwd: join(host.root, 'work') })
+  const standard = await host.createAgent(SessionId('optional-bundle-b12-standard'), { cwd: join(host.root, 'work') })
   await presets.select(standard, 'standard')
   assert.equal(host.hasTool('plugin_market', standard), false,
     'standard declares the market tool row disabled')
-  const minimal = await host.createAgent(SessionId('s4-d2-b12-minimal'), { cwd: join(host.root, 'work') })
+  const minimal = await host.createAgent(SessionId('optional-bundle-b12-minimal'), { cwd: join(host.root, 'work') })
   await presets.select(minimal, 'minimal')
   assert.equal(host.hasTool('plugin_market', minimal), false,
     'minimal never declares the market tool')
