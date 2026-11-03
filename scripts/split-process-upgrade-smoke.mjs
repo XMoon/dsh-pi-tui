@@ -73,7 +73,12 @@ import {
   runPnpmInstall,
 } from './pi2dsh-compat-smoke.mjs'
 import { loadDshDistribution, npmDshVersion, PACKAGE_ROOT } from './lib/dsh-distribution.mjs'
-import { requireExactSmokeDshPin } from './lib/split-smoke-diagnostics.mjs'
+import {
+  boundedErrorSummary,
+  createSmokeDiagnostics,
+  requireExactSmokeDshPin,
+  smokeArtifactIdentity,
+} from './lib/split-smoke-diagnostics.mjs'
 import { EntryProcess, SurfaceEntryProcess, hostSessionEvents, waitForHostSessionEvent, writeC1WorkFixture } from './split-process-smoke.mjs'
 
 const EXPECTED_PACKAGE_NAME = '@xmoon76/dsh-pi-tui'
@@ -81,8 +86,15 @@ const KEEP = process.env.SPLIT_UPGRADE_KEEP === '1'
 const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/u
 
 let statusSequence = 0
+/** This run's bounded diagnostics (checkpoints + one default failure report). */
+let diagnostics
 const activeProcesses = new Set()
 const trackedHosts = new Map()
+
+/** One U phase boundary: remembered and announced by default, never FIELDS. */
+function checkpoint(name) {
+  diagnostics?.checkpoint(name)
+}
 
 function assert(condition, message) {
   if (!condition) throw new Error(`ASSERTION_FAILED: ${message}`)
@@ -681,12 +693,14 @@ async function runUserCommandReloadRound(context) {
   }
 
   // ── U08 negative 1: same installed build → already-current, no stop ──────
+  checkpoint('U08/negative-already-current')
   reloadOldClient.send('/reload-client\r')
   await reloadOldClient.waitForScreen('Client reload skipped: this Client already runs the installed build.',
     'U08 already-current notice', 120_000)
   await assertOldSurfaceKept('U08 already-current')
 
   // ── U08 negative 2: a staged, unreferenced image blocks the reload ───────
+  checkpoint('U08/negative-attachments')
   const imagePath = join(roundRoot, 'u08-staged.png')
   writeReloadProbePng(imagePath)
   reloadOldClient.send(`/image ${imagePath}\r`)
@@ -704,6 +718,7 @@ async function runUserCommandReloadRound(context) {
     'U08 attachments refusal', 120_000)
   await assertOldSurfaceKept('U08 attachments refusal')
 
+  checkpoint('U08/upgrade-install')
   // ── The official in-place profile upgrade to the new candidate ───────────
   // The old Client keeps running from its own real old installation; the
   // production command must resolve the NEW profile package, WITHOUT the
@@ -746,6 +761,7 @@ async function runUserCommandReloadRound(context) {
   assertEqual(reloadClient.records.filter(record => record.m4r === 'handoff-requested').length, 0,
     'U08 reload Client reloaded before the user command')
 
+  checkpoint('U08/positive-reexec')
   // ── U08 positive: the PRODUCTION `/reload-client` command drives the SAME
   //    PR3 reexec/handoff chain into the newly installed build ─────────────
   reloadClient.send('/reload-client\r')
@@ -969,6 +985,7 @@ async function runUnavailableTargetRound(context) {
   assertEqual(removal.status, 0, `U08 the official package removal failed: ${removal.stderr ?? ''}`)
   assert(!existsSync(join(profileDir, 'node_modules', EXPECTED_PACKAGE_NAME)),
     'U08 the official removal left the installed package behind')
+  checkpoint('U08/negative-target-invalid')
   client.send('/reload-client\r')
   await client.waitForScreen('Client reload failed: the installed replacement Client is unavailable or incompatible.',
     'U08 target-invalid notice', 120_000)
@@ -1101,6 +1118,7 @@ async function runReloadSourceIsolationRound(context) {
   await waitForC1WorkEvent(c1WorkRoot, event => event.kind === 'long-turn-held' && event.sessionId === sessionId, 'U09 Host Turn held')
   assertEqual(await seatIsFree(clientSeatName), false, 'U09 Client does not hold the Client seat')
 
+  checkpoint('U09/manual-already-current')
   // The MANUAL command runs in the qualification environment and must still
   // resolve the PROFILE: the profile IS the running build, so this is the
   // already-current refusal. The qualification override would have been a
@@ -1119,6 +1137,7 @@ async function runReloadSourceIsolationRound(context) {
   assert(readFileSync(join(scopeDir, 'launch.json')).equals(launchBefore),
     'U09 the manual refusal mutated the launch material')
 
+  checkpoint('U09/qualification-reexec')
   // In the SAME process, the qualification entry may use the override. This
   // proves both entries coexist on ONE latch and only the target resolution
   // differs.
@@ -1234,11 +1253,31 @@ async function main() {
     throw new Error('split upgrade smoke: --old and --new must carry different package versions')
   }
   const targetDshVersion = npmDshVersion()
+  diagnostics = createSmokeDiagnostics({
+    lane: 'split-upgrade',
+    heading: 'SPLIT_PROCESS_UPGRADE_SMOKE',
+    marker: 'U',
+    runtimeDshPin: targetDshVersion,
+    artifacts: [
+      smokeArtifactIdentity('old', oldArtifact.manifest, oldArtifact.sha256),
+      smokeArtifactIdentity('new', newArtifact.manifest, newArtifact.sha256),
+    ],
+  })
   // Input qualification BEFORE any install (the same exact-pin rule the
   // production Client reexec preflight applies): a differently pinned artifact
   // is an invalid test pairing, not a product result to observe.
-  requireExactSmokeDshPin('old', oldArtifact.manifest, targetDshVersion)
-  requireExactSmokeDshPin('new', newArtifact.manifest, targetDshVersion)
+  try {
+    requireExactSmokeDshPin('old', oldArtifact.manifest, targetDshVersion)
+    requireExactSmokeDshPin('new', newArtifact.manifest, targetDshVersion)
+  } catch (error) {
+    // The preflight happens before any work root exists, so this report is the
+    // safe input identity alone and never reads a process.
+    diagnostics.reportFailure(error, { evidencePath: options.evidence })
+    throw error
+  }
+  // The startup identity is announced only AFTER preflight qualified it.
+  process.stderr.write(`${diagnostics.identityLine()}\n`)
+  diagnostics.checkpoint('preflight/artifacts')
   const distribution = loadDshDistribution({ mode: 'npm', version: targetDshVersion })
   const workRoot = mkdtempSync(join(tmpdir(), 'dsh-split-upgrade-'))
   const home = join(workRoot, 'home')
@@ -1337,6 +1376,7 @@ async function main() {
     }
 
     // ── U01/U03: old Host A, old Client A, one real admitted Host Turn ──────
+    checkpoint('U01-U06/base-pairing')
     const hostA = new EntryProcess('host', join(oldProfilePackage, 'dist', 'local-host.mjs'), hostBase)
     hosts.push(hostA)
     const hostAReady = await hostA.waitFor(record => record.m4a0 === 'ready', 'Host A ready', 240_000)
@@ -1453,6 +1493,7 @@ async function main() {
     assert(oldCookieIdentity.status === 200, 'Host A did not accept its own minted Cookie')
 
     // ── U07: real Client-only reexec onto the SAME Host A / Session S ───────
+    checkpoint('U07/reexec-request')
     // Client A is still the live PTY Client. The old Client must capture the
     // authoritative Session, release every Client resource through its ONE
     // stop coordinator, and only then spawn the NEW build's real entry as a
@@ -1635,6 +1676,7 @@ async function main() {
     })
 
     // ── U07 negative 1: a wrong expected Host instance is refused pre-connect ─
+    checkpoint('U07/negative-wrong-instance')
     const registryBeforeRefusal = readFileSync(join(scopeDir, 'instance.json'))
     const launchBeforeRefusal = readFileSync(join(scopeDir, 'launch.json'))
     const sessionLogsBeforeRefusal = sessionLogFiles(dshHome)
@@ -1698,6 +1740,7 @@ async function main() {
     }
 
     // ── U07 negative 2: the replacement child fails after a real reexec ─────
+    checkpoint('U07/negative-child-failure')
     // The one-shot fault injection exists only in the OLD Client's environment
     // and is passed to the CHILD, never applied to the old Client itself.
     const clientA2 = new SurfaceEntryProcess(join(oldProfilePackage, 'dist', 'local-client.mjs'), {
@@ -1804,6 +1847,7 @@ async function main() {
     }
 
     // ── U02: new Client B speaks v1 to the live old Host A ─────────────────
+    checkpoint('U02/cross-build-attach')
 
     // The new package has a different version, bundle and buildId but the same
     // local protocol and exact DSH runtime. It must authenticate the SAME Host
@@ -1889,6 +1933,7 @@ async function main() {
     }
 
     // ── U04: the new build's REAL surface opens the running old Session ─────
+    checkpoint('U04/cross-build-surface')
     // The qualification Client above proves the RPC path; this is the real PTY
     // surface. It must open the SAME Session whose Turn is currently held,
     // paint its admitted prompt, and exit without releasing the Turn or
@@ -1972,6 +2017,7 @@ async function main() {
     evidence.work.completedAfterCrossBuild = true
 
     // ── U05: explicit owner-verified SIGTERM, one official shutdown ─────────
+    checkpoint('U05/host-stop')
     // Production spawns the Host with stdin ignored. The qualification harness
     // keeps a JSONL control pipe open, so close it before the signal: an open
     // `process.stdin` would keep the Node event loop alive after the completed
@@ -2006,6 +2052,7 @@ async function main() {
     }
 
     // ── U06: after the old Host is gone, install the new build and boot it ─
+    checkpoint('U06/new-host-boot')
     installPlugin(dsh, newArtifact.path, harnessDir, env, false)
     // Replacing the bundle must not prune the Client peer from the same
     // profile owner.
@@ -2112,6 +2159,15 @@ async function main() {
     if (options.evidence !== undefined) {
       writeFileSync(options.evidence, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 })
     }
+  } catch (error) {
+    // Report BEFORE the cleanup below: the projection reads the still-live
+    // Host/Client handles, and the work root still exists while it is built.
+    // A failure also writes the `--evidence` FAIL twin with the same safe fields.
+    diagnostics.reportFailure(error, {
+      processes: [...hosts, ...clients],
+      evidencePath: options.evidence,
+    })
+    throw error
   } finally {
     for (const client of clients) {
       try { await client.dispose?.() } catch { /* best effort */ }
@@ -2129,7 +2185,9 @@ async function main() {
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch(error => {
-    process.stderr.write(`SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: ${error instanceof Error ? error.message : String(error)}\n`)
+    // One concise final line; the structured report (written BEFORE the work
+    // root was deleted) owns the diagnosis.
+    process.stderr.write(`SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: ${boundedErrorSummary(error)}\n`)
     process.exitCode = 1
   })
 }

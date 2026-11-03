@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Shared input qualification for the two split-process smoke lanes
- * (`split-process-smoke.mjs` T and `split-process-upgrade-smoke.mjs` U).
+ * Shared input qualification and failure diagnostics for the two split-process
+ * smoke lanes (`split-process-smoke.mjs` T and `split-process-upgrade-smoke.mjs` U).
  *
  * Both lanes run against the ONE exact DSH runtime this checkout declares
  * (`npmDshVersion()`), so every packaged input must declare that same exact
@@ -11,12 +11,18 @@
  * reports it as a timeout. This module makes that pairing mistake a fast,
  * explicitly classified INPUT problem instead of a product-looking failure.
  *
- * The module is deliberately pure: it reads no product service, owns no process
- * or lifecycle, and never decides PASS. The real PTY viewport and the entry's
- * own JSONL records stay the only authorities.
+ * The rest of the module is the lanes' DEFAULT failure diagnostics: a bounded,
+ * whitelisted projection of facts the lane already holds, written once to a
+ * private report OUTSIDE the deletable qualification work root. It reads no
+ * product service, owns no process or lifecycle, and never decides PASS — the
+ * real PTY viewport and the entry's own JSONL records stay the only authorities.
  *
  * @module split-smoke-diagnostics
  */
+
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { DSH_AGENT_PACKAGE } from './dsh-distribution.mjs'
 
@@ -30,8 +36,87 @@ const EXACT_DSH_PIN = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-
 
 const INPUT_ROLES = new Set(['candidate', 'old', 'new'])
 
+/** The fixed report categories; nothing outside this set may ever be reported. */
+export const FAILURE_CATEGORIES = Object.freeze([
+  'INPUT_UNQUALIFIED',
+  'UNEXPECTED_RELOAD_REFUSAL',
+  'WAIT_TIMEOUT',
+  'PROCESS_EXITED',
+  'ASSERTION_FAILED',
+  'INFRA_FAILURE',
+])
+
+/** The fixed `/reload-client` notice classifications (never raw viewport text). */
+export const RELOAD_NOTICE_TYPES = Object.freeze([
+  'ALREADY_CURRENT',
+  'ATTACHMENTS',
+  'DRAFT_TEXT',
+  'SUBMISSION',
+  'INTERACTION',
+  'TRANSITION',
+  'TARGET_INVALID',
+  'TARGET_INVALID_DSH_PIN_MISMATCH',
+  'TARGET_INVALID_UNCLASSIFIED',
+  'UNAVAILABLE',
+  'NOT_READY',
+  'STOPPING',
+])
+
+/**
+ * The ONE fixed notice text of every `/reload-client` decision, exactly as the
+ * product paints it (`CLIENT_RELOAD_REFUSAL_NOTICES` in
+ * `src/tui/commands/utility.ts`). This is the allowlist a painted row must match
+ * COMPLETELY to be classified: an unknown row is never a notice, so user text
+ * can never be mistaken for a refusal. A product notice change must land here
+ * too, and the real lane fails loudly when the two diverge.
+ */
+const RELOAD_NOTICE_BY_TEXT = new Map([
+  ['Client reload is available only in the split Client.', 'UNAVAILABLE'],
+  ['Client reload is unavailable until the current Client is connected and ready.', 'NOT_READY'],
+  ['Client reload blocked: finish or clear the editor draft first.', 'DRAFT_TEXT'],
+  ['Client reload blocked: remove or submit the staged attachments first.', 'ATTACHMENTS'],
+  ['Client reload blocked: wait for the pending submission to settle.', 'SUBMISSION'],
+  ['Client reload blocked: finish the current Question or Approval first.', 'INTERACTION'],
+  ['Client reload blocked: wait for the current session operation to settle.', 'TRANSITION'],
+  ['Client reload skipped: this Client already runs the installed build.', 'ALREADY_CURRENT'],
+  ['Client reload failed: the installed replacement Client is unavailable or incompatible.', 'TARGET_INVALID'],
+  ['Client reload is unavailable because this Client is stopping.', 'STOPPING'],
+])
+
+/** The product notice row shape: the `✗`/`ℹ` mark, then `Client reload `. */
+const RELOAD_NOTICE_LINE = /^\s*(?:✗|ℹ) Client reload (?:skipped|blocked|failed|is available|is unavailable)/u
+
+/** The three official telemetry event keys a report may name. */
+const EVENT_KEYS = Object.freeze(['m4a0', 'm4r', 'm4b2s'])
+
+const MAX_CHECKPOINTS = 24
+const MAX_PROCESSES = 8
+const MAX_PROCESS_EVENTS = 8
+const MAX_ARTIFACTS = 3
+const MAX_NAME_CHARS = 80
+const MAX_LABEL_CHARS = 120
+
+/** Keep only printable ASCII inside a fixed length: no ANSI, no newlines, no dump. */
+function bounded(value, limit) {
+  if (typeof value !== 'string') return undefined
+  const clean = value.replace(/[^\x20-\x7e]/gu, '').slice(0, limit)
+  return clean === '' ? undefined : clean
+}
+
+function boundedName(value) {
+  return bounded(value, MAX_NAME_CHARS)
+}
+
 function exactPinOrUndefined(value) {
   return typeof value === 'string' && EXACT_DSH_PIN.test(value) ? value : undefined
+}
+
+function sha256OrUndefined(value) {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/u.test(value) ? value : undefined
+}
+
+function reloadNoticeTypeOrUndefined(value) {
+  return RELOAD_NOTICE_TYPES.includes(value) ? value : undefined
 }
 
 /** An input artifact this lane is not allowed to run with (never a product defect). */
@@ -156,3 +241,270 @@ export function requireExactSmokeDshPin(role, manifest, targetDshVersion) {
   return pin
 }
 
+/** The whitelisted artifact identity a lane may report from one tarball manifest. */
+export function smokeArtifactIdentity(role, manifest, checksum) {
+  return {
+    role: boundedName(role),
+    name: boundedName(manifest?.name),
+    version: boundedName(manifest?.version),
+    sha256: sha256OrUndefined(checksum),
+    pin: exactPinOrUndefined(manifest?.devDependencies?.[DSH_AGENT_PACKAGE]),
+  }
+}
+
+/** One owned process → the bounded projection a report may carry. */
+function projectProcess(handle) {
+  if (handle === null || typeof handle !== 'object') return undefined
+  const records = Array.isArray(handle.records) ? handle.records : []
+  const events = []
+  for (const record of records.slice(-MAX_PROCESS_EVENTS)) {
+    const event = {}
+    for (const key of EVENT_KEYS) {
+      const value = boundedName(record?.[key])
+      if (value !== undefined) event[key] = value
+    }
+    if (Object.keys(event).length > 0) events.push(event)
+  }
+  const identity = records.find(record => record?.m4a0 === 'ready')
+    ?? records.find(record => record?.m4a0 === 'client-started')
+  const summary = {
+    role: boundedName(handle.role),
+    exited: handle.exited === true,
+    events,
+  }
+  if (Number.isInteger(identity?.pid)) summary.pid = identity.pid
+  if (handle.exitResult !== undefined) {
+    if (Number.isInteger(handle.exitResult.code)) summary.exitCode = handle.exitResult.code
+    const signal = boundedName(handle.exitResult.signal)
+    if (signal !== undefined) summary.exitSignal = signal
+  }
+  return summary.role === undefined ? undefined : summary
+}
+
+/** Owned processes → bounded summaries, merged by role+PID, capped. */
+function projectProcesses(handles) {
+  const summaries = []
+  for (const handle of Array.isArray(handles) ? handles : []) {
+    const summary = projectProcess(handle)
+    if (summary === undefined) continue
+    const known = summaries.find(entry => entry.role === summary.role && entry.pid === summary.pid)
+    // A live handle and the exiting snapshot of the SAME process never count twice.
+    if (known !== undefined) {
+      known.exited = known.exited || summary.exited
+      known.exitCode = summary.exitCode ?? known.exitCode
+      known.exitSignal = summary.exitSignal ?? known.exitSignal
+      known.events = summary.events
+      continue
+    }
+    summaries.push(summary)
+  }
+  return summaries.slice(-MAX_PROCESSES)
+}
+
+function projectArtifacts(artifacts) {
+  return (Array.isArray(artifacts) ? artifacts : [])
+    .map(artifact => {
+      const entry = { role: boundedName(artifact?.role) }
+      if (entry.role === undefined) return undefined
+      for (const key of ['name', 'version']) {
+        const value = boundedName(artifact?.[key])
+        if (value !== undefined) entry[key] = value
+      }
+      const sha256 = sha256OrUndefined(artifact?.sha256)
+      if (sha256 !== undefined) entry.sha256 = sha256
+      // Idempotent: a fresh identity carries `pin`, an already-projected one
+      // carries `dshPin`, and re-projecting it must not lose the version.
+      const pin = exactPinOrUndefined(artifact?.pin ?? artifact?.dshPin)
+      if (pin !== undefined) entry.dshPin = pin
+      return entry
+    })
+    .filter(entry => entry !== undefined)
+    .slice(-MAX_ARTIFACTS)
+}
+
+/**
+ * The ONE default failure report shape (`schemaVersion: 1`). A field the lane
+ * cannot state is omitted, never guessed, and nothing outside the whitelist is
+ * copied.
+ */
+export function projectFailureReport(input = {}) {
+  const report = {
+    schemaVersion: 1,
+    lane: boundedName(input.lane) ?? 'split-process',
+    status: 'FAIL',
+    category: FAILURE_CATEGORIES.includes(input.category) ? input.category : 'INFRA_FAILURE',
+  }
+  const reason = boundedName(input.reason)
+  if (reason !== undefined) report.reason = reason
+  const checkpoint = boundedName(input.checkpoint)
+  if (checkpoint !== undefined) report.checkpoint = checkpoint
+  const waitLabel = bounded(input.waitLabel, MAX_LABEL_CHARS)
+  if (waitLabel !== undefined) report.waitLabel = waitLabel
+  if (Number.isInteger(input.elapsedMs)) report.elapsedMs = input.elapsedMs
+  const runtimeDshPin = exactPinOrUndefined(input.runtimeDshPin)
+  if (runtimeDshPin !== undefined) report.runtimeDshPin = runtimeDshPin
+  const artifacts = projectArtifacts(input.artifacts)
+  if (artifacts.length > 0) report.artifacts = artifacts
+  const expected = reloadNoticeTypeOrUndefined(input.expected)
+  if (expected !== undefined) report.expected = expected
+  const observed = reloadNoticeTypeOrUndefined(input.observed)
+  if (observed !== undefined) report.observed = observed
+  const progress = (Array.isArray(input.progress) ? input.progress : [])
+    .map(step => {
+      const name = boundedName(step?.name)
+      if (name === undefined) return undefined
+      return Number.isInteger(step.elapsedMs) ? { name, elapsedMs: step.elapsedMs } : { name }
+    })
+    .filter(step => step !== undefined)
+    .slice(-MAX_CHECKPOINTS)
+  if (progress.length > 0) report.progress = progress
+  const processes = projectProcesses(input.processes)
+  if (processes.length > 0) report.processes = processes
+  return report
+}
+
+/** The stable category of any lane error: its explicit code first, else the message shape. */
+export function failureCategoryOf(error) {
+  if (FAILURE_CATEGORIES.includes(error?.category)) return error.category
+  const message = error instanceof Error ? error.message : String(error ?? '')
+  if (message.startsWith('ASSERTION_FAILED:')) return 'ASSERTION_FAILED'
+  return 'INFRA_FAILURE'
+}
+
+/**
+ * The one concise final stderr line for a lane failure.
+ *
+ * A classified waiter/input error is already a bounded projection, so it prints
+ * verbatim. Any other error (a lane assertion or an install/environment
+ * failure) is one collapsed printable line inside a fixed budget: the lane's
+ * final summary stays readable without becoming a dump of terminal bytes,
+ * captured stderr or an arbitrary `Error.message`.
+ */
+export function boundedErrorSummary(error, limit = 400) {
+  if (error instanceof SplitSmokeWaitError || error instanceof SplitSmokeInputError) {
+    return error.message
+  }
+  return bounded(error instanceof Error ? error.message : String(error ?? ''), limit) ?? '(no message)'
+}
+
+/** Write the private `0600` report file; a diagnostic write never replaces the real failure. */
+function writePrivateJson(path, value) {
+  try {
+    writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 })
+    chmodSync(path, 0o600)
+    return true
+  } catch (error) {
+    process.stderr.write(`DIAGNOSTIC_WRITE_FAILURE: ${boundedName(error?.code ?? error?.name) ?? 'unknown'}\n`)
+    return false
+  }
+}
+
+/**
+ * Write the one default-retained failure artifact: a private directory OUTSIDE
+ * the deletable work root (`0700`) holding `failure.json` (`0600`, created
+ * exclusively). Returns its path, or `undefined` when the write itself failed.
+ */
+export function writeFailureReport(report) {
+  try {
+    const directory = mkdtempSync(join(tmpdir(), 'dsh-pi-tui-smoke-failure-'))
+    chmodSync(directory, 0o700)
+    const path = join(directory, 'failure.json')
+    writeFileSync(path, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
+    chmodSync(path, 0o600)
+    return path
+  } catch (error) {
+    process.stderr.write(`DIAGNOSTIC_WRITE_FAILURE: ${boundedName(error?.code ?? error?.name) ?? 'unknown'}\n`)
+    return undefined
+  }
+}
+
+/** The safe stderr summary of one failure report: fixed keys, bounded values. */
+export function formatFailureSummary(report, reportPath) {
+  const lines = []
+  const add = (key, value) => {
+    if (value !== undefined) lines.push(`  ${key}: ${String(value)}`)
+  }
+  add('category', report.category)
+  add('reason', report.reason)
+  add('checkpoint', report.checkpoint)
+  add('wait', report.waitLabel)
+  add('elapsedMs', report.elapsedMs)
+  add('runtimeDshPin', report.runtimeDshPin)
+  for (const artifact of report.artifacts ?? []) {
+    add(artifact.role, `${artifact.name ?? '(unknown)'}@${artifact.version ?? '(unknown)'}; `
+      + `pin=${artifact.dshPin ?? '(unqualified)'}; sha256=${artifact.sha256 ?? '(unread)'}`)
+  }
+  add('expected', report.expected)
+  add('observed', report.observed)
+  const progress = (report.progress ?? []).map(step => step.name)
+  if (progress.length > 0) add('recent checkpoints', progress.join(' -> '))
+  for (const handle of report.processes ?? []) {
+    add(handle.role, `pid=${String(handle.pid ?? 'unknown')} exited=${String(handle.exited)} `
+      + `events=${handle.events.map(event => Object.values(event).join('=')).join(',')}`)
+  }
+  add('report', reportPath)
+  return lines.join('\n')
+}
+
+/**
+ * The per-run collector a lane owns: its reported identity, the bounded
+ * checkpoint ring, and the single default failure emission. No global state, no
+ * lifecycle, no product read.
+ */
+export function createSmokeDiagnostics({ lane, heading, marker, runtimeDshPin, artifacts = [] }) {
+  const startedAt = Date.now()
+  const steps = []
+  const pinned = exactPinOrUndefined(runtimeDshPin)
+  const identity = projectArtifacts(artifacts)
+  return {
+    /** One phase boundary: remembered, and announced on stderr by default. */
+    checkpoint(name) {
+      const step = boundedName(name)
+      if (step === undefined) return
+      steps.push({ name: step, elapsedMs: Date.now() - startedAt })
+      if (steps.length > MAX_CHECKPOINTS) steps.shift()
+      process.stderr.write(`[${marker} checkpoint] ${step}\n`)
+    },
+    progress() {
+      return steps.map(step => ({ ...step }))
+    },
+    /** The one-line startup identity — only ever printed AFTER preflight passed. */
+    identityLine() {
+      const parts = identity.map(entry => `${entry.role}=${entry.name ?? '(unknown)'}@${entry.version ?? '(unknown)'}`
+        + ` sha256=${entry.sha256 ?? '(unread)'} pin=${entry.dshPin ?? '(unqualified)'}`)
+      parts.push(`runtimeDshPin=${pinned ?? '(unpinned)'}`)
+      parts.push('qualified=true')
+      return `${heading}_START ${parts.join('; ')}`
+    },
+    /**
+     * Build, write and announce the bounded failure projection. Returns the
+     * report; propagating the original error stays the lane's job, as does the
+     * cleanup in its own `finally`.
+     *
+     * `evidencePath` is the U lane's `--evidence` file: its FAIL twin holds the
+     * same safe fields (`0600`). A missing path is simply no twin.
+     */
+    reportFailure(error, { processes = [], evidencePath, ...extra } = {}) {
+      const report = projectFailureReport({
+        lane,
+        category: extra.category ?? failureCategoryOf(error),
+        reason: extra.reason ?? boundedName(error?.code),
+        checkpoint: extra.checkpoint ?? steps.at(-1)?.name,
+        waitLabel: extra.waitLabel ?? error?.waitLabel,
+        elapsedMs: extra.elapsedMs ?? error?.elapsedMs,
+        expected: extra.expected ?? error?.expected,
+        observed: extra.observed ?? error?.observed,
+        runtimeDshPin: pinned,
+        artifacts: identity,
+        progress: steps,
+        processes: error?.processSummary === undefined
+          ? processes
+          : [...processes, error.processSummary],
+      })
+      const path = writeFailureReport(report)
+      process.stderr.write(`${heading}_FAILURE\n${formatFailureSummary(report, path)}\n`)
+      if (evidencePath !== undefined) writePrivateJson(evidencePath, report)
+      return report
+    },
+  }
+}
