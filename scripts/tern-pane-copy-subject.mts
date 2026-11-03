@@ -1,5 +1,5 @@
 /**
- * PR4-B2-A: the real-Tern `/copy` subject.
+ * The real-Tern `/copy` subject.
  *
  * Boots the production Direct/TSP composition on the Tern-owned stdio
  * (`externalTern: true`) and records the facts the flow needs from INSIDE the

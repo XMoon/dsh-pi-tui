@@ -1,7 +1,7 @@
 /**
- * PR4-B2-A: real-Tern `/copy` qualification flow.
+ * Real-Tern `/copy` qualification flow.
  *
- *   node scripts/tern-pane-drive.mjs scripts/tern-pane-b2a-copy.mjs
+ *   node scripts/tern-pane-drive.mjs scripts/tern-pane-copy.mjs
  *
  * Runs the production Direct/TSP composition inside a real headless Tern pane
  * and drives `/copy` through the REAL Composer keys. What it proves:
@@ -56,7 +56,7 @@ const finish = (h) => {
 
 export default async function (h) {
   await h.resize(1000, 700)
-  const subject = join(h.repo, 'scripts', 'tern-pane-b2a-copy-subject.mts')
+  const subject = join(h.repo, 'scripts', 'tern-pane-copy-subject.mts')
   h.check('the production Direct/TSP copy subject launches in the real Tern pane', await h.launch(subject))
 
   if (!await requiredWait(h, 'fixture ready with a live production TSP surface', () =>
@@ -89,7 +89,7 @@ export default async function (h) {
     finish(h)
     return
   }
-  h.capture('b2a-copy-after-copy', 'the real client after /copy')
+  h.capture('copy-after-copy', 'the real client after /copy')
 
   const osc52 = records(h).filter((entry) => entry.kind === 'stdout.osc52')
   const expectedBase64 = Buffer.from(ASSISTANT_TEXT, 'utf8').toString('base64')
@@ -130,7 +130,7 @@ export default async function (h) {
   h.check('the input loop and frame ACK survive the raw OSC 52 bytes',
     records(h).filter((entry) => entry.kind === 'stdout.osc52').length === 2,
     JSON.stringify({ emissions: records(h).filter((entry) => entry.kind === 'stdout.osc52').length }))
-  h.capture('b2a-copy-after-later-command', 'a later command still works after the OSC 52 emission')
+  h.capture('copy-after-later-command', 'a later command still works after the OSC 52 emission')
 
   // 5. The close flow still settles.
   await submitCommand(h, '/exit')
