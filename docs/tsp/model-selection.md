@@ -67,10 +67,16 @@ row) opens that model's Full details DIRECTLY, with no intermediate page.
   `Tab`/`Shift+Tab` walk `Back → Search → Options → Full` (or
   `Rows → Full` on the root), and typing edits only the menu's own query. The
   draft and its UTF-16 caret are unchanged across the whole open/close cycle, and
-  closing returns the caret to the Composer. `Esc` clears a non-empty search
-  first, then returns subpage → root → closed, and is never an Agent cancel.
+  closing returns the caret to the Composer. `Esc` is state-dependent: on the
+  non-error Models page it clears a non-empty search first, and otherwise it
+  returns from the Models or Effort page to the root, then closes the menu — the
+  clear step exists only where the search field is the live editing target, so a
+  filter left behind by a `Back` activation, an Effort page or a failed read can
+  never swallow the key. `Esc` is never an Agent cancel.
   `Ctrl+C` revokes the menu's interaction identity and still reaches the original
-  cancel owner.
+  cancel owner. Pointing at the search field is also an editing claim: clicking it
+  while the option list holds the region puts the caret in the field, and the next
+  keystroke edits the search rather than the list.
 - The quick menu is never expanded together with the Permission menu, and every
   higher seat (the modal seat, the temporary Screen, the Work Hub, the Session
   Browser, the Preset picker and the full Model panel) retires it synchronously
@@ -204,7 +210,7 @@ Composer quick menu:
 | `Enter` | Activate the highlighted row (never send the draft) |
 | typing / Backspace / `←`/`→` | Edit the menu's own search field |
 | `Tab` / `Shift+Tab` | Move between the menu's regions |
-| `Esc` | Clear the search; then subpage → root → closed |
+| `Esc` | On the non-error Models page: clear a non-empty search. Otherwise: Models/Effort → root → closed. Never an Agent cancel |
 | `Ctrl+C` | Revoke the menu and reach the original cancel owner |
 
 A full-panel row activation never writes: `Enter` on a highlighted row opens the
@@ -216,7 +222,9 @@ selection IS the commit, for a live Session only.
 - Loading paints the catalogue shell without fabricating rows; the quick menu
   states `Loading models…` and offers no directory-derived value.
 - A provider-failure row is an inert failure row, not a model; the quick menu
-  keeps the usable provider groups and states the failed provider beside them.
+  keeps the usable provider groups and states each failed provider among the rows
+  it belongs to, inside the scrolling body — their count comes from the directory
+  and is not bounded, so they can never occupy the menu's fixed chrome.
 - An empty catalogue is shown as no models; it is never filled from a
   hard-coded list.
 - A read failure paints an explicit Retry; the page stays usable and the draft
