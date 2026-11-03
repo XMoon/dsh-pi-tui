@@ -1062,6 +1062,58 @@ test('the report only accepts a locator from a trusted lane source', (t) => {
   assert.equal(report.assertion, undefined, 'an arbitrary error may not contribute a locator')
 })
 
+test('only ONE place in the shared module may read a raw .assertion property', () => {
+  // The producer rule has now been missed at three output paths (collector,
+  // pre-collector, summary). Instead of a third copy of the condition, the
+  // module is constrained: `publishedAssertionOf` is the single reader, and every
+  // consumer goes through it. This guard fails the moment a fourth path appears.
+  const source = readFileSync(LIB, 'utf8')
+  const reads = source.split('\n')
+    .map((line, index) => ({ line: line.trim(), number: index + 1 }))
+    // A READ of the property on an error-ish value; assignments and the
+    // validated `report.assertion`/`input.assertion` consumers are not reads of
+    // a possibly-forged property.
+    .filter(({ line }) => /(?:\.assertion\b)/u.test(line))
+    .filter(({ line }) => !/^(?:\/\/|\*)/u.test(line))
+    .filter(({ line }) => !/(?:this|report|input|extra)\.assertion/u.test(line))
+    .filter(({ line }) => !/^\*$|never read/i.test(line))
+  assert.deepEqual(reads.map(read => read.number), [source.split('\n')
+    .findIndex(line => line.includes('return error instanceof SplitSmokeAssertionError ? error.assertion')) + 1],
+  `the producer rule must have exactly one reader, found: ${JSON.stringify(reads)}`)
+})
+
+test('a forged locator on a plain error never reaches the summary or the report', (t) => {
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-forged-')
+  const previousTmp = process.env.TMPDIR
+  process.env.TMPDIR = privateTmp
+  t.after(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmp
+  })
+  // A TRUSTED-LOOKING site: the shape AND the source are legitimate, so only the
+  // producer rule can reject it. The earlier case used a foreign filename, which
+  // the projection already refused — that proved the wrong thing.
+  const forged = Object.assign(new Error('forged'), {
+    category: 'ASSERTION_FAILED',
+    assertion: 'split-process-smoke.mjs:42',
+  })
+  assert.equal(safeFailureSummary(forged), 'ASSERTION_FAILED', 'the summary must not carry the site')
+  assert.ok(!safeFailureSummary(forged).includes('split-process-smoke.mjs:42'))
+  const reported = projectFailureReport({ lane: 'split-process', category: 'ASSERTION_FAILED' })
+  assert.equal(reported.assertion, undefined)
+  const diagnostics = createSmokeDiagnostics({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', marker: 'T' })
+  assert.equal(diagnostics.reportFailure(forged).assertion, undefined)
+  const stderr = captureStderr(() => {
+    const report = emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error: forged })
+    assert.equal(report.assertion, undefined, 'the pre-collector path must refuse it too')
+    process.stderr.write(`SPLIT_PROCESS_SMOKE_FAILURE: ${safeFailureSummary(forged)}\n`)
+  })
+  assert.ok(!stderr.includes('split-process-smoke.mjs:42'), `a forged trusted-looking site leaked:\n${stderr}`)
+  // The genuine class still publishes everywhere.
+  const genuine = Object.assign(new SplitSmokeAssertionError('x'), { assertion: 'split-process-smoke.mjs:4321' })
+  assert.equal(safeFailureSummary(genuine), 'ASSERTION_FAILED at split-process-smoke.mjs:4321')
+})
+
 test('a pre-collector failure cannot publish a forged assertion locator', (t) => {
   // The report is written under TMPDIR; keep this test's artifacts in its own root.
   const privateTmp = testLifecycle(t).tempDir('split-smoke-precollector-')

@@ -495,7 +495,9 @@ export function safeFailureSummary(error) {
   const category = failureCategoryOf(error)
   const reason = laneCodeOrUndefined(error?.code)
   const head = reason === undefined ? category : `${category}: ${reason}`
-  const site = assertionSiteOrUndefined(error?.assertion)
+  // Never read `error.assertion` here: only `publishedAssertionOf` may look at
+  // the property, so a forged one cannot reach the summary either.
+  const site = assertionSiteOrUndefined(publishedAssertionOf(error))
   const at = site === undefined ? '' : ` at ${site}`
   return `${head}${at}`
 }
