@@ -127,6 +127,26 @@ function recordReaderCalls(): {
   }
 }
 
+/** The controlled editor's current text on the wire. */
+function editorText(fixture: DirectTspFixture): string {
+  const editor = wireNodes(fixture.pane).find(node => node.k === 'editor')
+  return typeof editor?.p.text === 'string' ? editor.p.text : ''
+}
+
+/** The controlled editor's caret offset (UTF-16 units, as the SDK counts them). */
+function editorCaret(fixture: DirectTspFixture): number | undefined {
+  const editor = wireNodes(fixture.pane).find(node => node.k === 'editor')
+  return typeof editor?.p.cursor === 'number' ? editor.p.cursor : undefined
+}
+
+/** Every focus target the SDK actually sent, in order. */
+function focusOps(fixture: DirectTspFixture): string[] {
+  const out: string[] = []
+  for (const frame of fixture.pane.frames())
+    for (const op of frame.ops) if (op[0] === 'focus') out.push(String(op[1]))
+  return out
+}
+
 test('the real turn-boundary blank authority presents the D Welcome in Main and keeps the Dock composer-only', async (t) => {
   const { testLifecycle } = await import('../../support/temp-lifecycle.ts')
   const life = testLifecycle(t)
@@ -274,6 +294,94 @@ test('W14: a Host-owned /sessions leaves a disabled Welcome action and starts no
     assert.equal(pickerNode(fixture.pane, BROWSER), undefined, 'nothing opened')
     assert.equal(reads.lists.length, 0, 'and no Session listing was read')
     assert.equal(hostInvocations.length, 0, 'the Host-owned command was not invoked either')
+  } finally {
+    // reason: the fixture's OWN teardown drain (it releases the pane/fibers); not a wait for a fact
+    await fixture.settle()
+  }
+})
+
+test('W11: cancelling the Welcome Browser leaves the draft, the caret and the Editor focus exactly as they were', async (t) => {
+  const { testLifecycle } = await import('../../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('dsh-welcome-cancel-')
+  const fixture = await createDirectTspFixture(life, {
+    workRoot,
+    sessionBrowser: true,
+    composerActions: true,
+    persistedBlankSession: { id: 'welcome-cancel-target' },
+    startup: { sessionId: 'welcome-cancel-target' },
+  })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    await waitFor('the blank subject presents the Welcome', () => welcomeShown(fixture), 25_000)
+    // A multi-line draft with a non-BMP cluster, typed through the REAL input
+    // loop (Shift+Enter is the editor's own newline, never a submit).
+    for (const char of '第一行 🙂') fixture.pane.key(char)
+    fixture.pane.key('\u001b[13;2u')
+    for (const char of 'tail') fixture.pane.key(char)
+    const expected = '第一行 🙂\ntail'
+    await waitFor('the draft reaches the composer', () => editorText(fixture) === expected, 20_000)
+    const caretBefore = editorCaret(fixture)
+    const focusBefore = focusOps(fixture).length
+    const button = resumeNode(fixture)
+    assert.ok(button !== undefined, 'the Welcome action is painted')
+    clickNode(fixture.pane, button!)
+    await waitFor('the Browser opens', () => pickerNode(fixture.pane, BROWSER) !== undefined, 25_000)
+    sendPickerAction(fixture.pane, 'close', BROWSER)
+    await waitFor('the Browser closes', () => pickerNode(fixture.pane, BROWSER) === undefined, 20_000)
+    assert.equal(editorText(fixture), expected, 'the draft is exactly what the user typed')
+    assert.equal(editorCaret(fixture), caretBefore, 'the caret did not move')
+    assert.ok(focusOps(fixture).length > focusBefore, 'the Editor took the focus back')
+    assert.equal(focusOps(fixture).at(-1), 'dock.quiet-composer.composer',
+      'the restored focus is the ONE composer, not a Welcome node')
+    assert.ok(welcomeShown(fixture), 'the blank subject presents its Welcome again')
+  } finally {
+    // reason: the fixture's OWN teardown drain (it releases the pane/fibers); not a wait for a fact
+    await fixture.settle()
+  }
+})
+
+test('W13: a Welcome action retired by a real switch never opens the Browser for the new subject', async (t) => {
+  const { testLifecycle } = await import('../../support/temp-lifecycle.ts')
+  const life = testLifecycle(t)
+  const workRoot = life.tempDir('dsh-welcome-stale-')
+  const reads = recordReaderCalls()
+  life.defer(() => reads.detach())
+  const fixture = await createDirectTspFixture(life, {
+    workRoot,
+    sessionBrowser: true,
+    composerActions: true,
+    persistedBlankSessions: [{ id: 'welcome-stale-a' }, { id: 'welcome-stale-b' }],
+    startup: { sessionId: 'welcome-stale-a' },
+  })
+  try {
+    await waitForInputDelivery(fixture.pane)
+    await waitFor('subject A presents the Welcome', () => welcomeShown(fixture), 25_000)
+    const staleButton = resumeNode(fixture)
+    assert.ok(staleButton !== undefined)
+    const scopeBefore = String(staleButton.p.key ?? '')
+    assert.ok(scopeBefore !== '', 'the action key carries the mount presentation scope')
+    // A REAL switch wins first: the typed `/resume <id>` route runs the same
+    // guarded SessionRuntime path, and the hydration fence retires the old
+    // subject's frame.
+    await submitInput(fixture, '/resume welcome-stale-b')
+    // The witness that B was COMMITTED is the mount's own re-scope: the Welcome
+    // action key carries the presentation scope, and a new subject re-scopes it
+    // in the very commit that lifts the input fence.
+    await waitFor('B becomes the presented subject under a new scope', () => {
+      const now = String(resumeNode(fixture)?.p.key ?? '')
+      return now !== '' && now !== scopeBefore
+    }, 25_000)
+    // Count from HERE: the switch's own reads are already accounted for, so any
+    // further listing could only come from the retired action.
+    const listsAfterSwitch = reads.lists.length
+    // Now the A-era Welcome node is delivered: it must do nothing at all.
+    clickNode(fixture.pane, staleButton)
+    await observeNothingHappens()
+    assert.equal(pickerNode(fixture.pane, BROWSER), undefined,
+      'the retired Welcome opened no Browser')
+    assert.equal(reads.lists.length, listsAfterSwitch,
+      'and it started no Session listing for the new subject')
   } finally {
     // reason: the fixture's OWN teardown drain (it releases the pane/fibers); not a wait for a fact
     await fixture.settle()
