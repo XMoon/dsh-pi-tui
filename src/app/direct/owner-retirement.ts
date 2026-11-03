@@ -185,30 +185,24 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
       disposeOwner: () => handle.dispose(),
     })
 
-  const retireTransition = (agent: Agent, handle: AgentHandle): Promise<RetirementReport> => {
-    const shared = {
+  const retireTransition = (agent: Agent, handle: AgentHandle): Promise<RetirementReport> =>
+    retireDirectOwnedSession({
+      mode: 'transition',
+      // A "transition" retirement is not always a LIVE-Host retirement: a
+      // non-cooperative child create (or a pre-commit release) can commit
+      // AFTER the lifecycle aborted, and an exit can also begin DURING this
+      // retirement's own idle/drain awaits. Either way the DSH root teardown
+      // may already be closing the replaced session's write handle, so an
+      // explicit flush would be the same closed-handle race the shutdown mode
+      // refuses. The helper re-reads this at FLUSH time (the entry-time answer
+      // goes stale), and the cancel branch above already reads the same fact.
+      isLiveHost: () => !deps.isLifecycleAborted(),
       cancel: () => cancelRetiredOwner(agent),
       whenIdle: () => agent.whenIdle(),
       drainDescendants: () => deps.drainContinuableDescendants(agent),
-      disposeOwner: () => handle.dispose(),
-    }
-    // A "transition" retirement is not always a LIVE-Host retirement: a
-    // non-cooperative child create (or a pre-commit release) can commit AFTER
-    // the lifecycle aborted, and by then the DSH root teardown may already be
-    // closing the replaced session's write handle. An explicit flush there is
-    // the same `flush on a closed handle` race the shutdown mode refuses, so
-    // an aborted lifecycle uses the shutdown durability regime (DSH's dispose
-    // joins the close/drain). The cancel branch above already draws the same
-    // line from the same lifecycle fact.
-    if (deps.isLifecycleAborted()) {
-      return retireDirectOwnedSession({ mode: 'shutdown', ...shared })
-    }
-    return retireDirectOwnedSession({
-      mode: 'transition',
-      ...shared,
       flush: () => deps.flushSession(agent.session),
+      disposeOwner: () => handle.dispose(),
     })
-  }
 
   const retireShutdown = (agent: Agent, handle: AgentHandle): Promise<RetirementReport> => {
     deps.diag.info('retire start', { session: agent.session.id })

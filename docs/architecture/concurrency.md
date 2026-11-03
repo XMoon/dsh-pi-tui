@@ -621,6 +621,18 @@ DSH's close authority instead of adding durability; a shutdown dispose
 failure is therefore reported as durability UNCONFIRMED (never as a flush
 failure, and never as proof that data was lost).
 
+The transition mode is not a synonym for "the lifecycle is live"; it is a
+claim that must still hold when the flush phase RUNS. A transition (or fork
+adoption) retirement can enter while the lifecycle is live and then span its
+own `idle`/`descendants` awaits across an exit — the shutdown does not wait
+for an in-flight transition retirement, so the root teardown can start
+closing that write handle mid-retirement. The retirement therefore re-reads
+the authoritative lifecycle fact at flush time: once the lifecycle aborted,
+the retirement uses the shutdown durability regime and adds no explicit
+flush (the same fact the cancel phase reads to choose the shutdown cancel).
+The resolved regime also decides which phase owns durability for the report —
+`flush` while the live-Host regime held, otherwise `dispose`.
+
 A successful ordinary transition also checkpoints the COMMITTED child: after
 the post-commit child quiesce confirms idle and before the new owner's
 surface init, ONE `retirement.flush(nextOwner)` materializes the new

@@ -1004,6 +1004,8 @@ test('exit during the post-commit child quiesce skips surface init and retires t
   const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
   assert.ok(newHandler, 'the real runner must register the /new transition command')
   const transition = newHandler()
+  // Bounded microtask drain (not a wall-clock wait): the transition parks in its
+  // gated child create before the test releases it.
   await settle()
   releaseCreate()
   await settle()
@@ -1119,7 +1121,6 @@ test('a transition flush failure aborts the switch with a visible error (durabil
   const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
   assert.ok(newHandler, 'the real runner must register the /new transition command')
   const result = await newHandler() as { kind: string; text?: string }
-  await settle()
   // The /new pre-commit flush failure aborts the switch (the old session
   // stays current) and the command result carries the real error: the user
   // sees the durability failure, never a silent fallback.
@@ -1318,7 +1319,6 @@ test('a committed child checkpoint flush failure keeps the child and warns clear
   const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
   assert.ok(newHandler, 'the real runner must register the /new transition command')
   const result = await newHandler() as { kind: string; text?: string }
-  await settle()
   // The switch COMMITTED despite the checkpoint failure: the command must
   // report SUCCESS (never a failed transition), the child stays current.
   assert.equal(result.kind, 'success', `the committed switch must not be misreported as failed: ${JSON.stringify(result)}`)
@@ -1409,12 +1409,14 @@ test('a transition retiring an old owner AFTER the lifecycle aborted does NOT fl
   // Interactive exit while the create is still pending: pre-cancel + appExit.
   app.setDraft('exit')
   ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded microtask drain: the exit latch reaches appExit before the release.
   await settle()
   // The non-cooperative create now commits AFTER appExit began: the post-commit
   // retireOld runs under an aborted lifecycle and must NOT flush the closing
   // handle.
   releaseCreate()
   await transition
+  // Bounded microtask drain (no wall-clock wait): the appExit disposal settles.
   await settle()
   const events = harness.retirementEvents
   assert.deepEqual(flushCalls, ['late-transition-flush-old'],
@@ -1464,7 +1466,6 @@ test('the post-commit checkpoint is skipped when the committed child quiesce REJ
   const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
   assert.ok(newHandler, 'the real runner must register the /new transition command')
   const result = await newHandler() as { kind: string }
-  await settle()
   assert.equal(result.kind, 'success', 'the committed switch still reports success')
   const created = harness.createdSessions.at(-1)
   assert.ok(created, '/new must create a child session')
@@ -1476,4 +1477,99 @@ test('the post-commit checkpoint is skipped when the committed child quiesce REJ
   fiber = undefined
   assert.equal(events.filter(event => event === `dispose:${created.id}`).length, 1,
     'the committed child is still retired exactly once on teardown')
+})
+
+test('an exit beginning DURING the old-owner retirement (mode already resolved) does NOT flush the closing handle', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-midflight-abort-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'midflight-abort-old',
+    header: { id: 'midflight-abort-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // Park the OLD owner's retirement in its `descendants` phase: the retirement
+  // has ALREADY resolved its mode, and its `cancel` phase made `whenIdle`
+  // return immediately, so the descendant drain is the phase that actually
+  // spans the exit. The drain is the harness subagents fake (the real
+  // retirement's own phase), not a fabricated seam.
+  let retirementDrainStarted!: () => void
+  const retirementDrain = new Promise<void>(resolve => { retirementDrainStarted = resolve })
+  let releaseRetirementDrain!: () => void
+  const retirementDrainGate = new Promise<void>(resolve => { releaseRetirementDrain = resolve })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, (events: string[]) => ({
+    drainContinuableDescendants: async (parents: readonly unknown[]) => {
+      const parent = parents[0] as { session: { id: string } } | undefined
+      events.push(`drain:${parent?.session.id ?? '?'}`)
+      if (parent?.session.id === 'midflight-abort-old') {
+        retirementDrainStarted()
+        await retirementDrainGate
+      }
+    },
+  }))
+  // The old session's write handle starts closing the moment the exit's
+  // appExit hook runs (the DSH root teardown).
+  let handleClosing = false
+  const flushCalls: string[] = []
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    const id = (session as { id?: string } | undefined)?.id ?? '?'
+    flushCalls.push(`${id}${handleClosing ? ':closing' : ''}`)
+    await flushOriginal(session)
+    if (handleClosing && id === 'midflight-abort-old') {
+      throw new Error('session "midflight-abort-old": flush on a closed handle')
+    }
+  }
+  const stderrWrites: string[] = []
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: unknown) => {
+    stderrWrites.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  life.defer(() => { process.stderr.write = originalWrite })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
+    handleClosing = true
+    void fiber?.dispose()
+  })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  // The transition commits, retires the OLD owner, and parks in its drain.
+  await retirementDrain
+  const flushesBeforeExit = [...flushCalls]
+  assert.deepEqual(flushesBeforeExit, ['midflight-abort-old'],
+    `exactly the pre-commit old-owner flush precedes the exit: ${JSON.stringify(flushesBeforeExit)}`)
+  // Exit NOW: the lifecycle aborts while the retirement is mid-flight, and the
+  // old session's handle starts closing. The retirement had already chosen the
+  // transition regime BEFORE this happened.
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  // Bounded microtask drain: the exit latch reaches appExit while drain parks.
+  await settle()
+  releaseRetirementDrain()
+  await transition
+  // Bounded microtask drain (no wall-clock wait): the appExit disposal settles.
+  await settle()
+  // Only the pre-commit old-owner flush ran; the retirement must not add a
+  // second one against the now-closing handle.
+  assert.deepEqual(flushCalls, ['midflight-abort-old'],
+    `no flush may run after the mid-flight exit began: ${JSON.stringify(flushCalls)}`)
+  assert.equal(harness.retirementEvents.filter(event => event === 'dispose:midflight-abort-old').length, 1,
+    'the old owner must still be disposed exactly once')
+  assert.ok(!stderrWrites.some(write => write.includes('session flush failed during retirement')),
+    `a skipped flush must never surface a flush failure: ${JSON.stringify(stderrWrites)}`)
 })

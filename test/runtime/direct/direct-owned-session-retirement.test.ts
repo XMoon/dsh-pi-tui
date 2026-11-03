@@ -17,6 +17,9 @@ import {
 /** A recording retirement surface; every phase can be made to fail. */
 function retirementHarness(options: {
   mode?: 'transition' | 'shutdown'
+  /** The transition's live-Host regime has ENDED before the flush phase
+   *  (an exit began during the idle/descendants awaits). */
+  regimeEnded?: boolean
   cancelError?: unknown
   idleError?: unknown
   drainError?: unknown
@@ -53,6 +56,9 @@ function retirementHarness(options: {
     : {
         mode: 'transition' as const,
         ...common,
+        // The live-Host regime is the DEFAULT for the transition harness; the
+        // dedicated cases below flip it to model an exit beginning mid-flight.
+        isLiveHost: () => !options.regimeEnded,
         flush: async () => {
           events.push('flush')
           fail(options.flushError)
@@ -190,6 +196,47 @@ test('transition with idle+drain+flush+dispose failures all recorded, never aggr
   ])
   assert.equal(report.durabilityFailure?.phase, 'flush',
     'the transition durability failure stays the flush failure')
+})
+
+test('a transition whose live-Host regime ENDED before the flush phase runs NO flush and maps durability to dispose', async () => {
+  const { deps, events } = retirementHarness({ regimeEnded: true })
+  const report = await retireDirectOwnedSession(deps)
+  assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'dispose'],
+    'the exit began during the retirement: DSH close owns durability, no explicit flush may run')
+  assert.deepEqual(report.failures, [])
+  assert.equal(report.durabilityFailure, undefined,
+    'a clean dispose confirmed the durable close')
+})
+
+test('a transition whose live-Host regime ENDED reports a dispose failure as the durability failure', async () => {
+  const { deps, events } = retirementHarness({ regimeEnded: true, disposeError: new Error('dispose exploded') })
+  const report = await retireDirectOwnedSession(deps)
+  assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'dispose'])
+  assert.deepEqual(report.failures, [{ phase: 'dispose', error: 'dispose exploded' }])
+  assert.equal(report.durabilityFailure?.phase, 'dispose',
+    'once the regime ended, dispose is the durability owner')
+})
+
+test('the live-Host regime is re-read at FLUSH time, not fixed at entry', async () => {
+  // The harness starts LIVE and the regime ends DURING the descendants phase:
+  // the helper must observe the new answer when it reaches the flush phase.
+  const events: string[] = []
+  let live = true
+  const report = await retireDirectOwnedSession({
+    mode: 'transition',
+    isLiveHost: () => live,
+    cancel: () => { events.push('cancel') },
+    whenIdle: async () => { events.push('idle') },
+    drainDescendants: async () => {
+      events.push('descendants')
+      live = false
+    },
+    flush: async () => { events.push('flush') },
+    disposeOwner: async () => { events.push('dispose') },
+  })
+  assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'dispose'],
+    'the flush phase must not run once the regime ended mid-retirement')
+  assert.equal(report.durabilityFailure, undefined)
 })
 
 test('a hostile thrown value is contained by safeErrorMessage', async () => {
