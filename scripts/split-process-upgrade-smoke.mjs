@@ -240,6 +240,23 @@ export function parseUpgradeArguments(argv) {
   }
 }
 
+/**
+ * Write an operator-requested evidence document, or fail the lane.
+ *
+ * The PASS document is part of what the operator asked for, so a write that
+ * cannot land is not a pass: the lane must exit nonzero instead of announcing
+ * its success marker with no evidence behind it. The FAIL twin keeps the
+ * opposite rule (a diagnostic write must never mask the real failure), so only
+ * this requested-document path throws.
+ */
+export function writeRequestedEvidence(path, value) {
+  if (writePrivateReport(path, value) === true) return
+  throw Object.assign(new Error('the requested --evidence file could not be written'), {
+    category: 'INFRA_FAILURE',
+    code: 'EVIDENCE_WRITE_FAILED',
+  })
+}
+
 function usage() {
   return 'usage: pnpm smoke:split-upgrade -- --old <absolute-old.tgz> --new <absolute-new.tgz> [--evidence <file>]'
 }
@@ -2299,13 +2316,15 @@ async function main() {
       sameProtocol: true,
       sameDshRuntime: true,
     }
+    if (options.evidence !== undefined) {
+      // Land the document the operator asked for BEFORE announcing anything:
+      // same private-write contract as the FAIL twin (a fresh `0600` inode
+      // instead of relying on an existing file's mode), and an unwritable
+      // target fails the lane instead of printing a PASS with no evidence.
+      writeRequestedEvidence(options.evidence, evidence)
+    }
     process.stdout.write(`${JSON.stringify(evidence, null, 2)}\n`)
     process.stdout.write('SPLIT_UPGRADE_SMOKE_PASS (cross-build-compatible)\n')
-    if (options.evidence !== undefined) {
-      // Same private-write contract as the FAIL twin: replace the target on a
-      // fresh `0600` inode instead of relying on an existing file's mode.
-      writePrivateReport(options.evidence, evidence)
-    }
   } catch (error) {
     // Report BEFORE the cleanup below: the projection reads the still-live
     // Host/Client handles, and the work root still exists while it is built.

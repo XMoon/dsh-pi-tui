@@ -323,7 +323,11 @@ test('the U lane reports every failure with a bounded default projection', () =>
   assert.match(main, /emitInputFailure\(\{[\s\S]{0,160}evidencePath: options\?\.evidence/u,
     'an input failure before the collector still writes the --evidence FAIL twin')
   assert.match(main, /diagnostics\.reportFailure\(error, \{ evidencePath: options\.evidence \}\)/u)
-  assert.match(source, /writePrivateReport\(options\.evidence, evidence\)/u)
+  assert.match(source, /writeRequestedEvidence\(options\.evidence, evidence\)/u,
+    'a requested PASS evidence document must fail the lane when it cannot land')
+  assert.ok(source.indexOf('writeRequestedEvidence(options.evidence, evidence)')
+    < source.indexOf("'SPLIT_UPGRADE_SMOKE_PASS"),
+    'the PASS marker may only be announced after the requested evidence landed')
 })
 
 test('the reload waits fail early on a refusal yet still PASS only on a painted notice', () => {
