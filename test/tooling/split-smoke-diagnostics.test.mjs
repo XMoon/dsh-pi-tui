@@ -1382,6 +1382,19 @@ test('the SAME handle passed twice is one process, with or without a PID', () =>
   const merged = projectFailureReport({ lane: 'split-process', processes: [withPidA, withPidB] })
   assert.equal(merged.processes.length, 1, 'one PID is one process')
   assert.equal(merged.processes[0].exited, true, 'the exit fact from either wrapper survives')
+  assert.equal(merged.processes[0].exitCode, 0, 'the exit code survives the merge')
+  // EACH fact must come from the OTHER wrapper, not from itself: a merge that
+  // only repeats the first wrapper's values silently drops what it learned.
+  const signalled = { role: 'surface-client', exited: true, records: [{ m4a0: 'ready', pid: 4343 }], exitResult: { code: null, signal: 'SIGTERM' } }
+  const signalFirst = { role: 'surface-client', exited: false, records: [{ m4a0: 'ready', pid: 4343 }] }
+  const signalMerged = projectFailureReport({ lane: 'split-process', processes: [signalFirst, signalled] })
+  assert.equal(signalMerged.processes.length, 1)
+  assert.equal(signalMerged.processes[0].exitSignal, 'SIGTERM',
+    'the second wrapper\'s signal must survive the merge')
+  // And the reverse order must produce the same facts.
+  const reverse = projectFailureReport({ lane: 'split-process', processes: [signalled, signalFirst] })
+  assert.equal(reverse.processes[0].exitSignal, 'SIGTERM', 'order must not change the merged facts')
+  assert.equal(reverse.processes[0].exited, true)
 })
 
 test('no bounded wait in either lane still throws a bare Error', () => {
