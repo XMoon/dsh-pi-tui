@@ -847,6 +847,49 @@ test('src/** can never reach the test-only M3 carrier, by import or by symbol (M
     entry('app/remote/x.ts', '// the retired createRemoteApplicationRuntime lives in test/support now\nexport const x = 1\n'),
   ]), [])
 
+  // Every LOAD spelling reaches the same verdict: static, type-only, re-export,
+  // `require()`, string `import()`, and a no-substitution template `import()`.
+  const spellings = [
+    "import { x } from '../../test/support/m3-inprocess/runtime.ts'\n",
+    "import type { X } from '../../test/support/m3-inprocess/runtime.ts'\n",
+    "export * from '../../test/support/m3-inprocess/runtime.ts'\n",
+    "const m = require('../../test/support/m3-inprocess/runtime.ts')\n",
+    "const m = await import('../../test/support/m3-inprocess/runtime.ts')\n",
+    'const m = await import(`../../test/support/m3-inprocess/runtime.ts`)\n',
+  ]
+  for (const source of spellings) {
+    const violations = findRetiredM3CompositionViolations([entry('app/remote/x.ts', source)])
+    assert.equal(violations.length, 1, `the load spelling must be refused: ${source.trim()}`)
+    assert.equal(violations[0].rule, 'src-imports-test-support')
+  }
+
+  // …and every SYMBOL spelling too, including the member-access and
+  // element-access forms that hide the identifier from a naive walk.
+  const symbolSpellings = [
+    'export function boot() { return createRemoteApplicationRuntime() }\n',
+    'export function boot(factory) { return factory.createRemoteApplicationRuntime() }\n',
+    "export function boot(factory) { return factory['createRemoteApplicationRuntime']() }\n",
+    'export const pick = (m) => m.createExperimentalRemoteRuntime\n',
+    'const { createRemoteHostRuntime } = carrier\n',
+  ]
+  for (const source of symbolSpellings) {
+    const violations = findRetiredM3CompositionViolations([entry('app/remote/x.ts', source)])
+    assert.equal(violations.length, 1, `the symbol spelling must be refused: ${source.trim()}`)
+    assert.equal(violations[0].rule, 'retired-m3-composition')
+  }
+
+  // A DECLARATION of that name (an object key, an interface member, a method or a
+  // parameter) is not a reference to the retired carrier and stays legal.
+  assert.deepEqual(findRetiredM3CompositionViolations([
+    entry('app/remote/x.ts', [
+      'export interface Factory {',
+      '  createRemoteApplicationRuntime: () => void',
+      '}',
+      'export const keys = { createRemoteHostRuntime: 1 }',
+      'export function build(createRemoteClientRuntime: () => void) { return 1 }',
+    ].join('\n')),
+  ]), [])
+
   // The REAL production tree is clean, and the retired symbols exist only in
   // the test carrier.
   const tree = collectSourceEntries()

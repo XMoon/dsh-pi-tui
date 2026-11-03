@@ -220,6 +220,7 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     't63',
     't64',
     't65',
+    't66',
     'SPLIT_PROCESS_CLIENT_OMIT_COOKIE',
     'SPLIT_PROCESS_CLIENT_FORCE_STARTUP_FATAL',
     'SPLIT_PROCESS_CLIENT_FORCE_REFRESH_UNRESPONSIVE_ONCE',

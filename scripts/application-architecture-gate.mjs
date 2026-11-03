@@ -1022,24 +1022,47 @@ export function findRetiredM3CompositionViolations(entries) {
       report(node, 'src-imports-test-support',
         `src/** must never import test/** (${specifier}); the M3 carrier is test-only`)
     }
+    /**
+     * A module specifier in ANY spelling TypeScript can load: a string literal,
+     * or a template literal with no substitution (`` import(`./x.ts`) ``). A
+     * substituted template is not a static edge and is reported separately by
+     * the loader rules, never silently trusted.
+     */
+    const specifierText = (node) => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)
+      ? node.text
+      : undefined
+    const CALLEE_LOADERS = new Set(['require', 'import'])
     const visit = (node) => {
       if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node))
-        && node.moduleSpecifier !== undefined && ts.isStringLiteral(node.moduleSpecifier)) {
-        checkSpecifier(node, node.moduleSpecifier.text)
-      } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword
-        && node.arguments.length > 0 && ts.isStringLiteral(node.arguments[0])) {
-        checkSpecifier(node, node.arguments[0].text)
+        && node.moduleSpecifier !== undefined) {
+        const specifier = specifierText(node.moduleSpecifier)
+        if (specifier !== undefined) checkSpecifier(node, specifier)
+      } else if (ts.isCallExpression(node) && node.arguments.length > 0
+        && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+          || (ts.isIdentifier(node.expression) && CALLEE_LOADERS.has(node.expression.text)))) {
+        const specifier = specifierText(node.arguments[0])
+        if (specifier !== undefined) checkSpecifier(node, specifier)
       } else if (ts.isIdentifier(node) && RETIRED_M3_COMPOSITION_SYMBOLS.includes(node.text)) {
         const parent = node.parent
-        // The property NAME of an object literal / member access is not a
-        // reference to the symbol, and a property access (`x.createRemote...`)
-        // is checked by its own identifier node.
-        const isPropertyName = (ts.isPropertyAssignment(parent) || ts.isPropertyAccessExpression(parent)
-          || ts.isMethodDeclaration(parent)) && parent.name === node
-        if (!isPropertyName) {
+        // A DECLARATION names the symbol without referencing the retired
+        // carrier: an object-literal key, an interface member, a method or a
+        // parameter. Everything else is a reference — including a MEMBER ACCESS
+        // (`x.createRemoteApplicationRuntime`) and an aliased destructure.
+        const isDeclarationName = (ts.isPropertyAssignment(parent) || ts.isMethodDeclaration(parent)
+          || ts.isPropertySignature(parent) || ts.isMethodSignature(parent)
+          || ts.isPropertyDeclaration(parent) || ts.isParameter(parent)
+          || ts.isVariableDeclaration(parent) || ts.isFunctionDeclaration(parent))
+          && parent.name === node
+        if (!isDeclarationName) {
           report(node, 'retired-m3-composition',
             `src/** must not reference the retired M3 in-process composition symbol "${node.text}"`)
         }
+      } else if (ts.isElementAccessExpression(node) && ts.isStringLiteral(node.argumentExpression)
+        && RETIRED_M3_COMPOSITION_SYMBOLS.includes(node.argumentExpression.text)) {
+        // `factory['createRemoteApplicationRuntime']` is the same reference with
+        // the identifier hidden from the AST walk.
+        report(node, 'retired-m3-composition',
+          `src/** must not reference the retired M3 in-process composition symbol "${node.argumentExpression.text}"`)
       }
       ts.forEachChild(node, visit)
     }
