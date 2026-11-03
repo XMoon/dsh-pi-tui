@@ -529,6 +529,35 @@ test('Q06 a different model writes once with its OWN effort decision', async (t)
   assert.equal(m.applied.length, 1)
 })
 
+test('Q08 an admitted write also refuses the Full handoff and any second read', async (t) => {
+  const m = await mountedQuick()
+  t.after(() => { void m.dispose() })
+  const { pane } = m
+  await m.openAndHydrate({ provider: 'alpha', model: 'a-one', reasoningEffort: 'high' })
+  click(pane, menuAction(pane, 'o1'))
+  await waitUntil('the effort page mounted', () => bodyLabels(pane).includes('Low'))
+  click(pane, menuAction(pane, 'o0'))
+  await waitUntil('the write started', () => m.applied.length === 1)
+  // While that write is in flight the fixed Full footer is inert too: no second
+  // presentation, no second directory read, no second dispatch.
+  click(pane, menuAction(pane, 'full'))
+  await observeInactivity(pane)
+  assert.deepEqual(m.entries.full, [], 'the Full handoff never runs under an admitted write')
+  assert.equal(m.counts.retries, 0, 'and no second directory read is started')
+  assert.equal(m.applied.length, 1, 'still exactly one selection')
+  m.settle('committed')
+  await waitUntil('committed dismisses', () => !menuMounted(pane))
+})
+
+/**
+ * A bounded NEGATIVE-observation window: the claim under test is that nothing
+ * happens (no second dispatch, no reopen), and the only way to witness a
+ * nothing is to wait out the window in which it could have happened.
+ */
+async function observeInactivity(pane: TspPane): Promise<void> {
+  await settle(120) // negative: bounded window for the refused intent
+}
+
 test('Q06 a model that declares a default effort is written WITH that default', async (t) => {
   const m = await mountedQuick()
   t.after(() => { void m.dispose() })
@@ -878,11 +907,19 @@ test('Q15 a partial read keeps every usable group and states the failed provider
   await m.openAndHydrate({ provider: 'alpha', model: 'a-one', reasoningEffort: 'high' })
   click(pane, menuAction(pane, 'o0'))
   await waitUntil('the model page mounted', () => menuNode(pane, 'search') !== undefined)
-  const failure = menuNodes(pane).find(node => nodeKey(node).includes('failure-gamma'))
+  // The failure line's KEY is a container token (panel serial + index): an
+  // external provider id never reaches a node key, so the line is addressed by
+  // what it paints, exactly like the client does.
+  // The failure line's KEY is a container token (panel serial + index): an
+  // external provider id never reaches a node key, so the line is addressed by
+  // its own painted text, exactly like the client does.
+  const failure = menuNodes(pane).find(node => String(node.p['text'] ?? '') === 'Gamma · unavailable')
   assert.ok(failure, 'the failed provider is shown as inert context')
   assert.equal(text(pane, failure), 'Gamma · unavailable')
   assert.equal(attrOf(failure, 'data-detail'), 'provider gamma is unreachable')
   assert.equal(failure!.p['tag'], 'div', 'a failed provider line is not a selectable row')
+  assert.equal(nodeKey(failure!).includes('gamma'), false, 'no provider id enters a node key')
+  assert.equal(/failure-\d+$/.test(nodeKey(failure!)), true, 'the failure line is keyed by index')
   click(pane, menuAction(pane, 'o2'))
   await waitUntil('the write reached the owner', () => m.applied.length === 1)
   assert.deepEqual(m.applied[0], { provider: 'alpha', model: 'a-two' },
@@ -949,6 +986,17 @@ test('Q17 hostile model facts are sanitized on the wire and untouched in the wri
   }
   const target = menuBodyRows(pane).find(node => text(pane, node).startsWith('Evil'))
   assert.ok(target)
+  // RFL-001 witness: NO external identity reaches a node key. The group section,
+  // the failure line and every row are keyed by panel serial + frame revision +
+  // paint index, so a dotted or control-character provider/model id cannot
+  // collide with another node's id — while the WRITE still carries that exact id.
+  for (const node of menuNodes(pane)) {
+    const key = nodeKey(node)
+    assert.equal(key.includes('\u0000'), false, 'no control byte enters a node key')
+    assert.equal(key.includes('evil'), false, 'the hostile model id never enters a key')
+    assert.equal(key.includes('Gamma'), false, 'a provider name never enters a key')
+    assert.equal(key.includes('alpha'), false, 'a provider id never enters a key')
+  }
   click(pane, target!)
   await waitUntil('the write reached the owner', () => m.applied.length === 1)
   assert.deepEqual(m.applied[0], { provider: 'a', model: 'evil-name' },
@@ -1044,6 +1092,7 @@ test('the real registered command drives one read, one writer and the authoritat
       'the reopened panel marks the model the Session now uses')
     assert.equal(writes.length, 1, 'and the reopen wrote nothing')
   } finally {
+    // bounded: the official Direct composition fixture owns its own teardown settle window.
     await fixture.settle()
   }
 })
@@ -1076,6 +1125,7 @@ test('sessionless: the trigger routes to the full panel with its explicit Save d
     assert.equal(reads.length, 1, 'the SAME registered command read the directory once')
     assert.equal(fixture.modelCalls(), 0, 'opening the picker dispatches no prompt and creates no Session')
   } finally {
+    // bounded: the official Direct composition fixture owns its own teardown settle window.
     await fixture.settle()
   }
 })
@@ -1083,41 +1133,74 @@ test('sessionless: the trigger routes to the full panel with its explicit Save d
 /* ============================== One command owner, two presentation variants */
 
 interface OwnerProbe {
-  readonly calls: { loads: number; selects: ModelSelectionDto[]; pending: unknown[] }
+  readonly calls: { loads: number; selects: ModelSelectionDto[]; pending: unknown[]; notices: string[] }
   readonly opened: Array<'full' | 'quick'>
   readonly commands: ReturnType<typeof createModelCommands>
+  /** Hold the port write (the Host has not answered yet), then release it. */
+  releaseWrite(): void
+  /** The subject moves to a NEW Session while the write is in flight. */
+  moveToNewSession(): void
+  /** The Session the port write was actually dispatched against. */
+  writtenSession(): string | undefined
 }
 
 /** The registered `/model` command over the narrow boundary it actually uses:
  *  one catalog, one writer, one pending marker. */
-function commandOwner(options: { readonly sessionless: boolean; readonly presentation: ModelPresentation }): OwnerProbe {
-  const calls = { loads: 0, selects: [] as ModelSelectionDto[], pending: [] as unknown[] }
+function commandOwner(options: {
+  readonly sessionless: boolean
+  readonly presentation: ModelPresentation
+  /** Stage the port write so the test can move the subject while it is in flight. */
+  readonly holdWrite?: boolean
+  /** Replace the catalog boundary with a transport-neutral port shape. */
+  readonly port?: Record<string, unknown>
+}): OwnerProbe {
+  const calls = {
+    loads: 0,
+    selects: [] as ModelSelectionDto[],
+    pending: [] as unknown[],
+    notices: [] as string[],
+    port: [] as string[],
+    sessions: [] as string[],
+  }
   const opened: Array<'full' | 'quick'> = []
+  // The subject the command captured, and the live Session the port write was
+  // dispatched against: both are mutable so a real A→B move can be staged.
+  let sessionId = options.sessionless ? undefined : 'session-a'
+  let scopeCurrent = true
+  let written: string | undefined
+  let holdWrite = options.holdWrite === true
+  let release: (() => void) | undefined
   const directory: ModelDirectoryDto = {
     default: { provider: 'p', model: 'one' },
     routableProviders: ['p'],
     groups: [{ id: 'p', name: 'P', models: [{ id: 'one', name: 'One' }, { id: 'two', name: 'Two' }] }],
     failures: [],
   }
-  const models = {
+  const models = (options.port as Record<string, unknown> | undefined) ?? {
     available: () => true,
     loadDirectory: async () => { calls.loads += 1; return directory },
     sessionSelection: () => ({ provider: 'p', model: 'one' }),
-    selectSessionModel: async (_id: string, selection: ModelSelectionDto) => {
+    selectSessionModel: async (id: string, selection: ModelSelectionDto) => {
       calls.selects.push(selection)
+      written = id
+      if (holdWrite) await new Promise<void>(resolve => { release = resolve })
       return { ownership: 'owned', outcome: { kind: 'committed', value: selection } }
     },
     saveDefaultSelection: async () => ({ kind: 'committed', value: undefined }),
   }
   const runner = {
     catalog: { models },
-    captureSessionScope: () => ({ sessionId: options.sessionless ? undefined : 's1', epoch: 1 }),
-    captureLiveSessionScope: () => (options.sessionless ? undefined : { sessionId: 's1', epoch: 1 }),
-    isSessionScopeCurrent: () => true,
-    currentSessionId: options.sessionless ? undefined : 's1',
+    captureSessionScope: () => ({ sessionId, epoch: 1 }),
+    captureLiveSessionScope: () => (sessionId === undefined ? undefined : { sessionId, epoch: 1 }),
+    isSessionScopeCurrent: () => scopeCurrent,
+    currentSessionId: sessionId,
     signal: new AbortController().signal,
     diag: { debug() {}, warn() {}, error() {} },
-    withWriter: async (_scope: unknown, run: () => Promise<unknown>) => await run(),
+    withWriter: async (scope: unknown, run: () => Promise<unknown>) => {
+      calls.port.push(`withWriter`)
+      calls.sessions.push(String((scope as { sessionId?: string }).sessionId))
+      return await run()
+    },
     setModelSelectionPending: (marker: unknown) => { calls.pending.push(marker) },
     refreshStatus() {},
     updateWelcomeCard() {},
@@ -1135,7 +1218,7 @@ function commandOwner(options: { readonly sessionless: boolean; readonly present
         opened.push('quick')
         return options.presentation.openQuick!(request)
       } }),
-    notify: () => {},
+    notify: (message) => { calls.notices.push(message) },
   }
   const commands = createModelCommands({
     runner: runner as unknown as ModelCommandDeps['runner'],
@@ -1145,9 +1228,59 @@ function commandOwner(options: { readonly sessionless: boolean; readonly present
     recordCommandDraftDisposition: () => {},
     notifyOutcome: () => {},
   })
-  return { calls, opened, commands }
+  return {
+    calls,
+    opened,
+    commands,
+    releaseWrite: () => {
+      holdWrite = false
+      release?.()
+    },
+    moveToNewSession: () => {
+      // The replacement subject: the captured scope is no longer current and the
+      // live Session id is a different one.
+      scopeCurrent = false
+      sessionId = 'session-b'
+    },
+    writtenSession: () => written,
+  }
 }
 
+/**
+ * A transport-neutral `ModelCatalog` in the Remote shape: the same four
+ * semantic members the Remote adapter implements, with NO Direct-only surface.
+ * `remoteShapedPort` is typed as the port the command consumes, so a quick path
+ * that reached for a Direct Agent or a private RPC would not compile, and the
+ * recorded `port` sequence shows the two presentations drive the identical calls.
+ */
+function remoteShapedPort(notes: { port: string[]; selections: unknown[] }) {
+  const directory: ModelDirectoryDto = {
+    default: { provider: `rp`, model: `r-one` },
+    routableProviders: [`rp`],
+    groups: [{ id: `rp`, name: `Remote Provider`, models: [
+      { id: 'r-one', name: 'Remote One', reasoning: { efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] } },
+      { id: 'r-two', name: 'Remote Two' },
+    ] }],
+    failures: [],
+  }
+  return {
+    available: () => true,
+    loadDirectory: async () => { notes.port.push(`loadDirectory`); return directory },
+    defaultSelection: () => ({ provider: `rp`, model: `r-one` }),
+    sessionSelection: () => { notes.port.push(`sessionSelection`); return { provider: `rp`, model: `r-two` } },
+    selectSessionModel: async (_id: string, selection: ModelSelectionDto) => {
+      notes.port.push(`selectSessionModel`)
+      notes.selections.push(selection)
+      return { ownership: 'owned' as const, outcome: { kind: 'committed' as const, value: selection } }
+    },
+    saveDefaultSelection: async () => {
+      notes.port.push(`saveDefaultSelection`)
+      return { kind: 'unsupported' as const, reason: 'the Remote backend has no TUI global-default write' }
+    },
+    discoverModels: async () => [],
+    listConfigurableProviders: () => [],
+  }
+}
 /** A presenter that records the request the command handed it. */
 function recordingPresenter(): { readonly presentation: ModelPresentation; lastRequest(): ModelPickerRequest | undefined } {
   let last: ModelPickerRequest | undefined
@@ -1206,6 +1339,77 @@ test('a renderer without a quick presentation is refused, never silently substit
   assert.equal(result.kind, 'error', 'the registered command states the missing capability')
   assert.deepEqual(probe.opened, [], 'no silent fallback open, no accepted write')
   assert.equal(probe.calls.loads, 0, 'and no directory read was started')
+})
+
+// RFL-003: the fence that matters in production is the COMMAND's own scope
+// currentness, not the presenter's retirement. A quick write that is already
+// dispatched when the subject moves must settle as `superseded`: no pending
+// marker clear, no notice, no repaint, and never a write against the new owner.
+test('the command refuses a late quick write after the subject moved to another Session', async () => {
+  const recorder = recordingPresenter()
+  const probe = commandOwner({ sessionless: false, presentation: recorder.presentation, holdWrite: true })
+  await probe.commands.openModelQuick()
+  const request = recorder.lastRequest()
+  assert.ok(request)
+  const settling = request!.apply({ provider: 'p', model: 'two' })
+  // The subject is replaced while the Host write is still in flight.
+  probe.moveToNewSession()
+  probe.releaseWrite()
+  const outcome = await settling
+  assert.equal(outcome, 'superseded', 'a stale operation owns nothing on the new subject')
+  assert.equal(probe.writtenSession(), 'session-a',
+    'the dispatched write went to the Session that was captured, never to the replacement')
+  assert.equal(probe.calls.pending.length, 1,
+    'the stale settlement does not clear the replacement owner\'s pending marker')
+  assert.deepEqual(probe.calls.notices, [], 'and it emits no notice onto the new subject')
+})
+test('the quick and full presentations drive the identical semantic port', async () => {
+  const quickNotes = { port: [] as string[], selections: [] as unknown[] }
+  const quickRecorder = recordingPresenter()
+  const quickProbe = commandOwner({
+    sessionless: false,
+    presentation: quickRecorder.presentation,
+    port: remoteShapedPort(quickNotes) as unknown as Parameters<typeof commandOwner>[0]['port'],
+  })
+  await quickProbe.commands.openModelQuick()
+  const quickRequest = quickRecorder.lastRequest()
+  assert.ok(quickRequest)
+  await quickRequest!.apply({ provider: 'rp', model: 'r-one', reasoningEffort: 'high' })
+
+  const fullNotes = { port: [] as string[], selections: [] as unknown[] }
+  const fullRecorder = recordingPresenter()
+  const fullProbe = commandOwner({
+    sessionless: false,
+    presentation: fullRecorder.presentation,
+    port: remoteShapedPort(fullNotes) as unknown as Parameters<typeof commandOwner>[0]['port'],
+  })
+  await fullProbe.commands.openModel('models')
+  const fullRequest = fullRecorder.lastRequest()
+  assert.ok(fullRequest)
+  await fullRequest!.apply({ provider: 'rp', model: 'r-one', reasoningEffort: 'high' })
+
+  assert.deepEqual(fullNotes.port, quickNotes.port,
+    'quick and full use the same ModelCatalog members in the same order\n       (one directory read, one session current read, one official selection write)')
+  assert.deepEqual(quickNotes.selections, [{ provider: 'rp', model: 'r-one', reasoningEffort: 'high' }],
+    'the port received the exact DTO identity, not a display label')
+  assert.equal(quickNotes.port.includes('saveDefaultSelection'), false,
+    'a live quick selection never touches the global-default writer')
+
+  // Sessionless: the command routes the quick request to the FULL panel, whose
+  // explicit 'Save default' is the only path to the (Remote-unsupported) default
+  // writer. Nothing writes a default implicitly.
+  const offNotes = { port: [] as string[], selections: [] as unknown[] }
+  const offRecorder = recordingPresenter()
+  const offProbe = commandOwner({
+    sessionless: true,
+    presentation: offRecorder.presentation,
+    port: remoteShapedPort(offNotes) as unknown as Parameters<typeof commandOwner>[0]['port'],
+  })
+  await offProbe.commands.openModelQuick()
+  assert.deepEqual(offProbe.opened, ['full'],
+    'no quick selector exists before a Session')
+  assert.equal(offNotes.port.includes('saveDefaultSelection'), false,
+    'and opening it wrote no global default')
 })
 
 test('the typed /model route never takes the quick presentation', async () => {

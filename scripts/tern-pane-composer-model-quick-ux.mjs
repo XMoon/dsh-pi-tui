@@ -113,12 +113,17 @@ function allLabels(snap) {
 }
 
 /** Everything the menu paints, rows and non-rows (group heads, notices, the
- *  search placeholder): a click that changes only the notice still changes it. */
+ *  search placeholder): a click that changes only the notice still changes it.
+ *  The client's tree carries an `id` on only some nodes, so the region is
+ *  selected by geometry against the menu's own anchored box, never by id. */
 function menuPainted(snap) {
   const box = menuBox(snap)
   if (box === undefined) return ''
   return snap.nodes
-    .filter(node => node.id !== undefined && inside(box, boxOf(node)))
+    .filter(node => {
+      const inner = boxOf(node)
+      return inner.w > 0 && inner.h > 0 && inside(box, inner)
+    })
     .map(node => String(node.text ?? ''))
     .filter(Boolean)
     .join(' | ')
@@ -175,7 +180,9 @@ export default async function (h) {
     && !title.includes('…') && !title.includes('▾') && !title.includes('▴')
     && !title.includes('null') && !title.includes('undefined'),
     `title=${JSON.stringify(title)} label=${JSON.stringify(label)}`)
-  if (testCase !== 'noeffort') {
+  // The cases whose fixture declares NO effort have nothing to abbreviate; the
+  // claim below is about the narrow pane's clamped effort, not about them.
+  if (testCase !== 'noeffort' && testCase !== 'partial') {
     h.check('the tooltip keeps the unabbreviated effort value the clamped label drops',
       /· (high|low|medium)$/.test(title.replace(' — model and reasoning effort', ''))
       || testCase === 'models',
@@ -297,10 +304,11 @@ export default async function (h) {
       h.check('the Model page searches through a native input field', field !== undefined,
         JSON.stringify(page.nodes.filter(node => node.tag === 'input').map(node => node.tag)))
       const painted = menuPainted(page)
+      const expectedHead = testCase === 'long' ? 'A very long advertised provider name' : 'Alpha Provider'
       h.check('provider group heads come from the directory order',
-        painted.includes('Alpha Provider'), painted.slice(0, 260))
+        painted.includes(expectedHead), painted.slice(0, 260))
       const seen = menuLabels(page)
-      const expectedRow = testCase === 'models' ? 'Model Number 01' : 'Alpha Two'
+      const expectedRow = testCase === 'models' ? 'Model Number 01' : testCase === 'long' ? 'Beta One' : 'Alpha Two'
       h.check('the model rows are painted from the directory read',
         seen.some(label => label.includes(expectedRow)), JSON.stringify(seen))
       h.check('the subpage keeps its fixed Back row and Full footer',
@@ -353,7 +361,14 @@ export default async function (h) {
           h.check('the admitted write is stated as pending on the real client',
             menuPainted(h.snapshot()).includes('Selecting…'), menuPainted(h.snapshot()).slice(0, 260))
           const duringPending = countEvents(h, 'apply')
-          await choose('Alpha Two', ' (second click under pending)')
+          // Under an admitted write the row is inert BY CONTRACT, so the frame is
+          // expected to stay unchanged: the claim is the event counter below, and
+          // the click is delivered raw (no change oracle) exactly for that reason.
+          const inertRow = menuButtons(h.snapshot()).find(entry => nodeText(entry).includes('Alpha Two'))
+          if (inertRow !== undefined) {
+            const inertBox = boxOf(inertRow)
+            await h.clickAt(inertBox.cx, inertBox.cy)
+          }
           await h.key('Return', 400)
           h.check('a second click or Enter under an admitted write dispatches no second selection',
             countEvents(h, 'apply') === duringPending,

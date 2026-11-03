@@ -164,6 +164,10 @@ const FOOTER_ROW = 'full'
  * scroll and for the search field the caret, on every repaint.
  */
 const searchKeyOf = (panel: QuickPanel): string => `q${panel.serial}-search`
+/** A non-interactive container key: panel serial plus a role/index token. No
+ *  provider, model or failure identity from the directory ever reaches an HTML
+ *  key, so a hostile or dotted id cannot collide with another node's id. */
+const containerKeyOf = (panel: QuickPanel, token: string): string => `q${panel.serial}-${token}`
 /**
  * The key of one OPERABLE row: panel serial + frame revision + paint token.
  *
@@ -509,10 +513,11 @@ export class TspModelQuickMenu {
       : row(actionKeyOf(panel, BACK_ROW), '‹ Model & Effort', panel.zone === 'back', { kind: 'back', revision })
     const footer = row(actionKeyOf(panel, FOOTER_ROW), 'All models & details…', panel.zone === 'footer', { kind: 'full', revision })
     const sections: QuickMenuSection[] = []
+    let sectionAt = -1
     if (panel.phase === 'error') {
       // The failed read offers exactly ONE operation: the command's own re-read.
       sections.push({
-        key: `q${panel.serial}-retry`,
+        key: containerKeyOf(panel, 's0'),
         head: '',
         rows: [mint(RETRY_ROW, 'Retry', undefined, false, false, { kind: 'retry', revision })],
       })
@@ -540,7 +545,7 @@ export class TspModelQuickMenu {
           { kind: 'open-effort', revision },
         ))
       }
-      sections.push({ key: `q${panel.serial}-root`, head: '', rows })
+      sections.push({ key: containerKeyOf(panel, 's0'), head: '', rows })
     } else if (panel.page === 'effort') {
       const rows = currentChoices(panel).map((choice) => mint(
         choice.value,
@@ -550,7 +555,7 @@ export class TspModelQuickMenu {
         ready && choice.value === currentEffortValue(panel),
         { kind: 'choose-effort', value: choice.value, revision },
       ))
-      sections.push({ key: `q${panel.serial}-efforts`, head: '', rows })
+      sections.push({ key: containerKeyOf(panel, 's0'), head: '', rows })
     } else {
       for (const group of panel.directory?.directory.groups ?? []) {
         const rows = visibleModels(panel)
@@ -564,7 +569,8 @@ export class TspModelQuickMenu {
             { kind: 'choose-model', rowId: modelRowId(item), revision },
           ))
         if (rows.length === 0) continue
-        sections.push({ key: `q${panel.serial}-g-${group.id}`, head: sanitizedPhysicalLine(group.name), rows })
+        sectionAt += 1
+        sections.push({ key: containerKeyOf(panel, `s${sectionAt}`), head: sanitizedPhysicalLine(group.name), rows })
       }
     }
     return {
@@ -578,8 +584,8 @@ export class TspModelQuickMenu {
       searching: panel.page === 'models' && panel.zone === 'search',
       back,
       sections,
-      failures: panel.failures.map((failure) => ({
-        key: `${panel.serial}-failure-${failure.providerId}`,
+      failures: panel.failures.map((failure, index) => ({
+        key: containerKeyOf(panel, `failure-${index}`),
         label: `${sanitizedPhysicalLine(failure.providerName)} · unavailable`,
         detail: sanitizedPhysicalLine(failure.message),
       })),
