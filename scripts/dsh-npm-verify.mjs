@@ -199,7 +199,7 @@ async function main() {
       // against, so it must clear the same Direct ↔ official Host fork/rewind
       // parity gate as source mode. Keeping the closure here (rather than in the
       // ordinary source-check job) lets npm CI prove it too.
-      await run(PNPM_COMMAND, ['smoke:remote-d2-closure'], workspace, 'D2 closure (fork/rewind parity) smoke', npmEnvironment)
+      await run(PNPM_COMMAND, ['smoke:remote-fork-rewind-closure'], workspace, 'D2 closure (fork/rewind parity) smoke', npmEnvironment)
       console.log(`DSH Client family compatibility passed — ${distribution.version}${exactFamily ? ' (exact family)' : ''}`)
       return
     }

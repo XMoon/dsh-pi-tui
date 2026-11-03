@@ -18,7 +18,7 @@
  * remote-model-port / remote-preset-port). This closure proves only the D2.4
  * fork/rewind parity scenarios.
  *
- * @module dsh-remote-d2-closure-smoke
+ * @module dsh-remote-fork-rewind-closure-smoke
  */
 
 import { spawnSync } from 'node:child_process'
@@ -27,7 +27,7 @@ import { dirname, resolve } from 'node:path'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PROOFS = [
-  ['fork/rewind parity', 'scripts/dsh-remote-d2.4-fork-parity-smoke.mjs'],
+  ['fork/rewind parity', 'scripts/dsh-remote-fork-rewind-parity-smoke.mjs'],
 ]
 
 function main() {
@@ -52,6 +52,6 @@ function main() {
 try {
   main()
 } catch (error) {
-  console.error(`DSH_REMOTE_D2_CLOSURE_FAILURE: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+  console.error(`DSH_REMOTE_FORK_REWIND_CLOSURE_FAILURE: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
   process.exitCode = 1
 }

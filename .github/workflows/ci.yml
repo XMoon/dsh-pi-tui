@@ -381,11 +381,11 @@ jobs:
       # non-zero exit with the script name and the tail of its output.
       - name: D1 closure gate
         if: env.DSH_MODE == 'source'
-        run: pnpm smoke:remote-d1-closure
+        run: pnpm smoke:remote-read-capability-closure
 
       - name: D2 closure smoke
         if: env.DSH_MODE == 'source'
-        run: pnpm smoke:remote-d2-closure
+        run: pnpm smoke:remote-fork-rewind-closure
 
       # The tmux terminal-tooling suite. The lane was historically named
       # `test:docs`, but it never tested `docs/**`: it proves the tmux

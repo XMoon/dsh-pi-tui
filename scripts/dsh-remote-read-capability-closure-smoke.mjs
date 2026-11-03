@@ -4,7 +4,7 @@
  * own their fixtures and assertions; this script aggregates their results into
  * the explicit read-gap ledger without duplicating that logic.
  *
- * @module dsh-remote-d1-closure-smoke
+ * @module dsh-remote-read-capability-closure-smoke
  */
 
 import assert from 'node:assert/strict'

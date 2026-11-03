@@ -35,7 +35,7 @@
  *   header (origin/delegationDepth not copied);
  * - P8 child activation stays the Host current default.
  *
- * @module dsh-remote-d2.4-fork-parity-smoke
+ * @module dsh-remote-fork-rewind-parity-smoke
  */
 
 import assert from 'node:assert/strict'
@@ -679,6 +679,6 @@ async function main() {
 }
 
 main().catch(error => {
-  console.error(`DSH_REMOTE_D2_4_FORK_PARITY_FAILURE: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
+  console.error(`DSH_REMOTE_FORK_REWIND_PARITY_FAILURE: ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
   process.exitCode = 1
 })

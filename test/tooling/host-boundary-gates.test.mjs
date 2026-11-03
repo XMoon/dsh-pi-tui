@@ -37,7 +37,7 @@ test('the D1 closure gate is the ONE Source Mode entry for the four parity proof
   // run, and the closure is the only place that invokes it.
   assert.match(
     workflow,
-    /- name: D1 closure gate\n\s+if: env\.DSH_MODE == 'source'\n\s+run: pnpm smoke:remote-d1-closure/u,
+    /- name: D1 closure gate\n\s+if: env\.DSH_MODE == 'source'\n\s+run: pnpm smoke:remote-read-capability-closure/u,
     'the D1 closure gate must remain a Source Mode step',
   )
   for (const command of [
@@ -68,7 +68,7 @@ test('the D1 closure gate is the ONE Source Mode entry for the four parity proof
 })
 
 test('the D1 closure still invokes all four parity proofs and keeps the known-skips contract', () => {
-  const closure = readFileSync(new URL('../../scripts/dsh-remote-d1-closure-smoke.mjs', import.meta.url), 'utf8')
+  const closure = readFileSync(new URL('../../scripts/dsh-remote-read-capability-closure-smoke.mjs', import.meta.url), 'utf8')
   for (const script of [
     'scripts/dsh-remote-session-read-parity-smoke.mjs',
     'scripts/dsh-remote-surface-authority-parity-smoke.mjs',
@@ -107,8 +107,8 @@ test('Source Mode parity smokes build the vendored pi-tui dist first', () => {
 test('task, presentation, and closure smokes are Source Mode gates', () => {
   const workflow = readFileSync(CI_WORKFLOW, 'utf8')
   for (const [name, command] of [
-    ['D1 closure gate', 'smoke:remote-d1-closure'],
-    ['D2 closure smoke', 'smoke:remote-d2-closure'],
+    ['D1 closure gate', 'smoke:remote-read-capability-closure'],
+    ['D2 closure smoke', 'smoke:remote-fork-rewind-closure'],
   ]) {
     assert.match(
       workflow,
@@ -120,12 +120,12 @@ test('task, presentation, and closure smokes are Source Mode gates', () => {
   // the official SessionFace) are covered by the remote writer,
   // host-command, subagent-port, and pending-input reader unit suites, and
   // the D2 closure keeps proving fork/rewind parity through the current
-  // d2.4 smoke.
+  // the fork/rewind parity smoke.
   assert.doesNotMatch(workflow, /smoke:remote-d2-write/,
     'the retired D2.2 write harness must not remain a gate')
   // D2 stays an INDEPENDENT qualification: it must not be folded into the D1
   // closure, and the D2 closure keeps its own separate step.
-  assert.doesNotMatch(workflow, /d2-closure[\s\S]*?d1-closure/u,
+  assert.doesNotMatch(workflow, /fork-rewind-closure[\s\S]*?read-capability-closure/u,
     'the D2 closure must stay a separate step from the D1 closure')
 })
 

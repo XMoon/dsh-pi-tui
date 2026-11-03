@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * P1 isolated-profile smoke: the candidate bundle composes the official
+ * Isolated-profile job-controller smoke: the candidate bundle composes the official
  * job-controller row in a REAL DSH profile at the checkout's declared target
  * family, and the TUI's
  * non-consuming observation contract holds against the real `LocalJobRegistry`.
@@ -13,11 +13,11 @@
  *   - reading through `follow()` did NOT advance the model-facing
  *     `ctx.jobs.read()` cursor (observation is non-consuming).
  *
- * Usage: node scripts/dsh-p1-profile-smoke.mjs [path-to-candidate.tgz]
- *        pnpm smoke:p1-profile -- [path-to-candidate.tgz]
+ * Usage: node scripts/dsh-job-controller-profile-smoke.mjs [path-to-candidate.tgz]
+ *        pnpm smoke:job-controller-profile -- [path-to-candidate.tgz]
  *
- * Set DSH_P1_PROFILE_KEEP=1 to preserve the isolated profile on failure.
- * @module dsh-p1-profile-smoke
+ * Set DSH_JOB_CONTROLLER_PROFILE_KEEP=1 to preserve the isolated profile on failure.
+ * @module dsh-job-controller-profile-smoke
  */
 
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -40,7 +40,7 @@ import { loadDshDistribution, npmDshVersion } from './lib/dsh-distribution.mjs'
 import { pnpmExecutable } from './lib/process.mjs'
 
 const PNPM_COMMAND = pnpmExecutable()
-const EVIDENCE_ENV = 'PI2DSH_P1_PROFILE_EVIDENCE'
+const EVIDENCE_ENV = 'PI2DSH_JOB_CONTROLLER_PROFILE_EVIDENCE'
 const BOOT_TIMEOUT_MS = 120_000
 
 function commandOutput(result) {
@@ -122,7 +122,7 @@ function writeJobProbePackage(workDir) {
     '      // The registry requires a controller for the calling scope (the',
     '      // official tool-jobs row normally attaches one); the probe owns its',
     '      // own scratch controller so it can register a real Job.',
-    "      jobs.attachController('p1-profile-smoke')",
+    "      jobs.attachController('job-controller-profile-smoke')",
     '      let handle',
     '      let settle',
     '      const jobId = jobs.start({',
@@ -177,7 +177,7 @@ function writeJobProbePackage(workDir) {
   return probeDir
 }
 
-function writeP1Launcher(path, invocation, env) {
+function writeProfileLauncher(path, invocation, env) {
   const lines = [
     '#!/bin/sh',
     'set -eu',
@@ -202,7 +202,7 @@ async function main() {
   const tarball = resolveTarball(candidateArgument(args))
   validateCandidateTarball(tarball)
   const targetDshVersion = npmDshVersion()
-  const workDir = mkdtempSync(join(tmpdir(), 'dsh-p1-profile-'))
+  const workDir = mkdtempSync(join(tmpdir(), 'dsh-job-controller-profile-'))
   const home = join(workDir, 'home')
   const dshHome = join(workDir, 'dsh-home')
   const harnessDir = join(workDir, 'harness')
@@ -214,12 +214,12 @@ async function main() {
     [EVIDENCE_ENV]: evidencePath,
   }
 
-  const socket = `dsh-p1-profile-${process.pid}`
-  const session = `p1-profile-${process.pid}`
+  const socket = `dsh-job-controller-profile-${process.pid}`
+  const session = `job-controller-profile-${process.pid}`
   let tmux
   try {
     writeFileSync(join(harnessDir, 'package.json'), JSON.stringify({
-      name: 'dsh-p1-profile-harness',
+      name: 'dsh-job-controller-profile-harness',
       private: true,
       type: 'module',
       dependencies: { '@deepseek-ai/dsh': targetDshVersion },
@@ -240,14 +240,14 @@ async function main() {
     installPlugin(dsh, tarball, harnessDir, env, false)
     installPlugin(dsh, writeJobProbePackage(workDir), harnessDir, env, false)
 
-    const launcher = join(workDir, 'run-p1-profile.sh')
-    writeP1Launcher(launcher, dsh, env)
-    const tuiLog = join(workDir, 'p1-profile.tui.log')
+    const launcher = join(workDir, 'run-job-controller-profile.sh')
+    writeProfileLauncher(launcher, dsh, env)
+    const tuiLog = join(workDir, 'job-controller-profile.tui.log')
     const started = run('tmux', [
       'new-session', '-d', '-s', session, '-x', '100', '-y', '30',
       `script -qefc ${shellQuote(launcher)} ${shellQuote(tuiLog)}`,
     ], { cwd: workDir, env })
-    if (started.status !== 0) fail('P1_PROFILE_BOOT_FAILURE', `TUI could not start:\n${commandOutput(started)}`)
+    if (started.status !== 0) fail('PROFILE_BOOT_FAILURE', `TUI could not start:\n${commandOutput(started)}`)
     tmux = {
       capture: () => commandOutput(run('tmux', ['capture-pane', '-p', '-t', session], { env })),
       has: () => run('tmux', ['has-session', '-t', session], { env }).status === 0,
@@ -255,35 +255,35 @@ async function main() {
       stop: () => { run('tmux', ['kill-session', '-t', session], { env }) },
     }
 
-    await waitUntil('P1 profile boot', BOOT_TIMEOUT_MS, () => tmux.has() && tmux.capture().includes('❯'), 'P1_PROFILE_BOOT_FAILURE')
+    await waitUntil('profile boot', BOOT_TIMEOUT_MS, () => tmux.has() && tmux.capture().includes('❯'), 'PROFILE_BOOT_FAILURE')
     const evidence = await waitUntil('job-controller probe evidence', BOOT_TIMEOUT_MS, () => {
       const value = readOptionalJson(evidencePath)
-      if (value?.error !== undefined) fail('P1_PROFILE_PROBE_FAILURE', `job probe failed: ${String(value.error)}`)
+      if (value?.error !== undefined) fail('PROFILE_PROBE_FAILURE', `job probe failed: ${String(value.error)}`)
       return value
-    }, 'P1_PROFILE_PROBE_FAILURE')
+    }, 'PROFILE_PROBE_FAILURE')
 
-    if (evidence.jobController !== true) fail('P1_PROFILE_PROBE_FAILURE', 'ctx.jobController was not composed')
-    if (!evidence.followSawProbe) fail('P1_PROFILE_PROBE_FAILURE', `follow() did not observe the job output: ${JSON.stringify(evidence)}`)
+    if (evidence.jobController !== true) fail('PROFILE_PROBE_FAILURE', 'ctx.jobController was not composed')
+    if (!evidence.followSawProbe) fail('PROFILE_PROBE_FAILURE', `follow() did not observe the job output: ${JSON.stringify(evidence)}`)
     if (!evidence.nonConsuming || !evidence.modelReadSawProbe) {
-      fail('P1_PROFILE_PROBE_FAILURE', `observation was consuming: ${JSON.stringify(evidence)}`)
+      fail('PROFILE_PROBE_FAILURE', `observation was consuming: ${JSON.stringify(evidence)}`)
     }
-    if (!evidence.followFrames.includes('opened')) fail('P1_PROFILE_PROBE_FAILURE', 'follow() never opened a frame')
+    if (!evidence.followFrames.includes('opened')) fail('PROFILE_PROBE_FAILURE', 'follow() never opened a frame')
 
     tmux.send('/exit')
     await new Promise(resolveDelay => setTimeout(resolveDelay, 600))
     tmux.send('Enter')
-    await waitUntil('P1 profile exit', 30_000, () => !tmux.has(), 'P1_PROFILE_DISPOSE_FAILURE')
-    console.log(`P1 isolated-profile smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (job-controller composed, follow non-consuming)`)
+    await waitUntil('profile exit', 30_000, () => !tmux.has(), 'P1_PROFILE_DISPOSE_FAILURE')
+    console.log(`job-controller isolated-profile smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (job-controller composed, follow non-consuming)`)
   } finally {
     tmux?.stop()
-    if (process.env.DSH_P1_PROFILE_KEEP !== '1') rmSync(workDir, { recursive: true, force: true })
+    if (process.env.DSH_JOB_CONTROLLER_PROFILE_KEEP !== '1') rmSync(workDir, { recursive: true, force: true })
     else console.error(`preserved P1 profile environment: ${workDir}`)
   }
 }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
   main().catch(error => {
-    console.error(`DSH_P1_PROFILE_FAILURE[${error?.phase ?? 'UNKNOWN'}]: ${error instanceof Error ? error.message : String(error)}`)
+    console.error(`DSH_JOB_CONTROLLER_PROFILE_FAILURE[${error?.phase ?? 'UNKNOWN'}]: ${error instanceof Error ? error.message : String(error)}`)
     process.exitCode = 1
   })
 }
