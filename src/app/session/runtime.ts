@@ -690,6 +690,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // fast otherwise).
         const nextOwner = committedOwner
         if (nextOwner === undefined) throw new Error('committed transition child has no owned Session generation')
+        // The child is only checkpointed when its quiesce COMPLETED normally:
+        // a rejected quiesce never proved idle, and the plan's post-commit
+        // checkpoint is defined as running after a confirmed-idle child.
+        let childQuiesced = false
         try {
           // The child quiesce is abort-aware too: an exit during this
           // post-commit phase must cancel the NEW owner instead of hanging past
@@ -705,6 +709,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
             retired.push('child quiesce aborted by lifecycle')
             return
           }
+          // ONLY an OBSERVED settle proves the child idle: 'unobservable'
+          // (a rolled Remote binding / missing attachment) is not proof, and
+          // the checkpoint must never claim a confirmed-idle boundary.
+          childQuiesced = aborted === false
         } catch (error) {
           retired.push(`child whenIdle: ${safeErrorMessage(error)}`)
         }
@@ -718,11 +726,13 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
         // transition: the failure is recorded and the user is warned after the
         // surface work below.
         let committedDurabilityFailure: string | undefined
-        try {
-          await deps.retirement.flush(nextOwner)
-        } catch (error) {
-          committedDurabilityFailure = safeErrorMessage(error)
-          retired.push(`committed child flush: ${committedDurabilityFailure}`)
+        if (childQuiesced) {
+          try {
+            await deps.retirement.flush(nextOwner)
+          } catch (error) {
+            committedDurabilityFailure = safeErrorMessage(error)
+            retired.push(`committed child flush: ${committedDurabilityFailure}`)
+          }
         }
         try {
           await deps.surface.initLiveSession(nextOwner)

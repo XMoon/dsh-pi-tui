@@ -1333,3 +1333,147 @@ test('a committed child checkpoint flush failure keeps the child and warns clear
   assert.equal(events.filter(event => event === `dispose:${created.id}`).length, 1,
     'the committed child must still be retired exactly once on teardown')
 })
+
+test('a transition retiring an old owner AFTER the lifecycle aborted does NOT flush its closing handle', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-late-transition-flush-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'late-transition-flush-old',
+    header: { id: 'late-transition-flush-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  // The fake create is NON-COOPERATIVE: it ignores lifecycle cancellation and
+  // resolves only after the interactive exit already started the root teardown.
+  // Its post-commit retireOld therefore runs with the lifecycle ABORTED, and by
+  // then the replaced session's write handle is already closing (exactly the
+  // production ordering of the closed-handle race, one step later).
+  let releaseCreate!: () => void
+  const createRelease = new Promise<void>(resolve => { releaseCreate = resolve })
+  let createStarted!: () => void
+  const createStartedPromise = new Promise<void>(resolve => { createStarted = resolve })
+  const harness = makeHarness(
+    home,
+    resumed,
+    { provider: 'p', model: 'm' },
+    undefined,
+    async () => {
+      createStarted()
+      await createRelease
+    },
+    retirementSubagents,
+  )
+  // Record EVERY flush call (like the harness fake) so the assertion can
+  // actually fail, then reject the one that lands on the closing handle.
+  let handleClosing = false
+  const flushCalls: string[] = []
+  const flushOriginal = (harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush.bind(harness.sessions)
+  ;(harness.sessions as { flush: (session?: unknown) => Promise<unknown> }).flush = async (session?: unknown) => {
+    const id = (session as { id?: string } | undefined)?.id ?? '?'
+    flushCalls.push(`${id}${handleClosing ? ':closing' : ''}`)
+    await flushOriginal(session)
+    if (handleClosing && id === 'late-transition-flush-old') {
+      throw new Error('session "late-transition-flush-old": flush on a closed handle')
+    }
+  }
+  const stderrWrites: string[] = []
+  const originalWrite = process.stderr.write.bind(process.stderr)
+  process.stderr.write = ((chunk: unknown) => {
+    stderrWrites.push(String(chunk))
+    return true
+  }) as typeof process.stderr.write
+  life.defer(() => { process.stderr.write = originalWrite })
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id }, () => {
+    // appExit: the root teardown is starting, so the write handle closes.
+    handleClosing = true
+    void fiber?.dispose()
+  })
+  const app = probe.apps.at(-1)
+  assert.ok(app, 'the production runner must create a TuiApp')
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const transition = newHandler()
+  await createStartedPromise
+  // Interactive exit while the create is still pending: pre-cancel + appExit.
+  app.setDraft('exit')
+  ;(app as unknown as { submitDraft(): void }).submitDraft()
+  await settle()
+  // The non-cooperative create now commits AFTER appExit began: the post-commit
+  // retireOld runs under an aborted lifecycle and must NOT flush the closing
+  // handle.
+  releaseCreate()
+  await transition
+  await settle()
+  const events = harness.retirementEvents
+  assert.deepEqual(flushCalls, ['late-transition-flush-old'],
+    `only the pre-commit old-owner flush may run; the aborted-lifecycle transition retirement must add none: ${JSON.stringify(flushCalls)}`)
+  assert.equal(events.filter(event => event === 'dispose:late-transition-flush-old').length, 1,
+    'the replaced owner must still be disposed exactly once')
+  assert.ok(!stderrWrites.some(write => write.includes('session flush failed during retirement')),
+    `a skipped flush must never surface a flush failure: ${JSON.stringify(stderrWrites)}`)
+})
+
+test('the post-commit checkpoint is skipped when the committed child quiesce REJECTS (never a checkpoint without confirmed idle)', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-retire-quiesce-reject-')
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  life.defer(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  })
+  const probe = installProbe()
+  life.defer(probe.restore)
+  let context: Context | undefined
+  let fiber: { dispose: () => Promise<unknown> } | undefined
+  life.defer(() => { if (context !== undefined) return disposeContext(context) })
+  life.defer(() => { if (fiber !== undefined) return fiber.dispose() })
+  const resumed: FakeSession = fakeSession({
+    id: 'quiesce-reject-old',
+    header: { id: 'quiesce-reject-old', cwd: home, createdAt: 1_700_000_000_000, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('old answer'),
+  })
+  const harness = makeHarness(home, resumed, { provider: 'p', model: 'm' }, undefined, undefined, retirementSubagents)
+  // The COMMITTED CHILD's whenIdle REJECTS (a real Agent failure): no idle was
+  // proven, so no checkpoint may run. The reject is injected on the CREATED
+  // handle (the shared fake's whenIdleGate swallows its gate rejection), so it
+  // reaches the production whenIdleOrAbort path unchanged.
+  const agents = harness.agents as {
+    create: (options: { sessionId: unknown }) => Promise<{ agent: { whenIdle: () => Promise<void> } }>
+  }
+  const originalCreate = agents.create.bind(agents)
+  agents.create = async (options) => {
+    const handle = await originalCreate(options)
+    handle.agent.whenIdle = async () => { throw new Error('child quiesce exploded') }
+    return handle
+  }
+  context = new Context()
+  fiber = await mountRunner(context, home, harness, { sessionId: resumed.id }, { sessionId: resumed.id })
+  const newHandler = (harness.commands as { handler(name: string): ((...args: never[]) => unknown) | undefined }).handler('new')
+  assert.ok(newHandler, 'the real runner must register the /new transition command')
+  const result = await newHandler() as { kind: string }
+  await settle()
+  assert.equal(result.kind, 'success', 'the committed switch still reports success')
+  const created = harness.createdSessions.at(-1)
+  assert.ok(created, '/new must create a child session')
+  const events = harness.retirementEvents
+  assert.equal(events.filter(event => event === `flush:${created.id}`).length, 0,
+    `a rejected child quiesce must not run the post-commit checkpoint: ${JSON.stringify(events)}`)
+  // The committed child is still retired exactly once by the teardown.
+  await fiber.dispose()
+  fiber = undefined
+  assert.equal(events.filter(event => event === `dispose:${created.id}`).length, 1,
+    'the committed child is still retired exactly once on teardown')
+})

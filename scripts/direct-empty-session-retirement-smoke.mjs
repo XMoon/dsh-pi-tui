@@ -136,6 +136,77 @@ function environmentFacts(tarball, harnessDir, env, targetDshVersion) {
   }
 }
 
+/** The exactly-two expected profile bundles (plan §5): the official base layer
+ * plus the candidate. Anything else means this is not the isolated profile the
+ * smoke claims to test. */
+const EXPECTED_BUNDLES = ['@deepseek-ai/dsh-base', '@xmoon76/dsh-pi-tui']
+
+/**
+ * Verify the profile composition the smoke tests (plan §5's machine-checkable
+ * preconditions) and return it as recorded evidence:
+ *   - `dsh.profile.bundles` is EXACTLY [dsh-base, candidate];
+ *   - the USER patch layer (`profiles/<name>/cordis.patch.yml`) carries no
+ *     user patch: its only entry is the candidate's own shipped `tui-app`
+ *     row (no other id, no insert/disable/override);
+ *   - the installed candidate's own bundle patch is byte-identical to the
+ *     tarball's, so the package layer is the SHIPPED one;
+ *   - the invocation passes no `--patch` overlay.
+ * Everything is asserted here, not merely printed: a wrong composition would
+ * otherwise produce a smoke PASS against the wrong profile.
+ */
+function assertProfileComposition({ profileDir, tarball, invocation, env }) {
+  const profilePackage = readOptionalJson(join(profileDir, 'package.json'))
+  const bundles = profilePackage?.dsh?.profile?.bundles
+  if (!Array.isArray(bundles) || bundles.length !== EXPECTED_BUNDLES.length
+    || EXPECTED_BUNDLES.some(name => !bundles.includes(name))) {
+    fail('INFRA_INSTALL_FAILURE', `profile bundles must be exactly ${JSON.stringify(EXPECTED_BUNDLES)}, got ${JSON.stringify(bundles)}`)
+  }
+
+  // The user patch layer: every non-comment line is checked, so an unrelated
+  // id / insert / disable / override (a real user patch) fails the smoke.
+  const userPatchPath = join(profileDir, 'cordis.patch.yml')
+  if (!existsSync(userPatchPath)) {
+    fail('INFRA_INSTALL_FAILURE', `profile user patch layer is missing: ${userPatchPath}`)
+  }
+  const userPatchLines = readFileSync(userPatchPath, 'utf8')
+    .split(/\r?\n/u)
+    .map(line => line.trim())
+    .filter(line => line !== '' && !line.startsWith('#'))
+  const foreignIds = userPatchLines.filter(line => line.startsWith('- id:') && line !== '- id: tui-app')
+  const foreignRows = userPatchLines.filter(line => /^- (?:insert|disable|patch):/u.test(line))
+  if (foreignIds.length > 0 || foreignRows.length > 0) {
+    fail('INFRA_INSTALL_FAILURE', `the profile user patch layer carries a user patch (${JSON.stringify([...foreignIds, ...foreignRows])})`)
+  }
+
+  // The package layer: the installed bundle patch must be the SHIPPED one.
+  const installedPatchPath = join(profileDir, 'node_modules', '@xmoon76', 'dsh-pi-tui', 'cordis.patch.yml')
+  if (!existsSync(installedPatchPath)) {
+    fail('INFRA_INSTALL_FAILURE', `installed candidate bundle patch is missing: ${installedPatchPath}`)
+  }
+  const packed = run('tar', ['-xOf', tarball, 'package/cordis.patch.yml'], { env, timeout: 60_000 })
+  if (packed.status !== 0) {
+    fail('INFRA_INSTALL_FAILURE', `the candidate tarball's bundle patch could not be read:\n${commandOutput(packed)}`)
+  }
+  if (sha256OfText(readFileSync(installedPatchPath, 'utf8')) !== sha256OfText(packed.stdout)) {
+    fail('INFRA_INSTALL_FAILURE', 'the installed candidate bundle patch DIFFERS from the tarball (the package layer was modified)')
+  }
+
+  if (invocation.includes('--patch')) {
+    fail('INFRA_INSTALL_FAILURE', `the smoke invocation must pass no --patch overlay: ${JSON.stringify(invocation)}`)
+  }
+
+  return {
+    profileBundles: bundles,
+    userPatchLayer: { path: userPatchPath, rows: userPatchLines },
+    packagePatchMatchesTarball: true,
+    patchOverlays: [],
+  }
+}
+
+function sha256OfText(text) {
+  return createHash('sha256').update(text).digest('hex')
+}
+
 function writeLauncher(path, invocation, env) {
   const lines = [
     '#!/bin/sh',
@@ -153,19 +224,24 @@ function writeLauncher(path, invocation, env) {
 
 /** One driven TUI run in its own tmux session; `steps` receives the driver. */
 async function driveTuiRun(label, options) {
+  // Every tmux call targets the run's OWN server socket inside the one-shot
+  // work dir (`-S <path>`, an explicit socket path; `-L` would take a NAME):
+  // the smoke must never attach to, collide with, or kill a session on the
+  // developer's default tmux server.
   const { socket, session, launcher, tuiLog, env } = options
-  const started = run('tmux', [
+  const tmuxArgs = (args) => run('tmux', ['-S', socket, ...args], { env })
+  const started = tmuxArgs([
     'new-session', '-d', '-s', session, '-x', '100', '-y', '30',
     `script -qefc ${shellQuote(launcher)} ${shellQuote(tuiLog)}`,
-  ], { env })
+  ])
   if (started.status !== 0) fail(`${label.toUpperCase()}_BOOT_FAILURE`, `TUI could not start:\n${commandOutput(started)}`)
   const tmux = {
     // Include recent scrollback: a transient command notice can scroll out of
     // the visible pane when the next frame repaints.
-    capture: () => commandOutput(run('tmux', ['capture-pane', '-p', '-S', '-500', '-t', session], { env })),
-    has: () => run('tmux', ['has-session', '-t', session], { env }).status === 0,
-    send: (text) => { run('tmux', ['send-keys', '-t', session, text], { env }) },
-    stop: () => { run('tmux', ['kill-session', '-t', session], { env }) },
+    capture: () => commandOutput(tmuxArgs(['capture-pane', '-p', '-S', '-500', '-t', session])),
+    has: () => tmuxArgs(['has-session', '-t', session]).status === 0,
+    send: (text) => { tmuxArgs(['send-keys', '-t', session, text]) },
+    stop: () => { tmuxArgs(['kill-session', '-t', session]) },
   }
   try {
     await waitUntil(`${label} first frame`, BOOT_TIMEOUT_MS, () => tmux.has() && tmux.capture().includes('❯'), `${label.toUpperCase()}_BOOT_FAILURE`)
@@ -276,16 +352,30 @@ async function main() {
     if (bundles.status !== 0) fail('INFRA_INSTALL_FAILURE', `plugin list failed:\n${commandOutput(bundles)}`)
     const bundleLines = commandOutput(bundles).split(/\r?\n/u).filter(line => line.trim() !== '')
 
+    const profileDir = join(dshHome, 'profiles', 'pi-tui')
     const facts = environmentFacts(tarball, harnessDir, env, targetDshVersion)
+    // The composition is ASSERTED, not just printed: a wrong profile (extra
+    // bundle, user patch, modified package patch, --patch overlay) would
+    // otherwise produce a PASS against a profile this smoke never claims.
+    const composition = assertProfileComposition({ profileDir, tarball, invocation: dsh, env })
     console.log(JSON.stringify({
       ...facts,
       pluginList: bundleLines,
+      composition,
       dshHome: env.DSH_HOME,
       tuiLogsDir: join(dshHome, 'logs'),
     }, null, 2))
 
-    const socket = `empty-retire-${process.pid}`
+    // ONE isolated tmux server socket inside the one-shot work dir; removed
+    // with it. All four scenarios share the server, each in its own session.
+    const socket = join(workDir, 'tmux.sock')
+    const sessionPrefix = `empty-retire-${process.pid}`
     const makeRun = (name, extraArgs = []) => {
+      // No `--patch` overlay may join ANY run (plan §5): the two composed
+      // layers must be the shipped ones only.
+      if (extraArgs.includes('--patch')) {
+        fail('INFRA_INSTALL_FAILURE', `run ${name} must not pass a --patch overlay: ${JSON.stringify(extraArgs)}`)
+      }
       const launcher = join(workDir, `run-${name}.sh`)
       // --profile first (a launcher flag); extra args (like --session <id>)
       // follow as the booted app's inner arguments.
@@ -299,7 +389,7 @@ async function main() {
     try {
       logA = await driveTuiRun('a', {
         socket,
-        session: `${socket}-a`,
+        session: `${sessionPrefix}-a`,
         launcher: runA.launcher,
         tuiLog: runA.tuiLog,
         env,
@@ -336,7 +426,7 @@ async function main() {
     try {
       logB = await driveTuiRun('b', {
         socket,
-        session: `${socket}-b`,
+        session: `${sessionPrefix}-b`,
         launcher: runB.launcher,
         tuiLog: runB.tuiLog,
         env,
@@ -363,7 +453,7 @@ async function main() {
     try {
       logC = await driveTuiRun('c', {
         socket,
-        session: `${socket}-c`,
+        session: `${sessionPrefix}-c`,
         launcher: runC.launcher,
         tuiLog: runC.tuiLog,
         env,
@@ -411,7 +501,7 @@ async function main() {
     try {
       logD = await driveTuiRun('d', {
         socket,
-        session: `${socket}-d`,
+        session: `${sessionPrefix}-d`,
         launcher: runD.launcher,
         tuiLog: runD.tuiLog,
         env,
@@ -436,6 +526,8 @@ async function main() {
     }
   }
 }
+
+export { assertProfileComposition, countSessionArtifacts, EXPECTED_BUNDLES }
 
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === new URL(import.meta.url).pathname) {
   main().catch(error => {
