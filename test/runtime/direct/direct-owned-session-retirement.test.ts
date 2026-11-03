@@ -281,19 +281,34 @@ test('a flush failure that was ACTUALLY issued owns durability even after the li
 })
 
 test('a flush failure and a dispose failure are BOTH kept, and durability is never washed by the abort (T2)', async () => {
+  const events: string[] = []
+  let live = true
   const report = await retireDirectOwnedSession({
     mode: 'transition',
-    isLiveHost: () => false,
-    cancel: () => {},
-    whenIdle: async () => {},
-    drainDescendants: async () => {},
-    flush: async () => { throw new Error('flush failed: disk full') },
-    disposeOwner: async () => { throw new Error('close failed: disk full') },
+    isLiveHost: () => live,
+    cancel: () => { events.push('cancel') },
+    whenIdle: async () => { events.push('idle') },
+    drainDescendants: async () => { events.push('descendants') },
+    flush: async () => {
+      events.push('flush')
+      // The flush IS entered while the Host is live and then fails; the exit
+      // begins while it is in flight, so both phases really run and both fail.
+      live = false
+      throw new Error('flush failed: disk full')
+    },
+    disposeOwner: async () => {
+      events.push('dispose')
+      throw new Error('close failed: disk full')
+    },
   })
-  // The regime is already shutdown when the phases run, so the flush phase is
-  // not entered at all; the dispose failure is the only durability fact.
-  assert.deepEqual(report.failures, [{ phase: 'dispose', error: 'close failed: disk full' }])
-  assert.equal(report.durabilityFailure?.phase, 'dispose')
+  assert.deepEqual(events, ['cancel', 'idle', 'descendants', 'flush', 'dispose'],
+    'both the flush and the dispose phase must actually run')
+  assert.deepEqual(report.failures, [
+    { phase: 'flush', error: 'flush failed: disk full' },
+    { phase: 'dispose', error: 'close failed: disk full' },
+  ], 'both original failures are kept verbatim')
+  assert.equal(report.durabilityFailure?.phase, 'flush',
+    'the issued-and-failed flush owns durability; a later close failure cannot wash it')
 })
 
 test('a shutdown retirement keeps a dispose failure as its durability fact (T2 complement)', async () => {

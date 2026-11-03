@@ -604,13 +604,15 @@ shutdown / HMR / parked exit:       cancel → idle → descendants → AgentHan
   for minutes after the TUI exited.
 - `flush` (transition only) — the FINAL `sessions.flush` runs AFTER the
   descendant drain, so the durability boundary includes every descendant
-  settlement. The Host is still live here, so this explicit flush is the
-  transition's own durability barrier and cannot race another closer.
+  settlement. It is ISSUED while the live-Host regime holds, which is what
+  makes it the transition's own durability barrier; it is not immune to a
+  concurrent close that STARTS during the flush (see the overtake rule
+  below), and a failure it records is never reclassified.
 - `dispose` — `AgentHandle.dispose()` releases the persistence writer and
   stops Agent-scoped background jobs (the TUI never enumerates/kills jobs
   itself — DSH jobs lifecycle is bound to the Agent scope). In shutdown
-  mode this disposal IS the durability settlement: it joins DSH's own
-  durable handle close/drain.
+  mode this disposal IS the durability settlement (no flush phase runs to
+  compete with it): it joins DSH's own durable handle close/drain.
 
 The shutdown mode deliberately runs NO explicit `sessions.flush`: during
 root unload the DSH agent loop and the JSONL backend may already be closing
@@ -628,10 +630,11 @@ own `idle`/`descendants` awaits across an exit — the shutdown does not wait
 for an in-flight transition retirement, so the root teardown can start
 closing that write handle mid-retirement. The retirement therefore re-reads
 the authoritative lifecycle fact at flush time: once the lifecycle aborted,
-the retirement uses the shutdown durability regime and adds no explicit
-flush (the same fact the cancel phase reads to choose the shutdown cancel).
-The resolved regime also decides which phase owns durability for the report —
-`flush` while the live-Host regime held, otherwise `dispose`.
+the retirement does not START an explicit flush (the same fact the cancel
+phase reads to choose the shutdown cancel). That decision is only about
+starting the phase; it never decides how a failure of an
+already-started flush is classified (the rule below fixes durability to
+that flush).
 
 A successful ordinary transition also checkpoints the COMMITTED child:
 IMMEDIATELY after the synchronous commit, BEFORE the OLD owner's retirement
