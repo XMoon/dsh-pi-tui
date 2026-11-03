@@ -72,16 +72,22 @@ test('a paste that also carries prose is not a candidate', () => {
   assert.equal(candidateImagePathFromPaste('/tmp/a.png and b '), undefined)
 })
 
-test('several space-separated absolute IMAGE paths in one paste body are not one file', () => {
-  assert.equal(candidateImagePathFromPaste('/tmp/a.png /tmp/b.png '), undefined)
-  assert.equal(candidateImagePathFromPaste('/tmp/a.png /tmp/nested/b.webp '), undefined)
-})
-
 test('a legal single path whose directory ends with a space keeps its interior space', () => {
   // The frozen grammar interprets the body verbatim: `/tmp/foo ` is a legal
   // directory name and `/bar.png` its file — never two shell words.
   assert.deepEqual(candidateImagePathFromPaste('/tmp/foo /bar.png '), { path: '/tmp/foo /bar.png' })
   assert.deepEqual(candidateImagePathFromPaste('/tmp/a b.png '), { path: '/tmp/a b.png' })
+})
+
+test('a directory name that itself ends with an image extension is still one path', () => {
+  // The same bytes could describe two pasted paths, but the grammar never
+  // splits a body into shell words: the complete body is the candidate and
+  // the intake's resolve/read is the authority on whether it exists.
+  assert.deepEqual(candidateImagePathFromPaste('/tmp/foo.png /bar.png '), { path: '/tmp/foo.png /bar.png' })
+  assert.deepEqual(
+    candidateImagePathFromPaste('/tmp/a.png /nested/b.webp '),
+    { path: '/tmp/a.png /nested/b.webp' },
+  )
 })
 
 test('URLs, protocol-relative URLs and non-absolute forms are refused', () => {
