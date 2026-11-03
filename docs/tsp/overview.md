@@ -117,6 +117,51 @@ folder/window/subject before the commit and publishes only if all are still
 live afterwards; a session switch, viewer open/exit or teardown drops the stale
 frame, and `dispose()` releases the observer before the app dies.
 
+### The Main empty state (Welcome)
+
+The TSP renderer paints its invitation in **Main only**. The Dock stays the ONE
+Quiet Composer — one fixed input, one cursor, one draft owner — and never
+carries Session facts, a second input or a Session listing.
+
+```text
+the application's formal idle commit (no Session yet)  -> sessionless
+SurfaceRuntime.repaintTarget() for the live MAIN subject
+   SessionReader.blank(sessionId) === true
+   AND the complete fold holds no turn                 -> blank-session
+anything else (a started turn, an unknown read, a
+   viewed child, the hydration window)                -> hidden
+```
+
+- The one blank authority is `SessionReader.blank` (Direct: the official
+  turn-boundary projection; Remote: the official Client session-summary bit).
+  An unknown read is never inferred from the rendered window, a row count or a
+  running state, and the bounded display window is never the history: a fold
+  that already carries a turn vetoes the empty state, while an empty window
+  alone never proves blankness. On Remote that bit exists only once the session
+  list is ready, so a fresh blank Session can show the Welcome at a later
+  authorized commit instead of the first frame; nothing here adds a refresh, a
+  subscription or a poll to hurry it up.
+- The eligibility is a display-only argument carried by the SAME transcript
+  commit (`SurfaceDisplaySeam.setTranscript`, appended last). A renderer never
+  derives it from an empty projection, never shows a Welcome on its own
+  initiative and keeps no second Session cache. `beginSessionHydration()`
+  retires the presented Welcome in the same synchronous commit that installs
+  the Loading state, so a retired subject's action can never act on the
+  incoming subject.
+- The single action delegates and owns nothing: it calls the registered
+  `/sessions` command's argument-free UI entry, and the existing Session
+  Browser owns membership, reading, search, cancel, resume and every outcome
+  (see [session-browser.md](./session-browser.md)). The renderer never lists
+  Sessions, never picks a row, never holds a `SessionScope` and never switches
+  a Session. Where that business entry does not exist (the command is not
+  registered, or this mount cannot present the Browser), the state says so
+  instead of painting a control that does nothing.
+- A pane that negotiated neither `el` nor `styles` gets the plain-text form of
+  the same state with no claim of a clickable affordance; the typed command
+  stays its route. The mascot rows come from the ONE shared whale asset
+  (`src/tui/components/welcome-whale.ts`), picked once per renderer mount and
+  never re-picked by a repaint, a resize or a status commit.
+
 ## Surface, frame and lifecycle invariants
 
 - One persistent inline Tern surface per TSP renderer, with ONE bounded

@@ -152,7 +152,7 @@ async function mounted(t: { after(fn: () => unknown): void }, read: SessionReade
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {}, openModelQuick() {},
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
   })
   const browserPresentation = renderer.sessionBrowserPresentation
   assert.ok(browserPresentation, 'the pane advertises picker, row, overlay, text and scroll')

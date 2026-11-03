@@ -25,7 +25,7 @@ import {
 import { installProbe, liveAgentOf, modelEvent } from '../support/runner-session-fixtures.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import type { TspPane, TspWireFrame } from '../support/tsp-terminal-fixture.ts'
-import { wireNodes } from '../support/tsp-picker-wire.ts'
+import { foldWireNodes, wireNodes } from '../support/tsp-picker-wire.ts'
 import { ownTspBoot, waitUntil, type OwnedTspRunner } from '../support/tsp-runner-harness.ts'
 
 process.env.NO_COLOR = ''
@@ -1674,23 +1674,6 @@ function liveLayerModals(frames: readonly TspWireFrame[]): string[] {
   return [...live]
 }
 
-/**
- * The live `layer.modal-*` ids at the FIRST frame that presents `text` (one
- * Session's own identity on the wire). `undefined` when that frame never came,
- * so a publication that never happened can never satisfy the assertion.
- */
-function liveLayerModalsAt(frames: readonly TspWireFrame[], text: string): string[] | undefined {
-  const live = new Set<string>()
-  for (const frame of frames) {
-    for (const op of frame.ops) {
-      if (op[0] === 'add' && /^layer\.modal-\d+$/u.test(op[1])) live.add(op[1])
-      else if (op[0] === 'del' && /^layer\.modal-\d+$/u.test(op[1])) live.delete(op[1])
-    }
-    if (JSON.stringify(frame.ops).includes(text)) return [...live]
-  }
-  return undefined
-}
-
 /** Whether the pane's CURRENT frame owns the dock's continued-Question line. */
 function attentionLineLive(frames: readonly TspWireFrame[]): boolean {
   let live = false
@@ -1711,14 +1694,124 @@ function liveDockNotices(pane: TspPane): string[] {
     .map(node => String(node.p.text ?? ''))
 }
 
-/** The Session ids whose welcome card the renderer has presented, in order. */
-function presentedSessions(pane: TspPane): string[] {
-  const presented: string[] = []
-  for (const match of pane.output.text().matchAll(/DSH session ([^\s\\"]+)/gu)) {
-    const id = match[1] as string
-    if (presented.at(-1) !== id) presented.push(id)
+/**
+ * The projection scope the pane presents RIGHT NOW (`s3`), or `undefined` while
+ * Main holds the hydration frame or a subject that paints no scoped row.
+ *
+ * AUTHORITY: `src/tui/tsp/session.ts` accepts an incoming subject in ONE commit
+ * that both lifts the hydration fence (`hydrating = false`) and re-keys every
+ * transcript node under a fresh `s<epoch>-` prefix. So "the live wire presents a
+ * different scope" IS "this subject became the presented main subject" — the
+ * presentation fact the retired Dock welcome line was waited on. It names the
+ * SUBJECT, never a Session id; the id authority stays the Host side
+ * (`harness.createdSessions`, the real `agents.create` argument).
+ */
+function presentedScope(pane: TspPane): string | undefined {
+  for (const node of wireNodes(pane)) {
+    const match = /main\.(s\d+)-/u.exec(node.id)
+    if (match !== null) return match[1]
   }
-  return presented
+  return undefined
+}
+
+/** Whether the live Main is the hydration frame: a switch is in flight and its
+ *  subject has NOT committed yet. */
+function hydrationPending(pane: TspPane): boolean {
+  return wireNodes(pane).some(node => node.id === 'main.loading')
+}
+
+/** The text the presented Main carries: the live scoped transcript rows, i.e.
+ *  the subject's OWN folded history as the client really sees it. */
+function presentedMainText(pane: TspPane): string {
+  return wireNodes(pane)
+    .filter(node => /^main\.s\d+/u.test(node.id))
+    .map(node => (typeof node.p.text === 'string' ? node.p.text : ''))
+    .join('\n')
+}
+
+/** Whether the wire has presented a subject OTHER than `retiredScope` (the
+ *  hydration frame never counts: the switch has not committed in it). */
+function replacementPresented(pane: TspPane, retiredScope: string | undefined): boolean {
+  if (hydrationPending(pane)) return false
+  const scope = presentedScope(pane)
+  return scope !== undefined && scope !== retiredScope
+}
+
+/** Every projection scope the wire EVER presented a Main row for, in order. The
+ *  frames are replayed into the LIVE node set (the shipped fold) because an
+ *  `add` op carries its subtree nested, so a top-level op scan would miss the
+ *  rows the first frame painted. A subject that was never presented never
+ *  appears here — the negative the retired `DSH session <id>` line used to give. */
+function presentedScopes(pane: TspPane): string[] {
+  const frames = pane.frames()
+  const seen: string[] = []
+  for (let index = 0; index < frames.length; index += 1) {
+    for (const node of foldWireNodes(frames.slice(0, index + 1))) {
+      const match = /^main\.(s\d+)-/u.exec(node.id)
+      if (match !== null && seen.at(-1) !== match[1]) seen.push(match[1])
+    }
+  }
+  return seen
+}
+
+/**
+ * Wait until the presented Main really carries `marker` — the subject's OWN
+ * folded content, not a status line about it — and return the projection scope
+ * it was painted under, for the later replacement witness.
+ */
+async function waitUntilMainPresents(pane: TspPane, marker: string, timeoutMs = 15_000): Promise<string> {
+  let scope: string | undefined
+  await waitUntil(`the Main to present ${JSON.stringify(marker)}`, () => {
+    if (!presentedMainText(pane).includes(marker)) return false
+    scope = presentedScope(pane)
+    return scope !== undefined
+  }, timeoutMs)
+  return scope!
+}
+
+/**
+ * Wait until the pane presents a subject OTHER than `retiredScope` — the
+ * replacement's own publication — and return its scope.
+ */
+async function waitUntilReplacementPresented(
+  pane: TspPane,
+  retiredScope: string | undefined,
+  label: string,
+  timeoutMs = 15_000,
+): Promise<string> {
+  let scope: string | undefined
+  await waitUntil(label, () => {
+    if (!replacementPresented(pane, retiredScope)) return false
+    scope = presentedScope(pane)
+    return scope !== undefined
+  }, timeoutMs)
+  return scope!
+}
+
+/**
+ * The live `layer.modal-*` ids at the FIRST frame that presents a subject other
+ * than `retiredScope` — the replacement's own publication frame. `undefined`
+ * when that frame never came, so a publication that never happened can never
+ * satisfy the assertion. This is the frame marker the retired
+ * `DSH session <id>` text used to give, taken now from the wire's own commit.
+ * Each candidate state is the shipped fold of the frames up to that point, so a
+ * row a later frame retired cannot satisfy it and a subtree delivered nested
+ * still counts as presented.
+ */
+function liveLayerModalsAtReplacement(
+  frames: readonly TspWireFrame[],
+  retiredScope: string | undefined,
+): string[] | undefined {
+  for (let index = 0; index < frames.length; index += 1) {
+    const live = foldWireNodes(frames.slice(0, index + 1))
+    const mainIds = live.filter(node => node.id.startsWith('main.')).map(node => node.id)
+    // The hydration frame is not a commit: the outgoing subject is already gone
+    // and the incoming one has not been presented yet.
+    if (mainIds.includes('main.loading')) continue
+    if (!mainIds.some(id => /^main\.s\d+-/u.test(id) && !id.startsWith(`main.${retiredScope}-`))) continue
+    return live.map(node => node.id).filter(id => /^layer\.modal-\d+$/u.test(id))
+  }
+  return undefined
 }
 
 /** The recorded outcome of one Host tool call (never a bare rejection). */
@@ -1754,7 +1847,10 @@ test('the real /new stops a LIVE Question owner instead of parking until it is a
   const { owned, plane, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id, idleGates })
   const abort = new AbortController()
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     idleGates.set(sessionA.id, new Promise<void>(resolve => { releaseIdle.set(sessionA.id, resolve) }))
     // A held gate always has a fallback release: a failure path must never park
     // the Agent's `whenIdle` on a promise nobody resolves.
@@ -1783,7 +1879,7 @@ test('the real /new stops a LIVE Question owner instead of parking until it is a
     await transition
     await waitUntil('the /new child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
     const events = harness.retirementEvents
     assert.equal(events.filter(event => event === `cancel:keepInbox:${sessionA.id}`).length, 1,
       'the navigation stop is ONE keepInbox user cancel of the exact captured owner')
@@ -1823,7 +1919,10 @@ test('the real /fork publication withdraws A\'s live modal while the Host cancel
   })
   const { owned, plane, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const abort = new AbortController()
     const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
     const originalCancel = aAgent.cancel
@@ -1853,11 +1952,11 @@ test('the real /fork publication withdraws A\'s live modal while the Host cancel
     const fork = commandOf(owned, 'fork')()
     await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
 
     // THE finding-C contract: B's OWN publication frame must not present A's
     // modal — and it must not be the Host cancellation that removed it.
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'B\'s publication frame must not present the replaced subject\'s modal')
     assert.equal(requestOutcome, undefined,
       'A\'s Host request is still in flight: the withdrawal is presentation-only, never a fabricated settlement')
@@ -1914,7 +2013,10 @@ test('a real publication withdraws a MOUNTED continued form and re-scopes its at
   })
   const { owned, plane, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     // The Host's durable projection lists one CONTINUED call for A, and a REAL
     // routed event re-derives reachability (the production trigger).
     plane.seedContinued(sessionA.id, 'call-c-switch',
@@ -1944,8 +2046,8 @@ test('a real publication withdraws a MOUNTED continued form and re-scopes its at
     const transition = commandOf(owned, 'new')()
     await waitUntil('the replacement Session', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'the replacement publication frame must not present the continued form')
     assert.equal(attentionLineLive(owned.pane.frames()), false,
       'the replaced subject\'s parked count leaves the dock with its form')
@@ -2033,7 +2135,10 @@ test('a real publication withdraws A\'s live APPROVAL prompt while its request i
   })
   const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
     const originalCancel = aAgent.cancel
     // The official Agent cancel ends the in-flight approval request (its signal
@@ -2069,8 +2174,8 @@ test('a real publication withdraws A\'s live APPROVAL prompt while its request i
     const fork = commandOf(owned, 'fork')()
     await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'B\'s publication frame must not present the replaced subject\'s approval prompt')
     assert.equal(approvalOutcome, undefined,
       'the approval request is still in flight: the withdrawal is presentation-only, never an implicit allow')
@@ -2116,7 +2221,10 @@ test('a replaced subject\'s request that arrives AFTER the publication is never 
   })
   const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
     const originalCancel = aAgent.cancel
     let completeCancellation: (() => void) | undefined
@@ -2166,7 +2274,7 @@ test('a replaced subject\'s request that arrives AFTER the publication is never 
     const fork = commandOf(owned, 'fork')()
     await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
 
     // The delayed request is admitted now: the proof is the REAL admission (not a
     // timer), and it must NEVER be mounted.
@@ -2174,7 +2282,7 @@ test('a replaced subject\'s request that arrives AFTER the publication is never 
     await waitUntil('the delayed request reached the answerer', () => admitted, 15_000)
     await Promise.resolve()
     await Promise.resolve()
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'B\'s publication frame presents nothing of the replaced subject')
     assert.deepEqual(liveLayerModals(owned.pane.frames()), [],
       'the late request is never mounted into the replacement')
@@ -2279,7 +2387,10 @@ test('a REAL opening rollback retires the opening target\'s presentation with NO
   })
   let releaseMiddleware: (() => void) | undefined
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     // Discover the opening target's id from the production create call itself (the
     // journal already opened it at admission, before this call).
     const agents = harness.agents as { create: (options: { sessionId: string }) => Promise<unknown> }
@@ -2361,7 +2472,10 @@ test('signal-less live requests are settled by the REAL retirement, not by TUI e
   })
   const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const aAgent = liveAgentOf(harness, sessionA.id)
     // The official signal is OPTIONAL for both kinds — these requests have no
     // lifetime of their own, so a real subject replacement is their only owner.
@@ -2391,8 +2505,8 @@ test('signal-less live requests are settled by the REAL retirement, not by TUI e
     const fork = commandOf(owned, 'fork')()
     await waitUntil('the fork child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'B\'s publication frame must not present the replaced subject\'s signal-less request')
 
     await fork
@@ -2416,7 +2530,10 @@ test('an open Alt+Q list does not survive a real Session replacement', async (t)
   })
   const { owned, harness, ctx, plane } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     // One parked continued call, then the transient list opens over it.
     plane.seedContinued(sessionA.id, 'call-altq-switch',
       [{ id: 'q-altq', question: 'Parked?', options: [{ label: 'yes' }] }])
@@ -2430,9 +2547,9 @@ test('an open Alt+Q list does not survive a real Session replacement', async (t)
     const transition = commandOf(owned, 'new')()
     await waitUntil('the replacement Session', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
     await transition
-    assert.deepEqual(liveLayerModalsAt(owned.pane.frames(), `DSH session ${sessionB}`), [],
+    assert.deepEqual(liveLayerModalsAtReplacement(owned.pane.frames(), scopeA), [],
       'the transient list must not cross the replacement')
     assert.deepEqual(liveLayerModals(owned.pane.frames()), [], 'no overlay left the replacement seat')
     // The replacement owns the INPUT again: the last caret request the renderer
@@ -2474,7 +2591,10 @@ async function expectPublicationWindowCurrentness(
     },
   })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const aAgent = liveAgentOf(harness, sessionA.id) as { cancel: () => void }
     const originalCancel = aAgent.cancel
     const approvalAbort = new AbortController()
@@ -2527,7 +2647,7 @@ async function expectPublicationWindowCurrentness(
     // THE WINDOW: the commit published B and the transition is parked in the
     // post-commit child quiesce — nothing has been hydrated yet.
     await waitUntil('the post-commit child quiesce', () => childGateEntered, 15_000)
-    assert.equal(presentedSessions(owned.pane).includes(sessionB), false,
+    assert.equal(replacementPresented(owned.pane, scopeA), false,
       'B is the published owner but not initialized yet (the window is real)')
     assert.equal(approvalOutcome, undefined, 'the held Host cancellation has not completed: A\'s approval is in flight')
     assert.equal(questionOutcome, undefined, 'the held Host cancellation has not completed: A\'s Question is in flight')
@@ -2562,7 +2682,7 @@ async function expectPublicationWindowCurrentness(
     // still owned by their own Host lifetimes.
     releaseChildIdle!()
     await transition
-    await waitUntil('B hydrated', () => presentedSessions(owned.pane).includes(sessionB), 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B hydrated')
     await waitUntil('A retired', () => harness.retirementEvents.includes(`dispose:${sessionA.id}`), 15_000)
     completeCancellation!()
     await waitUntil('A\'s requests settled by their own lifetimes',
@@ -2607,7 +2727,10 @@ test('the commit-time withdrawal performs NO Host projection read (a throwing re
     },
   })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     // A MOUNTED continued form for A: the commit-time drop must have real work to
     // do (the path that used to publish attention, i.e. read the Host).
     plane.seedContinued(sessionA.id, 'call-commit-read',
@@ -2651,7 +2774,7 @@ test('the commit-time withdrawal performs NO Host projection read (a throwing re
     await transition
     await waitUntil('the new owner published', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
     assert.ok(harness.retirementEvents.includes(`dispose:${sessionA.id}`), 'the replaced owner was retired exactly once')
   } finally {
     releaseCreate?.()
@@ -2686,7 +2809,10 @@ test('two overlapping /new intents admit exactly ONE create; the duplicate is re
     createGate: () => { createStarted(); return createGate },
   })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const execute = (agent: unknown): Promise<{ result: { kind: string; text?: string } } | undefined> =>
       (harness.commands as { execute(agent: unknown, line: string): Promise<{ result: { kind: string; text?: string } } | undefined> })
         .execute(agent, '/new')
@@ -2705,7 +2831,7 @@ test('two overlapping /new intents admit exactly ONE create; the duplicate is re
     assert.equal((await first)?.result.kind, 'success', 'the first intent commits')
     await waitUntil('exactly one fresh Session', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    const scopeB = await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
     assert.equal(harness.createdSessions.length, 1, 'the overlap produced exactly ONE child Session')
     assert.ok(!liveDockNotices(owned.pane).includes('already starting'),
       'the refusal belongs to the duplicate command card, never a success notice')
@@ -2717,7 +2843,7 @@ test('two overlapping /new intents admit exactly ONE create; the duplicate is re
     await waitUntil('the second fresh Session', () => harness.createdSessions.length === 2, 15_000)
     const sessionC = harness.createdSessions[1]!.id
     assert.notEqual(sessionC, sessionB)
-    await waitUntil('C publication', () => presentedSessions(owned.pane).at(-1) === sessionC, 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeB, 'C publication')
   } finally {
     releaseCreate()
     // Bounded fixture teardown (the owned runner is closed, not a timing window).
@@ -2740,7 +2866,10 @@ test('a failed /new releases the in-flight marker, reports the stopped old Turn,
   const releaseIdle = new Map<string, () => void>()
   const { owned, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id, idleGates })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     idleGates.set(sessionA.id, new Promise<void>(resolve => { releaseIdle.set(sessionA.id, resolve) }))
     life.defer(() => { releaseIdle.get(sessionA.id)?.() })
     const agents = harness.agents as { create: (options: { sessionId: string }) => Promise<unknown> }
@@ -2766,7 +2895,8 @@ test('a failed /new releases the in-flight marker, reports the stopped old Turn,
     assert.doesNotMatch(failed?.result.text ?? '', /turn stop requested \(not yet confirmed\)/,
       'the quiesce completed before the failure, so the stronger claim is the true one')
     assert.equal(harness.createdSessions.length, 0, 'no child was published')
-    await waitUntil('A stays current', () => presentedSessions(owned.pane).at(-1) === sessionA.id, 15_000)
+    await waitUntil('A stays the presented Main', () =>
+      !hydrationPending(owned.pane) && presentedScope(owned.pane) === scopeA, 15_000)
     assert.equal(harness.retirementEvents.filter(event => event === `dispose:${sessionA.id}`).length, 0,
       'a pre-create failure must not retire the still-current old owner')
 
@@ -2775,7 +2905,7 @@ test('a failed /new releases the in-flight marker, reports the stopped old Turn,
     assert.equal(retry?.result.kind, 'success', 'the retry after a failed /new starts normally')
     await waitUntil('the retry child', () => harness.createdSessions.length === 1, 15_000)
     const sessionB = harness.createdSessions[0]!.id
-    await waitUntil('B publication', () => presentedSessions(owned.pane).at(-1) === sessionB, 15_000)
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
     assert.equal(harness.retirementEvents.filter(event => event === `dispose:${sessionA.id}`).length, 1,
       'the committed retry retires A exactly once')
   } finally {
@@ -2795,7 +2925,10 @@ test('an accepted stop whose quiesce fails reports "requested, not confirmed" �
   })
   const { owned, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
-    await waitUntil('A\'s welcome card', () => presentedSessions(owned.pane).includes(sessionA.id), 15_000)
+    // A is the presented main subject: the wire really paints A's OWN folded
+    // history, and the scope it was painted under is the marker every later
+    // replacement is measured against.
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
     const agent = liveAgentOf(harness, sessionA.id) as unknown as { whenIdle: () => Promise<void> }
     const originalWhenIdle = agent.whenIdle
     // The Host ACCEPTED the cancellation (committed) but the pre-commit
@@ -2810,7 +2943,10 @@ test('an accepted stop whose quiesce fails reports "requested, not confirmed" �
     assert.doesNotMatch(result.text ?? '', /old turn stopped \(cannot resume\)/,
       'the failure must not claim the old Turn already stopped')
     assert.equal(harness.createdSessions.length, 0, 'no child is published on a quiesce failure')
-    assert.deepEqual(presentedSessions(owned.pane), [sessionA.id], 'A stays current')
+    // "A stays current" as two wire facts: the wire never painted any other
+    // subject's Main, and A's own scope is still what it presents.
+    assert.deepEqual(presentedScopes(owned.pane), [scopeA], 'no replacement subject was ever painted')
+    assert.equal(presentedScope(owned.pane), scopeA, 'A stays current')
   } finally {
     // Bounded fixture teardown (the owned runner is closed, not a timing window).
     await owned.settle()

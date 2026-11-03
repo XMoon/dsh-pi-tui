@@ -305,6 +305,8 @@ async function mountedQuick(options: {
       entries.quick += 1
       handle = presentation.openQuick!(buildRequest())
     },
+    openSessionBrowser: () => {},
+    sessionBrowserAvailable: () => true,
     modelPickerAvailable: () => true,
     permissionOptions: () => ['read-only', 'workspace-write', 'danger-full-access'],
     selectPermission: () => {},

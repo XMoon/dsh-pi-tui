@@ -141,7 +141,7 @@ async function mount(t: { after(fn: () => unknown): void }): Promise<ScrollHarne
       return []
     },
     reopenContinuedQuestion: () => false,
-    openModelPicker() {}, openModelQuick() {},
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
   })
   harness.renderer = renderer
   return harness

@@ -170,7 +170,7 @@ async function mountHarness(options: {
       harness.onReopen?.()
       return true
     },
-    openModelPicker() {}, openModelQuick() {},
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
   })
   harness.renderer = renderer
   return harness

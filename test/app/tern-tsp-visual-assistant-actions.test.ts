@@ -405,7 +405,7 @@ async function mountHarness(options: {
     noteUserInput: () => {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {}, openModelQuick() {},
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
   }
   if (options.bind !== false) renderer.bindInput(handlers)
   return {

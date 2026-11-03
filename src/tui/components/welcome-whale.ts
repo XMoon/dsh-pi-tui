@@ -81,14 +81,31 @@ export function pickWelcomeWhaleVariant(): number {
 }
 
 /**
+ * The picked whale variant's rows as ANSI-free plain text (the same asset
+ * {@link renderWelcomeWhaleLines} paints). A renderer that colours the rows
+ * itself (the native TSP Welcome) consumes this read-only view instead of a
+ * second copy of the pattern.
+ * @returns the variant's rows, out-of-range variants fall back to the first.
+ */
+export function welcomeWhalePlainLines(variant: number): readonly string[] {
+  return WELCOME_WHALES[variant] ?? WELCOME_WHALES[0]
+}
+
+/** The fixed brand ramp behind the whale rows, in row order (rows beyond the
+ * ramp reuse the last color; see {@link renderWelcomeWhaleLines}). */
+export function welcomeWhaleGradientColors(): readonly string[] {
+  return WELCOME_WHALE_COLORS
+}
+
+/**
  * The picked whale variant, painted with the fixed brand gradient (rows
  * beyond the 6-color ramp reuse the last ramp color).
  * @returns the painted lines of the variant, one per whale row.
  */
 export function renderWelcomeWhaleLines(variant: number): string[] {
-  const whale = WELCOME_WHALES[variant] ?? WELCOME_WHALES[0]
-  return whale.map((line, index) => hexPaint(
-    WELCOME_WHALE_COLORS[Math.min(index, WELCOME_WHALE_COLORS.length - 1)]!,
+  const colors = WELCOME_WHALE_COLORS
+  return welcomeWhalePlainLines(variant).map((line, index) => hexPaint(
+    colors[Math.min(index, colors.length - 1)]!,
     line,
   ))
 }

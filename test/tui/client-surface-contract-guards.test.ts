@@ -19,6 +19,8 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { WelcomeCard } from '../../src/tui/components/welcome-card.ts'
+import { WELCOME_WHALE_VARIANTS, renderWelcomeWhaleLines, welcomeWhaleGradientColors, welcomeWhalePlainLines } from '../../src/tui/components/welcome-whale.ts'
+import { hexPaint } from '../../src/tui/theme/runtime.ts'
 
 const source = (relative: string): string =>
   readFileSync(new URL(`../../src/${relative}`, import.meta.url), 'utf8')
@@ -524,6 +526,39 @@ test('the Welcome card and the Settings About page share ONE whale source', () =
   assert.ok(whale.includes('pickWelcomeWhaleVariant'), 'the shared module owns the variant pick')
   assert.ok(card.includes('pickWelcomeWhaleVariant()'), 'the Welcome card picks through the shared helper')
   assert.ok(settings.includes('pickWelcomeWhaleVariant()'), 'the About page picks through the shared helper')
+})
+
+test('the native TSP Welcome reads the SAME whale asset as plain rows and owns no second copy', () => {
+  const whale = code('tui/components/welcome-whale.ts')
+  const welcome = code('tui/tsp/welcome-view.ts')
+  // The shared module exposes the read-only views; the TSP view consumes them.
+  assert.ok(whale.includes('export function welcomeWhalePlainLines'), 'the shared module owns the plain-row view')
+  assert.ok(whale.includes('export function welcomeWhaleGradientColors'), 'the shared module owns the ramp view')
+  assert.ok(welcome.includes('welcomeWhalePlainLines') || welcome.includes('whaleLines'),
+    'the TSP Welcome receives its rows from the shared asset')
+  assert.ok(welcome.includes('welcomeWhaleGradientColors'), 'the TSP Welcome colours its rows from the shared ramp')
+  // No second copy of either brand asset may exist in the TSP layer.
+  assert.equal(welcome.includes('WELCOME_WHALES'), false, 'the TSP view keeps no copy of the variants')
+  for (const color of welcomeWhaleGradientColors()) {
+    assert.equal(whale.split(color).length - 1, 1, `the ramp holds exactly one copy of ${color}`)
+    assert.equal(welcome.includes(color), false, `the TSP view never re-declares ${color}`)
+  }
+  // The painted ANSI path is byte-stable: every variant, every row, exactly the
+  // ramp colour of its index over its own text. The Welcome card and the About
+  // page paint THIS, so the plain view cannot change what PiTui draws.
+  const ramp = welcomeWhaleGradientColors()
+  for (let variant = 0; variant < WELCOME_WHALE_VARIANTS; variant += 1) {
+    const plain = welcomeWhalePlainLines(variant)
+    const painted = renderWelcomeWhaleLines(variant)
+    assert.equal(painted.length, plain.length, `variant ${variant}: one painted line per whale row`)
+    for (const [index, row] of plain.entries()) {
+      assert.equal(painted[index], hexPaint(ramp[Math.min(index, ramp.length - 1)]!, row),
+        `variant ${variant} row ${index} keeps the exact ramp colour over the exact text`)
+      assert.equal(//u.test(row), false, `variant ${variant} row ${index} stays ANSI-free`)
+    }
+  }
+  assert.equal(welcomeWhalePlainLines(0).some(row => row.includes('\u001b')), false,
+    'the plain view carries no escape bytes for the native renderer to leak')
 })
 
 test('the About page reads the TUI and the DSH version as TWO independent facts', () => {

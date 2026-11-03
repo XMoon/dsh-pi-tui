@@ -430,6 +430,19 @@ export interface CommandSurface<Selection extends ModelSelectionValue, ExactAgen
    * to the full panel with its explicit `Save default`.
    */
   openModelQuick(): void
+  /**
+   * TSP-7 Welcome D: open the SAME registered `/sessions` Session Browser the
+   * typed command runs, from the Welcome screen's single Resume action. It is
+   * admitted only while the `/sessions` registration is live AND the mounted
+   * renderer really offers a Session Browser presentation; a refusal states
+   * itself through the existing notice path. The command owns every listing,
+   * switch, cancel and outcome — this entry opens it and nothing else.
+   */
+  openSessionBrowser(): void
+  /** Whether that `/sessions` UI entry is actually installed (registered AND
+   *  presentable on this mount) — the business-entry fact the Welcome button
+   *  paints, never the presence of a painted button. */
+  sessionBrowserAvailable(): boolean
   /** Request one catalog refresh through the coordinator. */
   requestCatalogRefresh(request: CatalogRefreshRequest): Promise<CatalogRefreshOutcome>
   /** Whether the catalog coordinator is registered yet. */
@@ -565,6 +578,16 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
    * `/model` registration degraded, so no quick read or write may run.
    */
   let modelQuickOpener: (() => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
+
+  /**
+   * TSP-7 Welcome D: the installed `/sessions` UI entry — the
+   * `openSessionBrowser` member `registerTuiCommands` returns, captured only
+   * when the `/sessions` registration itself succeeded. `undefined` means
+   * "not registered (yet)": the Welcome then paints its disabled form and the
+   * public entry refuses through the existing notice path instead of opening a
+   * Browser of its own.
+   */
+  let sessionBrowserOpener: (() => Promise<import('@deepseek-ai/dsh-commands').CommandResult>) | undefined
 
   /** Consume TUI-local command draft dispositions after DSH normalizes the
    * public CommandResult. A missing id is used only for a thrown command
@@ -838,6 +861,39 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     })
   }
 
+  /**
+   * TSP-7 Welcome D: the ONE `/sessions` UI entry — the registered handler's
+   * own body, admitted only while its registration is live AND the mounted
+   * renderer can present the Browser. It opens no Screen itself, reads no
+   * session list and switches nothing: every settlement, notice, cancel and
+   * stale check stays with the `/sessions` command and its Browser owner.
+   */
+  const openSessionBrowser = (): void => {
+    if (!commandsRegistered || sessionBrowserOpener === undefined) {
+      deps.notify('session resume is unavailable in this session (the /sessions command is not registered)', 'error')
+      return
+    }
+    // The TSP branch has no PiTui fallback presenter, so a mounted renderer
+    // that offers no Session Browser presentation is refused BEFORE the
+    // handler runs — the same fail-closed admission the model entries apply.
+    if (deps.app() === undefined && deps.sessionBrowserPresentation?.() === undefined) {
+      deps.notify("This command's UI is not available in TSP yet", 'error')
+      return
+    }
+    const opened = sessionBrowserOpener()
+    void opened.then((result) => { // allowlist: result observer — the command owns the task
+      if (result.kind === 'error' && typeof result.text === 'string' && result.text !== '') {
+        deps.notify(result.text, 'error')
+      }
+    }, (error: unknown) => { // allowlist: diagnostics observer, the command owns the task
+      deps.logError(`tui-runner: session browser UI entry failed: ${safeErrorMessage(error)}`)
+    })
+  }
+
+  const sessionBrowserAvailable = (): boolean => commandsRegistered
+    && sessionBrowserOpener !== undefined
+    && (deps.sessionBrowserPresentation?.() !== undefined || deps.app() !== undefined)
+
   const registerCommands = (initial?: InitialCommandCatalog): void => {
     if (commandsRegistered) return
     commandsRegistered = true
@@ -897,6 +953,10 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
       // TSP-7 PR-G: the QUICK entry rides the SAME registration fact —
       // `registerTuiCommands` supplies both or neither.
       modelQuickOpener = installed.openModelQuick
+      // TSP-7 Welcome D: the `/sessions` UI entry rides the SAME registration
+      // fact — `registerTuiCommands` supplies it only when the `/sessions`
+      // registration really installed one.
+      sessionBrowserOpener = installed.openSessionBrowser
       takeCommandDraftDisposition = installed.takeCommandDraftDisposition
       // The coordinator's surface hooks point INTO the command surface;
       // the command runtime's refresh facades (and the switch/first-session
@@ -1390,6 +1450,9 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
     openModelPicker,
     modelPickerAvailable,
     openModelQuick,
+    // TSP-7 Welcome D: the `/sessions` UI entry and its real availability.
+    openSessionBrowser,
+    sessionBrowserAvailable,
     requestCatalogRefresh,
     catalogRefreshAvailable,
     isSkillInvocation,

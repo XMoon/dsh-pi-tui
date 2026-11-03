@@ -131,7 +131,7 @@ async function mountPane(
       pasteMedia: () => {},
       pastedPath: () => {},
       admitPastedPathDelivery: () => options.admitPastedPathDelivery?.() ?? true,
-      noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
+      noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true
     })
   }
   return {
@@ -359,7 +359,7 @@ test('a key HELD across a generation bump cannot submit when the bind replays it
     harness.renderer.bindInput({
       exit: () => {}, cancel: () => {},
       submit: (text) => { submissions.push(text) },
-      steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {},
+      steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true
     })
     await settle()
     assert.deepEqual(submissions, [], 'the held Enter did NOT cross the hydration fence at the replay')

@@ -51,10 +51,52 @@ function dockNotices(fixture: DirectTspFixture): string[] {
     .map(node => (typeof node.p.text === 'string' ? node.p.text : ''))
 }
 
-/** The Session ids the dock welcome card currently carries (the hydration signal). */
-function welcomeSessionIds(fixture: DirectTspFixture): string[] {
-  const prefix = 'dock.welcome-'
-  return wireNodes(fixture.pane).filter(node => node.id.startsWith(prefix)).map(node => node.id.slice(prefix.length))
+/**
+ * The projection scope the renderer presents (`s3`), or `undefined` while Main
+ * holds something that paints no scoped transcript row — the TSP-7 Welcome D
+ * empty state or the hydration frame. It says WHICH subject is presented, never
+ * which Session it is; the Session id comes from the Host `agents` registry
+ * through `liveSession`.
+ */
+function projectionScopeId(fixture: DirectTspFixture): string | undefined {
+  for (const node of wireNodes(fixture.pane)) {
+    const match = /main\.(s\d+)-/u.exec(node.id)
+    if (match !== null) return match[1]
+  }
+  return undefined
+}
+
+/** Whether Main currently presents the hydration frame: the switch has NOT
+ *  committed and the composer input is still fenced. */
+function hydrationFramePresented(fixture: DirectTspFixture): boolean {
+  return wireNodes(fixture.pane).some(node => node.id === 'main.loading')
+}
+
+/** Whether Main currently presents the Welcome D empty state (a blank main
+ *  subject). The retired Dock line's "there is an owner" role is now this
+ *  positive presentation fact plus `liveSession`'s registry fact. */
+function welcomeMainPresented(fixture: DirectTspFixture): boolean {
+  return wireNodes(fixture.pane).some(node => node.id.startsWith('main.welcome-'))
+}
+
+/**
+ * Whether a NEW main subject has been formally committed since `frameMark`.
+ *
+ * AUTHORITY: the renderer's own presentation commit
+ * (`src/tui/tsp/session.ts`): a switch paints the hydration frame first, and the
+ * frame that retires it in favour of the incoming subject's OWN Main — a fresh
+ * `main.s<N>-…` transcript scope, or the Welcome D empty state for a blank
+ * subject — is the same commit that lifts the composer input fence
+ * (`hydrating = false` and `scopeEpoch += 1` happen together). The retired Dock
+ * welcome line was the wait gate for exactly this; it carried the id, which is
+ * why the gate is paired with `liveSession` (the Host registry) at each call.
+ */
+function subjectCommitted(fixture: DirectTspFixture, frameMark: number, previousScope: string | undefined): boolean {
+  if (hydrationFramePresented(fixture)) return false
+  const scope = projectionScopeId(fixture)
+  if (scope !== undefined && scope !== previousScope) return true
+  return welcomeMainPresented(fixture)
+    && fixture.pane.frames().slice(frameMark).some(frame => frame.ops.some(op => op[0] === 'add' && op[1] === 'main.loading'))
 }
 
 /** Type one `/` line into the REAL composer and submit it with Enter. */
@@ -685,6 +727,8 @@ test('switching Session A→B through the real Browser leaves B with only B rows
     const resume = ((pickerProps(fixture.pane, BROWSER).actions ?? []) as Array<{ readonly id: string; readonly disabled?: boolean }>)
       .find(action => action.id.startsWith('resume'))
     assert.ok(resume !== undefined && resume.disabled !== true, 'Resume is offered for the persisted B')
+    const switchFrameMark = fixture.pane.frames().length
+    const switchScopeBefore = projectionScopeId(fixture)
     fixture.pane.event({ ev: 'action', sf: fixture.pane.frames().at(-1)!.sf, id: pickerNode(fixture.pane, BROWSER)!.id, act: String(resume!.id) })
     await waitFor('the Browser retired after the switch', () => pickerNode(fixture.pane, BROWSER) === undefined, 25_000)
     // The switch really moved the live owner to B.
@@ -692,10 +736,12 @@ test('switching Session A→B through the real Browser leaves B with only B rows
     await waitFor('B owns the live Agent', () => agents.get(SessionId(B)) !== undefined, 25_000)
 
     // Reopen /tasks. The renderer's hydration fence drops ordinary keys while
-    // the new subject is applied, so the dock naming B is the authoritative
-    // "B is live" gate for typing.
-    await waitFor('the dock names the switched Session B',
-      () => welcomeSessionIds(fixture).includes(B), 25_000)
+    // the new subject is applied, so the WIRE COMMIT is the authoritative gate
+    // for typing: `liveSession`/the Host registry says B owns an Agent, and this
+    // says B's subject is the presented Main (the retired Dock line conflated the
+    // two into one text row).
+    await waitFor('the switched Session B to become the presented Main', () =>
+      subjectCommitted(fixture, switchFrameMark, switchScopeBefore), 25_000)
     // Give B its OWN work BEFORE reopening: a roster that merely happens to be
     // empty cannot distinguish "read B" from "kept reading A's stale subject",
     // so the proof needs a positive B row AND the absence of A's row.

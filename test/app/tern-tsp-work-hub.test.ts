@@ -166,7 +166,7 @@ async function mount(
     noteUserInput() {},
     listContinuedQuestions: () => [],
     reopenContinuedQuestion: () => false,
-    openModelPicker() {}, openModelQuick() {},
+    openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true,
   })
   const opens: TaskBrowserPresentationHandle[] = []
   const harness: WorkHubHarness = {

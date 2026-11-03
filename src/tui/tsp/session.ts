@@ -46,6 +46,7 @@ import type { ComposerSubmitRequest } from '../../tui-app.ts'
 import type {
   DisplayDockNotice,
   DisplayStatusFacts,
+  DisplayWelcomeEligibility,
   DisplayWelcomeFacts,
   SurfaceDisplaySeam,
 } from '../../app/surface/display-seam.ts'
@@ -71,6 +72,8 @@ import { TspPresetPicker } from './preset-picker.ts'
 import { TspSessionBrowser } from './session-browser.ts'
 import { nativeStatuslineRows, compileNativeFooterPresentation, type NativeFooterPresentation } from './statusline-view.ts'
 import { quietComposerView, QUIET_COMPOSER_SHEET, QUIET_COMPOSER_STYLES, QUIET_COMPOSER_ROLES, type QuietComposerPermissionOption } from './quiet-composer-view.ts'
+import { welcomeView, TSP_WELCOME_SHEET, TSP_WELCOME_STYLES } from './welcome-view.ts'
+import { pickWelcomeWhaleVariant, welcomeWhalePlainLines } from '../components/welcome-whale.ts'
 import type { TspNativeFooterConfig } from '../../domain/footer/tsp-native-config.ts'
 import type { TspFooterAffordances } from '../../domain/footer/layout.ts'
 import { TspWorkHub } from './work-hub.ts'
@@ -111,10 +114,16 @@ import {
 } from './assistant-visual.ts'
 import type { ToolImageState } from './transcript-view.ts'
 
-/** The renderer-local dock state (welcome + notices). */
+/**
+ * The renderer-local dock state (notices + the mount-scoped footer notices).
+ *
+ * TSP-7 Welcome D: the Dock carries NO welcome facts at all. The Quiet
+ * Composer is its only input and its only business controls; the empty-state
+ * invitation lives in Main, where it is projected from the ONE display
+ * eligibility the surface commits — never from a second Session cache.
+ */
 interface DockState {
   notices: readonly DisplayDockNotice[]
-  welcome: readonly DisplayWelcomeFacts[]
   /**
    * TSP-7 PR-D: the mount-scoped footer compatibility notices. They are a
    * SEPARATE segment from the transient `notices`: the transient list evicts
@@ -281,6 +290,16 @@ export interface TspInputHandlers {
    * StatusRuntime selection writer (never optimistic, never a renderer store).
    */
   selectPermission?(id: string): void
+  /**
+   * TSP-7 Welcome D: open the SAME registered `/sessions` Session Browser the
+   * typed command runs, from the Welcome's single Resume action. The renderer
+   * owns no listing, no Session id and no switch: it re-checks its own seat
+   * admission and forwards.
+   */
+  openSessionBrowser(): void
+  /** Whether that `/sessions` business entry is actually installed (registered
+   *  AND presentable on this mount). The Welcome paints its real state. */
+  sessionBrowserAvailable(): boolean
 }
 
 /** The B1 binding: editor-local + lifecycle only (submissions are B2). */
@@ -627,7 +646,42 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
    * premature no-op (and the resources are still released exactly once).
    */
   let disposeTask: Promise<void> | undefined
-  const dock: DockState = { notices: [], welcome: [], footerNotices: [] }
+  const dock: DockState = { notices: [], footerNotices: [] }
+  /**
+   * TSP-7 Welcome D: the ONE display-only Welcome eligibility of this mount.
+   * It is written by exactly three commits — `setWelcomeIdle` (the formal
+   * sessionless invitation), the hydration fence (always hidden) and the live
+   * main subject's `setTranscript` commit — and read only by `render()`'s Main
+   * selection. No Session facts, no id, no history and no second cache.
+   */
+  let welcomeEligibility: DisplayWelcomeEligibility = 'hidden'
+  /**
+   * TSP-7 Welcome D: the whale pick of THIS mount, drawn ONCE and never
+   * re-drawn: a repaint, a resize, a status refresh or a Browser cancel keeps
+   * the same variant for the whole mount lifetime.
+   */
+  const welcomeWhaleVariant = pickWelcomeWhaleVariant()
+  /**
+   * TSP-7 Welcome D: the ONE predicate that decides whether the Welcome is the
+   * presented Main right now. `render()` selects the Main with it and the
+   * Resume action re-checks with it, so a click can never act on a frame the
+   * mount no longer shows: the sessionless invitation or the live MAIN
+   * subject's own blank commit qualifies, while the hydration window and the
+   * temporary Reader (a different subject's surface) do not.
+   */
+  /**
+   * TSP-7 Welcome D: the empty state is an EMPTY state, so the committed
+   * projection has the last word. A blank subject still shows real turn-less
+   * rows — a command result card, a refusal, a system line — and those are
+   * content the user must see: the Welcome may only occupy Main while the
+   * frame it would replace carries no visible message at all. This is a
+   * presentation fact about the frame ALREADY committed, never a second
+   * authority: the eligibility still decides whether the empty state is
+   * allowed, and a started turn hides it in the surface layer.
+   */
+  let lastProjectionEmpty = true
+  const welcomeMainPresented = (): boolean =>
+    welcomeEligibility !== 'hidden' && !hydrating && detailsSlot === undefined && lastProjectionEmpty
   const pending: { queued: readonly QueueItem[]; tail: readonly PendingTailRow[]; running: boolean } = { queued: [], tail: [], running: false }
   /** The application's pending-submit fact, surfaced as a dock line. */
   let pendingSubmit: SubmitPendingDetail | undefined
@@ -1438,7 +1492,21 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     const draftStates = prepareDockDraftImageStates()
     if (imageProjectionAborted) return
     const dockNode = dockView(draftStates)
-    const mainNode = lastMain
+    // TSP-7 Welcome D: the Main selection is strict and shares ONE predicate
+    // with the Resume admission, so a frame and a click can never disagree
+    // about whether the Welcome is the presented Main. The transcript
+    // projection `lastMain` is always kept (no fake row is ever inserted into
+    // the fold) and the Welcome never enters the Dock.
+    const mainNode = welcomeMainPresented()
+      ? welcomeView({
+          tuiVersion: presentedStatus?.host.tuiVersion,
+          whaleLines: welcomeWhalePlainLines(welcomeWhaleVariant),
+          resumeAvailable: boundHandlers?.sessionBrowserAvailable() === true,
+          nativeStyled: composerChromeSupported(),
+          scopeKey: scopePrefix,
+          onResume: welcomeResumeClicked,
+        })
+      : lastMain
     surface.render({
       ...(mainNode === undefined ? {} : { main: mainNode }),
       ...(dockNode === undefined ? {} : { dock: dockNode }),
@@ -2105,10 +2173,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // PR4: a draft preview is a `ui.image` node, so the line list holds any
     // native node kind — not just text/editor.
     const lines: Node[] = []
-    for (const facts of dock.welcome) {
-      const model = facts.model === undefined ? '' : ` · ${facts.model}`
-      lines.push(ui.text({ key: `welcome-${facts.sessionId}`, text: sanitizeDisplayText(`DSH session ${facts.sessionId}${model}`) }))
-    }
+    // TSP-7 Welcome D: the Dock draws NO welcome line at all — no Session id,
+    // no model fact, no second input. Its invitation, if any, is Main's.
     // The pending-input presentation IS visible on this renderer: the queue
     // lane (authoritative queued + local echoes) and the ordered conversation
     // tail, exactly as the ONE join produced them.
@@ -2228,12 +2294,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     streamingToolPreviews?: readonly StreamingToolPreview[],
     _searchPresentation?: TranscriptSearchPresentation,
     source?: object,
+    welcomeEligibilityCommit?: DisplayWelcomeEligibility,
   ): void => {
     if (disposed) return
     // Hydration fence: while a NEW source is pending, a frame still carrying
     // the RETIRED source is dropped (it reads the old fold — its rows can
     // never lift the Loading state).
     if (retiredSource !== undefined && source === retiredSource) return
+    // TSP-7 Welcome D: the eligibility travels with THIS commit only. A frame
+    // the fence already rejected carries none, and an ABSENT argument is never
+    // an invitation — it leaves the formal state alone (the initial state is
+    // `'hidden'`, and only a commit that speaks for the live main subject
+    // answers the question). `'sessionless'` therefore survives an empty
+    // sessionless projection, while every real subject commit decides.
+    if (welcomeEligibilityCommit !== undefined) welcomeEligibility = welcomeEligibilityCommit
+    // The frame's OWN content decides whether an empty state may cover it (see
+    // `welcomeMainPresented`): any committed message — including the turn-less
+    // command card a blank subject can produce — keeps the transcript in Main.
+    lastProjectionEmpty = messages.length === 0
     // The projection source identity governs the presentation-key scope: a
     // NEW identity (session commit, cold rehydrate, viewer switch) re-scopes
     // into a FRESH namespace (a new epoch prefix + allocator), so identical
@@ -2389,6 +2467,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // window (§3.4 row 1).
       hydrating = true
       retiredSource = projectionScope
+      // TSP-7 Welcome D: the Welcome retires SYNCHRONOUSLY in this same commit,
+      // so the outgoing subject's CTA and the Loading state never share a frame
+      // and a late event of the old subject can no longer open the Browser.
+      welcomeEligibility = 'hidden'
       // TSP-7 PR-A: the outgoing subject's status is dropped with its
       // transcript — the Loading frame shows NO native status row, so an old
       // permission/cwd/usage fact can never sit beside the incoming subject.
@@ -2456,14 +2538,19 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       }
       render()
     },
-    setWelcomeCard(facts) {
-      if (disposed) return
-      dock.welcome = [facts]
-      render()
+    setWelcomeCard(_facts: DisplayWelcomeFacts) {
+      // TSP-7 Welcome D: the seam member stays (the upstream owner still
+      // commits its card facts on the PiTui branch), but this page shows no
+      // Session facts: no cache, no eligibility change, no extra repaint. The
+      // Main empty state is decided ONLY by the idle commit and the live
+      // subject's transcript commit.
     },
     setWelcomeIdle(idle) {
       if (disposed) return
-      if (idle) dock.welcome = []
+      // The application's OWN formal sessionless commit — the one source of
+      // `'sessionless'`. Clearing the idle form hides the Welcome; it never
+      // promotes a blank session, which only a real commit can declare.
+      welcomeEligibility = idle ? 'sessionless' : 'hidden'
       render()
     },
     setTerminalCwd() {
@@ -2610,7 +2697,35 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   if (composerActionsSupported()) {
     surface.stylesheet(QUIET_COMPOSER_SHEET, QUIET_COMPOSER_STYLES)
   }
+  // TSP-7 Welcome D: the Welcome sheet is installed ONCE at surface init (never
+  // from `render()`) and only where the client negotiated BOTH `el` and
+  // `styles` — the same gate as the Quiet Composer chrome, and the reason a
+  // pane without them gets the plain text fallback instead of an unpainted
+  // stage. It never touches the composer sheet.
+  if (composerChromeSupported()) {
+    surface.stylesheet(TSP_WELCOME_SHEET, TSP_WELCOME_STYLES)
+  }
 
+  /**
+   * TSP-7 Welcome D: the Welcome's Resume click — the ONE registered
+   * `/sessions` UI entry, admitted by the SAME seat predicate every other base
+   * action re-checks. A stale frame's click (retired subject, hydration
+   * window, modal seat, open presenter, disposed mount) reaches nothing; a
+   * throw from an unwired composition becomes a Dock notice instead of a
+   * renderer crash, exactly like the composer's Model entry.
+   */
+  function welcomeResumeClicked(): void {
+    if (!visualActionsAdmitted()) return
+    if (!welcomeMainPresented()) return
+    const handlers = boundHandlers
+    if (handlers === undefined || !handlers.sessionBrowserAvailable()) return
+    try {
+      handlers.openSessionBrowser()
+    } catch (error) {
+      display.notify('session resume is unavailable in this session (the /sessions command is not registered)', 'error')
+      options.logError?.('tsp renderer: welcome session browser entry refused', { error: errorText(error) })
+    }
+  }
   /**
    * PR-C (TSP-7 §3.3): the ONE shared submit helper — the Editor's Enter
    * branch and the Send button both run EXACTLY this sequence (the frozen
