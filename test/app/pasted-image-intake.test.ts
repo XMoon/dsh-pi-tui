@@ -165,7 +165,7 @@ function harness(life: TestLifecycle, images = new DraftImageStore()): Harness {
       for (const release of releases.splice(0)) release()
       await drain()
     },
-    settle: drain,
+    drain,
   }
 }
 
