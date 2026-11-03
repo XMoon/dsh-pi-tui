@@ -72,27 +72,32 @@ port values. `src/app/host/pi-tui-host-runtime.ts` is the ONE built-in Host
 Runtime Loader row; `src/app/host/features/**` are its two internal business
 modules, not independent plugins.
 
-There are exactly TWO real OS-process composition roots, and each owns its own
-graph:
+Three real OS processes compose this package. Exactly TWO of them are roots of
+the `app/bootstrap.ts` facade; the third enters through the official profile
+runner and does not compose through that facade:
 
 - **Direct (production default).** `src/index.ts -> app/bootstrap.ts` boots one
   Direct runtime over the caller's Host Context. No Remote module participates.
+  This is one of the two `app/bootstrap.ts` roots.
+- **Split Client (internal, Linux-only).** `local-client-entry.ts ->
+  app/bootstrap.ts` owns its OWN Client Context, the official B1 transport and
+  the one official Client Domain mount (`app/remote/client-runtime.ts`, mounted
+  in two stages so the interaction owner exists before the Gateway's first
+  generation). It then composes the ONE semantic assembly and owner registry
+  through `createRemoteApplicationRuntimeFromClient()`
+  (`app/remote/application-runtime.ts`) over the shared
+  `app/remote/application-stage.ts`, and adopts that pre-built core through the
+  selection seam instead of constructing a second graph. This is the second
+  `app/bootstrap.ts` root.
 - **Split Host (internal, Linux-only).** `local-host-entry.ts` boots the official
-  profile through `runProfile()` with the Host-only overlay, and the overlay's
-  single built-in `@xmoon76/dsh-pi-tui/host-runtime` row owns the package's ONE
-  private Typert contribution and its two business services. Base/profile-owned
-  Host services are reused, never remounted.
-- **Split Client (internal, Linux-only).** `local-client-entry.ts` owns its OWN
-  Client Context, the official B1 transport and the one official Client Domain
-  mount (`app/remote/client-runtime.ts`, mounted in two stages so the interaction
-  owner exists before the Gateway's first generation). It then composes the ONE
-  semantic assembly and owner registry through
-  `createRemoteApplicationRuntimeFromClient()` (`app/remote/application-runtime.ts`)
-  over the shared `app/remote/application-stage.ts`, and adopts that pre-built
-  core through the selection seam instead of constructing a second graph.
+  profile through `runProfile()` with the Host-only overlay; it does NOT enter
+  `app/bootstrap.ts`. The overlay's single built-in
+  `@xmoon76/dsh-pi-tui/host-runtime` row owns the package's ONE private Typert
+  contribution and its two business services. Base/profile-owned Host services
+  are reused, never remounted.
 - **Retired in-process carrier (test-only).** The former M3 in-process
-  composition lives in `test/support/m3-inprocess/**`. It is not a third
-  production composition: `src/**` must never import it, it must never enter the
+  composition lives in `test/support/m3-inprocess/**`. It is not a real process
+  composition at all: `src/**` must never import it, it must never enter the
   published bundle, and it exists only so the historical L5/L6 suites can
   exercise transport-neutral Remote semantics.
 
