@@ -94,12 +94,14 @@ export interface RetirementFailure {
 export interface RetirementReport {
   failures: readonly RetirementFailure[]
   /**
-   * The contained failure that broke FINAL DURABILITY for this mode, when
-   * there was one: the transition mode's explicit `flush` phase, or the
-   * shutdown mode's `dispose` phase (a failed dispose means the durable
-   * close/drain could not be CONFIRMED — it does not claim data was lost).
-   * `undefined` when durability held. The consumer contract carries this
-   * SEMANTIC outcome; the phase names stay local.
+   * The contained failure that broke FINAL DURABILITY, when there was one.
+   * A flush that was ACTUALLY ISSUED and failed always wins, whatever the
+   * lifecycle did afterwards: `sessions.flush` awaits every listener, so a
+   * later successful close proves only its own drain. Only when no flush
+   * failure happened does the shutdown `dispose` phase decide (a failed close
+   * means durability could not be CONFIRMED — it does not claim data was
+   * lost). `undefined` when durability held. The consumer contract carries
+   * this SEMANTIC outcome; the phase names stay local.
    */
   durabilityFailure: RetirementFailure | undefined
 }
@@ -137,9 +139,11 @@ export async function retireDirectOwnedSession(
   }
   await runPhase('idle', deps.whenIdle, failures)
   await runPhase('descendants', deps.drainDescendants, failures)
-  // The explicit durable flush belongs to the LIVE-HOST regime only, and that
-  // regime is re-read HERE (not at entry): an exit that began during the
-  // awaits above has already handed durability to DSH's close/drain.
+  // The explicit durable flush is ISSUED only while the LIVE-HOST regime holds,
+  // and that regime is re-read HERE (not at entry): an exit that began during
+  // the awaits above has already handed durability to DSH's close/drain. This
+  // decides whether to START the flush; it never decides how a failure of an
+  // already-started flush is classified (see the report mapping below).
   const liveHostFlush = deps.mode === 'transition' && deps.isLiveHost()
   if (liveHostFlush) {
     await runPhase('flush', deps.flush, failures)

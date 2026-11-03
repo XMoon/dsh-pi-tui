@@ -203,10 +203,10 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
       // A rejection here is NEVER reclassified by the lifecycle flag: the flush
       // waits on every `session/flush` listener, so a failure may be a real
       // persistence I/O error rather than a close takeover, and an aborted
-      // lifecycle does not prove which one it was. The failure stays in the
-      // report; the durability mapping in the helper attributes durability to
-      // the dispose phase (the verifiable close settlement) once the live-Host
-      // regime has ended, and the surface still shows the failing phase.
+      // lifecycle does not prove which one it was. An issued-and-failed flush
+      // therefore ALWAYS becomes the report's durability failure — a later
+      // successful close proves only its own drain, never that every listener
+      // succeeded. The failing phase also stays in the surface's phase summary.
       flush: () => deps.flushSession(agent.session),
       disposeOwner: () => handle.dispose(),
     })

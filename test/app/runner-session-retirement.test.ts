@@ -1896,6 +1896,11 @@ test('a committed-child checkpoint failure is diagnosed AT THE FAILURE, before t
   // A single user notice while the surface is still live.
   assert.equal(notices.filter(entry => entry.includes('durability checkpoint failed')).length, 1,
     `exactly one user notice: ${JSON.stringify(notices)}`)
+  // v2 §3.3: exactly ONE checkpoint-specific diagnosis. The transaction summary
+  // may list the same failure once (the plan keeps `retired` for that summary),
+  // but it must never become a second "durability checkpoint failed" line.
+  assert.equal(diagNow.split('\n').filter(line => line.includes('committed session durability checkpoint failed')).length, 1,
+    `the checkpoint failure must be diagnosed exactly once: ${JSON.stringify(diagNow.slice(-600))}`)
   releaseOldDrain()
   await transition
   // Bounded microtask drain: the appExit-triggered disposal settles.
@@ -1982,6 +1987,11 @@ test('a checkpoint failure diagnosed before the old drain is not duplicated when
   const checkpointLines = diagText.split('\n').filter(line => line.includes('committed session durability checkpoint failed'))
   assert.equal(checkpointLines.length, 1,
     `the same checkpoint failure must be diagnosed once, not re-reported: ${JSON.stringify(checkpointLines)}`)
+  // The one permitted repeat is the TRANSACTION SUMMARY listing the failure —
+  // and it must appear once, not once per re-diagnosis.
+  const summaryLines = diagText.split('\n').filter(line => line.includes('transition retire failed (child committed)'))
+  assert.equal(summaryLines.length, 1,
+    `the transaction summary must appear once: ${JSON.stringify(summaryLines)}`)
   assert.equal(notices.filter(entry => entry.includes('durability checkpoint failed')).length, 1,
     `no second notice may target the disposed surface: ${JSON.stringify(notices)}`)
   // The committed child is not rolled back and is retired exactly once.
