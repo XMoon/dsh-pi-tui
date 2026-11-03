@@ -322,22 +322,27 @@ current pin.
 
 A default run is diagnosable without any environment variable. Both lanes
 announce the qualified artifact identity at startup and one checkpoint per
-phase on stderr; on failure they print a bounded summary and write exactly one
+phase on stderr; on failure they print a fixed summary and write exactly one
 default-retained artifact — a `failure.json` in a fresh private directory under
 the OS temp root (directory `0700`, file `0600`), never inside the work root
-the lane deletes during cleanup. The report is a whitelist projection of the
-lane's own facts (lane, category, checkpoint, wait label, elapsed, target pin,
-artifact name/version/SHA, expected and observed notice, recent checkpoints,
-per-process exit and official event names). Terminal bytes, captured stderr,
-record contents, session text, cookies, tokens and connect URLs are not in
-that projection and must never be added to it. A passing run writes no report.
+the lane deletes during cleanup. The report and that summary carry only
+whitelisted fields (lane, category, stable code, checkpoint, wait label,
+elapsed, target pin, artifact name/version/SHA, expected and observed notice,
+recent checkpoints, per-process exit and official event names). No
+`Error.message` is ever copied into the default output — the lane assertion,
+the tool failure and the parser text all stay out of it — so terminal bytes,
+captured stderr, record contents, session text, cookies, tokens and connect
+URLs are never reported. A passing run writes no report.
 
-`SPLIT_PROCESS_SMOKE_KEEP=1` and `SPLIT_UPGRADE_KEEP=1` preserve the isolated
-work root for forensics. That directory holds the real profile, session logs
-and private telemetry of the run, so it stays local: never attach or upload
-it as evidence. `--evidence` writes the lane's JSON result — the PASS document
-keeps its schema, and a failure writes the same safe failure projection
-instead — and its path is outside the work root.
+`SPLIT_PROCESS_SMOKE_KEEP=1` and `SPLIT_UPGRADE_KEEP=1` are the explicit
+forensic mode: they preserve the isolated work root, which holds the real
+profile, session logs and private telemetry of the run, and they add one
+`*_SMOKE_FORENSICS` line carrying the raw error text. That directory stays
+local: never attach or upload it as evidence. `--evidence` writes the lane's
+JSON result — the PASS document keeps its schema, and a failure writes the same
+safe failure projection instead — always onto a freshly created private `0600`
+inode, so a pre-existing target never keeps a looser mode. Its path is outside
+the work root.
 
 Record a lane result exactly as the lane reports it: the candidate and old
 package SHA256 values, the exact DSH pin, the command, and the per-lane

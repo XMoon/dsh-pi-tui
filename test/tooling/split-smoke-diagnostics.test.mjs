@@ -18,7 +18,7 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -26,6 +26,8 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { npmDshVersion } from '../../scripts/lib/dsh-distribution.mjs'
 import {
   classifyHandoffRejection,
+  forensicErrorText,
+  safeFailureSummary,
   classifyReloadNoticeLine,
   classifyReloadNotices,
   createSmokeDiagnostics,
@@ -595,4 +597,105 @@ test('a real process wait failure reports no terminal or record payload', (t) =>
   }
   assert.match(failures[0].message, /probe Host ready/u)
   assert.match(failures[1].message, /probe notice/u)
+})
+
+// ── The default output never carries foreign text ───────────────────────────
+
+test('the default final line is the fixed classification, never an Error.message', () => {
+  const foreign = new Error(`COOKIE_SENTINEL token=TOKEN_SENTINEL https://secret.invalid/mux `
+    + `at /home/operator/private/xmoon76-dsh-pi-tui-0.5.5.tgz records=[{"m4a0":"ready"}]`)
+  assert.equal(safeFailureSummary(foreign), 'INFRA_FAILURE')
+  assert.equal(safeFailureSummary(new Error('ASSERTION_FAILED: the Host did not publish the old buildId')), 'ASSERTION_FAILED')
+  assert.equal(safeFailureSummary(new SplitSmokeInputError('INPUT_DSH_PIN_MISMATCH', 'private text', { role: 'old' })),
+    'INPUT_UNQUALIFIED: INPUT_DSH_PIN_MISMATCH')
+  const wait = new SplitSmokeWaitError('UNEXPECTED_RELOAD_REFUSAL', {
+    code: 'PROCESS_REFUSED_RELOAD',
+    waitLabel: 'U08 already-current notice',
+    processRole: 'surface-client',
+    elapsedMs: 83,
+    expected: 'ALREADY_CURRENT',
+    observed: 'TARGET_INVALID_DSH_PIN_MISMATCH',
+  })
+  assert.equal(safeFailureSummary(wait), 'UNEXPECTED_RELOAD_REFUSAL: PROCESS_REFUSED_RELOAD')
+  // The forensic projection is a separate call the lanes take only under KEEP.
+  assert.match(forensicErrorText(foreign), /COOKIE_SENTINEL/u)
+  assert.equal(forensicErrorText(undefined), '(no detail)')
+})
+
+test('a failure before the diagnostics collector still leaves one safe report', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-preflight-failure-')
+  const evidence = join(dir, 'evidence.json')
+  const result = runLane(UPGRADE_SCRIPT, [
+    '--old', join(dir, 'missing-old.tgz'),
+    '--new', join(dir, 'missing-new.tgz'),
+    '--evidence', evidence,
+  ], dir)
+  assert.notEqual(result.status, 0)
+  assert.equal(result.signal, null, 'the lane must fail by itself inside the budget')
+  assert.match(result.stderr, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE/u)
+  assert.match(result.stderr, /category: INFRA_FAILURE/u)
+  // The artifact path is the operator's own input, but the default projection
+  // stays field-shaped and never echoes it as free text.
+  for (const path of [join(dir, 'missing-old.tgz'), join(dir, 'missing-new.tgz')]) {
+    assert.ok(!result.stderr.includes(path), `the raw artifact path must not be echoed:\n${result.stderr}`)
+  }
+  assertNoLaneSetup(dir, 'dsh-split-upgrade-')
+  const report = JSON.parse(readFileSync(evidence, 'utf8'))
+  assert.equal(report.status, 'FAIL')
+  assert.equal(report.category, 'INFRA_FAILURE')
+  assert.equal(report.lane, 'split-upgrade')
+  assert.equal(report.artifacts, undefined, 'no artifact identity may be invented')
+  assert.equal(report.processes, undefined, 'no process may be invented')
+})
+
+test('an unreadable artifact reports the category without tar or parser text', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-unreadable-')
+  writeFileSync(join(dir, 'junk-old.tgz'), 'not a gzip stream at all\n')
+  const result = runLane(UPGRADE_SCRIPT, [
+    '--old', join(dir, 'junk-old.tgz'),
+    '--new', syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN)),
+  ], dir)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /category: INFRA_FAILURE/u)
+  assert.ok(!/gzip|tar:|invalid|JSON/u.test(result.stderr), `foreign tool text leaked:\n${result.stderr}`)
+})
+
+test('KEEP is the only mode that prints the raw error text', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-forensics-')
+  const args = [
+    '--old', syntheticTarball(dir, 'old', manifestOf('0.5.5-old.1', OTHER_PIN)),
+    '--new', syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN)),
+  ]
+  const quiet = runLane(UPGRADE_SCRIPT, args, dir)
+  assert.ok(!quiet.stderr.includes('FORENSICS'), `a default run must not print forensics:\n${quiet.stderr}`)
+  const started = Date.now()
+  const kept = spawnSync(process.execPath, [UPGRADE_SCRIPT, ...args], {
+    encoding: 'utf8',
+    timeout: 5_000,
+    env: { ...process.env, TMPDIR: dir, SPLIT_UPGRADE_KEEP: '1' },
+  })
+  assert.notEqual(kept.status, 0)
+  assert.ok(Date.now() - started < 5_000)
+  assert.match(kept.stderr, /SPLIT_PROCESS_UPGRADE_SMOKE_FORENSICS: SplitSmokeInputError: INPUT_UNQUALIFIED/u)
+})
+
+test('an existing --evidence file is replaced on a private inode, never rewritten in place', (t) => {
+  const life = testLifecycle(t)
+  const dir = life.tempDir('split-upgrade-evidence-mode-')
+  const evidence = join(dir, 'evidence.json')
+  writeFileSync(evidence, '{}\n')
+  chmodSync(evidence, 0o644)
+  assert.equal(statSync(evidence).mode & 0o777, 0o644, 'the fixture must start group/world readable')
+  const result = runLane(UPGRADE_SCRIPT, [
+    '--old', syntheticTarball(dir, 'old', manifestOf('0.5.5-old.1', OTHER_PIN)),
+    '--new', syntheticTarball(dir, 'new', manifestOf('0.5.5', TARGET_PIN)),
+    '--evidence', evidence,
+  ], dir)
+  assert.notEqual(result.status, 0)
+  assert.equal(statSync(evidence).mode & 0o777, 0o600, 'the FAIL twin must land private')
+  assert.equal(JSON.parse(readFileSync(evidence, 'utf8')).category, 'INPUT_UNQUALIFIED')
+  assert.deepEqual(readdirSync(dir).filter(name => name.includes('.tmp')), [], 'no temp file may survive')
 })

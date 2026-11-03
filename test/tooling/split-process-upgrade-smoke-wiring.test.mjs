@@ -128,7 +128,7 @@ test('the upgrade lane qualifies BOTH artifact pins against the exact DSH runtim
   const main = source.slice(source.indexOf('async function main()'))
   const inspectOld = main.indexOf("inspectArtifact(options.old, 'old')")
   const inspectNew = main.indexOf("inspectArtifact(options.new, 'new')")
-  const target = main.indexOf('npmDshVersion()')
+  const target = main.indexOf('targetDshVersion = npmDshVersion()')
   const guardOld = main.indexOf("requireExactSmokeDshPin('old', oldArtifact.manifest, targetDshVersion)")
   const guardNew = main.indexOf("requireExactSmokeDshPin('new', newArtifact.manifest, targetDshVersion)")
   const distribution = main.indexOf('loadDshDistribution(')
@@ -313,7 +313,17 @@ test('the U lane reports every failure with a bounded default projection', () =>
   // The PASS evidence keeps its original shape and marker.
   assert.match(source, /evidence\.status = 'PASS'/u)
   assert.match(source, /evidence\.verdict = 'cross-build-compatible'/u)
-  assert.match(source, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: \$\{boundedErrorSummary\(error\)\}/u)
+  // The default final line is the fixed classification only; the raw error text
+  // appears in one place, and only when the operator asked for a kept scene.
+  assert.match(source, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: \$\{safeFailureSummary\(error\)\}/u)
+  assert.match(source, /if \(KEEP\) process\.stderr\.write\(`SPLIT_PROCESS_UPGRADE_SMOKE_FORENSICS: \$\{forensicErrorText\(error\)\}\\n`\)/u)
+  assert.doesNotMatch(source, /SPLIT_PROCESS_UPGRADE_SMOKE_FAILURE: \$\{error instanceof Error \? error\.message/u)
+  // A failure before the collector existed still leaves one safe report AND the
+  // `--evidence` FAIL twin, and the PASS twin uses the same private write.
+  assert.match(main, /emitInputFailure\(\{[\s\S]{0,160}evidencePath: options\?\.evidence/u,
+    'an input failure before the collector still writes the --evidence FAIL twin')
+  assert.match(main, /diagnostics\.reportFailure\(error, \{ evidencePath: options\.evidence \}\)/u)
+  assert.match(source, /writePrivateReport\(options\.evidence, evidence\)/u)
 })
 
 test('the reload waits fail early on a refusal yet still PASS only on a painted notice', () => {
