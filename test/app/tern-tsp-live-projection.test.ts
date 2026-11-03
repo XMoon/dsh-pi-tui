@@ -1425,7 +1425,7 @@ interface PreparingHarness {
   readonly committedEligibilities: Array<'sessionless' | 'blank-session' | 'hidden' | undefined>
   /** The ONE bounded display-window controller of the main subject. Exposed so
    *  a case can re-select the window and prove the Welcome eligibility does not
-   *  read it (the eligibility reads the complete fold's turn index). */
+   *  read it (the eligibility reads the fold's OWN turn facts). */
   readonly window: TranscriptWindowController
   /** Mount a viewed child as the display subject (the Welcome D W07 switch). */
   viewChild(): TranscriptFolder
@@ -1460,8 +1460,9 @@ async function mountPreparingHarness(welcome: {
   readonly nativeEl?: boolean
   /**
    * The bounded display window's turn count. The Welcome eligibility NEVER
-   * reads it (it reads the complete fold's turn index), so a case can shrink
-   * the window under a longer history and prove the two are not the same fact.
+   * reads it (it reads the fold's OWN turn facts — the grouped index and the
+   * activity map), so a case can shrink the window under a longer history and
+   * prove the two are not the same fact.
    */
   readonly windowTurns?: number
 } = {}): Promise<PreparingHarness> {
@@ -1979,7 +1980,7 @@ test('W06: a started turn with no displayable row yet vetoes the empty state whi
 test('W06: a turn in the complete fold vetoes the empty state even when the authority still claims blank', async () => {
   // The Remote shape this veto exists for: the listed summary still says
   // `blank:true` while the complete fold already carries the turn. The veto
-  // reads the fold's turn index, never the projected window, so no window
+  // reads the fold's own turn facts, never the projected window, so no window
   // re-selection can bring the Welcome back.
   const harness = await mountPreparingHarness({ nativeEl: true, sessionBlank: () => true })
   try {
