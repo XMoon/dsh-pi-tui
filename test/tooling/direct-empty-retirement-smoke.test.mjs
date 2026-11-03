@@ -12,6 +12,7 @@ import {
   assertCleanDshExit,
   userPatchViolations,
 } from '../../scripts/direct-empty-session-retirement-smoke.mjs'
+import { testLifecycle } from '../support/temp-lifecycle.ts'
 
 test('the fresh profile user patch layer is exactly the empty list', () => {
   assert.deepEqual(userPatchViolations('[]\n'), [])
@@ -69,27 +70,23 @@ test('a missing or malformed exit status fails closed (never a silent pass)', ()
   }
 })
 
-test('the real launcher template RECORDS a controlled non-zero exit and the assertion rejects it', async () => {
+test('the real launcher template RECORDS a controlled non-zero exit and the assertion rejects it', async (t) => {
   // End-to-end over the same shell plumbing the smoke uses: the launcher must
   // capture the TUI's status (no `set -e` shortcut) and the assertion must
   // reject it, so an abnormal DSH exit can never look like a clean one.
-  const { mkdtempSync, readFileSync, rmSync } = await import('node:fs')
-  const { tmpdir } = await import('node:os')
+  const { readFileSync } = await import('node:fs')
   const { join } = await import('node:path')
   const { spawnSync } = await import('node:child_process')
   const { writeLauncher } = await import('../../scripts/direct-empty-session-retirement-smoke.mjs')
-  const root = mkdtempSync(join(tmpdir(), 'smoke-launcher-exit-'))
-  try {
-    const launcher = join(root, 'run-fault.sh')
-    const exitCodeFile = join(root, 'run-fault.exit-code')
-    const env = { HOME: join(root, 'home'), DSH_HOME: join(root, 'dsh-home') }
-    writeLauncher(launcher, ['sh', '-c', 'exit 7'], env, exitCodeFile)
-    const run = spawnSync('sh', [launcher], { encoding: 'utf8' })
-    assert.equal(run.status, 7, 'the launcher must propagate the command status')
-    assert.equal(readFileSync(exitCodeFile, 'utf8').trim(), '7',
-      'the launcher must RECORD the real status for the smoke to assert on')
-    assert.throws(() => assertCleanDshExit(readFileSync(exitCodeFile, 'utf8'), 'fault'), /exited with status 7/u)
-  } finally {
-    rmSync(root, { recursive: true, force: true })
-  }
+  const life = testLifecycle(t)
+  const root = life.tempDir('smoke-launcher-exit-')
+  const launcher = join(root, 'run-fault.sh')
+  const exitCodeFile = join(root, 'run-fault.exit-code')
+  const env = { HOME: join(root, 'home'), DSH_HOME: join(root, 'dsh-home') }
+  writeLauncher(launcher, ['sh', '-c', 'exit 7'], env, exitCodeFile)
+  const run = spawnSync('sh', [launcher], { encoding: 'utf8' })
+  assert.equal(run.status, 7, 'the launcher must propagate the command status')
+  assert.equal(readFileSync(exitCodeFile, 'utf8').trim(), '7',
+    'the launcher must RECORD the real status for the smoke to assert on')
+  assert.throws(() => assertCleanDshExit(readFileSync(exitCodeFile, 'utf8'), 'fault'), /exited with status 7/u)
 })
