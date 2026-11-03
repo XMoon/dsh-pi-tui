@@ -38,7 +38,7 @@ import type {
   ModelPickerRequest,
   ModelPresentation,
 } from '../../src/app/command/model-presentation.ts'
-import type { ModelDirectoryDto, ModelSelectionDto } from '../../src/runtime/catalog-port.ts'
+import type { ModelCatalog, ModelDirectoryDto, ModelSelectionDto } from '../../src/runtime/catalog-port.ts'
 import { emptyStatusSnapshot, type StatusSnapshot, type StatusSnapshotReader } from '../../src/domain/status/types.ts'
 import { runOwned } from '../../src/runtime/process/tasks.ts'
 import { installTspPane, type TspPane } from '../support/tsp-terminal-fixture.ts'
@@ -1151,8 +1151,13 @@ function commandOwner(options: {
   readonly presentation: ModelPresentation
   /** Stage the port write so the test can move the subject while it is in flight. */
   readonly holdWrite?: boolean
-  /** Replace the catalog boundary with a transport-neutral port shape. */
-  readonly port?: Record<string, unknown>
+  /**
+   * Replace the catalog boundary with the transport-neutral port slice both
+   * presentations may touch. It is TYPED as that slice, so a quick path that
+   * reached for any other member of `ModelCatalog` — let alone a Direct-only
+   * surface or a private RPC — would not compile.
+   */
+  readonly port?: QuickPort,
 }): OwnerProbe {
   const calls = {
     loads: 0,
@@ -1176,7 +1181,7 @@ function commandOwner(options: {
     groups: [{ id: 'p', name: 'P', models: [{ id: 'one', name: 'One' }, { id: 'two', name: 'Two' }] }],
     failures: [],
   }
-  const models = (options.port as Record<string, unknown> | undefined) ?? {
+  const models: QuickPort = options.port ?? {
     available: () => true,
     loadDirectory: async () => { calls.loads += 1; return directory },
     sessionSelection: () => ({ provider: 'p', model: 'one' }),
@@ -1184,7 +1189,7 @@ function commandOwner(options: {
       calls.selects.push(selection)
       written = id
       if (holdWrite) await new Promise<void>(resolve => { release = resolve })
-      return { ownership: 'owned', outcome: { kind: 'committed', value: selection } }
+      return { ownership: 'current', outcome: { kind: 'committed', value: selection } }
     },
     saveDefaultSelection: async () => ({ kind: 'committed', value: undefined }),
   }
@@ -1193,7 +1198,7 @@ function commandOwner(options: {
     captureSessionScope: () => ({ sessionId, epoch: 1 }),
     captureLiveSessionScope: () => (sessionId === undefined ? undefined : { sessionId, epoch: 1 }),
     isSessionScopeCurrent: () => scopeCurrent,
-    currentSessionId: sessionId,
+    get currentSessionId() { return sessionId },
     signal: new AbortController().signal,
     diag: { debug() {}, warn() {}, error() {} },
     withWriter: async (scope: unknown, run: () => Promise<unknown>) => {
@@ -1246,14 +1251,20 @@ function commandOwner(options: {
   }
 }
 
+
+/** Exactly the port members the `/model` command body consumes. */
+type QuickPort = Pick<
+  ModelCatalog,
+  'available' | 'loadDirectory' | 'sessionSelection' | 'selectSessionModel' | 'saveDefaultSelection'
+>
+
 /**
- * A transport-neutral `ModelCatalog` in the Remote shape: the same four
- * semantic members the Remote adapter implements, with NO Direct-only surface.
- * `remoteShapedPort` is typed as the port the command consumes, so a quick path
- * that reached for a Direct Agent or a private RPC would not compile, and the
- * recorded `port` sequence shows the two presentations drive the identical calls.
+ * A transport-neutral `ModelCatalog` in the Remote shape: the five semantic
+ * members above and nothing else — the same slice the Remote adapter
+ * implements. Typed as `QuickPort`, so the command cannot reach past it, and
+ * the recorded `port` sequence shows both presentations drive the same calls.
  */
-function remoteShapedPort(notes: { port: string[]; selections: unknown[] }) {
+function remoteShapedPort(notes: { port: string[]; selections: unknown[] }): QuickPort {
   const directory: ModelDirectoryDto = {
     default: { provider: `rp`, model: `r-one` },
     routableProviders: [`rp`],
@@ -1266,19 +1277,16 @@ function remoteShapedPort(notes: { port: string[]; selections: unknown[] }) {
   return {
     available: () => true,
     loadDirectory: async () => { notes.port.push(`loadDirectory`); return directory },
-    defaultSelection: () => ({ provider: `rp`, model: `r-one` }),
     sessionSelection: () => { notes.port.push(`sessionSelection`); return { provider: `rp`, model: `r-two` } },
     selectSessionModel: async (_id: string, selection: ModelSelectionDto) => {
       notes.port.push(`selectSessionModel`)
       notes.selections.push(selection)
-      return { ownership: 'owned' as const, outcome: { kind: 'committed' as const, value: selection } }
+      return { ownership: 'current' as const, outcome: { kind: 'committed' as const, value: selection } }
     },
     saveDefaultSelection: async () => {
       notes.port.push(`saveDefaultSelection`)
       return { kind: 'unsupported' as const, reason: 'the Remote backend has no TUI global-default write' }
     },
-    discoverModels: async () => [],
-    listConfigurableProviders: () => [],
   }
 }
 /** A presenter that records the request the command handed it. */
@@ -1369,7 +1377,7 @@ test('the quick and full presentations drive the identical semantic port', async
   const quickProbe = commandOwner({
     sessionless: false,
     presentation: quickRecorder.presentation,
-    port: remoteShapedPort(quickNotes) as unknown as Parameters<typeof commandOwner>[0]['port'],
+    port: remoteShapedPort(quickNotes),
   })
   await quickProbe.commands.openModelQuick()
   const quickRequest = quickRecorder.lastRequest()
@@ -1381,7 +1389,7 @@ test('the quick and full presentations drive the identical semantic port', async
   const fullProbe = commandOwner({
     sessionless: false,
     presentation: fullRecorder.presentation,
-    port: remoteShapedPort(fullNotes) as unknown as Parameters<typeof commandOwner>[0]['port'],
+    port: remoteShapedPort(fullNotes),
   })
   await fullProbe.commands.openModel('models')
   const fullRequest = fullRecorder.lastRequest()
@@ -1403,7 +1411,7 @@ test('the quick and full presentations drive the identical semantic port', async
   const offProbe = commandOwner({
     sessionless: true,
     presentation: offRecorder.presentation,
-    port: remoteShapedPort(offNotes) as unknown as Parameters<typeof commandOwner>[0]['port'],
+    port: remoteShapedPort(offNotes),
   })
   await offProbe.commands.openModelQuick()
   assert.deepEqual(offProbe.opened, ['full'],
