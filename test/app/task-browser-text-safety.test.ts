@@ -190,7 +190,7 @@ async function openBrowserAndStop(harness: Harness): Promise<void> {
 
 // ── S-02: the real Job Stop notice ─────────────────────────────────────────
 
-test('S-02 a hostile Job label never reaches the terminal through a real Task Browser Stop', async () => {
+test('a hostile Job label never reaches the terminal through a real Task Browser Stop', async () => {
   const harness = startHarness({ jobLabel: HOSTILE })
   await flush()
   await openBrowserAndStop(harness)
@@ -210,7 +210,7 @@ test('S-02 a hostile Job label never reaches the terminal through a real Task Br
   harness.app.stop()
 })
 
-test('S-02b a hostile Job label never reaches the terminal through a FAILED Stop notice', async () => {
+test('a hostile Job label never reaches the terminal through a FAILED Stop notice', async () => {
   const harness = startHarness({ jobLabel: HOSTILE })
   await flush()
   harness.observation.stopOutcome = { kind: 'rejected', message: 'the registry refused' }
@@ -227,7 +227,7 @@ test('S-02b a hostile Job label never reaches the terminal through a FAILED Stop
   harness.app.stop()
 })
 
-test('S-02c a hostile Job label never reaches the terminal through a THROWING Stop dispatch', async () => {
+test('a hostile Job label never reaches the terminal through a THROWING Stop dispatch', async () => {
   const harness = startHarness({ jobLabel: HOSTILE })
   await flush()
   harness.observation.stopFailure = new Error('kill admission refused')
@@ -244,7 +244,7 @@ test('S-02c a hostile Job label never reaches the terminal through a THROWING St
   harness.app.stop()
 })
 
-test('S-04 a benign label is unchanged, so the hostile-byte guard is not vacuous', async () => {
+test('a benign label is unchanged, so the hostile-byte guard is not vacuous', async () => {
   const harness = startHarness({ jobLabel: 'plain build' })
   await flush()
   await openBrowserAndStop(harness)
@@ -259,7 +259,7 @@ test('S-04 a benign label is unchanged, so the hostile-byte guard is not vacuous
 
 // ── S-03: the symmetric Subagent interrupt notices ─────────────────────────
 
-test('S-03 a hostile Subagent label never reaches the terminal through a committed interrupt', async () => {
+test('a hostile Subagent label never reaches the terminal through a committed interrupt', async () => {
   const harness = startHarness({ subagentLabel: HOSTILE, interrupt: async () => ({ kind: 'committed' }) })
   await flush()
   await openBrowserAndStop(harness)
@@ -274,7 +274,7 @@ test('S-03 a hostile Subagent label never reaches the terminal through a committ
   harness.app.stop()
 })
 
-test('S-03b a hostile Subagent label never reaches the terminal through a rejected interrupt', async () => {
+test('a hostile Subagent label never reaches the terminal through a rejected interrupt', async () => {
   const harness = startHarness({
     subagentLabel: HOSTILE,
     interrupt: async () => ({ kind: 'rejected', reason: { kind: 'error', message: 'denied' } }),
@@ -291,7 +291,7 @@ test('S-03b a hostile Subagent label never reaches the terminal through a reject
   harness.app.stop()
 })
 
-test('S-03c a hostile Subagent label never reaches the terminal through an indeterminate interrupt', async () => {
+test('a hostile Subagent label never reaches the terminal through an indeterminate interrupt', async () => {
   const harness = startHarness({
     subagentLabel: HOSTILE,
     interrupt: async () => ({ kind: 'indeterminate', message: 'carrier went away' }),
@@ -309,7 +309,7 @@ test('S-03c a hostile Subagent label never reaches the terminal through an indet
   harness.app.stop()
 })
 
-test('S-03d a hostile Subagent label never reaches the terminal through a THROWING interrupt dispatch', async () => {
+test('a hostile Subagent label never reaches the terminal through a THROWING interrupt dispatch', async () => {
   const harness = startHarness({
     subagentLabel: HOSTILE,
     interrupt: async () => { throw new Error('admission refused') },
@@ -328,7 +328,7 @@ test('S-03d a hostile Subagent label never reaches the terminal through a THROWI
   harness.app.stop()
 })
 
-test('S-03e a superseded parent subject never dispatches the selected child Stop', async () => {
+test('a superseded parent subject never dispatches the selected child Stop', async () => {
   let current = true
   const harness = startHarness({
     subagentLabel: 'plain child',
@@ -354,7 +354,7 @@ test('S-03e a superseded parent subject never dispatches the selected child Stop
 
 // ── S-04: currentness — a closed browser receives no late notice ────────────
 
-test('S-04 a browser closed before the Stop settles receives no late notice', async () => {
+test('a browser closed before the Stop settles receives no late notice', async () => {
   const harness = startHarness({ jobLabel: HOSTILE })
   await flush()
   harness.observation.holdStop = true

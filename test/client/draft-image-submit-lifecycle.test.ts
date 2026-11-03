@@ -304,7 +304,7 @@ async function waitFor(check: () => boolean, label: string): Promise<void> {
   assert.fail(`timed out waiting for ${label}`)
 }
 
-test('L01: Enter hands all nine pinned images to the REAL controller/sink', async () => {
+test('Enter hands all nine pinned images to the REAL controller/sink', async () => {
   const harness = startHarness()
   const { vt, app, store, bridge } = harness
   const images = Array.from({ length: 9 }, () => addImage(store))
@@ -343,7 +343,7 @@ test('L01: Enter hands all nine pinned images to the REAL controller/sink', asyn
   app.stop()
 })
 
-test('L02: the accelerated submitDraft path hands the same nine pinned images to the sink', async () => {
+test('the accelerated submitDraft path hands the same nine pinned images to the sink', async () => {
   const harness = startHarness()
   const { vt, app, store, bridge } = harness
   const images = Array.from({ length: 9 }, () => addImage(store))
@@ -365,7 +365,7 @@ test('L02: the accelerated submitDraft path hands the same nine pinned images to
   app.stop()
 })
 
-test('L04b: a deferred session-create failure restores the draft BEFORE the business pin releases', async () => {
+test('a deferred session-create failure restores the draft BEFORE the business pin releases', async () => {
   const harness = startHarness({ failSessionCreate: true })
   const { vt, app, store, bridge } = harness
   const images = Array.from({ length: 9 }, () => addImage(store))
@@ -387,7 +387,7 @@ test('L04b: a deferred session-create failure restores the draft BEFORE the busi
   app.stop()
 })
 
-test('L04: an async writer rejection restores the draft BEFORE the business pin releases', async () => {
+test('an async writer rejection restores the draft BEFORE the business pin releases', async () => {
   const harness = startHarness()
   const { vt, app, store, bridge } = harness
   const images = Array.from({ length: 9 }, () => addImage(store))

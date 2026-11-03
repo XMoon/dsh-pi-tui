@@ -971,7 +971,7 @@ const assertRowWidths = (h: Harness, columns: number): void => {
 
 // ── A-01: the dedicated fullscreen workspace ───────────────────────────────
 
-test('A-01 /settings enters a dedicated fullscreen workspace: Settings chrome owns the frame, no editor row behind it', async () => {
+test('/settings enters a dedicated fullscreen workspace: Settings chrome owns the frame, no editor row behind it', async () => {
   const h = setup({ columns: 100, rows: 40 })
   await h.vt.waitForRender()
   assert.match(h.view(), /❯/, 'the regular editor seat is painted before opening')
@@ -987,7 +987,7 @@ test('A-01 /settings enters a dedicated fullscreen workspace: Settings chrome ow
 
 // ── A-02 / A-03: the wide and medium projections ──────────────────────────
 
-test('A-02 200x60 and 160x40 paint the three-column projection with the real value/source facts', async () => {
+test('200x60 and 160x40 paint the three-column projection with the real value/source facts', async () => {
   for (const [columns, rows] of [[200, 60], [160, 40]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
     await h.open()
@@ -1002,7 +1002,7 @@ test('A-02 200x60 and 160x40 paint the three-column projection with the real val
   }
 })
 
-test('A-03 100x40 and 76x24 project the medium composition per level and switch category with ↑↓', async () => {
+test('100x40 and 76x24 project the medium composition per level and switch category with ↑↓', async () => {
   for (const [columns, rows] of [[100, 40], [76, 24]] as const) {
   const h = setup({ columns, rows, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
@@ -1032,7 +1032,7 @@ test('A-03 100x40 and 76x24 project the medium composition per level and switch 
   }
 })
 
-test('A-03b the wide inline choice keeps the focused pane title as its phase changes', async () => {
+test('the wide inline choice keeps the focused pane title as its phase changes', async () => {
   const h = setup({ columns: 200, rows: 50, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // Categories -> Rows
@@ -1046,7 +1046,7 @@ test('A-03b the wide inline choice keeps the focused pane title as its phase cha
   h.dispose()
 })
 
-test('A-03c a short inline choice exposes only Esc when the pane title consumes the body budget', async () => {
+test('a short inline choice exposes only Esc when the pane title consumes the body budget', async () => {
   for (const rows of [3, 4] as const) {
     const h = setup({ columns: 200, rows, doc: { theme: 'dark' } })
     await h.open()
@@ -1087,7 +1087,7 @@ test('A-03c a short inline choice exposes only Esc when the pane title consumes 
   }
 })
 
-test('A-03d a resize before repaint revokes the previous choice-navigation grant', async () => {
+test('a resize before repaint revokes the previous choice-navigation grant', async () => {
   const h = setup({ columns: 200, rows: 24, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r') // Categories -> Rows
@@ -1110,7 +1110,7 @@ test('A-03d a resize before repaint revokes the previous choice-navigation grant
 
 // ── A-04: the narrow drill-down ───────────────────────────────────────────
 
-test('A-04 72x24 drills categories → rows → detail with one Esc per level and a final close', async () => {
+test('72x24 drills categories → rows → detail with one Esc per level and a final close', async () => {
   const h = setup({ columns: 72, rows: 24, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await h.open()
   assert.match(h.rowsPlain()[0]!, /Settings · Categories/)
@@ -1128,7 +1128,7 @@ test('A-04 72x24 drills categories → rows → detail with one Esc per level an
   h.dispose()
 })
 
-test('A-04b 44x8 shows the old value, current candidate identity and explicit confirm', async () => {
+test('44x8 shows the old value, current candidate identity and explicit confirm', async () => {
   const longTheme = 'file:a-very-long-custom-theme-name-that-must-wrap-across-cells'
   const h = setup({ columns: 44, rows: 8, doc: { theme: longTheme } })
   await h.open()
@@ -1150,7 +1150,7 @@ test('A-04b 44x8 shows the old value, current candidate identity and explicit co
 
 // ── A-05: the extreme-height allocation ───────────────────────────────────
 
-test('A-05 every height keeps the pinned bar last, grants a real body from 3 rows, and Esc always escapes', async () => {
+test('every height keeps the pinned bar last, grants a real body from 3 rows, and Esc always escapes', async () => {
   for (const rows of [1, 2, 3, 4, 5, 8, 10, 24]) {
     const h = setup({ columns: 72, rows })
     await h.open()
@@ -1168,7 +1168,7 @@ test('A-05 every height keeps the pinned bar last, grants a real body from 3 row
 
 // ── A-06: resize only re-projects ─────────────────────────────────────────
 
-test('A-06 200 → 72 → 44 → 200 preserves the category, the row, the level and the focus', async () => {
+test('200 → 72 → 44 → 200 preserves the category, the row, the level and the focus', async () => {
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'plugin:acme/solarized', iconStyle: 'symbols' }, themes: pluginThemes() })
   await h.open()
   await key(h, '\x1b[B') // Appearance -> Conversation on the categories level
@@ -1193,7 +1193,7 @@ test('A-06 200 → 72 → 44 → 200 preserves the category, the row, the level 
 
 // ── A-07: hostile external text ───────────────────────────────────────────
 
-test('A-07 hostile OSC/CSI/CJK theme text is sanitized before paint and never reaches the clipboard', async () => {
+test('hostile OSC/CSI/CJK theme text is sanitized before paint and never reaches the clipboard', async () => {
   const hostile = `evil\x1b[31mred\x07payload-${'汉'.repeat(60)}`
   const h = setup({ columns: 100, rows: 24, doc: { theme: hostile } })
   await h.open()
@@ -1223,7 +1223,7 @@ test('A-07 hostile OSC/CSI/CJK theme text is sanitized before paint and never re
 
 // ── A-08: read provenance and currentness ─────────────────────────────────
 
-test('A-08 the ready snapshot distinguishes the raw theme identity, the runtime preset and its persisted last-read', async () => {
+test('the ready snapshot distinguishes the raw theme identity, the runtime preset and its persisted last-read', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -1247,7 +1247,7 @@ test('A-08 the ready snapshot distinguishes the raw theme identity, the runtime 
   h.dispose()
 })
 
-test('A-08b stale and unavailable backends keep the last-known document but never claim it current', async () => {
+test('stale and unavailable backends keep the last-known document but never claim it current', async () => {
   for (const readiness of ['stale', 'unavailable'] as const) {
     const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' }, readiness })
     await h.open()
@@ -1259,7 +1259,7 @@ test('A-08b stale and unavailable backends keep the last-known document but neve
   }
 })
 
-test('A-08c a missing document and a throwing read are distinct explicit states, never fabricated defaults', async () => {
+test('a missing document and a throwing read are distinct explicit states, never fabricated defaults', async () => {
   const missing = setup({ columns: 100, rows: 40, settingsService: false })
   await missing.open()
   assert.match(missing.view(), /Unavailable — no authoritative config document/)
@@ -1277,7 +1277,7 @@ test('A-08c a missing document and a throwing read are distinct explicit states,
 
 // ── A-09: the painted mouse identity ──────────────────────────────────────
 
-test('A-09 SGR press/release hits the same painted row; a repaint between press and release is refused', async () => {
+test('SGR press/release hits the same painted row; a repaint between press and release is refused', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { iconStyle: 'minimal' } })
   await h.open()
   const iconRow = rowOf(h, 'Icon style')
@@ -1307,7 +1307,7 @@ test('A-09 SGR press/release hits the same painted row; a repaint between press 
   h.dispose()
 })
 
-test('A-09b the wheel scrolls only the visible pane under the pointer, and blank chrome is inert', async () => {
+test('the wheel scrolls only the visible pane under the pointer, and blank chrome is inert', async () => {
   const h = setup({ columns: 100, rows: 10, doc: { theme: 'dark' } })
   await h.open()
   const l0 = h.view()
@@ -1339,7 +1339,7 @@ test('A-09b the wheel scrolls only the visible pane under the pointer, and blank
 
 // ── A-10: exact copy and scoped feedback ──────────────────────────────────
 
-test('A-10 About c copies the exact selected fact and its settlement is visible inside the workspace', async () => {
+test('About c copies the exact selected fact and its settlement is visible inside the workspace', async () => {
   const h = setup({ columns: 140, rows: 40, liveSession: { sessionId: 'sess-a10', title: 'a10 proof', contextUsed: 1_000 } })
   await h.openHome()
   await key(h, '\r') // rail -> About content
@@ -1355,7 +1355,7 @@ test('A-10 About c copies the exact selected fact and its settlement is visible 
   h.dispose()
 })
 
-test('A-10d Legacy choosing and settled Detail never copy, under raw and encoded copy keys', async () => {
+test('Legacy choosing and settled Detail never copy, under raw and encoded copy keys', async () => {
   const encodedCopyKeys = ['c', 'C', '\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
   for (const columns of [72, 44, 30] as const) {
     // A plain palette: this case confirms a real write, and the fixture's theme
@@ -1385,7 +1385,7 @@ test('A-10d Legacy choosing and settled Detail never copy, under raw and encoded
   }
 })
 
-test('A-10e About c/C accept raw, Kitty and modifyOtherKeys printable events', async () => {
+test('About c/C accept raw, Kitty and modifyOtherKeys printable events', async () => {
   // Each encoded event is one whole press of the same semantic key: `c` for the
   // selected fact, the Shift+C form for the whole report.
   const factKeys = ['c', '\x1b[99u'] as const
@@ -1412,7 +1412,7 @@ test('A-10e About c/C accept raw, Kitty and modifyOtherKeys printable events', a
   }
 })
 
-test('A-10f a copy key never edits a Legacy document at any level', async () => {
+test('a copy key never edits a Legacy document at any level', async () => {
   const encodedCopyKeys = ['\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
   for (const encodedKey of encodedCopyKeys) {
     const h = setup({ columns: 72, rows: 24, doc: { theme: 'dark' } })
@@ -1432,7 +1432,7 @@ test('A-10f a copy key never edits a Legacy document at any level', async () => 
   }
 })
 
-test('B-15e mouse Confirm requires the painted Enter hint at the minimum Action Bar width', async () => {
+test('mouse Confirm requires the painted Enter hint at the minimum Action Bar width', async () => {
   for (const [columns, canConfirm] of [[18, false], [19, true], [23, true]] as const) {
     const h = setup({ columns, rows: 24, doc: { theme: 'dark' }, themes: pluginThemes() })
     await openSelectedRow(h, 'theme')
@@ -1463,7 +1463,7 @@ test('B-15e mouse Confirm requires the painted Enter hint at the minimum Action 
   }
 })
 
-test('A-10b a copy settled after the workspace closed never notifies the restored surface', async () => {
+test('a copy settled after the workspace closed never notifies the restored surface', async () => {
   let settleCopy: ((ok: boolean) => void) | undefined
   let copyRequests = 0
   const h = setup({
@@ -1492,7 +1492,7 @@ test('A-10b a copy settled after the workspace closed never notifies the restore
 
 // ── A-11: the legacy compatibility bridge ─────────────────────────────────
 
-test('A-11 Agent paints only the five availability-gated rows and no legacy launcher', async () => {
+test('Agent paints only the five availability-gated rows and no legacy launcher', async () => {
   const h = setup({
     columns: 140,
     rows: 44,
@@ -1533,7 +1533,7 @@ test('A-11 Agent paints only the five availability-gated rows and no legacy laun
   h.dispose()
 })
 
-test('A-11b Agent hides the approval and delegation rows when their authority is absent', async () => {
+test('Agent hides the approval and delegation rows when their authority is absent', async () => {
   // Sessionless Direct with the capability present: no session-scoped row.
   const sessionless = setup({
     columns: 140,
@@ -1625,7 +1625,7 @@ async function openAgentRow(h: Harness, label: string): Promise<void> {
   assert.fail(`the Agent row ${JSON.stringify(label)} was never reached:\n${h.view()}`)
 }
 
-test('R3-01 confirming a permission preset writes the Host default and never the current session', async () => {
+test('confirming a permission preset writes the Host default and never the current session', async () => {
   const h = setup({
     columns: 120,
     rows: 40,
@@ -1653,7 +1653,7 @@ test('R3-01 confirming a permission preset writes the Host default and never the
   h.dispose()
 })
 
-test('R3-01b a Host permission default that could not be written is never reported as Verified', async () => {
+test('a Host permission default that could not be written is never reported as Verified', async () => {
   const h = setup({
     columns: 120,
     rows: 40,
@@ -1677,7 +1677,7 @@ test('R3-01b a Host permission default that could not be written is never report
   h.dispose()
 })
 
-test('R3-02 the approval Confirm targets the pinned session scope; a stale scope dispatches nothing', async () => {
+test('the approval Confirm targets the pinned session scope; a stale scope dispatches nothing', async () => {
   const h = setup({
     columns: 120,
     rows: 40,
@@ -1702,7 +1702,7 @@ test('R3-02 the approval Confirm targets the pinned session scope; a stale scope
   h.dispose()
 })
 
-test('R3-02b a session switch revokes the approval row instead of re-targeting the new session', async () => {
+test('a session switch revokes the approval row instead of re-targeting the new session', async () => {
   let current = true
   const h = setup({
     columns: 120,
@@ -1734,7 +1734,7 @@ test('R3-02b a session switch revokes the approval row instead of re-targeting t
   h.dispose()
 })
 
-test('R3-04 the allowlist row mounts the EXISTING picker in the same workspace and toggles the official section', async () => {
+test('the allowlist row mounts the EXISTING picker in the same workspace and toggles the official section', async () => {
   const h = setup({
     columns: 140,
     rows: 40,
@@ -1801,7 +1801,7 @@ test('R3-04 the allowlist row mounts the EXISTING picker in the same workspace a
   h.dispose()
 })
 
-test('R3-05 enabling the toggle with an EMPTY allowlist writes nothing and moves to the allowlist row', async () => {
+test('enabling the toggle with an EMPTY allowlist writes nothing and moves to the allowlist row', async () => {
   const h = setup({
     columns: 120,
     rows: 40,
@@ -1829,7 +1829,7 @@ test('R3-05 enabling the toggle with an EMPTY allowlist writes nothing and moves
   h.dispose()
 })
 
-test('R3-05b enabling and disabling the toggle preserves every saved route', async () => {
+test('enabling and disabling the toggle preserves every saved route', async () => {
   const h = setup({
     columns: 120,
     rows: 40,
@@ -1866,7 +1866,7 @@ test('R3-05b enabling and disabling the toggle preserves every saved route', asy
   h.dispose()
 })
 
-test('R3-07 the user shell sandbox policy Confirm stores the raw document value only', async () => {
+test('the user shell sandbox policy Confirm stores the raw document value only', async () => {
   const h = setup({
     columns: 120,
     rows: 40,
@@ -1898,7 +1898,7 @@ test('R3-07 the user shell sandbox policy Confirm stores the raw document value 
   h.dispose()
 })
 
-test('R3-06 one queued section write cannot resurrect a route a pending picker write removed', async () => {
+test('one queued section write cannot resurrect a route a pending picker write removed', async () => {
   // The cross-surface failure this queue must prevent: the picker removes a
   // route (its write is still in flight), the user leaves the picker and flips
   // the toggle. The toggle owns ONLY `enabled`, so the route list it writes must
@@ -1973,7 +1973,7 @@ test('R3-06 one queued section write cannot resurrect a route a pending picker w
   h.dispose()
 })
 
-test('R3-06b a queued allowlist write is REFUSED when the backend goes stale while the first turn is held', async () => {
+test('a queued allowlist write is REFUSED when the backend goes stale while the first turn is held', async () => {
   // Ready at dispatch time, then the Client loses currentness while the write
   // waits: the queued turn must refuse from the FRESH authority at its own
   // turn, never write the last-known section back, and the refusal must reach
@@ -2031,7 +2031,7 @@ test('R3-06b a queued allowlist write is REFUSED when the backend goes stale whi
   h.dispose()
 })
 
-test('R3-06c a READY but UNREADABLE official section is never written as an empty config', async () => {
+test('a READY but UNREADABLE official section is never written as an empty config', async () => {
   // The one-shot failure targets the COMMIT read (the snapshot opened from a
   // readable section, so the row and its candidates exist); the following
   // refresh reads the section again and paints the real refusal.
@@ -2072,7 +2072,7 @@ test('R3-06c a READY but UNREADABLE official section is never written as an empt
   h.dispose()
 })
 
-test('R3-09 a NON-CURRENT backend paints no confirmable Agent candidate and claims no current value', async () => {
+test('a NON-CURRENT backend paints no confirmable Agent candidate and claims no current value', async () => {
   for (const readiness of ['stale', 'unavailable'] as const) {
     const h = setup({
       columns: 140,
@@ -2112,7 +2112,7 @@ test('R3-09 a NON-CURRENT backend paints no confirmable Agent candidate and clai
   }
 })
 
-test('R3-09b the default permission and shell policy rows offer no candidate on a non-ready backend', async () => {
+test('the default permission and shell policy rows offer no candidate on a non-ready backend', async () => {
   for (const readiness of ['stale', 'unavailable'] as const) {
     const h = setup({
       columns: 140,
@@ -2147,7 +2147,7 @@ test('R3-09b the default permission and shell policy rows offer no candidate on 
 
 // ── A-12: the return surface ──────────────────────────────────────────────
 
-test('A-12 Esc restores the SAME return surface: the editor draft, the regular footer and the fullscreen mode', async () => {
+test('Esc restores the SAME return surface: the editor draft, the regular footer and the fullscreen mode', async () => {
   const h = setup({ columns: 100, rows: 40 })
   await h.vt.waitForRender()
   for (const ch of 'draft text') await key(h, ch)
@@ -2170,7 +2170,7 @@ test('A-12 Esc restores the SAME return surface: the editor draft, the regular f
 
 // ── A-15: live theme tokens ───────────────────────────────────────────────
 
-test('A-15 the workspace chrome paints the live palette tokens (dark → light)', async () => {
+test('the workspace chrome paints the live palette tokens (dark → light)', async () => {
   // The row summaries come from the LIVE authorities (C2-R1): the icon row's
   // summary is `app.currentIconStyle()`, so the app must start on the style this
   // token assertion names.
@@ -2415,7 +2415,7 @@ test('a raw source value with a line break renders a visible escape distinct fro
 
 // ── F9 extras: the remaining matrix controls ──────────────────────────────
 
-test('A-02b the wide geometry is exact and a 300-char value never squeezes the Action Bar', async () => {
+test('the wide geometry is exact and a 300-char value never squeezes the Action Bar', async () => {
   const long = `file:${'x'.repeat(300)}`
   const h = setup({ columns: 200, rows: 60, doc: { theme: long } })
   await h.open()
@@ -2435,7 +2435,7 @@ test('A-02b the wide geometry is exact and a 300-char value never squeezes the A
   h.dispose()
 })
 
-test('A-10c the About copy failure paths report inside the workspace instead of a false success', async () => {
+test('the About copy failure paths report inside the workspace instead of a false success', async () => {
   for (const failing of [async () => false, async () => { throw new Error('clipboard refused') }]) {
     const h = setup({
       columns: 140,
@@ -2452,7 +2452,7 @@ test('A-10c the About copy failure paths report inside the workspace instead of 
   }
 })
 
-test('A-15b a custom palette repaints the workspace tokens', async () => {
+test('a custom palette repaints the workspace tokens', async () => {
   const h = setup({ columns: 100, rows: 40 })
   await h.open()
   const dark = h.vt.getCellFgRgb(0, 0)
@@ -2464,7 +2464,7 @@ test('A-15b a custom palette repaints the workspace tokens', async () => {
   h.dispose()
 })
 
-test('A-06b a non-first row and its REAL detail scroll survive a resize', async () => {
+test('a non-first row and its REAL detail scroll survive a resize', async () => {
   // A long RAW icon-style value makes the SELECTED row's Detail overflow the
   // short viewport, so the scroll below is observable and meaningful.
   const h = setup({ columns: 100, rows: 10, doc: { iconStyle: `symbols-${'z'.repeat(240)}` } })
@@ -2485,7 +2485,7 @@ test('A-06b a non-first row and its REAL detail scroll survive a resize', async 
   h.dispose()
 })
 
-test('A-15c an unhandled printable key is inert inside the workspace', async () => {
+test('an unhandled printable key is inert inside the workspace', async () => {
   const h = setup({ columns: 100, rows: 40, doc: { theme: 'dark' } })
   await h.open()
   const before = h.view()
@@ -2690,7 +2690,7 @@ test('Left/Right select levels while Tab/Shift+Tab only re-focus the panes', asy
 
 // ── External UI review (PR #295) P2s ───────────────────────────────────────
 
-test('A-02c the list summary survives a long value and stays exact for a short one', async () => {
+test('the list summary survives a long value and stays exact for a short one', async () => {
   const long = `file:${'w'.repeat(120)}`
   // The rows pane is located from its painted pane header, so the assertion
   // follows the real medium geometry (L0 paints the list in its second column).
@@ -2723,7 +2723,7 @@ test('A-02c the list summary survives a long value and stays exact for a short o
   narrow.dispose()
 })
 
-test('A-05b the decorative rules yield before readable content on short screens', async () => {
+test('the decorative rules yield before readable content on short screens', async () => {
   // 5 rows without a notice: header + THREE real body rows + bar, no rule row.
   const short = setup({ columns: 72, rows: 5, doc: { theme: 'dark' } })
   await short.open()
@@ -3197,7 +3197,7 @@ async function openSelectedRow(h: Harness, row: 'theme' | 'display-preset'): Pro
   await key(h, '\r') // L0 -> L1
 }
 
-test('B-01 the Theme Detail separates the runtime palette from the persisted preference and starts read-only', async () => {
+test('the Theme Detail separates the runtime palette from the persisted preference and starts read-only', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes: pluginThemes() })
   await openSelectedRow(h, 'theme')
   assert.match(h.rowsPlain()[0]!, /Settings · Appearance · Rows/)
@@ -3210,7 +3210,7 @@ test('B-01 the Theme Detail separates the runtime palette from the persisted pre
   h.dispose()
 })
 
-test('B-02 Enter opens the L2 choice; moving the candidate writes nothing; only the explicit Confirm commits and verifies', async () => {
+test('Enter opens the L2 choice; moving the candidate writes nothing; only the explicit Confirm commits and verifies', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' }, themes: pluginThemes() })
   await openSelectedRow(h, 'theme')
   await key(h, '\r') // L1 -> inline choice
@@ -3273,7 +3273,7 @@ test('B-02 Enter opens the L2 choice; moving the candidate writes nothing; only 
   h.dispose()
 })
 
-test('B-03 a confirmed Theme commit whose write is refused reports the real failure and never claims Verified', async () => {
+test('a confirmed Theme commit whose write is refused reports the real failure and never claims Verified', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -3311,7 +3311,7 @@ test('B-03 a confirmed Theme commit whose write is refused reports the real fail
   h.dispose()
 })
 
-test('B-04 Retry save re-dispatches the failed value once the write can succeed', async () => {
+test('Retry save re-dispatches the failed value once the write can succeed', async () => {
   let refuse = true
   const h = setup({
     columns: 200,
@@ -3347,7 +3347,7 @@ test('B-04 Retry save re-dispatches the failed value once the write can succeed'
   h.dispose()
 })
 
-test('B-04b two long same-prefix theme identities stay distinguishable at 44 columns and Confirm the raw choice', async () => {
+test('two long same-prefix theme identities stay distinguishable at 44 columns and Confirm the raw choice', async () => {
   const themes = new ThemeRegistry()
   themes.register({
     id: 'sunrise-alpha', name: 'Sunrise very long theme name alpha',
@@ -3379,7 +3379,7 @@ test('B-04b two long same-prefix theme identities stay distinguishable at 44 col
   h.dispose()
 })
 
-test('B-05 the Display preset applies through the shared runtime owner, persists exactly once and verifies', async () => {
+test('the Display preset applies through the shared runtime owner, persists exactly once and verifies', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { displayPreset: 'compact', theme: 'dark' }, displayPreset: 'full' })
   await openSelectedRow(h, 'display-preset')
   assert.match(h.view(), /Value\s+full/, 'the row value IS the live runtime preset')
@@ -3406,7 +3406,7 @@ test('B-05 the Display preset applies through the shared runtime owner, persists
   h.dispose()
 })
 
-test('B-05b the profile-wide Visual tools switch confirms through its Host port, verifies and restores', async () => {
+test('the profile-wide Visual tools switch confirms through its Host port, verifies and restores', async () => {
   const h = setup({ columns: 200, rows: 40 })
   await h.open('Tools')
   assert.match(h.view(), /Visual tools/, 'the Tools category carries the built-in switch row')
@@ -3443,7 +3443,7 @@ test('B-05b the profile-wide Visual tools switch confirms through its Host port,
   h.dispose()
 })
 
-test('B-05c an unavailable Visual tools section stays visible and offers neither choice nor write', async () => {
+test('an unavailable Visual tools section stays visible and offers neither choice nor write', async () => {
   const h = setup({ columns: 200, rows: 40, visualToolsUnavailable: true })
   await h.open('Tools')
   assert.match(h.view(), /Visual tools/, 'the category still names its built-in row')
@@ -3457,7 +3457,7 @@ test('B-05c an unavailable Visual tools section stays visible and offers neither
   h.dispose()
 })
 
-test('B-05d a stale backend keeps the last-known Visual tools value but refuses the write', async () => {
+test('a stale backend keeps the last-known Visual tools value but refuses the write', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -3475,7 +3475,7 @@ test('B-05d a stale backend keeps the last-known Visual tools value but refuses 
   h.dispose()
 })
 
-test('B-05e a switch the Host registry did not adopt is reported as unverified, never Verified', async () => {
+test('a switch the Host registry did not adopt is reported as unverified, never Verified', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -3515,7 +3515,7 @@ test('B-05e2 a verified Off whose registrations remain is named as a runtime mis
   h.dispose()
 })
 
-test('B-05f a refused Visual tools write is reported as Not saved and never Verified', async () => {
+test('a refused Visual tools write is reported as Not saved and never Verified', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -3534,7 +3534,7 @@ test('B-05f a refused Visual tools write is reported as Not saved and never Veri
   h.dispose()
 })
 
-test('B-05g an external edit before Confirm is a conflict, never a silent overwrite', async () => {
+test('an external edit before Confirm is a conflict, never a silent overwrite', async () => {
   const h = setup({ columns: 200, rows: 40, visualToolsExternalChange: false })
   await h.open('Tools')
   await key(h, '\r')
@@ -3549,7 +3549,7 @@ test('B-05g an external edit before Confirm is a conflict, never a silent overwr
   h.dispose()
 })
 
-test('B-06 a stale backend never writes and says why; the Display runtime fact still applies locally', async () => {
+test('a stale backend never writes and says why; the Display runtime fact still applies locally', async () => {
   const theme = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, readiness: 'stale', themes: pluginThemes() })
   await openSelectedRow(theme, 'theme')
   await key(theme, '\r')
@@ -3583,7 +3583,7 @@ test('B-06 a stale backend never writes and says why; the Display runtime fact s
   display.dispose()
 })
 
-test('B-07 a stored theme whose source is gone is listed as unavailable and can never be confirmed', async () => {
+test('a stored theme whose source is gone is listed as unavailable and can never be confirmed', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'plugin:gone/removed' } })
   await openSelectedRow(h, 'theme')
   assert.match(h.view(), /plugin:gone\/removed/, 'the broken persisted identity is still readable')
@@ -3598,7 +3598,7 @@ test('B-07 a stored theme whose source is gone is listed as unavailable and can 
   h.dispose()
 })
 
-test('B-08 the Input & Terminal handoff keeps its facts readable and gains no edit channel', async () => {
+test('the Input & Terminal handoff keeps its facts readable and gains no edit channel', async () => {
   // C2-R2 migrated every Input & Terminal configuration row; C2-R5 replaced the
   // last read-only handoff with the same-lease Keyboard shortcuts page entry. It
   // paints no scalar writer and exposes no copy verb.
@@ -3631,7 +3631,7 @@ test('B-08 the Input & Terminal handoff keeps its facts readable and gains no ed
   h.dispose()
 })
 
-test('B-09 a settlement held across the teardown never reaches a closed or replacement workspace', async () => {
+test('a settlement held across the teardown never reaches a closed or replacement workspace', async () => {
   const h = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, themes: pluginThemes(), holdOwned: true })
   await openSelectedRow(h, 'theme')
   await key(h, '\r')
@@ -3665,7 +3665,7 @@ test('B-09 a settlement held across the teardown never reaches a closed or repla
   h.dispose()
 })
 
-test('B-10 the 44x8 choice stays reachable, identity-fenced across a resize, and only the painted confirm writes', async () => {
+test('the 44x8 choice stays reachable, identity-fenced across a resize, and only the painted confirm writes', async () => {
   const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' } })
   await h.open()
   await key(h, '\r')
@@ -3689,7 +3689,7 @@ test('B-10 the 44x8 choice stays reachable, identity-fenced across a resize, and
   h.dispose()
 })
 
-test('B-11 a write the authority readably disagrees with is Not saved, never Verified and never "verification unavailable"', async () => {
+test('a write the authority readably disagrees with is Not saved, never Verified and never "verification unavailable"', async () => {
   // The document call RESOLVES (the Host accepted the request) but the stored
   // value never becomes the requested one — the one shape where "the write
   // returned" must not be reported as saved.
@@ -3722,7 +3722,7 @@ test('B-11 a write the authority readably disagrees with is Not saved, never Ver
   h.dispose()
 })
 
-test('B-12 the writable rows reach the choice and confirm at every responsive breakpoint', async () => {
+test('the writable rows reach the choice and confirm at every responsive breakpoint', async () => {
   for (const [columns, rows] of [[200, 40], [120, 40], [109, 40], [108, 40], [107, 40], [76, 40], [75, 24], [60, 24]] as const) {
     const h = setup({ columns, rows, doc: { theme: 'dark' } })
     await openSelectedRow(h, 'theme')
@@ -3745,7 +3745,7 @@ test('B-12 the writable rows reach the choice and confirm at every responsive br
 
 // ── B2-B round 2: the qualified paths and the reviewer's P2 regressions ────
 
-test('B-13 the REAL Direct adapter drives the workspace write end to end (UI → path ops → authoritative re-read → Verified)', async () => {
+test('the REAL Direct adapter drives the workspace write end to end (UI → path ops → authoritative re-read → Verified)', async () => {
   const fixture = createDirectSettingsFixture({ theme: 'dark', iconStyle: 'symbols' })
   const h = setup({ columns: 140, rows: 40, tuiSettings: fixture.settings })
   await openSelectedRow(h, 'theme')
@@ -3773,7 +3773,7 @@ test('B-13 the REAL Direct adapter drives the workspace write end to end (UI →
   h.dispose()
 })
 
-test('B-14 the Persisted fact distinguishes a readable document without a value from an unreadable one', async () => {
+test('the Persisted fact distinguishes a readable document without a value from an unreadable one', async () => {
   // A readable document with no stored preset: `not set`, never "unreadable".
   const readable = setup({ columns: 200, rows: 40, doc: { theme: 'dark' }, displayPreset: 'full' })
   await openSelectedRow(readable, 'display-preset')
@@ -3787,7 +3787,7 @@ test('B-14 the Persisted fact distinguishes a readable document without a value 
   missing.dispose()
 })
 
-test('B-15 a long CJK candidate wraps while retaining its source-qualified raw identity', async () => {
+test('a long CJK candidate wraps while retaining its source-qualified raw identity', async () => {
   const label = `汉${'字'.repeat(30)}`
   const themes = new ThemeRegistry()
   themes.register({ id: 'long-cjk', name: label, palette: darkColors }, 'acme-owner', 'acme')
@@ -3826,7 +3826,7 @@ test('B-15 a long CJK candidate wraps while retaining its source-qualified raw i
   h.dispose()
 })
 
-test('B-15b the source-qualified candidate identity stays visible before 44x8 keyboard confirm', async () => {
+test('the source-qualified candidate identity stays visible before 44x8 keyboard confirm', async () => {
   const themes = new ThemeRegistry()
   themes.register({ id: 'solarized', name: 'Solarized', palette: darkColors }, 'acme-owner', 'acme')
   const value = 'plugin:acme/solarized'
@@ -3845,7 +3845,7 @@ test('B-15b the source-qualified candidate identity stays visible before 44x8 ke
   h.dispose()
 })
 
-test('B-15c identity-aware 44x8 allocation shows a full long raw identity with confirm', async () => {
+test('identity-aware 44x8 allocation shows a full long raw identity with confirm', async () => {
   const id = 'x'.repeat(80)
   const themes = new ThemeRegistry()
   themes.register({ id, name: 'Long custom theme', palette: darkColors }, 'acme-owner', 'acme')
@@ -3881,7 +3881,7 @@ test('B-15c identity-aware 44x8 allocation shows a full long raw identity with c
   h.dispose()
 })
 
-test('B-15d identity beyond the adaptive 44x8 budget remains non-confirmable', async () => {
+test('identity beyond the adaptive 44x8 budget remains non-confirmable', async () => {
   const id = 'x'.repeat(200)
   const themes = new ThemeRegistry()
   themes.register({ id, name: 'Oversized custom theme', palette: darkColors }, 'acme-owner', 'acme')
@@ -3903,7 +3903,7 @@ test('B-15d identity beyond the adaptive 44x8 budget remains non-confirmable', a
   h.dispose()
 })
 
-test('B-16 the wheel really scrolls the candidate list independently of its selection', async () => {
+test('the wheel really scrolls the candidate list independently of its selection', async () => {
   const themes = longNamedThemes(5)
   const h = setup({ columns: 44, rows: 8, doc: { theme: 'dark' }, themes })
   await openSelectedRow(h, 'theme')
@@ -3923,7 +3923,7 @@ test('B-16 the wheel really scrolls the candidate list independently of its sele
   h.dispose()
 })
 
-test('B-16b wheel scrolling the facts leaves candidate identity and offset alone', async () => {
+test('wheel scrolling the facts leaves candidate identity and offset alone', async () => {
   const themes = longNamedThemes(10)
   const value = `file:${'x'.repeat(120)}`
   const h = setup({ columns: 108, rows: 24, doc: { theme: value }, themes })
@@ -3948,7 +3948,7 @@ test('B-16b wheel scrolling the facts leaves candidate identity and offset alone
   h.dispose()
 })
 
-test('B-17 choosing auto drops the plugin-theme record, so a later HMR unload cannot force dark over it', async () => {
+test('choosing auto drops the plugin-theme record, so a later HMR unload cannot force dark over it', async () => {
   const themes = pluginThemes()
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'plugin:acme/solarized' }, themes })
   // The plugin palette is the LIVE one when the user opens the workspace.
@@ -3972,7 +3972,7 @@ test('B-17 choosing auto drops the plugin-theme record, so a later HMR unload ca
   h.dispose()
 })
 
-test('B-18 a late OSC answer never overrides a newer choice, while it still applies to an unchallenged auto', async () => {
+test('a late OSC answer never overrides a newer choice, while it still applies to an unchallenged auto', async () => {
   const saved = {
     NO_COLOR: process.env.NO_COLOR,
     FORCE_COLOR: process.env.FORCE_COLOR,
@@ -4054,7 +4054,7 @@ test('B-18 a late OSC answer never overrides a newer choice, while it still appl
   }
 })
 
-test('B-19 a dispatched write that fails after the workspace closed still leaves a diagnostic', async () => {
+test('a dispatched write that fails after the workspace closed still leaves a diagnostic', async () => {
   const h = setup({
     columns: 140,
     rows: 40,
@@ -4094,7 +4094,7 @@ test('B-19 a dispatched write that fails after the workspace closed still leaves
   h.dispose()
 })
 
-test('B-20 a FAILED candidate never steals the intent of a pending auto query', async () => {
+test('a FAILED candidate never steals the intent of a pending auto query', async () => {
   const saved = {
     NO_COLOR: process.env.NO_COLOR,
     FORCE_COLOR: process.env.FORCE_COLOR,
@@ -4156,7 +4156,7 @@ test('B-20 a FAILED candidate never steals the intent of a pending auto query', 
   }
 })
 
-test('B-21 a candidate taller than the list viewport reveals its HEAD, never a marker-less tail', async () => {
+test('a candidate taller than the list viewport reveals its HEAD, never a marker-less tail', async () => {
   const label = `汉${'字'.repeat(30)}`
   const themes = new ThemeRegistry()
   themes.register({ id: 'tall-cjk', name: label, palette: darkColors }, 'acme-owner', 'acme')
@@ -4185,7 +4185,7 @@ test('B-21 a candidate taller than the list viewport reveals its HEAD, never a m
   h.dispose()
 })
 
-test('B-22 a PENDING theme commit already shows the runtime fact it applied', async () => {
+test('a PENDING theme commit already shows the runtime fact it applied', async () => {
   const themes = pluginThemes()
   // A COMPLETE palette so the applied plugin theme is renderable, like a real one.
   themes.register({ id: 'full-palette', name: 'FullPalette', palette: darkColors }, 'acme-owner', 'acme')
@@ -4228,7 +4228,7 @@ test('B-22 a PENDING theme commit already shows the runtime fact it applied', as
   h.dispose()
 })
 
-test('B-23 a PENDING display commit already shows the runtime preset', async () => {
+test('a PENDING display commit already shows the runtime preset', async () => {
   const h = setup({
     columns: 140,
     rows: 40,
@@ -4261,7 +4261,7 @@ test('B-23 a PENDING display commit already shows the runtime preset', async () 
   h.dispose()
 })
 
-test('B-24 a refused write whose value an external writer already set is neither accepted nor refused', async () => {
+test('a refused write whose value an external writer already set is neither accepted nor refused', async () => {
   const h = setup({
     columns: 200,
     rows: 40,
@@ -4296,7 +4296,7 @@ test('B-24 a refused write whose value an external writer already set is neither
   h.dispose()
 })
 
-test('B-25 a contribution unloading under an open choice re-anchors the highlight on the chosen candidate', async () => {
+test('a contribution unloading under an open choice re-anchors the highlight on the chosen candidate', async () => {
   const themes = new ThemeRegistry()
   themes.register({ id: 'aaa', name: 'Alpha', palette: darkColors }, 'acme-owner', 'acme')
   themes.register({ id: 'zzz', name: 'Zeta', palette: darkColors }, 'acme-owner', 'acme')
@@ -4328,7 +4328,7 @@ test('B-25 a contribution unloading under an open choice re-anchors the highligh
   h.dispose()
 })
 
-test('B-26 a choice whose candidate source vanished is dropped instead of offering a dead confirm', async () => {
+test('a choice whose candidate source vanished is dropped instead of offering a dead confirm', async () => {
   const themes = new ThemeRegistry()
   const handle = themes.register({ id: 'gone', name: 'Gone', palette: darkColors }, 'acme-owner', 'acme')
   themes.register({ id: 'stay', name: 'Stay', palette: darkColors }, 'acme-owner', 'acme')
@@ -4351,7 +4351,7 @@ test('B-26 a choice whose candidate source vanished is dropped instead of offeri
   h.dispose()
 })
 
-test('B-27 a rejected write whose field an external writer moved to a THIRD value is attributed as unknown, never as a refusal', async () => {
+test('a rejected write whose field an external writer moved to a THIRD value is attributed as unknown, never as a refusal', async () => {
   // The base this request started from is `dark` and it asks for `light`; before the
   // forced authoritative re-read an external writer lands a THIRD value. Neither the
   // requested value (so not an acceptance) nor the base value (so not a provable
@@ -4389,7 +4389,7 @@ test('B-27 a rejected write whose field an external writer moved to a THIRD valu
   h.dispose()
 })
 
-test('B-28 the leased Settings screen joins the terminal scheme-notification sync in both directions', async () => {
+test('the leased Settings screen joins the terminal scheme-notification sync in both directions', async () => {
   const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
   await openSelectedRow(h, 'theme')
   await key(h, '\r')
@@ -4430,7 +4430,7 @@ test('B-28 the leased Settings screen joins the terminal scheme-notification syn
   h.dispose()
 })
 
-test('B-29 leaving the workspace right after choosing auto re-samples on the restored screen', async () => {
+test('leaving the workspace right after choosing auto re-samples on the restored screen', async () => {
   const saved = {
     NO_COLOR: process.env.NO_COLOR,
     FORCE_COLOR: process.env.FORCE_COLOR,
@@ -4490,7 +4490,7 @@ function longNamedThemes(count: number): ThemeRegistry {
   return themes
 }
 
-test('B-30 a narrower pane that re-flows the wrapped candidates keeps the confirmed candidate visible', async () => {
+test('a narrower pane that re-flows the wrapped candidates keeps the confirmed candidate visible', async () => {
   const themes = longNamedThemes(10)
   const h = setup({ columns: 200, rows: 14, doc: { theme: 'dark' }, themes })
   themes.dispose('long0') // the builtin rows still precede the plugins; keep the walk short
@@ -4508,7 +4508,7 @@ test('B-30 a narrower pane that re-flows the wrapped candidates keeps the confir
   h.dispose()
 })
 
-test('B-31 the same re-flow inside the two-pane layout keeps the confirmed candidate visible', async () => {
+test('the same re-flow inside the two-pane layout keeps the confirmed candidate visible', async () => {
   const themes = longNamedThemes(10)
   const h = setup({ columns: 107, rows: 14, doc: { theme: 'dark' }, themes })
   themes.dispose('long0')
@@ -4524,7 +4524,7 @@ test('B-31 the same re-flow inside the two-pane layout keeps the confirmed candi
   h.dispose()
 })
 
-test('B-32 re-entering the choice reveals the highlighted candidate again', async () => {
+test('re-entering the choice reveals the highlighted candidate again', async () => {
   const themes = longNamedThemes(10)
   const h = setup({ columns: 108, rows: 14, doc: { theme: 'dark' }, themes })
   themes.dispose('long0')
@@ -4546,7 +4546,7 @@ test('B-32 re-entering the choice reveals the highlighted candidate again', asyn
   h.dispose()
 })
 
-test('B-32b Enter first reveals an offscreen selected identity and only a later Enter confirms', async () => {
+test('Enter first reveals an offscreen selected identity and only a later Enter confirms', async () => {
   const themes = longNamedThemes(10)
   const h = setup({ columns: 108, rows: 14, doc: { theme: 'dark' }, themes })
   await openSelectedRow(h, 'theme')
@@ -4608,7 +4608,7 @@ const startPendingObservation = (h: Harness): Promise<void> => {
   return pending
 }
 
-test('B-33 entering Transcript Fullscreen re-samples the observation the main screen lost', async () => {
+test('entering Transcript Fullscreen re-samples the observation the main screen lost', async () => {
   clearThemeEnv()
   try {
     const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
@@ -4626,7 +4626,7 @@ test('B-33 entering Transcript Fullscreen re-samples the observation the main sc
   }
 })
 
-test('B-34 entering the Settings workspace re-samples the observation the return screen lost', async () => {
+test('entering the Settings workspace re-samples the observation the return screen lost', async () => {
   clearThemeEnv()
   try {
     const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
@@ -4645,7 +4645,7 @@ test('B-34 entering the Settings workspace re-samples the observation the return
   }
 })
 
-test('B-35 a handled hand-off leaves no stale re-sample latch for the next one', async () => {
+test('a handled hand-off leaves no stale re-sample latch for the next one', async () => {
   clearThemeEnv()
   try {
     const h = setup({ columns: 140, rows: 40, doc: { theme: 'dark' } })
@@ -4672,7 +4672,7 @@ test('B-35 a handled hand-off leaves no stale re-sample latch for the next one',
 
 // ── B-16 / B-17: the narrow-width colour contracts the review asked for ─────
 
-test('B-16 a status WORD that WRAPS keeps its semantic tone on every character (22 columns)', async () => {
+test('a status WORD that WRAPS keeps its semantic tone on every character (22 columns)', async () => {
   // At 22 columns the narrow pane's label column is 8 and the value area 14, so
   // `Outcome unknown` (15 cells) really wraps. The tone must follow the WORD,
   // not the first wrapped line.
@@ -4718,7 +4718,7 @@ test('B-16 a status WORD that WRAPS keeps its semantic tone on every character (
   h.dispose()
 })
 
-test('B-17 the diagnostic line keeps its field name muted and tones only the status word', async () => {
+test('the diagnostic line keeps its field name muted and tones only the status word', async () => {
   for (const [readiness, tone] of [['stale', 'warning'], ['unavailable', 'error']] as const) {
     const h = setup({ columns: 100, rows: 40, readiness })
     await h.open()
@@ -4790,7 +4790,7 @@ const paintedFrame = (h: Harness): PaintedFrame => ({
   primaryRgb: hexToRgb(currentPalette.primary),
 })
 
-test('A-16 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size', async () => {
+test('the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size', async () => {
   for (const [columns, rows] of SETTINGS_MATRIX) {
     for (const noticeLive of [false, true]) {
       const h = setup({ columns, rows, doc: { theme: 'dark' } })
@@ -5280,7 +5280,7 @@ test('the Tab hints are whole segments and the action bar keeps the last physica
 // press/release gestures on the SAME painted row, each hitting its own
 // button cells. (The sessionless default harness hides the Refresh button by
 // contract — the live-session source-sink harness owns the two-button case.)
-test('C3 the sessionless About action row: Copy All is clickable and blank cells are inert', async () => {
+test('the sessionless About action row: Copy All is clickable and blank cells are inert', async () => {
   const h = setup({ columns: 120, rows: 40 })
   await h.openHome()
   const rows = h.vt.getViewport().map(stripTerminalSequences)
@@ -5336,7 +5336,7 @@ test('C3 the sessionless About action row: Copy All is clickable and blank cells
 // are COUNTED in the same harness as the panel, so the assertion observes
 // the reads the GATING actually admitted (removing the paintsDirectContent
 // condition fails the first assertion).
-test('C3 a narrow Account deeplink → rail-browse About reads nothing; Enter reads exactly once', async () => {
+test('a narrow Account deeplink → rail-browse About reads nothing; Enter reads exactly once', async () => {
   // A minimal runner stub with COUNTED About seams + a LIVE scope.
   const vt = new VirtualTerminal(44, 20)
   const reads: string[] = []
@@ -5527,7 +5527,7 @@ function sendKey(vt: VirtualTerminal, data: string): void {
   vt.sendInput(data)
 }
 
-test('B-05h the Visual tools row keeps its focus/choice/confirm contract at medium and narrow widths', async () => {
+test('the Visual tools row keeps its focus/choice/confirm contract at medium and narrow widths', async () => {
   // Medium (76–107): the row's keyboard/Tab focus, mouse Change confirm and Esc
   // paths are the same workspace behaviors as the other writable rows.
   const medium = setup({ columns: 100, rows: 30 })
@@ -6475,7 +6475,7 @@ test('a cross-generation pointer gesture cannot select a replaced registration',
 // `runner.extensions.settings.snapshot()`, and the painted frame moves — with
 // the fiber dispose (the HMR unload) moving it back.
 
-test('C2-R0 a real extension fiber registration reaches the mounted Settings workspace and its unload retracts it', async () => {
+test('a real extension fiber registration reaches the mounted Settings workspace and its unload retracts it', async () => {
   const ctx = new Context()
   try {
     await ctx.plugin(Loader)
@@ -8875,7 +8875,7 @@ async function railToCategory(h: Harness, category: string): Promise<void> {
 }
 
 // Regression: C2-R7 acceptance R7-APP1 / R7-03 / R7-13.
-test('R7-APP1 the real /settings route edits rows, choices and pages without ever calling app.openSettings', async () => {
+test('the real /settings route edits rows, choices and pages without ever calling app.openSettings', async () => {
   // ONE live extension registration: its row is the newest Settings content and
   // its confirm goes through the real Registry, so the negative control covers
   // the newest owner as well as the original document rows.
@@ -8978,7 +8978,7 @@ test('R7-APP1 the real /settings route edits rows, choices and pages without eve
 })
 
 // Regression: C2-R7 acceptance R7-13 (the independent SettingsList consumers).
-test('R7-13 /keybindings conflicts still paints its conflicts in the independent SettingsList', async () => {
+test('/keybindings conflicts still paints its conflicts in the independent SettingsList', async () => {
   // The conflicts command is the ONE independent `app.openSettings` consumer
   // that the R7 retirement could plausibly break, because the same command
   // module lost the legacy editor. A REAL conflict is installed on THIS app's

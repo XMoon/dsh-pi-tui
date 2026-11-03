@@ -684,7 +684,7 @@ function wireHasText(wire: string, text: string): boolean {
   return [...wireState(wire).values()].some(node => node.p['text'] === text)
 }
 
-test('B3-S01: the preview the renderer is given reaches the wire as ONE native row', async () => {
+test('the preview the renderer is given reaches the wire as ONE native row', async () => {
   const harness = await mountPane(() => {})
   try {
     harness.renderer.display.setTranscript(
@@ -713,7 +713,7 @@ test('B3-S01: the preview the renderer is given reaches the wire as ONE native r
   }
 })
 
-test('B3-S02: more bytes re-text the SAME row, and the formal call removes it', async () => {
+test('more bytes re-text the SAME row, and the formal call removes it', async () => {
   const harness = await mountPane(() => {})
   try {
     const source = { subject: 'A' }
@@ -773,7 +773,7 @@ test('B3-S02: more bytes re-text the SAME row, and the formal call removes it', 
   }
 })
 
-test('B3-S03: the retired source\'s Preparing rows can never revive the Loading state', async () => {
+test('the retired source\'s Preparing rows can never revive the Loading state', async () => {
   const harness = await mountPane(() => {})
   try {
     const retired = { subject: 'A' }

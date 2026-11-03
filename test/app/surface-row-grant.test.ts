@@ -178,7 +178,7 @@ function setup(options: { columns?: number; rows?: number } = {}): Harness {
   }
 }
 
-test('C-T08: bare /keybindings deeplinks into the ONE Settings lease and disposes its panel once', async () => {
+test('bare /keybindings deeplinks into the ONE Settings lease and disposes its panel once', async () => {
   for (const [columns, rows] of [[80, 24], [120, 40]] as const) {
     const h = setup({ columns, rows })
     h.invoke('keybindings')

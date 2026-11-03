@@ -251,7 +251,7 @@ class Lines implements Component {
   invalidate(): void {}
 }
 
-test('B-01 JobOutputScrollView: every manual scroll pauses, only End re-arms, and relayout never steals the intent', () => {
+test('JobOutputScrollView: every manual scroll pauses, only End re-arms, and relayout never steals the intent', () => {
   const mk = (content: number, viewport: number): JobOutputScrollView => {
     const view = new JobOutputScrollView(new Lines(content), { follow: 'end', primary: true, scrollbar: 'auto' })
     view.updateLayout(content, viewport, () => {})
@@ -326,7 +326,7 @@ test('B-01 JobOutputScrollView: every manual scroll pauses, only End re-arms, an
   view.dispose()
 })
 
-test('B-01b rebaseRetainedAnchor: a pure append keeps the row, an eviction shifts by the proven rows', () => {
+test('rebaseRetainedAnchor: a pure append keeps the row, an eviction shifts by the proven rows', () => {
   const old = ['a', 'b', 'c', 'd', 'e']
   // Pure append: nothing moved.
   assert.equal(rebaseRetainedAnchor({
@@ -360,7 +360,7 @@ test('B-01b rebaseRetainedAnchor: a pure append keeps the row, an eviction shift
 
 // ── B-02: the real Job screen, keyboard scroll and the strict follow ─────────
 
-test('B-02 the real Job screen follows the tail, PgUp/Home/arrows really scroll the Output, End re-arms, and the background never moves', async () => {
+test('the real Job screen follows the tail, PgUp/Home/arrows really scroll the Output, End re-arms, and the background never moves', async () => {
   // 120×40: the frame can carry the LOWEST-priority viewport position too, so
   // the bar's own position fact is read from the user's sink.
   const { vt, app } = startApp({}, {}, 120, 40)
@@ -420,7 +420,7 @@ test('B-02 the real Job screen follows the tail, PgUp/Home/arrows really scroll 
 
 // ── B-03: pushes while PAUSED, End catch-up, then follow again ──────────────
 
-test('B-03 a newer official snapshot never moves a PAUSED viewport; End catches up and keeps following', async () => {
+test('a newer official snapshot never moves a PAUSED viewport; End catches up and keeps following', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -455,7 +455,7 @@ test('B-03 a newer official snapshot never moves a PAUSED viewport; End catches 
 
 // ── B-04: real terminal wheel input ─────────────────────────────────────────
 
-test('B-04 a real alt-screen wheel pauses follow, and a later append is not followed', async () => {
+test('a real alt-screen wheel pauses follow, and a later append is not followed', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -485,7 +485,7 @@ test('B-04 a real alt-screen wheel pauses follow, and a later append is not foll
 
 // ── B-04b: the real scrollbar thumb press/drag/release ──────────────────────
 
-test('B-04b a real scrollbar press, drag and release move the Output, keep it paused and never re-arm follow', async () => {
+test('a real scrollbar press, drag and release move the Output, keep it paused and never re-arm follow', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -537,7 +537,7 @@ test('B-04b a real scrollbar press, drag and release move the Output, keep it pa
 
 // ── B-05: the effective Find is Job-local ───────────────────────────────────
 
-test('B-05 the effective Find opens the JOB Find over the retained body and never enters the Transcript search', async () => {
+test('the effective Find opens the JOB Find over the retained body and never enters the Transcript search', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -585,7 +585,7 @@ test('B-05 the effective Find opens the JOB Find over the retained body and neve
 
 // ── B-05b: the initial (already observed) snapshot is searchable at open ───
 
-test('B-05b a Job opened with an ALREADY observed retained snapshot is searchable and positioned before any push', async () => {
+test('a Job opened with an ALREADY observed retained snapshot is searchable and positioned before any push', async () => {
   // The observation port is allowed to emit its first snapshot synchronously
   // inside `open()` (the Remote adapter does), so the opener's `initial` state
   // may already carry `observed.text` — the workspace must project it into the
@@ -620,7 +620,7 @@ test('B-05b a Job opened with an ALREADY observed retained snapshot is searchabl
 
 // ── B-05c: Stop is not advertised while a Find owns the ordinary keys ──────
 
-test('B-05c the Action Bar stops advertising Stop while a Find is active and restores it after Esc', async () => {
+test('the Action Bar stops advertising Stop while a Find is active and restores it after Esc', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -643,7 +643,7 @@ test('B-05c the Action Bar stops advertising Stop while a Find is active and res
 
 // ── B-05e: the Action Bar does not promise keys the search state consumes ──
 
-test('B-05e the Action Bar drops the inert End/Find hints while the query is being edited', async () => {
+test('the Action Bar drops the inert End/Find hints while the query is being edited', async () => {
   const { vt, app } = startApp({}, {}, 200, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -679,7 +679,7 @@ test('B-05e the Action Bar drops the inert End/Find hints while the query is bei
 
 // ── B-05d: the fork's own search key never opens a second overlay ──────────
 
-test('B-05d Ctrl+Shift+F (the fork search chord) opens the Job Find, never the fork search overlay', async () => {
+test('Ctrl+Shift+F (the fork search chord) opens the Job Find, never the fork search overlay', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -703,7 +703,7 @@ test('B-05d Ctrl+Shift+F (the fork search chord) opens the Job Find, never the f
 
 // ── B-06: EDIT vs NAVIGATE and n/N ─────────────────────────────────────────
 
-test('B-06 EDIT types n/N as query text, Enter enters result navigation, n/N cycle, and 0 hits stay 0/0', async () => {
+test('EDIT types n/N as query text, Enter enters result navigation, n/N cycle, and 0 hits stay 0/0', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -759,7 +759,7 @@ test('B-06 EDIT types n/N as query text, Enter enters result navigation, n/N cyc
 
 // ── B-06b: End in the query editor stays in the Input ──────────────────────
 
-test('B-06b End while EDITING the query stays in the Input and never resumes follow', async () => {
+test('End while EDITING the query stays in the Input and never resumes follow', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -789,7 +789,7 @@ test('B-06b End while EDITING the query stays in the Input and never resumes fol
 
 // ── B-07: Esc layering and End ─────────────────────────────────────────────
 
-test('B-07 the first Esc leaves only the search (still PAUSED in the same Job) and the second returns to the same browser; End resumes from a search', async () => {
+test('the first Esc leaves only the search (still PAUSED in the same Job) and the second returns to the same browser; End resumes from a search', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -840,7 +840,7 @@ test('B-07 the first Esc leaves only the search (still PAUSED in the same Job) a
 
 // ── B-08: remap / disable / leader ─────────────────────────────────────────
 
-test('B-08 the Job Find follows the EFFECTIVE Find binding: a remap, a disable and a leader completion are all honored', async () => {
+test('the Job Find follows the EFFECTIVE Find binding: a remap, a disable and a leader completion are all honored', async () => {
   // A wide frame so the LOWEST-priority Find hint is actually on screen and can
   // be read as the user's sink (plan §6.2 degradation order).
   const { vt, app } = startApp({}, {}, 200, 40)
@@ -907,7 +907,7 @@ test('B-08 the Job Find follows the EFFECTIVE Find binding: a remap, a disable a
 
 // ── B-08b: a Find remap onto a reserved viewport key cannot shadow End ─────
 
-test('B-08b a Find binding remapped onto the reserved physical End cannot shadow the only follow re-arm or be advertised', async () => {
+test('a Find binding remapped onto the reserved physical End cannot shadow the only follow re-arm or be advertised', async () => {
   // A wide frame so the LOWEST-priority Find hint really fits: with the reserved
   // key filtered out the segment is the bare `/ find`, and without the filter it
   // would advertise the inert `End` as `End find`.
@@ -949,7 +949,7 @@ test('B-08b a Find binding remapped onto the reserved physical End cannot shadow
 
 // ── B-09: CJK / wrapping / ANSI ────────────────────────────────────────────
 
-test('B-09 searching CJK, wrapped and ANSI text keeps the rendered row count and visible width, and highlights the hit', async () => {
+test('searching CJK, wrapped and ANSI text keeps the rendered row count and visible width, and highlights the hit', async () => {
   // A SHORT body so the whole fixture stays inside the Output viewport: the
   // highlight comparison is then a same-row, same-width proof.
   const lines = [
@@ -1021,7 +1021,7 @@ test('B-09 searching CJK, wrapped and ANSI text keeps the rendered row count and
 
 // ── B-09b: the sanitized body is the ONE search/geometry source ────────────
 
-test('B-09b a CR progress stream paints distinct records and Find navigates to the row actually painted', async () => {
+test('a CR progress stream paints distinct records and Find navigates to the row actually painted', async () => {
   for (const width of [40, 80, 160]) {
     const { vt, app } = startApp({}, {}, width, 24)
     const harness = attachTasks(app, { jobIds: ['job-a'] })
@@ -1063,7 +1063,7 @@ test('B-09b a CR progress stream paints distinct records and Find navigates to t
 
 // ── B-10: bounded retention and the GAP truth ──────────────────────────────
 
-test('B-10 a truncated retained window rebases a provable anchor, never fabricates GAP, and the footer stays preview-relative', async () => {
+test('a truncated retained window rebases a provable anchor, never fabricates GAP, and the footer stays preview-relative', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1102,7 +1102,7 @@ test('B-10 a truncated retained window rebases a provable anchor, never fabricat
 
 // ── B-10b: a source change between frames never falsifies the anchor ───────
 
-test('B-10b several snapshots before the next frame keep the anchor on the same provable row', async () => {
+test('several snapshots before the next frame keep the anchor on the same provable row', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1276,7 +1276,7 @@ test('B-10b4 a resize re-wrap drops the unprovable hit identity instead of handi
 
 // ── B-10c: a pending reveal survives a snapshot landing before the paint ───
 
-test('B-10c a pending result reveal survives a snapshot that lands between the keypress and the paint', async () => {
+test('a pending result reveal survives a snapshot that lands between the keypress and the paint', async () => {
   const { vt, app } = startApp({}, {}, 120, 40)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1304,7 +1304,7 @@ test('B-10c a pending result reveal survives a snapshot that lands between the k
 
 // ── B-10d: a lost current match falls back to the visible anchor ───────────
 
-test('B-10d a truncation that EVICTS the current match falls back to the nearest provable match at the visible anchor', async () => {
+test('a truncation that EVICTS the current match falls back to the nearest provable match at the visible anchor', async () => {
   const lines = Array.from({ length: 200 }, (_, index) => `line ${String(index).padStart(3, '0')}`)
   lines[10] = 'needle alpha'
   lines[190] = 'needle beta'
@@ -1343,7 +1343,7 @@ test('B-10d a truncation that EVICTS the current match falls back to the nearest
 
 // ── B-11: the short-screen budget ──────────────────────────────────────────
 
-test('B-11 short frames keep one Output row, the Action Bar last, and a Find only where its row can exist', async () => {
+test('short frames keep one Output row, the Action Bar last, and a Find only where its row can exist', async () => {
   const { vt, app } = startApp({}, {}, 44, 4)
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1386,7 +1386,7 @@ test('B-11 short frames keep one Output row, the Action Bar last, and a Find onl
 
 // ── B-12: lifecycle ────────────────────────────────────────────────────────
 
-test('B-12 a Job replacement/dispose keeps ONE observer per Job and never restores the old query, anchor or focus', async () => {
+test('a Job replacement/dispose keeps ONE observer per Job and never restores the old query, anchor or focus', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a', 'job-b'] })
   await flush()
@@ -1420,7 +1420,7 @@ test('B-12 a Job replacement/dispose keeps ONE observer per Job and never restor
 
 // ── B-13: the strict follow survives a real production push (Direct shape) ──
 
-test('B-13 the strict follow/search work over the production observer push, and the PAUSED state is not reset by a newer snapshot', async () => {
+test('the strict follow/search work over the production observer push, and the PAUSED state is not reset by a newer snapshot', async () => {
   const { vt, app } = startApp()
   const harness = attachTasks(app, { jobIds: ['job-a'] })
   await flush()
@@ -1451,7 +1451,7 @@ test('B-13 the strict follow/search work over the production observer push, and 
 
 // ── B-08c: the reserved Tab page toggle outranks a Find remap onto it ───────
 
-test('B-08c a Find binding remapped onto the reserved Tab cannot shadow the page toggle or be advertised', async () => {
+test('a Find binding remapped onto the reserved Tab cannot shadow the page toggle or be advertised', async () => {
   // `Tab` is reserved for the workspace's own page toggle exactly like Home/End: the
   // owner matches it BEFORE the Find check, and the Find hint drops such a binding. A
   // user remap onto `Tab` must therefore change NEITHER what the key does NOR what the

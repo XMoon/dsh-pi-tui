@@ -359,7 +359,7 @@ async function settle(): Promise<void> {
 
 // ── A-01: opt-in + real SDK connect success ⇒ TSP-only mount ────────────────
 
-test('A-01: the PRODUCTION selection + a real SDK connect mounts the TSP renderer and never starts a TuiApp', async () => {
+test('the PRODUCTION selection + a real SDK connect mounts the TSP renderer and never starts a TuiApp', async () => {
   const tern = new ScriptedTern()
   // The PRODUCTION selector, with the shipped SDK connect over the scripted pane.
   const mount = await selectRenderer({
@@ -402,7 +402,7 @@ test('A-01: the PRODUCTION selection + a real SDK connect mounts the TSP rendere
 
 // ── A-02: connect() === null ⇒ the unchanged PiTui mount ────────────────────
 
-test('A-02: SDK connect null falls back to the PiTui mount (opt-in present)', async () => {
+test('SDK connect null falls back to the PiTui mount (opt-in present)', async () => {
   const tern = new ScriptedTern()
   // The pane never answers the probe: the shipped SDK declines (returns null).
   tern.output.onWrite = () => {}
@@ -455,7 +455,7 @@ test('A-02: SDK connect null falls back to the PiTui mount (opt-in present)', as
 
 // ── A-03: no opt-in ⇒ no SDK probe at all ───────────────────────────────────
 
-test('A-03: without the opt-in the PRODUCTION selection never invokes the connector', async () => {
+test('without the opt-in the PRODUCTION selection never invokes the connector', async () => {
   const tern = new ScriptedTern()
   let connectorCalls = 0
   const renderer = await selectRenderer({ env: {}, onConnect: () => { connectorCalls += 1 } })
@@ -475,7 +475,7 @@ test('A-03: without the opt-in the PRODUCTION selection never invokes the connec
 
 // ── B3-A3: the Task Center capability through the PRODUCTION selection ──────
 
-test('A-03c: a fully negotiated pane declares the Task Center on the selected TSP mount', async () => {
+test('a fully negotiated pane declares the Task Center on the selected TSP mount', async () => {
   // The real production selector + the shipped SDK: the negotiated HELLO
   // carries `picker`/`row`/`text` and `scroll`, so the mounted seam the
   // composition root reads (`surface.display.supportsTaskCenter`) is TRUE.
@@ -504,7 +504,7 @@ test('A-03c: a fully negotiated pane declares the Task Center on the selected TS
   }
 })
 
-test('A-03d: a lean negotiated pane (no picker/Reader kinds) declares no Task Center', async () => {
+test('a lean negotiated pane (no picker/Reader kinds) declares no Task Center', async () => {
   // The same production selection over the DEFAULT lean HELLO: /tasks can
   // never reach a Hub this pane could neither paint nor read.
   const tern = new ScriptedTern()
@@ -525,7 +525,7 @@ test('A-03d: a lean negotiated pane (no picker/Reader kinds) declares no Task Ce
 
 // ── A-07 (selection half): a connect throw is a startup failure ─────────────
 
-test('A-07: a SDK connect THROW propagates — never mapped to null or a fallback', async () => {
+test('a SDK connect THROW propagates — never mapped to null or a fallback', async () => {
   await assert.rejects(
     selectRenderer({
       env: { DSH_PI_TUI_RENDERER: 'tsp' },
@@ -538,7 +538,7 @@ test('A-07: a SDK connect THROW propagates — never mapped to null or a fallbac
 
 // ── The env name is the ONLY authority (no TERM_PROGRAM inference) ──────────
 
-test('A-03b: TERM_PROGRAM=tern alone never selects the TSP renderer', async () => {
+test('TERM_PROGRAM=tern alone never selects the TSP renderer', async () => {
   const tern = new ScriptedTern()
   const renderer = await selectRenderer({ env: { TERM_PROGRAM: 'tern' } })
   assert.equal(renderer, undefined)

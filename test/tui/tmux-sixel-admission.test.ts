@@ -43,7 +43,7 @@ function admitted(cli: FakeTmuxCli): TmuxSixelIdentity {
   return identity
 }
 
-test('N01: the real CLI probe reads the one trusted server/client/Sxl topology', (t) => {
+test('the real CLI probe reads the one trusted server/client/Sxl topology', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     assert.deepEqual(probeTmuxSixelIdentity(cli.env), {
@@ -65,7 +65,7 @@ test('N01: the real CLI probe reads the one trusted server/client/Sxl topology',
   }
 })
 
-test('N02: the server SIXEL compilation report must be exactly 1', (t) => {
+test('the server SIXEL compilation report must be exactly 1', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     for (const [name, reply] of [
@@ -84,7 +84,7 @@ test('N02: the server SIXEL compilation report must be exactly 1', (t) => {
   }
 })
 
-test('N03: only one complete Sxl (flag) true line admits; decoys and duplicates fail', (t) => {
+test('only one complete Sxl (flag) true line admits; decoys and duplicates fail', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const rejected = [
@@ -108,7 +108,7 @@ test('N03: only one complete Sxl (flag) true line admits; decoys and duplicates 
   }
 })
 
-test('N04: exactly one ordinary display client must own the pane session', (t) => {
+test('exactly one ordinary display client must own the pane session', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     cli.setReply('list-clients', { text: '' })
@@ -131,7 +131,7 @@ test('N04: exactly one ordinary display client must own the pane session', (t) =
   }
 })
 
-test('N05: Control Mode clients are observed, never counted as display clients', (t) => {
+test('Control Mode clients are observed, never counted as display clients', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     cli.setReply('list-clients', {
@@ -161,7 +161,7 @@ test('N05: Control Mode clients are observed, never counted as display clients',
   }
 })
 
-test('N06: the whole list-clients report must be strict six-column records', (t) => {
+test('the whole list-clients report must be strict six-column records', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const rejected = [
@@ -196,7 +196,7 @@ test('N06: the whole list-clients report must be strict six-column records', (t)
   }
 })
 
-test('N07: a live client identity change permanently revokes the handle', (t) => {
+test('a live client identity change permanently revokes the handle', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const identity = admitted(cli)
@@ -218,7 +218,7 @@ test('N07: a live client identity change permanently revokes the handle', (t) =>
   }
 })
 
-test('N08: lost server SIXEL support or Sxl is a one-way revoke', (t) => {
+test('lost server SIXEL support or Sxl is a one-way revoke', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const identity = admitted(cli)
@@ -242,7 +242,7 @@ test('N08: lost server SIXEL support or Sxl is a one-way revoke', (t) => {
   }
 })
 
-test('N09: missing binary, non-zero exit, timeout and overflow all deny', (t) => {
+test('missing binary, non-zero exit, timeout and overflow all deny', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     assert.equal(probeTmuxSixelIdentity({ ...cli.env, PATH: '/nonexistent' }), undefined, 'missing binary')
@@ -262,7 +262,7 @@ test('N09: missing binary, non-zero exit, timeout and overflow all deny', (t) =>
   }
 })
 
-test('N10: environment gates reject before any tmux subprocess', (t) => {
+test('environment gates reject before any tmux subprocess', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const cases: ReadonlyArray<{ name: string; mutate: (env: NodeJS.ProcessEnv) => void }> = [
@@ -292,7 +292,7 @@ test('N10: environment gates reject before any tmux subprocess', (t) => {
   }
 })
 
-test('N10b: explicit sixel admits native SIXEL without any tmux Kitty probe', (t) => {
+test('explicit sixel admits native SIXEL without any tmux Kitty probe', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const env = { ...cli.env, PI_IMAGE_PROTOCOL: 'sixel' }
@@ -309,7 +309,7 @@ test('N10b: explicit sixel admits native SIXEL without any tmux Kitty probe', (t
   }
 })
 
-test('N10c: explicit kitty never falls back to native SIXEL', (t) => {
+test('explicit kitty never falls back to native SIXEL', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const graphics = createTmuxSixelGraphics(new VirtualTerminal(), {
@@ -324,7 +324,7 @@ test('N10c: explicit kitty never falls back to native SIXEL', (t) => {
   }
 })
 
-test('N10d: an invalid PI_IMAGE_PROTOCOL is a startup error before any tmux query', (t) => {
+test('an invalid PI_IMAGE_PROTOCOL is a startup error before any tmux query', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     assert.throws(
@@ -337,7 +337,7 @@ test('N10d: an invalid PI_IMAGE_PROTOCOL is a startup error before any tmux quer
   }
 })
 
-test('F4: live SIXEL re-probes use the startup preference, not a later env mutation', (t) => {
+test('live SIXEL re-probes use the startup preference, not a later env mutation', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const identity = admitted(cli)
@@ -351,7 +351,7 @@ test('F4: live SIXEL re-probes use the startup preference, not a later env mutat
   }
 })
 
-test('N11: known-U1 tmux Kitty keeps precedence; a real Sxl outranks a pending U1 probe', (t) => {
+test('known-U1 tmux Kitty keeps precedence; a real Sxl outranks a pending U1 probe', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const knownKitty = createTmuxSixelGraphics(new VirtualTerminal(), cli.env)
@@ -376,7 +376,7 @@ test('N11: known-U1 tmux Kitty keeps precedence; a real Sxl outranks a pending U
   }
 })
 
-test('N12: the 250 ms render cache is bypassed by the forced DCS write probe', (t) => {
+test('the 250 ms render cache is bypassed by the forced DCS write probe', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const identity = admitted(cli)
@@ -395,7 +395,7 @@ test('N12: the 250 ms render cache is bypassed by the forced DCS write probe', (
   }
 })
 
-test('N13: PI_TUI_TMUX_KITTY_IMAGES=0 disables only the virtual Kitty transport', (t) => {
+test('PI_TUI_TMUX_KITTY_IMAGES=0 disables only the virtual Kitty transport', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const env = { ...cli.env, PI_TUI_TMUX_KITTY_IMAGES: '0' }
@@ -410,7 +410,7 @@ test('N13: PI_TUI_TMUX_KITTY_IMAGES=0 disables only the virtual Kitty transport'
   }
 })
 
-test('N14: an unregistered managed-looking DCS writes zero bytes and never bypasses the write gate', (t) => {
+test('an unregistered managed-looking DCS writes zero bytes and never bypasses the write gate', (t) => {
   const cli = createSixelFakeTmuxCli(t)
   try {
     const identity = admitted(cli)

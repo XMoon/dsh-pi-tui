@@ -1173,7 +1173,7 @@ test('PR-B EXT-F2b: a title-only facts commit still updates the legacy dock line
  * The read is the interaction owner's own synchronous state — never the Host's
  * pending-question fact and never the footer icon.
  */
-test('M4 PR4: the interaction owner reports reload-blocking input for live approvals and questions', async () => {
+test('the interaction owner reports reload-blocking input for live approvals and questions', async () => {
   const owner = mountQuestionOwner({ fifoSeat: true })
   try {
     assert.equal(owner.hasReloadBlockingInput(), false, 'an idle interaction owner owns no local input')

@@ -146,7 +146,7 @@ test('G01/G02: /tasks is admitted ONLY when the display seam really declares the
   }
 })
 
-test('G03: the registered /subagents alias follows the SAME admission as /tasks', () => {
+test('the registered /subagents alias follows the SAME admission as /tasks', () => {
   const tui = classify({ tuiCommand: true })
   assert.deepEqual(bare(tui, 'subagents', { taskCenter: true }), { kind: 'available' })
   assert.deepEqual(bare(tui, 'subagents', { taskCenter: false }), { kind: 'unsupported' })

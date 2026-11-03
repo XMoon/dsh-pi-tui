@@ -258,7 +258,7 @@ const assertRowWidths = (vt: VirtualTerminal, width: number): void => {
 
 // ── D-01: the locked standard-size information architecture ────────────────
 
-test('D-01 120x40 paints status → metadata → summary → tabs → body → facts → Action Bar in that physical order', async () => {
+test('120x40 paints status → metadata → summary → tabs → body → facts → Action Bar in that physical order', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({
@@ -321,7 +321,7 @@ test('D-01 120x40 paints status → metadata → summary → tabs → body → f
 
 // ── D-02: the tabs really switch the reading page ──────────────────────────
 
-test('D-02 clicking the Command tab switches the body, keeps ONE observer, and the Output tab returns', async () => {
+test('clicking the Command tab switches the body, keeps ONE observer, and the Output tab returns', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({ label: 'pnpm build', text: numberedLines(0, 39) })
@@ -350,7 +350,7 @@ test('D-02 clicking the Command tab switches the body, keeps ONE observer, and t
 
 // ── D-03: every affordance is a REAL sink ─────────────────────────────────
 
-test('D-03 the summary, the ↗ Command entry and Copy All [C] reach the original-command clipboard sink', async () => {
+test('the summary, the ↗ Command entry and Copy All [C] reach the original-command clipboard sink', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   const label = '  pnpm build --watch  \n'
@@ -378,7 +378,7 @@ test('D-03 the summary, the ↗ Command entry and Copy All [C] reach the origina
   assert.deepEqual(harness.copied, [], 'opening the page copies nothing by itself')
 })
 
-test('D-04 a 1,500-character command summary stays ONE truncated row that still opens the full Command', async () => {
+test('a 1,500-character command summary stays ONE truncated row that still opens the full Command', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   const label = `pnpm build ${'--flag=value '.repeat(120)}--tail`
@@ -425,7 +425,7 @@ test('D-04 a 1,500-character command summary stays ONE truncated row that still 
 
 // ── D-05: no faked Command affordance ─────────────────────────────────────
 
-test('D-05 a non-shell Job paints Label only: no Command tab, no ↗ entry and no phantom click target', async () => {
+test('a non-shell Job paints Label only: no Command tab, no ↗ entry and no phantom click target', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({ kind: 'subagent', label: 'review the diff', text: 'out' })
@@ -454,7 +454,7 @@ test('D-05 a non-shell Job paints Label only: no Command tab, no ↗ entry and n
 
 // ── D-06: the independent facts coexist ───────────────────────────────────
 
-test('D-06 GAP + ERROR + SETTLED stay independently visible without squeezing the body or the bar', async () => {
+test('GAP + ERROR + SETTLED stay independently visible without squeezing the body or the bar', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({
@@ -484,7 +484,7 @@ test('D-06 GAP + ERROR + SETTLED stay independently visible without squeezing th
 
 // ── D-07: the three empty phases are distinct ─────────────────────────────
 
-test('D-07 connecting / empty / unavailable paint three DIFFERENT bodies, never a black void', async () => {
+test('connecting / empty / unavailable paint three DIFFERENT bodies, never a black void', async () => {
   // (1) No snapshot yet: the opening identity is a fallback, not a claim.
   const connecting = startApp()
   connecting.observation.syncEmit = false
@@ -516,7 +516,7 @@ test('D-07 connecting / empty / unavailable paint three DIFFERENT bodies, never 
 
 // ── D-08: no ghost metadata row ───────────────────────────────────────────
 
-test('D-08 80x24 with no real metadata grows no blank row and keeps the bounded disclosure on the bar', async () => {
+test('80x24 with no real metadata grows no blank row and keeps the bounded disclosure on the bar', async () => {
   const harness = startApp(80, 24)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({ text: numberedLines(0, 39) })
@@ -537,7 +537,7 @@ test('D-08 80x24 with no real metadata grows no blank row and keeps the bounded 
 
 // ── D-09/D-10: compact frames ─────────────────────────────────────────────
 
-test('D-09 44x8 compact paints `[Out]  Cmd` on one row and keeps the body readable with a CJK identity', async () => {
+test('44x8 compact paints `[Out]  Cmd` on one row and keeps the body readable with a CJK identity', async () => {
   const harness = startApp(44, 8)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({
@@ -555,7 +555,7 @@ test('D-09 44x8 compact paints `[Out]  Cmd` on one row and keeps the body readab
   assertRowWidths(harness.vt, 44)
 })
 
-test('D-10 44x5 with a live Find keeps the SearchRow and one body row, and the tabs yield', async () => {
+test('44x5 with a live Find keeps the SearchRow and one body row, and the tabs yield', async () => {
   const harness = startApp(44, 5)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({ label: 'echo one', text: 'needle alpha\nother' })
@@ -577,7 +577,7 @@ test('D-10 44x5 with a live Find keeps the SearchRow and one body row, and the t
 
 // ── D-11/D-12: the short-screen floor ─────────────────────────────────────
 
-test('D-11 44x4 keeps status + SearchRow + body + Action Bar, and a live notice yields instead', async () => {
+test('44x4 keeps status + SearchRow + body + Action Bar, and a live notice yields instead', async () => {
   const harness = startApp(44, 4)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({ label: 'echo one', text: 'needle alpha\nother' })
@@ -604,7 +604,7 @@ test('D-11 44x4 keeps status + SearchRow + body + Action Bar, and a live notice 
   assert.ok(rows.slice(0, 3).some(row => /needle alpha|other/.test(row)), 'the body row survives')
 })
 
-test('D-12 80x2 keeps the status + Action Bar, 80x1 keeps the Action Bar alone, and Esc really exits', async () => {
+test('80x2 keeps the status + Action Bar, 80x1 keeps the Action Bar alone, and Esc really exits', async () => {
   const harness = startApp(80, 2)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({ text: 'retained job-a' })
@@ -632,7 +632,7 @@ test('D-12 80x2 keeps the status + Action Bar, 80x1 keeps the Action Bar alone, 
 
 // ── D-13/D-17: hit-map re-projection and stale presses ────────────────────
 
-test('D-13 a resize re-projects the hit map, keeps the current page AND its query, and rejects the moved press', async () => {
+test('a resize re-projects the hit map, keeps the current page AND its query, and rejects the moved press', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   const label = Array.from({ length: 30 }, (_, index) => `cmd line ${String(index).padStart(2, '0')}`).join('\n')
@@ -693,7 +693,7 @@ test('D-13 a resize re-projects the hit map, keeps the current page AND its quer
   assert.deepEqual(harness.copied, [label], 'the re-projected button copies the whole original command')
 })
 
-test('D-13b an 8-column tab row keeps its truncation ellipsis inert (real press/release)', async () => {
+test('an 8-column tab row keeps its truncation ellipsis inert (real press/release)', async () => {
   const harness = startApp(8, 24)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({ label: 'echo hello', text: 'retained body' })
@@ -724,7 +724,7 @@ test('D-13b an 8-column tab row keeps its truncation ellipsis inert (real press/
   assert.equal(harness.observation.records.length, 1, 'no second observer')
 })
 
-test('D-17 a press whose painted frame changed before the release never fires', async () => {
+test('a press whose painted frame changed before the release never fires', async () => {
   // (a) SAME panel, SAME cell: the Job's label changes between press and release,
   // so the painted `↗ Command` target now belongs to a DIFFERENT Command source.
   const labelChange = startApp(120, 40)
@@ -763,7 +763,7 @@ test('D-17 a press whose painted frame changed before the release never fires', 
 
 // ── D-18/D-24: the per-page native copy-on-select ─────────────────────────
 
-test('D-18 the Command page owns the EXACT selection copy; the Output page keeps the native one', async () => {
+test('the Command page owns the EXACT selection copy; the Output page keeps the native one', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   const label = 'echo alpha beta'
@@ -822,7 +822,7 @@ test('D-18 the Command page owns the EXACT selection copy; the Output page keeps
   assert.deepEqual(harness.copied, [], 'scrolling never copies')
 })
 
-test('D-24 a TAB-origin rapid double click on Copy All [C] copies only the original label, and Output keeps its native drag', async () => {
+test('a TAB-origin rapid double click on Copy All [C] copies only the original label, and Output keeps its native drag', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   const label = 'echo hello\nworld'
@@ -952,7 +952,7 @@ test('D-16/D-19 the status follows the LIVE theme and every real status keeps it
 
 // ── D-20/D-25: cell-exact wide text and a single disclosure ───────────────
 
-test('D-20 CJK/wide identity and label stay terminal-cell exact at 120x40, 200x60 and 80x24', async () => {
+test('CJK/wide identity and label stay terminal-cell exact at 120x40, 200x60 and 80x24', async () => {
   for (const [width, height] of [[120, 40], [200, 60], [80, 24]] as const) {
     const harness = startApp(width, height)
     await openFirstJob(harness)
@@ -972,7 +972,7 @@ test('D-20 CJK/wide identity and label stay terminal-cell exact at 120x40, 200x6
   }
 })
 
-test('D-20b an emoji/combining identity and label stay terminal-cell exact', async () => {
+test('an emoji/combining identity and label stay terminal-cell exact', async () => {
   for (const [width, height] of [[120, 40], [44, 8]] as const) {
     const harness = startApp(width, height)
     await openFirstJob(harness)
@@ -994,7 +994,7 @@ test('D-20b an emoji/combining identity and label stay terminal-cell exact', asy
   }
 })
 
-test('D-25 the bounded-preview disclosure is advertised EXACTLY once per frame', async () => {
+test('the bounded-preview disclosure is advertised EXACTLY once per frame', async () => {
   // Standard width: the dedicated facts row owns it, the bar does not repeat it.
   const standard = startApp(120, 40)
   await openFirstJob(standard)
@@ -1022,7 +1022,7 @@ test('D-25 the bounded-preview disclosure is advertised EXACTLY once per frame',
 
 // ── D-23: the chrome safety boundary survives the new layout ──────────────
 
-test('D-23 a hostile label is sanitized on the NEW header rows and never reaches the terminal stream', async () => {
+test('a hostile label is sanitized on the NEW header rows and never reaches the terminal stream', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   const written: string[] = []
@@ -1056,7 +1056,7 @@ test('D-23 a hostile label is sanitized on the NEW header rows and never reaches
 
 // ── D-23b: hostile RETAINED OUTPUT is projected at the body seam ───────────
 
-test('D-23b hostile retained output reaches the TTY only as safe text, keeps whitelisted SGR and copies byte-exact', async () => {
+test('hostile retained output reaches the TTY only as safe text, keeps whitelisted SGR and copies byte-exact', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   const hostile = [
@@ -1104,7 +1104,7 @@ test('D-23b hostile retained output reaches the TTY only as safe text, keeps whi
 
 // ── C-19: the `Tab` page toggle is symmetric and `v` is inert ──────────────
 
-test('C-19 Tab switches Output <-> Command in BOTH directions and v is inert', async () => {
+test('Tab switches Output <-> Command in BOTH directions and v is inert', async () => {
   const harness = startApp(120, 40)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({ label: 'pnpm build --watch', text: numberedLines(0, 39) })
@@ -1149,7 +1149,7 @@ test('C-19 Tab switches Output <-> Command in BOTH directions and v is inert', a
 
 // ── B-18: BOTH metadata groups drop a fact WHOLE before truncating ─────────
 
-test('B-18 the metadata row drops a long Detail whole and truncates only a lone fact', async () => {
+test('the metadata row drops a long Detail whole and truncates only a lone fact', async () => {
   const harness = startApp(100, 40)
   await openFirstJob(harness)
   harness.observation.latest()!.emit({
@@ -1230,7 +1230,7 @@ function jobLadder(
 /** The frozen §11.2 matrix. */
 const JOB_MATRIX = [[200, 50], [120, 40], [100, 40], [80, 24], [80, 10], [72, 24], [44, 20]] as const
 
-test('D-26 the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size', async () => {
+test('the frozen §11.2 matrix keeps the §8 ladder-derived chrome at every size', async () => {
   for (const [width, height] of JOB_MATRIX) {
     for (const noticeLive of [false, true]) {
       const harness = startApp(width, height)

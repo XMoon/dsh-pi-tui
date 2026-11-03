@@ -1902,7 +1902,7 @@ test('/new keeps the accepted-stop phase when a commit throw escapes the transac
 
 // ── M4 PR4: `/reload-client` ────────────────────────────────────────────────
 
-test('M4 PR4 `/reload-client` is a bare reserved sessionless Client command with fixed notices', () => {
+test('`/reload-client` is a bare reserved sessionless Client command with fixed notices', () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
@@ -1963,7 +1963,7 @@ test('M4 PR4 `/reload-client` is a bare reserved sessionless Client command with
   app.stop()
 })
 
-test('M4 PR4 `/reload-client` on Direct (no process capability) is an explicit local refusal', () => {
+test('`/reload-client` on Direct (no process capability) is an explicit local refusal', () => {
   const ctx = new Context()
   const vt = new VirtualTerminal(80, 24)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })

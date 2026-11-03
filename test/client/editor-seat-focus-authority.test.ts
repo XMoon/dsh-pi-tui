@@ -156,7 +156,7 @@ function cursorLine(app: TuiApp): number {
 // FOCUS-01: the optional seat tenant stays the physical focus owner.
 // ---------------------------------------------------------------------------
 
-test('FOCUS-01 a fullscreen click inside the optional seat tenant leaves the PANEL as the input owner', async () => {
+test('a fullscreen click inside the optional seat tenant leaves the PANEL as the input owner', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} })
   app.start()
@@ -222,7 +222,7 @@ test('FOCUS-01 a fullscreen click inside the optional seat tenant leaves the PAN
 // FOCUS-02: capturing overlay open/close + plugin-editor handoff.
 // ---------------------------------------------------------------------------
 
-test('FOCUS-02 a fullscreen editor click, a capturing overlay and a plugin editor handoff never leave a wrong input owner', async () => {
+test('a fullscreen editor click, a capturing overlay and a plugin editor handoff never leave a wrong input owner', async () => {
   const vt = new VirtualTerminal(100, 30)
   const registry = new EditorRegistry()
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, { editorRegistry: registry })
@@ -310,7 +310,7 @@ test('FOCUS-02 a fullscreen editor click, a capturing overlay and a plugin edito
 // FOCUS-03: a plugin binding may not steal an editor-owned navigation key.
 // ---------------------------------------------------------------------------
 
-test('FOCUS-03 a plugin Down binding never takes the key while the seat editor owns the seat', async () => {
+test('a plugin Down binding never takes the key while the seat editor owns the seat', async () => {
   const vt = new VirtualTerminal(100, 30)
   const actions: string[] = []
   const app = new TuiApp(vt, {
@@ -356,7 +356,7 @@ function historyRow(content: string, ts: number): HistorySearchResult {
   return { id: content, content, cwd: '/work/a', ts, sourceFile: '/work/a/history.jsonl', sourceByteOffset: 0 }
 }
 
-test('FOCUS-04 a fullscreen click inside the REAL History tenant leaves the PANEL as the input owner', async () => {
+test('a fullscreen click inside the REAL History tenant leaves the PANEL as the input owner', async () => {
   const vt = new VirtualTerminal(100, 30)
   const app = new TuiApp(vt, { onSubmit: () => {}, onExit: () => {} }, {
     historySearchSource: {

@@ -3246,7 +3246,8 @@ test('PERF (plan §5): the Direct compat read adds no perceptible refresh cost o
 // notice line — with a HOSTILE official label, and asserts on the RAW stream
 // the TUI writes to the terminal (never a `stripTerminalSequences()` shot).
 
-test('S-03 L6: the real /tasks Subagent interrupt admits through the session control admission and a hostile label never reaches the terminal stream', async (t) => {
+// Evidence level: L6 (the raw stream the TUI writes to the terminal).
+test('the real /tasks Subagent interrupt admits through the session control admission and a hostile label never reaches the terminal stream', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-task-interrupt-text-safety-')
   const previousHome = process.env.DSH_HOME
@@ -3342,7 +3343,7 @@ test('S-03 L6: the real /tasks Subagent interrupt admits through the session con
   assert.ok(!stream.includes('UFdORUQ='), 'no Host clipboard payload reaches the terminal stream')
 })
 
-test('PRA-L6: Task Stop is admitted through the control barrier while a /new transition is frozen, and a superseded browser never dispatches again', async (t) => {
+test('Task Stop is admitted through the control barrier while a /new transition is frozen, and a superseded browser never dispatches again', async (t) => {
   const life = testLifecycle(t)
   const home = life.tempDir('dsh-pi-tui-pra-task-control-')
   const previousHome = process.env.DSH_HOME

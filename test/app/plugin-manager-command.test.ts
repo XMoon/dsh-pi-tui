@@ -237,7 +237,7 @@ test('/plugins is registered by the real registrar and dispatches success into t
   assert.match(view, /PLUGIN PAGE/, 'the embedded page is painted by the Settings content column')
 })
 
-test('T01 the real /plugins chain mounts the PRODUCTION page and reads the inventory exactly once', async () => {
+test('the real /plugins chain mounts the PRODUCTION page and reads the inventory exactly once', async () => {
   // §8.1 T01: the REAL Client command registry -> the REAL Settings lease ->
   // the REAL `createPluginManagerWorkspacePanel` over a real Controller and the
   // semantic PluginManagerPort. Only the Host port is a fixture; the page,

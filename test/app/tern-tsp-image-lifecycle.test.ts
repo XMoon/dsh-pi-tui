@@ -1188,7 +1188,7 @@ test('T02/T03/T08: every explicit protocol performs zero image reads, blobs or i
   }
 })
 
-test('T04: none keeps a staged draft and its count while sending no chip/blob/read', async () => {
+test('none keeps a staged draft and its count while sending no chip/blob/read', async () => {
   const previous = process.env.PI_IMAGE_PROTOCOL
   process.env.PI_IMAGE_PROTOCOL = 'none'
   const harness = await mountHarness()
@@ -1207,7 +1207,7 @@ test('T04: none keeps a staged draft and its count while sending no chip/blob/re
   }
 })
 
-test('T07: an invalid PI_IMAGE_PROTOCOL fails the TSP mount before any frame', async () => {
+test('an invalid PI_IMAGE_PROTOCOL fails the TSP mount before any frame', async () => {
   const previous = process.env.PI_IMAGE_PROTOCOL
   process.env.PI_IMAGE_PROTOCOL = 'sixelx'
   const tern = new ScriptedTern()

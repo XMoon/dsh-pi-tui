@@ -2339,7 +2339,7 @@ test('a TRUE indeterminate Remote /title <name> is consumed by the outer settlem
 // view serializes the OFFICIAL figures. This is the Remote half of the
 // plan §3.3 proof 2: absent projections stay absent, no bounded-window
 // fold ever stands in for a session total.
-test('C3 Remote proof: official projections → the About controller view → the exact report', async (t) => {
+test('Remote proof: official projections → the About controller view → the exact report', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'c3-about-remote'
   const hostPreset = 'c3-about-preset'
@@ -2453,7 +2453,7 @@ test('C3 Remote proof: official projections → the About controller view → th
 // Backend: Remote). A second session seeded WITHOUT the performance/usage
 // projection rows is the absent-authority negative: the report words the
 // gap, never a fabricated figure.
-test('C3 Remote production lane: /settings → real About panel → [Copy All] click → OSC 52 payload', async (t) => {
+test('Remote production lane: /settings → real About panel → [Copy All] click → OSC 52 payload', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'c3-prod-remote'
   const hostPreset = 'c3-prod-preset'
@@ -2671,7 +2671,7 @@ test('C3 Remote production lane: /settings → real About panel → [Copy All] c
 // an absence). The About route must word the sample-less groups Unavailable,
 // keep the authoritative ones (including the honest zero), and never fill a
 // gap from a bounded-window fold.
-test('C3 Remote negative: the sample-less performance/context groups word Unavailable through the production route (tokenUsage stays the authoritative zero)', async (t) => {
+test('Remote negative: the sample-less performance/context groups word Unavailable through the production route (tokenUsage stays the authoritative zero)', async (t) => {
   const life = testLifecycle(t)
   const mainId = 'c3-absent-remote'
   const hostPreset = 'c3-absent-preset'
@@ -2886,7 +2886,7 @@ class CountingLlmAdapter extends StubStreamingLlmAdapter {
  * the real PTY/install/reload process proof is the two-package upgrade smoke
  * (U08).
  */
-test('M4 PR4: the live /reload-client command reaches the ONE process capability with its fixed notice', async (t) => {
+test('the live /reload-client command reaches the ONE process capability with its fixed notice', async (t) => {
   const life = testLifecycle(t)
   const results: ClientReloadRequestResult[] = []
   let next: ClientReloadRequestResult = { kind: 'accepted' }

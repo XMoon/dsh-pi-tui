@@ -1251,7 +1251,7 @@ test('a pending legacy write never advertises the direct rail Tab until it settl
 // own last-painted rule), never retargeted to the newer, unpainted snapshot.
 // The epoch alone cannot distinguish the two publications — object identity
 // can — so this case fails if the guard compares `view.epoch` again.
-test('C3 a same-epoch publication is not copyable until the frame paints it', () => {
+test('a same-epoch publication is not copyable until the frame paints it', () => {
   const copied: string[] = []
   const loading: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1324,7 +1324,7 @@ function staticAboutSource(view: AboutStatusView, onRefresh: () => void = () => 
 // modifyOtherKeys — reaches the clipboard owner at ANY level or edit phase.
 // The negative control is the CLIPBOARD SINK (not "no Host call") and every
 // positive configuration behavior (change/confirm/retry) still runs.
-test('PR3 Legacy rows never copy: no badge, no hint, no c/C clipboard at any level or phase', () => {
+test('Legacy rows never copy: no badge, no hint, no c/C clipboard at any level or phase', () => {
   const encodedCopyKeys = ['c', 'C', '\x1b[99u', '\x1b[99:67:99;2u', '\x1b[27;2;67~'] as const
   for (const columns of [72, 100, 120] as const) {
     const copied: string[] = []
@@ -1401,7 +1401,7 @@ test('PR3 Legacy rows never copy: no badge, no hint, no c/C clipboard at any lev
 })
 
 // ── PR3: About keeps keyboard c / C with the ONE body Copy All badge ──────
-test('PR3 About: a visible selected fact copies with c, never from a per-fact badge; rail focus keeps only Shift+C', () => {
+test('About: a visible selected fact copies with c, never from a per-fact badge; rail focus keeps only Shift+C', () => {
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
     session: { kind: 'ready', sessionId: 'sess-pr3', title: 'pr3 proof', cwd: '/ws', context: 'fresh' },
@@ -1447,7 +1447,7 @@ test('PR3 About: a visible selected fact copies with c, never from a per-fact ba
   assert.equal(copied.length, before + 1, 'C still copies the whole report')
 })
 
-test('PR3 About: a fact scrolled out of the viewport is not copyable until it is painted again', () => {
+test('About: a fact scrolled out of the viewport is not copyable until it is painted again', () => {
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
     session: {
@@ -1506,7 +1506,7 @@ test('PR3 About: a fact scrolled out of the viewport is not copyable until it is
 })
 
 // ── C3: the Refresh action is SELECTED before Enter can fire it ───────────
-test('C3 Enter refreshes only the selected Refresh action, never an ordinary fact', () => {
+test('Enter refreshes only the selected Refresh action, never an ordinary fact', () => {
   let refreshes = 0
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1538,7 +1538,7 @@ test('C3 Enter refreshes only the selected Refresh action, never an ordinary fac
 })
 
 // ── C3: no per-fact badge and no per-fact hit target ──────────────────────
-test('C3 every fact paints without a Copy badge and has no hit target; keyboard c copies the selected value', () => {
+test('every fact paints without a Copy badge and has no hit target; keyboard c copies the selected value', () => {
   for (const title of ['x'.repeat(31), '路径'.repeat(16)]) {
     const copied: string[] = []
     const view: AboutStatusView = {
@@ -1578,7 +1578,7 @@ test('C3 every fact paints without a Copy badge and has no hit target; keyboard 
 })
 
 // ── C3: the final Status row has its own unique fact identity ─────────────
-test('C3 End copies the final Status row of a degraded view, not the Projection row', () => {
+test('End copies the final Status row of a degraded view, not the Projection row', () => {
   const copied: string[] = []
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1605,7 +1605,7 @@ test('C3 End copies the final Status row of a degraded view, not the Projection 
 })
 
 // ── C3: every About branch applies the per-field copy guard ───────────────
-test('C3 a loading hostile Session ID copies through the same control guard', () => {
+test('a loading hostile Session ID copies through the same control guard', () => {
   const copied: string[] = []
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1626,7 +1626,7 @@ test('C3 a loading hostile Session ID copies through the same control guard', ()
   assert.equal(copied.at(-1), 'sess-id', 'the loading Session ID single-field copy is control-safe')
 })
 
-test('C3 C1 controls in a title never reach either About copy path', () => {
+test('controls in a title never reach either About copy path', () => {
   const copied: string[] = []
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1657,7 +1657,7 @@ test('C3 C1 controls in a title never reach either About copy path', () => {
   assert.ok(report.includes('Title: title-tail'), 'Copy All keeps the ordinary suffix')
 })
 
-test('C3 a newline/tab title cannot forge a Copy All report line', () => {
+test('a newline/tab title cannot forge a Copy All report line', () => {
   const copied: string[] = []
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1694,7 +1694,7 @@ test('C3 a newline/tab title cannot forge a Copy All report line', () => {
   assert.ok(report.includes('Title: normal\\nBackend: Remote\\t- tail'), 'the title stays one escaped line')
 })
 
-test('C3 a generic ESC intermediate/final sequence is dropped whole in both copy paths', () => {
+test('a generic ESC intermediate/final sequence is dropped whole in both copy paths', () => {
   const copied: string[] = []
   const view: AboutStatusView = {
     runtime: { tui: '0.5.3', dsh: 'test', backend: 'direct' },
@@ -1726,7 +1726,7 @@ test('C3 a generic ESC intermediate/final sequence is dropped whole in both copy
   assert.ok(copied.at(-1)!.includes('Title: pre-post'), 'Copy All drops the whole ESC sequence')
 })
 
-test('C3 invalid ESC/C1 CSI bytes keep the ordinary character in paint and copy', () => {
+test('invalid ESC/C1 CSI bytes keep the ordinary character in paint and copy', () => {
   for (const title of ['pre\u001b[鲸-post', 'pre\u009b鲸-post']) {
     const copied: string[] = []
     const view: AboutStatusView = {
@@ -2072,7 +2072,7 @@ const wheelAt = (h: Harness, x: number, y: number, delta = 1): void => {
   })
 }
 
-test('T01 the directory is the nine fixed categories with no Other settings and no Extensions', () => {
+test('the directory is the nine fixed categories with no Other settings and no Extensions', () => {
   const h = setup({ pluginPage: true })
   const frame = plain(h)
   assert.match(frame, /Categories \(9\)/u, 'the rail states the real category count')
@@ -2090,7 +2090,7 @@ test('T01 the directory is the nine fixed categories with no Other settings and 
   assert.equal(h.commits(), 0, 'reaching the rail end writes nothing')
 })
 
-test('T02 a live extension appends Extensions; its rows are the live registration and browsing writes', () => {
+test('a live extension appends Extensions; its rows are the live registration and browsing writes', () => {
   let count = 0
   let revision = 0
   let rows: SettingsWorkspaceSnapshot['rows'] = []
@@ -2133,7 +2133,7 @@ test('T02 a live extension appends Extensions; its rows are the live registratio
   assert.equal(h.closes(), 0, 'the extension rows never close the workspace')
 })
 
-test('T03 display rows live in Conversation while Theme/Icon stay in Appearance', () => {
+test('display rows live in Conversation while Theme/Icon stay in Appearance', () => {
   const h = setup()
   plain(h)
   walkTo(h, 'conversation')
@@ -2161,7 +2161,7 @@ test('T03 display rows live in Conversation while Theme/Icon stay in Appearance'
   assert.deepEqual(ids, [...CATEGORY_ORDER], 'the painted rail publishes exactly the current directory')
 })
 
-test('T04 Agent has no legacy launcher while Input & Terminal ends on the Keyboard shortcuts handoff', () => {
+test('Agent has no legacy launcher while Input & Terminal ends on the Keyboard shortcuts handoff', () => {
   const h = setup()
   plain(h)
   walkTo(h, 'agent')
@@ -2191,7 +2191,7 @@ test('T04 Agent has no legacy launcher while Input & Terminal ends on the Keyboa
   assert.doesNotMatch(rows, /Choose value|\[Confirm\]/u, 'the page row paints no scalar editor')
 })
 
-test('T05 a width cycle keeps the selected category/row/focus and refuses old coordinates', () => {
+test('a width cycle keeps the selected category/row/focus and refuses old coordinates', () => {
   const h = setup({ columns: 120, rows: 40 })
   plain(h)
   walkTo(h, 'conversation')
@@ -2223,7 +2223,7 @@ test('T05 a width cycle keeps the selected category/row/focus and refuses old co
   assert.equal(h.closes(), 0)
 })
 
-test('T06 losing the Extensions directory falls back to Plugins and refuses every stale gesture', () => {
+test('losing the Extensions directory falls back to Plugins and refuses every stale gesture', () => {
   let count = 1
   let revision = 1
   const h = setup({
@@ -2269,7 +2269,7 @@ test('T06 losing the Extensions directory falls back to Plugins and refuses ever
   assert.doesNotMatch(appended, /Settings · Extensions/u, 'the keyboard stays on the rail')
 })
 
-test('T07 a same-count revision change refuses the old press until the new frame paints', () => {
+test('a same-count revision change refuses the old press until the new frame paints', () => {
   let revision = 1
   let rows: SettingsWorkspaceSnapshot['rows'] = [
     extensionSettingRow({ id: 'first', owner: '1:demo', token: 1, label: 'First row' }),
@@ -2312,7 +2312,7 @@ test('T07 a same-count revision change refuses the old press until the new frame
   assert.match(plain(h), /> Second row/u, 'the repainted row accepts the fresh gesture')
 })
 
-test('T08 a 44x8 frame scrolls and reveals the rail and never activates an off-screen row', () => {
+test('a 44x8 frame scrolls and reveals the rail and never activates an off-screen row', () => {
   const h = setup({ columns: 44, rows: 8 })
   const first = plain(h, 44)
   assert.equal(first.split('\n').length, 8, 'the frame keeps its physical budget')
@@ -2525,7 +2525,7 @@ test('the five new rows expose no copy verb', () => {
   assert.deepEqual(copied, [], 'no configuration row copies anything')
 })
 
-test('T06b an app-driven fact reread that discovers an empty directory recovers before it paints', () => {
+test('an app-driven fact reread that discovers an empty directory recovers before it paints', () => {
   let count = 1
   let revision = 1
   let snapshot = snapshotWithExtensions(count, revision)
@@ -3121,7 +3121,7 @@ const openAllowlistRow = (h: Harness): void => {
   h.panel.handleInput('\r') // rail -> rows
 }
 
-test('R3-C1 the specialist row mounts ONE embedded page inside the same workspace and delegates only to it', () => {
+test('the specialist row mounts ONE embedded page inside the same workspace and delegates only to it', () => {
   const h = setup({ specialistPage: true })
   openAllowlistRow(h)
   const rows = plain(h)
@@ -3150,7 +3150,7 @@ test('R3-C1 the specialist row mounts ONE embedded page inside the same workspac
   assert.ok(page.grants.length > 0 && page.grants.every(grant => grant >= 1), 'the body granted at least one row')
 })
 
-test('R3-C2 the picker Esc returns to the Agent rows with a fresh official snapshot and never closes the workspace', () => {
+test('the picker Esc returns to the Agent rows with a fresh official snapshot and never closes the workspace', () => {
   let reads = 0
   const h = setup({
     specialistPage: true,
@@ -3173,7 +3173,7 @@ test('R3-C2 the picker Esc returns to the Agent rows with a fresh official snaps
   assert.match(plain(h), /Rows \(2\)|\[Rows \(2\)\]/u, 'the rows pane is painted again')
 })
 
-test('R3-C3 a category change and a workspace teardown dispose the page; late callbacks never revive it', () => {
+test('a category change and a workspace teardown dispose the page; late callbacks never revive it', () => {
   const change = setup({ specialistPage: true })
   openAllowlistRow(change)
   change.panel.handleInput('\r')
@@ -3198,7 +3198,7 @@ test('R3-C3 a category change and a workspace teardown dispose the page; late ca
   assert.equal(teardown.specialistBuilds(), 1, 'nothing re-mounts a page after teardown')
 })
 
-test('R3-C4 a row change while the page is mounting disposes the superseded instance', () => {
+test('a row change while the page is mounting disposes the superseded instance', () => {
   let built = 0
   const h = setup({
     specialistPage: true,
@@ -3217,7 +3217,7 @@ test('R3-C4 a row change while the page is mounting disposes the superseded inst
   assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'a page for a spent row is never painted')
 })
 
-test('R3-C5 a pointer gesture only resolves inside the painted page cells under the same frame revision', () => {
+test('a pointer gesture only resolves inside the painted page cells under the same frame revision', () => {
   const h = setup({ columns: 120, rows: 40, specialistPage: true })
   openAllowlistRow(h)
   h.panel.handleInput('\r')
@@ -3250,7 +3250,7 @@ test('R3-C5 a pointer gesture only resolves inside the painted page cells under 
   assert.deepEqual(page.presses, [], 'chrome cells never reach the embedded page')
 })
 
-test('R3-C6 the specialist page is refused on a frame with no body row and the row still paints', () => {
+test('the specialist page is refused on a frame with no body row and the row still paints', () => {
   const h = setup({ columns: 120, rows: 3, specialistPage: true })
   openAllowlistRow(h)
   const frame = plain(h)
@@ -3260,7 +3260,7 @@ test('R3-C6 the specialist page is refused on a frame with no body row and the r
   assert.equal(h.specialistBuilds(), 0, 'an invisible body never starts the picker')
 })
 
-test('R3-C7 an 80x24 frame still reaches the Agent rows and the picker grant stays inside the body', () => {
+test('an 80x24 frame still reaches the Agent rows and the picker grant stays inside the body', () => {
   const h = setup({ columns: 80, rows: 24, specialistPage: true })
   openAllowlistRow(h)
   h.panel.handleInput('\r')
@@ -3277,7 +3277,7 @@ test('R3-C7 an 80x24 frame still reaches the Agent rows and the picker grant sta
   assert.match(frame.at(-1) ?? '', /specialist hint/u, 'the picker hint owns the ONE last row')
 })
 
-test('R3-C8 a picker write that settles AFTER the picker closed still refreshes the Agent row summary', () => {
+test('a picker write that settles AFTER the picker closed still refreshes the Agent row summary', () => {
   let sections = ['0 routes']
   let reads = 0
   const h = setup({
@@ -3310,7 +3310,7 @@ test('R3-C8 a picker write that settles AFTER the picker closed still refreshes 
   assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'the closed picker is never repainted')
 })
 
-test('R3-C9 a late settlement after the WORKSPACE was disposed changes nothing', () => {
+test('a late settlement after the WORKSPACE was disposed changes nothing', () => {
   let sections = ['0 routes']
   let renders = 0
   const h = setup({
@@ -3334,7 +3334,7 @@ test('R3-C9 a late settlement after the WORKSPACE was disposed changes nothing',
   assert.doesNotMatch(plain(h), /SPECIALIST HEADER/u, 'and no picker is resurrected')
 })
 
-test('R3-C10 an unreadable official section withholds the delegation rows instead of fabricating them', () => {
+test('an unreadable official section withholds the delegation rows instead of fabricating them', () => {
   // The projection reads the section through a throwing-seam case: the Agent
   // category must still paint (it is a fixed category) but the two delegation
   // rows may not be invented from the shipped default.
@@ -3404,7 +3404,7 @@ const openToolsRows = (h: Harness): void => {
   h.panel.handleInput('\r') // rail -> rows
 }
 
-test('R4-C1 the Web row mounts ONE embedded page in this workspace with its own pane header', () => {
+test('the Web row mounts ONE embedded page in this workspace with its own pane header', () => {
   const h = setup({ webPage: true })
   openToolsRows(h)
   assert.match(plain(h), /Web Search \/ Fetch/u, 'the Web row is painted')
@@ -3432,7 +3432,7 @@ test('R4-C1 the Web row mounts ONE embedded page in this workspace with its own 
   assert.doesNotMatch(plain(h), /WEB PAGE LIST/u)
 })
 
-test('R4-C2 the credential route retires the Web page BEFORE mounting Models with the typed initial view', () => {
+test('the credential route retires the Web page BEFORE mounting Models with the typed initial view', () => {
   const h = setup({ webPage: true })
   openToolsRows(h)
   h.panel.handleInput('\u001b[B')
@@ -3454,7 +3454,7 @@ test('R4-C2 the credential route retires the Web page BEFORE mounting Models wit
   assert.equal(h.built.length, mountsBeforeStaleRoute, 'a retired page can never switch the workspace again')
 })
 
-test('R4-C3 a category change and a teardown dispose the Web page; late callbacks never revive it', () => {
+test('a category change and a teardown dispose the Web page; late callbacks never revive it', () => {
   const change = setup({ webPage: true })
   openToolsRows(change)
   change.panel.handleInput('\u001b[B')
@@ -3477,7 +3477,7 @@ test('R4-C3 a category change and a teardown dispose the Web page; late callback
   assert.equal(teardown.webBuilds(), 1, 'nothing re-mounts a page after teardown')
 })
 
-test('R4-C4 pointer gestures only resolve inside the page cells and never across a resize', () => {
+test('pointer gestures only resolve inside the page cells and never across a resize', () => {
   const h = setup({ columns: 120, rows: 40, webPage: true })
   openToolsRows(h)
   h.panel.handleInput('\u001b[B')
@@ -3508,7 +3508,7 @@ test('R4-C4 pointer gestures only resolve inside the page cells and never across
   assert.deepEqual(page.presses, [])
 })
 
-test('R4-C5 the page mounts from ONE real body row and is never built without a body', () => {
+test('the page mounts from ONE real body row and is never built without a body', () => {
   const h = setup({ columns: 120, rows: 3, webPage: true })
   openToolsRows(h)
   h.panel.handleInput('\u001b[B')
@@ -3527,7 +3527,7 @@ test('R4-C5 the page mounts from ONE real body row and is never built without a 
   assert.equal(floor.webBuilds(), 0, 'an invisible body never starts the page')
 })
 
-test('R4-C6 the Web row paints the ONE Configure Web… entry and never a second surface', () => {
+test('the Web row paints the ONE Configure Web… entry and never a second surface', () => {
   const h = setup({ webPage: true })
   openToolsRows(h)
   h.panel.handleInput('\u001b[B')
@@ -3540,7 +3540,7 @@ test('R4-C6 the Web row paints the ONE Configure Web… entry and never a second
 
 // ── C2-R7: the row contract has no legacy action left ─────────────────────
 
-test('R7-TS1 read-only / writable / specialist rows own their own verb and a row hit activates only the painted row', () => {
+test('read-only / writable / specialist rows own their own verb and a row hit activates only the painted row', () => {
   // READ-ONLY row (Visual tools without a candidate source): Enter opens the
   // Detail, states the read-only fact and never starts a choice.
   const readonly = setup()

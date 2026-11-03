@@ -329,7 +329,7 @@ test('removing the LAST route while enabled is refused with the official rule', 
     /disable subagent model selection before removing the last route|requires at least one allowed model/u)
 })
 
-test('EXT-4: a REJECTED write that cannot re-read the section still clears the optimistic marker', async () => {
+test('a REJECTED write that cannot re-read the section still clears the optimistic marker', async () => {
   // The section accepted nothing, and the authoritative re-read is unavailable.
   // Leaving the optimistic marker on screen would show a route as allowed that
   // the Host never stored, and a later close could report it as the summary.
@@ -372,7 +372,7 @@ test('EXT-4: a REJECTED write that cannot re-read the section still clears the o
     `the refusal is reported: ${JSON.stringify(harness.notices)}`)
 })
 
-test('EXT-4b: close-before-settlement never reports the optimistic list, and a failed late write corrects the outer row', async () => {
+test('close-before-settlement never reports the optimistic list, and a failed late write corrects the outer row', async () => {
   // The sequence the review named: the section WAS readable, the user adds a
   // route, Escapes immediately, and the write then fails while the authority is
   // unreadable. The picker reported a summary on close; it must be the COMMITTED

@@ -400,7 +400,7 @@ test('a real Remote generation replacement never paints its late success OR its 
   }
 })
 
-test('F02: the Direct and Remote ports answer the SAME Session file identically', async (t) => {
+test('the Direct and Remote ports answer the SAME Session file identically', async (t) => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 'pr2-parity-preset')
   const workspace = life.tempDir('dsh-pr2-parity-ws-')
