@@ -399,7 +399,8 @@ function readC1WorkEvents(workRoot) {
 }
 
 async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs = 120_000) {
-  const deadline = Date.now() + timeoutMs
+  const started = Date.now()
+  const deadline = started + timeoutMs
   while (Date.now() < deadline) {
     const event = readC1WorkEvents(workRoot).find(predicate)
     if (event !== undefined) return event
@@ -408,7 +409,7 @@ async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs = 120_00
   throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
     code: 'WORK_PROOF_WAIT_TIMEOUT',
     waitLabel: label,
-    elapsedMs: timeoutMs,
+    elapsedMs: Date.now() - started,
   })
 }
 
@@ -572,7 +573,8 @@ function writeReloadProbePng(path) {
  * submitted only after the placeholder is provably gone from the composer.
  */
 async function waitForClearedComposer(client, needle, label, timeoutMs = 60_000) {
-  const deadline = Date.now() + timeoutMs
+  const started = Date.now()
+  const deadline = started + timeoutMs
   while (Date.now() < deadline) {
     const viewport = await client.viewport()
     const separators = []
@@ -602,7 +604,7 @@ async function waitForClearedComposer(client, needle, label, timeoutMs = 60_000)
     code: 'COMPOSER_CLEAR_TIMEOUT',
     waitLabel: label,
     processRole: client.role,
-    elapsedMs: timeoutMs,
+    elapsedMs: Date.now() - started,
     process: client,
   })
 }

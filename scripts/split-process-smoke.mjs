@@ -287,13 +287,14 @@ export class EntryProcess {
 
   waitForExit(timeoutMs = 120_000) {
     let timer
+    const started = Date.now()
     const deadline = new Promise((_resolve, reject) => {
       timer = setTimeout(() => {
         reject(new SplitSmokeWaitError('WAIT_TIMEOUT', {
           code: 'PROCESS_EXIT_TIMEOUT',
           waitLabel: 'process exit',
           processRole: this.role,
-          elapsedMs: timeoutMs,
+          elapsedMs: Date.now() - started,
           process: this,
         }))
       }, timeoutMs)
@@ -581,13 +582,14 @@ export class SurfaceEntryProcess {
 
   waitForExit(timeoutMs = 120_000) {
     let timer
+    const started = Date.now()
     const deadline = new Promise((_resolve, reject) => {
       timer = setTimeout(() => {
         reject(new SplitSmokeWaitError('WAIT_TIMEOUT', {
           code: 'PROCESS_EXIT_TIMEOUT',
           waitLabel: 'process exit',
           processRole: this.role,
-          elapsedMs: timeoutMs,
+          elapsedMs: Date.now() - started,
           process: this,
         }))
       }, timeoutMs)
@@ -765,7 +767,8 @@ function readC1WorkEvents(workRoot) {
 
 /** Wait for one fixture proof matching the predicate. */
 export async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs = 60_000) {
-  const deadline = Date.now() + timeoutMs
+  const started = Date.now()
+  const deadline = started + timeoutMs
   while (Date.now() < deadline) {
     const event = readC1WorkEvents(workRoot).find(predicate)
     if (event !== undefined) return event
@@ -774,13 +777,14 @@ export async function waitForC1WorkEvent(workRoot, predicate, label, timeoutMs =
   throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
     code: 'WORK_PROOF_WAIT_TIMEOUT',
     waitLabel: label,
-    elapsedMs: timeoutMs,
+    elapsedMs: Date.now() - started,
   })
 }
 
 /** Wait for one durable Host Session event matching the predicate. */
 export async function waitForHostSessionEvent(dshHome, sessionId, predicate, label, timeoutMs = 60_000) {
-  const deadline = Date.now() + timeoutMs
+  const started = Date.now()
+  const deadline = started + timeoutMs
   while (Date.now() < deadline) {
     const events = hostSessionEvents(dshHome, sessionId)
     const event = events?.find(predicate)
@@ -790,7 +794,7 @@ export async function waitForHostSessionEvent(dshHome, sessionId, predicate, lab
   throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
     code: 'SESSION_EVENT_WAIT_TIMEOUT',
     waitLabel: label,
-    elapsedMs: timeoutMs,
+    elapsedMs: Date.now() - started,
   })
 }
 
@@ -801,17 +805,29 @@ function lastSurfaceStatus(client) {
 
 /** Wait for a surface status matching the predicate. */
 export async function waitForSurfaceStatus(client, predicate, label, timeoutMs = 120_000) {
-  const deadline = Date.now() + timeoutMs
+  const started = Date.now()
+  const deadline = started + timeoutMs
   while (Date.now() < deadline) {
     const status = lastSurfaceStatus(client)
     if (status !== undefined && predicate(status)) return status
+    // A Client that died while the status never arrived is not a timeout: that
+    // is the failure itself, and it must not consume the whole budget.
+    if (client.exited) {
+      throw new SplitSmokeWaitError('PROCESS_EXITED', {
+        code: 'PROCESS_EXITED_BEFORE_STATUS',
+        waitLabel: label,
+        processRole: client.role,
+        elapsedMs: Date.now() - started,
+        process: client,
+      })
+    }
     await sleep(25)
   }
   throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
     code: 'SURFACE_STATUS_WAIT_TIMEOUT',
     waitLabel: label,
     processRole: client.role,
-    elapsedMs: timeoutMs,
+    elapsedMs: Date.now() - started,
     process: client,
   })
 }
@@ -837,7 +853,7 @@ export async function waitForAnyReady(processes, label, timeoutMs) {
   throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
     code: 'READY_RACE_TIMEOUT',
     waitLabel: label,
-    elapsedMs: timeoutMs,
+    elapsedMs: Date.now() - started,
   })
 }
 
@@ -1001,7 +1017,8 @@ function closeMux(socket, WebSocket) {
 
 /** Bounded wait for a kernel abstract-socket name to become bindable. */
 async function seatFree(name, timeoutMs = 5_000) {
-  const deadline = Date.now() + timeoutMs
+  const started = Date.now()
+  const deadline = started + timeoutMs
   while (Date.now() < deadline) {
     const free = await new Promise(resolveFree => {
       const server = createNetServer()
@@ -1016,7 +1033,7 @@ async function seatFree(name, timeoutMs = 5_000) {
   throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
     code: 'SEAT_RELEASE_TIMEOUT',
     waitLabel: 'abstract seat release',
-    elapsedMs: timeoutMs,
+    elapsedMs: Date.now() - started,
   })
 }
 
