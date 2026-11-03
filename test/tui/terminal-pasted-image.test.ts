@@ -280,3 +280,56 @@ test('the accelerated submit chord and Ctrl+S steer are refused while the paste 
   assert.equal(h.steered[0], `${placeholder} `, 'the retried steer sends the real image token')
 })
 
+test('the first Undo after the conversion restores the raw pasted path, then the paste itself', async (t) => {
+  const life = testLifecycle(t)
+  const h = harness(life)
+  paste(h.vt, `${h.imagePath} `)
+  await waitFor(() => h.app.getDraft().includes(h.imagePath))
+  await h.release()
+  await waitFor(() => h.images.size() === 1)
+  const placeholder = h.images.values()[0]!.placeholder
+  assert.equal(h.app.getDraft(), `${placeholder} `)
+
+  h.vt.sendInput('\x1b[45;5u') // kitty Ctrl+- : the fork editor's Undo
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), `${h.imagePath} `,
+    'the first Undo restores the raw pasted path text, never a dead image token')
+
+  h.vt.sendInput('\x1b[45;5u')
+  await h.vt.waitForRender()
+  assert.equal(h.app.getDraft(), '', 'the second Undo removes the paste itself')
+})
+
+test('two pastes of the SAME path each replace their own occurrence', async (t) => {
+  const life = testLifecycle(t)
+  const h = harness(life)
+  paste(h.vt, `${h.imagePath} `)
+  paste(h.vt, `${h.imagePath} `)
+  await waitFor(() => h.reads.length === 2)
+  await h.release()
+  await waitFor(() => h.images.size() === 1)
+  await h.release()
+  await waitFor(() => h.images.size() === 2)
+  const [firstCompleted, secondCompleted] = h.images.values()
+  assert.equal(h.app.getDraft(), `${secondCompleted!.placeholder} ${firstCompleted!.placeholder} `,
+    'both occurrences converted independently in text order; ids follow completion order')
+})
+
+test('deleting the pending path clears the block and the next Enter submits normally', async (t) => {
+  const life = testLifecycle(t)
+  const h = harness(life)
+  paste(h.vt, `${h.imagePath} `)
+  await waitFor(() => h.app.getDraft().includes(h.imagePath))
+  // The user deletes the pasted path (and its separator) before the read ends.
+  for (let index = 0; index < h.imagePath.length + 1; index += 1) h.vt.sendInput('\x7f')
+  h.vt.sendInput('hello')
+  await waitFor(() => h.app.getDraft() === 'hello')
+  h.vt.sendInput('\r')
+  await waitFor(() => h.submitted.length === 1)
+  assert.equal(h.submitted[0]!.text, 'hello',
+    'a dead lease never blocks an unrelated submission')
+
+  await h.release()
+  await h.vt.waitForRender()
+  assert.equal(h.images.size(), 0, 'the stale read converts nothing after its span was deleted')
+})

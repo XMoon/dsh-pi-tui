@@ -17,6 +17,8 @@
  * @module @xmoon76/dsh-pi-tui/tui/interaction/pasted-path-range
  */
 
+import { PASTE_CANDIDATE_MAX_LENGTH } from '../../client/media/image/pasted-path.ts'
+
 /** One tracked document interval: the expected bytes and where they live. */
 export interface PasteRangeSpan {
   /** UTF-16 start offset in the editor's RAW text. */
@@ -51,6 +53,10 @@ export function pastedBodySpan(
   pastedText: string,
 ): PasteRangeSpan | undefined {
   if (pastedText === '') return undefined
+  // A body the candidate grammar can never accept is not tracked at all:
+  // retaining it would force a full-body slice comparison on every later editor
+  // edit for a conversion that can never happen.
+  if (pastedText.length > PASTE_CANDIDATE_MAX_LENGTH) return undefined
   if (beforeCursor < 0 || beforeCursor > beforeText.length) return undefined
   if (afterCursor < beforeCursor || afterCursor > afterText.length) return undefined
   // The insertion must be ONE splice at the caret: the prefix and suffix of
