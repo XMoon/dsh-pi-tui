@@ -326,7 +326,7 @@ manually against the actual candidate tarball. The lanes CI does NOT run — the
 must run locally — are
 `compat:dsh:npm`, `gate:keybindings`, `gate:boundary`, `gate:architecture`,
 `scripts/check-no-session-events.mjs`, `gate:dsh-preset-parity`,
-`smoke:remote-d2-fork` and `smoke:remote-session-lifecycle-parity`; a mode-gated
+`smoke:remote-fork-rewind-parity` and `smoke:remote-session-lifecycle-parity`; a mode-gated
 CI step that was skipped counts as not covered.
 
 **Keep one run ledger per session** (lane → last green state → its inputs) and
