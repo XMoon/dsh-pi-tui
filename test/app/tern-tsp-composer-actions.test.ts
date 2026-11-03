@@ -562,7 +562,7 @@ test('composer actions: a Host-owned /model stays ONE forwarded entry and paints
   // refusal (proven end-to-end in tern-tsp-model-picker.test.ts); the renderer
   // never opens a menu of its own and never pretends a write happened.
   assert.deepEqual(calls.modelEntries, ['models'])
-  assert.equal(wireNodes(pane).some(node => String(node.p['key'] ?? '').startsWith('composer-quick-menu')), false,
+  assert.equal(dockNodes(pane).some(node => String(node.p['key'] ?? '').startsWith('composer-quick-menu')), false,
     'no quick menu is painted by the renderer')
 })
 

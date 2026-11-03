@@ -24,9 +24,9 @@
  * trigger's own container, so its rect deliberately falls outside that ancestor.
  * The ancestor-clipping oracle (`containedXY`/`visiblePoint`) therefore reports
  * every overlay row as clipped — a false negative about the painted result that
- * the capture disproves. Rows are therefore clicked at their own painted centre
- * and every claim is verified from the NEXT frame plus the subject's own record;
- * no claim here rests on a node's rect alone.
+ * the capture disproves. Rows are therefore clicked at their own painted centre,
+ * and every click claim is verified from what the NEXT frame paints or from the
+ * subject's own record; no claim here rests on a node's rect alone.
  *
  * The subject declares its own boundary stand-ins on `events.jsonl` (the scripted
  * directory and the write settlement); the registered command owner and the real
@@ -112,6 +112,18 @@ function allLabels(snap) {
   return elButtons(snap).map(nodeText)
 }
 
+/** Everything the menu paints, rows and non-rows (group heads, notices, the
+ *  search placeholder): a click that changes only the notice still changes it. */
+function menuPainted(snap) {
+  const box = menuBox(snap)
+  if (box === undefined) return ''
+  return snap.nodes
+    .filter(node => node.id !== undefined && inside(box, boxOf(node)))
+    .map(node => String(node.text ?? ''))
+    .filter(Boolean)
+    .join(' | ')
+}
+
 function editorText(snap) {
   const editor = editorNode(snap)
   return editor === undefined ? '' : nodeText(editor)
@@ -132,7 +144,7 @@ function countEvents(h, field) {
 export default async function (h) {
   const subject = join(h.repo, 'scripts', 'tern-pane-composer-model-quick-ux-subject.mts')
   const testCase = process.env.TERN_TSP7_MQ_CASE ?? 'root'
-  const width = Number(process.env.TSP7_MQ_W ?? process.env.TERN_TSP7_MQ_W ?? 1280)
+  const width = Number(process.env.TERN_TSP7_MQ_W ?? 1280)
   const height = Number(process.env.TERN_TSP7_MQ_H ?? 800)
   const appearance = process.env.TERN_TSP7_MQ_APPEARANCE ?? 'dark'
   writeFileSync(join(h.root, 'case'), `${testCase}\n`)
@@ -154,10 +166,21 @@ export default async function (h) {
   h.check('no separate Effort control survives on the composer row',
     !allLabels(snap).some(label => /^Effort\b/.test(label)), JSON.stringify(allLabels(snap)))
   if (trigger === undefined) return
-  const triggerLabel = nodeText(trigger).replace(/[▴▾]$/, '').trim()
+  // The tooltip carries the COMPLETE sanitized facts: never the clamped label,
+  // never an ellipsis, never the narrow-pane effort abbreviation.
+  const title = String(trigger.title ?? '')
+  const label = nodeText(trigger)
   h.check('the trigger tooltip states the complete model and effort facts',
-    String(trigger.title ?? '') === `${triggerLabel} — model and reasoning effort`,
-    `title=${JSON.stringify(trigger.title)} label=${JSON.stringify(triggerLabel)}`)
+    title.endsWith('— model and reasoning effort')
+    && !title.includes('…') && !title.includes('▾') && !title.includes('▴')
+    && !title.includes('null') && !title.includes('undefined'),
+    `title=${JSON.stringify(title)} label=${JSON.stringify(label)}`)
+  if (testCase !== 'noeffort') {
+    h.check('the tooltip keeps the unabbreviated effort value the clamped label drops',
+      /· (high|low|medium)$/.test(title.replace(' — model and reasoning effort', ''))
+      || testCase === 'models',
+      `title=${JSON.stringify(title)}`)
+  }
 
   const editorBefore = boxOf(editorNode(snap))
   const sendBefore = boxOf(elButtons(snap).find(node => nodeText(node).includes('↑')) ?? trigger)
@@ -206,22 +229,37 @@ export default async function (h) {
   h.measure('menu-rows-open', JSON.stringify(menuLabels(after)))
   h.capture(`${testCase}-${width}x${height}-${appearance}-open`, 'the anchored quick menu, open')
 
-  /** Click a menu row at its own painted centre and require the NEXT frame to
-   *  show an effect: the click claim is the frame change, never the rect. */
-  const choose = async (fragment) => {
+  /**
+   * Click a menu row at its own painted centre, then prove the click landed by
+   * what the NEXT frame paints (rows, notice or the panel going away) — a
+   * rect-only claim is never evidence, and a commit click legitimately leaves
+   * the row list unchanged.
+   */
+  const choose = async (fragment, note = '') => {
     const current = h.snapshot()
     const node = menuButtons(current).find(entry => nodeText(entry).includes(fragment))
     if (node === undefined) {
       h.check(`the menu offers "${fragment}"`, false, JSON.stringify(menuLabels(current)))
       return false
     }
+    const beforePainted = menuPainted(current)
     const box = boxOf(node)
     await h.clickAt(box.cx, box.cy)
     const next = h.snapshot()
-    h.check(`a real pointer click on "${fragment}" changed the frame`,
-      menuLabels(next).join(' | ') !== menuLabels(current).join(' | ') || !menuMounted(next),
-      `before=${JSON.stringify(menuLabels(current))} after=${JSON.stringify(menuLabels(next))}`)
+    const changed = menuPainted(next) !== beforePainted || !menuMounted(next)
+    h.check(`a real pointer click on "${fragment}" changed what the menu paints${note}`,
+      changed, `before=${beforePainted.slice(0, 200)} after=${menuPainted(next).slice(0, 200)}`)
     return true
+  }
+  /** Poll the real tree until `done()` or the budget runs out. */
+  const poll = async (label, done, timeoutMs = 9000) => {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (done()) return true
+      await h.sleep(200)
+    }
+    h.check(`the client reached ${label}`, false, `timed out after ${timeoutMs}ms`)
+    return false
   }
 
   // ── Case-specific behaviour.
@@ -236,12 +274,19 @@ export default async function (h) {
       !seen.some(label => label.includes('Reasoning Effort')), JSON.stringify(seen))
   }
   if (testCase === 'partial') {
-    const painted = h.snapshot().nodes.map(node => String(node.text ?? '')).join(' | ')
-    h.check('the failed provider is stated beside the usable groups',
-      painted.includes('unreachable') && painted.includes('Alpha One'), painted.slice(0, 300))
+    const painted = menuPainted(h.snapshot())
+    h.check('the failed provider is stated in words beside the usable groups',
+      painted.includes('Gamma Provider') && painted.includes('unavailable') && painted.includes('Alpha One'),
+      painted.slice(0, 300))
     h.check('the usable provider groups stay offered under a partial read',
       menuLabels(h.snapshot()).some(label => label.includes('Alpha One')),
       JSON.stringify(menuLabels(h.snapshot())))
+  }
+  if (testCase === 'long') {
+    const seen = menuLabels(h.snapshot())
+    h.check('a long advertised name never eats the row label it belongs to',
+      seen.some(label => /^Model\b/.test(label)) && seen.some(label => /^Reasoning Effort\b/.test(label)),
+      JSON.stringify(seen))
   }
 
   if (['models', 'long', 'effort', 'write', 'reject', 'full'].includes(testCase)) {
@@ -251,7 +296,7 @@ export default async function (h) {
       const field = page.nodes.find(node => node.tag === 'input' || String(node.class ?? '').includes('sf-in'))
       h.check('the Model page searches through a native input field', field !== undefined,
         JSON.stringify(page.nodes.filter(node => node.tag === 'input').map(node => node.tag)))
-      const painted = page.nodes.map(node => String(node.text ?? '')).join(' | ')
+      const painted = menuPainted(page)
       h.check('provider group heads come from the directory order',
         painted.includes('Alpha Provider'), painted.slice(0, 260))
       const seen = menuLabels(page)
@@ -264,33 +309,30 @@ export default async function (h) {
       h.capture(`${testCase}-${width}x${height}-${appearance}-models`, 'the searchable model page')
 
       if (testCase === 'models') {
-        // The list body is the scrolling region, so the LAST provider group is
-        // reached through the menu's own search (the reachable path a user has)
-        // rather than by assuming it is painted without scrolling.
-        h.check('the first provider group is painted in directory order',
-          painted.includes('Alpha Provider'), painted.slice(0, 200))
+        // The list body is the only scrolling region, so the LAST provider group
+        // is reached through the menu's own search instead of assuming it is
+        // painted without scrolling.
         const beforeDraft = editorText(page)
         await h.key('B', 400)
         await h.key('e', 400)
         await h.key('t', 400)
         const filtered = h.snapshot()
-        const filteredText = filtered.nodes.map(node => String(node.text ?? '')).join(' | ')
-        h.check('typing filters the menu list to the last provider group',
-          filteredText.includes('Beta Provider') && filteredText.includes('Beta One'),
-          filteredText.slice(0, 260))
+        const filteredPainted = menuPainted(filtered)
+        h.check('typing filters the menu to the last provider group',
+          filteredPainted.includes('Beta Provider') && !filteredPainted.includes('Alpha Provider'),
+          filteredPainted.slice(0, 260))
         h.check('the filter never touches the Composer draft',
           editorText(filtered) === beforeDraft, editorText(filtered))
         h.capture(`${testCase}-${width}x${height}-${appearance}-filtered`, 'the filtered list')
       }
       if (testCase === 'long') {
-        const joined = menuLabels(h.snapshot()).join(' | ')
         const nowMenu = menuBox(h.snapshot())
         h.check('over-long and CJK labels stay inside the anchored menu width',
           nowMenu !== undefined && nowMenu.w <= MENU_MAX_WIDTH_PX, JSON.stringify(nowMenu))
         h.check('the hostile labels never wrap the Composer into extra height',
           boxOf(editorNode(h.snapshot())).y === editorBefore.y,
           JSON.stringify(boxOf(editorNode(h.snapshot()))))
-        h.measure('long-label-paint', joined.slice(0, 240))
+        h.measure('long-label-paint', menuLabels(h.snapshot()).join(' | ').slice(0, 240))
       }
       if (testCase === 'effort') {
         if (await choose('‹ Model & Effort')) {
@@ -303,22 +345,24 @@ export default async function (h) {
       }
       if (testCase === 'write' || testCase === 'reject') {
         const before = countEvents(h, 'apply')
-        if (await choose('Alpha Two')) {
+        if (await choose('Alpha Two', ' (the selection)')) {
           h.capture(`${testCase}-${width}x${height}-${appearance}-pending`, 'the frame right after the selection')
           h.measure('pending-text', JSON.stringify(h.snapshot().nodes
             .map(node => String(node.text ?? ''))
-            .filter(line => /Selecting|Loading/.test(line))))
+            .filter(line => /Selecting/.test(line))))
+          h.check('the admitted write is stated as pending on the real client',
+            menuPainted(h.snapshot()).includes('Selecting…'), menuPainted(h.snapshot()).slice(0, 260))
           const duringPending = countEvents(h, 'apply')
-          await choose('Alpha Two')
+          await choose('Alpha Two', ' (second click under pending)')
           await h.key('Return', 400)
           h.check('a second click or Enter under an admitted write dispatches no second selection',
             countEvents(h, 'apply') === duringPending,
             `during=${duringPending} after=${countEvents(h, 'apply')}`)
-          await h.waitFor(() => !menuMounted(h.snapshot()) || menuLabels(h.snapshot()).some(label => label.includes('Low')),
-            { timeoutMs: 9000 })
-          await h.sleep(1500)
-          const settled = h.snapshot()
           if (testCase === 'write') {
+            await poll('the committed selection to dismiss the menu', () => !menuMounted(h.snapshot()))
+            await poll('the projection to relabel the trigger', () =>
+              nodeText(triggerOf(h.snapshot()) ?? trigger).includes('Alpha Two'), 4000)
+            const settled = h.snapshot()
             h.check('the committed selection dismisses the menu', !menuMounted(settled),
               JSON.stringify(allLabels(settled)))
             h.check('the trigger relabels from the projection, not from the clicked row',
@@ -327,20 +371,29 @@ export default async function (h) {
             h.check('exactly one selection reached the write owner',
               countEvents(h, 'apply') - before === 1, String(countEvents(h, 'apply') - before))
           } else {
+            await poll('the refused write to restore the page', () =>
+              !menuPainted(h.snapshot()).includes('Selecting…'))
+            const settled = h.snapshot()
             h.check('a refused write leaves the panel on its page and operable',
-              menuMounted(settled) && menuLabels(settled).length > 0,
+              menuMounted(settled) && menuLabels(settled).length > 0
+              && !menuPainted(settled).includes('Selecting…'),
               JSON.stringify(menuLabels(settled)))
+            h.check('the refused write never relabels the trigger optimistically',
+              !nodeText(triggerOf(settled) ?? trigger).includes('Alpha Two'),
+              nodeText(triggerOf(settled) ?? trigger))
           }
         }
       }
       if (testCase === 'full') {
         const target = footerRow(h.snapshot())
         if (target !== undefined) {
+          const beforePainted = menuPainted(h.snapshot())
           const box = boxOf(target)
           await h.clickAt(box.cx, box.cy)
           await h.sleep(700)
           const handed = h.snapshot()
-          h.check('the Full handoff retires the quick frame', !menuMounted(handed),
+          h.check('the Full handoff retires the quick frame',
+            !menuMounted(handed) && menuPainted(handed) !== beforePainted,
             JSON.stringify(allLabels(handed)))
           h.check('the handoff went through the registered full entry exactly once',
             countEvents(h, 'fullEntry') === 1, String(countEvents(h, 'fullEntry')))
