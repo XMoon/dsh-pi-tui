@@ -119,6 +119,7 @@ async function mountWelcome(options: {
   const state: HandlerState = { browserOpens: 0, browserAvailable: true, browserThrows: false }
   renderer.bindInput({
     exit() {}, cancel() {}, submit() {}, steer() {}, pasteMedia() {}, noteUserInput() {},
+    pastedPath: () => {}, admitPastedPathDelivery: () => true,
     listContinuedQuestions: () => [], reopenContinuedQuestion: () => false,
     openModelPicker() {}, openModelQuick() {},
     openSessionBrowser() {
@@ -676,5 +677,5 @@ test('the Composer keeps its own Tab / Shift+Tab / Enter / Escape while the Welc
   for (const key of keys) m.pane.key(key)
   await observeNothingHappens()
   assert.equal(m.state.browserOpens, opensBefore, 'no Composer key reaches the Session Browser entry')
-  assert.equal(m.fatals.length, 0, 'and none of them broke the input loop')
+  assert.equal(m.fatals.length, 0, `and none of them broke the input loop: ${m.fatals.map(String).join(' | ')}`)
 })

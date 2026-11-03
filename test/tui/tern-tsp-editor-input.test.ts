@@ -752,7 +752,7 @@ test('keys before the bind are HELD, then consumed exactly once at the bind', as
     await settle()
     assert.equal(lastEditorProps(harness.frames())?.text, 'held', 'the bind consumed the held keys')
     // A second bind is refused — exactly ONE input owner.
-    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {} }),
+    assert.throws(() => harness.renderer.bindInput({ exit: () => {}, cancel: () => {}, submit: () => {}, steer: () => {}, pasteMedia: () => {}, pastedPath: () => {}, admitPastedPathDelivery: () => true, noteUserInput: () => {}, listContinuedQuestions: () => [], reopenContinuedQuestion: () => false, openModelPicker() {}, openModelQuick() {}, openSessionBrowser() {}, sessionBrowserAvailable: () => true }),
       /already bound/, 'a second bind throws')
   } finally {
     await harness.dispose()
