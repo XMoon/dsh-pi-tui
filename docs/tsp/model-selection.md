@@ -276,9 +276,14 @@ node scripts/tern-pane-drive.mjs scripts/tern-pane-composer-model-quick-ux.mjs
 ```
 
 The flow/subject scripts mount the PRODUCTION presenter over one official inline
-surface and send real input; containment claims go through the visibility oracle
-(`scripts/tern-pane-geometry.mjs`), never a node's own rect. The quick-menu flow
-additionally asserts the anchor distance from the trigger and that the Composer
-and editor layout boxes do not change while the menu is open. See
+surface and send real input; list/row containment claims go through the
+visibility oracle (`scripts/tern-pane-geometry.mjs`), never a node's own rect.
+The quick-menu flow is the deliberate exception: the menu is an absolutely
+positioned child of the trigger's own container, so it is intentionally OUTSIDE
+that ancestor and a generic ancestor-chain containment oracle would report every
+legitimately painted overlay row as clipped. Its claims are therefore made
+against the client-reported pane box (the menu and the fixed footer inside it,
+the Composer and editor layout boxes unchanged across the open) plus the captured
+PNG/layout tree, not against a clipping chain. See
 [the harness guide](../guides/tern-pane-testing.md) for run preconditions and
 evidence rules.
