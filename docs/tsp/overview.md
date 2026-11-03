@@ -120,14 +120,18 @@ frame, and `dispose()` releases the observer before the app dies.
 ### The Main empty state (Welcome)
 
 The TSP renderer paints its invitation in **Main only**. The Dock stays the ONE
-Quiet Composer — one fixed input, one cursor, one draft owner — and never
-carries Session facts, a second input or a Session listing.
+Quiet Composer — one fixed input, one cursor, one draft owner — and gives up the
+empty state's identity line: no Session id/model welcome row and no Session
+listing ever appear there. The Dock's ordinary status content is untouched by
+this surface (session title, todo count, compaction phase, attention and visual
+rows keep painting as before): "Main only" constrains where the *empty state*
+lives, not everything the Dock may show.
 
 ```text
 the application's formal idle commit (no Session yet)  -> sessionless
 SurfaceRuntime.repaintTarget() for the live MAIN subject
    SessionReader.blank(sessionId) === true
-   AND the complete fold holds no turn                 -> blank-session
+   AND the fold holds no turn activity at all           -> blank-session
 anything else (a started turn, an unknown read, a
    viewed child, the hydration window)                -> hidden
 ```
@@ -137,7 +141,11 @@ anything else (a started turn, an unknown read, a
   An unknown read is never inferred from the rendered window, a row count or a
   running state, and the bounded display window is never the history: a fold
   that already carries a turn vetoes the empty state, while an empty window
-  alone never proves blankness. On Remote that bit exists only once the session
+  alone never proves blankness. The veto reads the fold's own turn *activity*,
+  not its rendered turn index: a Session whose `turn/start` has been applied
+  but which has produced no displayable row yet is already started, and a stale
+  `blank:true` summary must not keep the Welcome — or its live Resume action —
+  over it. On Remote that bit exists only once the session
   list is ready, so a fresh blank Session can show the Welcome at a later
   authorized commit instead of the first frame; nothing here adds a refresh, a
   subscription or a poll to hurry it up.
