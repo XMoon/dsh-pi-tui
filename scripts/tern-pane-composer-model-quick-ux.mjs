@@ -361,26 +361,32 @@ export default async function (h) {
         const lines = now.nodes
           .filter(node => String(node.text ?? '').includes('unavailable') || /Provider \d+ · /.test(String(node.text ?? '')))
           .map(node => boxOf(node))
-        h.check('every failed provider is stated in the menu', lines.length >= 12,
-          `${lines.length} failure lines painted`)
-        // The client's tree reports a scrolled-out row at its LAYOUT position,
-        // outside the scroller's clip, so a claim about every row's rect would be
-        // a claim about clipping the tree cannot make. Which container a row
-        // belongs to is the structural claim and the automated wire case owns it
-        // (the failure nodes are children of the scroller node); here the claim
-        // is that a real subset of them paints inside the anchored menu box.
-        const paintedLines = nowMenu === undefined
-          ? []
-          : lines.filter(line => inside(nowMenu, line))
-        // How many of them are VISIBLE without scrolling depends on the room the
-        // pane gives the body, so the claim is size-aware: a normal pane must show
-        // a real subset of them, and any pane must at least lay all of them out
-        // inside the menu (none dropped, none pushed past the fixed footer).
-        h.check('failed-provider lines paint inside the anchored menu',
-          height >= 600
-            ? paintedLines.length >= 3
-            : paintedLines.length >= 1 || lines.length === 12,
-          JSON.stringify({ menu: nowMenu, painted: paintedLines.length, laidOut: lines.length }))
+        h.check('all twelve failed providers are stated, none dropped', lines.length === 12,
+          `${lines.length} failure lines laid out`)
+        // The client reports a scrolled-out row at its LAYOUT position, outside
+        // the scroller's clip, so this lane never claims anything about what the
+        // clip hides. What it does claim, at every size: each line is laid out in
+        // the menu's own column and BELOW the fixed search row — i.e. it belongs
+        // to the body, not to the fixed chrome. Which node is whose CHILD is the
+        // structural claim and the automated wire case owns it (the failure nodes
+        // are children of the scroller node), which the tree here cannot show.
+        const searchBox = boxOf(now.nodes.find(node => String(node.class ?? '')
+          .split(' ').includes('sf-input')) ?? { rect: [0, 0, 0, 0] })
+        h.check('the failed-provider lines lay out in the menu column, below the fixed search row',
+          nowMenu !== undefined
+          && lines.every(line => line.x >= nowMenu.x - 1 && line.right <= nowMenu.right + 1
+            && line.y >= searchBox.y),
+          JSON.stringify({ menu: nowMenu, search: searchBox, first: lines[0], last: lines.at(-1) }))
+        // Only a pane that gives the body room makes a visibility promise: there,
+        // a real subset must be readable with no scrolling at all. A short pane
+        // promises no visible count — its promise is the fixed chrome, which the
+        // two checks below are the ones that can actually break.
+        if (height >= 600) {
+          const paintedLines = nowMenu === undefined ? [] : lines.filter(line => inside(nowMenu, line))
+          h.check('a pane with room for the body shows failed providers without scrolling',
+            paintedLines.length >= 3,
+            JSON.stringify({ menu: nowMenu, painted: paintedLines.length, laidOut: lines.length }))
+        }
         h.check('the menu keeps its own height budget under a dozen failures',
           nowMenu !== undefined && paneBox !== undefined && nowMenu.h <= paneBox.h + 2,
           JSON.stringify({ menu: nowMenu, pane: paneBox }))
