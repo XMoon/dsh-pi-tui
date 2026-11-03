@@ -32,6 +32,7 @@ import {
   forensicErrorText,
   formatFailureSummary,
   LANE_ERROR_CODES,
+  emitInputFailure,
   isLaneSourceFile,
   LANE_SOURCE_FILES,
   laneAssertionSite,
@@ -1028,7 +1029,15 @@ test('a forged or unusable frame never becomes a locator', () => {
   }
 })
 
-test('the report only accepts a locator from a trusted lane source', () => {
+test('the report only accepts a locator from a trusted lane source', (t) => {
+  // `reportFailure` writes a report under TMPDIR; keep it in this test's root.
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-locator-')
+  const previousTmp = process.env.TMPDIR
+  process.env.TMPDIR = privateTmp
+  t.after(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmp
+  })
   // A real lane file is accepted (shape + source).
   assert.equal(projectFailureReport({ lane: 'split-process', assertion: 'split-process-smoke.mjs:12' }).assertion,
     'split-process-smoke.mjs:12')
@@ -1051,6 +1060,34 @@ test('the report only accepts a locator from a trusted lane source', () => {
   const diagnostics = createSmokeDiagnostics({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', marker: 'T' })
   const report = diagnostics.reportFailure(forged)
   assert.equal(report.assertion, undefined, 'an arbitrary error may not contribute a locator')
+})
+
+test('a pre-collector failure cannot publish a forged assertion locator', (t) => {
+  // The report is written under TMPDIR; keep this test's artifacts in its own root.
+  const privateTmp = testLifecycle(t).tempDir('split-smoke-precollector-')
+  const previousTmp = process.env.TMPDIR
+  process.env.TMPDIR = privateTmp
+  t.after(() => {
+    if (previousTmp === undefined) delete process.env.TMPDIR
+    else process.env.TMPDIR = previousTmp
+  })
+  // Same producer rule as the collector, on the path used when the failure
+  // happens before the diagnostics object exists.
+  const forged = Object.assign(new Error('forged pre-collector failure'), {
+    category: 'INFRA_FAILURE',
+    assertion: 'split-process-smoke.mjs:42',
+  })
+  const stderr = captureStderr(() => {
+    const report = emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error: forged })
+    assert.equal(report.assertion, undefined, 'a plain error may not contribute a locator')
+    assert.ok(!JSON.stringify(report).includes('split-process-smoke.mjs:42'))
+  })
+  assert.ok(!stderr.includes('split-process-smoke.mjs:42'), `the summary leaked the forged site:\n${stderr}`)
+  // The real class still publishes on that path.
+  const genuine = new SplitSmokeAssertionError('a real pre-collector assertion')
+  if (genuine.assertion === undefined) return // not a lane source: nothing to publish
+  const report = emitInputFailure({ lane: 'split-process', heading: 'SPLIT_PROCESS_SMOKE', error: genuine })
+  assert.equal(report.assertion, genuine.assertion)
 })
 
 test('both lanes raise locatable assertions through the shared class', () => {
