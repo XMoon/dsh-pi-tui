@@ -2981,6 +2981,7 @@ test('a refused /new Host Workspace preflight never stops the old owner, creates
     assert.deepEqual(presentedScopes(owned.pane), [scopeA], 'no replacement subject was ever painted')
     assert.equal(presentedScope(owned.pane), scopeA, 'A stays current')
   } finally {
+    // Bounded fixture teardown (the owned runner is closed, not a timing window).
     await owned.settle()
   }
 })
@@ -3021,6 +3022,7 @@ test('the real /new uses the captured Session Host Workspace membership, never t
     assert.deepEqual(workspaceY.sessionIds, [child.id, ...before],
       'the fresh Session is attached to the SAME Workspace as its source')
   } finally {
+    // Bounded fixture teardown (the owned runner is closed, not a timing window).
     await owned.settle()
   }
 })
