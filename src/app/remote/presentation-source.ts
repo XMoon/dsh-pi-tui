@@ -168,8 +168,14 @@ export function createRemotePresentationSource(
   const sessionReader = backendRuntime.semantics.sessionReader
   const planSource = sessions as RemotePlanBindingSource
   // The ONE shared live-ingress factory, referenced by both the main-surface
-  // bundle member and the child-view source (never a second instance).
-  const liveIngress = createRemoteLiveIngress(sessions, generation, CURRENT_STATUS_PROJECTION_KEYS)
+  // bundle member and the child-view source (never a second instance). It
+  // follows the status keys PLUS the official `inbox` projection: another
+  // Client's queued/steering occurrence is Host-owned pending input whose
+  // projection value must re-join the pending pane after it lands (the durable
+  // event and the projection value travel on different streams, so the event
+  // alone cannot order the read). `inbox` stays OUT of the status-key contract:
+  // `CURRENT_STATUS_PROJECTION_KEYS` remains exactly what `sessionStatus` reads.
+  const liveIngress = createRemoteLiveIngress(sessions, generation, [...CURRENT_STATUS_PROJECTION_KEYS, 'inbox'])
   // The ONE semantic Task read over the SAME Client faces. It retains the root
   // Job roster watch for the session it last read.
   const taskReader = new RemoteTaskReader(sessions, client.jobs, generation)

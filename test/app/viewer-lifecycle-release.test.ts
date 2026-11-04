@@ -370,3 +370,75 @@ test('a throwing ingress disposer cannot strand the retained child binding', asy
   viewer.dispose()
   assert.equal(order.length, releases, 'a second dispose does not re-run either release')
 })
+
+test('a viewed child\'s inbox projection re-joins the CHILD pending pane, and a retired viewer callback cannot', async () => {
+  let capturedSinks: ViewerChildLiveSinks<SessionPresentationEvent> | undefined
+  const refreshedSubjects: Array<string | undefined> = []
+  const view: ViewerChildView<SessionPresentationEvent> = {
+    childSessionId: 'child-1',
+    parentSessionId: 'parent-1',
+    snapshot: { durableEvents: [], liveInputs: [], activity: 'inactive', cwd: '', revision: 1 },
+    rehydrate: async () => undefined,
+    loadOlder: async () => {},
+    currentActivity: () => 'inactive',
+    subscribe: sinks => {
+      capturedSinks = sinks
+      return { dispose() {} }
+    },
+    release: () => {},
+  }
+  const childView: ViewerChildSource<SessionPresentationEvent> = {
+    open: async () => view,
+    childWriterSubject: () => undefined,
+  }
+  // The surface stub records the CURRENT pending subject at each refresh: the
+  // contract under test is that the child's projection refresh targets the
+  // viewed child, never the parent's queue.
+  const holder: { viewer?: { pendingSubjectId(): string | undefined } } = {}
+  const surface = {
+    routeSessionEvent: () => {},
+    repaint: () => {},
+    refreshPendingInput: () => { refreshedSubjects.push(holder.viewer?.pendingSubjectId()) },
+    display: displaySeamStub(),
+    app: {
+      enterFocusViewerScope: () => {},
+      exitFocusViewerScope: () => {},
+      discardFocusViewerScope: () => {},
+      setViewerMode: () => {},
+      clearLocalMessages: () => {},
+      clearNotify: () => {},
+    },
+  } as unknown as SurfaceRuntime<SessionPresentationEvent>
+  const viewer = createViewerRuntime<SessionPresentationEvent>({
+    surface,
+    isCleanedUp: () => false,
+    summaryKeys: toolSummaryKeys,
+    currentSessionId: () => 'parent-1',
+    liveParentSessionId: () => 'parent-1',
+    childView,
+    refreshStatus: () => {},
+    restoreMainTranscriptAnchor: () => {},
+    runDetached: () => {},
+  } satisfies ViewerRuntimeDeps<SessionPresentationEvent>)
+  holder.viewer = viewer
+
+  await viewer.enterView('child-1', 'research', 'continuable', 'parent-1', 'inactive')
+  assert.equal(viewer.isViewing(), true)
+  assert.equal(viewer.pendingSubjectId(), 'child-1',
+    'a viewed continuable child owns the pending subject while it is displayed')
+  assert.ok(capturedSinks !== undefined, 'the child live sinks are captured')
+  // The entry refresh is not the fact under test: count only the projection
+  // notification that follows.
+  refreshedSubjects.length = 0
+  capturedSinks!.onProjectionsChanged()
+  assert.deepEqual(refreshedSubjects, ['child-1'],
+    'the child inbox projection change re-joins the pending pane for the CHILD subject')
+  // A retired viewer's callback must not refresh the parent's queue after the
+  // editor seat returns to the main surface.
+  viewer.exitView()
+  refreshedSubjects.length = 0
+  capturedSinks!.onProjectionsChanged()
+  assert.deepEqual(refreshedSubjects, [],
+    'a retired child callback cannot refresh the current pending pane')
+  viewer.dispose()
+})

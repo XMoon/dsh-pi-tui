@@ -561,6 +561,11 @@ export function createViewerRuntime<Event extends SessionPresentationEvent>(
         onProjectionsChanged: () => {
           if (viewing === undefined || viewing.id !== childId) return
           deps.refreshStatus()
+          // The child's official `inbox` projection changed (its own submission
+          // or another Client's occurrence): re-join the pending pane for the
+          // CURRENT subject — never the parent's queue while this viewer owns
+          // the editor seat.
+          deps.surface.refreshPendingInput()
         },
       })
       deps.surface.app.enterFocusViewerScope()
