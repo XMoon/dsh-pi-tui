@@ -1847,6 +1847,9 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
  * is the minimal PR2 harness family (no Host, no live DSH Session); the recorder
  * on the mounted renderer's own display seam is a one-to-one observer that calls
  * the UNBOUND original through, so the kernel commit still runs.
+ * The kernel state behind those commits is read back through the mount's OWN
+ * headless diagnostics (`scopeFactCountForTest` / `reconcileStepsForTest`), so
+ * the seam is proven to COMMIT, not merely to be called.
  * NOT IN THIS RUN: in production the real `SubmissionController` sits between
  * `events.onSubmit` and the history writer; this case calls the PRODUCTION
  * `InputHistory` owner at that point, so the controller hop is the one labelled
@@ -2028,6 +2031,11 @@ test('a real TSP Enter reaches the production history owner, writes its row and 
   life.defer(() => { seam.settleScopeInput = originalSettle })
   try {
     harness.surface.bindRendererInput()
+    // The mount kernel starts this case with no durable settlement fact at all,
+    // so every count below is a STATE witness, not a call witness: a seam whose
+    // body no longer commits to the kernel cannot move these numbers.
+    assert.equal(harness.renderer().scopeFactCountForTest(), 0,
+      'no settlement fact exists before any submission')
 
     await enterDraft(harness, submitted, 'recall chain prompt')
     assert.equal(typeof submitted[0]!.scopeToken, 'number', 'the accepted Enter is an occurrence')
@@ -2044,6 +2052,12 @@ test('a real TSP Enter reaches the production history owner, writes its row and 
       outcome: 'written',
       text: 'recall chain prompt',
     }], 'persist settled the occurrence on its own stack, once')
+    // SINK 3 — THAT settlement became a durable per-token fact INSIDE this
+    // mount's kernel. This is what proves the seam delegates rather than
+    // swallowing: a `settleScopeInput` body that ignored its argument would
+    // still satisfy the recorder above and leave this at 0.
+    assert.equal(harness.renderer().scopeFactCountForTest(), 1,
+      'the written occurrence holds exactly one durable settlement fact in this mount')
 
     // N05 at the real writer: a SECOND identical Enter is a distinct occurrence
     // (the CWD-level dedupe skips its row), so write and skip stay separable.
@@ -2056,6 +2070,8 @@ test('a real TSP Enter reaches the production history owner, writes its row and 
     assert.equal(settlements[1]!.token, submitted[1]!.scopeToken,
       'the skip is attributed to ITS OWN occurrence, not to the text')
     assert.equal(loadHistoryRecords(file).length, 1, 'a policy skip wrote no row')
+    assert.equal(harness.renderer().scopeFactCountForTest(), 2,
+      'the skipped occurrence keeps its OWN fact — settled is not written, and both are remembered')
 
     // The owner's hydration reseed, driven with the REAL rows the file now
     // holds: the kernel commits it and CLOSES the scope. The next Enter is
@@ -2063,6 +2079,13 @@ test('a real TSP Enter reaches the production history owner, writes its row and 
     // changed this mount's state instead of being dropped.
     const diskRows = loadHistoryRecords(file).map(row => row.content).reverse()
     harness.surface.display.resetInputHistory(diskRows, SESSION_ID)
+    // The reseed consumed those facts in a real linear reconcile and then
+    // retired the scope with them: both numbers are kernel state, read back
+    // through the mount's own diagnostics.
+    assert.ok(harness.renderer().reconcileStepsForTest() > 0,
+      'the reseed really walked the window this mount had settled')
+    assert.equal(harness.renderer().scopeFactCountForTest(), 0,
+      'the committed scope left no settlement fact behind')
     await enterDraft(harness, submitted, 'after the real reseed')
     assert.equal(submitted[2]!.scopeToken, undefined,
       "the real reseed closed this mount's open scope")
@@ -2071,6 +2094,8 @@ test('a real TSP Enter reaches the production history owner, writes its row and 
       'a closed scope still writes through the production owner')
     assert.equal(settlements.length, 3, 'the tokenless write settled once, with no token')
     assert.equal(settlements[2]!.token, undefined, 'the tokenless writer reports no occurrence')
+    assert.equal(harness.renderer().scopeFactCountForTest(), 0,
+      'a tokenless write records no occurrence fact — settled without an occurrence stays stateless')
   } finally {
     await harness.dispose()
     await harness.session.close()
