@@ -608,6 +608,16 @@ test('the non-destructive Split Remote navigation witness stays between M5-C and
     'M5N must wait until the refused line is gone from the composer')
   assert.match(m5n, /includes\('\/resume'\)/u,
     'M5N must reject a queued line that inherits the refused command line')
+  {
+    // The ORDER is the proof: observe the restored line FIRST, then clear it,
+    // then require the composer to be clean. Clearing before observing would
+    // be a harness guess that can race the production restore.
+    const observed = m5n.indexOf('await clientA.waitForComposerDraft(refusedLine)')
+    const cleared = m5n.indexOf("clientA.send('\\x15')", observed)
+    const gone = m5n.indexOf("'M5N cleared the refused command line'", cleared)
+    assert.ok(observed >= 0 && cleared > observed && gone > cleared,
+      'M5N must observe the restored refused line, clear it with Ctrl+U, then wait until it is gone')
+  }
 
   // The queued occurrence is submitted through the PAINTED composer: type,
   // confirm the composer holds the exact text, then Enter. A one-shot
@@ -616,9 +626,10 @@ test('the non-destructive Split Remote navigation witness stays between M5-C and
   {
     const typed = m5n.indexOf("clientA.send('m5n-x-queued')")
     const confirmed = m5n.indexOf("await clientA.waitForComposerDraft('m5n-x-queued')")
-    const entered = m5n.indexOf("clientA.send('\\r')", confirmed)
-    assert.ok(typed >= 0 && confirmed > typed && entered > confirmed,
-      'M5N must type the queued text, confirm the painted composer, then press Enter')
+    const noInherit = m5n.indexOf('the queued line must not inherit a refused command line')
+    const entered = m5n.indexOf("clientA.send('\\r')", noInherit)
+    assert.ok(typed >= 0 && confirmed > typed && noInherit > confirmed && entered > noInherit,
+      'M5N must type the queued text, confirm the painted composer, reject an inherited refused line, then press Enter')
     assert.doesNotMatch(m5n, /send\('m5n-x-queued\\r'\)/u,
       'M5N must never submit the queued occurrence one-shot without the composer readiness fact')
   }
