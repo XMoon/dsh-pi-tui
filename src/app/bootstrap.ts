@@ -145,7 +145,7 @@ import { type SessionQueryLike } from '../runtime/direct/session-direct.ts'
 import { type WorkingDirectoryServiceLike } from '../runtime/direct/working-directory-direct.ts'
 import { serializeTuiSettingsMutation, type TuiSettingsDoc } from '../runtime/config-port.ts'
 import type { AssistantLiveInput } from '../runtime/assistant-stream-port.ts'
-import { requireCreated, requireOpened, type SessionHandle } from '../runtime/session-lifecycle-port.ts'
+import { requireCreated, requireOpened, type SessionHandle, type WorkspaceSelectionIntent } from '../runtime/session-lifecycle-port.ts'
 import { listGlobalCommands, readSurfaceCatalog, type SurfaceCatalogContext, type SurfaceCommandsService } from '../runtime/direct/surface-catalog.ts'
 import { commandSummaryOf, type SurfaceCatalogSnapshot } from '../domain/catalog/surface.ts'
 import { parseCommand } from '@deepseek-ai/dsh-commands'
@@ -199,6 +199,21 @@ function detachedModelSelection(selection: ModelSelectionDto | undefined): Model
     model: selection.model,
     ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
   } as ModelSelection
+}
+
+/**
+ * The first-session Workspace intent: the Client's own launch directory by
+ * default. A qualification-only split-surface override feeds the SAME seam with
+ * a deliberately invalid Host path (the OS lane's negative control) — it can
+ * never inject a pre-validated WorkspaceId, and a normal Direct process ignores
+ * it because the override is gated on the internal surface Client mode.
+ */
+export function initialWorkspaceIntentFromEnvironment(
+  launchCwd: string,
+  env: { readonly SPLIT_PROCESS_CLIENT_MODE?: string; readonly SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH?: string } = process.env,
+): WorkspaceSelectionIntent {
+  const override = env.SPLIT_PROCESS_CLIENT_MODE === 'surface' ? env.SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH : undefined
+  return { kind: 'host-path', path: override === undefined || override === '' ? launchCwd : override }
 }
 
 export function applyRunner(ctx: Context, config: Config): void {
@@ -1083,14 +1098,7 @@ export function applyRunnerWithRuntime(
         // registry realpaths and validates it, and the resulting official
         // WorkspaceId (never this path) is what the create names. Client-local
         // cwd consumers are untouched.
-        // The qualification-only override feeds the SAME intent seam with a
-        // deliberately invalid Host path (the split-process negative control);
-        // it can never inject a pre-validated WorkspaceId and production leaves
-        // it unset.
-        initialWorkspaceIntent: () => ({
-          kind: 'host-path',
-          path: process.env.SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH ?? process.cwd(),
-        }),
+        initialWorkspaceIntent: () => initialWorkspaceIntentFromEnvironment(process.cwd()),
         currentOpening: () => surface.openingJournal.current(),
         resetOpening: () => {
           // The whole journal is dropped (the first-session finally): the SAME

@@ -96,8 +96,9 @@ function officialSessionLifecycle(
   sessions: ISessions,
   generation: ConnectionGenerationState,
   workspace: ClientRemote['workspace'],
+  session: ClientRemote['session'],
 ): RemoteSessionLifecycle {
-  return new RemoteSessionLifecycle(sessions, generation, workspace)
+  return new RemoteSessionLifecycle(sessions, generation, workspace, session)
 }
 
 /** WS-2: the official generated `workspace` namespace satisfies the

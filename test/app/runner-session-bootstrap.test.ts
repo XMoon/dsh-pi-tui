@@ -11,6 +11,7 @@ import { createToolResultMessage, MessageId, type ToolCallId } from '@deepseek-a
 import type {} from '@deepseek-ai/dsh-subagent'
 import { SESSION_FORMAT_VERSION, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { Config as TuiConfigSchema } from '../../src/index.ts'
+import { initialWorkspaceIntentFromEnvironment } from '../../src/app/bootstrap.ts'
 import { TuiApp } from '../../src/tui-app.ts'
 import type { StreamingToolPreview } from '../../src/app/surface/streaming-tool-preparing.ts'
 import {
@@ -1239,4 +1240,20 @@ test('a skills/change emitted after surface teardown performs no further catalog
   await new Promise(resolve => setTimeout(resolve, 400))
   assert.equal(snapshots, afterLive,
     'a post-teardown skills/change must not read the catalog again (the disposed coordinator must stay untouched)')
+})
+
+test('the first-session Workspace intent ignores the qualification override outside the surface entry', () => {
+  const launch = '/home/user/project'
+  assert.deepEqual(initialWorkspaceIntentFromEnvironment(launch, {}),
+    { kind: 'host-path', path: launch }, 'a normal launch proposes its own directory')
+  assert.deepEqual(initialWorkspaceIntentFromEnvironment(launch, {
+    SPLIT_PROCESS_CLIENT_MODE: 'surface',
+    SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: '/deliberately/invalid',
+  }), { kind: 'host-path', path: '/deliberately/invalid' },
+  'the qualification-only surface entry may inject the negative-control path')
+  // The override is NOT a user configuration: an inherited variable without
+  // the internal surface mode never redirects a Direct launch or a reexec.
+  assert.deepEqual(initialWorkspaceIntentFromEnvironment(launch, {
+    SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: '/deliberately/invalid',
+  }), { kind: 'host-path', path: launch })
 })

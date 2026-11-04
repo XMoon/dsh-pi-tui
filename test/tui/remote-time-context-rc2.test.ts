@@ -214,7 +214,7 @@ async function prepareTimeContextHost(
   })
   life.defer(() => runtime.dispose().catch(() => {}))
   const sessions = runtime.client.sessions
-  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace)
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace, runtime.client.remote.session)
   const workspaceId = (await lifecycle.resolveWorkspace({ kind: 'host-path', path: host.anchorDir })).workspaceId
   const created = await lifecycle.create({ sessionId: SESSION, workspaceId })
   assert.equal(created.outcome.kind, 'created',
