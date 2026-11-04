@@ -1998,9 +1998,11 @@ test('a real TSP Enter reaches the production history owner, writes its row and 
   // The PRODUCTION write owner, composed exactly as `bootstrap` composes it:
   // the late-bound display seam of THIS surface, the client cwd, the row
   // owner's cwd. Nothing here reimplements the write policy.
+  let persistSubmissions = true
   const harness = await mountTspHarness({
     onSubmit: (text, _request, scopeToken) => {
       submitted.push({ text, scopeToken })
+      if (!persistSubmissions) return
       historyOwner.persist({
         text,
         sessionId: SESSION_ID,
@@ -2096,6 +2098,29 @@ test('a real TSP Enter reaches the production history owner, writes its row and 
     assert.equal(settlements[2]!.token, undefined, 'the tokenless writer reports no occurrence')
     assert.equal(harness.renderer().scopeFactCountForTest(), 0,
       'a tokenless write records no occurrence fact — settled without an occurrence stays stateless')
+
+    // N07, now a test and not just a code fact: a DISPOSED mount must refuse a
+    // late kernel commit. It has to be aimed at an occurrence that is still
+    // LIVE and UNSETTLED while the scope is still OPEN — settling an already
+    // closed scope early-returns for its own reason and would prove nothing.
+    // So the last Enter allocates its token in the mount and the writer is told
+    // to leave it unsettled; only then is the mount disposed.
+    harness.surface.display.beginInputHistoryScope('late-owner')
+    persistSubmissions = false
+    await enterDraft(harness, submitted, 'left unsettled')
+    const lateToken = submitted[3]!.scopeToken
+    assert.equal(typeof lateToken, 'number', 'the reopened scope allocated the late occurrence')
+    assert.equal(harness.renderer().scopeFactCountForTest(), 0,
+      'that occurrence is live and UNSETTLED before the disposal')
+    await harness.dispose()
+    harness.surface.display.settleScopeInput({
+      token: lateToken,
+      owner: 'late-owner',
+      outcome: 'written',
+      text: 'left unsettled',
+    })
+    assert.equal(harness.renderer().scopeFactCountForTest(), 0,
+      'a disposed mount refuses the late settlement instead of reopening recall state')
   } finally {
     await harness.dispose()
     await harness.session.close()
