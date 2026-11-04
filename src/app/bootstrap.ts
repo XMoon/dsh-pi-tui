@@ -1955,11 +1955,14 @@ export function applyRunnerWithRuntime(
       ownership,
       transition: {
         pending: () => ownership.gate.busy,
-        // A user navigation goes through the session runtime's admission: the
-        // barrier stops the captured old generation BEFORE the admitted-writer
-        // drain. Everything else (`/preset`, and any transition that is not a
-        // user leaving its Session) keeps the plain admission and never
-        // cancels the owner it replaces.
+        // A user navigation goes through the session runtime's admission:
+        // after the barrier freeze it applies the BACKEND's navigation
+        // ownership — a `stop-and-quiesce` backend stops the captured old
+        // generation BEFORE the admitted-writer drain, while a `detach-client`
+        // backend dispatches no Host stop and waits for no Host idle. The
+        // admitted writers then drain. Everything else (`/preset`, and any
+        // transition that is not a user leaving its Session) keeps the plain
+        // admission and never cancels the owner it replaces.
         run: <T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T> =>
           navigation === undefined
             ? ownership.gate.run(() => ownership.barrier.runTransition(async () => task()))

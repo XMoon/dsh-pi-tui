@@ -794,10 +794,13 @@ export interface TuiCommandRunner {  ctx: Context
    * `navigation` marks a USER NAVIGATION intent (`/new`, a selected-session
    * switch): the caller captures `runner.captureSessionScope()` synchronously
    * before its first await and passes the intent here. The transition admission
-   * then sends ONE exact-owner stop of that captured generation BEFORE the
-   * admitted writers drain; without it (e.g. the `/preset` swap) nothing is
-   * cancelled. The intent records whether that stop was accepted, so a later
-   * failure can state that the old Turn is already stopped.
+   * applies the BACKEND's navigation ownership BEFORE the admitted writers
+   * drain: a `stop-and-quiesce` backend sends ONE exact-owner stop of that
+   * captured generation (the intent records whether it was accepted, so a
+   * later failure can state that the old Turn is already stopped), while a
+   * `detach-client` backend dispatches no Host stop and waits for no Host
+   * idle. Without `navigation` (e.g. the `/preset` swap) the plain admission
+   * is used and nothing is cancelled.
    */
   withSessionTransition<T>(task: () => Promise<T> | T, navigation?: NavigationIntent): Promise<T>
   /**
