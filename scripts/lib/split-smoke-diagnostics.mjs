@@ -151,6 +151,9 @@ export const LANE_ERROR_CODES = Object.freeze([
   // Session creation, client-hmr frames): declared here so its failure detail
   // survives the report projection instead of being dropped as unknown.
   'QUALIFICATION_CONDITION_TIMEOUT',
+  // The same wait stopped by its caller (the Browser driver exited first): the
+  // poller really stops, so this is a distinct, reportable outcome.
+  'QUALIFICATION_CONDITION_ABORTED',
 ])
 
 /** A POSIX errno NAME (`EACCES`, `ENOENT`, …) is a fixed vocabulary. */
