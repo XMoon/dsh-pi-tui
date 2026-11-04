@@ -4,7 +4,8 @@
  * Two layers over the SAME production code:
  *
  * 1. the composer reducer (`src/tui/tsp/editor.ts`) — grapheme/UTF-16
- *    cursor safety, gesture classification, paste atomicity, port members;
+ *    cursor safety, gesture classification, paste atomicity, port members,
+ *    and the ↑/↓ recall of the mount's history scope;
  * 2. the REAL SDK loop (`mountTspRenderer` over the scripted pane, the same
  *    fixture family as the live-mount suite) — decoded key/paste bytes →
  *    the reducer → the controlled `ui.editor` text/cursor on the wire →
@@ -49,17 +50,57 @@ function key(name: string, modifiers: { ctrl?: boolean; shift?: boolean; alt?: b
   }
 }
 
+/** The recall port a reducer-layer composer reads: the scope snapshot is
+ *  newest-first and the admission is the application's paste/plain-history
+ *  policy. Both are the mount's, never a second history store. */
+interface ComposerRecallOptions {
+  readonly entries?: readonly string[]
+  readonly admitDraft?: (text: string) => boolean
+}
+
 /** A composer with recording sinks (the reducer layer's observer). */
-function composerWithSinks(): { composer: TspComposer; pending: Array<string | undefined>; notices: string[]; changes: () => number } {
+function composerWithSinks(options: ComposerRecallOptions = {}): {
+  composer: TspComposer
+  pending: Array<string | undefined>
+  notices: string[]
+  changes: () => number
+  /** Every draft the reducer asked the application to admit for recall. */
+  admissions: () => readonly string[]
+  /** Replace the newest-first scope snapshot the composer reads. */
+  setEntries(entries: readonly string[]): void
+} {
   const pending: Array<string | undefined> = []
   const notices: string[] = []
+  const admitted: string[] = []
   let changeCount = 0
+  let entries: readonly string[] = options.entries ?? []
   const composer = createTspComposer({
     onChanged: () => { changeCount += 1 },
     setSubmitPending: detail => { pending.push(detail) },
     notify: text => { notices.push(text) },
+  }, {
+    entries: () => entries,
+    admitDraft: (text) => {
+      admitted.push(text)
+      return options.admitDraft === undefined ? true : options.admitDraft(text)
+    },
   })
-  return { composer, pending, notices, changes: () => changeCount }
+  return {
+    composer,
+    pending,
+    notices,
+    changes: () => changeCount,
+    admissions: () => admitted,
+    setEntries: (next) => { entries = next },
+  }
+}
+
+/** Every legal caret position of `text` (each grapheme cluster start plus the
+ *  text end) — the boundary set a cursor must always land on. */
+function caretBoundaries(text: string): number[] {
+  const seen = new Set<number>([0, text.length])
+  for (const { index } of new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(text)) seen.add(index)
+  return [...seen].sort((left, right) => left - right)
 }
 
 // ── Layer 1: the reducer (pure composer semantics) ──────────────────────────
@@ -309,6 +350,305 @@ test('setDraft/setEditorText/insertIntoEditor each notify exactly one render', (
   composer.state()
   assert.equal(changes(), afterInsert, 'reads do not render')
 })
+// ── The ↑/↓ recall of the mount's scope snapshot ─────────────────────────────
+
+test('the first ↑ recalls the NEWEST scope entry, a repeated ↑ walks older, ↓ walks newer', () => {
+  const { composer } = composerWithSinks({ entries: ['new', 'old'] })
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: 'new', cursor: 0, focused: false },
+    'the first ↑ takes index 0 of the newest-first snapshot — never the oldest row')
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: 'old', cursor: 0, focused: false })
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'new', cursor: 3, focused: false },
+    '↓ goes newer again and lands that row\'s caret at its end')
+})
+
+test('a draft whose caret is not at the line start takes Home first, and ↓ restores that exact draft and caret', () => {
+  const { composer } = composerWithSinks({ entries: ['new', 'old'] })
+  composer.setDraft('draft')
+  const original = composer.state()
+  assert.deepEqual(original, { text: 'draft', cursor: 5, focused: false })
+  assert.deepEqual(composer.applyKey(key('up')), { kind: 'edited' }, 'Home is an edit, never a submit gesture')
+  assert.deepEqual(composer.state(), { text: 'draft', cursor: 0, focused: false },
+    'the first ↑ only moved the caret — the draft is still the user\'s own')
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, 'new', 'the second ↑ enters the recall')
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), original,
+    'leaving index 0 restores the pre-browse draft with its EXACT caret')
+})
+
+test('a multi-line draft moves by logical lines before the recall boundary, keeping a grapheme column', () => {
+  const { composer, admissions } = composerWithSinks({ entries: ['first', 'second'] })
+  composer.setDraft('a\n👍xy')
+  assert.equal(composer.state().cursor, 6)
+  composer.applyKey(key('home'))
+  assert.equal(composer.state().cursor, 2, 'Home landed on the second line\'s start (after the whole newline)')
+  composer.applyKey(key('right'))
+  assert.equal(composer.state().cursor, 4, 'the emoji cluster is one step')
+
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: 'a\n👍xy', cursor: 1, focused: false },
+    '↑ moved to the previous logical line — the recall was never consulted')
+  assert.deepEqual(admissions(), [], 'a vertical caret move runs no application policy')
+
+  composer.applyKey(key('down'))
+  assert.equal(composer.state().cursor, 4,
+    'the kept column is counted in GRAPHEMES (after 👍), never in UTF-16 units (which would strand the caret inside the pair)')
+  assert.deepEqual(composer.applyKey(key('up')), { kind: 'edited' })
+  assert.equal(composer.state().cursor, 1)
+
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: 'a\n👍xy', cursor: 0, focused: false },
+    'on the first line, ↑ first lands on the line start')
+  assert.deepEqual(admissions(), [], 'still no recall before the boundary')
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: 'first', cursor: 0, focused: false }, 'the next ↑ at the boundary enters the recall')
+  assert.deepEqual(admissions(), ['a\n👍xy'], 'the entry into the first row asked the application about the live draft')
+})
+
+test('every ↑/↓/Home/End target across CRLF, emoji, ZWJ and combining text is a grapheme boundary', () => {
+  const { composer } = composerWithSinks()
+  const drafts = ['one\r\ntwo', '👨‍👩‍👧\nflag', 'e\u0301g\nbas']
+  for (const draft of drafts) {
+    composer.setDraft(draft)
+    const boundaries = caretBoundaries(draft)
+    const seen: number[] = []
+    for (const step of ['home', 'end', 'up', 'down', 'up', 'left', 'right', 'down', 'end'] as const) {
+      composer.applyKey(key(step))
+      seen.push(composer.state().cursor)
+    }
+    assert.equal(composer.state().text, draft, 'a pure movement never changed the draft')
+    for (const cursor of seen) {
+      assert.ok(boundaries.includes(cursor),
+        `a movement of ${JSON.stringify(draft)} landed at ${cursor}, inside a cluster`)
+    }
+  }
+})
+
+test('a draft with a mid-line caret returns unchanged after walking the whole recall', () => {
+  const { composer } = composerWithSinks({ entries: ['x', 'y', 'z'] })
+  composer.setDraft('a👍b')
+  composer.applyKey(key('left'))
+  const original = composer.state()
+  assert.deepEqual(original, { text: 'a👍b', cursor: 3, focused: false })
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, 'x')
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, 'z', 'walking past the oldest row is a no-op, not a wrap')
+  composer.applyKey(key('down'))
+  composer.applyKey(key('down'))
+  assert.equal(composer.state().text, 'x', 'walking to the newest row stops there')
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), original,
+    'the pre-browse draft returns byte-identical with its original caret, and the focus never flipped')
+})
+
+test('a real edit during browsing ends the browse and leaves the recalled row editable', () => {
+  const { composer } = composerWithSinks({ entries: ['r1', 'r2'] })
+  composer.setDraft('scratch')
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, 'r1')
+  composer.applyKey(key('end'))
+  composer.applyKey(key('X', { text: 'X' }))
+  assert.deepEqual(composer.state(), { text: 'r1X', cursor: 3, focused: false })
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'r1X', cursor: 3, focused: false },
+    '↓ cannot resurrect the superseded scratch draft')
+
+  for (const [step, expected] of [['backspace', 'r'], ['delete', '1'], ['paste', 'Zr1']] as const) {
+    composer.applyKey(key('up'))
+    composer.applyKey(key('up'))
+    assert.equal(composer.state().text, 'r1', `the ${step} case starts from a recalled row`)
+    if (step === 'backspace') composer.applyKey(key('end'))
+    composer.applyKey(step === 'paste' ? key('paste', { text: 'Z' }) : key(step))
+    assert.equal(composer.state().text, expected, `the ${step} edited the recalled row`)
+    composer.applyKey(key('down'))
+    assert.equal(composer.state().text, expected, `a ${step} ended the browse: no stale draft returns`)
+  }
+})
+
+test('Shift+Enter during browsing keeps the recalled text editable and drops the stale bookmark', () => {
+  const { composer } = composerWithSinks({ entries: ['r1', 'r2'] })
+  composer.setDraft('scratch')
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  composer.applyKey(key('end'))
+  composer.applyKey(key('enter', { shift: true }))
+  assert.deepEqual(composer.state(), { text: 'r1\n', cursor: 3, focused: false })
+  composer.applyKey(key('down'))
+  assert.equal(composer.state().text, 'r1\n', 'the newline edit ended the browse; ↓ cannot restore the scratch draft')
+})
+
+test('cursor keys during browsing neither end the browse nor repaint on a no-op', () => {
+  const { composer, changes } = composerWithSinks({ entries: ['aaa', 'bbb'] })
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: 'aaa', cursor: 0, focused: false })
+  const painted = changes()
+  assert.deepEqual(composer.applyKey(key('left')), { kind: 'none' }, 'Left at the text start is a no-op')
+  assert.deepEqual(composer.applyKey(key('home')), { kind: 'none' }, 'Home at the line start is a no-op')
+  assert.equal(changes(), painted, 'a no-op cursor key paints nothing')
+  assert.deepEqual(composer.applyKey(key('end')), { kind: 'edited' })
+  assert.equal(changes(), painted + 1, 'the real move painted exactly one frame')
+  assert.deepEqual(composer.applyKey(key('right')), { kind: 'none' }, 'Right at the text end is a no-op')
+  assert.equal(changes(), painted + 1, 'and that no-op painted nothing')
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: 'bbb', cursor: 0, focused: false },
+    'the browse survived the cursor keys and still goes older')
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'aaa', cursor: 3, focused: false }, 'and ↓ from its last line goes newer again')
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false }, 'one more returns the draft entered from')
+})
+
+test('a programmatic draft write drops the browse bookmark and keeps the end-caret rule', () => {
+  const { composer, changes } = composerWithSinks({ entries: ['r1', 'r2'] })
+  composer.setDraft('scratch')
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, 'r1')
+
+  composer.setDraft('later')
+  assert.deepEqual(composer.state(), { text: 'later', cursor: 5, focused: false }, 'a replacement still lands the caret at the end')
+  composer.applyKey(key('down'))
+  assert.equal(composer.state().text, 'later', 'the pre-replacement scratch draft is unreachable')
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'later', cursor: 5, focused: false },
+    'the new bookmark is the programmatic draft, with the caret it held when the browse began')
+
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, 'r1', 'browsing again')
+  composer.insertIntoEditor('!')
+  assert.equal(composer.state().text, '!r1', 'insertIntoEditor writes at the caret')
+  composer.applyKey(key('down'))
+  assert.equal(composer.state().text, '!r1', 'insertIntoEditor ended the browse too')
+
+  composer.setDraft('scratch')
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, 'r1')
+  const beforeClear = changes()
+  composer.clearDraftStateOnly()
+  assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false })
+  assert.equal(changes(), beforeClear, 'clearDraftStateOnly stayed pure — no repaint')
+  composer.applyKey(key('down'))
+  assert.equal(composer.state().text, '', 'the cleared draft has no bookmark to restore')
+})
+
+test('invalidateRecallNavigation retires the browse state without touching the text or repainting', () => {
+  const { composer, changes } = composerWithSinks({ entries: ['r1', 'r2'] })
+  composer.setDraft('mine')
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, 'r1')
+  const before = changes()
+  composer.invalidateRecallNavigation()
+  assert.deepEqual(composer.state(), { text: 'r1', cursor: 0, focused: false }, 'the recalled text and caret are untouched')
+  assert.equal(changes(), before, 'the invalidation painted nothing')
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'r1', cursor: 2, focused: false },
+    'the retired bookmark cannot restore the outgoing owner\'s draft')
+})
+
+test('a refused or reentrant admission leaves the live draft with no selection', () => {
+  const refused = composerWithSinks({ entries: ['r1'], admitDraft: () => false })
+  refused.composer.setDraft('staged <img 1>')
+  refused.composer.applyKey(key('home'))
+  const before = refused.changes()
+  assert.deepEqual(refused.composer.applyKey(key('up')), { kind: 'none' })
+  assert.deepEqual(refused.composer.state(), { text: 'staged <img 1>', cursor: 0, focused: false },
+    'a refused admission keeps the draft and its caret exactly')
+  assert.equal(refused.changes(), before, 'a refused admission repaints nothing')
+  assert.deepEqual(refused.admissions(), ['staged <img 1>'], 'only the entry into the first row asked the application')
+  refused.composer.applyKey(key('down'))
+  assert.equal(refused.composer.state().text, 'staged <img 1>', 'a refused entry started no browse for ↓ to undo')
+
+  let target!: TspComposer
+  const reentrant = composerWithSinks({
+    entries: ['r1'],
+    admitDraft: () => { target.setDraft('written by the callback'); return true },
+  })
+  target = reentrant.composer
+  target.setDraft('mine')
+  target.applyKey(key('home'))
+  target.applyKey(key('up'))
+  assert.deepEqual(target.state(), { text: 'written by the callback', cursor: 23, focused: false },
+    'a draft the admission callback itself replaced is never overwritten by the stale gesture')
+})
+
+test('an empty scope and an out-of-range walk are silent no-ops', () => {
+  const { composer, changes, admissions } = composerWithSinks()
+  const before = changes()
+  assert.deepEqual(composer.applyKey(key('up')), { kind: 'none' })
+  assert.deepEqual(composer.applyKey(key('down')), { kind: 'none' })
+  assert.equal(changes(), before, 'no entries means no render')
+  assert.deepEqual(admissions(), [], 'an empty scope runs no application policy at all')
+
+  const two = composerWithSinks({ entries: ['a', 'b'] })
+  two.composer.applyKey(key('up'))
+  two.composer.applyKey(key('up'))
+  const atOldest = two.changes()
+  assert.deepEqual(two.composer.state(), { text: 'b', cursor: 0, focused: false })
+  two.composer.applyKey(key('up'))
+  assert.deepEqual(two.composer.state(), { text: 'b', cursor: 0, focused: false }, 'past the oldest row nothing changes')
+  assert.equal(two.changes(), atOldest, 'and the no-op painted nothing')
+  two.composer.applyKey(key('down'))
+  assert.deepEqual(two.composer.state(), { text: 'a', cursor: 1, focused: false }, 'back to the newest row')
+  two.composer.applyKey(key('down'))
+  assert.deepEqual(two.composer.state(), { text: '', cursor: 0, focused: false }, 'and one more restores the entered draft')
+  const afterRestore = two.changes()
+  two.composer.applyKey(key('down'))
+  assert.deepEqual(two.composer.state(), { text: '', cursor: 0, focused: false }, 'below the draft there is nothing newer')
+  assert.equal(two.changes(), afterRestore, 'and that no-op painted nothing')
+})
+
+test('a multi-line history row moves its caret by line before it changes row', () => {
+  const { composer } = composerWithSinks({ entries: ['a\nb', 'x'] })
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: 'a\nb', cursor: 0, focused: false })
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'a\nb', cursor: 2, focused: false },
+    '↓ first moved to the row\'s own second line, still on the same entry')
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().cursor, 0, '↑ moved back to its first line')
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: 'x', cursor: 0, focused: false }, 'at that boundary ↑ went to the OLDER row')
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'a\nb', cursor: 3, focused: false }, 'a newer row lands the caret at its end')
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false }, 'and leaving index 0 restores the pre-browse draft')
+})
+
+test('a modified arrow keeps its existing meaning and never routes the recall', () => {
+  const { composer, changes, admissions } = composerWithSinks({ entries: ['r1'] })
+  const before = changes()
+  for (const modifiers of [{ ctrl: true }, { alt: true }, { shift: true }, { ctrl: true, alt: true }]) {
+    assert.deepEqual(composer.applyKey(key('up', modifiers)), { kind: 'none' })
+    assert.deepEqual(composer.applyKey(key('down', modifiers)), { kind: 'none' })
+  }
+  assert.equal(changes(), before, 'no modified arrow painted anything')
+  assert.deepEqual(admissions(), [], 'no modified arrow consulted the application')
+  assert.deepEqual(composer.state(), { text: '', cursor: 0, focused: false })
+})
+
+test('a recall gesture is never a submission: only the Enter family classifies as submit', () => {
+  const { composer } = composerWithSinks({ entries: ['r1', 'r2'] })
+  for (const step of ['up', 'down', 'up', 'up', 'down', 'down'] as const) {
+    assert.notEqual(composer.applyKey(key(step)).kind, 'submit', `${step} never submits`)
+  }
+  composer.setDraft('submit me')
+  assert.deepEqual(composer.applyKey(key('enter')), { kind: 'submit', gesture: 'enter' },
+    'the ordinary Enter gesture classification is unchanged by the recall')
+})
+
 // ── Layer 2: the REAL SDK loop over the scripted pane ───────────────────────
 
 class FakeInput extends EventEmitter implements TermInput {
