@@ -44,13 +44,14 @@ import { PiTuiWebAccessHostService } from './features/web-access.ts'
 export const name = 'pi-tui-host-runtime'
 
 /**
- * Explicit Host dependencies: the private Typert registry, the two live Host
- * facts the business rows resolve per call, and the Host's OWN Loader — the
- * official Web frontend toggle drives that Loader's rows, so the row may not
- * complete without it. `tuiStartup` remains a Loader row gate (see the
- * Host-only overlay), not a plugin inject.
+ * Explicit Host dependencies: the private Typert registry plus the two live
+ * Host facts the business rows resolve per call. `tuiStartup` remains a Loader
+ * row gate (see the Host-only overlay), not a plugin inject. The Web access row
+ * resolves the Host's OWN Loader through the service on every call, so this
+ * published row contract does not change: this row IS a Loader row, and a Host
+ * without a Loader fails closed (`unavailable`) instead of pending forever.
  */
-export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory', 'loader']
+export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory']
 
 /** Data-free readiness gate published after the whole built-in runtime is live. */
 export const PI_TUI_HOST_READY_SERVICE = 'piTuiHostReady'
