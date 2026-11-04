@@ -214,13 +214,14 @@ duplicates it (see [`../tsp/overview.md`](../tsp/overview.md)).
 Direct is the current production/default provider. Remote is the internal,
 Linux-only split-process backend with no public selector: a real Host process
 plus zero or more real Client processes, each composing its own Context (the
-Host outlives its Clients). Both implement the same transport-neutral semantic
-contracts defined by `src/runtime/**`; the contract is never derived from the
-Direct implementation shape. Each Remote Client composes through ONE sanctioned
-lazy edge (`app/remote-process/local-client-entry.ts -> app/bootstrap.ts`) over
-the shared `src/app/remote/application-stage.ts`; there is no runtime backend
-loader, and the former in-process composition exists only as a test-only carrier
-under `test/support/m3-inprocess/**`.
+Host lifetime is independent of Client attachment). Both implement the same
+transport-neutral semantic contracts defined by `src/runtime/**`; the contract
+is never derived from the Direct implementation shape. Each Remote Client
+composes through ONE sanctioned lazy edge
+(`app/remote-process/local-client-entry.ts -> app/bootstrap.ts`) over the shared
+`src/app/remote/application-stage.ts`; there is no runtime backend loader, and
+the former in-process composition exists only as a test-only carrier under
+`test/support/m3-inprocess/**`.
 
 Locality, semantic-port ownership, currentness/generation fences and the
 Direct/Remote test contract are owned by [host-client.md](./host-client.md).
