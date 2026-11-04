@@ -721,8 +721,13 @@ export const QUIET_COMPOSER_STYLES = `
   }
   /* The candidate list floats UP from the Composer shell and MAY cover the
      transcript above it. It is out of flow, so the Composer, the control line
-     and the Footer never move; the budget stays inside the pane at every
-     supported size, and a short pane scrolls instead of covering the editor. */
+     and the Footer never move. The height budget is the REAL measured one: the
+     pane is at its shortest in the 900x360 matrix cell, where a 220px/40vh cap
+     clipped the sixth painted row and the hint row OUTSIDE the box (proved on
+     the pinned client: the row's visible span was zero). The window is four rows
+     (see SLASH_COMPLETION_MAX_ROWS for why four and not six), which needs ~134px,
+     so this cap keeps the WHOLE painted window visible at every supported cell and
+     appearance, and the scroller stays only the safety net it was meant to be. */
   [data-role='dsh.composer.slash-menu'] {
     position: absolute;
     left: 12px;
@@ -732,18 +737,27 @@ export const QUIET_COMPOSER_STYLES = `
     display: flex;
     flex-direction: column;
     gap: 1px;
-    max-height: min(220px, 40vh);
+    max-width: 100%;
+    max-height: min(146px, 40vh);
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 4px;
     border: 1px solid var(--l2);
     border-radius: 8px;
     background: var(--pop-bg);
     box-shadow: none;
   }
+  /* A row must never grow past the box it was anchored into: measured on the
+     client at 400x600 the buttons took their intrinsic width (719px inside a
+     342px menu) and painted command text outside the popup. A zero min-width plus
+     the hidden overflow keep the row inside its frame at every width. */
   [data-role='dsh.composer.slash-item'] {
     display: flex;
     align-items: center;
     gap: 8px;
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
     padding: 4px 8px;
     border: 0;
     border-radius: 6px;
@@ -766,10 +780,16 @@ export const QUIET_COMPOSER_STYLES = `
   /* The command name is the thing that must survive a narrow anchor; the
      description is secondary and truncates first, so a row never loses its
      leading slash-name (the same rule the quick menu's label/value pair
-     follows). */
+     follows). Both stay inside the box: when even the name cannot fit it
+     ellipsizes — the row's title/aria still carry the complete text, and a
+     truncated row is never a different command because the composer receives
+     the Provider's own full value, not the painted label. */
   [data-role='dsh.composer.slash-name'] {
-    flex-shrink: 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
+    flex-shrink: 1;
     color: var(--t1);
   }
   [data-role='dsh.composer.slash-description'] {
@@ -778,7 +798,7 @@ export const QUIET_COMPOSER_STYLES = `
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    flex-shrink: 1;
+    flex-shrink: 8;
   }
   [data-role='dsh.composer.slash-menu'] .sf-text {
     padding: 2px 8px;
