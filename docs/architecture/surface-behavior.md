@@ -1237,6 +1237,7 @@ Attachment completion and intake are Client-local:
 Authority: `src/commands.ts` (`PATH_ARGUMENT_COMMANDS`),
 `src/tui/file-completion/path-argument.ts`,
 `src/tui/interaction/autocomplete/provider.ts`,
+`src/tui/interaction/autocomplete/installed-provider.ts`,
 `src/domain/transcript/content-blocks.ts`,
 `src/tui/components/media/image-thumbnail.ts`,
 `src/tui/components/media/draft-image-preview.ts`,
@@ -1248,6 +1249,63 @@ Authority: `src/commands.ts` (`PATH_ARGUMENT_COMMANDS`),
 `src/tui/commands/artifacts.ts`,
 `src/app/command/tsp-capability.ts`,
 `src/app/submission/submit-flow.ts`.
+
+### Slash command-name completion
+
+The command-name candidate list has ONE source and ONE composition. The single
+catalog commit point in `src/commands.ts` publishes the effective display catalog
+(Host rows, Client registrations and merged extension contributions) together with
+the collision and Host-claims bookkeeping, and that same install reaches the
+mounted renderer by renderer kind: PiTui through the editor's installed
+autocomplete provider, a renderer without a PiTui editor through the mount's
+command-completion install port, which only forwards. Both compose their provider
+from `createInstalledAutocompleteProvider`, so there is never a second catalog,
+resolver, claims map or ranking implementation.
+
+- A candidate row is a display fact only. Screening happens once, at that commit
+  point, by real source provenance: a genuine Host-origin winner keeps its row and
+  is never screened by renderer capability; a live dynamic Skill wrapper keeps its
+  row; a row proven to be this surface's own TUI registration is offered only
+  while the mounted renderer can run that command family, read from the mounted
+  presenters at each commit (never a version or a name guess), and it never falls
+  through to a same-name extension contribution; every other admitted row stays
+  visible. A failed synthesis (a name collision) withdraws ALL displayed
+  candidates while the Host input claims stay live.
+- A bare `/name` candidate carries no argument, so a builtin whose bare form needs
+  UI the renderer lacks is not offered. Offering a row is never an execution claim:
+  submitting the original text still runs the unchanged gate and refusal.
+- The completion seat is admitted only for the FIRST logical line's leading
+  command token, with no space before the caret, and never for an argument
+  position, an `@` mention, an inline skill reference, a shell line or ordinary
+  prose. File and argument candidates therefore open no file discovery from this
+  seat.
+- Accepting a candidate is a Composer edit, not a submission: the shared provider
+  computes the replacement and the renderer's composer applies it as one
+  conditional atomic write that keeps the indentation and the text after the caret
+  and parks the caret where the provider landed it — never at the end of the
+  draft, which is what a whole-document draft write does. Only a later, separate
+  submit gesture reaches the submission controller. The write is refused as a
+  whole when the live document or caret no longer matches the document the
+  replacement was computed against, when the caret is not a grapheme boundary, or
+  when the change is not confined to one logical line; a refused completion
+  changes no text, caret, paste lease or frame.
+- Any currentness loss ends the browse without touching the draft: a new catalog
+  commit, a formal completion-scope change, a cleared draft, a Session
+  publication, a hydration window, a disposed renderer, or a higher input seat
+  taking the keys. A late answer and a click on an older frame's row are dropped on
+  the same fence.
+- While the list is open it owns ↑/↓, Tab/Shift+Tab, plain Enter and Escape:
+  Escape closes only the list, and a modified or otherwise unconsumed key retires
+  the list first and then reaches its existing owner exactly once — so a visible
+  list can never turn Cancel into a no-op, and a no-op key can never leave a
+  dismissed list painted. With the list closed the Composer's own arrows keep their
+  existing meaning, including the input-history recall browse.
+
+Authority: `src/commands.ts`,
+`src/tui/interaction/autocomplete/installed-provider.ts`,
+`src/tui/tsp/slash-completion.ts`, `src/tui/tsp/editor.ts`,
+`src/app/command/tsp-capability.ts`, `src/app/surface/runtime.ts`.
+
 
 ## Session `@` completion routing
 
