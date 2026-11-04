@@ -303,10 +303,21 @@ export async function raceWithAbortableDeadline (promise, timeoutMs, onExpiry) {
   }
 }
 
-/** Bounded wait for one qualification condition. */
-async function waitForCondition (predicate, label, timeoutMs) {
+/**
+ * Bounded wait for one qualification condition. A caller-owned `signal` stops
+ * the polling loop for real: a race that only *returns* early would leave the
+ * loop's own timer holding the process until the full budget.
+ */
+export async function waitForCondition (predicate, label, timeoutMs, signal) {
   const started = Date.now()
   while (Date.now() - started < timeoutMs) {
+    if (signal?.aborted === true) {
+      throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+        code: 'QUALIFICATION_CONDITION_ABORTED',
+        waitLabel: label,
+        elapsedMs: Date.now() - started,
+      })
+    }
     if (await predicate()) return true
     await sleep(100)
   }
@@ -6445,31 +6456,39 @@ async function main() {
             return bounded
           }
           /**
-           * Race one observation against the driver's own exit: a driver that has
-           * already left can never produce the fact it owns, so the wait fails at
-           * once with the exit facts instead of consuming its whole budget.
-           * The answer wait is deliberately NOT raced: the driver may legitimately
-           * exit after painting it while the TUI paints the same Turn a moment
-           * later.
+           * Race one caller-started observation against the driver's own exit: a
+           * driver that has already left can never produce the fact it owns, so
+           * the wait fails at once with the exit facts. The wait itself is
+           * cancelled through its signal, so an early failure cannot leave a
+           * polling timer behind.
+           *
+           * Only facts the DRIVER owns belong here. A TUI paint is not one of
+           * them: the driver may exit normally while the renderer paints the
+           * same Host message a moment later.
            */
-          const whileBrowserRuns = async (work, label) => {
-            const outcome = await Promise.race([
-              Promise.resolve(work).then(value => ({ value }), error => ({ error })),
-              browserExit.then(exit => ({ exit })),
-            ])
-            if (outcome.exit !== undefined) {
-              throw new SplitSmokeAssertionError(
-                `PA-05 the real-Browser driver exited (${String(outcome.exit.code)}/${String(outcome.exit.signal)}) before ${label}`,
-              )
+          const whileBrowserRuns = async (startWait, label) => {
+            const stopWait = new AbortController()
+            try {
+              const outcome = await Promise.race([
+                Promise.resolve(startWait(stopWait.signal)).then(value => ({ value }), error => ({ error })),
+                browserExit.then(exit => ({ exit })),
+              ])
+              if (outcome.exit !== undefined) {
+                throw new SplitSmokeAssertionError(
+                  `PA-05 the real-Browser driver exited (${String(outcome.exit.code)}/${String(outcome.exit.signal)}) before ${label}`,
+                )
+              }
+              if (outcome.error !== undefined) throw outcome.error
+              return outcome.value
+            } finally {
+              stopWait.abort()
             }
-            if (outcome.error !== undefined) throw outcome.error
-            return outcome.value
           }
           try {
             await whileBrowserRuns(
-              waitForCondition(
+              signal => waitForCondition(
                 () => existsSync(join(coordination, 'browser-session.json')),
-                'PR-A Browser Session creation', 240_000,
+                'PR-A Browser Session creation', 240_000, signal,
               ),
               'the Browser Session file appeared',
             )
@@ -6493,10 +6512,10 @@ async function main() {
               'PA-05 TUI attached to the Browser Session')
             // Release the Browser prompt only now: both Clients observe ONE Turn.
             writeFileSync(join(coordination, 'browser-go'), `${Date.now()}\n`, { mode: 0o600 })
-            await whileBrowserRuns(
-              tui.waitForScreen(marker, 'PA-05 TUI paints the Browser prompt', 180_000),
-              'the TUI painted the Browser prompt',
-            )
+            // The TUI paint is NOT gated on Browser liveness: the Host committed
+            // the prompt (asserted from the durable log below), and the renderer
+            // may paint it after an otherwise successful Browser exit.
+            await tui.waitForScreen(marker, 'PA-05 TUI paints the Browser prompt', 180_000)
             await tui.waitForScreen('stub answer', 'PA-05 TUI paints the Host answer', 180_000)
             await waitBrowserTurn(browserSession, marker, 'PA-05')
             const headerAfter = await waitForHostSessionHeader(dshHome, browserSession, 'PA-08 Browser Session header after TUI attach')

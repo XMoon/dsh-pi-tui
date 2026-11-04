@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { EntryProcess, PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText, statusMatches } from '../../scripts/split-process-smoke.mjs'
+import { EntryProcess, PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText, statusMatches, waitForCondition } from '../../scripts/split-process-smoke.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -622,14 +622,20 @@ test('the official Web composition qualification is discoverable and never fakes
   assert.match(source, /EXIT_TIMEOUT/u)
   assert.doesNotMatch(source, /await browserExit\.catch/u)
   // A driver that already exited fails the observation it owns immediately
-  // instead of consuming the whole wait budget.
+  // instead of consuming the whole wait budget, and the wait it started is
+  // CANCELLED so no polling timer survives the early failure.
   assert.match(source, /const whileBrowserRuns = async/u)
+  assert.match(source, /const stopWait = new AbortController\(\)/u)
+  assert.match(source, /stopWait\.abort\(\)/u)
   assert.match(source, /the real-Browser driver exited \(\$\{String\(outcome\.exit\.code\)\}/u)
-  assert.match(source, /whileBrowserRuns\(\s*\n\s*waitForCondition\(/u)
-  assert.match(source, /whileBrowserRuns\(\s*\n\s*tui\.waitForScreen\(marker/u)
-  // The answer wait stays un-raced on purpose: the driver may exit after its own
-  // paint while the TUI paints the same Turn a moment later.
-  assert.doesNotMatch(source, /whileBrowserRuns\(\s*\n\s*tui\.waitForScreen\('stub answer'/u)
+  assert.match(source, /signal => waitForCondition\(/u)
+  assert.match(source, /QUALIFICATION_CONDITION_ABORTED/u)
+  // The TUI paints are judged by the TUI, never by Browser liveness: the driver
+  // may exit normally while the renderer paints the same Host message later.
+  assert.doesNotMatch(source, /whileBrowserRuns\(\s*\n\s*tui\.waitForScreen\(/u,
+    'no TUI screen wait may be raced against the Browser process lifetime')
+  assert.match(source, /await tui\.waitForScreen\(marker, 'PA-05 TUI paints the Browser prompt'/u)
+  assert.match(source, /await tui\.waitForScreen\('stub answer'/u)
   // The real-Browser driver redacts its own retained failure text.
   const driver = readFileSync(join(ROOT, 'scripts', 'fixtures', 'pr-a-web-browser.mjs'), 'utf8')
   assert.match(driver, /function redacted\(text\)/u)
@@ -712,4 +718,45 @@ test('a completed abortable deadline releases its timer instead of holding the p
   const elapsed = Number(/elapsed=(\d+)/u.exec(result.stderr ?? '')?.[1] ?? Number.NaN)
   assert.ok(Number.isFinite(elapsed) && elapsed < 3_000,
     `the completed deadline took ${String(elapsed)}ms to release; a bare sleep would hold it for 120s`)
+})
+
+test('an aborted condition wait stops polling instead of holding the process', () => {
+  const probe = `
+    import { waitForCondition } from ${JSON.stringify(pathToFileURL(SCRIPT).href)}
+    const controller = new AbortController()
+    const started = Date.now()
+    setTimeout(() => controller.abort(), 120)
+    try {
+      await waitForCondition(() => false, 'probe condition', 240_000, controller.signal)
+      process.exit(3)
+    } catch (error) {
+      if (error?.code !== 'QUALIFICATION_CONDITION_ABORTED') process.exit(4)
+      console.error('elapsed=' + String(Date.now() - started))
+    }
+  `
+  // A surviving poller would keep this child alive for the full 240s bound.
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    encoding: 'utf8',
+    timeout: 10_000,
+  })
+  assert.equal(result.error, undefined, `the probe was still running when its bound expired: ${String(result.error)}`)
+  assert.equal(result.status, 0, `the probe exited ${String(result.status)}: ${result.stderr}`)
+  const elapsed = Number(/elapsed=(\d+)/u.exec(result.stderr ?? '')?.[1] ?? Number.NaN)
+  assert.ok(Number.isFinite(elapsed) && elapsed < 3_000,
+    `the aborted wait took ${String(elapsed)}ms to stop; the poller must end with the signal`)
+})
+
+test('a Browser exit cannot turn a later TUI paint into a failure', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  // The prompt paint is a TUI fact; the Host commitment is proved separately by
+  // the durable-log assertion, so the wait must not be raced with the driver.
+  const promptWait = source.slice(
+    source.indexOf("// The TUI paint is NOT gated on Browser liveness"),
+    source.indexOf('PA-05 TUI paints the Browser prompt'),
+  )
+  assert.ok(promptWait.length > 0, 'the decoupling comment must stay next to the prompt wait')
+  assert.equal(/whileBrowserRuns/u.test(promptWait), false,
+    'the TUI prompt paint must not be coupled to the Browser process lifetime')
+  assert.match(source, /await waitBrowserTurn\(browserSession, marker, 'PA-05'\)/u,
+    'the Host commitment of the Browser prompt must stay asserted independently')
 })
