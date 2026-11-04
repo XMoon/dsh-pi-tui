@@ -503,7 +503,7 @@ test('exit: sessionTransitionPending() is used ONLY by the attachment-intake UX 
   // TS1 moved the attachment-intake fence into the artifacts command owner.
   const artifacts = readFileSync(new URL('../../src/tui/commands/artifacts.ts', import.meta.url), 'utf8')
   // The /skill semantic write enters through withWriter: no gate.busy re-check.
-  const skill = span(commands, 'const loadSkill = async (', '\n  const skillDisposers = new Map<string, () => void>()')
+  const skill = span(commands, 'const loadSkill = async (', '\n  const replaceSkillCommands = ')
   assert.equal(skill.includes('sessionTransitionPending()'), false,
     'the /skill writer section must not pre-check the transition gate')
   // The only remaining uses are the attachment-intake UX fence (a draft-stage

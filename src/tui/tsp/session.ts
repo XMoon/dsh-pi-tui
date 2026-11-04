@@ -2374,9 +2374,13 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // editor — keyboard-operable, with NO click affordance claimed (an `el`
       // button paints as bare text here, so promising a click would be false).
       // Three rows maximum: the draft and the Send/Footer stay operable.
-      const bare = slash.renderState()
+      // The seat windows the rows IT can show; this surface can show three, and
+      // the window it asks for is the one that follows the highlighted row — a
+      // bare pane must never paint a window that leaves the user's own selection
+      // off-screen (a row the user cannot see must never be the accepted one).
+      const bare = slash.renderState(3)
       if (bare !== undefined) {
-        for (const row of bare.rows.slice(0, 3)) {
+        for (const row of bare.rows) {
           lines.push(ui.text({
             key: `slash-bare-${bare.revision}-${row.id.replace(/[^A-Za-z0-9._-]+/g, '_')}`,
             wrap: 'none',

@@ -52,6 +52,7 @@ const ESCAPE = '\u001b'
 const UP = `${ESCAPE}[A`
 const DOWN = `${ESCAPE}[B`
 const ALT_UP = `${ESCAPE}[1;3A`
+const LEFT = `${ESCAPE}[D`
 const TAB = '\t'
 const SHIFT_TAB = `${ESCAPE}[27;2Z`
 const ENTER = '\r'
@@ -101,7 +102,7 @@ interface SlashPane {
   key(bytes: string): Promise<void>
   /** Send a key that must change NOTHING, then wait the absence window. */
   quietKey(bytes: string): Promise<void>
-  click(node: WireNode): Promise<void>
+  click(node: WireNode, writes?: boolean): Promise<void>
   commitStatus(snapshot: StatusSnapshot): Promise<void>
   dispose(): Promise<void>
 }
@@ -251,9 +252,16 @@ async function mountSlashPane(
       pane.key(bytes)
       await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
     },
-    async click(node) {
+    async click(node, writes = false) {
+      const mark = pane.frameCount()
       pane.event({ ev: 'action', sf: pane.frames().at(-1)?.sf, id: node.id, act: 'click' })
-      await new Promise(resolve => setTimeout(resolve, 60))
+      if (writes) {
+        await waitUntil('the click painted its frame', () => pane.frameCount() > mark)
+        return
+      }
+      // reason: bounded absence window — a refused click writes no frame, so the
+      // only observation available is that the wire stopped moving.
+      await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
     },
     commitStatus: async (snapshot) => {
       status = snapshot
@@ -459,7 +467,7 @@ test('a click on the current row completes it once and submits nothing', async (
   const m = await mountSlashPane(t, { chrome: true })
   await m.key('/mo')
   await waitUntil('the list painted', () => m.rows().length > 0)
-  await m.click(m.rows()[1]!)
+  await m.click(m.rows()[1]!, true)
   assert.deepEqual(m.editor(), { text: '/more ', cursor: 6 },
     'the clicked row is the one written, with the provider command-name separator')
   assert.equal(m.rows().length, 0)
@@ -552,7 +560,9 @@ test('a disposed mount cannot be painted or written by a late catalog or a late 
     extensionSuggest: () => new Promise((resolve) => { release.push(resolve as never) }),
   })
   await m.key('/zz')
-  await new Promise(resolve => setTimeout(resolve, 60))
+  // reason: bounded absence window — no settlement has been released yet, so the
+  // fact to observe is that nothing painted.
+  await new Promise(resolve => setTimeout(resolve, ABSENCE_WINDOW_MS))
   const draft = m.editor()
   await m.dispose()
   release[0]?.(undefined as never)
@@ -589,6 +599,43 @@ test('a pane without el and styles shows at most three plain text candidates abo
   await m.key(ENTER)
   assert.deepEqual(m.editor(), { text: '/cmd0 ', cursor: 6 }, 'Enter completes on the bare pane too')
   assert.deepEqual(m.calls.submits, [], 'and still never submits')
+})
+
+test('typing inside a command token keeps the caret column as the query, and the text after it survives', async (t) => {
+  const m = await mountSlashPane(t, { chrome: true })
+  // `/mo x`, two real Left steps, then `e`: the document the query must describe
+  // is `/moe x` with the caret INSIDE the token (column 4), not at its end. A
+  // query built on the line end would read the space after the caret, refuse the
+  // seat and never open — the shape a user hits when fixing a typo mid-token.
+  await m.type('/mo x')
+  await m.key(LEFT)
+  await m.key(LEFT)
+  await m.key('e')
+  assert.deepEqual(m.editor(), { text: '/moe x', cursor: 4 }, 'the typed char landed inside the token')
+  await waitUntil('the mid-token query painted', () => m.rows().length > 0)
+  const names = m.rows().map(node => node.id.slice(node.id.lastIndexOf('_') + 1))
+  assert.deepEqual(names.sort(), ['model', 'more'], 'the candidates are the ones for the token under the caret')
+  assert.deepEqual(m.editor(), { text: '/moe x', cursor: 4 }, 'painting the query moved neither text nor caret')
+  assert.deepEqual(m.calls.submits, [], 'a mid-token query submitted nothing')
+})
+
+test('a bare pane walks its three-line window so the selected candidate is never off-window', async (t) => {
+  const wide = Array.from({ length: 8 }, (_unused, index) => ({ name: `cmd${index}`, description: `d${index}` }))
+  const m = await mountSlashPane(t, { chrome: false, commands: wide })
+  await m.key('/cmd')
+  await waitUntil('the bare window painted', () => m.bareRows().length === 3)
+  // Four DOWN steps select the fifth candidate — past the painted three. The
+  // window is the SURFACE's budget, so a bare pane must walk it the same way the
+  // styled shell does: a candidate the user selected must be on screen.
+  for (let step = 0; step < 4; step += 1) await m.key(DOWN)
+  const painted = m.bareRows().map(node => m.rowText(node))
+  assert.equal(painted.length, 3, 'still at most three plain text lines')
+  const marked = painted.filter(text => text.startsWith('›'))
+  assert.equal(marked.length, 1, 'exactly one painted line carries the highlight')
+  assert.match(marked[0]!, /\/cmd4/, 'the selected candidate is inside the painted window')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '/cmd4 ', cursor: 6 }, 'Enter completes the VISIBLE selection')
+  assert.deepEqual(m.calls.submits, [], 'and completing it submitted nothing')
 })
 
 test('the window keeps the highlighted row visible when the list is longer than the popup', async (t) => {

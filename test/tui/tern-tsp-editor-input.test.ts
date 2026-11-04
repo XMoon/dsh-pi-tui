@@ -1874,7 +1874,11 @@ test('every rejection path leaves the text, the caret, the live paste lease and 
   const insideCluster = `${pasted} /new ${family}`
   const refusals: Array<{ label: string; next: { text: string; cursor: number } }> = [
     { label: 'a caret inside a grapheme cluster', next: { text: insideCluster, cursor: insideCluster.length - 7 } },
-    { label: 'a caret beyond the changed span', next: { text: `${pasted} /new b`, cursor: draft.length + 2 } },
+    // A caret is refused when it leaves the LINE the completion wrote (the
+    // contract since the `/im x` defect: a caret is NOT confined to the minimal
+    // diff span, because the command-name rule appends a separator that the
+    // minimal span can exclude). Here it lands on a later line.
+    { label: 'a caret on another line', next: { text: `${pasted} /new b\nsecond`, cursor: `${pasted} /new b\n`.length + 2 } },
     { label: 'a change that appends a line break', next: { text: `${draft}\n`, cursor: draft.length + 1 } },
     { label: 'a stale document', next: { text: `${pasted} /new`, cursor: 15 } },
   ]
