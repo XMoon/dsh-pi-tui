@@ -275,7 +275,7 @@ import { SaveLocationPrompt, SaveLocationFrame, type SaveLocationDeps, type Save
 // than importing the concrete `src/tui/interaction/**` modules (TS5 §15).
 export type { QuestionFlowDraft } from './tui/interaction/question.ts'
 export type { SaveLocationResult } from './tui/interaction/save-location.ts'
-import { MentionProvider } from './tui/interaction/autocomplete/provider.ts'
+import { createInstalledAutocompleteProvider } from './tui/interaction/autocomplete/installed-provider.ts'
 import { assistantPresentationRevision, PTC_MAX_DEPTH, recentTurnThreshold, textWithAttachmentMarkers, transcriptSearchSourceKey, type AssistantDisplayBlock, subCallDisplayStatus, type PresentedFilePresentation, type TranscriptMessage, type TranscriptSearchMatch, type TurnActivity, type WorkflowMemberView, type WorkflowRunStatus, workflowPhaseKey } from './transcript.ts'
 import { classifyTranscriptMessage, isSurfacedInteractionTool, isSurfacedContext } from './domain/transcript/semantics.ts'
 import {
@@ -363,7 +363,7 @@ import { EditorSeatHolder } from './tui/interaction/editor-seat-holder.ts'
 import { TuiEditor, type TuiEditorPasteCommit, type TuiEditorRenderLayout } from './tui/interaction/tui-editor.ts'
 import { PasteRangeTracker, proveCaretEdit } from './tui/interaction/pasted-path-range.ts'
 import { PASTE_PENDING_NOTICE, type PastedImageIntakePort, type PastedPathReceipt } from './app/surface/pasted-image-intake.ts'
-import { serializeEditorInput, serializedDraftHasPayload, shellPrefixForMode, type EditorInputMode } from './tui/interaction/editor-input-mode.ts'
+import { serializeEditorInput, serializedDraftHasPayload, type EditorInputMode } from './tui/interaction/editor-input-mode.ts'
 import type { EditorRegistry } from './extension/internal/editor-registry.ts'
 import { compileView } from './extension/internal/component-compiler.ts'
 import { AdvancedOverlayComponent } from './extension/internal/advanced-overlay.ts'
@@ -22796,120 +22796,26 @@ export class TuiApp {
     skillReferences: readonly import('./domain/catalog/skill.ts').HumanSkillSummary[] = [],
     hostShellCompletion: boolean = true,
   ): void {
-    const base = new MentionProvider(
-      [...commands],
+    // TSP I-C: the composition moved VERBATIM into the shared installed-provider
+    // factory so the TSP renderer composes the same completion authority from the
+    // same catalog install. This surface keeps only what is PiTui's own: the
+    // installed-row record and the LIVE host-editor input mode plus the inline
+    // attachment acceptance sink the base provider hands its acceptances to.
+    const { provider } = createInstalledAutocompleteProvider({
+      commands,
       cwd,
       fileReferences,
-      () => this.editor.getInputMode(),
+      extensionSuggest,
       scope,
-      undefined,
       localCwd,
       skillReferences,
       hostShellCompletion,
-    )
+      inputMode: () => this.editor.getInputMode(),
+      localFdPath: undefined,
+      inlineAttachmentAccept: acceptance => this.acceptInlineAttachment(acceptance),
+    })
     this.installedCommandCompletions = [...commands]
-    // The inline attachment acceptance rides THIS provider (the
-    // base one owns the strict snapshot; the delegating wrap only forwards
-    // applyCompletion, so either installation must install the same sink).
-    base.setInlineAttachmentAcceptSink(acceptance => this.acceptInlineAttachment(acceptance))
-    if (extensionSuggest === undefined) {
-      this.editor.setAutocompleteProvider(base)
-      return
-    }
-    // A delegating provider: the host's own completions run FIRST; the
-    // plugin chain (M5 AutocompleteRegistry) is consulted only when the
-    // host provider has nothing. applyCompletion always delegates to the
-    // host provider (the fork's completion semantics own the editor).
-    // HOST EXECUTION MODE (review round 23): the provider is attached to
-    // the HOST editor, and every forwarded key into it (the declined-key
-    // fallback) re-DECODES the visible plugin wire document into the host
-    // editor's mode first — so the host editor's mode is the
-    // authoritative completion mode. Reading the VISIBLE seat mode here
-    // would see a mode-less plugin and drop the shell semantics of a
-    // declined `!gi` Tab (no shell completion, no `!` wire prefix in the
-    // extension query). `seatInputMode()` stays for the genuine
-    // visible-seat consumers (the ↓ task-browser gate, the Ctrl+C clear,
-    // the footer badge).
-    const getMode = (): EditorInputMode => this.editor.getInputMode()
-    const delegated: import('@xmoon76/pi-tui').AutocompleteProvider = {
-      async getSuggestions(lines, cursorLine, cursorCol, options) {
-        // THIS delegated request's generation AND scope: minted/captured
-        // synchronously at entry (before ANY await), so both the host
-        // result and the extension's answer bind to THIS request — never to
-        // a newer one that started while the extension was in flight, and
-        // never to a session/workspace that switched mid-request.
-        const requestGeneration = base.mintRequestGeneration()
-        const requestScope = base.scopeAtRequestTime()
-        const requestMode = getMode()
-        const requestLocalCwd = base.localCwdAtRequestTime()
-        const host = await base.getSuggestionsForGeneration(requestGeneration, lines, cursorLine, cursorCol, options, requestMode, requestLocalCwd)
-        if (host !== null) return host
-        // Preserve the shell-mode natural-trigger suppression: a leading
-        // `/` on ANY line of a shell-mode document is a PATH, and the
-        // host provider deliberately stays quiet until Tab — the plugin
-        // chain must not flash its suggestions over it (that would
-        // reopen the dropdown mid-typing and double-apply on the next
-        // Tab). The wire query below still carries the prefix on line 0
-        // only.
-        const mode = requestMode
-        if (mode !== 'prompt' && options.force !== true
-          && (lines[cursorLine] ?? '').startsWith('/')) {
-          return null
-        }
-        // M5 Stable-compatibility adapter: the plugin chain's query is
-        // the WIRE document — the same lines the host exposed BEFORE the
-        // shell-editor-mode feature. A shell-mode body is re-prefixed
-        // (`git che` → `!git che`, cursor shifted), so a third-party
-        // plugin keeps parsing shell lines exactly as before and can
-        // still tell a shell line from plain prose; the query shape is
-        // unchanged (no new fields, no semantic drift).
-        const prefix = shellPrefixForMode(mode)
-        // The wire document carries the shell prefix on LINE 0 only: a
-        // body continuation line is ordinary text in the wire form too,
-        // and only the first-line cursor shifts by the prefix.
-        const wireLines = mode === 'prompt'
-          ? lines
-          : lines.map((line, index) => index === 0 ? prefix + line : line)
-        const result = await extensionSuggest({
-          lines: wireLines,
-          cursorLine,
-          cursorCol: cursorCol + (mode === 'prompt' || cursorLine > 0 ? 0 : prefix.length),
-          signal: options.signal,
-          force: options.force,
-        })
-        // The EXTENSION's suggestions bind the host's stale fence too:
-        // the base provider owns the apply-time document/cursor snapshot,
-        // and a list the extension produced must be computed against the
-        // SAME editor state + scope (plan §9.2 — a stale ext accept must
-        // never modify a later edit, and an old session's candidate must
-        // never be accepted under a switched session).
-        return base.captureRequestSnapshot(requestGeneration, requestScope, lines, cursorLine, cursorCol, result, requestMode, requestLocalCwd)
-      },
-      applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
-        // A Stable plugin computes its prefix on the WIRE document it
-        // received (line 0 carries the synthetic `!` / `!!`), so its
-        // prefix may include it (`!ch` for the wire line `!ch`).
-        // Normalize back to BARE coordinates before the host apply — the
-        // base adapter adds its own virtual prefix and strips it exactly
-        // once; a doubled prefix would corrupt the result. The strip
-        // applies ONLY when the prefix starts at the WIRE line start
-        // (cursorCol + synthetic length − prefix length === 0): a
-        // mid-body `!` token (e.g. `echo !ch`) is a literal document
-        // character and must never be stripped.
-        const mode = getMode()
-        const synthetic = mode === 'prompt' ? 0 : shellPrefixForMode(mode).length
-        const stripWirePrefix = mode !== 'prompt' && cursorLine === 0 && synthetic > 0
-          && (prefix.startsWith('!!') || prefix.startsWith('!'))
-          && cursorCol + synthetic - prefix.length === 0
-        const barePrefix = stripWirePrefix
-          ? prefix.slice(prefix.startsWith('!!') ? 2 : 1)
-          : prefix
-        return base.applyCompletion(lines, cursorLine, cursorCol, item, barePrefix)
-      },
-      shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) =>
-        base.shouldTriggerFileCompletion(lines, cursorLine, cursorCol),
-    }
-    this.editor.setAutocompleteProvider(delegated)
+    this.editor.setAutocompleteProvider(provider)
   }
 
   /**

@@ -169,6 +169,26 @@ export function tspBuiltinAvailability(
     // must branch on this kind — it is the family decision, made once here.
     return { kind: 'not-a-tui-builtin' }
   }
+  return tspSelectedTuiBuiltinAvailability(name, pickers, rawInput)
+}
+
+/**
+ * TSP I-C: the family-decided half of {@link tspBuiltinAvailability}, exposed
+ * for a caller that already established the `client-command` + `source: 'tui'`
+ * winner somewhere else. Slash candidates are screened by the command
+ * authority BEFORE they reach the renderer, and a candidate row is a bare
+ * command NAME with no parsed line behind it — so that caller passes the empty
+ * `rawInput`, which is exactly why bare `/logout` is never offered.
+ *
+ * Same rule, same answers, one implementation: it never decides whether a name
+ * IS a TUI builtin, never consults a Host claim, the command catalog or a
+ * registry, and never admits an execution result.
+ */
+export function tspSelectedTuiBuiltinAvailability(
+  name: string,
+  pickers: TspBuiltinPickers,
+  rawInput: string,
+): TspBuiltinAvailability {
   if (TSP_SUPPORTED_TUI_BUILTINS.has(name)) return { kind: 'available' }
   if (name === 'logout') {
     // The ONE input-shaped member: `/logout <target>` runs the unchanged

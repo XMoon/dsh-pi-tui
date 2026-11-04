@@ -215,6 +215,59 @@ export type {
 const REPAINT_FLUSH_MS = 50
 
 /**
+ * TSP I-C: ONE slash candidate row, published by the command layer. It is
+ * declared STRUCTURAL on purpose — the same three display facts
+ * `setCommandCompletions` already builds from a `SurfaceCommandSummary` —
+ * because the application mount contract must not name a renderer-package
+ * type, and a row is a display fact only: never a claim, never an execution
+ * right, never a provenance tag the renderer has to re-derive.
+ */
+export interface TspCommandCompletionCandidate {
+  readonly name: string
+  readonly description: string
+  readonly argumentHint?: string
+}
+
+/** The plugin autocomplete chain's query/result shape, declared structurally
+ *  for the same reason: the identical fields, no renderer-package type name. */
+export type TspCommandCompletionExtensionSuggest = (query: {
+  lines: readonly string[]
+  cursorLine: number
+  cursorCol: number
+  signal: AbortSignal
+  force?: boolean
+}) => Promise<{ items: { value: string; label: string; description?: string }[]; prefix: string } | null>
+
+/**
+ * TSP I-C: what the ONE catalog commit publishes to a renderer that has no
+ * PiTui editor. The member set is EXACTLY the batch of inputs
+ * `TuiApp.setCommandCompletions` receives, so a mounted renderer composes the
+ * SAME installed provider over the SAME effective catalog — no second
+ * catalog, no second resolver, no second claims map. `commands` is already
+ * this renderer's displayable set, screened by REAL source provenance at the
+ * single commit point (`src/commands.ts`): a row it does not carry was never
+ * admitted for this renderer.
+ *
+ * The mount owns the provider lifecycle: every new installation REPLACES the
+ * previous source (a withdrawn command leaves the menu), and disposal removes
+ * the source before the renderer is released. The surface stores none of it.
+ */
+export interface TspCommandCompletionInstallation {
+  readonly commands: readonly TspCommandCompletionCandidate[]
+  readonly cwd: string
+  /** The Host-file port that owns `@`-mention discovery (migration M1.10).
+   *  I-C never opens a file seat, so it stays an unread input here. */
+  readonly fileReferences: import('../../runtime/host-file-port.ts').HostFilePort | null
+  readonly extensionSuggest?: TspCommandCompletionExtensionSuggest
+  /** Resolved at SUGGESTION time, so a session switch never needs a reinstall. */
+  readonly scope: () => import('../../runtime/host-file-port.ts').HostFileScope
+  /** The Client-local base, kept independent from the Host session cwd. */
+  readonly localCwd: () => string
+  readonly skillReferences: readonly import('../../domain/catalog/skill.ts').HumanSkillSummary[]
+  readonly hostShellCompletion: boolean
+}
+
+/**
  * PR3-B §3.3 (the B1 slice): the renderer-facing input binding — a NARROW
  * structural projection of the existing `TuiAppEvents` (the lifecycle/user
  * activity members), constructed at the `SurfaceRuntime.start` composition
@@ -480,6 +533,15 @@ export interface SurfaceRendererMount {
      * editor-local/lifecycle projection; B2 widens it with submissions.
      */
     readonly bindInput: (handlers: SurfaceInputBinding) => void
+    /**
+     * TSP I-C: publish ONE effective slash-command catalog commit onto the
+     * mounted renderer. OPTIONAL: a renderer with no command-completion seat
+     * (and the PiTui branch, which keeps its own `setCommandCompletions`
+     * route) supplies nothing, and the command layer says so in a diagnostic.
+     * Every call REPLACES the previous source; it is synchronous and carries
+     * no command execution right.
+     */
+    readonly installCommandCompletions?: (installation: TspCommandCompletionInstallation) => void
     /**
      * Stop the renderer and release its terminal ONCE (the TSP branch closes
      * the SDK surface then the session). May be async; the surface disposal
@@ -1108,6 +1170,16 @@ export interface SurfaceRuntime<Event extends RoutedSessionEvent> {
    */
   bindRendererInput(): void
   /**
+   * TSP I-C: forward ONE effective slash-command catalog commit to the CURRENT
+   * TSP mount, SYNCHRONOUSLY. This owner stores only the mount's installer
+   * function reference — never a catalog, never a candidate list, never a
+   * second completion state — and a renderer that is not mounted (or is
+   * already disposed) receives nothing. The PiTui branch never calls this: its
+   * catalog keeps going through `app.setCommandCompletions` at the same single
+   * commit point.
+   */
+  installTspCommandCompletions(installation: TspCommandCompletionInstallation): void
+  /**
    * Early teardown: release the Plugin Manager install-event subscription at
    * its original EARLY cleanup position (a late install event must never
    * notify/repaint a dying surface).
@@ -1202,6 +1274,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
    */
   let pendingInputBinding: SurfaceInputBinding | undefined
   let inputBindTarget: { bindInput(handlers: SurfaceInputBinding): void } | undefined
+  /**
+   * TSP I-C: the CURRENT TSP mount's command-completion installer, and
+   * NOTHING else. The catalog itself lives with its owner
+   * (`src/commands.ts`), the candidate/provider state lives inside the mount —
+   * this slot is only the forwarding reference, cleared with the mount.
+   */
+  let rendererCommandCompletionsInstaller: ((installation: TspCommandCompletionInstallation) => void) | undefined
   /**
    * PR3-B §3.2: the live modal presenter projection. PiTui assigns the
    * mounted app (structurally a `SurfaceInteractionPresenter`); a renderer
@@ -2892,6 +2971,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
         sessionBrowserPresentation = mounted.sessionBrowserPresentation
         interactionPresenter = mounted.interaction
         rendererDispose = mounted.dispose
+        // TSP I-C: keep ONLY the mount's installer reference (no catalog, no
+        // candidate state). A mount without a completion seat leaves this
+        // unset, and the command layer reports the skipped install.
+        rendererCommandCompletionsInstaller = mounted.installCommandCompletions
         // PR3-B §3.3: the input projection is constructed HERE (from the EXACT
         // already-built callbacks, preserving their receiver/signature) but
         // BOUND LATER, through `bindRendererInput()`. Binding at this instant
@@ -3032,6 +3115,13 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       if (target === undefined || handlers === undefined) return
       target.bindInput(handlers)
     },
+    installTspCommandCompletions(installation) {
+      // TSP I-C: one synchronous forward to the CURRENT mount's installer.
+      // Absent (no renderer mounted, a renderer without a completion seat, or
+      // already disposed) means NOTHING is installed — the command layer
+      // reports the skipped install instead of keeping a second copy here.
+      rendererCommandCompletionsInstaller?.(installation)
+    },
     disposePluginManager() {
       // Release the Plugin Manager install-event subscription at its original
       // EARLY position. This never cancels a Host install: only the official
@@ -3053,6 +3143,10 @@ export function createSurfaceRuntime<Event extends RoutedSessionEvent>(options: 
       // disposed-but-present TuiApp.
       const releaseRenderer = rendererDispose
       rendererDispose = undefined
+      // TSP I-C: withdraw the catalog source BEFORE the renderer is released,
+      // so no late catalog commit can reach a disposed mount (and nothing
+      // survives into a remount, which mounts a NEW installer reference).
+      rendererCommandCompletionsInstaller = undefined
       modelPresentation = undefined
       presetPresentation = undefined
       sessionBrowserPresentation = undefined

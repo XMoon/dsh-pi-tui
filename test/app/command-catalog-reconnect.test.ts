@@ -362,6 +362,13 @@ function fakeRunnerDeps(options: {
       // mounts the real PiTui app, which is its own composer port.
       composer: () => app,
       deliveredFilesSnapshot: () => undefined,
+      // TSP I-C: this harness mounts the real PiTui app, so `app` is defined and
+      // every catalog commit keeps its existing `app.setCommandCompletions`
+      // route — these two seams are never reached here. They are declared
+      // because the production composition makes them required capabilities of
+      // the mounted surface, and this literal is that contract's fake.
+      installTspCommandCompletions: () => {},
+      tspCommandPickerCapabilities: () => ({}),
     },
     backend: {
       kind: options.remoteSource === undefined ? 'direct' : 'remote',

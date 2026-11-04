@@ -41,7 +41,8 @@ import type { ClientCommandRegistry } from './client-command-registry.ts'
 import type { SubmissionComposerPort } from '../submission/composer-port.ts'
 import type { RemoteCommandSourceFace } from '../application-runtime.ts'
 import { bindCommandRuntime, type CommandRuntimeSurface, type CommandSessionRuntime } from './runtime.ts'
-import { titleRefusalNoticeOwner, titleSuccessNoticeVisible } from './tsp-capability.ts'
+import { titleRefusalNoticeOwner, titleSuccessNoticeVisible, type TspBuiltinPickers } from './tsp-capability.ts'
+import type { TspCommandCompletionInstallation } from '../surface/runtime.ts'
 import type { DeliveredFilesSnapshot } from '../../domain/deliverables/catalog.ts'
 import { copyToClipboard } from '../../client/clipboard/copy.ts'
 import { isFocusDisplayPreset, type DisplayState } from '../../domain/display/preset.ts'
@@ -253,6 +254,20 @@ export interface CommandSurfaceDeps<Selection extends ModelSelectionValue, Exact
      * can re-project, mutate or window the transcript through it.
      */
     deliveredFilesSnapshot(): DeliveredFilesSnapshot | undefined
+    /**
+     * TSP I-C: publish ONE effective slash-command catalog commit onto the
+     * CURRENTLY mounted TSP renderer. The command layer calls it at its single
+     * completion commit point; this owner forwards to the mount and stores
+     * nothing, so the PiTui branch (which keeps `app.setCommandCompletions`)
+     * and the catalog authority stay exactly as they were.
+     */
+    installTspCommandCompletions(installation: TspCommandCompletionInstallation): void
+    /**
+     * TSP I-C: which native TUI-builtin presenters the mounted renderer
+     * actually installed — a READ of the existing mount capabilities, sampled
+     * live at each catalog commit and never a version/kind guess.
+     */
+    tspCommandPickerCapabilities(): TspBuiltinPickers
   }
   /** The semantic backend port slices the runner exposes unchanged. */
   readonly backend: {
@@ -925,6 +940,14 @@ export function createCommandSurface<Selection extends ModelSelectionValue, Id e
           // Deliberately not cached — the mount (and any seat replacement) is
           // read at command time, exactly like `deps.app`.
           composer: () => deps.surface.composer(),
+          // TSP I-C: the catalog commit reaches the mounted renderer through
+          // the SAME live-read pattern — never a cached mount, never a second
+          // catalog. The capability read is sampled per commit, so a presenter
+          // that appears or goes away later changes the candidate set with it.
+          installTspCommandCompletions: installation => {
+            deps.surface.installTspCommandCompletions(installation)
+          },
+          tspCommandPickerCapabilities: () => deps.surface.tspCommandPickerCapabilities(),
         },
       )
       // Per-name degradation notice (M3-4 PR2): a Host-claimed name (the
