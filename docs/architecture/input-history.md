@@ -208,11 +208,42 @@ Two intentional trade-offs of the bounded window:
 
 The file is oldest-first; the recall API (`SurfaceDisplaySeam.resetInputHistory`,
 implemented by each renderer's adapter over the shared kernel) takes
-**newest-first**, and the PiTui adapter seeds its editor reversed so the ↑/↓
-list ends newest-first. The runner therefore reverses the loaded entries before
-seeding. The first `↑` must recall the MOST RECENT submission — this is
-pinned by `test/tui/input-experience.test.ts` ("seeded input history recalls
-entries with the up arrow") and `test/client/tui-app.test.ts`.
+**newest-first**. Both editors consume that projection without reversing it:
+the PiTui adapter seeds its editor with the same order, and the TSP composer
+reads the kernel's newest-first snapshot directly at each arrow. The runner
+therefore reverses the loaded entries before seeding. The first `↑` must recall
+the MOST RECENT submission — this is pinned by
+`test/tui/input-experience.test.ts` ("seeded input history recalls entries with
+the up arrow"), `test/client/tui-app.test.ts` and the TSP composer tests.
+
+### The two editors' ↑/↓ presentation
+
+Both editor adapters read the SAME newest-first kernel projection; their
+vertical-caret model is deliberately different because the layout owner is
+different:
+
+- PiTui owns its own visual soft-wrap map, so ↑/↓ first move across the lines
+  it actually painted, then walk its editor history stack at the first/last
+  VISUAL line.
+- The Tern Surface Protocol's `ui.editor` owns the TSP renderer's layout, so
+  the TSP composer moves by hard logical lines (`\n`; a complete CRLF pair is
+  one cluster), keeps its desired column in grapheme clusters and consults the
+  kernel only at the first/last LOGICAL line. It never guesses the client's
+  soft-wrap width. Soft-wrapped visual-row arrow parity with PiTui is not part
+  of this contract; the client's own editor remains the layout authority.
+
+In both adapters, leaving index 0 downward restores the exact draft and caret
+that browsing replaced; a real text edit ends the browse and makes the recalled
+row ordinary editable content. Browsing never submits, writes a row, switches a
+Session or paints a second input surface. The TSP composer retires its short-lived
+browse bookmark at the formal `beginInputHistoryScope` / `resetInputHistory`
+commits (before the kernel commit), while a settlement, a repaint or a
+pre-publication hydration window leaves the current browse alone. Entering the
+first recalled row consults the application's existing pasted-path delivery and
+plain-history eligibility; a refusal keeps the draft, caret and live paste
+leases and starts no browse. A whole-document recall replacement retires old
+pasted-path leases, so a late image read cannot rewrite bytes inside a history
+row.
 
 ### Seeding at boot (trap: deferred start has no session)
 
@@ -268,9 +299,11 @@ submission sequence (newest first) in ONE Client-local pure kernel,
 renderer, no SDK, no Session reader. Every mounted renderer owns exactly ONE
 instance and commits the same three signals into it through the existing
 `SurfaceDisplaySeam` (`beginInputHistoryScope` / `resetInputHistory` /
-`settleScopeInput`); the PiTui adapter additionally mirrors the kernel's
-snapshot into its editor stack, and a renderer that presents no recall UI keeps
-the same projection without painting it. The hydration reseed reconciles them:
+`settleScopeInput`); the PiTui adapter mirrors the kernel's snapshot into its
+editor stack, and the TSP adapter keeps the ONE composer's browse state while
+reading that same snapshot on demand. A renderer that presents no recall UI
+keeps the same projection without painting it. The hydration reseed reconciles
+them:
 
 - the scope is OPEN FROM CONSTRUCTION: the SESSIONLESS POOL is a real scope (a
   deferred start, and the Remote startup resume whose `remote.read` await leaves
