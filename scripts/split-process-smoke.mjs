@@ -4592,7 +4592,7 @@ async function main() {
         }
         await c2.waitForScreen('Continue the C1 test?', `${label} C2 redelivered question`, 120_000)
         c2.send('1')
-        await c2.waitForScreen('Submit', `${label} C2 review page`, 30_000)
+        await c2.waitForScreen('Review your answer before submit', `${label} C2 review page`, 30_000)
         c2.send('\r')
         const settled = await waitForC1WorkEvent(workRoot, event => event.kind === 'question-settled' && event.sessionId === sessionId, `${label} Host question settled`, 120_000)
         assert(settled.answers?.[0]?.selected?.[0] === 'Proceed', `${label} the Host received the wrong answer: ${JSON.stringify(settled.answers)}`)
@@ -4653,7 +4653,7 @@ async function main() {
           assertInteractionGate(c2, 'T51 C2')
           await c2.waitForScreen('Continue the C1 test?', 'T51 C2 question', 120_000)
           c2.send('1')
-          await c2.waitForScreen('Submit', 'T51 C2 review')
+          await c2.waitForScreen('Review your answer before submit', 'T51 C2 review')
           c2.send('\r')
           await waitForC1WorkEvent(workRoot, event => event.kind === 'question-settled' && event.sessionId === sessionId, 'T51 answered')
           await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T51 turn/end')
@@ -4736,8 +4736,11 @@ async function main() {
         await c2.waitForScreen('Continue the C1 test?', 'T52 continued row')
         c2.send('\r')
         c2.send('1')
-        await c2.waitForScreen('Submit', 'T52 continued form review', 60_000)
-        c2.send('\r')
+        await c2.waitForScreen('Review your answer before submit', 'T52 continued form review', 60_000)
+        // ONE final Enter from the painted review frame: the official
+        // `answerContinued` result and the duplicate probe below prove the
+        // queued classification, so a second Enter would only risk an
+        // unrelated reply.
         c2.send('\r')
         // The C2 UI's `answerContinued` return is observable through the
         // controller's queued notice; the Host-side probe then calls the
@@ -4921,8 +4924,12 @@ async function main() {
         const { host, ready, workRoot } = await startC1Host(scenario, label)
         const { client } = await startC1Client(`${label} Client`, { SPLIT_PROCESS_CLIENT_HMR_PROBE: '1' })
         const sessionId = await openC1Session(client, `${label} prompt`, label.toUpperCase())
+        // The Host `tool/call` is the official callId authority; the question
+        // witnesses below must all name THIS one invocation.
+        let questionCallId
         if (kind === 'question') {
-          await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', 'T55c question tool/call')
+          const call = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'tool/call' && event.data?.name === 'ask_user_question', 'T55c question tool/call')
+          questionCallId = String(call.data.callId)
           await client.waitForScreen(confirmText, 'T55c C1 question modal', 120_000)
         } else {
           await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/asked', 'T55c approval/asked', 120_000)
@@ -4940,11 +4947,26 @@ async function main() {
         await client.waitForScreen(confirmText, 'T55c new surface shows the same Host pending', 120_000)
         if (kind === 'question') {
           client.send(answer)
-          await client.waitForScreen('Submit', 'T55c question review', 30_000)
+          await client.waitForScreen('Review your answer before submit', 'T55c question review', 30_000)
           client.send('\r')
-          await waitForC1WorkEvent(workRoot, event => event.kind === 'question-settled' && event.sessionId === sessionId, 'T55c question settled', 120_000)
+          // The settlement must name the SAME callId the Host asked for, carry
+          // the new surface's answer, and exist exactly once for that call.
+          const settled = await waitForC1WorkEvent(workRoot,
+            event => event.kind === 'question-settled' && event.sessionId === sessionId && event.callId === questionCallId,
+            'T55c question settled', 120_000)
+          assert(settled.answers?.[0]?.selected?.[0] === 'Proceed',
+            `T55c the new surface submitted the wrong answer: ${JSON.stringify(settled.answers)}`)
           assert(readC1WorkEvents(workRoot).filter(event => event.kind === 'question-request' && event.sessionId === sessionId).length === 1,
             'T55c HMR replayed the Host question request')
+          const forCall = readC1WorkEvents(workRoot).filter(event => event.callId === questionCallId)
+          assert(forCall.filter(event => event.kind === 'question-request').length === 1
+            && forCall.filter(event => event.kind === 'question-settled').length === 1
+            && forCall.every(event => event.kind !== 'question-failed'),
+            'T55c the Host pending was not requested/settled exactly once for this callId')
+          const result = await waitForHostSessionEvent(dshHome, sessionId,
+            event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === questionCallId,
+            'T55c question tool result', 120_000)
+          assert(result.data?.message?.isError !== true, 'T55c the answered question failed at the Host')
         } else {
           client.send(answer)
           await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'approval/decided', 'T55c approval/decided', 120_000)
