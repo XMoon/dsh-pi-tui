@@ -719,6 +719,20 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
   /** The application's pending-submit fact, surfaced as a dock line. */
   let pendingSubmit: SubmitPendingDetail | undefined
   /**
+   * TSP I-A: the ONE Client-local input-recall kernel of THIS mount (see
+   * `src/client/history/recall-scope.ts`). It is mount-private, never a module
+   * global: the recall projection, the OPEN scope's occurrences, the write
+   * owner's settlements and the hydration reseed reconcile all live here, and
+   * the mount's Enter/Send occurrences are tokened from it. It holds no
+   * persistence, no Session identity, no timer and no subscription — the row
+   * owner (`InputHistory.persist`) and the publication authority
+   * (`SessionRuntime`) stay where they are and only REPORT into this kernel
+   * through the existing display seam. I-A added no visible recall surface;
+   * TSP I-B made the composer's ↑/↓ read exactly this projection — the composer
+   * owns only the short-lived browse position and the draft it replaced.
+   */
+  const historyRecall = createHistoryRecallScope()
+  /**
    * PR3-B B1: the ONE program-owned composer. The SDK controls the editor
    * node (`text`/`cursor` in UTF-16 units); the native edit/undo/send
    * features are NOT advertised — every authoritative mutation (a reducer
@@ -732,6 +746,22 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       render()
     },
     notify: (text, kind) => display.notify(text, kind),
+  }, {
+    // The recall read is the mount's own kernel snapshot — no second history
+    // source, no file handle, no Session filter invented here.
+    entries: () => historyRecall.snapshot(),
+    // The SAME two application admissions a submission consults, read off the
+    // CURRENT bound handlers (never a boot-time capture) and only when the
+    // composer is about to replace a live draft with a recalled row. A refusal
+    // or a callback that rewrote the draft leaves the browse un-entered; a
+    // throw keeps travelling up the original key stack.
+    admitDraft: (text) => {
+      // `dispatchKey` reaches the composer ONLY after `bindInput` installed
+      // these handlers (the pre-bind keys are held, not applied), so the bind
+      // is a fact of this call site, not a state to re-check.
+      const handlers = boundHandlers as TspInputHandlers
+      return handlers.admitPastedPathDelivery(text) && handlers.shouldRememberInput(text)
+    },
   })
   /**
    * PR3-B B3: the ONE interaction seat (the renderer's modal presentation
@@ -2425,20 +2455,6 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     render()
   }
 
-  /**
-   * TSP I-A: the ONE Client-local input-recall kernel of THIS mount (see
-   * `src/client/history/recall-scope.ts`). It is mount-private, never a module
-   * global: the recall projection, the OPEN scope's occurrences, the write
-   * owner's settlements and the hydration reseed reconcile all live here, and
-   * the mount's Enter/Send occurrences are tokened from it. It holds no
-   * persistence, no Session identity, no timer and no subscription — the row
-   * owner (`InputHistory.persist`) and the publication authority
-   * (`SessionRuntime`) stay where they are and only REPORT into this kernel
-   * through the existing display seam. I-A therefore adds NO visible recall
-   * surface: ↑/↓ belongs to I-B.
-   */
-  const historyRecall = createHistoryRecallScope()
-
   const display: SurfaceDisplaySeam = {
     setTranscript,
     commitDisplaySubject() {
@@ -2563,19 +2579,30 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // TSP I-A: a real kernel commit, NOT the old no-op. This records the
       // reseed/reconcile into THIS mount's recall projection only: no render,
       // no draft/caret touch, no seat or Focus change, no second read of the
-      // history file. I-B is what will make the projection visible.
+      // history file.
+      // TSP I-B: the composer's browse is retired with the projection it was
+      // indexing — BEFORE the kernel commit, so no recalled row of the
+      // outgoing owner can be walked back into the incoming one. Pure state:
+      // this seam still triggers no render and touches no draft.
       if (disposed) return
+      composer.invalidateRecallNavigation()
       historyRecall.reset(entries, owner)
     },
     beginInputHistoryScope(owner) {
       // TSP I-A: the formal Session publication the application already owns.
       // Pure kernel state; nothing here is inferred from a received Session id.
+      // TSP I-B: the same synchronous commit retires the open browse, so a
+      // browse of Session A can never return A's draft under Session B.
       if (disposed) return
+      composer.invalidateRecallNavigation()
       historyRecall.begin(owner)
     },
     settleScopeInput(settlement) {
       // TSP I-A: the row owner's synchronous append/skip report, in append
       // order. Kernel state only — a settlement never re-renders or re-seats.
+      // TSP I-B: and it never retires an open browse either: what the user is
+      // reading is the projection of the moment, and a settlement only updates
+      // the ledger the NEXT reseed reconciles with.
       if (disposed) return
       historyRecall.settle(settlement)
     },

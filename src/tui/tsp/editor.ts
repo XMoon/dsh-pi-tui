@@ -107,6 +107,59 @@ function nextGraphemeEnd(text: string, cursor: number): number {
   return text.length
 }
 
+/** One logical (hard-newline) line of the draft. */
+interface LogicalLine {
+  readonly start: number
+  readonly end: number
+}
+
+/** The line end sits BEFORE a complete CRLF pair — the same line model `end`
+ *  uses, because that pair is ONE grapheme cluster. */
+function trimCarriageReturn(text: string, start: number, end: number): number {
+  return end > start && text.charCodeAt(end - 1) === 0x0d ? end - 1 : end
+}
+
+/** The `\n`-delimited logical lines of `text` (always at least one). */
+function logicalLines(text: string): LogicalLine[] {
+  const lines: LogicalLine[] = []
+  let start = 0
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) !== 0x0a) continue
+    lines.push({ start, end: trimCarriageReturn(text, start, index) })
+    start = index + 1
+  }
+  lines.push({ start, end: trimCarriageReturn(text, start, text.length) })
+  return lines
+}
+
+/** The line that holds `cursor` (a caret at a line's end belongs to that line). */
+function lineIndexOf(lines: readonly LogicalLine[], cursor: number): number {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (cursor >= lines[index]!.start) return index
+  }
+  return 0
+}
+
+/** The caret's column inside `line`, counted in GRAPHEMES (never UTF-16 units). */
+function graphemeColumn(text: string, line: LogicalLine, caret: number): number {
+  let column = 0
+  for (const { index } of segmenter.segment(text.slice(line.start, line.end))) {
+    if (line.start + index >= caret) break
+    column += 1
+  }
+  return column
+}
+
+/** The UTF-16 boundary `column` graphemes into `line`, clamped to its end. */
+function offsetAtColumn(text: string, line: LogicalLine, column: number): number {
+  let seen = 0
+  for (const { index } of segmenter.segment(text.slice(line.start, line.end))) {
+    if (seen === column) return line.start + index
+    seen += 1
+  }
+  return line.end
+}
+
 /** The sinks the composer notifies: the owning renderer renders ONE frame per
  *  authoritative mutation, plus the application-facing presentation facts. */
 export interface TspComposerSinks {
@@ -119,10 +172,34 @@ export interface TspComposerSinks {
 }
 
 /**
- * Create the TSP composer. The sinks surface both the render trigger and the
- * application's composer-port facts onto the renderer's own presentation.
+ * The mount's history recall, as the composer is allowed to see it (TSP I-B):
+ * a read of the ONE `HistoryRecallScope` snapshot plus the application's
+ * EXISTING draft admission. The composer owns no history store, no filter and
+ * no second Session identity.
  */
-export function createTspComposer(sinks: TspComposerSinks): TspComposer {
+export interface TspComposerRecallPort {
+  /** I-A kernel's defensive latest-first snapshot. No IO. */
+  entries(): readonly string[]
+  /**
+   * The existing application paste and plain-history eligibility for a draft
+   * about to be replaced by a recalled row. It may notify; it never submits.
+   */
+  admitDraft(text: string): boolean
+}
+
+/** The draft and caret ↑/↓ browsing gives back when it leaves index 0. */
+interface RecallDraftBookmark {
+  readonly text: string
+  /** A UTF-16 boundary — the caret the user was editing at. */
+  readonly cursor: number
+}
+
+/**
+ * Create the TSP composer. The sinks surface both the render trigger and the
+ * application's composer-port facts onto the renderer's own presentation, and
+ * the recall port is the mount's history scope read through the ONE kernel.
+ */
+export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRecallPort): TspComposer {
   let text = ''
   let cursor = 0
   let focused = false
@@ -130,9 +207,155 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
   // an asynchronous read may replace. Every real text mutation feeds it
   // BEFORE the render/application sink observes the frame.
   const pasteRanges = new PasteRangeTracker()
+  /**
+   * The editor-local recall navigation state (TSP I-B) — UI state, never a
+   * second history authority: `-1` = editing the user's own draft, `>= 0` =
+   * the index into the CURRENT `recall.entries()` snapshot the editor shows.
+   * The bookmark is the draft `↑` replaced; it is dropped the moment a real
+   * edit makes the recalled text ordinary content. Nothing here is persisted
+   * and nothing here survives a formal scope `begin`/`reset`.
+   */
+  let historyIndex = -1
+  let historyDraft: RecallDraftBookmark | undefined
+  /** The column a consecutive ↑/↓ run wants to keep, in GRAPHEMES. */
+  let preferredGraphemeColumn: number | undefined
+  /** Counts every committed draft mutation, clear, programmatic replacement,
+   *  scope invalidation and history-navigation commit. The admission callback
+   *  below is a reentrancy boundary: a callback that moved the draft wins and
+   *  this gesture is dropped. */
+  let editEpoch = 0
 
   const state = (): TspComposerState => ({ text, cursor, focused })
   const setFocused = (next: boolean): void => { focused = next }
+
+  /** ONE committed mutation: the epoch first, then the render trigger, so a
+   *  callback the sink runs already observes the new state. */
+  const commitChange = (): void => {
+    editEpoch += 1
+    sinks.onChanged()
+  }
+
+  /** Leave browse mode: the recalled row is now ordinary editable content. */
+  const forgetRecallBookmark = (): void => {
+    historyIndex = -1
+    historyDraft = undefined
+    preferredGraphemeColumn = undefined
+  }
+
+  /** A deliberate Left/Right/Home/End placement invalidates a bookmark no
+   *  browse has claimed yet; during a browse it belongs to the browse. */
+  const forgetPendingBookmark = (): void => {
+    if (historyIndex < 0) historyDraft = undefined
+  }
+
+  /** A caret move to a computed boundary of the CURRENT text. */
+  const setCaret = (next: number): void => {
+    cursor = boundaryCursor(text, next)
+    preferredGraphemeColumn = undefined
+    commitChange()
+  }
+
+  /** A vertical move onto `line`, keeping the desired grapheme column. */
+  const moveToColumn = (line: LogicalLine, column: number): void => {
+    cursor = boundaryCursor(text, offsetAtColumn(text, line, column))
+    preferredGraphemeColumn = column
+    commitChange()
+  }
+
+  /** Replace the whole document with one recalled row (or the bookmark). */
+  const replaceForRecall = (next: string, caret: number): void => {
+    // A whole-document replacement is not the paste that made the old text:
+    // the previous draft's leases retire and never come back.
+    pasteRanges.reset(next)
+    text = next
+    cursor = boundaryCursor(next, caret)
+    commitChange()
+  }
+
+  /** Apply one entry of the mount's snapshot, keeping the browse position. */
+  const recallRow = (index: number, caretAtEnd: boolean): void => {
+    const row = recall.entries()[index]!
+    historyIndex = index
+    preferredGraphemeColumn = undefined
+    // The state is committed BEFORE the render the sink triggers (F2).
+    replaceForRecall(row, caretAtEnd ? row.length : 0)
+  }
+
+  /** The recallable boundary reached from the user's own draft. */
+  const recallEnter = (): TspComposerEdit => {
+    const entries = recall.entries()
+    if (entries.length === 0) return { kind: 'none' }
+    const draft = text
+    const caret = cursor
+    const epoch = editEpoch
+    // Only the step FROM an un-browsed draft INTO the first row consults the
+    // application; an empty scope consults nothing at all.
+    if (!recall.admitDraft(draft)) return { kind: 'none' }
+    if (editEpoch !== epoch || text !== draft || cursor !== caret) {
+      return { kind: 'none' }
+    }
+    // The bookmark was taken by the ↑ walk that began this browse (or, for a
+    // caret already on the boundary, by this very key).
+    historyDraft ??= { text: draft, cursor: caret }
+    recallRow(0, false)
+    return { kind: 'edited' }
+  }
+
+  const recallOlder = (): TspComposerEdit => {
+    const next = historyIndex + 1
+    if (next >= recall.entries().length) return { kind: 'none' }
+    recallRow(next, false)
+    return { kind: 'edited' }
+  }
+
+  const recallNewer = (): TspComposerEdit => {
+    if (historyIndex > 0) {
+      recallRow(historyIndex - 1, true)
+      return { kind: 'edited' }
+    }
+    // Leaving index 0 gives back the EXACT draft and caret browsing replaced.
+    // (A browse always has its bookmark: `>= 0` is set only by `recallEnter`.)
+    const bookmark = historyDraft as RecallDraftBookmark
+    historyIndex = -1
+    historyDraft = undefined
+    preferredGraphemeColumn = undefined
+    replaceForRecall(bookmark.text, bookmark.cursor)
+    return { kind: 'edited' }
+  }
+
+  /** One unmodified ↑/↓: the vertical caret move first, then the recall. */
+  const applyArrow = (direction: 'up' | 'down'): TspComposerEdit => {
+    const lines = logicalLines(text)
+    const index = lineIndexOf(lines, cursor)
+    const line = lines[index]!
+    const wanted = preferredGraphemeColumn ?? graphemeColumn(text, line, cursor)
+    if (direction === 'up') {
+      // The first ↑ of an un-browsed walk owns the bookmark, so a browse that
+      // began with a Home/line-up sequence gives back where the user actually
+      // was — not the boundary position the walk moved them to.
+      if (historyIndex < 0 && historyDraft === undefined) historyDraft = { text, cursor }
+      if (index > 0) {
+        moveToColumn(lines[index - 1]!, wanted)
+        return { kind: 'edited' }
+      }
+      if (historyIndex >= 0) return recallOlder()
+      if (cursor !== line.start) {
+        setCaret(line.start)
+        return { kind: 'edited' }
+      }
+      return recallEnter()
+    }
+    if (index < lines.length - 1) {
+      moveToColumn(lines[index + 1]!, wanted)
+      return { kind: 'edited' }
+    }
+    if (historyIndex >= 0) return recallNewer()
+    if (cursor !== line.end) {
+      setCaret(line.end)
+      return { kind: 'edited' }
+    }
+    return { kind: 'none' }
+  }
 
   /**
    * Replace the text (port mutator): the caret moves to the END of the new
@@ -145,13 +368,17 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
     // A programmatic whole-document replacement is NOT the paste that made
     // the old text: retire every lease even when the same path bytes reappear.
     pasteRanges.reset(next)
+    // An external draft write is a real write: the browse it interrupted ends
+    // with it (the bookmark would restore text that no longer exists).
+    forgetRecallBookmark()
     text = next
     cursor = boundaryCursor(next, next.length)
-    sinks.onChanged()
+    commitChange()
   }
   /** Insert at the caret (reducer/port): normalize after any cluster merge. */
   const insert = (fragment: string): void => {
     const insertionPoint = cursor
+    forgetRecallBookmark()
     text = text.slice(0, cursor) + fragment + text.slice(cursor)
     // The fragment may MERGE with the following cluster (a combining mark or
     // ZWJ suffix): the caret lands at the END of the cluster it now sits in.
@@ -161,7 +388,7 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
       { start: insertionPoint, oldEnd: insertionPoint, newEnd: insertionPoint + fragment.length },
       text,
     )
-    sinks.onChanged()
+    commitChange()
   }
 
   return {
@@ -175,8 +402,23 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
       // PR3-B §7.3 (B2 F1): PURE STATE — no `onChanged`, no render. See the
       // interface doc; the next committed frame carries the emptied editor.
       pasteRanges.reset('')
+      // A cleared draft has no browse to return to: the bookmark dies with it
+      // (restoring a recalled row into a session that no longer owns the
+      // draft would be a cross-owner write).
+      forgetRecallBookmark()
       text = ''
       cursor = 0
+      editEpoch += 1
+    },
+    invalidateRecallNavigation: () => {
+      // TSP I-B: a formal scope `begin`/`reset` retires THIS browse and only
+      // this browse. Pure state: the text and caret stay exactly as the mount
+      // shows them, and the frame the caller commits anyway carries the right
+      // content — a second repaint here would flicker the seat.
+      historyIndex = -1
+      historyDraft = undefined
+      preferredGraphemeColumn = undefined
+      editEpoch += 1
     },
     registerPastedPathSpan: (span) => pasteRanges.add(span),
     hasLivePath: (id, path) => pasteRanges.live(id)?.expected === path,
@@ -202,7 +444,7 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
       pasteRanges.retire(id)
       text = next
       cursor = boundaryCursor(next, nextCursor)
-      sinks.onChanged()
+      commitChange()
       return true
     },
     notify: (message, kind) => sinks.notify(message, kind),
@@ -250,6 +492,7 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
           // cluster's start; the cut end is the (aligned) caret itself.
           const start = previousGraphemeStart(text, cursor)
           const caret = cursor
+          forgetRecallBookmark()
           text = text.slice(0, start) + text.slice(cursor)
           // The deletion may MERGE the clusters on both sides of the cut
           // (removing a separator between two regional indicators fuses them
@@ -257,31 +500,32 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
           // boundary so it can never sit inside the merged cluster.
           cursor = boundaryCursor(text, start)
           pasteRanges.applyEdit({ start, oldEnd: caret, newEnd: start }, text)
-          sinks.onChanged()
+          commitChange()
           return { kind: 'edited' }
         }
         case 'delete': {
           if (cursor >= text.length) return { kind: 'none' }
           const cutStart = cursor
           const end = nextGraphemeEnd(text, cursor)
+          forgetRecallBookmark()
           text = text.slice(0, cursor) + text.slice(end)
           // Same merge-after-cut hazard as backspace (the clusters around the
           // removed one may fuse): keep the caret boundary-aligned.
           cursor = boundaryCursor(text, cursor)
           pasteRanges.applyEdit({ start: cutStart, oldEnd: end, newEnd: cutStart }, text)
-          sinks.onChanged()
+          commitChange()
           return { kind: 'edited' }
         }
         case 'left': {
           if (cursor === 0) return { kind: 'none' }
-          cursor = previousGraphemeStart(text, cursor)
-          sinks.onChanged()
+          forgetPendingBookmark()
+          setCaret(previousGraphemeStart(text, cursor))
           return { kind: 'edited' }
         }
         case 'right': {
           if (cursor >= text.length) return { kind: 'none' }
-          cursor = nextGraphemeEnd(text, cursor)
-          sinks.onChanged()
+          forgetPendingBookmark()
+          setCaret(nextGraphemeEnd(text, cursor))
           return { kind: 'edited' }
         }
         case 'home': {
@@ -290,10 +534,9 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
           // Normalize the result: a CRLF pair is ONE grapheme cluster, and
           // the line start must never sit between its CR and LF.
           const rawStart = text.lastIndexOf('\n', cursor - 1) + 1
-          const next = boundaryCursor(text, rawStart)
-          if (next === cursor) return { kind: 'none' }
-          cursor = next
-          sinks.onChanged()
+          if (boundaryCursor(text, rawStart) === cursor) return { kind: 'none' }
+          forgetPendingBookmark()
+          setCaret(rawStart)
           return { kind: 'edited' }
         }
         case 'end': {
@@ -305,11 +548,18 @@ export function createTspComposer(sinks: TspComposerSinks): TspComposer {
           const nextNewline = text.indexOf('\n', cursor)
           let lineEnd = nextNewline === -1 ? text.length : nextNewline
           if (lineEnd > 0 && text.charCodeAt(lineEnd - 1) === 0x0d) lineEnd -= 1
-          const next = boundaryCursor(text, lineEnd)
-          if (next === cursor) return { kind: 'none' }
-          cursor = next
-          sinks.onChanged()
+          if (boundaryCursor(text, lineEnd) === cursor) return { kind: 'none' }
+          forgetPendingBookmark()
+          setCaret(lineEnd)
           return { kind: 'edited' }
+        }
+        case 'up':
+        case 'down': {
+          // TSP I-B: unmodified ↑/↓ only. A modified arrow keeps whatever it
+          // means today (the existing app/plugin gesture, or a no-op) and is
+          // never routed through the recall.
+          if (key.ctrl === true || key.alt === true || key.shift === true || key.meta === true) break
+          return applyArrow(key.name === 'up' ? 'up' : 'down')
         }
         default:
           break
@@ -352,6 +602,16 @@ export interface TspComposer {
    * un-editable, so the outgoing text is never submittable meanwhile.
    */
   clearDraftStateOnly(): void
+  /**
+   * TSP I-B: retire the ↑/↓ browse state (the browse index, its draft
+   * bookmark and the kept column) WITHOUT touching the text, the caret or the
+   * render. The application's formal history-scope owners (`beginInputHistoryScope`
+   * / `resetInputHistory`) call it at their synchronous commit, so a recalled
+   * row of a Session that is no longer current can never be walked back into a
+   * newer Session's composer. The frame those commits trigger anyway carries
+   * the correct content.
+   */
+  invalidateRecallNavigation(): void
   /**
    * Register the proven raw span of ONE completed bracketed paste. Returns
    * the lease id, or undefined when the current document does not hold those
