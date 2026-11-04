@@ -477,6 +477,62 @@ async function main() {
       }
     }
 
+    // ---- Flow H: historical Session without membership (F1 evidence) ------
+    // The official Host `session.list` is the fallback authority: this proves
+    // the REAL wire read succeeds for a durable historical Session whose Workspace
+    // the registry does not account, and that the read result (not a Client
+    // cache) drives the Host canonical path proposal.
+    {
+      const historicalDir = join(workRoot, 'lifecycle-historical-project')
+      mkdirSync(historicalDir, { recursive: true })
+      const canonicalHistorical = realpathSync(historicalDir)
+      const historicalId = 'lifecycle-historical'
+      // The RAW Host Session store (not the lifecycle create): a durable header
+      // cwd with NO Workspace membership.
+      host.ctx.get('sessions').create(SessionId(historicalId), { meta: { cwd: historicalDir } })
+      const registry = host.ctx.workspaceRegistry
+      assert.equal(registry.list().some(workspace => workspace.sessionIds.map(String).includes(historicalId)), false,
+        'Flow H the historical Session must start without Workspace membership')
+
+      // The OFFICIAL Host read the fallback performs (the real wire row, never
+      // the Client list cache whose store drops the pull state).
+      const listed = await sessionRemoteFace.list({})
+      assert.equal(listed.ok, true, `Flow H the official session.list must succeed: ${JSON.stringify(listed)}`)
+      const listedRow = listed.ok ? listed.value.items.find(item => String(item.sessionId) === historicalId) : undefined
+      assert.equal(listedRow?.cwd, canonicalHistorical,
+        'Flow H the official Host list row must carry the persisted immutable header cwd')
+
+      const historicalSelection = await lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: historicalId })
+      assert.equal(historicalSelection.path, canonicalHistorical,
+        'Flow H the fallback must propose the Host canonical header directory')
+      const historicalWorkspace = registry.list().find(workspace => String(workspace.id) === historicalSelection.workspaceId)
+      assert.ok(historicalWorkspace !== undefined, 'Flow H the Host must register the header Workspace')
+      assert.equal(historicalWorkspace.path, canonicalHistorical)
+      assert.deepEqual(historicalWorkspace.sessionIds.map(String), [],
+        'Flow H the historical Session must never be silently attached')
+
+      // The next ordinary create lands in that header Workspace.
+      const historicalChild = await lifecycle.create({
+        sessionId: 'lifecycle-historical-child',
+        workspaceId: historicalSelection.workspaceId,
+      })
+      assert.equal(historicalChild.outcome.kind, 'created',
+        `Flow H child create failed: ${historicalChild.ownership}/${historicalChild.outcome.kind}`)
+      const childId = historicalChild.outcome.handle.session.id
+      assert.equal(hostSession(childId).header.cwd, canonicalHistorical,
+        'Flow H the child durable cwd must be the header Workspace path')
+      assert.deepEqual(historicalWorkspace.sessionIds.map(String), [childId],
+        'Flow H only the fresh Session joins the header Workspace')
+      historicalChild.outcome.handle.client?.release()
+      flows.historicalHeaderFallback = {
+        status: 'covered',
+        historicalSessionId: historicalId,
+        workspaceId: historicalSelection.workspaceId,
+        canonicalPath: canonicalHistorical,
+        listedCwd: listedRow?.cwd,
+      }
+    }
+
     // ---- Blank-reuse flow: a BLANK requested Session is reused -------------
     {
       const requested = 'lifecycle-blank-reuse'
