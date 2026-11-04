@@ -20,6 +20,7 @@ import type {
   QuickMenuRenderState,
   QuickMenuRow,
 } from './model-quick-menu.ts'
+import type { SlashCompletionPopup } from './slash-completion.ts'
 
 /** The ONE surface-scoped stylesheet name the renderer installs. */
 export const QUIET_COMPOSER_SHEET = 'dsh-quiet-composer'
@@ -52,6 +53,15 @@ export const QUIET_COMPOSER_ROLES = {
   send: 'dsh.composer.send',
   stop: 'dsh.composer.stop',
   footerGroup: 'dsh.footer.group',
+  // TSP I-C: the anchored slash-candidate list. It is a SIBLING of the editor
+  // inside the editor's own positioning container, so it floats over the
+  // transcript and takes NO layout height — the Composer box never moves.
+  editorStack: 'dsh.composer.editor-stack',
+  slashMenu: 'dsh.composer.slash-menu',
+  slashItem: 'dsh.composer.slash-item',
+  slashName: 'dsh.composer.slash-name',
+  slashDescription: 'dsh.composer.slash-description',
+  slashHint: 'dsh.composer.slash-hint',
 } as const
 
 /** One selectable permission preset in the v2 menu (fixed standard set). */
@@ -98,12 +108,22 @@ export interface QuietComposerViewInput {
   }
   readonly busy: boolean
   readonly sendable: boolean
+  /**
+   * TSP I-C: the slash candidate list this frame shows, or `undefined` when the
+   * seat has nothing to paint. It is the SEAT's own render-time projection —
+   * already filtered, already ordered by the shared provider and already
+   * windowed — so this view re-sorts nothing, re-queries nothing and claims no
+   * availability the catalog did not state.
+   */
+  readonly slash: SlashCompletionPopup | undefined
   readonly onPermissionToggle: () => void
   readonly onPermissionChoose: (id: string, menuEpoch: number) => void
   /** The combined trigger: opens, or closes, the anchored quick menu. */
   readonly onModelQuickToggle: () => void
   /** One interaction of the CURRENT menu frame. */
   readonly onModelQuickIntent: (intent: QuickMenuIntent) => void
+  /** Choose ONE slash candidate of the CURRENT list frame (row id + revision). */
+  readonly onSlashChoose: (id: string, revision: number) => void
   readonly onSend: () => void
   readonly onStop: () => void
 }
@@ -207,6 +227,35 @@ function quickMenuNode(
   )
 }
 
+/** One row of the anchored slash-candidate list. A row is a COMPLETION, never
+ *  an execution: `title`/`aria` carry the full name plus its description so a
+ *  reviewer or a reader can tell two similar commands apart from the frame
+ *  alone, and the highlighted row is marked by exactly one active signal. */
+function slashRow(
+  scope: string,
+  popup: SlashCompletionPopup,
+  row: SlashCompletionPopup['rows'][number],
+  onChoose: (id: string, revision: number) => void,
+): Node {
+  const description = row.description ?? ''
+  const full = description === '' ? row.name : `${row.name} — ${description}`
+  return html.button({
+    key: `slash-${scope}-${popup.revision}-${row.id.replace(/[^A-Za-z0-9._-]+/g, '_')}`,
+    role: QUIET_COMPOSER_ROLES.slashItem,
+    title: full,
+    aria: full,
+    ...(row.highlighted
+      ? { attrs: { 'data-highlight': 'true' } as Readonly<Record<string, string>> }
+      : {}),
+    onClick: () => onChoose(row.id, popup.revision),
+  },
+    html.span({ role: QUIET_COMPOSER_ROLES.slashName }, `${row.highlighted ? '›' : ' '}${row.name}`),
+    ...(description === ''
+      ? []
+      : [html.span({ role: QUIET_COMPOSER_ROLES.slashDescription }, description)]),
+  )
+}
+
 /** Build the ONE Quiet Composer shell (editor + controls). */
 export function quietComposerView(input: QuietComposerViewInput): Node {
   const scope = input.scope
@@ -235,9 +284,38 @@ export function quietComposerView(input: QuietComposerViewInput): Node {
       )
     : undefined
 
+  const slashMenu = input.slash === undefined || input.slash.rows.length === 0
+    ? undefined
+    : ui.col(
+        {
+          key: `composer-slash-menu-${input.scope}-${input.slash.revision}`,
+          role: QUIET_COMPOSER_ROLES.slashMenu,
+          aria: 'Slash command candidates',
+          gap: 'none',
+        },
+        ...input.slash.rows.map(row => slashRow(
+          input.scope,
+          input.slash!,
+          row,
+          input.onSlashChoose,
+        )),
+        ui.text({
+          key: `composer-slash-hint-${input.slash.revision}`,
+          wrap: 'none',
+          text: '↑↓ select · Tab/Enter complete · Esc close',
+        }),
+      )
+
   return ui.col(
     { key: 'quiet-composer', role: QUIET_COMPOSER_ROLES.shell, gap: 'none' },
-    input.editor,
+    // The editor plus its OWN positioning container: the candidate list floats
+    // up from the editor and covers the transcript, so it takes no layout row
+    // and the Composer, the control line and the Footer never move.
+    ui.col(
+      { key: 'composer-editor-stack', role: QUIET_COMPOSER_ROLES.editorStack, gap: 'none' },
+      ...(slashMenu === undefined ? [] : [slashMenu]),
+      input.editor,
+    ),
     ui.row(
       { key: 'composer-controls', role: QUIET_COMPOSER_ROLES.controls, gap: 'sm', align: 'center' },
       ui.col(
@@ -635,6 +713,84 @@ export const QUIET_COMPOSER_STYLES = `
   }
   [data-role='dsh.composer.stop']:hover {
     background: rgb(from var(--bad) r g b / 10%);
+  }
+  /* TSP I-C: the editor's own positioning container. It adds no box, no padding
+     and no height of its own — the editor keeps the exact metrics it had as a
+     direct child of the shell — so introducing it cannot move the Composer. */
+  [data-role='dsh.composer.editor-stack'] {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  /* The candidate list floats UP from the editor and MAY cover the transcript.
+     It takes no layout height, so the Composer box and the transcript scroll
+     never move (the same anchored pattern the Model quick menu already uses).
+     The budget stays inside the pane at every supported size: a short pane has
+     the least room above the editor, so the list caps low and scrolls. */
+  [data-role='dsh.composer.slash-menu'] {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(100% + 4px);
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-height: min(220px, 40vh);
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid var(--l2);
+    border-radius: 8px;
+    background: var(--pop-bg);
+    box-shadow: none;
+  }
+  [data-role='dsh.composer.slash-item'] {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--t2);
+    font-family: var(--sans);
+    font-size: 12px;
+    line-height: 1.5;
+    text-align: left;
+    cursor: pointer;
+  }
+  [data-role='dsh.composer.slash-item']:hover {
+    background: rgb(from var(--t1) r g b / 4%);
+    color: var(--t1);
+  }
+  [data-role='dsh.composer.slash-item'][data-highlight='true'] {
+    background: rgb(from var(--t1) r g b / 7%);
+    color: var(--t1);
+  }
+  /* The command name is the thing that must survive a narrow anchor; the
+     description is secondary and truncates first, so a row never loses its
+     leading slash-name (the same rule the quick menu's label/value pair
+     follows). */
+  [data-role='dsh.composer.slash-name'] {
+    flex-shrink: 0;
+    white-space: nowrap;
+    color: var(--t1);
+  }
+  [data-role='dsh.composer.slash-description'] {
+    color: var(--t3);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex-shrink: 1;
+  }
+  [data-role='dsh.composer.slash-menu'] .sf-text {
+    padding: 2px 8px;
+    color: var(--t4);
+    font-family: var(--sans);
+    font-size: 11px;
+    line-height: 1.4;
   }
   [data-role='dsh.footer.group'] {
     display: flex;

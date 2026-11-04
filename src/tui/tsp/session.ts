@@ -59,6 +59,9 @@ import type { DraftImage } from '../../client/media/image/types.ts'
 import type { ImageAttachmentRefLike } from '../../domain/media/types.ts'
 import { TSP_CONTINUED_INSPECTION_LABEL, TSP_VISUAL_CHORDS, TSP_VISUAL_COPY_LABEL, TSP_VISUAL_SELECT_LABEL, matchesKeyId } from '../keybindings/hints.ts'
 import { createTspComposer, type TspComposer, type TspComposerEdit, type TspComposerState } from './editor.ts'
+import { createTspSlashCompletion, type SlashCompletionPopup, type TspSlashCompletion } from './slash-completion.ts'
+import { createInstalledAutocompleteProvider } from '../interaction/autocomplete/installed-provider.ts'
+import type { TspCommandCompletionInstallation } from '../../app/surface/runtime.ts'
 import { pastedBodySpan } from '../interaction/pasted-path-range.ts'
 import type { PastedPathReceipt } from '../../app/surface/pasted-image-intake.ts'
 import { imageProtocolPreference } from '../graphics/image-protocol-preference.ts'
@@ -439,6 +442,19 @@ export interface TspRenderer extends TspInputBinding {
    */
   readonly bindNativeFooterConfig: (config: TspNativeFooterConfig) => void
   /**
+   * TSP I-C: publish ONE effective slash-command catalog commit onto this mount.
+   * The renderer composes its provider through the SAME shared installed-provider
+   * factory the PiTui surface uses, so there is exactly one completion authority
+   * and one catalog source; every call REPLACES the previous source (a withdrawn
+   * command leaves the menu, an empty install closes the seat) and the mount
+   * stores no catalog of its own.
+   *
+   * It carries no execution right: a candidate only ever edits the composer, and
+   * a disposed mount installs nothing (the command layer keeps its own claims
+   * regardless).
+   */
+  readonly installCommandCompletions: (installation: TspCommandCompletionInstallation) => void
+  /**
    * Stop the input loop, close the surface + session ONCE. The promise
    * settles only after the SDK restored the tty (input drain included), so
    * callers awaiting it can safely touch the terminal afterwards.
@@ -764,6 +780,26 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       if (handlers === undefined) throw new Error('the TSP composer recalled before the input was bound')
       return handlers.admitPastedPathDelivery(text) && handlers.shouldRememberInput(text)
     },
+  })
+  /**
+   * TSP I-C: the ONE slash-completion seat of this mount. It is created with the
+   * composer it edits and holds only the short-lived candidate list, the
+   * highlighted row and the request its answer must match. The catalog source
+   * arrives later through `installCommandCompletions` (the command layer's own
+   * commit point); until then the seat queries nothing and paints nothing.
+   *
+   * Its admission is the composer's OWN live key-ownership facts plus the two
+   * anchored menus that sit above it in the fixed ladder: a seat that is not
+   * admitted neither keeps a popup painted nor consumes a key, so a Modal,
+   * Reader, Picker, the Permission menu or the Quick menu can never be shadowed
+   * by a hidden candidate list.
+   */
+  const slash: TspSlashCompletion = createTspSlashCompletion({
+    composer,
+    admitted: () => visualActionsAdmitted()
+      && !permissionMenuOpen
+      && modelQuick?.isOpen() !== true,
+    requestRender: () => render(),
   })
   /**
    * PR3-B B3: the ONE interaction seat (the renderer's modal presentation
@@ -2332,6 +2368,24 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // features are NOT advertised; the program owns every edit.
     const editorNode = composerEditorNode()
     const quietShell = composerActionsSupported() ? quietComposerNode(editorNode) : undefined
+    if (quietShell === undefined) {
+      // TSP I-C: a pane without `el`+`styles` cannot anchor a styled popup, so
+      // the candidates ride ordinary `ui.text` rows directly above the ONE
+      // editor — keyboard-operable, with NO click affordance claimed (an `el`
+      // button paints as bare text here, so promising a click would be false).
+      // Three rows maximum: the draft and the Send/Footer stay operable.
+      const bare = slash.renderState()
+      if (bare !== undefined) {
+        for (const row of bare.rows.slice(0, 3)) {
+          lines.push(ui.text({
+            key: `slash-bare-${bare.revision}-${row.id.replace(/[^A-Za-z0-9._-]+/g, '_')}`,
+            wrap: 'none',
+            text: `${row.highlighted ? '›' : ' '}${row.name}`
+              + (row.description === undefined ? '' : ` — ${row.description}`),
+          }))
+        }
+      }
+    }
     lines.push(quietShell ?? editorNode)
     // TSP-7 PR-A/PR-D/PR-E: the native status rows follow the composer. They
     // are projected from the LAST FORMALLY COMMITTED snapshot through THIS
@@ -2397,6 +2451,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // TSP-7 PR-G: and with it the composer quick menu — its node keys carry
       // the same scope, so an old subject's panel can never act on the new one.
       modelQuick?.retire()
+      // TSP I-C: a formal publication is a new presentation scope for the
+      // candidate list too — the in-flight query is aborted and its rows are
+      // withdrawn, so a candidate set built for the outgoing subject can never
+      // be accepted into the incoming one. The next keystroke re-queries.
+      slash.retire()
       scopePrefix = `s${scopeEpoch}-`
       scopeKeys = new TranscriptNodeKeys()
       // PR-C: the retired subject's image subscriptions go with it, and the
@@ -2515,6 +2574,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // retiring Presenter callback can run, so no old read, click or write
       // settlement can paint or act on the incoming subject.
       modelQuick?.retire()
+      // TSP I-C: the hydration window fences the keys, so the candidate list and
+      // its in-flight query die with the outgoing subject HERE, before any
+      // retiring callback can run. A failed transition restores the fence and a
+      // later keystroke re-queries; nothing from the old subject survives.
+      slash.retire()
       // B3-A2 §8.2: the Reader belongs to the OUTGOING subject, so it is
       // revoked FIRST — before any retiring Presenter callback can run — and
       // its close stays owned here. `resetSessionFacts()` deliberately does
@@ -2570,6 +2634,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // un-editable, so the outgoing text is never submittable meanwhile.
       if (disposed) return
       composer.clearDraftStateOnly()
+      // TSP I-C: the draft the candidate list was built for is gone, so the
+      // list and any in-flight query die with it — PURE STATE here, exactly like
+      // the composer call above; the next committed frame paints the emptied
+      // editor with no popup.
+      slash.retire()
     },
     retainsStaleDraftRestore() {
       // PR3-B §7.3 (F2): the switch authority DROPPED the old draft, so a
@@ -2588,6 +2657,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // this seam still triggers no render and touches no draft.
       if (disposed) return
       composer.invalidateRecallNavigation()
+      // TSP I-C: the same formal scope commit rolls the completion seat: a
+      // candidate list (and an in-flight query) belongs to the scope its
+      // catalog was resolved under, so it is withdrawn here too. Pure state,
+      // no render, exactly as above.
+      slash.retire()
       historyRecall.reset(entries, owner)
     },
     beginInputHistoryScope(owner) {
@@ -2597,6 +2671,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // browse of Session A can never return A's draft under Session B.
       if (disposed) return
       composer.invalidateRecallNavigation()
+      // TSP I-C: a newly published Owner also ends the completion browse (the
+      // scope its candidates were resolved under is the outgoing one).
+      slash.retire()
       historyRecall.begin(owner)
     },
     settleScopeInput(settlement) {
@@ -3187,6 +3264,11 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       },
       busy: presentedStatus?.activity.busy === true && !hydrating,
       sendable: composerDraftSubmittable(),
+      // TSP I-C: the seat's OWN projection, observed at paint time. The painter
+      // never queries and never re-sorts; a click is admitted only for the row
+      // of the frame that painted it.
+      slash: slash.renderState(),
+      onSlashChoose: (id, revision) => { slash.acceptClick(id, revision) },
       onPermissionToggle: () => { composerPermissionToggled() },
       onPermissionChoose: (id, menuEpoch) => { permissionOptionChosen(renderScope, id, menuEpoch) },
       onModelQuickToggle: () => { composerModelQuickToggled() },
@@ -3369,6 +3451,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // first (with the frame that shows it), and the cancel intent still
       // reaches its original owner unchanged.
       retireQuickMenu()
+      // TSP I-C: the same rule for the slash candidate list — the popup retires
+      // FIRST and the cancel intent still reaches its original owner exactly
+      // once. An open list never turns Ctrl+C into a no-op.
+      slash.retire()
       handlers.cancel()
       return false
     }
@@ -3386,6 +3472,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // cycle, Enter chooses, Escape closes ONLY the menu; any other key closes
     // the menu and then reaches the ONE composer reducer exactly once.
     if (permissionMenuHandleKey(key)) return false
+    // TSP I-C: the slash candidate list sits AFTER every higher seat (Reader,
+    // Modal, Alt+Q list, the pickers, the Quick menu, the Permission menu) and
+    // BEFORE the original Escape cancel and the Composer reducer. It consumes a
+    // key ONLY for its own gestures (arrows walk the list, Tab/Shift+Tab walk it
+    // too, a plain Enter or the single-candidate Tab ACCEPTS, Escape closes just
+    // the list). Everything else retires the list first and then reaches its
+    // existing owner exactly once, so an open popup never hijacks Escape,
+    // Ctrl+V, a visual chord, a printable edit or an I-B History arrow.
+    if (slash.handleKey(key)) return false
     if (key.name === 'escape') {
       handlers.cancel()
       return false
@@ -3428,6 +3523,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // automatic image-file-path attachment. The span is measured from the
       // composer's own before/after state — never from the draft text.
       if (key.name === 'paste') acceptPastedPath(before, key, handlers)
+      // TSP I-C: the natural trigger runs off the composer's OWN committed
+      // change (never from the paint, which would cycle render → query → render).
+      // A submit or an exit-empty is not an edit, so neither re-queries, and the
+      // seat itself decides whether the new document still sits in the
+      // first-line command seat at all.
+      slash.onComposerEdit()
     }
     if (edit.kind === 'exit-empty') return true
     return false
@@ -3742,6 +3843,31 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // no consumer in production code (see `TspRenderer`).
     scopeFactCountForTest: () => historyRecall.scopeFactCountForTest(),
     reconcileStepsForTest: () => historyRecall.reconcileStepsForTest(),
+    installCommandCompletions: (installation) => {
+      // A disposed mount installs nothing and never re-acquires anything: the
+      // surface withdraws this installer with the renderer, and a late catalog
+      // commit has no seat to write into.
+      if (disposed) return
+      const { provider } = createInstalledAutocompleteProvider({
+        commands: installation.commands,
+        cwd: installation.cwd,
+        fileReferences: installation.fileReferences,
+        extensionSuggest: installation.extensionSuggest,
+        scope: installation.scope,
+        localCwd: installation.localCwd,
+        skillReferences: installation.skillReferences,
+        hostShellCompletion: installation.hostShellCompletion,
+        // The TSP composer has no shell mode and no plugin replacement editor:
+        // the ONE input mode this mount can present is the prompt mode.
+        inputMode: () => 'prompt',
+        // I-C opens no file seat, so this mount never needs a Client-local
+        // finder. `null` is the bounded fallback — and it also means NO Client
+        // PATH probe at catalog-install time, the choice PiTui's own install
+        // makes and this renderer deliberately does not inherit.
+        localFdPath: null,
+      })
+      slash.install(provider)
+    },
     bindInput: (handlers) => {
       if (disposed) throw new Error('the TSP renderer is disposed')
       if (inputBound) throw new Error('the TSP renderer input is already bound')
@@ -3818,6 +3944,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
           // read or write settlement of a disposed mount owns no frame.
           () => { modelQuick?.retire() },
           () => { presetPicker?.retire() },
+          // TSP I-C: the completion seat dies with the renderer — an aborted
+          // query that a disposed mount owns can neither paint nor write.
+          () => { slash.retire() },
         ])
       } catch (error) {
         failures.push(error)
