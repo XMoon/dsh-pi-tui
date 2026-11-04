@@ -5661,6 +5661,11 @@ async function main() {
         assert(!existsSync(releaseBarrier), 'M5N the hold barrier was released during /resume')
 
         // NB-03: an already-current switch is a NO-OP: no re-open, no Turn end.
+        // The refusal is a COMMAND ERROR, and the TUI's contract keeps a
+        // refused command line in the editor for correction ("an error outcome
+        // keeps the draft"). That restored line is observed here and cleared
+        // through the real editor before the next ordinary submit, so the
+        // queued-occurrence proof can never be built on a concatenated line.
         const alreadyBoundary = clientA.records.length
         clientA.send(`/resume ${sessionX}\r`)
         await clientA.waitForScreen('already on this session', 'M5N already-current refusal', 120_000)
@@ -5671,6 +5676,13 @@ async function main() {
         assert(clientA.records.filter(record => clientA.records.indexOf(record) >= alreadyBoundary
           && record.m4b2s === 'surface-status' && record.openSessionId === sessionY).length === 0,
           'M5N an already-current switch opened a different Session')
+        const refusedLine = `/resume ${sessionX}`
+        await clientA.waitForComposerDraft(refusedLine)
+        clientA.send('\x15')
+        await waitForCondition(async () => {
+          const composer = (await clientA.composerText()) ?? ''
+          return !composer.includes('/resume')
+        }, 'M5N cleared the refused command line', 30_000)
 
         // NB-04 (N-04): a Host-queued occurrence on the running X, then A
         // leaves X. The occurrence belongs to X and must survive the release.
@@ -5681,6 +5693,8 @@ async function main() {
         const xQueueIndex = durableOf(sessionX).length
         clientA.send('m5n-x-queued')
         await clientA.waitForComposerDraft('m5n-x-queued')
+        assert(!((await clientA.composerText()) ?? '').includes('/resume'),
+          'M5N the queued line must not inherit a refused command line')
         clientA.send('\r')
         const queuedX = await waitForHostSessionEventAfter(dshHome, sessionX, xQueueIndex,
           event => event.type === 'agent/inbox/spliced'
