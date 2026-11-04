@@ -4544,6 +4544,20 @@ async function main() {
           `${label}: row "${id}" was re-mounted (fiber ${String(expected.fiberUid)} -> ${String(actual.fiberUid)})`)
       }
     }
+    /**
+     * The Client root's ONE official interaction listener pair. `ready` alone
+     * never proves a surface could receive a Question or Approval: the startup
+     * gate is the fact that the official `$on` pair exists exactly once before
+     * the first forwarded request can arrive.
+     */
+    const assertInteractionGate = (client, label) => {
+      const gate = client.records.find(record => record.m4b2s === 'qualification' && record.op === 'interaction-startup-gate')
+      assert(gate !== undefined && gate.phase === 'listeners-ready' && gate.agentResolver === true
+        && gate.questionListeners === 1 && gate.approvalListeners === 1 && gate.loaderTasks >= 1,
+      `${label} interaction startup gate was not ready before the first generation: ${JSON.stringify(gate)}`)
+      assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === 'interaction-startup-gate').length === 1,
+        `${label} registered the interaction startup gate more than once`)
+    }
 
     try {
       // M5B-01 (M5-B): TWO real Surface Clients — distinct `script(1)` PTYs and
@@ -4913,6 +4927,509 @@ async function main() {
           clientAKept: true,
           hostIdentityKept: true,
         })
+      }
+
+      // M5C-01 (M5-C): TWO REAL Surface Clients — distinct `script(1)` PTYs,
+      // distinct business PIDs and one installed official interaction-provider
+      // pair each — are admitted to the SAME Host Session X BEFORE the Host
+      // asks. ONE Host Question/Approval reaches BOTH real modals, the winner's
+      // ONE real keyboard decision settles the ONE Host waterfall, and the
+      // loser's presentation is withdrawn by the official Gateway cancellation
+      // so its later key cannot produce a second Host result.
+      //
+      // Three fixed scenes, each with its own Host, empty Session X and work
+      // root: Question won by A (M5C-01Q), Approval-Reject won by B (M5C-01AR)
+      // and Approval-Allow won by A (M5C-01AA). Both Approval scenes use the
+      // same real `approval-allow` Host workload: the outcome is decided by the
+      // real Client keyboards, never by a second Host scenario pretending a
+      // refusal.
+      {
+        /**
+         * Admit both real Clients onto one EMPTY Host Session X without asking
+         * anything yet. A creates X with the REAL product `/new` command, which
+         * creates an empty Session without submitting a model prompt; B then
+         * joins the SAME X through its own startup intent. `openC1Session` is
+         * forbidden here: it submits the first prompt immediately, so the Host
+         * could ask before B exists and the scene would only prove a replay.
+         *
+         * The returned scene is not evidence by itself: the Host must carry no
+         * turn/tool call/approval and the fixture no request before the caller
+         * sends the ONE trigger prompt.
+         */
+        const admitM5cDualSurfaceScene = async (scenario, label) => {
+          const { host, ready: hostReady, workRoot } = await startC1Host(scenario, label)
+          const hostBefore = await hostIdentityFacts(host)
+          assert(hostBefore.hostPid === hostReady.pid,
+            `${label} the Host ready record does not own the Host identity`)
+          const { client: clientA, ready: aReady } = await startC1Client(`${label} A`)
+          const aBoundary = clientA.records.length
+          clientA.send('/new\r')
+          const aOpen = await clientA.waitFor(
+            record => clientA.records.indexOf(record) >= aBoundary
+              && record.m4b2s === 'surface-status'
+              && record.sessionOpen === true
+              && typeof record.openSessionId === 'string'
+              && record.openSessionId !== ''
+              && record.transport === 'connected'
+              && record.surfaceMounted === true,
+            `${label} Client A opened an empty Session`,
+            120_000,
+          )
+          const sessionX = aOpen.openSessionId
+          assert(Number.isInteger(aReady.pid) && aReady.pid > 0 && aReady.pid !== hostBefore.hostPid,
+            `${label} Client A published no live business PID distinct from the Host`)
+          assert(alive(aReady.pid), `${label} Client A is not a live business process`)
+          assert(aReady.activeWrappers === 1 && aReady.liveSockets === 1,
+            `${label} Client A owns wrappers=${String(aReady.activeWrappers)} sockets=${String(aReady.liveSockets)}`)
+          for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+            assert(aReady.owners?.[owner] === 1, `${label} Client A owns ${owner} ${String(aReady.owners?.[owner])}`)
+          }
+          assertInteractionGate(clientA, `${label} Client A`)
+          const { client: clientB, ready: bReady } = await startC1Client(`${label} B`, {
+            SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+          })
+          const bOpen = await waitForSurfaceStatus(clientB, record => record.sessionOpen === true
+            && record.openSessionId === sessionX
+            && record.transport === 'connected'
+            && record.surfaceMounted === true, `${label} Client B retained Session X`)
+          assertClientHostFacts(aOpen.host, hostBefore, `${label} Client A`)
+          assertClientHostFacts(bOpen.host, hostBefore, `${label} Client B`)
+          assert(Number.isInteger(bReady.pid) && bReady.pid > 0 && bReady.pid !== hostBefore.hostPid,
+            `${label} Client B published no live business PID distinct from the Host`)
+          assert(aReady.pid !== bReady.pid, `${label} the two Clients must be two different business PIDs`)
+          assert(clientA.child.pid !== clientB.child.pid,
+            `${label} the two Clients must run under distinct script(1) wrappers`)
+          assert(aReady.pid !== clientA.child.pid && bReady.pid !== clientB.child.pid,
+            `${label} a business PID was mistaken for its script(1) wrapper`)
+          assert(alive(aReady.pid) && alive(bReady.pid),
+            `${label} a Client was not a live business process after B was admitted`)
+          assert(bReady.activeWrappers === 1 && bReady.liveSockets === 1,
+            `${label} Client B owns wrappers=${String(bReady.activeWrappers)} sockets=${String(bReady.liveSockets)}`)
+          for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+            assert(bReady.owners?.[owner] === 1, `${label} Client B owns ${owner} ${String(bReady.owners?.[owner])}`)
+          }
+          assertInteractionGate(clientB, `${label} Client B`)
+          const pendingBefore = hostSessionEvents(dshHome, sessionX) ?? []
+          assert(!pendingBefore.some(event => event.type === 'turn/start' || event.type === 'tool/call'
+            || event.type === 'approval/asked'),
+          `${label} Host Session X carried Host activity before the trigger`)
+          assert(readC1WorkEvents(workRoot).every(event => event.kind !== 'question-request'
+            && event.kind !== 'approval-request'),
+          `${label} the Host asked before both real Clients were admitted`)
+          assert(alive(hostBefore.hostPid), `${label} the Host died while both Clients were admitted`)
+          return { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX }
+        }
+
+        // M5C-01Q: the Host's non-timed foreground Question reaches both real
+        // modals; A answers through the REAL review page; B's modal is withdrawn
+        // and its later option key is inert. The durable `tool/call.callId` ties
+        // the ONE question tool call to its ONE `tool/result` — a non-timed ask
+        // carries no `wait.callId`, so the waterfall record cannot be the
+        // correlation authority here.
+        {
+          const { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX } =
+            await admitM5cDualSurfaceScene('question', 'm5c-question')
+          // The ONE trigger is A's real keyboard submission AFTER both Clients
+          // are ready and nothing is pending.
+          const triggerIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+          clientA.send('m5c-question-trigger\r')
+          const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+            event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
+            'M5C question tool/call', 120_000)
+          const callId = String(call.data.callId)
+          assert(callId !== '', 'M5C the question tool/call carries no callId')
+          const request = await waitForC1WorkEvent(workRoot,
+            event => event.kind === 'question-request' && event.sessionId === sessionX,
+            'M5C Host question request', 120_000)
+          assert(request.questions?.[0]?.question === 'Continue the C1 test?',
+            `M5C unexpected Host question payload: ${JSON.stringify(request.questions?.[0]?.question)}`)
+          assert((request.questions?.[0]?.options ?? []).map(option => option?.label).join('|') === 'Proceed|Cancel',
+            'M5C the Host question options are not the fixture Proceed/Cancel pair')
+          const requestsBeforeAnswer = readC1WorkEvents(workRoot)
+            .filter(event => event.kind === 'question-request' && event.sessionId === sessionX)
+          assert(requestsBeforeAnswer.length === 1,
+            `M5C the Host asked ${String(requestsBeforeAnswer.length)} times before any answer`)
+          // BOTH physically distinct PTYs must paint the same ANSWERABLE modal
+          // BEFORE the winner types anything.
+          await clientA.waitForScreen('[1] Proceed', 'M5C A question modal', 120_000)
+          await clientB.waitForScreen('[1] Proceed', 'M5C B question modal', 120_000)
+          assert((await clientA.viewport()).join('\n').includes('Continue the C1 test?'),
+            'M5C Client A painted no question text')
+          assert((await clientB.viewport()).join('\n').includes('Continue the C1 test?'),
+            'M5C Client B painted no question text')
+          // A answers through the REAL QuestionFlow review page, never the port.
+          const answerIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+          clientA.send('1')
+          await clientA.waitForScreen('Review your answer before submit', 'M5C A question review', 30_000)
+          clientA.send('\r')
+          const settled = await waitForC1WorkEvent(workRoot,
+            event => event.kind === 'question-settled' && event.sessionId === sessionX,
+            'M5C Host question settled', 120_000)
+          assert(settled.answers?.[0]?.selected?.[0] === 'Proceed',
+            `M5C the Host received the wrong answer: ${JSON.stringify(settled.answers)}`)
+          const result = await waitForHostSessionEventAfter(dshHome, sessionX, answerIndex,
+            event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === callId,
+            'M5C question tool result', 120_000)
+          assert(result.data?.message?.isError !== true, 'M5C the answered question failed at the Host')
+          await waitForHostSessionEventAfter(dshHome, sessionX, answerIndex,
+            event => event.type === 'turn/end', 'M5C question turn/end', 120_000)
+          for (const [side, client] of [['A', clientA], ['B', clientB]]) {
+            await client.waitForScreen('question answered', `M5C ${side} read the Host settlement`, 120_000)
+          }
+          // B lost the SAME Host delivery: the official Gateway cancellation
+          // withdrew its CURRENT modal and returned the editor seat without a
+          // local Esc or decision.
+          await clientB.waitForScreenGone('[1] Proceed', 'M5C B question modal withdrawn', 120_000)
+          const bAfterWithdraw = (await clientB.viewport()).join('\n')
+          assert(!bAfterWithdraw.includes('Review your answer before submit'),
+            'M5C loser B opened the question review page')
+          assert(!bAfterWithdraw.includes('○ Submit') && !bAfterWithdraw.includes('✓ Submit'),
+            'M5C loser B still paints the question Submit tab')
+          clientB.send('m5c-b-editor-after-question')
+          await clientB.waitForComposerDraft('m5c-b-editor-after-question', 30_000)
+          clientB.send('\x15')
+          await clientB.waitForScreenGone('m5c-b-editor-after-question', 'M5C loser B cleared its editor draft', 30_000)
+          // The old option key is ordinary editor text now: clearing it must not
+          // create a second Host answer or reopen the settled modal.
+          const lateIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+          clientB.send('2')
+          await sleep(300)
+          clientB.send('\x15')
+          await sleep(300)
+          assert(!(await clientB.viewport()).join('\n').includes('[1] Proceed'),
+            'M5C a late loser option key reopened the settled question modal')
+          assert((hostSessionEvents(dshHome, sessionX) ?? []).slice(lateIndex)
+            .every(event => event.type !== 'tool/call' && event.type !== 'tool/result'
+              && event.type !== 'turn/start' && event.type !== 'turn/end'),
+          'M5C a late loser key produced Host activity')
+          assert(alive(aReady.pid) && alive(bReady.pid) && alive(hostBefore.hostPid),
+            'M5C a process died during the question first-settlement proof')
+          assert(lastSurfaceStatus(clientA)?.openSessionId === sessionX
+            && lastSurfaceStatus(clientB)?.openSessionId === sessionX,
+          'M5C a Client left Session X after the first settlement')
+          await assertHostIdentityKept(host, hostBefore, 'M5C Host after the question first settlement')
+          // B exits normally; A, the Host and X's durable facts stay live, and a
+          // NEW durable snapshot after the exit still carries exactly one answer.
+          await exitC1Client(clientB, 'M5C question B')
+          assert(alive(aReady.pid), 'M5C Client A died when Client B exited')
+          assert(alive(hostBefore.hostPid), 'M5C the Host died when Client B exited')
+          assert(lastSurfaceStatus(clientA)?.openSessionId === sessionX
+            && lastSurfaceStatus(clientA)?.transport === 'connected',
+          'M5C Client A lost Session X when Client B exited')
+          const afterExitEvents = hostSessionEvents(dshHome, sessionX) ?? []
+          assert(afterExitEvents.filter(event => event.type === 'tool/result'
+            && String(event.data?.message?.toolCallId) === callId).length === 1,
+          'M5C the question produced a second Host tool result after the loser exited')
+          const afterExitProofs = readC1WorkEvents(workRoot)
+          assert(afterExitProofs.filter(event => event.kind === 'question-request' && event.sessionId === sessionX).length === 1
+            && afterExitProofs.filter(event => event.kind === 'question-settled' && event.sessionId === sessionX).length === 1,
+          'M5C the question request/settlement pair changed after the loser exited')
+          await exitC1Client(clientA, 'M5C question A')
+          const finalEvents = hostSessionEvents(dshHome, sessionX) ?? []
+          const finalProofs = readC1WorkEvents(workRoot)
+          assert(finalProofs.filter(event => event.kind === 'question-request' && event.sessionId === sessionX).length === 1
+            && finalProofs.filter(event => event.kind === 'question-settled' && event.sessionId === sessionX).length === 1,
+          'M5C the question was not settled exactly once')
+          assert(finalProofs.every(event => event.kind !== 'question-failed'),
+            'M5C a legal first answer was recorded as a failed Host question')
+          assert(finalEvents.filter(event => event.type === 'tool/call'
+            && event.data?.name === 'ask_user_question').length === 1,
+          'M5C the Host asked more than once for one question tool call')
+          assert(finalEvents.filter(event => event.type === 'tool/result'
+            && String(event.data?.message?.toolCallId) === callId).length === 1,
+          'M5C the Host wrote more than one tool result for the question call')
+          await stopC1Host(host)
+          trace('m5c-01q', {
+            hostPid: hostBefore.hostPid,
+            clientAPid: aReady.pid,
+            clientBPid: bReady.pid,
+            wrapperPids: [clientA.child.pid, clientB.child.pid],
+            sessionX,
+            questionCallId: callId,
+            bothPtysSawQuestion: true,
+            winner: 'A',
+            hostSettlements: 1,
+            loserWithdrawn: true,
+            loserLateKeyInert: true,
+            sameHostBeforeAfter: true,
+            clientsExitedNormally: true,
+          })
+        }
+
+        // M5C-01AR: the SAME ApprovalSheet is live in both real modals; B's
+        // rejection wins the ONE Host waterfall, A's later `y` cannot allow the
+        // command, and no marker may ever exist for this refusal.
+        {
+          const { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX } =
+            await admitM5cDualSurfaceScene('approval-allow', 'm5c-approval-reject')
+          const triggerIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+          clientA.send('m5c-approval-reject-trigger\r')
+          const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+            event => event.type === 'tool/call' && event.data?.name === 'bash',
+            'M5C AR bash tool/call', 120_000)
+          const toolCallId = String(call.data.callId)
+          const asked = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+            event => event.type === 'approval/asked', 'M5C AR approval/asked', 120_000)
+          const requestId = String(asked.data.id)
+          assert(typeof asked.data.id === 'string' && asked.data.id !== '',
+            'M5C AR the Host approval request carries no ApprovalRequestId')
+          assert(asked.data.callId === undefined || String(asked.data.callId) === toolCallId,
+            'M5C AR the approval/asked call correlation does not name the bash tool call')
+          const request = await waitForC1WorkEvent(workRoot,
+            event => event.kind === 'approval-request' && event.sessionId === sessionX,
+            'M5C AR Host approval request', 120_000)
+          assert(request.toolName === 'bash', 'M5C AR the approval is not for the official bash tool')
+          assert(String(request.callId) === toolCallId,
+            'M5C AR the fixture approval request names another tool call')
+          const askedBeforeDecision = (hostSessionEvents(dshHome, sessionX) ?? [])
+            .filter(event => event.type === 'approval/asked')
+          assert(askedBeforeDecision.length === 1,
+            `M5C AR the Host asked ${String(askedBeforeDecision.length)} approvals before any decision`)
+          // BOTH physically distinct PTYs must paint the same ANSWERABLE sheet.
+          await clientA.waitForScreen('[y] Allow once', 'M5C AR A approval sheet', 120_000)
+          await clientB.waitForScreen('[y] Allow once', 'M5C AR B approval sheet', 120_000)
+          assert((await clientA.viewport()).join('\n').includes('[n] Reject'),
+            'M5C AR Client A painted no reject action')
+          assert((await clientB.viewport()).join('\n').includes('[n] Reject'),
+            'M5C AR Client B painted no reject action')
+          const decideIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+          clientB.send('n')
+          const decided = await waitForHostSessionEventAfter(dshHome, sessionX, decideIndex,
+            event => event.type === 'approval/decided' && String(event.data?.id) === requestId,
+            'M5C AR approval/decided', 120_000)
+          assert(decided.data.outcome === 'rejected',
+            `M5C AR the first Host outcome was ${JSON.stringify(decided.data.outcome)}`)
+          const settlement = await waitForC1WorkEvent(workRoot,
+            event => event.kind === 'approval-settled' && event.outcome === 'rejected',
+            'M5C AR rejected settlement', 60_000)
+          assert(String(settlement.callId) === toolCallId,
+            'M5C AR the rejected settlement names another tool call')
+          assert(readC1WorkEvents(workRoot).every(event => event.kind !== 'approval-failed'),
+            'M5C AR the approval failed at the Host instead of settling rejected')
+          // The official denied tool result is written; the command NEVER runs.
+          const denied = await waitForHostSessionEventAfter(dshHome, sessionX, decideIndex,
+            event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === toolCallId,
+            'M5C AR denied tool result', 120_000)
+          assert(denied.data?.message?.isError === true,
+            'M5C AR a rejected approval still executed the bash tool')
+          await waitForHostSessionEventAfter(dshHome, sessionX, decideIndex,
+            event => event.type === 'turn/end', 'M5C AR turn/end', 120_000)
+          for (const [side, client] of [['A', clientA], ['B', clientB]]) {
+            await client.waitForScreen('approval settled', `M5C AR ${side} read the Host settlement`, 120_000)
+          }
+          assert(!existsSync(join(workRoot, 'approval-allow.marker')),
+            'M5C AR the rejected harmless command executed')
+          // A lost the SAME Host delivery: its sheet is withdrawn; the later
+          // `y` is ordinary editor text and must not allow or re-decide.
+          await clientA.waitForScreenGone('[y] Allow once', 'M5C AR loser A sheet withdrawn', 120_000)
+          assert(!(await clientA.viewport()).join('\n').includes('[n] Reject'),
+            'M5C AR loser A still paints the approval actions')
+          clientA.send('m5c-a-editor-after-approval')
+          await clientA.waitForComposerDraft('m5c-a-editor-after-approval', 30_000)
+          clientA.send('\x15')
+          await clientA.waitForScreenGone('m5c-a-editor-after-approval', 'M5C AR loser A cleared its editor draft', 30_000)
+          const lateIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+          clientA.send('y')
+          await sleep(300)
+          clientA.send('\x15')
+          await sleep(300)
+          assert(!(await clientA.viewport()).join('\n').includes('[y] Allow once'),
+            'M5C AR a late loser key reopened the settled ApprovalSheet')
+          const decisions = (hostSessionEvents(dshHome, sessionX) ?? [])
+            .filter(event => event.type === 'approval/decided' && String(event.data?.id) === requestId)
+          assert(decisions.length === 1 && decisions[0].data.outcome === 'rejected',
+            'M5C AR the late loser allow produced a second/changed Host decision')
+          assert((hostSessionEvents(dshHome, sessionX) ?? []).slice(lateIndex)
+            .every(event => event.type !== 'approval/decided' && event.type !== 'tool/result'),
+          'M5C AR a late loser key produced Host activity')
+          assert(readC1WorkEvents(workRoot).every(event => !(event.kind === 'approval-settled'
+            && event.outcome === 'allowed-once')),
+          'M5C AR the late loser key settled an allowed approval')
+          assert(!existsSync(join(workRoot, 'approval-allow.marker')),
+            'M5C AR the late loser key executed the rejected command')
+          assert((hostSessionEvents(dshHome, sessionX) ?? []).filter(event => event.type === 'tool/result'
+            && String(event.data?.message?.toolCallId) === toolCallId).length === 1,
+          'M5C AR the rejected tool call produced a second Host result')
+          assert(alive(aReady.pid) && alive(bReady.pid) && alive(hostBefore.hostPid),
+            'M5C AR a process died during the approval first-settlement proof')
+          assert(lastSurfaceStatus(clientA)?.openSessionId === sessionX
+            && lastSurfaceStatus(clientB)?.openSessionId === sessionX,
+          'M5C AR a Client left Session X after the first settlement')
+          await assertHostIdentityKept(host, hostBefore, 'M5C AR Host after the approval first settlement')
+          await exitC1Client(clientA, 'M5C AR A')
+          assert(alive(bReady.pid), 'M5C AR Client B died when the loser exited')
+          assert(alive(hostBefore.hostPid), 'M5C AR the Host died when the loser exited')
+          await exitC1Client(clientB, 'M5C AR B')
+          const finalEvents = hostSessionEvents(dshHome, sessionX) ?? []
+          const finalProofs = readC1WorkEvents(workRoot)
+          assert(finalEvents.filter(event => event.type === 'approval/asked'
+            && String(event.data?.id) === requestId).length === 1
+            && finalEvents.filter(event => event.type === 'approval/decided'
+              && String(event.data?.id) === requestId && event.data?.outcome === 'rejected').length === 1,
+          'M5C AR the approval was not asked/decided exactly once as rejected')
+          assert(finalProofs.filter(event => event.kind === 'approval-settled').length === 1
+            && finalProofs.filter(event => event.kind === 'approval-failed').length === 0,
+          'M5C AR the fixture settlement was not exactly one rejection')
+          assert(!existsSync(join(workRoot, 'approval-allow.marker')),
+            'M5C AR a marker appeared for the refused command')
+          await stopC1Host(host)
+          trace('m5c-01ar', {
+            hostPid: hostBefore.hostPid,
+            clientAPid: aReady.pid,
+            clientBPid: bReady.pid,
+            wrapperPids: [clientA.child.pid, clientB.child.pid],
+            sessionX,
+            approvalRequestId: requestId,
+            toolCallId,
+            bothPtysSawApproval: true,
+            winner: 'B',
+            hostOutcome: 'rejected',
+            decisions: 1,
+            marker: false,
+            loserWithdrawn: true,
+            loserLateAllowInert: true,
+            sameHostBeforeAfter: true,
+            clientsExitedNormally: true,
+          })
+        }
+
+        // M5C-01AA: the SAME ApprovalSheet is live in both real modals; A's
+        // allow wins the ONE Host waterfall and executes the harmless command
+        // exactly once; B's later `n` neither reverses the settlement nor adds
+        // a decision or a second execution.
+        {
+          const { host, hostBefore, workRoot, clientA, clientB, aReady, bReady, sessionX } =
+            await admitM5cDualSurfaceScene('approval-allow', 'm5c-approval-allow')
+          const triggerIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+          clientA.send('m5c-approval-allow-trigger\r')
+          const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+            event => event.type === 'tool/call' && event.data?.name === 'bash',
+            'M5C AA bash tool/call', 120_000)
+          const toolCallId = String(call.data.callId)
+          const asked = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
+            event => event.type === 'approval/asked', 'M5C AA approval/asked', 120_000)
+          const requestId = String(asked.data.id)
+          assert(typeof asked.data.id === 'string' && asked.data.id !== '',
+            'M5C AA the Host approval request carries no ApprovalRequestId')
+          assert(asked.data.callId === undefined || String(asked.data.callId) === toolCallId,
+            'M5C AA the approval/asked call correlation does not name the bash tool call')
+          const request = await waitForC1WorkEvent(workRoot,
+            event => event.kind === 'approval-request' && event.sessionId === sessionX,
+            'M5C AA Host approval request', 120_000)
+          assert(request.toolName === 'bash', 'M5C AA the approval is not for the official bash tool')
+          assert(String(request.callId) === toolCallId,
+            'M5C AA the fixture approval request names another tool call')
+          const askedBeforeDecision = (hostSessionEvents(dshHome, sessionX) ?? [])
+            .filter(event => event.type === 'approval/asked')
+          assert(askedBeforeDecision.length === 1,
+            `M5C AA the Host asked ${String(askedBeforeDecision.length)} approvals before any decision`)
+          await clientA.waitForScreen('[y] Allow once', 'M5C AA A approval sheet', 120_000)
+          await clientB.waitForScreen('[y] Allow once', 'M5C AA B approval sheet', 120_000)
+          assert((await clientA.viewport()).join('\n').includes('[n] Reject'),
+            'M5C AA Client A painted no reject action')
+          assert((await clientB.viewport()).join('\n').includes('[n] Reject'),
+            'M5C AA Client B painted no reject action')
+          const decideIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+          clientA.send('y')
+          const decided = await waitForHostSessionEventAfter(dshHome, sessionX, decideIndex,
+            event => event.type === 'approval/decided' && String(event.data?.id) === requestId,
+            'M5C AA approval/decided', 120_000)
+          assert(decided.data.outcome === 'allowed-once',
+            `M5C AA the first Host outcome was ${JSON.stringify(decided.data.outcome)}`)
+          const settlement = await waitForC1WorkEvent(workRoot,
+            event => event.kind === 'approval-settled' && event.outcome === 'allowed-once',
+            'M5C AA allowed-once settlement', 60_000)
+          assert(String(settlement.callId) === toolCallId,
+            'M5C AA the allowed settlement names another tool call')
+          assert(readC1WorkEvents(workRoot).every(event => event.kind !== 'approval-failed'),
+            'M5C AA the approval failed at the Host instead of settling allowed-once')
+          const executed = await waitForHostSessionEventAfter(dshHome, sessionX, decideIndex,
+            event => event.type === 'tool/result' && String(event.data?.message?.toolCallId) === toolCallId,
+            'M5C AA executed tool result', 120_000)
+          assert(executed.data?.message?.isError !== true,
+            'M5C AA the allowed harmless command reported a failed Host result')
+          const marker = join(workRoot, 'approval-allow.marker')
+          assert(existsSync(marker), 'M5C AA the allowed harmless command did not execute')
+          assert(readFileSync(marker, 'utf8') === 'c1-approval-allow',
+            'M5C AA the executed marker does not carry the fixture payload')
+          await waitForHostSessionEventAfter(dshHome, sessionX, decideIndex,
+            event => event.type === 'turn/end', 'M5C AA turn/end', 120_000)
+          for (const [side, client] of [['A', clientA], ['B', clientB]]) {
+            await client.waitForScreen('approval settled', `M5C AA ${side} read the Host settlement`, 120_000)
+          }
+          // B lost the SAME Host delivery: its sheet is withdrawn; the later
+          // `n` is ordinary editor text and must not reverse anything.
+          await clientB.waitForScreenGone('[y] Allow once', 'M5C AA loser B sheet withdrawn', 120_000)
+          assert(!(await clientB.viewport()).join('\n').includes('[n] Reject'),
+            'M5C AA loser B still paints the approval actions')
+          clientB.send('m5c-b-editor-after-approval')
+          await clientB.waitForComposerDraft('m5c-b-editor-after-approval', 30_000)
+          clientB.send('\x15')
+          await clientB.waitForScreenGone('m5c-b-editor-after-approval', 'M5C AA loser B cleared its editor draft', 30_000)
+          const lateIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+          clientB.send('n')
+          await sleep(300)
+          clientB.send('\x15')
+          await sleep(300)
+          assert(!(await clientB.viewport()).join('\n').includes('[y] Allow once'),
+            'M5C AA a late loser key reopened the settled ApprovalSheet')
+          const decisions = (hostSessionEvents(dshHome, sessionX) ?? [])
+            .filter(event => event.type === 'approval/decided' && String(event.data?.id) === requestId)
+          assert(decisions.length === 1 && decisions[0].data.outcome === 'allowed-once',
+            'M5C AA the late loser reject produced a second/changed Host decision')
+          assert((hostSessionEvents(dshHome, sessionX) ?? []).slice(lateIndex)
+            .every(event => event.type !== 'approval/decided' && event.type !== 'tool/result'),
+          'M5C AA a late loser key produced Host activity')
+          assert(readC1WorkEvents(workRoot).filter(event => event.kind === 'approval-settled'
+            && event.outcome === 'allowed-once').length === 1,
+          'M5C AA the late loser key settled a second allowed approval')
+          assert(readFileSync(marker, 'utf8') === 'c1-approval-allow',
+            'M5C AA the marker changed after the late loser key')
+          assert((hostSessionEvents(dshHome, sessionX) ?? []).filter(event => event.type === 'tool/result'
+            && String(event.data?.message?.toolCallId) === toolCallId).length === 1,
+          'M5C AA the approved tool call produced a second Host result')
+          assert(alive(aReady.pid) && alive(bReady.pid) && alive(hostBefore.hostPid),
+            'M5C AA a process died during the approval first-settlement proof')
+          assert(lastSurfaceStatus(clientA)?.openSessionId === sessionX
+            && lastSurfaceStatus(clientB)?.openSessionId === sessionX,
+          'M5C AA a Client left Session X after the first settlement')
+          await assertHostIdentityKept(host, hostBefore, 'M5C AA Host after the approval first settlement')
+          await exitC1Client(clientB, 'M5C AA B')
+          assert(alive(aReady.pid), 'M5C AA Client A died when the loser exited')
+          assert(alive(hostBefore.hostPid), 'M5C AA the Host died when the loser exited')
+          await exitC1Client(clientA, 'M5C AA A')
+          const finalEvents = hostSessionEvents(dshHome, sessionX) ?? []
+          const finalProofs = readC1WorkEvents(workRoot)
+          assert(finalEvents.filter(event => event.type === 'approval/asked'
+            && String(event.data?.id) === requestId).length === 1
+            && finalEvents.filter(event => event.type === 'approval/decided'
+              && String(event.data?.id) === requestId && event.data?.outcome === 'allowed-once').length === 1,
+          'M5C AA the approval was not asked/decided exactly once as allowed-once')
+          assert(finalProofs.filter(event => event.kind === 'approval-settled').length === 1
+            && finalProofs.filter(event => event.kind === 'approval-failed').length === 0,
+          'M5C AA the fixture settlement was not exactly one approval')
+          assert(existsSync(marker) && readFileSync(marker, 'utf8') === 'c1-approval-allow',
+            'M5C AA the final marker did not survive the normal exits')
+          await stopC1Host(host)
+          trace('m5c-01aa', {
+            hostPid: hostBefore.hostPid,
+            clientAPid: aReady.pid,
+            clientBPid: bReady.pid,
+            wrapperPids: [clientA.child.pid, clientB.child.pid],
+            sessionX,
+            approvalRequestId: requestId,
+            toolCallId,
+            bothPtysSawApproval: true,
+            winner: 'A',
+            hostOutcome: 'allowed-once',
+            decisions: 1,
+            marker: true,
+            loserWithdrawn: true,
+            loserLateRejectInert: true,
+            sameHostBeforeAfter: true,
+            clientsExitedNormally: true,
+          })
+        }
       }
 
       // T44: a real accepted Turn survives a Client SIGKILL. The LLM stream is
@@ -5290,14 +5807,6 @@ async function main() {
         trace('t48', { hostPid: ready.pid, parentSessionId: sessionId, childId: started.childId, runId: started.runId, childDurable: true })
       }
 
-      const assertInteractionGate = (client, label) => {
-        const gate = client.records.find(record => record.m4b2s === 'qualification' && record.op === 'interaction-startup-gate')
-        assert(gate !== undefined && gate.phase === 'listeners-ready' && gate.agentResolver === true
-          && gate.questionListeners === 1 && gate.approvalListeners === 1 && gate.loaderTasks >= 1,
-        `${label} interaction startup gate was not ready before the first generation: ${JSON.stringify(gate)}`)
-        assert(client.records.filter(record => record.m4b2s === 'qualification' && record.op === 'interaction-startup-gate').length === 1,
-          `${label} registered the interaction startup gate more than once`)
-      }
       // rc.4 exposes no pending inventory: after a Client detaches, the Host
       // status must keep the pending source fail-closed as UNKNOWN with the
       // stable gap reason. This asserts only the absence of an inventory; it
