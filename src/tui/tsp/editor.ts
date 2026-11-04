@@ -443,8 +443,16 @@ export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRe
       return source.charCodeAt(to - 1) === 0x0d && source.charCodeAt(to) === 0x0a
     }
     if (spanCrossesLine(expected.text, start, oldEnd) || spanCrossesLine(next.text, start, newEnd)) return false
-    // The caret the Provider asked for belongs to the replaced token.
-    if (next.cursor < start || next.cursor > newEnd) return false
+    // The caret the Provider asked for must belong to the COMPLETED LINE. It is
+    // not confined to the minimal diff span: the command-name rule appends one
+    // separator space, and when the document already held a space there the
+    // minimal span shrinks past it — the Provider's own landing spot is then one
+    // unit beyond `newEnd`. Requiring the minimal span would silently swallow
+    // those accepts; requiring the line keeps the real invariant (a completion
+    // never parks the caret on another line or outside the token it wrote).
+    let lineEnd = start
+    while (lineEnd < next.text.length && next.text.charCodeAt(lineEnd) !== 0x0a) lineEnd += 1
+    if (next.cursor < start || next.cursor > lineEnd) return false
     // The splice is EXACTLY known, so every OTHER paste lease follows it through
     // the tracker (never a re-derivation from path text), and the ↑/↓ browse this
     // draft may have come from is retired with it: a recalled row is ordinary
@@ -658,13 +666,16 @@ export interface TspComposer {
   /**
    * TSP I-C: replace the command token ONE completion produced, atomically and
    * only while the document still matches `expected` exactly. The caret lands
-   * where the Provider put it (never at the end of the draft), every other
-   * paste lease follows the exact splice, the ↑/↓ browse bookmark is retired, and
-   * `onChanged` fires exactly once on success.
+   * where the Provider put it — inside the completed line, keeping the
+   * indentation and the text after the caret — and is never forced to the end of
+   * the draft the way `setDraft` does. Every other paste lease follows the exact
+   * splice, the ↑/↓ browse bookmark is retired, and `onChanged` fires exactly
+   * once on success.
    *
    * Returns `false` — touching NOTHING, no text, no caret, no lease, no render —
    * when the live document/cursor moved, when the caret is not a grapheme
-   * boundary, or when the change is not confined to a single logical line. A
+   * boundary, when the change is not confined to one logical line, or when the
+   * requested caret does not sit inside the line the completion wrote. A
    * rejected completion is how a stale async result or a foreign edit is refused;
    * the caller never re-applies it and never submits anything because of it.
    */

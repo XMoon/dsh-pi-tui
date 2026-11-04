@@ -53,10 +53,10 @@ export const QUIET_COMPOSER_ROLES = {
   send: 'dsh.composer.send',
   stop: 'dsh.composer.stop',
   footerGroup: 'dsh.footer.group',
-  // TSP I-C: the anchored slash-candidate list. It is a SIBLING of the editor
-  // inside the editor's own positioning container, so it floats over the
-  // transcript and takes NO layout height — the Composer box never moves.
-  editorStack: 'dsh.composer.editor-stack',
+  // TSP I-C: the anchored slash-candidate list. It is ONE child of the Composer
+  // shell and positioned absolutely against it, so it floats above the Composer
+  // and takes NO layout height — the editor keeps its exact node path and the
+  // Composer box never moves.
   slashMenu: 'dsh.composer.slash-menu',
   slashItem: 'dsh.composer.slash-item',
   slashName: 'dsh.composer.slash-name',
@@ -308,14 +308,13 @@ export function quietComposerView(input: QuietComposerViewInput): Node {
 
   return ui.col(
     { key: 'quiet-composer', role: QUIET_COMPOSER_ROLES.shell, gap: 'none' },
-    // The editor plus its OWN positioning container: the candidate list floats
-    // up from the editor and covers the transcript, so it takes no layout row
-    // and the Composer, the control line and the Footer never move.
-    ui.col(
-      { key: 'composer-editor-stack', role: QUIET_COMPOSER_ROLES.editorStack, gap: 'none' },
-      ...(slashMenu === undefined ? [] : [slashMenu]),
-      input.editor,
-    ),
+    // TSP I-C: the candidate list is ONE child of the shell it anchors to, so
+    // the editor keeps its EXACT existing node path
+    // (`dock.quiet-composer.composer`) — no new wrapper, no focus-path change.
+    // Absolute positioning takes it out of flow, so the Composer keeps the
+    // height it had before and the transcript never moves.
+    ...(slashMenu === undefined ? [] : [slashMenu]),
+    input.editor,
     ui.row(
       { key: 'composer-controls', role: QUIET_COMPOSER_ROLES.controls, gap: 'sm', align: 'center' },
       ui.col(
@@ -714,24 +713,20 @@ export const QUIET_COMPOSER_STYLES = `
   [data-role='dsh.composer.stop']:hover {
     background: rgb(from var(--bad) r g b / 10%);
   }
-  /* TSP I-C: the editor's own positioning container. It adds no box, no padding
-     and no height of its own — the editor keeps the exact metrics it had as a
-     direct child of the shell — so introducing it cannot move the Composer. */
-  [data-role='dsh.composer.editor-stack'] {
+  /* TSP I-C: the shell is the anchor of its own candidate list. The relative
+     position adds no box, no padding and no height, so the Composer keeps the
+     exact metrics it had before this seat existed. */
+  [data-role='dsh.composer.shell'] {
     position: relative;
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
   }
-  /* The candidate list floats UP from the editor and MAY cover the transcript.
-     It takes no layout height, so the Composer box and the transcript scroll
-     never move (the same anchored pattern the Model quick menu already uses).
-     The budget stays inside the pane at every supported size: a short pane has
-     the least room above the editor, so the list caps low and scrolls. */
+  /* The candidate list floats UP from the Composer shell and MAY cover the
+     transcript above it. It is out of flow, so the Composer, the control line
+     and the Footer never move; the budget stays inside the pane at every
+     supported size, and a short pane scrolls instead of covering the editor. */
   [data-role='dsh.composer.slash-menu'] {
     position: absolute;
-    left: 0;
-    right: 0;
+    left: 12px;
+    right: 12px;
     bottom: calc(100% + 4px);
     z-index: 10;
     display: flex;
