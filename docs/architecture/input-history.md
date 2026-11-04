@@ -208,13 +208,14 @@ Two intentional trade-offs of the bounded window:
 
 The file is oldest-first; the recall API (`SurfaceDisplaySeam.resetInputHistory`,
 implemented by each renderer's adapter over the shared kernel) takes
-**newest-first**. Both editors consume that projection without reversing it:
-the PiTui adapter seeds its editor with the same order, and the TSP composer
-reads the kernel's newest-first snapshot directly at each arrow. The runner
-therefore reverses the loaded entries before seeding. The first `↑` must recall
-the MOST RECENT submission — this is pinned by
-`test/tui/input-experience.test.ts` ("seeded input history recalls entries with
-the up arrow"), `test/client/tui-app.test.ts` and the TSP composer tests.
+**newest-first**. Both editors consume that projection: the PiTui adapter
+mirrors the kernel snapshot into its editor stack in reverse (the editor's
+`addToHistory` unshifts), and the TSP composer reads the kernel's newest-first
+snapshot directly at each arrow. The runner therefore reverses the loaded
+entries before seeding. The first `↑` must recall the MOST RECENT submission —
+this is pinned by `test/tui/input-experience.test.ts` ("seeded input history
+recalls entries with the up arrow"), `test/client/tui-app.test.ts` and the TSP
+composer tests.
 
 ### The two editors' ↑/↓ presentation
 
