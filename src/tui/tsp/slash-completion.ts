@@ -80,8 +80,12 @@ export interface TspSlashCompletion {
   accept(): boolean
   /** Accept the row a click named, ONLY while that row is the current frame's. */
   acceptClick(id: string, revision: number): void
-  /** The popup projection for this frame (`undefined` = nothing to paint). */
-  renderState(): SlashCompletionPopup | undefined
+  /** The popup projection for this frame (`undefined` = nothing to paint).
+   *  `maxRows` is the calling surface's own row budget: the styled shell paints
+   *  the seat window, a pane without `el`+`styles` paints a smaller one — and in
+   *  BOTH cases the window is the one that follows the highlighted row, so a
+   *  candidate the user selected is never off-window. */
+  renderState(maxRows?: number): SlashCompletionPopup | undefined
   /** Whether a popup currently owns this seat's keys. */
   isOpen(): boolean
   /**
@@ -160,16 +164,24 @@ export function createTspSlashCompletion(
     return trimmed.startsWith('/') && !trimmed.includes(' ')
   }
 
+  /** The composer document in the Provider's own (lines, cursorLine, cursorCol)
+   *  shape. `cursorCol` is the caret's column INSIDE its line — the UTF-16
+   *  offset the user is actually at, never that line's length: a query and the
+   *  replacement it computes must describe the token under the caret, so a
+   *  caret in the middle of `/new` with trailing text both sees the right prefix
+   *  and preserves that tail. `SeatDocument.cursor` keeps the flat UTF-16 offset
+   *  the live-document fence compares against. */
   const documentOf = (): SeatDocument => {
     const state = ports.composer.state()
     const lines = state.text.split('\n')
-    const cursorLine = state.text.slice(0, state.cursor).split('\n').length - 1
+    const before = state.text.slice(0, state.cursor)
+    const cursorLine = before.split('\n').length - 1
     return {
       text: state.text,
       cursor: state.cursor,
       lines,
       cursorLine,
-      cursorCol: (lines[cursorLine] ?? '').length,
+      cursorCol: before.length - (before.lastIndexOf('\n') + 1),
     }
   }
 
@@ -216,10 +228,13 @@ export function createTspSlashCompletion(
     // `force:false` ALWAYS: the shared Provider's leading-command branch answers
     // a forced request with `null`, so a forced Tab would mean "never propose".
     // A Tab is a TRIGGER here, never a file-completion request.
-    void installed.getSuggestions([...document.lines], document.cursorLine, document.cursorCol, {
+    // The seat owns BOTH settlements below (fulfilment fences and paints,
+    // rejection closes the browse), so nothing is discarded unhandled and no
+    // second owner exists — the same shape as the mounted renderer's own loop.
+    void installed.getSuggestions([...document.lines], document.cursorLine, document.cursorCol, { // allowlist: the seat's own two-branch settlement
       signal: controller.signal,
       force: false,
-    }).then((result) => { // allowlist: the seat's own suggestion settlement — every branch settles the state
+    }).then((result) => {
       // A newer request, a replaced catalog, a taken seat or a moved document:
       // this answer is dropped and the newer state keeps its own.
       if (pending !== request || request.sourceRevision !== sourceRevision
@@ -425,7 +440,7 @@ export function createTspSlashCompletion(
       shown.selected = index
       accept()
     },
-    renderState: () => {
+    renderState: (maxRows = SLASH_COMPLETION_MAX_ROWS) => {
       const shown = list
       if (shown === undefined || shown.items.length === 0) return undefined
       // A popup the mount can no longer show is withdrawn AT THE PAINT, so a
@@ -439,11 +454,12 @@ export function createTspSlashCompletion(
       // The window walks with the highlighted row; the ORDER stays exactly the
       // Provider's (never re-sorted here) and the default highlight is the first
       // candidate.
+      const budget = Math.max(1, maxRows)
       const start = Math.min(
-        Math.max(0, shown.selected - SLASH_COMPLETION_MAX_ROWS + 1),
-        Math.max(0, total - SLASH_COMPLETION_MAX_ROWS),
+        Math.max(0, shown.selected - budget + 1),
+        Math.max(0, total - budget),
       )
-      const end = Math.min(total, start + SLASH_COMPLETION_MAX_ROWS)
+      const end = Math.min(total, start + budget)
       const rows: SlashCompletionRow[] = []
       for (let index = start; index < end; index += 1) {
         const item = shown.items[index]!

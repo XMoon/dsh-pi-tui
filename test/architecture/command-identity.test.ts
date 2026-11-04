@@ -82,7 +82,7 @@ test('the /skill paths resolve ONE atomic live scope and never pair two identity
 })
 
 test('loadSkill uses the captured scope for every session-scoped operation', () => {
-  const body = span(commandsSource, 'const loadSkill = async (', '\n  const skillDisposers = new Map<string, () => void>()')
+  const body = span(commandsSource, 'const loadSkill = async (', '\n  const replaceSkillCommands = ')
   assert.equal(body.includes('agent.session.id'), false,
     'a session-scoped call must use scope.sessionId, never an agent-derived id')
   // Every catalog interaction goes through a SCOPE-BOUND facade: the captured
