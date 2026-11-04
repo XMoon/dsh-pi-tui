@@ -725,7 +725,7 @@ test('an aborted condition wait stops polling instead of holding the process', (
     import { waitForCondition } from ${JSON.stringify(pathToFileURL(SCRIPT).href)}
     const controller = new AbortController()
     const started = Date.now()
-    setTimeout(() => controller.abort(), 120)
+    setTimeout(() => controller.abort(), 120) // bounded abort window: the probe's own input, not a settle
     try {
       await waitForCondition(() => false, 'probe condition', 240_000, controller.signal)
       process.exit(3)
