@@ -3,10 +3,11 @@
 This document owns the long-lived Host/Client boundary: locality, the semantic
 port contract, Direct/Remote equivalence, currentness/identity rules and the
 qualification tiers. Direct remains the production backend. Remote is the
-internal, Linux-only split-process backend: one Host process plus N Client
-processes (N ≥ 1; `dist/local-host.mjs` / `dist/local-client.mjs`) over an
-authenticated loopback HTTP/WebSocket carrier, entered through ONE lazy Client
-edge (`app/remote-process/local-client-entry.ts -> app/bootstrap.ts`) after
+internal, Linux-only split-process backend: one Host process plus zero or more
+Client processes (`dist/local-host.mjs` / `dist/local-client.mjs`; the Host
+outlives its Clients) over an authenticated loopback HTTP/WebSocket carrier,
+entered through ONE lazy Client edge
+(`app/remote-process/local-client-entry.ts -> app/bootstrap.ts`) after
 the official PluginPackages resolution. It is not a package export, bin, backend
 selector or Session surface. The former in-process composition is retired from
 `src/**` into a test-only carrier and composes no production graph.
@@ -131,12 +132,14 @@ second Host service or runtime graph.
 
 ## Split-process local Host transport
 
-The internal split-process entry is one Host process plus N Client processes
-(N ≥ 1) from ONE installed npm package. It is Linux-only, Linux abstract
-AF_UNIX sockets are its only process admission authority, and the non-Linux
-entry fails before writing runtime files with `B1_PLATFORM_UNSUPPORTED`. No PID
-file, `O_EXCL` marker, registry record or `hasLiveClient()` result may stand in
-for that kernel ownership.
+The internal split-process entry is one Host process plus zero or more Client
+processes from ONE installed npm package; the Host outlives all of its Clients.
+It is Linux-only. Linux abstract AF_UNIX sockets are the kernel admission
+authority for the Host Singleton and for the qualification-only Client seat; a
+real `surface` Client is admitted through the authenticated `/connect` and
+identity chain instead. The non-Linux entry fails before writing runtime files
+with `B1_PLATFORM_UNSUPPORTED`. No PID file, `O_EXCL` marker, registry record or
+`hasLiveClient()` result may stand in for the kernel seat where one is required.
 
 - **Scope.** The official `resolveDshHome()` / `resolveProfileDir()` results
   canonicalized through `realpath` plus the current UID decide the scope. The
@@ -154,9 +157,10 @@ for that kernel ownership.
   binds the second, Client abstract socket for its lifetime; a second
   qualification Client fails `CLIENT_ALREADY_ACTIVE` before spawning or touching
   a Host. A real `surface` Client — and the non-TUI `peer` — binds no
-  profile-global seat: N independent Surface Clients, each with its own PTY,
-  Cordis Client Context, official transport, Session reference and physical
-  surface, may attach to the SAME Host concurrently and share its exact
+  profile-global seat; it is admitted by the authenticated `/connect` + identity
+  chain described below. Zero or more independent Surface Clients, each with
+  its own PTY, Cordis Client Context, official transport, Session reference and
+  physical surface, may attach to the SAME Host concurrently and share its exact
   PID/starttime/`instanceId`. Kernel release on process death is the only
   stale-seat recovery.
 - **Identity is authenticated, never registry-only.** The registry
