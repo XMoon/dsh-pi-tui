@@ -3246,7 +3246,9 @@ async function main() {
       'T36 both /new Sessions must belong to the SAME Host Workspace')
       assert(privateProof.workspaceListCwdDigest === sha16(canonicalClientWorkspaceA),
         'T36 the Host list-row cwd digest is not the Workspace path')
-      assert(privateProof.workspaceMarkerText === 'client-workspace-A\n',
+      // The official page read joins lines, so the expected text carries no
+      // trailing newline.
+      assert(privateProof.workspaceMarkerText === 'client-workspace-A',
         `T36 the Host file read did not return THIS Workspace's marker: ${JSON.stringify(privateProof.workspaceMarkerText)}`)
       trace('t36', {
         sessionId: privateProof.sessionId,
