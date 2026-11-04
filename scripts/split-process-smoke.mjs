@@ -3351,6 +3351,57 @@ async function main() {
       const headerBAfterC = await waitForHostSessionHeader(dshHome, sessionB, 'WS2 B header after C')
       assert(headerAAfterC.cwd === canonicalClientWorkspaceA, 'WS2 a second Client changed A\'s durable Workspace')
       assert(headerBAfterC.cwd === canonicalClientWorkspaceA, 'WS2 a second Client changed B\'s durable Workspace')
+      // WS2-02 (cross-Workspace): this Client's launch cwd is C, but after
+      // resuming Session A (Workspace A) a `/new` must create the fresh Session
+      // in A's Host Workspace — never in the Client launch directory C. This is
+      // the real-wire witness the same-cwd case cannot provide.
+      ws2ClientC.send(`/resume ${sessionA}\r`)
+      await ws2ClientC.waitFor(
+        record => record.m4b2s === 'surface-status' && record.openSessionId === sessionA,
+        'WS2 resume A from Client C',
+        120_000,
+      )
+      await ws2ClientC.waitForScreen('session a', 'WS2 resumed A history in Client C', 120_000)
+      ws2ClientC.send('/new\r')
+      const ws2CrossOpened = await ws2ClientC.waitFor(
+        record => record.m4b2s === 'surface-status'
+          && record.sessionOpen === true
+          && record.openSessionId !== sessionA
+          && record.openSessionId !== sessionC,
+        'WS2 cross-Workspace /new Session',
+        120_000,
+      )
+      const sessionD = ws2CrossOpened.openSessionId
+      assert(typeof sessionD === 'string' && sessionD.startsWith('session-'), 'WS2 cross-Workspace /new has no Session id')
+      const headerD = await waitForHostSessionHeader(dshHome, sessionD, 'WS2 durable D header')
+      assert(headerD.cwd === canonicalClientWorkspaceA,
+        `WS2 /new from Session A must create in A's Host Workspace, not the Client launch cwd: ${String(headerD.cwd)} != ${canonicalClientWorkspaceA}`)
+      ws2ClientC.signalBusiness('SIGUSR2')
+      const ws2CrossProof = await ws2ClientC.waitFor(
+        record => record.m4b2s === 'qualification' && record.op === 'private-rpc-proof' && record.sessionId === sessionD,
+        'WS2 cross-Workspace /new workspace proof',
+        60_000,
+      )
+      assert(ws2CrossProof.workspacePathDigest === sha16(canonicalClientWorkspaceA),
+        `WS2 the /new Session Workspace is not A: ${String(ws2CrossProof.workspacePathDigest)}`)
+      assert(ws2CrossProof.workspaceMatchesClientCwd === false,
+        'WS2 the /new Session Workspace must not be the Client launch directory C')
+      assert(ws2CrossProof.workspaceListCwdDigest === sha16(canonicalClientWorkspaceA),
+        'WS2 the /new Session list-row cwd digest is not A')
+      assert(ws2CrossProof.workspaceMarkerText === 'client-workspace-A',
+        'WS2 the /new Session Host file read must reach A\'s marker')
+      const ws2Rows = Array.isArray(ws2CrossProof.workspaceRows) ? ws2CrossProof.workspaceRows : []
+      const ws2RowA = ws2Rows.find(row => row.pathDigest === sha16(canonicalClientWorkspaceA))
+      const ws2RowC = ws2Rows.find(row => row.pathDigest === sha16(canonicalClientWorkspaceC))
+      assert(ws2RowA !== undefined && Array.isArray(ws2RowA.sessionDigests)
+        && ws2RowA.sessionDigests.includes(sha16(sessionA))
+        && ws2RowA.sessionDigests.includes(sha16(sessionD)),
+      'WS2 the /new Session must join A\'s Host Workspace membership')
+      assert(ws2RowC !== undefined && Array.isArray(ws2RowC.sessionDigests)
+        && ws2RowC.sessionDigests.includes(sha16(sessionC)),
+      'WS2 the earlier Client-C Session must stay in Workspace C')
+      assert((await waitForHostSessionHeader(dshHome, sessionC, 'WS2 durable C header after /new')).cwd === canonicalClientWorkspaceC,
+        'WS2 the cross-Workspace /new changed Session C\'s durable Workspace')
       ws2ClientC.send('/exit\r')
       const ws2ClientCExit = await ws2ClientC.waitForExit(60_000)
       assert(ws2ClientCExit.code === 0, `WS2 second Client exit was ${JSON.stringify(ws2ClientCExit)}`)
@@ -3364,6 +3415,9 @@ async function main() {
         clientLaunchCwd: canonicalClientWorkspaceC,
         aWorkspaceKept: headerAAfterC.cwd,
         markerIsolated: true,
+        crossWorkspaceNew: true,
+        crossWorkspaceSessionId: sessionD,
+        crossWorkspaceCwd: canonicalClientWorkspaceA,
       })
 
       // WS-2 negative control: an invalid Host path proposal refuses BEFORE any

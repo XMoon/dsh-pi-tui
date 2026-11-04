@@ -371,7 +371,7 @@ async function main() {
 
     const generation = connection.generation
     const workspaceFace = client.remote.workspace
-    const lifecycle = new RemoteSessionLifecycle(sessions, generation, workspaceFace)
+    const lifecycle = new RemoteSessionLifecycle(sessions, generation, workspaceFace, sessionRemoteFace)
     // WS-2: the ordinary create names an OFFICIAL Host WorkspaceId. The Client
     // launch directory is only the proposal the Host canonicalizes.
     const anchorWorkspace = await lifecycle.resolveWorkspace({ kind: 'host-path', path: anchorDir })

@@ -982,6 +982,7 @@ async function startSurfaceLocalClient(
         let workspacePathDigest: string | undefined
         let workspaceMatchesClientCwd = false
         let workspaceSessionDigests: string[] = []
+        let workspaceRows: { readonly pathDigest: string; readonly sessionDigests: string[] }[] = []
         if (wsRemote.workspace !== undefined) {
           const stream = wsRemote.workspace.follow()
           try {
@@ -989,6 +990,12 @@ async function startSurfaceLocalClient(
               if (frame.type !== 'baseline') break
               const items = frame.value?.items ?? []
               workspaceCount = items.length
+              // Bounded per-Workspace facts (digests only): a multi-Client
+              // proof needs to see that each Session stayed in ITS Workspace.
+              workspaceRows = items.map(item => ({
+                pathDigest: digest(item.path),
+                sessionDigests: (item.sessionIds ?? []).map(digest),
+              }))
               const member = items.find(item =>
                 Array.isArray(item.sessionIds) && item.sessionIds.map(String).includes(sessionId))
               if (member !== undefined) {
@@ -1056,6 +1063,7 @@ async function startSurfaceLocalClient(
           workspacePathDigest,
           workspaceMatchesClientCwd,
           workspaceSessionDigests,
+          workspaceRows,
           workspaceListCwdDigest: listRow?.cwd === undefined ? undefined : digest(listRow.cwd),
           workspaceMarkerText,
           owners: status().owners,

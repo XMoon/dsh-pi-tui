@@ -79,6 +79,9 @@ function modelHarness(): ModelHarness {
   const selectionQueue: Array<{ ok: true; value: { selected: { provider: string; model: string; reasoningEffort?: string } } } | { ok: false; error: unknown }> = []
   const bound = new Set<string>(['session-a'])
   const session: RemoteModelRemotes = {
+    // The Session namespace carries the official Host Session list (WS-2's
+    // fail-closed historical-header read); the model port never calls it.
+    list: async () => ({ ok: true, value: { items: [] } }),
     modelCatalog: async () => {
       calls.catalog += 1
       // Bind the per-call result BEFORE the gate so out-of-order resolutions

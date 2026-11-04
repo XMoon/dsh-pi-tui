@@ -34,7 +34,7 @@ function harness() {
     workspaceCreates: [] as string[],
     follows: 0,
     followDisposals: 0,
-    refreshes: 0,
+    sessionLists: 0,
   }
   const catalogued = new Set<string>()
   const generations = new Map<string, {
@@ -68,10 +68,10 @@ function harness() {
   let followFrames: Array<{ readonly type: string; readonly value?: { readonly items: readonly RemoteWorkspaceViewLike[] } }> | undefined
   let followFailure: unknown
   let followHook: (() => void) | undefined
-  let listRows: Record<string, { readonly cwd?: string }> = {}
-  let listPhase: 'pending' | 'ready' = 'ready'
-  let refreshFailure: unknown
-  let refreshHook: (() => void) | undefined
+  let sessionListRows: { readonly sessionId: string; readonly cwd?: string }[] = []
+  let sessionListReply: RemoteReadResult<{ readonly items: readonly { readonly sessionId: string; readonly cwd?: string }[] }> | undefined
+  let sessionListFailure: unknown
+  let sessionListHook: (() => void) | undefined
   const sessions: RemoteLifecycleSessions = {
     create: async (options = {}) => {
       calls.creates.push(options)
@@ -146,15 +146,17 @@ function harness() {
       }
       return reference
     },
-    // The Host-authoritative Session list: the only source for a historical
-    // Session's persisted directory when it has no Workspace membership.
-    list: {
-      getSnapshot: () => ({ byId: listRows, phase: listPhase }),
-    },
-    refresh: async () => {
-      calls.refreshes += 1
-      refreshHook?.()
-      if (refreshFailure !== undefined) throw refreshFailure
+  }
+  // WS-2 Finding 1: the historical-header fallback reads the OFFICIAL Host
+  // Session list DIRECTLY, so a failed pull can never fall back to a cached row
+  // (the Client list store carries no pull-failure bit).
+  const sessionList = {
+    list: async () => {
+      calls.sessionLists += 1
+      sessionListHook?.()
+      if (sessionListFailure !== undefined) throw sessionListFailure
+      if (sessionListReply !== undefined) return sessionListReply
+      return { ok: true as const, value: { items: sessionListRows } }
     },
   }
   const workspace: RemoteWorkspaceNamespaceLike = {
@@ -194,7 +196,7 @@ function harness() {
   const lifecycle = new RemoteSessionLifecycle(sessions, {
     getSnapshot: () => generation,
     subscribe: () => () => {},
-  }, workspace)
+  }, workspace, sessionList)
   return {
     lifecycle,
     calls,
@@ -229,10 +231,10 @@ function harness() {
     setFollowFrames: (frames: typeof followFrames) => { followFrames = frames },
     setFollowFailure: (error: unknown) => { followFailure = error },
     setFollowHook: (hook: () => void) => { followHook = hook },
-    setListRows: (rows: Record<string, { readonly cwd?: string }>) => { listRows = rows },
-    setListPhase: (phase: 'pending' | 'ready') => { listPhase = phase },
-    setRefreshFailure: (error: unknown) => { refreshFailure = error },
-    setRefreshHook: (hook: () => void) => { refreshHook = hook },
+    setSessionListRows: (rows: { readonly sessionId: string; readonly cwd?: string }[]) => { sessionListRows = rows },
+    setSessionListReply: (reply: typeof sessionListReply) => { sessionListReply = reply },
+    setSessionListFailure: (error: unknown) => { sessionListFailure = error },
+    setSessionListHook: (hook: () => void) => { sessionListHook = hook },
   }
 }
 
@@ -782,6 +784,36 @@ test('a workspace create whose reply is lost is unavailable and dispatches no Se
   assert.deepEqual(h.calls.workspaceCreates, ['/client/proposal'], 'exactly one Host create was attempted, with no retry')
 })
 
+test('F2: a Host workspace-create failure never echoes the proposed path or the raw detail', async () => {
+  const refused = harness()
+  refused.setWorkspaceCreateReply({
+    ok: false,
+    error: { code: 'workspace/invalid-path', message: 'cannot create a Workspace at "/private/secret/project": EACCES' },
+  })
+  const refusedError = await refused.lifecycle.resolveWorkspace({ kind: 'host-path', path: '/private/secret/project' })
+    .then(() => undefined, (thrown: unknown) => thrown)
+  assert.ok(refusedError instanceof WorkspaceSelectionError)
+  assert.equal(refusedError.kind, 'refused')
+  assert.equal(refusedError.code, 'workspace/invalid-path', 'the official business code is preserved')
+  assert.equal(refusedError.message, 'the Host refused the proposed workspace directory')
+  assert.equal(refusedError.message.includes('/private/secret'), false)
+  assert.equal(refusedError.message.includes('cannot create a Workspace'), false)
+  assert.deepEqual(refused.calls.creates, [])
+
+  const unavailable = harness()
+  unavailable.setWorkspaceCreateReply({
+    ok: false,
+    error: { code: 'gateway/internal', message: 'carrier lost while reading /private/secret/project' },
+  })
+  const unavailableError = await unavailable.lifecycle.resolveWorkspace({ kind: 'host-path', path: '/private/secret/project' })
+    .then(() => undefined, (thrown: unknown) => thrown)
+  assert.ok(unavailableError instanceof WorkspaceSelectionError)
+  assert.equal(unavailableError.kind, 'unavailable')
+  assert.equal(unavailableError.code, 'gateway/internal')
+  assert.equal(unavailableError.message, 'the Host Workspace state is unavailable')
+  assert.equal(unavailableError.message.includes('/private/secret'), false)
+})
+
 test('resolveWorkspace(workspace-id) reads exactly one follow baseline and refuses an unknown identity', async () => {
   const h = harness()
   h.setWorkspaceRows([workspaceRow({ workspaceId: 'ws-a', path: '/host/a' })])
@@ -799,23 +831,23 @@ test('resolveWorkspace(workspace-id) reads exactly one follow baseline and refus
   assert.equal(h.calls.followDisposals, 2)
 })
 
-test('resolveWorkspace(source-session) uses official membership FIRST, never the list header cwd', async () => {
+test('resolveWorkspace(source-session) uses official membership FIRST, never the Host list row', async () => {
   const h = harness()
   h.setWorkspaceRows([workspaceRow({ workspaceId: 'ws-member', path: '/host/member', sessionIds: ['session-a'] })])
-  h.setListRows({ 'session-a': { cwd: '/host/status-only' } })
+  h.setSessionListRows([{ sessionId: 'session-a', cwd: '/host/status-only' }])
   assert.deepEqual(await h.lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'session-a' }),
     { workspaceId: 'ws-member', path: '/host/member' })
-  assert.equal(h.calls.refreshes, 0, 'membership-first never needs the Session list')
+  assert.equal(h.calls.sessionLists, 0, 'membership-first never reads the Host Session list')
   assert.deepEqual(h.calls.workspaceCreates, [])
 })
 
 test('resolveWorkspace(source-session) falls back to the persisted immutable header directory', async () => {
   const h = harness()
   h.setWorkspaceRows([])
-  h.setListRows({ 'session-a': { cwd: '/host/old-project' } })
+  h.setSessionListRows([{ sessionId: 'session-a', cwd: '/host/old-project' }])
   const resolved = await h.lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'session-a' })
   assert.deepEqual(resolved, { workspaceId: 'ws-1', path: '/host/old-project' })
-  assert.equal(h.calls.refreshes, 1)
+  assert.equal(h.calls.sessionLists, 1, 'exactly one official Host Session-list read')
   assert.deepEqual(h.calls.workspaceCreates, ['/host/old-project'],
     'the header directory is only a Host path proposal')
 })
@@ -823,19 +855,42 @@ test('resolveWorkspace(source-session) falls back to the persisted immutable hea
 test('resolveWorkspace(source-session) without a listed header cwd is unavailable and adopts nothing', async () => {
   const h = harness()
   h.setWorkspaceRows([])
-  h.setListRows({})
-  const error = await h.lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'session-a' })
+  h.setSessionListRows([])
+  const absent = await h.lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'session-a' })
     .then(() => undefined, (thrown: unknown) => thrown)
-  assert.ok(error instanceof WorkspaceSelectionError)
-  assert.equal(error.kind, 'unavailable')
+  assert.ok(absent instanceof WorkspaceSelectionError)
+  assert.equal(absent.kind, 'unavailable')
   assert.deepEqual(h.calls.workspaceCreates, [], 'no Workspace is created from an absent header cwd')
 
-  h.setListPhase('pending')
-  h.setListRows({ 'session-a': { cwd: '/host/old-project' } })
-  const pending = await h.lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'session-a' })
+  h.setSessionListRows([{ sessionId: 'session-a' }])
+  const noCwd = await h.lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'session-a' })
     .then(() => undefined, (thrown: unknown) => thrown)
-  assert.ok(pending instanceof WorkspaceSelectionError)
-  assert.equal(pending.kind, 'unavailable', 'a pending Host list is never treated as an empty list')
+  assert.ok(noCwd instanceof WorkspaceSelectionError)
+  assert.equal(noCwd.kind, 'unavailable', 'a row without a Host header cwd is never a Client guess')
+})
+
+test('F1: a failed Host Session-list read never falls back to a cached header cwd', async () => {
+  // The official Client list STORE drops the pull state, so its cached row is
+  // indistinguishable from a fresh one. The pre-selection must read the Host
+  // directly and refuse when that read fails: zero Workspace create, zero
+  // Session create, no old-Turn stop.
+  for (const failure of [
+    { reply: { ok: false as const, error: { code: 'gateway/internal', message: 'session list exploded at /private/secret' } } },
+    { thrown: new Error('carrier lost at /private/secret') },
+  ]) {
+    const h = harness()
+    h.setWorkspaceRows([])
+    h.setSessionListRows([{ sessionId: 'session-a', cwd: '/host/cached-old' }])
+    if ('reply' in failure) h.setSessionListReply(failure.reply)
+    else h.setSessionListFailure(failure.thrown)
+    const error = await h.lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: 'session-a' })
+      .then(() => undefined, (thrown: unknown) => thrown)
+    assert.ok(error instanceof WorkspaceSelectionError)
+    assert.equal(error.kind, 'unavailable')
+    assert.equal(error.message.includes('/private/secret'), false, 'the raw Host failure never reaches the user text')
+    assert.deepEqual(h.calls.workspaceCreates, [], 'a failed Host read authorizes no Workspace')
+    assert.deepEqual(h.calls.creates, [], 'a failed Host read dispatches no Session')
+  }
 })
 
 test('a follow stream that never yields its baseline is unavailable, never an empty Workspace set', async () => {

@@ -222,7 +222,9 @@ export function createRemoteM3ASemantics(
       options.promptSerializer,
       options.isDispatchAllowed === undefined ? undefined : { isDispatchAllowed: options.isDispatchAllowed },
     ),
-    sessionLifecycle: new RemoteSessionLifecycle(sessions, generation, remote.workspace),
+    // The ONE Client Remote's official `session` namespace also carries the
+    // fail-closed Session-list read the historical header fallback needs.
+    sessionLifecycle: new RemoteSessionLifecycle(sessions, generation, remote.workspace, remote.session),
     subagent: new RemoteSubagentPort(remote.subagents),
     catalog: {
       models: modelCatalog,

@@ -85,15 +85,6 @@ export interface RemoteWorkspaceViewLike {
   readonly sessionIds: readonly string[]
 }
 
-/** The Host-authoritative Session list subset the pre-selection needs: the
- *  list row's persisted directory. */
-export interface RemoteLifecycleSessionListSnapshot {
-  getSnapshot(): {
-    readonly phase: 'pending' | 'ready'
-    readonly byId: Readonly<Record<string, { readonly cwd?: string } | undefined>>
-  }
-}
-
 /** The official generated `workspace` Remote namespace subset this adapter
  *  consumes: `create` adopts an existing Host directory and `follow` carries
  *  the reconnect-safe state stream. The SAME Client Domain owns it; this
@@ -132,10 +123,27 @@ export interface RemoteLifecycleSessions {
     target: RemoteSessionTarget,
     options: { readonly source: TuiSessionReferenceSource; readonly signal?: AbortSignal },
   ): RemoteSessionReferenceLike
-  /** The Host-authoritative Session list: the only source for a historical
-   *  Session's persisted directory when it has no Workspace membership. */
-  readonly list: RemoteLifecycleSessionListSnapshot
-  refresh(): Promise<void>
+}
+
+/** One official Host Session-list row (the `session.list` summary subset). */
+export interface RemoteSessionListRowLike {
+  readonly sessionId: string
+  readonly cwd?: string
+}
+
+/**
+ * The official generated `session.list` face, read DIRECTLY for the historical
+ * header fallback. The Client list STORE deliberately drops the pull's
+ * `state`/`error` axis (`projectList` projects only `{ids,byId,phase}`), so a
+ * failed Host pull would leave a cached row indistinguishable from a fresh one.
+ * A direct official read fails closed: `ok === false` is `unavailable`, never a
+ * cached header cwd.
+ */
+export interface RemoteSessionListSourceLike {
+  list(
+    request: { readonly cursor?: string },
+    signal?: AbortSignal,
+  ): Promise<RemoteReadResult<{ readonly items: readonly RemoteSessionListRowLike[] }>>
 }
 
 /** Read the caller's cancellation state. Kept behind a call so a re-read after
@@ -254,15 +262,18 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
   private readonly sessions: RemoteLifecycleSessions
   private readonly generation: RemoteConnectionGenerationSource
   private readonly workspace: RemoteWorkspaceNamespaceLike
+  private readonly sessionList: RemoteSessionListSourceLike
 
   constructor(
     sessions: RemoteLifecycleSessions,
     generation: RemoteConnectionGenerationSource,
     workspace: RemoteWorkspaceNamespaceLike,
+    sessionList: RemoteSessionListSourceLike,
   ) {
     this.sessions = sessions
     this.generation = generation
     this.workspace = workspace
+    this.sessionList = sessionList
   }
 
   /**
@@ -326,20 +337,22 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
       result = await this.workspace.create({ path })
     } catch (error) {
       this.requireCurrent(captured, signal)
+      // The official Host message quotes the proposed directory; it is user
+      // data, not something a user-visible failure may echo. The stable code is
+      // preserved for the caller.
       throw new WorkspaceSelectionError(
         'unavailable',
-        `the Host did not answer the workspace create: ${remoteFailureMessage(error)}`,
+        'the Host did not answer the workspace create',
         errorCode(error),
       )
     }
     this.requireCurrent(captured, signal)
     if (!result.ok) {
       const code = errorCode(result.error)
-      const message = remoteFailureMessage(result.error)
       if (code === 'workspace/invalid-path' || code === 'workspace/name-conflict') {
-        throw new WorkspaceSelectionError('refused', message, code)
+        throw new WorkspaceSelectionError('refused', 'the Host refused the proposed workspace directory', code)
       }
-      throw new WorkspaceSelectionError('unavailable', message, code)
+      throw new WorkspaceSelectionError('unavailable', 'the Host Workspace state is unavailable', code)
     }
     const workspace = result.value.workspace
     if (typeof workspace?.workspaceId !== 'string' || workspace.workspaceId === ''
@@ -375,7 +388,7 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
       if (error instanceof WorkspaceSelectionError) throw error
       throw new WorkspaceSelectionError(
         'unavailable',
-        `the Host Workspace state is unavailable: ${remoteFailureMessage(error)}`,
+        'the Host Workspace state is unavailable',
         errorCode(error),
       )
     } finally {
@@ -384,29 +397,35 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
   }
 
   /** The captured Session's persisted immutable header directory, read from
-   *  the Host-authoritative Session list. Never the Client's launch directory
-   *  and never an effective/runtime status cwd. */
+   *  the OFFICIAL Host Session list. Never the Client's launch directory and
+   *  never an effective/runtime status cwd. A failed Host read fails closed:
+   *  the Client list store carries no pull-failure bit, so reading its cached
+   *  row would silently authorize a stale header. */
   private async sourceSessionHeaderPath(
     captured: NonNullable<ReturnType<RemoteConnectionGenerationSource['getSnapshot']>>,
     sessionId: string,
     signal: AbortSignal | undefined,
   ): Promise<string> {
+    let result: RemoteReadResult<{ readonly items: readonly RemoteSessionListRowLike[] }>
     try {
-      await this.sessions.refresh()
+      result = await this.sessionList.list({}, signal)
     } catch (error) {
       this.requireCurrent(captured, signal)
       throw new WorkspaceSelectionError(
         'unavailable',
-        `the Host Session list is unavailable: ${remoteFailureMessage(error)}`,
-        errorCode(error),
+        'the Host Session list is unavailable',
+        errorCode(error) ?? 'session/list-unavailable',
       )
     }
     this.requireCurrent(captured, signal)
-    const snapshot = this.sessions.list.getSnapshot()
-    if (snapshot.phase !== 'ready') {
-      throw new WorkspaceSelectionError('unavailable', 'the Host Session list has not settled', 'session/list-unavailable')
+    if (!result.ok) {
+      throw new WorkspaceSelectionError(
+        'unavailable',
+        'the Host Session list is unavailable',
+        errorCode(result.error) ?? 'session/list-unavailable',
+      )
     }
-    const cwd = snapshot.byId[sessionId]?.cwd
+    const cwd = result.value.items.find(item => item.sessionId === sessionId)?.cwd
     if (typeof cwd !== 'string' || cwd === '') {
       throw new WorkspaceSelectionError('unavailable', `session "${sessionId}" has no Host recorded workspace directory`)
     }

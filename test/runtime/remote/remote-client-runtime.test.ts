@@ -1429,6 +1429,7 @@ test('WORKSPACE. the official workspace namespace creates and follows the Host W
       composed.client.sessions,
       composed.client.connection.generation,
       remote as never,
+      composed.client.remote.session as never,
     )
     // Pre-selection resolves the EXISTING Host Workspace by its canonical path.
     const resolved = await lifecycle.resolveWorkspace({ kind: 'host-path', path: target })

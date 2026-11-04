@@ -44,6 +44,14 @@ export interface RemoteModelRemotes {
     readonly model: string
     readonly reasoningEffort?: string
   }): Promise<RemoteResultLike<{ readonly selected: ModelSelectionDto }>>
+  /** The official Host-authoritative Session list (WS-2): the fail-closed read
+   *  for a historical Session's persisted header cwd. */
+  list(
+    request: { readonly cursor?: string },
+    signal?: AbortSignal,
+  ): Promise<RemoteResultLike<{
+    readonly items: readonly { readonly sessionId: string; readonly cwd?: string }[]
+  }>>
 }
 
 /** The official generated `llm` Remote namespace the wizard probe needs

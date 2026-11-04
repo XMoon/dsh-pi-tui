@@ -2997,9 +2997,13 @@ test('the real /new uses the captured Session Host Workspace membership, never t
   const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
   try {
     const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
-    // The live Session BELONGS to a Host Workspace whose directory differs from
-    // both the Client launch directory and the Session's own header cwd.
-    const workspaceDir = join(home, 'host-project-y')
+    // A LEGAL Host membership: the Workspace's canonical path equals the
+    // Session's persisted header cwd (the real registry rejects any other
+    // combination). The Client launch directory is a DIFFERENT directory, so a
+    // `/new` that used `runner.cwd`/the launch cwd would create the child
+    // elsewhere; the cross-Workspace launch-vs-membership case is covered on the
+    // real OS wire by the split-process lane (Client cwd C -> Session A -> /new).
+    const workspaceDir = home
     const registry = ctx.get('workspaceRegistry') as {
       create(path: string): Promise<{
         readonly id: string
@@ -3011,13 +3015,16 @@ test('the real /new uses the captured Session Host Workspace membership, never t
     const workspaceY = await registry.create(workspaceDir)
     await workspaceY.attachSession(sessionA.id)
     const before = [...workspaceY.sessionIds]
+    assert.notEqual(process.cwd(), home, 'the launch directory must differ from the Workspace path')
 
     const result = await commandOf(owned, 'new')() as { kind: string; text?: string }
     assert.equal(result.kind, 'success', `the /new must commit: ${result.text ?? ''}`)
     await waitUntil('the fresh Session', () => harness.createdSessions.length === 1, 15_000)
     const child = harness.createdSessions[0]!
     assert.equal(child.header.cwd, workspaceY.path,
-      'the durable cwd is the captured Session’s Host membership, never the launch/header cwd')
+      'the durable cwd is the captured Session’s Host membership, never the Client launch directory')
+    assert.notEqual(child.header.cwd, process.cwd(),
+      'the /new Session must not inherit the Client launch directory')
     await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
     assert.deepEqual(workspaceY.sessionIds, [child.id, ...before],
       'the fresh Session is attached to the SAME Workspace as its source')

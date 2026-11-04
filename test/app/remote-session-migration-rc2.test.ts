@@ -130,7 +130,7 @@ test('a migration-required generation is listed read-only, refuses an explicit f
   assert.equal(listed?.formatStatus, 'migration-required',
     'the official Client reports the released artifact as needing migration')
 
-  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace)
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace, runtime.client.remote.session)
   // The TUI fork always refuses implicit migration, and the official Host then
   // refuses a fork of a source that needs migration.
   const forked = await lifecycle.fork({ sourceSessionId: String(id) })
@@ -186,7 +186,7 @@ test('a failed Remote open never replaces the current Session, its draft, or rep
   assert.equal(sessions.list.getSnapshot().byId[migrationId]?.formatStatus, 'migration-required',
     'the target is the real migration-required artifact')
 
-  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace)
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace, runtime.client.remote.session)
   const currentId = 'session-open-failure-current'
   const created = await lifecycle.create({ sessionId: currentId, workspaceId: (await lifecycle.resolveWorkspace({ kind: 'host-path', path: host.anchorDir })).workspaceId })
   assert.equal(created.outcome.kind, 'created', `the current Session must be created: ${created.ownership}/${created.outcome.kind}`)
@@ -360,7 +360,7 @@ test('the Remote owner cancel reaches the real official Host and settles committ
   life.defer(() => runtime.dispose().catch(() => {}))
   const sessions = runtime.client.sessions
   await sessions.refresh()
-  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace)
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace, runtime.client.remote.session)
   const id = 'remote-owner-cancel-wire'
   const created = await lifecycle.create({ sessionId: id, workspaceId: (await lifecycle.resolveWorkspace({ kind: 'host-path', path: host.anchorDir })).workspaceId })
   assert.equal(created.outcome.kind, 'created', `the official create must commit: ${created.ownership}/${created.outcome.kind}`)
