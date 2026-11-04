@@ -724,10 +724,11 @@ export const QUIET_COMPOSER_STYLES = `
      and the Footer never move. The height budget is the REAL measured one: the
      pane is at its shortest in the 900x360 matrix cell, where a 220px/40vh cap
      clipped the sixth painted row and the hint row OUTSIDE the box (proved on
-     the pinned client: the row's visible span was zero). The window is four rows
-     (see SLASH_COMPLETION_MAX_ROWS for why four and not six), which needs ~134px,
-     so this cap keeps the WHOLE painted window visible at every supported cell and
-     appearance, and the scroller stays only the safety net it was meant to be. */
+     the pinned client: the row's visible span was zero). Six rows plus the hint
+     need ~196px, so this cap shows the whole window wherever the pane has room and
+     scrolls only where it does not — at 900x360 the last row is clipped, which the
+     Owner accepted as a recorded limitation because the client reports no pane
+     height for the program to adapt to. */
   [data-role='dsh.composer.slash-menu'] {
     position: absolute;
     left: 12px;
@@ -738,7 +739,7 @@ export const QUIET_COMPOSER_STYLES = `
     flex-direction: column;
     gap: 1px;
     max-width: 100%;
-    max-height: min(146px, 40vh);
+    max-height: min(196px, 40vh);
     overflow-y: auto;
     overflow-x: hidden;
     padding: 4px;
