@@ -324,6 +324,18 @@ test('T09 is two real Surface Clients on one Host while T09Q keeps the qualifica
   assert.match(t09, /client-closed/u)
   assert.match(t09, /registryAfterM5aB\.instanceId === surfaceHostFacts\.instanceId/u)
   assert.match(t09, /trace\('t09',/u)
+  // A's owner/transport facts must come from a CURRENT status record emitted
+  // after B was admitted, not from A's initial ready snapshot.
+  assert.doesNotMatch(t09, /assertClientHostFacts\(c1Ready\.host/u,
+    'T09 must not use A\'s initial ready snapshot as current owner evidence')
+  assert.match(t09, /const aStatusBoundary = c1\.records\.length/u)
+  assert.match(t09, /c1\.records\.indexOf\(record\) >= aStatusBoundary/u)
+  assert.match(t09, /assertClientHostFacts\(currentA\.host, surfaceHostFacts, 'T09 Client A current'\)/u)
+  assert.match(t09, /currentA\.activeWrappers === 1/u)
+  assert.match(t09, /currentA\.liveSockets === 1/u)
+  assert.match(t09, /currentA\.owners\?\.\[owner\] === 1/u)
+  assert.match(t09, /currentB\?\.openSessionId === sessionM5aB/u,
+    'T09 must prove Client B is untouched by A\'s own status refresh')
   // Only ONE new dual-surface positive exists.
   assert.equal((source.match(/\/\/ T09 \(M5-A\): a SECOND real Surface Client/gu) ?? []).length, 1,
     'the real dual-surface positive must exist exactly once')

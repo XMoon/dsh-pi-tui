@@ -3221,14 +3221,10 @@ async function main() {
         assert(m5aClientBReady.owners?.[owner] === 1, `T09 Client B expected exactly one ${owner} owner`)
       }
       assertClientHostFacts(m5aClientBReady.host, surfaceHostFacts, 'T09 Client B')
-      // A's own ready facts already named the same Host; both business PIDs are
-      // live at the same time and neither is the Host nor a `script(1)` wrapper.
-      assertClientHostFacts(c1Ready.host, surfaceHostFacts, 'T09 Client A')
-      assert(c1Ready.activeWrappers === 1 && c1Ready.liveSockets === 1,
-        'T09 Client A lost its own transport wrappers/sockets while B was admitted')
-      for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
-        assert(c1Ready.owners?.[owner] === 1, `T09 Client A expected exactly one ${owner} owner`)
-      }
+      // A must still be a live process while B is admitted. A's CURRENT owner,
+      // transport and identity facts are asserted from a fresh authoritative
+      // `surface-status` produced below (after B has its own open Session);
+      // the initial ready snapshot is never used as proof of current ownership.
       assert(typeof c1Ready.pid === 'number' && typeof m5aClientBReady.pid === 'number'
         && c1Ready.pid !== m5aClientBReady.pid,
         'T09 the two surface Clients must be two different business PIDs')
@@ -3287,6 +3283,65 @@ async function main() {
       assert(alive(c1Ready.pid), 'T09 Client A died while B was admitted')
       assert(alive(surfaceHostPid), 'T09 the Host died while both surface Clients were admitted')
 
+      // A's CURRENT facts (identity, one owner per official service, one
+      // wrapper/socket, connected + mounted) must be proved on a record emitted
+      // AFTER B was admitted, not on A's initial ready snapshot. A frozen
+      // `surface` entry owns its tty and deliberately has no B1 JSON control
+      // channel, so there is no on-demand status read; a status projection is
+      // emitted only when an official status key changes. Drive A's own real
+      // navigation (a disposable Session with no user message, in A's Host
+      // Workspace) and read the next authoritative `surface-status`: first for
+      // leaving Session A, then for returning to it. The assertion below is
+      // "the next surface-status after B was ready while B is still alive", not
+      // an atomic snapshot of B's ready instant.
+      const aStaleStatus = lastSurfaceStatus(c1)
+      assert(aStaleStatus?.sessionOpen === true && aStaleStatus.openSessionId === sessionA
+        && aStaleStatus.transport === 'connected',
+      'T09 Client A has no connected Session A status before its status refresh')
+      c1.send('/new\r')
+      const aTemporaryStatus = await c1.waitFor(
+        record => record.m4b2s === 'surface-status'
+          && record.sessionOpen === true
+          && typeof record.openSessionId === 'string'
+          && record.openSessionId !== sessionA,
+        'T09 Client A current status via a disposable Session',
+        120_000,
+      )
+      const temporaryASessionId = aTemporaryStatus.openSessionId
+      assert(temporaryASessionId !== sessionM5aB,
+        'T09 Client A must never open Client B\'s Session')
+      const aStatusBoundary = c1.records.length
+      c1.send(`/resume ${sessionA}\r`)
+      const currentA = await c1.waitFor(
+        record => c1.records.indexOf(record) >= aStatusBoundary
+          && record.m4b2s === 'surface-status'
+          && record.sessionOpen === true
+          && record.openSessionId === sessionA
+          && record.transport === 'connected',
+        'T09 Client A current status restored to Session A',
+        120_000,
+      )
+      assertClientHostFacts(currentA.host, surfaceHostFacts, 'T09 Client A current')
+      assert(currentA.transport === 'connected', `T09 Client A current transport is ${JSON.stringify(currentA.transport)}`)
+      assert(currentA.surfaceMounted === true, 'T09 Client A current surface is not mounted')
+      assert(currentA.activeWrappers === 1, `T09 Client A currently owns ${String(currentA.activeWrappers)} wrapper(s)`)
+      assert(currentA.liveSockets === 1, `T09 Client A currently owns ${String(currentA.liveSockets)} socket(s)`)
+      for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+        assert(currentA.owners?.[owner] === 1, `T09 Client A currently owns ${owner} ${String(currentA.owners?.[owner])}`)
+      }
+      assert(alive(c1Ready.pid), 'T09 Client A died during its own status refresh')
+      // A's own navigation must not touch the concurrently admitted Client B.
+      const currentB = lastSurfaceStatus(m5aClientB)
+      assert(alive(m5aClientBReady.pid), 'T09 Client B died when A navigated Sessions')
+      assert(currentB?.transport === 'connected' && currentB?.openSessionId === sessionM5aB,
+        'T09 Client B lost its own Session/transport when A navigated')
+      await m5aClientB.waitForScreen('m5a client b', 'T09 Client B kept its own transcript')
+      await c1.waitForScreen('session a', 'T09 Client A restored its own transcript')
+      // Evidence limitation: the disposable navigation leaves ONE Session in
+      // A's Host Workspace that receives no user message or turn (the Host
+      // persists only its creation record); A's durable Session A
+      // header/content stay unchanged (re-asserted below after B exits).
+
       // B exits NORMALLY while A keeps running: only B's own Client resources
       // are released; A, the Host identity and the registry/launch material
       // stay. A's continued navigation is the next real T31 action.
@@ -3327,6 +3382,10 @@ async function main() {
         workspaceBDigest: sha16(canonicalM5aWorkspaceB),
         distinctBusinessPids: c1Ready.pid !== m5aClientBReady.pid,
         bothReadyConcurrently: true,
+        clientACurrentStatusAfterB: true,
+        clientACurrentOwners: currentA.owners,
+        clientACurrentWrappers: currentA.activeWrappers,
+        clientACurrentSockets: currentA.liveSockets,
         clientBNormalExit: m5aClientBExit.code,
         clientBClosed: true,
         clientAKept: true,
@@ -3334,9 +3393,15 @@ async function main() {
       })
 
       // T31: Session switch A -> B -> A, each with retained-window hydration.
+      // Each wait is bounded to the records appended AFTER its own command:
+      // an earlier Session-A status must never satisfy a later switch.
+      const t31NewBoundary = c1.records.length
       c1.send('/new\r')
       const openedB = await c1.waitFor(
-        record => record.m4b2s === 'surface-status' && record.sessionOpen === true && record.openSessionId !== sessionA,
+        record => c1.records.indexOf(record) >= t31NewBoundary
+          && record.m4b2s === 'surface-status'
+          && record.sessionOpen === true
+          && record.openSessionId !== sessionA,
         'T31 new Session',
         120_000,
       )
@@ -3345,23 +3410,32 @@ async function main() {
       c1.send('session b\r')
       await c1.waitForScreen('session b', 'T31 Session B user message')
       await c1.waitForScreen('stub answer', 'T31 Session B assistant answer')
+      const t31BackToABoundary = c1.records.length
       c1.send(`/resume ${sessionA}\r`)
       await c1.waitFor(
-        record => record.m4b2s === 'surface-status' && record.openSessionId === sessionA,
+        record => c1.records.indexOf(record) >= t31BackToABoundary
+          && record.m4b2s === 'surface-status'
+          && record.openSessionId === sessionA,
         'T31 switch back to A',
         120_000,
       )
       await c1.waitForScreen('session a', 'T31 Session A re-hydration')
+      const t31ToBBoundary = c1.records.length
       c1.send(`/resume ${sessionB}\r`)
       await c1.waitFor(
-        record => record.m4b2s === 'surface-status' && record.openSessionId === sessionB,
+        record => c1.records.indexOf(record) >= t31ToBBoundary
+          && record.m4b2s === 'surface-status'
+          && record.openSessionId === sessionB,
         'T31 switch to B',
         120_000,
       )
       await c1.waitForScreen('session b', 'T31 Session B re-hydration')
+      const t31FinalABoundary = c1.records.length
       c1.send(`/resume ${sessionA}\r`)
       await c1.waitFor(
-        record => record.m4b2s === 'surface-status' && record.openSessionId === sessionA,
+        record => c1.records.indexOf(record) >= t31FinalABoundary
+          && record.m4b2s === 'surface-status'
+          && record.openSessionId === sessionA,
         'T31 switch A -> B -> A',
         120_000,
       )
