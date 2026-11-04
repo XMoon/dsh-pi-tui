@@ -768,6 +768,20 @@ test('resolveWorkspace(host-path) refuses a Host invalid-path reply and dispatch
   assert.deepEqual(h.calls.creates, [])
 })
 
+test('a workspace create whose reply is lost is unavailable and dispatches no Session', async () => {
+  const h = harness()
+  // WS2-10: the Host may have committed the Workspace, but the Client cannot
+  // prove its identity. That is `unavailable` — never a fabricated Workspace id,
+  // never an empty result, and zero Session dispatch.
+  h.setWorkspaceCreateFailure({ code: 'gateway/internal', message: 'carrier lost after dispatch' })
+  const error = await h.lifecycle.resolveWorkspace({ kind: 'host-path', path: '/client/proposal' })
+    .then(() => undefined, (thrown: unknown) => thrown)
+  assert.ok(error instanceof WorkspaceSelectionError)
+  assert.equal(error.kind, 'unavailable')
+  assert.deepEqual(h.calls.creates, [], 'an unprovable Workspace never dispatches a Session')
+  assert.deepEqual(h.calls.workspaceCreates, ['/client/proposal'], 'exactly one Host create was attempted, with no retry')
+})
+
 test('resolveWorkspace(workspace-id) reads exactly one follow baseline and refuses an unknown identity', async () => {
   const h = harness()
   h.setWorkspaceRows([workspaceRow({ workspaceId: 'ws-a', path: '/host/a' })])
