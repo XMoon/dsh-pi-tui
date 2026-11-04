@@ -3302,9 +3302,9 @@ export function applyRunnerWithRuntime(
     // the TuiApp reference (the surface owner keeps the lifetime); the TSP
     // renderer branch has NO TuiApp (the slot stays undefined: command
     // registrations skip their completions install, input-gated execution
-    // paths never run) — every PiTui-only step below (the
+    // paths never run) — the PiTui-only steps in the block below (the
     // keymap/theme/footer boot application, the plugin-keybinding sync, the
-    // extension chrome seams, focus reporting) is skipped for it, exactly as
+    // extension chrome seams, focus reporting) are skipped for it, exactly as
     // the A0 audit classified them (display-preference chrome, never business
     // state: Tern owns its own theme, keymap and chrome).
     const tspRenderer = rendererMount !== undefined
@@ -3346,16 +3346,14 @@ export function applyRunnerWithRuntime(
       // are PiTui chrome; Tern owns the equivalent presentation natively.
       settings.applyBootDisplay()
       settings.applyFooterSettings()
-      // The editor recall seed is PiTui-only on this branch (the read-only
-      // renderer has no editor); the JSONL history store still accumulates.
-      // A startup RESUME publishes its Session owner BEFORE this mount and its
-      // hydration reseeds ↑ from that Session's own rows, so seeding the launch
-      // cwd's whole history here would expose every earlier Session's rows — and
-      // let them be resubmitted into this one — for as long as that reseed takes
-      // (arbitrarily long on Remote, where the read is awaited). A fresh start has
-      // no owner yet, so the boot recall is exactly what it is for.
-      if (ownership.currentSessionId() === undefined) history.activateBootRecall()
     }
+    // The editor recall seed is a formal boot fact of the mounted surface, not
+    // PiTui-only chrome: PiTui and TSP share the same InputHistory owner and
+    // display seam. A startup RESUME already published its Session owner before
+    // this point, so the guard keeps the cwd pool out of a live-session reseed
+    // window. A fresh/sessionless start has no owner and receives the launch
+    // cwd's recall seed.
+    if (ownership.currentSessionId() === undefined) history.activateBootRecall()
     // Fresh/deferred startup title: no session yet — cwd identity only. The
     // terminal-local cwd is published alongside it (OSC 7; no-op off Tern).
     status.refreshTerminalTitle()
