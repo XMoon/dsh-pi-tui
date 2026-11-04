@@ -1424,11 +1424,14 @@ test('a real Remote /new leaves the running old turn alive while it commits the 
   }, 20_000)
 
   // 2. The navigation left the old Host Turn RUNNING: no Host cancel was
-  //    dispatched. The held model request is still inside its gate (this test
-  //    never releases it) and the durable log carries no `turn/end` at all —
-  //    only a cancellation could have ended the step.
+  //    dispatched. The no-cancel proof is the AGENT STATE plus the durable log:
+  //    the old Agent still reports `running` after the fresh owner committed,
+  //    and the old Session carries no `turn/end` at all — only a cancellation
+  //    could have ended the held step (this test never releases the hold).
+  //    The adapter counter is cumulative, so it only proves WHICH model
+  //    request was held before the navigation; it is not a live-state probe.
   assert.equal(oldAgent.status, 'running', 'the old Host Agent kept running across the navigation')
-  assert.ok(adapter.heldStreamCount >= 1, 'the held model request is still inside its gate')
+  assert.ok(adapter.heldStreamCount >= 1, 'the held model request had entered its gate before the navigation')
   assert.equal(oldSession.snapshotEvents().some(event => event.type === 'turn/end'), false,
     'the old Turn wrote no durable end: the navigation must not cancel it')
   assert.ok(oldSession.snapshotEvents().some(event => event.type === 'step/start'),
