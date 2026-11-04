@@ -1815,6 +1815,11 @@ export function applyRunnerWithRuntime(
           presentation.applySessionCurrentFacts(id)
           status.refresh()
           status.updateWelcomeCard()
+          // The ingress also follows the official `inbox` projection: a queued
+          // or steering occurrence written by ANOTHER Client reaches the ONE
+          // pending pane only after that projection value lands, so re-join the
+          // presentation here instead of guessing from the durable event.
+          surface.refreshPendingInput()
         },
         onWindowRefoldRequired: (id, reason) => {
           // S3-R0: the incremental sequence is no longer trustworthy (generation

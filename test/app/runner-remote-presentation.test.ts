@@ -847,6 +847,77 @@ test('the official pendingSubmissions echo drives the pending-presentation join 
   void submission
 })
 
+test('an external inbox projection update re-joins the queue pane without a durable session event', async (t) => {
+  const life = testLifecycle(t)
+  const mainId = 'm3-4-pr2-inbox-face'
+  const hostPreset = 'm3-4-pr2-preset'
+  const seedHost = await mountRemotePresentationHost(life, hostPreset)
+  // The Agent route is required for the PRIMING turn to reach the adapter.
+  await seedHost.harness.create(SessionId(mainId), { provider: 'smoke', model: 'smoke-model' } as never, { cwd: seedHost.anchorDir })
+  const fixture = await mountRemoteRunner(life, { presetId: hostPreset, resumeSessionId: mainId, host: seedHost })
+  const app = await waitForApp(fixture)
+  const binding = fixture.aggregate.wire.client.sessions.binding(SessionId(mainId) as never) as {
+    session: {
+      getSnapshot(): { readonly running: boolean }
+      prompt(content: readonly { readonly type: 'text'; readonly text: string }[], mode: 'queue' | 'steer'): Promise<unknown>
+      readonly projections: {
+        apply(key: string, value: unknown, seq: number): void
+        seqOf(key: string): number | undefined
+        faceOf(key: string): { getSnapshot(): unknown }
+      }
+    }
+  } | undefined
+  assert.ok(binding !== undefined, 'the retained binding serves the official inbox projection face')
+  // Readiness gate: a REAL primed turn must be PAINTED through the live
+  // ingress. That proves the per-session projection faces are subscribed
+  // before the projection-only change below (the ingress installs them).
+  await binding.session.prompt([{ type: 'text', text: 'prime the live ingress' }], 'queue')
+  await waitFor('the live ingress paints the real answer', () => {
+    return fixture.vt.getViewport().join('\n').includes('remote reply')
+  }, 20_000)
+  // The Host inbox has drained and the projection caught up: no late frame can
+  // overwrite the injected value below (the session is idle and has no pending
+  // input, so no further inbox mutation is produced).
+  await waitFor('the primed turn settled and the Host inbox drained', () => {
+    if (binding.session.getSnapshot().running) return false
+    const inbox = binding.session.projections.faceOf('inbox').getSnapshot() as {
+      readonly 'next-turn': readonly unknown[]
+      readonly 'next-step': readonly unknown[]
+    } | undefined
+    return inbox !== undefined && inbox['next-turn'].length === 0 && inbox['next-step'].length === 0
+  }, 20_000)
+  assert.deepEqual(app.pendingInputForTest().queued, [], 'the primed turn leaves no queued row')
+  assert.deepEqual(app.pendingInputForTest().tail, [], 'the primed turn leaves no tail row')
+  // The OFFICIAL Host frame path for ANOTHER Client's mutation: the whole
+  // inbox projection value is delivered to the retained Client store. No
+  // durable `agent/inbox/spliced` event, no local echo, no keyboard input —
+  // the projection notification is the ONLY possible trigger.
+  const occurrence = {
+    id: 'm3-4-pr2-external-inbox',
+    role: 'user',
+    content: [{ type: 'text', text: 'queued by another client' }],
+    source: { kind: 'user', rpcId: 'm3-4-pr2-external-rpc' },
+  }
+  binding.session.projections.apply('inbox', {
+    'next-turn': [occurrence],
+    'next-step': [],
+  }, (binding.session.projections.seqOf('inbox') ?? 0) + 1)
+  await waitFor('the external inbox occurrence joins the queue pane', () => {
+    return app.pendingInputForTest().queued.some(row => row.text === 'queued by another client')
+  }, 15_000)
+  assert.equal(
+    app.pendingInputForTest().tail.some(row => row.row?.text === 'queued by another client'),
+    false,
+    'a queued occurrence never rides the transcript tail lane',
+  )
+  // The occurrence exists ONLY in the projection: the durable Host window has
+  // no matching user message (a projection frame is the sole trigger).
+  const read = await fixture.override.presentation.presentationReader.read(mainId)
+  assert.ok(read !== undefined, 'the presentation reader serves the retained session')
+  assert.equal(JSON.stringify(read.durableEvents).includes('queued by another client'), false,
+    'the projection-only occurrence must not appear as a durable Host event')
+})
+
 async function waitForApp(fixture: RemoteRunnerFixture): Promise<{
   pendingInputForTest(): {
     queued: Array<{ text?: string }>
