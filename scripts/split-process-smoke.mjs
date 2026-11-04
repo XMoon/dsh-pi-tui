@@ -5036,8 +5036,12 @@ async function main() {
           const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
             event => event.type === 'tool/call' && event.data?.name === 'ask_user_question',
             'M5C question tool/call', 120_000)
-          const callId = String(call.data.callId)
-          assert(callId !== '', 'M5C the question tool/call carries no callId')
+          // Validate the DURABLE field BEFORE touching it: a missing/foreign
+          // value coerced with String() would become the fabricated 'undefined'
+          // and silently pass every correlation below.
+          assert(typeof call.data.callId === 'string' && call.data.callId !== '',
+            'M5C the question tool/call carries no callId')
+          const callId = call.data.callId
           const request = await waitForC1WorkEvent(workRoot,
             event => event.kind === 'question-request' && event.sessionId === sessionX,
             'M5C Host question request', 120_000)
@@ -5139,6 +5143,11 @@ async function main() {
             && String(event.data?.message?.toolCallId) === callId).length === 1,
           'M5C the Host wrote more than one tool result for the question call')
           await stopC1Host(host)
+          // A swallowed shutdown is NOT a normal end: the Host entry exits 0
+          // only when its official owner shutdown completed without any
+          // cleanup failure, so the M5-C scene must assert the real result.
+          assert(host.exited === true && host.exitResult?.code === 0 && host.exitResult?.signal === null,
+            `M5C the Host did not shut down normally: ${JSON.stringify(host.exitResult)}`)
           trace('m5c-01q', {
             hostPid: hostBefore.hostPid,
             clientAPid: aReady.pid,
@@ -5153,6 +5162,7 @@ async function main() {
             loserLateKeyInert: true,
             sameHostBeforeAfter: true,
             clientsExitedNormally: true,
+            hostExitCode: host.exitResult.code,
           })
         }
 
@@ -5167,7 +5177,9 @@ async function main() {
           const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
             event => event.type === 'tool/call' && event.data?.name === 'bash',
             'M5C AR bash tool/call', 120_000)
-          const toolCallId = String(call.data.callId)
+          assert(typeof call.data.callId === 'string' && call.data.callId !== '',
+            'M5C AR the bash tool/call carries no callId')
+          const toolCallId = call.data.callId
           const asked = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
             event => event.type === 'approval/asked', 'M5C AR approval/asked', 120_000)
           const requestId = String(asked.data.id)
@@ -5273,6 +5285,8 @@ async function main() {
           assert(!existsSync(join(workRoot, 'approval-allow.marker')),
             'M5C AR a marker appeared for the refused command')
           await stopC1Host(host)
+          assert(host.exited === true && host.exitResult?.code === 0 && host.exitResult?.signal === null,
+            `M5C AR the Host did not shut down normally: ${JSON.stringify(host.exitResult)}`)
           trace('m5c-01ar', {
             hostPid: hostBefore.hostPid,
             clientAPid: aReady.pid,
@@ -5290,6 +5304,7 @@ async function main() {
             loserLateAllowInert: true,
             sameHostBeforeAfter: true,
             clientsExitedNormally: true,
+            hostExitCode: host.exitResult.code,
           })
         }
 
@@ -5305,7 +5320,9 @@ async function main() {
           const call = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
             event => event.type === 'tool/call' && event.data?.name === 'bash',
             'M5C AA bash tool/call', 120_000)
-          const toolCallId = String(call.data.callId)
+          assert(typeof call.data.callId === 'string' && call.data.callId !== '',
+            'M5C AA the bash tool/call carries no callId')
+          const toolCallId = call.data.callId
           const asked = await waitForHostSessionEventAfter(dshHome, sessionX, triggerIndex,
             event => event.type === 'approval/asked', 'M5C AA approval/asked', 120_000)
           const requestId = String(asked.data.id)
@@ -5411,6 +5428,8 @@ async function main() {
           assert(existsSync(marker) && readFileSync(marker, 'utf8') === 'c1-approval-allow',
             'M5C AA the final marker did not survive the normal exits')
           await stopC1Host(host)
+          assert(host.exited === true && host.exitResult?.code === 0 && host.exitResult?.signal === null,
+            `M5C AA the Host did not shut down normally: ${JSON.stringify(host.exitResult)}`)
           trace('m5c-01aa', {
             hostPid: hostBefore.hostPid,
             clientAPid: aReady.pid,
@@ -5428,6 +5447,7 @@ async function main() {
             loserLateRejectInert: true,
             sameHostBeforeAfter: true,
             clientsExitedNormally: true,
+            hostExitCode: host.exitResult.code,
           })
         }
       }
