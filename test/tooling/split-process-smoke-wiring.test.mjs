@@ -20,7 +20,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { EntryProcess, PR_A_WEB_ROWS, redactWebQualificationText, statusMatches } from '../../scripts/split-process-smoke.mjs'
+import { EntryProcess, PR_A_WEB_ROWS, raceWithAbortableDeadline, redactWebQualificationText, statusMatches } from '../../scripts/split-process-smoke.mjs'
 import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -613,14 +613,28 @@ test('the official Web composition qualification is discoverable and never fakes
   assert.doesNotMatch(source, /stderr: browserErr/u)
   assert.doesNotMatch(source, /stdout: browserOut/u)
   assert.match(source, /redactWebQualificationText/u)
-  // The driver exit is awaited through a bound, never unbounded.
+  // The driver exit is awaited through a bound whose timer is RELEASED: an
+  // uncancelled delay would keep the process alive for the whole timeout.
   assert.match(source, /const browserExitBounded = async/u)
+  assert.match(source, /export async function raceWithAbortableDeadline/u)
+  assert.match(source, /AbortController/u)
+  assert.match(source, /expiry\.abort\(\)/u)
   assert.match(source, /EXIT_TIMEOUT/u)
   assert.doesNotMatch(source, /await browserExit\.catch/u)
+  // A driver that already exited fails the observation it owns immediately
+  // instead of consuming the whole wait budget.
+  assert.match(source, /const whileBrowserRuns = async/u)
+  assert.match(source, /the real-Browser driver exited \(\$\{String\(outcome\.exit\.code\)\}/u)
+  assert.match(source, /whileBrowserRuns\(\s*\n\s*waitForCondition\(/u)
+  assert.match(source, /whileBrowserRuns\(\s*\n\s*tui\.waitForScreen\(marker/u)
+  // The answer wait stays un-raced on purpose: the driver may exit after its own
+  // paint while the TUI paints the same Turn a moment later.
+  assert.doesNotMatch(source, /whileBrowserRuns\(\s*\n\s*tui\.waitForScreen\('stub answer'/u)
   // The real-Browser driver redacts its own retained failure text.
   const driver = readFileSync(join(ROOT, 'scripts', 'fixtures', 'pr-a-web-browser.mjs'), 'utf8')
   assert.match(driver, /function redacted\(text\)/u)
   assert.match(driver, /result\.error = redacted\(String\(error\.message\)\)/u)
+  assert.match(driver, /result\.consoleErrors\.push\(redacted\(message\.text\(\)\)/u)
   assert.match(driver, /console\.error\(`PR_A_BROWSER_FAILURE: \$\{redacted\(result\.error\)\}`\)/u)
   // The negative controls must restore the isolated install byte for byte.
   assert.match(source, /renameSync\(distIndex, missingDist\)/u)
@@ -673,4 +687,29 @@ test('the Web qualification redactor removes every credential shape from retaine
   assert.throws(() => {
     assert.equal(raw.includes(token), false)
   })
+})
+
+test('a completed abortable deadline releases its timer instead of holding the process', () => {
+  const probe = `
+    import { raceWithAbortableDeadline } from ${JSON.stringify(pathToFileURL(SCRIPT).href)}
+    const started = Date.now()
+    const value = await raceWithAbortableDeadline(
+      Promise.resolve({ code: 0, signal: null }),
+      120_000,
+      { code: null, signal: 'EXIT_TIMEOUT' },
+    )
+    if (value.code !== 0) process.exit(2)
+    console.error('elapsed=' + String(Date.now() - started))
+  `
+  // spawnSync's own 10s bound is the witness: a surviving 120s timer would keep
+  // the child alive past it and make this call report a timeout instead of 0.
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', probe], {
+    encoding: 'utf8',
+    timeout: 10_000,
+  })
+  assert.equal(result.error, undefined, `the probe was still running when its bound expired: ${String(result.error)}`)
+  assert.equal(result.status, 0, `the probe exited ${String(result.status)}: ${result.stderr}`)
+  const elapsed = Number(/elapsed=(\d+)/u.exec(result.stderr ?? '')?.[1] ?? Number.NaN)
+  assert.ok(Number.isFinite(elapsed) && elapsed < 3_000,
+    `the completed deadline took ${String(elapsed)}ms to release; a bare sleep would hold it for 120s`)
 })

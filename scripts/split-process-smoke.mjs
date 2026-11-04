@@ -68,6 +68,7 @@ import { createRequire } from 'node:module'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative, resolve, sep } from 'node:path'
+import { setTimeout as sleepTimer } from 'node:timers/promises'
 import { zstdDecompressSync } from 'node:zlib'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import xterm from '@xterm/headless'
@@ -284,6 +285,22 @@ export function redactWebQualificationText (text, secrets = []) {
   return value
     .replace(/([?&]token=)[^&\s"']+/gu, '$1<redacted>')
     .replace(/http:\/\/127\.0\.0\.1:\d+/gu, 'http://127.0.0.1:<port>')
+}
+
+/**
+ * Race one promise against an ABORTABLE deadline. The deadline is cancelled in
+ * `finally`: a completed race must never keep the Node process alive for the
+ * rest of its timeout (an uncancelled delay does exactly that, even when the
+ * child exited immediately). Exported so the tooling guard can prove it in a
+ * real child process.
+ */
+export async function raceWithAbortableDeadline (promise, timeoutMs, onExpiry) {
+  const expiry = new AbortController()
+  try {
+    return await Promise.race([promise, sleepTimer(timeoutMs, onExpiry, { signal: expiry.signal })])
+  } finally {
+    expiry.abort()
+  }
 }
 
 /** Bounded wait for one qualification condition. */
@@ -6415,21 +6432,46 @@ async function main() {
           browserProcess.stderr.setEncoding('utf8')
           browserProcess.stderr.on('data', chunk => { browserErr += chunk })
           const browserExit = new Promise(resolveExit => browserProcess.on('close', (code, signal) => resolveExit({ code, signal })))
-          /** A bounded view of ONE driver exit; a stuck child is never awaited forever. */
+          /**
+           * A bounded view of ONE driver exit. The losing timer is CANCELLED in
+           * `finally`: an un-cancelled delay keeps the Node process alive for its
+           * whole timeout even when the child exited immediately.
+           */
           const browserExitBounded = async (timeoutMs) => {
-            const bounded = await Promise.race([
-              browserExit,
-              sleep(timeoutMs).then(() => ({ code: null, signal: 'EXIT_TIMEOUT' })),
-            ])
+            const bounded = await raceWithAbortableDeadline(browserExit, timeoutMs, { code: null, signal: 'EXIT_TIMEOUT' })
             if (bounded.signal === 'EXIT_TIMEOUT') {
               process.stderr.write('PR_A_BROWSER_EXIT_TIMEOUT the real-Browser driver did not exit inside its bound; the lane cleanup owns it\n')
             }
             return bounded
           }
+          /**
+           * Race one observation against the driver's own exit: a driver that has
+           * already left can never produce the fact it owns, so the wait fails at
+           * once with the exit facts instead of consuming its whole budget.
+           * The answer wait is deliberately NOT raced: the driver may legitimately
+           * exit after painting it while the TUI paints the same Turn a moment
+           * later.
+           */
+          const whileBrowserRuns = async (work, label) => {
+            const outcome = await Promise.race([
+              Promise.resolve(work).then(value => ({ value }), error => ({ error })),
+              browserExit.then(exit => ({ exit })),
+            ])
+            if (outcome.exit !== undefined) {
+              throw new SplitSmokeAssertionError(
+                `PA-05 the real-Browser driver exited (${String(outcome.exit.code)}/${String(outcome.exit.signal)}) before ${label}`,
+              )
+            }
+            if (outcome.error !== undefined) throw outcome.error
+            return outcome.value
+          }
           try {
-            await waitForCondition(
-              () => existsSync(join(coordination, 'browser-session.json')),
-              'PR-A Browser Session creation', 240_000,
+            await whileBrowserRuns(
+              waitForCondition(
+                () => existsSync(join(coordination, 'browser-session.json')),
+                'PR-A Browser Session creation', 240_000,
+              ),
+              'the Browser Session file appeared',
             )
             const browserSession = readJson(join(coordination, 'browser-session.json')).sessionId
             assert(typeof browserSession === 'string' && browserSession !== '', 'PA-05 the Browser created no Host Session')
@@ -6451,7 +6493,10 @@ async function main() {
               'PA-05 TUI attached to the Browser Session')
             // Release the Browser prompt only now: both Clients observe ONE Turn.
             writeFileSync(join(coordination, 'browser-go'), `${Date.now()}\n`, { mode: 0o600 })
-            await tui.waitForScreen(marker, 'PA-05 TUI paints the Browser prompt', 180_000)
+            await whileBrowserRuns(
+              tui.waitForScreen(marker, 'PA-05 TUI paints the Browser prompt', 180_000),
+              'the TUI painted the Browser prompt',
+            )
             await tui.waitForScreen('stub answer', 'PA-05 TUI paints the Host answer', 180_000)
             await waitBrowserTurn(browserSession, marker, 'PA-05')
             const headerAfter = await waitForHostSessionHeader(dshHome, browserSession, 'PA-08 Browser Session header after TUI attach')
