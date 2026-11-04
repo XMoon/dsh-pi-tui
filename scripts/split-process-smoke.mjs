@@ -3299,7 +3299,7 @@ async function main() {
         workDir,
         env: { ...base.env, SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF: '1' },
       })
-      surfaceClients.push(c2)
+      surfaceClients.push(ws2ClientC)
       const ws2ClientCReady = await ws2ClientC.waitFor(record => record.m4a0 === 'ready', 'WS2 second Client ready', 180_000)
       assert(ws2ClientCReady.processRole === 'client', 'WS2 second Client role mismatch')
       assert(ws2ClientCReady.pid !== surfaceHostPid, 'WS2 the second Client must be its own OS process')
@@ -3368,7 +3368,7 @@ async function main() {
           SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: join(workDir, 'ws2-invalid-host-path'),
         },
       })
-      surfaceClients.push(c3)
+      surfaceClients.push(ws2InvalidClient)
       const ws2InvalidClientReady = await ws2InvalidClient.waitFor(record => record.m4a0 === 'ready', 'WS2 negative Client ready', 180_000)
       assert(ws2InvalidClientReady.sessionOpen === false, 'WS2 the negative Client must start sessionless')
       ws2InvalidClient.send('ws2 invalid path probe\r')
