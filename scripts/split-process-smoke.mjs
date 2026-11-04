@@ -7617,12 +7617,15 @@ async function main() {
 
         // ── F. Negative lanes: a partial Web surface is never served (PB-08/PB-09) ──
         const negatives = {}
-        // (1) The official Web asset is missing. The official `frontend-static`
-        // owner resolves the dist at REQUEST time, so the toggle may legitimately
-        // report `enabled` (the graph is mounted) while nothing servable exists —
-        // the invariant that matters is that NO index is served and the Host
-        // never presents a working Web frontend. The dist is restored byte for
-        // byte; the `unavailable` branch is proven by the duplicate-owner lane.
+        // (1) The official Web ASSET is missing. The plan's PB-09 disjunction is
+        // "an intentionally unavailable Web asset/core module leads to
+        // `unavailable`/error AND a non-served index". The official
+        // `frontend-static` owner resolves its dist at REQUEST time (its own
+        // contract), so the toggle CANNOT see a missing page during enable
+        // without adding the request-time HTTP probe the plan forbids — the
+        // serving half below is therefore the authentic witness here; lane (2)
+        // proves the `unavailable`/error half for a CORE module. The dist is
+        // restored byte for byte.
         const distIndex = join(dirname(createRequire(anchor).resolve('@deepseek-ai/dsh-web-frontend/package.json')), 'dist', 'index.html')
         const savedDist = saveFile(distIndex)
         const missingDist = `${distIndex}.missing-pr-b`
@@ -7646,25 +7649,27 @@ async function main() {
           assert(absentRecord.ok === true, `PB-09 the enable call itself failed: ${JSON.stringify(absentRecord.errorCode ?? null)}`)
           assert(absentRecord.status?.state === 'enabled' || absentRecord.status?.state === 'unavailable',
             `PB-09 a Host with NO official frontend dist reported ${JSON.stringify(absentRecord.status)}`)
-          // Probe the index WITH the official authenticated cookie: an
-          // unauthenticated 401 would only prove the admission gate, not that a
-          // missing dist serves nothing.
+          // The index chain is probed the ONLY way the official Web shell admits
+          // a page: launch token -> 303 -> signed index cookie -> `/`. A mux
+          // credential or an unauthenticated probe would only prove the
+          // admission gate, never that a missing dist serves nothing.
           const absentLaunch = readJson(join(dshHome, 'run', 'dsh-pi-tui', absentReady.localHost.scopeId, 'launch.json'))
-          const absentCookie = await connectCookie(absentReady.localHost.origin, absentLaunch)
-          const absentRoot = await fetchStatus(`${absentReady.localHost.origin}/`, { headers: { cookie: absentCookie } })
-          assert(absentRoot.status !== 200 || !absentRoot.body.includes('__DSH_BOOT__'),
-            `PB-09 a Host whose official frontend dist is missing SERVED a Web index (HTTP ${absentRoot.status})`)
-          // The Host must not claim a working Web frontend either: a failed or
-          // broken Web surface is exactly what `unavailable` is for, and a
-          // reported `enabled` may only survive while nothing is served.
-          if (absentRecord.status?.state === 'unavailable') {
-            assert(/dist|frontend|web/iu.test(String(absentRecord.status.reason ?? '')),
-              `PB-09 the unavailable reason does not name the Web asset: ${String(absentRecord.status.reason ?? '')}`)
-          }
+          const absentIndex = await readHostWebIndex(absentReady.localHost.origin, absentLaunch, 'PB-09')
+          assert(!(absentIndex.index.status === 200 && absentIndex.hasModuleLoader),
+            `PB-09 a Host whose official frontend dist is missing SERVED a DSH Web index (HTTP ${absentIndex.index.status})`)
+          assert(absentIndex.graph === undefined,
+            'PB-09 a Host whose official frontend dist is missing served a browser graph')
+          // The plan's `unavailable` verdict belongs to a Web surface that cannot
+          // be COMPOSED; the official static owner resolves its dist per request,
+          // so the enable can only be truthful about the mounted graph. Record
+          // the verdict honestly and prove the serving half above.
+          assert(absentRecord.status?.state === 'enabled' || absentRecord.status?.state === 'unavailable',
+            `PB-09 unexpected verdict for a missing asset: ${JSON.stringify(absentRecord.status)}`)
           negatives.distAbsent = {
             reported: absentRecord.status?.state,
-            rootStatus: absentRoot.status,
-            indexServed: absentRoot.status === 200 && absentRoot.body.includes('__DSH_BOOT__'),
+            tokenExchange: absentIndex.exchange.status,
+            indexStatus: absentIndex.index.status,
+            indexServed: absentIndex.index.status === 200 && absentIndex.hasModuleLoader,
             officialStaticOwnsRequestTimeRead: true,
           }
           try { await absentHost.shutdown() } catch { /* the outcome owns it */ }
@@ -7672,6 +7677,52 @@ async function main() {
           renameSync(missingDist, distIndex)
           assert(existsSync(distIndex) && readFileSync(distIndex).equals(savedDist.bytes),
             'PB-09 the official frontend dist was not restored byte for byte')
+        }
+        // (2) A CORE Web module cannot be imported: the enable must refuse with
+        // `unavailable` and serve nothing. The installed module is restored byte
+        // for byte.
+        const modulesEntry = join(dirname(createRequire(anchor).resolve('@deepseek-ai/dsh-client-modules/package.json')), 'lib', 'index.js')
+        const savedModules = saveFile(modulesEntry)
+        const missingModules = `${modulesEntry}.missing-pr-b`
+        try {
+          renameSync(modulesEntry, missingModules)
+          await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 15_000)
+          const brokenModuleHost = new EntryProcess('host', entries.host, {
+            ...base,
+            env: {
+              ...base.env,
+              SPLIT_PROCESS_EXTRA_PATCH: hostPatch,
+              C1_SCENARIO: 'long-turn',
+              C1_WORK_ROOT: workRoot,
+              C1_HOLD_LONG_TURN: longTurnBarrier,
+            },
+          })
+          hosts.push(brokenModuleHost)
+          const brokenReady = await brokenModuleHost.waitFor(record => record.m4a0 === 'ready', 'PB-09 broken-module Host ready', 240_000)
+          const { peer: brokenPeer } = await startPeer('PB-09 broken module')
+          const brokenRecord = await webAccess(brokenPeer, 'PB-09', true)
+          assert(brokenRecord.ok === true && brokenRecord.status?.state === 'unavailable',
+            `PB-09 a Host whose core Web module cannot be imported reported ${JSON.stringify(brokenRecord.status)}`)
+          assert(/fiber|module|import/iu.test(String(brokenRecord.status.reason ?? '')),
+            `PB-09 the unavailable reason does not name the failed mount: ${String(brokenRecord.status.reason ?? '')}`)
+          const brokenIndex = await readHostWebIndex(brokenReady.localHost.origin,
+            readJson(join(dshHome, 'run', 'dsh-pi-tui', brokenReady.localHost.scopeId, 'launch.json')), 'PB-09')
+          assert(!(brokenIndex.index.status === 200 && brokenIndex.hasModuleLoader),
+            `PB-09 the refused core module still served a DSH Web index (HTTP ${brokenIndex.index.status})`)
+          const brokenActive = [...webStates(await hostStatus(brokenModuleHost))]
+            .filter(([, state]) => state === 'active').map(([id]) => id)
+          assert(brokenActive.length === 0,
+            `PB-09 a refused enable left these Web rows mounted: ${brokenActive.join(',')}`)
+          negatives.coreModuleUnavailable = {
+            reported: brokenRecord.status?.state,
+            indexStatus: brokenIndex.index.status,
+            rowsLeftMounted: brokenActive.length,
+          }
+          try { await brokenModuleHost.shutdown() } catch { /* the outcome owns it */ }
+        } finally {
+          renameSync(missingModules, modulesEntry)
+          assert(existsSync(modulesEntry) && readFileSync(modulesEntry).equals(savedModules.bytes),
+            'PB-09 the official client-modules entry was not restored byte for byte')
         }
         // (2) A second owner of the same official Web package: the roster is
         // refused before any row is toggled.

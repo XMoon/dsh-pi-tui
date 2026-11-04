@@ -262,8 +262,8 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     assert.ok(source.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 19,
-    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated surface LLM overlay, the isolated Host Schedule overlay, the isolated armed-Goal overlay, the three bounded PR-A Web composition runs and the four bounded PR-B Web-toggle runs')
+  assert.equal(extraPatchUses.length, 20,
+    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated surface LLM overlay, the isolated Host Schedule overlay, the isolated armed-Goal overlay, the three bounded PR-A Web composition runs and the five bounded PR-B Web-toggle runs')
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
@@ -282,8 +282,8 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
   // Host that carries the whole toggle, its missing-asset negative control, the
   // duplicate-module-owner control and the malformed-argument control. The
   // toggle itself never needs a second patch: it flips the declared rows.
-  assert.equal((source.match(/SPLIT_PROCESS_EXTRA_PATCH: hostPatch/gu) ?? []).length, 3,
-    'the toggle patch is reused by the default-off Host and its two isolated negative lanes')
+  assert.equal((source.match(/SPLIT_PROCESS_EXTRA_PATCH: hostPatch/gu) ?? []).length, 4,
+    'the toggle patch is reused by the default-off Host and its three isolated negative lanes')
   assert.equal((source.match(/SPLIT_PROCESS_EXTRA_PATCH: duplicatePatch/gu) ?? []).length, 2,
     'the duplicate-module control keeps its own patch in both Web lanes')
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
@@ -735,14 +735,15 @@ test('the Web runtime toggle lane drives the private Peer control, never a Host 
     'the smoke may only reach the toggle through the authenticated Remote call')
   assert.doesNotMatch(lane, /registerFallback|loader\.resolve|Entry\.update/u,
     'the smoke must not drive the Loader directly')
-  // The lane owns its own C1 fixture and profile paths: the outer C1 section's
-  // `c1Work`/`profileDir` bindings are BLOCK-SCOPED to that section, so reaching
-  // for them throws a ReferenceError only when the lane finally runs.
+  // The SMOKE function must own its C1 fixture and profile paths: the outer C1
+  // section's bindings are BLOCK-SCOPED there, so reaching for one throws a
+  // ReferenceError only when the lane finally runs. These two assertions scan
+  // `lane`, which is the smoke function's own source slice — never this test.
   assert.match(lane, /const c1Fixture = writeC1WorkFixture\(/u,
     'the lane must build the C1 fixture it owns')
   assert.match(lane, /readFileSync\(c1Fixture\.patchPath/u)
   assert.doesNotMatch(lane, /\bc1Work\b|\bprofileDir\b/u,
-    'the lane may not reference a binding declared inside another lane\'s block')
+    'the smoke function may not reference a binding declared inside another lane\'s block')
   // The three traces carry the verdicts the inventory reports.
   for (const marker of [
     't73-web-default-off',
@@ -795,9 +796,20 @@ test('the Web runtime toggle lane drives the private Peer control, never a Host 
   // PB-08/09: the three refusing lanes and their byte-for-byte restore.
   assert.match(lane, /absentRecord\.status\?\.state === 'enabled' \|\| absentRecord\.status\?\.state === 'unavailable'/u,
     'the missing-asset lane must accept the request-time read while refusing a served index')
-  assert.match(lane, /indexServed: absentRoot\.status === 200 && absentRoot\.body\.includes\('__DSH_BOOT__'\)/u,
-    'the missing-asset lane must record whether an index was actually served')
+  assert.match(lane, /const absentIndex = await readHostWebIndex\(/u,
+    'the missing-asset lane must probe the authenticated index chain, not the mux cookie')
+  assert.match(lane, /absentIndex\.graph === undefined/u,
+    'the missing-asset lane must prove no browser graph is served')
+  assert.match(lane, /indexServed: absentIndex\.index\.status === 200 && absentIndex\.hasModuleLoader/u)
   assert.match(lane, /duplicateRecord\.status\?\.state === 'unavailable'/u)
+  // A core Web module that cannot be imported IS the plan's `unavailable`
+  // witness: the enable refuses, nothing is mounted and no index is served.
+  assert.match(lane, /brokenRecord\.status\?\.state === 'unavailable'/u,
+    'a core Web module that cannot import must produce the unavailable verdict')
+  assert.match(lane, /const modulesEntry = join\(dirname\(createRequire\(anchor\)\.resolve\('@deepseek-ai\/dsh-client-modules\/package\.json'\)\)/u)
+  assert.match(lane, /renameSync\(missingModules, modulesEntry\)/u,
+    'the missing core module must be restored byte for byte')
+  assert.match(lane, /brokenActive\.length === 0/u)
   assert.match(lane, /second \.\*dsh-client-modules/u)
   assert.match(lane, /malformed\.errorCode === 'gateway\/input-invalid'/u)
   assert.match(lane, /renameSync\(missingDist, distIndex\)/u)
