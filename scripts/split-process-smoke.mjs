@@ -339,6 +339,54 @@ export async function waitForCondition (predicate, label, timeoutMs, signal) {
   })
 }
 
+/**
+ * Race one caller-started observation against the real-Browser driver's OWN
+ * exit. A driver that has already left can never produce the fact it owns, so
+ * the wait fails AT ONCE with the exit facts instead of consuming its whole
+ * budget, and the wait it started is cancelled through its signal so no polling
+ * timer survives the early failure. Both Browser lanes use this ONE mechanism.
+ *
+ * @param browserExit - the driver process's own exit promise.
+ * @param startWait - starts the observation; receives the cancellation signal.
+ * @param prefix - the lane code the failure message names (`PA-05`).
+ * @param label - what the wait was proving.
+ */
+export async function whileBrowserDriverRuns(browserExit, startWait, prefix, label) {
+  const stopWait = new AbortController()
+  try {
+    const outcome = await Promise.race([
+      Promise.resolve(startWait(stopWait.signal)).then(value => ({ value }), error => ({ error })),
+      browserExit.then(exit => ({ exit })),
+    ])
+    if (outcome.exit !== undefined) {
+      throw new SplitSmokeAssertionError(
+        `${prefix} the real-Browser driver exited (${String(outcome.exit.code)}/${String(outcome.exit.signal)}) before ${label}`,
+      )
+    }
+    if (outcome.error !== undefined) throw outcome.error
+    return outcome.value
+  } finally {
+    stopWait.abort()
+  }
+}
+
+/**
+ * A bounded view of ONE driver exit. The losing timer is CANCELLED in the
+ * helper, so an un-cancelled delay cannot keep the Node process alive for its
+ * whole timeout when the child exited immediately.
+ *
+ * @param browserExit - the driver process's own exit promise.
+ * @param timeoutMs - the bound.
+ * @param tag - the diagnostic tag this lane prints on expiry.
+ */
+export async function browserDriverExitBounded(browserExit, timeoutMs, tag) {
+  const bounded = await raceWithAbortableDeadline(browserExit, timeoutMs, { code: null, signal: 'EXIT_TIMEOUT' })
+  if (bounded.signal === 'EXIT_TIMEOUT') {
+    process.stderr.write(`${tag} the real-Browser driver did not exit inside its bound; the lane cleanup owns it\n`)
+  }
+  return bounded
+}
+
 let traceFd
 let sequence = 0
 let statusSequence = 0
@@ -6828,47 +6876,13 @@ async function main() {
           browserProcess.stderr.setEncoding('utf8')
           browserProcess.stderr.on('data', chunk => { browserErr += chunk })
           const browserExit = new Promise(resolveExit => browserProcess.on('close', (code, signal) => resolveExit({ code, signal })))
+          const browserExitBounded = timeoutMs => browserDriverExitBounded(browserExit, timeoutMs, 'PR_A_BROWSER_EXIT_TIMEOUT')
           /**
-           * A bounded view of ONE driver exit. The losing timer is CANCELLED in
-           * `finally`: an un-cancelled delay keeps the Node process alive for its
-           * whole timeout even when the child exited immediately.
-           */
-          const browserExitBounded = async (timeoutMs) => {
-            const bounded = await raceWithAbortableDeadline(browserExit, timeoutMs, { code: null, signal: 'EXIT_TIMEOUT' })
-            if (bounded.signal === 'EXIT_TIMEOUT') {
-              process.stderr.write('PR_A_BROWSER_EXIT_TIMEOUT the real-Browser driver did not exit inside its bound; the lane cleanup owns it\n')
-            }
-            return bounded
-          }
-          /**
-           * Race one caller-started observation against the driver's own exit: a
-           * driver that has already left can never produce the fact it owns, so
-           * the wait fails at once with the exit facts. The wait itself is
-           * cancelled through its signal, so an early failure cannot leave a
-           * polling timer behind.
-           *
            * Only facts the DRIVER owns belong here. A TUI paint is not one of
            * them: the driver may exit normally while the renderer paints the
            * same Host message a moment later.
            */
-          const whileBrowserRuns = async (startWait, label) => {
-            const stopWait = new AbortController()
-            try {
-              const outcome = await Promise.race([
-                Promise.resolve(startWait(stopWait.signal)).then(value => ({ value }), error => ({ error })),
-                browserExit.then(exit => ({ exit })),
-              ])
-              if (outcome.exit !== undefined) {
-                throw new SplitSmokeAssertionError(
-                  `PA-05 the real-Browser driver exited (${String(outcome.exit.code)}/${String(outcome.exit.signal)}) before ${label}`,
-                )
-              }
-              if (outcome.error !== undefined) throw outcome.error
-              return outcome.value
-            } finally {
-              stopWait.abort()
-            }
-          }
+          const whileBrowserRuns = (startWait, label) => whileBrowserDriverRuns(browserExit, startWait, 'PA-05', label)
           try {
             await whileBrowserRuns(
               signal => waitForCondition(
@@ -7495,16 +7509,20 @@ async function main() {
           browserProcess.stderr.setEncoding('utf8')
           browserProcess.stderr.on('data', chunk => { browserErr += chunk })
           const browserExit = new Promise(resolveExit => browserProcess.on('close', (code, signal) => resolveExit({ code, signal })))
-          const browserExitBounded = async timeoutMs => {
-            const bounded = await raceWithAbortableDeadline(browserExit, timeoutMs, { code: null, signal: 'EXIT_TIMEOUT' })
-            if (bounded.signal === 'EXIT_TIMEOUT') {
-              process.stderr.write('PR_B_BROWSER_EXIT_TIMEOUT the real-Browser driver did not exit inside its bound; the lane cleanup owns it\n')
-            }
-            return bounded
-          }
+          const browserExitBounded = timeoutMs => browserDriverExitBounded(browserExit, timeoutMs, 'PR_B_BROWSER_EXIT_TIMEOUT')
           try {
-            await waitForCondition(() => existsSync(join(coordination, 'browser-session.json')),
-              'PR-B Browser Session creation', 240_000)
+            // The Browser Session file is a fact the DRIVER owns: a driver that
+            // exited early can never write it, so the wait must fail with the
+            // exit facts instead of burning its whole budget.
+            await whileBrowserDriverRuns(
+              browserExit,
+              signal => waitForCondition(
+                () => existsSync(join(coordination, 'browser-session.json')),
+                'PR-B Browser Session creation', 240_000, signal,
+              ),
+              'PB-07',
+              'the Browser Session file appeared',
+            )
             const browserSession = readJson(join(coordination, 'browser-session.json')).sessionId
             assert(typeof browserSession === 'string' && browserSession !== '', 'PB-07 the Browser created no Host Session')
             // A REAL TUI attaches to the Browser's Session on the SAME Host, so
