@@ -242,9 +242,11 @@ commits (before the kernel commit), while a settlement, a repaint or a
 pre-publication hydration window leaves the current browse alone. Entering the
 first recalled row consults the application's existing pasted-path delivery and
 plain-history eligibility; a refusal keeps the draft, caret and live paste
-leases and starts no browse. A whole-document recall replacement retires old
-pasted-path leases, so a late image read cannot rewrite bytes inside a history
-row.
+leases, starts no browse, and discards the aborted attempt's pending bookmark so
+the next successful entry records the draft position that actually entered (an
+empty scope starts no browse and keeps no bookmark either). A whole-document
+recall replacement retires old pasted-path leases, so a late image read cannot
+rewrite bytes inside a history row.
 
 ### Seeding at boot (trap: deferred start has no session)
 

@@ -571,17 +571,69 @@ test('a refused or reentrant admission leaves the live draft with no selection',
   refused.composer.applyKey(key('down'))
   assert.equal(refused.composer.state().text, 'staged <img 1>', 'a refused entry started no browse for ↓ to undo')
 
+  let rewrote = false
   let target!: TspComposer
   const reentrant = composerWithSinks({
-    entries: ['r1'],
-    admitDraft: () => { target.setDraft('written by the callback'); return true },
+    entries: ['r1', 'r2'],
+    admitDraft: (text) => {
+      if (!rewrote) {
+        rewrote = true
+        target.setDraft('written by the callback')
+      }
+      return true
+    },
   })
   target = reentrant.composer
   target.setDraft('mine')
   target.applyKey(key('home'))
-  target.applyKey(key('up'))
+  assert.deepEqual(target.applyKey(key('up')), { kind: 'none' })
   assert.deepEqual(target.state(), { text: 'written by the callback', cursor: 23, focused: false },
     'a draft the admission callback itself replaced is never overwritten by the stale gesture')
+
+  // The dropped gesture must leave no bookmark either: the next entry records
+  // and restores what the user has NOW.
+  target.applyKey(key('up'))
+  target.applyKey(key('up'))
+  assert.equal(target.state().text, 'r1', 'the next attempt enters the recall')
+  target.applyKey(key('down'))
+  assert.deepEqual(target.state(), { text: 'written by the callback', cursor: 23, focused: false },
+    'the discarded bookmark cannot resurrect the pre-callback draft')
+})
+
+test('a refused entry leaves no pending bookmark for the next successful entry', () => {
+  let admit = false
+  const { composer } = composerWithSinks({ entries: ['r1'], admitDraft: () => admit })
+  composer.setDraft('staged <img 1>')
+  composer.applyKey(key('home'))
+  assert.deepEqual(composer.applyKey(key('up')), { kind: 'none' }, 'the refused entry moves nothing')
+  assert.deepEqual(composer.state(), { text: 'staged <img 1>', cursor: 0, focused: false })
+
+  admit = true
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'staged <img 1>', cursor: 14, focused: false })
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, 'r1', 'the next attempt does enter the recall')
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'staged <img 1>', cursor: 14, focused: false },
+    'the entry restores the LIVE draft and caret, not the position the refusal discarded')
+})
+
+test('an empty scope leaves no pending bookmark behind for the moment rows arrive', () => {
+  const { composer, setEntries } = composerWithSinks()
+  composer.setDraft('mine')
+  composer.applyKey(key('home'))
+  assert.deepEqual(composer.applyKey(key('up')), { kind: 'none' }, 'no candidate means no browse')
+
+  setEntries(['r1'])
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'mine', cursor: 4, focused: false })
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, 'r1')
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: 'mine', cursor: 4, focused: false },
+    'the empty-scope walk left no bookmark that could outlive the caret it recorded')
 })
 
 test('an empty scope and an out-of-range walk are silent no-ops', () => {

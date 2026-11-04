@@ -284,14 +284,26 @@ export function createTspComposer(sinks: TspComposerSinks, recall: TspComposerRe
   /** The recallable boundary reached from the user's own draft. */
   const recallEnter = (): TspComposerEdit => {
     const entries = recall.entries()
-    if (entries.length === 0) return { kind: 'none' }
+    if (entries.length === 0) {
+      // No candidate was entered, so this walk's pending bookmark is already
+      // stale: a later attempt records where the user is THEN.
+      historyDraft = undefined
+      return { kind: 'none' }
+    }
     const draft = text
     const caret = cursor
     const epoch = editEpoch
     // Only the step FROM an un-browsed draft INTO the first row consults the
     // application; an empty scope consults nothing at all.
-    if (!recall.admitDraft(draft)) return { kind: 'none' }
+    if (!recall.admitDraft(draft)) {
+      historyDraft = undefined
+      return { kind: 'none' }
+    }
     if (editEpoch !== epoch || text !== draft || cursor !== caret) {
+      // The admission callback rewrote the draft: this gesture is dropped, and
+      // the bookmark it carried describes a draft that no longer exists.
+      // Keeping it would let a LATER entry restore that stale text/caret.
+      historyDraft = undefined
       return { kind: 'none' }
     }
     // The bookmark was taken by the ↑ walk that began this browse (or, for a
