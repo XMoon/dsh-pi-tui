@@ -132,6 +132,20 @@
     - id: workspace
       name: '@deepseek-ai/dsh-workspace'
 
+    # The ONE Host Workspace commands/follow owner over the registry above
+    # (`ctx.workspaceController`, Typert namespace `workspace`): the same
+    # official row ID the web bundle mounts, so a Direct Host and a Host-only
+    # Split Host expose one Workspace Remote authority instead of two. Gating on
+    # `tuiStartup` is Direct's command-line admission only (`--help` starts no
+    # Host mutation); the Host-only overlay removes exactly that dependency in
+    # place, and the class's own `static inject` still supplies
+    # `remoteAccess`/`typert`/`workspaceRegistry`. Mounting it registers the
+    # generated `workspace` Remote namespace; it creates no Workspace and no
+    # directory by itself.
+    - id: workspace-controller
+      name: '@deepseek-ai/dsh-api-workspace-controller'
+      inject: [tuiStartup]
+
     # The OFFICIAL Host `@`-file reference authority (M3-3A): this row is
     # the same one the official web bundle mounts. It provides
     # `ctx.fileReferences` (the discovery service the Session Controller's

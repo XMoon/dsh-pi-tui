@@ -320,10 +320,30 @@ services (`piTuiFileReferences`, `piTuiTerminalProgress`); the feature modules
 are not independent Loader rows, configurable plugins or package subpaths. The
 row publishes `piTuiHostReady` only after both service bindings are live.
 
+Host Workspace authority has exactly two owners, both official bundle rows with
+the stable ids the official web bundle uses: `workspace`
+(`@deepseek-ai/dsh-workspace`, the durable registry) and `workspace-controller`
+(`@deepseek-ai/dsh-api-workspace-controller`, the `workspace` Typert Remote
+namespace that serves `create`/`follow` and the other Workspace verbs). Direct
+gates the controller on `tuiStartup` like the other Direct Host rows, so
+`--help` mounts no Workspace Remote surface; the Host-only overlay removes only
+that startup dependency from the SAME row in place, so a Split Host exposes one
+`workspace` namespace owned by one Loader row. There is no
+`split-host-workspace-controller`, no second registry, no hand-written Workspace
+DTO/RPC and no Workspace persistence of the TUI's own: the controller's
+`static inject` (`remoteAccess`, `typert`, `workspaceRegistry`) carries the real
+dependencies, the Host realpaths and records the directory, and
+`initializeDefault()` — which creates a Host directory — is never called during
+startup. Host readiness asserts the `workspace` registry row and the
+`workspace-controller` row are each ACTIVE exactly once for their official
+package AND that the live controller carries the
+`workspaceController`/`workspace` Typert binding; a readable service object
+without it is not a working Workspace API.
+
 The Host execution graph does not depend on the mutable `tui-startup` provider.
-The Host-only overlay overrides the existing `webserver` and `workspace-files`
-rows with `inject: []` and removes `tuiStartup` from the eight Host-only
-execution rows, which keep only their real service dependencies
+The Host-only overlay overrides the existing `webserver`, `workspace-files` and
+`workspace-controller` rows with `inject: []` and removes `tuiStartup` from the
+eight Host-only execution rows, which keep only their real service dependencies
 (`split-host-connection`, `split-host-file-upload`,
 `split-host-session-stats`, `split-host-turn-outline`,
 `split-host-session-controller`, `split-host-settings-controller`,
@@ -379,7 +399,8 @@ The epoch invalidates overlapping reads but is not an atomic barrier.
 The split Client keeps ONE Cordis root and ONE official
 Typert/Connection/Gateway graph. Its Domain plane is mounted in two stages by
 one owner: `mountRemoteClientDomainPrerequisites()` mounts the generated
-`/remote` contributions, the package's ONE private contribution, the official
+`/remote` contributions (including the official `workspace` descriptor), the
+package's ONE private contribution, the official
 fileUpload Client and the official Session Client (including its `agent` scope
 resolver) BEFORE the Gateway's first generation; `complete()` then mounts the
 Jobs Client and awaits the official initial readiness. The M3 in-process path
@@ -391,6 +412,14 @@ from the installed Harness family (its declared DSH peer); the browser-form
 `/client` bundles' `require` therefore resolves the SAME singleton the web shell
 shares, while `@deepseek-ai/cordis` resolves as a normal import. No source-tree
 descriptor may mix with that installation.
+
+The Client mounts the generated `workspace` namespace and nothing beside it: no
+`ClientWorkspaceModel`, no Client Workspace store, no cached Workspace list and
+no extra Host plugin. Its state arrives only as the Host baseline and increments
+of `workspace.follow`, so a Client reload, HMR revision or process exit disposes
+its own `/remote` descriptor and never the Host controller or registry. Session
+creation still passes its existing `cwd` intent; mounting the Workspace
+Controller does not make a Client directory an authoritative Host Workspace.
 
 Above the Domains, the Client mounts exactly one Client UI subtree (extension
 host + first-party builtins), one split application runtime (Backend + the ONE

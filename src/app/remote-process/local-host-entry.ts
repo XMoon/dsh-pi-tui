@@ -59,7 +59,8 @@ import { cleanupOwnedFiles, type LocalInstanceRecord } from './local-discovery.t
  * the three surface rows that must not exist in a Host-only PID, then adds the
  * two B1 rows plus the official Session-serving rows and the ONE built-in
  * PiTui Host Runtime row. The base Gateway, webserver, workspace-files,
- * credentials, agents, sessions and jobs are reused, never mounted twice.
+ * workspace-controller, credentials, agents, sessions and jobs are reused,
+ * never mounted twice.
  */
 export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Host rows only.
 - id: tui-app
@@ -73,6 +74,13 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
 - id: webserver
   inject: []
 - id: workspace-files
+  inject: []
+# The bundle's ONE official Workspace Controller row, retuned IN PLACE: the
+# Host is a long-lived Workspace Remote owner, not a CLI startup side effect,
+# yet the row (its ID, package, config and the class's own
+# remoteAccess/typert/workspaceRegistry injects) stays the bundle's. A second
+# row here would register the \`workspace\` namespace twice.
+- id: workspace-controller
   inject: []
 
 - insert:

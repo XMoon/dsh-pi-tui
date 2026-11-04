@@ -46,6 +46,7 @@ import settingsRemote from '@deepseek-ai/dsh-api-settings-controller/remote'
 import userQuestionsRemote from '@deepseek-ai/dsh-user-questions/remote'
 import fileUploadsRemote from '@deepseek-ai/dsh-client-file-upload/remote'
 import workspaceFilesRemote from '@deepseek-ai/dsh-api-workspace-files/remote'
+import workspaceRemote from '@deepseek-ai/dsh-api-workspace-controller/remote'
 import { PI_TUI_CLIENT_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { mergeCause } from './dispose-cause.ts'
 
@@ -330,8 +331,11 @@ function freezeOfficialClientModules(captured: Map<string, unknown>): OfficialCl
   return Object.freeze(modules)
 }
 
-/** Explicit generated `/remote` contributions (§2.4.2), never the aggregate. */
-const REMOTE_CONTRIBUTIONS = [
+/** Explicit generated `/remote` contributions (§2.4.2), never the aggregate.
+ *  Exported (module-internal seam, not a package export) so the L5 suite can
+ *  prove these two frozen tables agree package-by-package and that the
+ *  six-bundle Client list stays exactly six. */
+export const REMOTE_CONTRIBUTIONS = [
   sessionRemote,
   jobRemote,
   commandsRemote,
@@ -344,6 +348,11 @@ const REMOTE_CONTRIBUTIONS = [
   fileUploadsRemote,
   userQuestionsRemote,
   workspaceFilesRemote,
+  // The official generated `workspace` namespace (the Host Workspace
+  // Controller's Remote face). It supplies `ctx.remote.workspace.create`/
+  // `follow` and nothing else: this Client mounts no Workspace model, store or
+  // UI, so no Client-side Workspace state exists to keep current.
+  workspaceRemote,
 ] as const
 
 /**
@@ -353,7 +362,7 @@ const REMOTE_CONTRIBUTIONS = [
  * statically imported source-tree copy; both channels produce the one table
  * `mountRemoteClientDomains` mounts.
  */
-const REMOTE_CONTRIBUTION_SPECIFIERS = [
+export const REMOTE_CONTRIBUTION_SPECIFIERS = [
   '@deepseek-ai/dsh-api-session-controller/remote',
   '@deepseek-ai/dsh-api-job-controller/remote',
   '@deepseek-ai/dsh-commands/remote',
@@ -366,6 +375,7 @@ const REMOTE_CONTRIBUTION_SPECIFIERS = [
   '@deepseek-ai/dsh-client-file-upload/remote',
   '@deepseek-ai/dsh-user-questions/remote',
   '@deepseek-ai/dsh-api-workspace-files/remote',
+  '@deepseek-ai/dsh-api-workspace-controller/remote',
 ] as const
 
 /** The official Client-side modules and generated `/remote` contributions one
@@ -552,7 +562,7 @@ async function shutdownDomainState(state: RemoteClientDomainState): Promise<unkn
 
 /**
  * Mount the official Client Domain prerequisites on the caller's
- * ALREADY-AUTHENTICATED Client `Context`: the twelve generated `/remote`
+ * ALREADY-AUTHENTICATED Client `Context`: the thirteen generated `/remote`
  * contributions, the private pi-tui contribution, the official fileUpload
  * Client, then the official Session Client (which registers the `agent`
  * `typert.contexts` resolver). It deliberately does NOT wait for a Connection

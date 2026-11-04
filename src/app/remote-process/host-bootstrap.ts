@@ -5,9 +5,11 @@
  * (`@deepseek-ai/dsh/profile-boot`). This module runs after that boot and owns
  * only the Host verdict: the shared Remote Host prerequisite set must be live,
  * the B1-only Connection/API-remotes rows must be the sole active owners, the
- * base Gateway must be active exactly once, the loopback webserver must be
- * bound, and the TUI/Client-UI rows the Host-only overlay disables must not be
- * active. It never composes a second Host graph.
+ * base Gateway must be active exactly once, the ONE official Workspace registry
+ * and Workspace Controller rows must be the sole owners of their packages (the
+ * controller with a real `workspace` Typert binding), the loopback webserver
+ * must be bound, and the TUI/Client-UI rows the Host-only overlay disables must
+ * not be active. It never composes a second Host graph.
  *
  * @module app/remote-process/host-bootstrap
  */
@@ -121,6 +123,22 @@ const OFFICIAL_TYPERT_BINDINGS = [
   { serviceKey: 'sessionController', namespace: 'session' },
   { serviceKey: 'fileUploads', namespace: 'fileUploads' },
   { serviceKey: 'settingsController', namespace: 'settings' },
+  // The Host Workspace Remote owner the bundle mounts: `workspace/create` and
+  // `follow` reach the registry only through this binding, so a readable
+  // service object without it is not a working Workspace API.
+  { serviceKey: 'workspaceController', namespace: 'workspace' },
+] as const
+
+/**
+ * The two official Workspace owners, identified by their PACKAGE as well as
+ * their row id. A same-namespace competitor registered under a different Loader
+ * id would keep the `exactly one <id> row` check green while owning the service
+ * or the `workspace` namespace a second time, so uniqueness is proven on the
+ * package identity the Host actually imported.
+ */
+const WORKSPACE_OWNER_PACKAGES = [
+  { owner: 'workspaceRegistry', id: 'workspace', name: '@deepseek-ai/dsh-workspace' },
+  { owner: 'workspaceController', id: 'workspace-controller', name: '@deepseek-ai/dsh-api-workspace-controller' },
 ] as const
 
 /** The package's two private endpoint bindings. */
@@ -197,6 +215,9 @@ export function collectHostEntryStatus(
     'sessionController',
     'fileUploads',
     'settingsController',
+    // The Workspace Remote owner this overlay ENABLES is evidence too: `ready`
+    // must not be published while `ctx.remote.workspace` has no Host owner.
+    'workspaceController',
     PI_TUI_FILE_REFERENCES_NAMESPACE,
     PI_TUI_TERMINAL_PROGRESS_NAMESPACE,
     PI_TUI_HOST_READY_SERVICE,
@@ -231,12 +252,29 @@ export function collectHostEntryStatus(
     // publishes `piTuiPerformanceReady`, Visual Tools stays an independent row.
     performance: activeIds('pi-tui-performance-host'),
     visualTools: activeIds('pi-tui-visual-tools'),
+    // The ONE official Workspace registry and the ONE official Workspace
+    // Controller this overlay reuses/retunes in place. A duplicate registry or a
+    // `split-host-workspace-controller`-style second owner is a Host startup
+    // failure, never a degraded ready.
+    workspaceRegistry: activeIds('workspace'),
+    workspaceController: activeIds('workspace-controller'),
   }
   for (const [owner, ids] of Object.entries(ownerEntries)) {
     if (ids.length !== 1) {
       const visible = entries.map(entry => `${entry.options.id}:${fiberStateLabel(entry)}`)
       throw new Error(
         `local host entry: expected exactly one active ${owner} owner row, found ${String(ids.length)}; entries=${visible.join(',')}`,
+      )
+    }
+  }
+  for (const { owner, id, name } of WORKSPACE_OWNER_PACKAGES) {
+    const active = entries.filter(entry => entry.fiber?.state === FIBER_ACTIVE && entry.options.name === name)
+    if (active.length !== 1 || active[0].options.id !== id) {
+      const visible = active.length === 0
+        ? 'none'
+        : active.map(entry => entry.options.id).join(',')
+      throw new Error(
+        `local host entry: expected exactly one active ${owner} row for "${name}" named "${id}", found ${visible}`,
       )
     }
   }
