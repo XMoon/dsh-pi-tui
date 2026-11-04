@@ -83,6 +83,7 @@ reading is an additional rendering container, never a second renderer.
 | TSP connection and terminal input lifecycle | Composition bootstrap + mounted renderer + pinned SDK | A second direct stdin reader or ad-hoc wire pump |
 | Surface regions and emitted node projection | `src/tui/tsp/session.ts` (one base `surface.render`, plus the one temporary screen's own `render` for a reading) | Independently mounted competing renderers, or a second surface for any non-reading surface |
 | Modal seat/keyboard precedence | `src/tui/tsp/session.ts` + `interaction.ts` and its application owner | `modal:true` as an automatic JavaScript keyboard handler |
+| Slash command-name completion browse | One mount-local seat (`src/tui/tsp/slash-completion.ts`) fed by the ONE catalog commit the command layer publishes through the mount's install port, admitted only inside the existing keyboard precedence | A second candidate catalog, provider, ranking or claims map; a popup that owns submit/cancel; a completion that executes |
 | UI highlight, draft, pending, local page | The current presenter for that UI | Durable business authority |
 | SDK frame/ACK/current sent View | Installed SDK `Surface`/`Session` | A second application-side reconciler without a demonstrated gap |
 | The temporary reading surface, its reading identity and its close | `src/tui/tsp/session.ts` (the reader slot) | A presenter-owned surface, a business owner, a second Session, or a persisted reading state |
