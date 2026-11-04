@@ -168,7 +168,13 @@ export function createTspSlashCompletion(
     if (document.cursorLine !== 0) return false
     const before = (document.lines[0] ?? '').slice(0, document.cursorCol)
     const trimmed = before.trimStart()
-    return trimmed.startsWith('/') && !trimmed.includes(' ')
+    // The SAME whitespace rule the token bounds below use: ANY whitespace (not
+    // just a literal space) ends the command token. A `/new\targument` draft is an
+    // argument position, and a seat that only looked for ' ' would treat the
+    // tab-separated tail as part of the command name — letting the plugin
+    // fallback answer for, and a completion rewrite, a token this milestone
+    // never completes.
+    return trimmed.startsWith('/') && !/\s/.test(trimmed)
   }
 
   /** The composer document in the Provider's own (lines, cursorLine, cursorCol)
@@ -354,14 +360,21 @@ export function createTspSlashCompletion(
     // The popup goes BEFORE the write, so the ONE frame the composer commits
     // already carries the finished text with no stale list beside it.
     const hadPopup = withdraw()
-    if (writes) {
-      ports.composer.applyCompletionEdit(
+    // A `writes` plan is not a COMMITTED write: the composer still owns the
+    // final say (a grapheme-boundary caret, a change confined to one logical
+    // line), and a candidate value that breaks either — a plugin may hand back
+    // any text at all — is refused there. `false` means no editor frame is
+    // coming either, so the withdrawn popup would stay PAINTED while the seat
+    // already considers itself closed, and the user's next Escape would hit
+    // Cancel instead of dismissing a list they can still see. The frame is
+    // owed on EVERY path that wrote nothing, and a successful write is never
+    // double-rendered (the composer's own sink already committed that frame).
+    const written = writes
+      && ports.composer.applyCompletionEdit(
         { text: document.text, cursor: document.cursor },
         { text: nextText, cursor: nextCursor },
       )
-    } else if (hadPopup) {
-      ports.requestRender()
-    }
+    if (!written && hadPopup) ports.requestRender()
     // CONSUMED in every case except `tokenAlreadyComplete`. An accept gesture that
     // could not write must never degrade into executing the user's draft: the
     // list is gone and the NEXT Enter is the explicit submit.
@@ -477,7 +490,12 @@ export function createTspSlashCompletion(
       const index = shown.items.findIndex((item, itemIndex) => rowId(item, itemIndex) === id)
       if (index < 0) return
       shown.selected = index
-      accept()
+      if (accept()) return
+      // The click had nothing to complete (the token already names that
+      // candidate). For a KEY that is the right answer — the gesture stays what
+      // it always was — but a pointer press has no second half to come, so the
+      // list it dismissed must actually go away instead of looking inert.
+      if (withdraw()) ports.requestRender()
     },
     renderState: (maxRows = SLASH_COMPLETION_MAX_ROWS) => {
       const shown = list
