@@ -1351,10 +1351,10 @@ test('navigation: switch, same-id rollover and reconnect re-init the presentatio
   void app
 })
 
-test('a real Remote /new cancels the running old turn through the official Host cancel, then commits the fresh Session', async (t) => {
+test('a real Remote /new leaves the running old turn alive while it commits the fresh Session', async (t) => {
   const life = testLifecycle(t)
   const presetId = 'm3-4-pr2-preset'
-  const mainId = 'm3-4-pr2-navigation-cancel'
+  const mainId = 'm3-4-pr2-navigation-detach'
   const adapter = new StubStreamingLlmAdapter()
   const seedHost = await mountRemotePresentationHost(life, presetId, { llmAdapter: adapter })
   await seedHost.harness.create(
@@ -1402,23 +1402,15 @@ test('a real Remote /new cancels the running old turn through the official Host 
   const hostIdsBefore = new Set(seedHost.ctx.sessions.list().map(session => String(session.id)))
 
   // The REAL user gesture: a /new typed into the mounted Remote composer.
+  const retainCount = (): number =>
+    fixture.aggregate.wire.client.sessions.retainInfo(SessionId(mainId)).getSnapshot().referenceCount
+  const refsBefore = retainCount()
   const mounted = fixture.runnerApp() as unknown as { setDraft(text: string): void; submitDraft(): void }
   mounted.setDraft('/new')
   mounted.submitDraft()
 
-  // 1. The official Host cancel reached the EXACT old generation: the held turn
-  //    aborts WITHOUT the test releasing the hold, and the durable boundary is
-  //    the user-cancellation reason.
-  await waitFor('the old Host turn aborted by the navigation stop', () => oldAgent.status !== 'running', 20_000)
-  const lastEnd = oldSession.snapshotEvents().filter(event => event.type === 'turn/end').at(-1)?.data as
-    { reason?: { kind?: string; reason?: { kind?: string } } } | undefined
-  assert.equal(lastEnd?.reason?.kind, 'aborted', 'the old turn ended through the durable cancellation reason')
-  assert.equal(lastEnd?.reason?.reason?.kind, 'user', 'the cancellation is the user navigation stop, not a shutdown cancel')
-  assert.ok(oldSession.snapshotEvents().some(event => event.type === 'step/start'),
-    'the aborted step is the held model request that only the navigation stop could end')
-
-  // 2. Exactly ONE fresh Host Session is created and becomes the current Remote
-  //    owner; the old Session stays durable.
+  // 1. Exactly ONE fresh Host Session is created and becomes the current Remote
+  //    owner: the /new transaction COMMITTED while the old Turn was still held.
   await waitFor('exactly one fresh Host session', () => {
     return seedHost.ctx.sessions.list().filter(session => !hostIdsBefore.has(String(session.id))).length === 1
   }, 20_000)
@@ -1430,8 +1422,27 @@ test('a real Remote /new cancels the running old turn through the official Host 
   await waitFor('the fresh Remote owner is retained', () => {
     return fixture.aggregate.wire.client.sessions.binding(SessionId(freshId)) !== undefined
   }, 20_000)
+
+  // 2. The navigation left the old Host Turn RUNNING: no Host cancel was
+  //    dispatched. The held model request is still inside its gate (this test
+  //    never releases it) and the durable log carries no `turn/end` at all —
+  //    only a cancellation could have ended the step.
+  assert.equal(oldAgent.status, 'running', 'the old Host Agent kept running across the navigation')
+  assert.ok(adapter.heldStreamCount >= 1, 'the held model request is still inside its gate')
+  assert.equal(oldSession.snapshotEvents().some(event => event.type === 'turn/end'), false,
+    'the old Turn wrote no durable end: the navigation must not cancel it')
+  assert.ok(oldSession.snapshotEvents().some(event => event.type === 'step/start'),
+    'the held step is the model request the navigation left alone')
+
+  // 3. The Client detached from the old owner: its reference count dropped and
+  //    the surface re-initialized onto the fresh Session, while the old
+  //    Session stays persisted.
+  await waitFor('the navigation released the old Client reference', () => retainCount() < refsBefore, 20_000)
+  await waitFor('the fresh Session owns the surface', () => {
+    return !fixture.vt.getViewport().join('\n').includes('hold the old turn open')
+  }, 20_000)
   assert.ok(seedHost.ctx.sessions.list().some(session => String(session.id) === mainId),
-    'the old Session remains persisted (a cancel is not a delete)')
+    'the old Session remains persisted (a Client detach is not a delete)')
   void app
 })
 
