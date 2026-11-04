@@ -125,7 +125,13 @@ function stubRunner(
           replace: async () => undefined,
         } as never,
     applyFooterSettings: () => {},
-    agents: {} as never,
+    // WS-2: `/new` pre-selects a Host Workspace before it enters the
+    // transition; this stub runner never creates/opens a real Session.
+    agents: {
+      resolveWorkspace: async () => ({ workspaceId: 'workspace-test', path: '/workspace' }),
+      create: async () => { throw new Error('the stub runner never creates a Session') },
+      open: async () => { throw new Error('the stub runner never opens a Session') },
+    } as never,
     sessionReader: {
       list: async () => [],
       search: async () => ({ items: [], hasMore: false }),
