@@ -6,6 +6,7 @@ import { ProcessTerminal } from '@xmoon76/pi-tui'
 import { apply as applyRunner, Config as TuiConfigSchema } from '../../src/index.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import type { VirtualTerminal } from './virtual-terminal.ts'
+import { provideFakeHostWorkspaceRegistry } from './workspace-registry.ts'
 
 /** Build a minimal event envelope for tests. The type parameter is widened
  * to any string so legacy v1 `assistant/chunk` events (absent from master's
@@ -549,35 +550,9 @@ export async function mountRunner(
   ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
   ctx.provide('sessionPersistence', harness.persistence as never)
   ctx.provide('sessionQuery', harness.sessionQuery as never)
-  // WS-2: the official Host Workspace registry stand-in. `create` canonicalizes
-  // by identity (the harness runs no realpath), `get`/`list` expose the durable
-  // rows, and membership is the header-validated Session account — the same
-  // three faces the Direct lifecycle consumes.
-  const workspaces: Array<{
-    readonly id: string
-    readonly path: string
-    readonly sessionIds: string[]
-    attachSession(sessionId: unknown): Promise<void>
-  }> = []
-  ctx.provide('workspaceRegistry', {
-    create: async (path: string) => {
-      const existing = workspaces.find(workspace => workspace.path === path)
-      if (existing !== undefined) return existing
-      const created = {
-        id: `workspace-${workspaces.length + 1}`,
-        path,
-        sessionIds: [] as string[],
-        attachSession: async (sessionId: unknown) => {
-          const id = String(sessionId)
-          if (!created.sessionIds.includes(id)) created.sessionIds.unshift(id)
-        },
-      }
-      workspaces.push(created)
-      return created
-    },
-    get: (id: string) => workspaces.find(workspace => workspace.id === id),
-    list: () => workspaces,
-  } as never)
+  // WS-2: the official Host Workspace registry stand-in (the ONE authority the
+  // Direct lifecycle resolves before an ordinary create).
+  provideFakeHostWorkspaceRegistry(ctx)
   ctx.provide('agents', harness.agents as never)
   ctx.provide('sessions', harness.sessions as never)
   ctx.provide('agentDefaultModel', harness.defaultModel as never)

@@ -71,6 +71,7 @@ import { apply as applyBuiltins } from '../../src/builtins.ts'
 import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { installTspPane, type TspPane } from './tsp-terminal-fixture.ts'
 import { mountModelProfile } from './model-profile-fixture.ts'
+import { provideFakeHostWorkspaceRegistry } from './workspace-registry.ts'
 
 export const DIRECT_TSP_MODEL = 'scripted-model'
 /** A SECOND advertised model: selecting it is a real change, not a re-selection
@@ -572,6 +573,9 @@ export async function createDirectTspFixture(
     else process.env.DSH_HOME = previousDshHome
   })
   ctx.provide('appExit', options.appExit ?? (() => {}))
+  // WS-2: the official Host Workspace registry the Direct ordinary create
+  // pre-selects through (a real Host always mounts it).
+  provideFakeHostWorkspaceRegistry(ctx)
   ctx.provide(TUI_STARTUP_SERVICE, {
     ...(options.startup ?? {}),
     shippedPresetRoot: workRoot,

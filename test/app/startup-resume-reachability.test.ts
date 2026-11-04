@@ -37,7 +37,6 @@ import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deep
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import { CommandRuntime } from '@deepseek-ai/dsh-commands'
-import WorkspaceController from '@deepseek-ai/dsh-api-workspace-controller'
 import { RemoteSessionLifecycle } from '../../src/runtime/remote/session-lifecycle-remote.ts'
 import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { createRemoteSessionOwnerServices } from '../../src/app/remote/session-owners.ts'
@@ -237,7 +236,6 @@ test('an official Remote running binding keeps the pre-mount idle wait open unti
   const life = testLifecycle(t)
   const llm = new HeldWireLlmAdapter()
   const host = await createRemoteApplicationHostFixture(life, 'prd-remote-startup-running', { llmAdapter: llm })
-  await host.ctx.plugin(WorkspaceController)
   const runtime = await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},

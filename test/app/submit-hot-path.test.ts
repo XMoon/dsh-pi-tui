@@ -30,6 +30,7 @@ import { TuiApp } from '../../src/tui-app.ts'
 import { historyFilePath, loadHistoryRecords } from '../../src/client/history/store.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
+import { provideFakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -300,6 +301,8 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
    * submitted attachments the client handed over. */
   executed: { line: string; attachments: readonly unknown[]; outcome: 'executed' | 'rejected' }[]
   readonly session: LiveSession | undefined
+  /** The official Host observation seam (the historical-header fallback). */
+  sessionQuery: unknown
   /** The session ids `agents.create` produced (the deferred-start gate). */
   createdSessionIds: string[]
   /** Register a hook that runs as each session is created. */
@@ -535,9 +538,24 @@ function makeHarness(home: string, initial?: { id: string; events: SessionEvent[
     /** Test seam: wire the registry-change notification to the real context. */
     setChangeEmitter: (emit: () => void) => { emitChange = emit },
   }
+  // WS-2: the official Host observation seam `/new` reads for a historical
+  // Session without Workspace membership (its persisted immutable header cwd).
+  const sessionQuery = {
+    observeSession: async (id: unknown) => {
+      const session = persisted.get(String(id))
+      if (session === undefined) throw new Error(`unknown test session ${String(id)}`)
+      return {
+        header: session.header,
+        events: [...session.snapshotEvents()],
+        projections: { values: {} },
+        [Symbol.dispose]: () => {},
+      }
+    },
+  }
   return {
     counting,
     createdSessionIds,
+    sessionQuery,
     onCreateSession: (hook: (sessionId: string) => void | Promise<void>) => { onCreateSession = hook },
     agents,
     sessions,
@@ -612,7 +630,12 @@ async function mountRunner(
     ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
   }
   ctx.provide('sessionPersistence', harness.counting.proxy as never)
+  // `/new` resolves a historical Session's membership first and falls back to
+  // its persisted immutable header directory through the official query seam.
+  ctx.provide('sessionQuery', harness.sessionQuery as never)
   ctx.provide('agents', harness.agents as never)
+  // WS-2: the official Host Workspace registry the Direct lifecycle pre-selects through.
+  provideFakeHostWorkspaceRegistry(ctx)
   ctx.provide('sessions', harness.sessions as never)
   ctx.provide('agentDefaultModel', harness.defaultModel as never)
   ctx.provide('commands', harness.commands as never)
@@ -1668,7 +1691,13 @@ test('a transition-fenced explicit /skill result does not restore the wrapper tw
     // fence, but before the real /skill handler resolves its agent. This is
     // the exact window where loadSkill owns the normalized draft restore.
     if (line.startsWith('/skill grilling fix')) {
+      const cancellations = harness.host.cancelLog.length
       transition = (newHandler as () => Promise<unknown>)()
+      // WS-2: `/new` resolves the Host Workspace BEFORE it enters the
+      // transition, so a microtask budget no longer proves admission. The old
+      // owner's stop is the authoritative "transition is now in progress" fact.
+      assert.equal(await drainUntil(() => harness.host.cancelLog.length > cancellations, 15_000), true,
+        'the /new transition must be admitted before the skill dispatch continues')
     }
     try {
       return await originalExecute(agent, line, attachments)
@@ -1702,8 +1731,12 @@ test('Alt+Up refuses during a session transition without recalling stale queue r
   }).handler('new')
   assert.ok(newHandler, 'the /new handler must be registered')
   harness.armCreateGate()
+  const cancellations = harness.host.cancelLog.length
   const transition = (newHandler as () => Promise<unknown>)()
-  for (let index = 0; index < 4; index += 1) await Promise.resolve()
+  // WS-2: the Host Workspace pre-selection precedes the transition; the old
+  // owner's stop is the authoritative admission fact (see the skill fence case).
+  assert.equal(await drainUntil(() => harness.host.cancelLog.length > cancellations, 15_000), true,
+    'the /new transition must be admitted before the dequeue')
   ;(mounted.app as unknown as {
     actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
   }).actionDispatcher.dispatch('app.input.dequeue')
@@ -1715,35 +1748,30 @@ test('Alt+Up refuses during a session transition without recalling stale queue r
   await transition
 })
 
-test('Alt+Up does not carry a partial recalled image across a waiting transition', async (t) => {
+test('Alt+Up during a waiting /new transition does not carry a recalled image into the new session', async (t) => {
   const { harness, mounted } = await bootCommandHarness(t, { busyEnter: 'queue', status: 'idle', attachments: true })
   harness.host.nextTurn.push(queuedImage('queued-image', 'with image'), queuedText('queued-tail', 'tail'))
   const newHandler = (harness.commands as {
     handler(name: string): ((...args: never[]) => unknown) | undefined
   }).handler('new')
   assert.ok(newHandler, 'the /new handler must be registered')
-  let transition: Promise<unknown> | undefined
-  let transitionReachedCreate = false
-  harness.onCreateSession(() => { transitionReachedCreate = true })
-  // Keep the transition at create until the failed later removal has had a
-  // chance to reconcile. This makes the pre-barrier-release race deterministic.
   harness.armCreateGate()
-  harness.host.afterRemove = (id) => {
-    if (id !== 'queued-image') return
-    harness.host.abortRemoveAfter = 1
-    transition = (newHandler as () => Promise<unknown>)()
-  }
+  const cancellations = harness.host.cancelLog.length
+  const transition = (newHandler as () => Promise<unknown>)()
+  // WS-2: wait for the authoritative admission (the old owner's stop) — the
+  // Host Workspace pre-selection runs before the transition.
+  assert.equal(await drainUntil(() => harness.host.cancelLog.length > cancellations, 15_000), true,
+    'the /new transition must be admitted before the queue recall')
   ;(mounted.app as unknown as {
     actionDispatcher: { dispatch: (action: string, data?: string) => boolean }
   }).actionDispatcher.dispatch('app.input.dequeue')
-  assert.equal(await drainUntil(() => harness.host.removeCalls === 2 && transitionReachedCreate, 1_000), true,
-    'the transition and the cancellation-shaped later removal must overlap')
-  assert.ok(transition !== undefined)
+  assert.equal(await drainUntil(() => /session transition is in progress/.test(mounted.app.notifyTextForTest()), 1_000), true,
+    'the known transition fence must be surfaced for the image recall too')
+  assert.deepEqual(harness.host.nextTurn.map(message => message.id), ['queued-image', 'queued-tail'],
+    'the fenced image recall must leave the whole queue untouched')
+  assert.equal(mounted.app.getDraft(), '', 'the fenced image recall must not reach the new session editor')
   harness.releaseCreateGate()
   await transition
-  assert.equal(mounted.app.getDraft(), '', 'a partial old-session recall must not reach the new session editor')
-  assert.deepEqual(harness.host.nextTurn.map(message => message.id), ['queued-tail'],
-    'the untried later occurrence remains queued')
 })
 
 test('Alt+Up restores a committed prefix when the waiting transition rejects', async (t) => {

@@ -36,6 +36,7 @@ import { testLifecycle } from '../support/temp-lifecycle.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { sessionScopeFacts } from '../support/session-scope-facts.ts'
 import { registerTuiCommandsWithDirectSeams } from '../support/register-tui-commands.ts'
+import { provideFakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -889,6 +890,8 @@ async function mountRunner(
   ctx.provide('sessionPersistence', harness.persistence as never)
   ctx.provide('sessionQuery', harness.sessionQuery as never)
   ctx.provide('agents', harness.agents as never)
+  // WS-2: the official Host Workspace registry the Direct lifecycle pre-selects through.
+  provideFakeHostWorkspaceRegistry(ctx)
   ctx.provide('sessions', harness.sessions as never)
   ctx.provide('agentDefaultModel', harness.defaultModel as never)
   ctx.provide('llm', harness.llm as never)
