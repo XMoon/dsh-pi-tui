@@ -125,3 +125,55 @@ test('a throwing Agent cancel is indeterminate, never a false committed or rejec
   assert.equal(outcome.kind, 'indeterminate')
   assert.equal(outcome.kind === 'indeterminate' ? outcome.error.code : undefined, 'session/cancel-indeterminate')
 })
+
+// ── the navigation audience of the SAME one-shot cancel ────────────────────
+//
+// Direct owns the Agent lifecycle in-process, so leaving a Session during a
+// navigation is a Host stop: the adapter declares `stop-and-quiesce`, and its
+// navigation settlement keeps the exactly-exact-owner address and the
+// pre-dispatch/dispatched phase distinction.
+
+test('the Direct retirement declares the stop-and-quiesce navigation ownership', () => {
+  const h = harness()
+  assert.equal(h.retirement.navigationKind, 'stop-and-quiesce',
+    'Direct owns the Agent lifecycle, so a navigation must stop the replaced owner')
+})
+
+test('the Direct navigation stop addresses the exact Agent with keepInbox', async () => {
+  const h = harness()
+  const agent = fakeAgent('session-a', 'agent-a')
+  const owner = h.ownerOf(agent, 'session-a')
+  assert.deepEqual(await h.retirement.cancelForNavigation(owner), { kind: 'committed' })
+  assert.equal(agent.calls.length, 1, 'the navigation stop runs exactly once')
+  assert.deepEqual(agent.calls[0], { cause: { kind: 'user' }, options: { keepInbox: true } },
+    'the navigation stop is the same interrupt semantic and preserves the Host pending queue')
+})
+
+test('an aborted runner settles the navigation stop as cancelled without a second Agent cancel', async () => {
+  const h = harness()
+  const agent = fakeAgent('session-a', 'agent-a')
+  const owner = h.ownerOf(agent, 'session-a')
+  h.setAborted(true)
+  assert.deepEqual(await h.retirement.cancelForNavigation(owner), { kind: 'cancelled' },
+    'the confirmed pre-dispatch family is never permission to switch')
+  assert.equal(agent.calls.length, 0, 'no late cancel may land after the exit teardown')
+})
+
+test('a throwing Agent cancel is an indeterminate navigation stop, never permission to switch', async () => {
+  const h = harness()
+  const agent = fakeAgent('session-a', 'agent-a')
+  agent.cancel = (): void => { throw new Error('cancel exploded midway') }
+  const owner = h.ownerOf(agent, 'session-a')
+  const settlement = await h.retirement.cancelForNavigation(owner)
+  assert.equal(settlement.kind, 'indeterminate')
+  assert.equal(settlement.kind === 'indeterminate' ? settlement.detail : undefined, 'cancel exploded midway')
+})
+
+test('an owner with no Direct attachment is a rejected navigation stop', async () => {
+  const h = harness()
+  const stray = {} as SessionOwnerRef
+  const settlement = await h.retirement.cancelForNavigation(stray)
+  assert.equal(settlement.kind, 'rejected')
+  assert.equal(settlement.kind === 'rejected' ? settlement.detail : undefined,
+    'the session owner has no Direct attachment in this runtime')
+})

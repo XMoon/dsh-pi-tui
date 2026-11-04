@@ -122,13 +122,17 @@ On top of the gate, ordinary session transitions share ONE transaction shape
 (`runner.transitionTo`), whose phase order — fixed in `src/app/session/transition.ts`
 (`runTransitionTo`, unit-tested) — is the whole point:
 
-1. QUIESCE OLD — `old.whenIdle()` then the FINAL flush. May fail → abort,
-   ZERO child side effects. For a USER NAVIGATION (`/new`, a selected-session
-   switch) the session runtime has ALREADY sent ONE exact-owner stop of the
-   captured old generation at the transition admission, BEFORE the admitted
-   writers drained (see "Navigation-initiated stop"); this quiesce then waits
-   for that stopped Turn to actually end. `/preset` and the other ordinary
-   transitions never stop the owner they are replacing.
+1. QUIESCE OLD — a `stop-and-quiesce` backend runs `old.whenIdle()` then the
+   FINAL flush; a `detach-client` backend runs neither (the Host Turn it is
+   leaving keeps running, its `flush` is a Client no-op, and the admitted
+   writers already drained in the barrier). May fail → abort, ZERO child side
+   effects. For a USER NAVIGATION (`/new`, a selected-session switch) the
+   session runtime has ALREADY applied the backend's navigation ownership at
+   the transition admission, BEFORE the admitted writers drained (see
+   "Navigation ownership"): a `stop-and-quiesce` backend sent ONE exact-owner
+   stop and this quiesce waits for that stopped Turn to actually end, a
+   `detach-client` backend sent no stop and has nothing to wait for. `/preset`
+   and the other ordinary transitions never stop the owner they are replacing.
 2. ALL TUI-owned preflight (preset/composition/stale checks — BEFORE the
    DSH boundary, so failures abort with ZERO side effects).
 3. create/open the CHILD — may fail → abort; once it SUCCEEDS the child
@@ -142,10 +146,13 @@ On top of the gate, ordinary session transitions share ONE transaction shape
    the new owner is published into the ownership core
    (`runOrdinaryCommit`, `src/app/session/commit-order.ts`), with no awaits
    between its steps.
-5. RETIRE — retire the OLD owner through the retirement port, which owns the
-   official session-close order (see the session-owner retirement section);
-   child surface/catalog work is best-effort and the committed child always
-   stands.
+5. RETIRE — retire the OLD owner through the retirement port: a
+   `stop-and-quiesce` backend runs its official session-close order (see the
+   session-owner retirement section) and waits for the committed child's
+   abort-aware idle; a `detach-client` backend only releases the replaced
+   Client reference, and its committed child is NOT waited to idle before the
+   surface init/catalog (the target may legitimately be running). Child
+   surface/catalog work is best-effort and the committed child always stands.
 
 ### Fork dispatch and adoption
 
@@ -209,69 +216,99 @@ refused (`TransitionInProgressError`).
 `runTransition` also owns the ONE user-navigation admission seam
 (`stopOldOwner`, see below). It runs after the freeze and before the drain,
 exactly once; it is not a writer admission and ordinary writers stay refused
-while it runs.
+while it runs. The seam always performs the intent's scope/currentness check;
+the Host stop itself belongs to a `stop-and-quiesce` backend (see "Navigation
+ownership"), so a `detach-client` navigation still freezes and drains but
+addresses no Host owner.
 
-### Navigation-initiated stop — `/new` and a selected-session switch
+### Navigation ownership — leaving a Session
 
 A user who leaves the current Session (`/new`, a Session-Browser selection,
-`/resume <id>`) does not have to wait for the old Turn to finish naturally, and
-does not depend on a modal Question being answered. The canonical order is:
+`/resume <id>`) must not be blocked by the Turn they are leaving, and the two
+backends own that Turn differently. The runtime consumes ONE capability,
+`SessionOwnerRetirement.navigationKind`, assigned once by each adapter; the
+commands, the picker and the renderer never branch on the backend:
+
+- `stop-and-quiesce` (Direct) — the TUI and the Host share one process and the
+  adapter owns the Agent, so a navigation sends ONE exact-owner stop of the
+  captured old generation (`cancelForNavigation`: the same interrupt semantic
+  as the control Stop, `keepInbox` included), then waits for that exact owner
+  to settle and runs the final flush before the child is created.
+- `detach-client` (Remote) — the Host owns the Agent and a retained Client
+  reference's release never stops it, so a navigation only detaches the Client
+  view: no Host cancel is dispatched and no idle is awaited, the exact Client
+  reference is released after the synchronous commit, and the Host Turn keeps
+  running (and keeps persisting) while the user reads another Session.
+
+The canonical order is:
 
 ```text
 UI intent captures the OLD generation (scope)
 → freeze new ordinary writers (barrier)
-→ ONE exact-owner stop of the CAPTURED owner (control authority)
-→ admitted ordinary writers drain (the stop may be what lets one settle)
-→ whenIdleOrAbort / preflight
-→ final flush
+→ backend navigation ownership
+    stop-and-quiesce: ONE exact-owner stop of the CAPTURED owner
+    detach-client:    no Host stop (nothing is addressed)
+→ admitted ordinary writers drain
+→ stop-and-quiesce only: whenIdleOrAbort of the captured owner + final flush
 → create/open the target ONCE
 → synchronous owner publication
-→ old-owner retirement (its own close-order cancel → idle → drain → flush → dispose)
+→ retire the replaced owner
+    stop-and-quiesce: its own close-order cancel → idle → drain → flush → dispose
+    detach-client:    release the replaced Client reference
+→ committed child's post-commit phase
+    stop-and-quiesce: abort-aware child idle wait, then surface init/catalog
+    detach-client:    surface init/catalog immediately (the target may be running)
 ```
 
-- The stop is the semantic USER cancel of the exact captured owner
-  (`SessionOwnerRetirement.cancel`): Direct calls the captured
-  `Agent.cancel({kind:'user'}, {keepInbox:true})`, Remote calls the exact
-  binding generation's official `SessionFace.cancel()`. It runs at most once,
-  and it is NOT the shutdown `preCancel`, NOT the retirement close-order
-  cancel (which still runs after the commit) and NOT a writer bypass.
+- The old owner is the semantic USER-NAVIGATION stop for a `stop-and-quiesce`
+  backend only. It is NOT the shutdown `preCancel`, NOT the retirement
+  close-order cancel (which still runs after the commit) and NOT a writer
+  bypass.
 - The identity is captured SYNCHRONOUSLY by the command owner before its first
   await (`/new`) or by the scoped browser intent. A stale capture — another
   navigation published first — aborts silently without touching the
-  replacement generation. An UNSCOPED picker selection captures the owner it
-  is actually leaving inside the gate, right before the freeze, so a queued
-  later selection keeps its own FIFO intent instead of inheriting an older
-  generation.
-- ONLY a `committed` cancellation is permission to enter the next phase.
+  replacement generation, on BOTH backends. An UNSCOPED picker selection
+  captures the owner it is actually leaving inside the gate, right before the
+  freeze, so a queued later selection keeps its own FIFO intent instead of
+  inheriting an older generation.
+- The stop settlement taxonomy belongs to the `stop-and-quiesce` backend.
+  ONLY a `committed` cancellation is permission to enter the next phase.
   `rejected` (a proven refusal), `cancelled` (confirmed pre-dispatch: the exact
   generation could not be addressed, or the runner is exiting) and
   `indeterminate` (the call WAS dispatched but its effect is unproven) all abort
   BEFORE the drain and before any child work: the current Session stays live,
-  nothing is created/opened and nothing is retried. `cancelled` means "the Host
+  nothing is created/opened and nothing is retried. `cancelled` means "the
   cancel was NOT ADDRESSED", never "there is no work to stop": a disconnected
   Connection generation, a replaced binding or a released owner reference
   leaves the old Host Turn unproven, and `whenIdleOrAbort` returning
   `'unobservable'` for a rolled/released binding or a changed Connection
   generation is not proof of idle — the accepted stop carries its EXACT
   generation receipt into the quiesce, so a reconnect during the writer drain
-  can never make the quiesce observe a later generation —
-  navigation never reaches that quiesce without a `committed` stop. Only
-  `indeterminate` states that the old Turn may already have stopped. The phase
-  distinction comes from `SessionOwnerRetirement.cancelForNavigation`, which
-  leaves the control `cancel` taxonomy untouched: the control Stop still
-  reports a dispatched caller/carrier cancellation as `cancelled`, while
-  navigation resolves that same reply as dispatched-unproven.
-- Cancellation is never rolled back. An ACCEPTED stop has two distinct proven
-  facts: until the pre-commit OLD-owner quiesce completes, a failure says the
-  stop was REQUESTED but its completion is not confirmed; only after an
-  OBSERVED settle (`whenIdleOrAbort === false`) followed by the final flush does
-  a failure say the old Turn is stopped and cannot be resumed. An
-  `'unobservable'` quiesce (a rolled/released exact binding) is NOT a completed
-  quiesce, and the Remote no-op flush adds no proof. A failure before any
-  accepted stop owns no message.
+  can never make the quiesce observe a later generation — navigation never
+  reaches that quiesce without a `committed` stop. Only `indeterminate` states
+  that the old Turn may already have stopped. The phase distinction comes from
+  `SessionOwnerRetirement.cancelForNavigation`, which leaves the control
+  `cancel` taxonomy untouched: the control Stop still reports a dispatched
+  caller/carrier cancellation as `cancelled`, while navigation resolves that
+  same reply as dispatched-unproven.
+- A `detach-client` navigation never claims a Host Turn stopped: the intent's
+  `admission.oldStopAccepted` stays false, so no "old turn stopped" wording is
+  produced. Its failures state whether the target create/open was dispatched,
+  published and committed — never a fabricated stop result and never a
+  rollback of a published Host Session.
+- Cancellation is never rolled back. On a `stop-and-quiesce` backend an
+  ACCEPTED stop has two distinct proven facts: until the pre-commit
+  OLD-owner quiesce completes, a failure says the stop was REQUESTED but its
+  completion is not confirmed; only after an OBSERVED settle
+  (`whenIdleOrAbort === false`) followed by the final flush does a failure say
+  the old Turn is stopped and cannot be resumed. An `'unobservable'` quiesce
+  (a rolled/released exact binding) is NOT a completed quiesce, and the Remote
+  no-op flush adds no proof. A failure before any accepted stop owns no
+  message.
 - Browsing is read-only: opening `/sessions`, bare `/resume` or `/search` never
   stops the current owner. Only an explicit target selection enters this
-  admission.
+  admission, and a selection that resolves to the CURRENT Session is a no-op
+  that stops nothing on either backend.
 - Duplicate `/new`: the command registration holds a local in-flight marker,
   set in the handler's FIRST synchronous step (before its first await and
   before the transition gate) and released at the true terminal settlement.
@@ -587,6 +624,17 @@ destroys the Host Agent, which is exactly why the port fixes only the
 observable contract (await quiescence and report which condition ended the
 wait) and leaves HOW an abort is reflected onto the owner to the backend.
 
+That ownership difference is declared explicitly, not inferred from a missing
+cancel receipt: `navigationKind` is `'stop-and-quiesce'` on the Direct adapter
+(it owns the Agent lifecycle in-process) and `'detach-client'` on the Remote
+adapter (`src/app/remote/session-owners.ts`, where `retire` releases the exact
+retained Client reference and `flush`/`preCancel` are deliberate no-ops). The
+runtime consumes that ONE field for user navigation, so no command, picker or
+renderer decides the policy itself (see "Navigation ownership"). A Remote
+`whenIdleOrAbort` still observes the official `SessionSnapshot.running` under
+its exact binding/Connection-generation fence; it is simply not part of the
+ordinary navigation path, because the Host Turn is allowed to keep running.
+
 The retirement order is mode-dependent, because the two modes have different
 durability owners:
 
@@ -639,9 +687,12 @@ that flush).
 A successful ordinary transition also checkpoints the COMMITTED child:
 IMMEDIATELY after the synchronous commit, BEFORE the OLD owner's retirement
 (whose descendant drain is unbounded), before the abort-aware child quiesce
-and before any surface work, ONE `retirement.flush(nextOwner)` materializes
-the new session's durable boundary (an empty `/new` session has no events,
-so only an explicit flush makes it resumable). That position is part of the
+(which only a `stop-and-quiesce` backend has — a `detach-client` backend goes
+straight to the surface work) and before any surface work, ONE
+`retirement.flush(nextOwner)` materializes the new session's durable boundary
+(an empty `/new` session has no events, so only an explicit flush makes it
+resumable; on a `detach-client` backend that flush is the port's Client no-op
+and makes no durable claim). That position is part of the
 contract, not an implementation detail: a shutdown closes the handle
 concurrently with the transaction, and DSH's close drains what was appended
 but does NOT materialize a never-appended session — a checkpoint parked
@@ -744,10 +795,13 @@ Where it runs:
   exit-controller hook, so `retireOwnedSession` performs the same synchronous
   pre-cancel itself before creating the memoized promise.
 - **Client detach vs explicit Stop**: a Client surface teardown, Client
-  process exit or connection loss releases only the Client-owned surface,
-  official transport and Client root. It does not invoke the Direct/runtime
-  Session retirement cancel: that cancel remains the explicit Stop/navigation
-  authority. A Host-owned pending Question/Approval forward must stay pending in
+  process exit, connection loss or leaving the Session through `/new`/a
+  switch/`/resume` releases only the Client-owned surface, official transport,
+  exact Session reference and Client root. It does not invoke the Direct/runtime
+  Session retirement cancel: that cancel remains the explicit Stop authority
+  (the Direct in-process navigation stop is the separate
+  `stop-and-quiesce` ownership described above, never a Client detach). A
+  Host-owned pending Question/Approval forward must stay pending in
   the Host Gateway across the detach, and a later Client must answer the same
   event/call identity at most once. A split Client composition must install its
   interaction owner before the official Gateway event pump can consume the
@@ -767,14 +821,20 @@ Where it runs:
   its partial graph and exits the Client. The Host identity and Host business
   objects never change.
 - **Successful ordinary session transition** (`/new`, `/sessions` switch,
-  or open): a USER NAVIGATION first sends its one exact-owner stop at the
-  transition admission (before the drain), then the pre-commit quiesce
-  (whenIdle + flush) waits for that Turn to end; AFTER the commit the old owner
-  is retired with the same fixed order, so the old Agent's continuable
-  descendants are drained and its final flush lands after the drain. A failed
-  child create never drains or disposes the old owner — the old session stays
-  current and, when the navigation stop was accepted, the failure says the old
-  Turn is already stopped (the transaction semantics are unchanged).
+  or open): a USER NAVIGATION applies the backend's navigation ownership at the
+  transition admission (before the drain). A `stop-and-quiesce` backend (Direct)
+  first sends its one exact-owner stop, then the pre-commit quiesce
+  (whenIdle + flush) waits for that Turn to end, and AFTER the commit the old
+  owner is retired with the same fixed order, so the old Agent's continuable
+  descendants are drained and its final flush lands after the drain. A
+  `detach-client` backend (Remote) sends no Host cancel and runs no old-owner
+  quiesce: the admitted Client writers drain, the commit is synchronous, the
+  replaced Client reference is released, and the Host Turn keeps running. A
+  failed child create never drains or disposes the old owner — the old session
+  stays current; on a `stop-and-quiesce` backend, when the navigation stop was
+  accepted, the failure says the old Turn is already stopped (the transaction
+  semantics are unchanged), while a `detach-client` failure never claims a Turn
+  stop at all.
 - **Fork/rewind adoption:** Host publication is not rolled back on navigation
   supersession. Current Direct adoption retires the old owner after the gated
   visible handoff; a successful unselected child remains parked for a later

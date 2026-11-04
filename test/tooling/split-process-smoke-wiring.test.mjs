@@ -416,9 +416,9 @@ test('two real TUI Clients must both show one Host Question or Approval before f
   // The M5-C Case is ONE isolated C1 scope between the M5-B Case and the T44
   // inventory: it may not renumber, skip or absorb any existing Case.
   const start = source.indexOf('// M5C-01 (M5-C):')
-  const end = source.indexOf('// T44: a real accepted Turn survives')
+  const end = source.indexOf('// M5N-01 (M5-N):')
   assert.ok(start > source.indexOf('// M5B-01 (M5-B):') && end > start,
-    'M5C-01 must stay between the M5-B Case and the T44 inventory')
+    'M5C-01 must stay between the M5-B Case and the M5N-01 Case')
   assert.equal((source.match(/\/\/ M5C-01 \(M5-C\):/gu) ?? []).length, 1,
     'the dual-TUI first-settlement Case must exist exactly once')
   const m5c = source.slice(start, end)
@@ -551,6 +551,69 @@ test('two real TUI Clients must both show one Host Question or Approval before f
   }
   assert.ok(source.indexOf('// M5B-01 (M5-B):') > 0,
     'the M5-C Case must not remove the M5-B same-Session witness')
+})
+
+test('the non-destructive Split Remote navigation witness stays between M5-C and the T44 inventory', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  // ONE isolated case, after the M5-C first-settlement Case and before the
+  // T44 inventory it must not renumber or absorb.
+  const start = source.indexOf('// M5N-01 (M5-N):')
+  const end = source.indexOf('// T44: a real accepted Turn survives')
+  assert.ok(start > source.indexOf('// M5C-01 (M5-C):'), 'M5N-01 must run after the M5-C Case')
+  assert.ok(end > start, 'M5N-01 must stay immediately before the T44 inventory')
+  assert.equal((source.match(/\/\/ M5N-01 \(M5-N\):/gu) ?? []).length, 1,
+    'the non-destructive navigation witness must exist exactly once')
+  const m5n = source.slice(start, end)
+
+  // ONE real Host with a HELD Turn: the held barrier is the only thing that
+  // ends it, so no replay/timer can produce the continuation.
+  assert.match(m5n, /startC1Host\('long-turn', 'm5n-navigation'/u)
+  assert.match(m5n, /C1_HOLD_LONG_TURN: releaseBarrier/u)
+  // TWO real SurfaceEntryProcess Clients (never the qualification
+  // EntryProcess): A navigates, B joins the Session A left.
+  assert.equal((m5n.match(/startC1Client\(/gu) ?? []).length, 2,
+    'M5N-01 must start exactly two real Surface Clients')
+  assert.doesNotMatch(m5n, /new EntryProcess\('client'/u,
+    'M5N-01 must never downgrade to the qualification EntryProcess')
+  assert.match(m5n, /SPLIT_PROCESS_CLIENT_SESSION: sessionX/u)
+  assert.match(m5n, /aReady\.pid !== bReady\.pid/u)
+  assert.match(m5n, /clientA\.child\.pid !== clientB\.child\.pid/u)
+
+  // The case must PROVE the navigation did not wait: it asserts no turn/end
+  // exists while the hold barrier is absent, for BOTH the /new and /resume.
+  assert.match(m5n, /clientA\.send\('\/new\\r'\)/u)
+  assert.match(m5n, /clientA\.send\(`\/resume \$\{sessionX\}\\r`\)/u)
+  assert.match(m5n, /clientA\.send\(`\/resume \$\{sessionY\}\\r`\)/u)
+  assert.equal((m5n.match(/!existsSync\(releaseBarrier\)/gu) ?? []).length, 4,
+    'M5N must assert the hold barrier was still absent before and at each navigation commit')
+  assert.match(m5n, /event\.type !== 'turn\/end'/u,
+    'M5N must prove the held Turn did not settle before the barrier release')
+  // The RUNNING target projection and the already-current no-op are explicit.
+  assert.match(m5n, /record\.openSessionId === sessionX/u)
+  assert.match(m5n, /long-turn started/u)
+  assert.match(m5n, /already on this session/u)
+
+  // The old X Turn must COMPLETE (never be cancelled) after A left, and the
+  // Host-queued occurrence must stay with X (exact identity, exactly once).
+  assert.match(m5n, /waitForTurnEnds/u)
+  assert.match(m5n, /reason\?\.kind === 'completed'/u)
+  assert.match(m5n, /event\.type === 'agent\/inbox\/spliced'/u)
+  assert.match(m5n, /event\.data\?\.target === 'next-turn'/u)
+  assert.match(m5n, /event\.data\?\.id === queuedItem\.id/u)
+  assert.doesNotMatch(m5n, /requestId/iu, 'M5N must not infer a requestId from a text match')
+
+  // Explicit Busy Esc is the negative control: the SAME Host records an
+  // aborted user settlement for that exact Turn.
+  assert.match(m5n, /clientA\.send\('\\x1b'\)/u)
+  assert.match(m5n, /reason\?\.kind === 'aborted'/u)
+  assert.match(m5n, /reason\?\.reason\?\.kind === 'user'/u)
+
+  // Identity, cleanup and the trace are explicit.
+  assert.match(m5n, /assertHostIdentityKept\(host, hostBefore/u)
+  assert.match(m5n, /exitC1Client\(clientA/u)
+  assert.match(m5n, /exitC1Client\(clientB/u)
+  assert.match(m5n, /stopC1Host\(host\)/u)
+  assert.match(m5n, /trace\('m5n-01'/u)
 })
 
 test('the question lanes wait for the real review frame, never the permanent Submit tab', () => {

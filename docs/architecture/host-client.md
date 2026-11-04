@@ -539,9 +539,14 @@ never terminates Host work that the Host already accepted. The Host's exact
 Agent, Turn, Tool, Job and Child objects keep their own Host lifetimes; a new
 Client attaches through the official authenticated Session reference and reads
 the durable Session log plus the live event stream. Only an explicit human
-Stop/navigation action sends the Host Agent cancel; a Client detach is a
-release of the Client's `tuiMainView` reference and transport, never a Host
-cancel in disguise.
+Stop sends the Host Agent cancel. Leaving a Session through the Client's
+`/new`, a session switch or `/resume` is a Client detach too: it releases the
+Client's `tuiMainView` reference and transport, never a Host cancel in
+disguise, so the Host Turn the Client was watching keeps running and
+persisting. (The Direct backend inside the Host process is the exception, and
+it belongs to `docs/architecture/concurrency.md`: there the adapter owns the
+Agent lifecycle, so its navigation stops the replaced owner before creating
+the next Session.)
 
 The Host Gateway's pending forwarded events are the ONE recovery channel for a
 Question or Approval that was waiting when the Client left. A Client surface

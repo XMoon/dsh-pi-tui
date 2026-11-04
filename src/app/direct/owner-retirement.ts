@@ -343,6 +343,10 @@ export function createDirectOwnerRetirement(deps: DirectOwnerRetirementDeps): Se
   }
 
   return {
+    // Direct owns the Agent lifecycle in-process: leaving a Session must stop
+    // its current Turn and wait for that exact owner before the child is
+    // created (see `SessionNavigationOwnership`).
+    navigationKind: 'stop-and-quiesce',
     whenIdleOrAbort,
     cancel,
     cancelForNavigation,

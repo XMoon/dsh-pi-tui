@@ -22,16 +22,22 @@
  * owner, so `flush`/`preCancel` are deliberate no-ops, `retire` releases the
  * exact Client reference exactly once, and `whenIdleOrAbort` observes the
  * official `SessionSnapshot.running` without ever cancelling the Host session.
- * The ONE Host mutation here is `cancel`: the explicit user Stop addresses the
- * EXACT captured binding generation through the official `SessionFace.cancel`
- * verb; it never substitutes a same-id replacement and never releases the
- * Client reference. The Connection generation is captured before dispatch and
- * re-checked with the exact binding after the reply, so a superseded reply is
- * `indeterminate`, never the current generation's definite result. The same
- * one-shot verb serves the navigation audience through `cancelForNavigation`,
- * which resolves the dispatch PHASE (a dispatched reply whose classification is
- * a caller/carrier `cancelled` is dispatched-unproven there) without changing
- * the control `cancel` taxonomy; only `committed` lets navigation proceed.
+ * That is also why this adapter declares `navigationKind: 'detach-client'`:
+ * leaving a Session through `/new`, a selected-session switch or `/resume`
+ * releases THIS Client's exact reference and never stops the Host Turn, so a
+ * navigation neither dispatches the official cancel nor waits for the old or
+ * committed child's idle. The ONE Host mutation here is the explicit user Stop
+ * (`cancel`): it addresses the EXACT captured binding generation through the
+ * official `SessionFace.cancel` verb; it never substitutes a same-id
+ * replacement and never releases the Client reference. The Connection
+ * generation is captured before dispatch and re-checked with the exact binding
+ * after the reply, so a superseded reply is `indeterminate`, never the current
+ * generation's definite result. The same one-shot verb serves the navigation
+ * audience through `cancelForNavigation`, which resolves the dispatch PHASE (a
+ * dispatched reply whose classification is a caller/carrier `cancelled` is
+ * dispatched-unproven there) without changing the control `cancel` taxonomy;
+ * the port keeps it because a backend that owns the Agent lifecycle needs it —
+ * this adapter's navigation path deliberately never calls it.
  *
  * Composition note: the Remote application runtime constructs this provider
  * ONCE over the official Client's sessions and Connection generation source.
@@ -406,6 +412,10 @@ export function createRemoteSessionOwnerServices(
       completionIdentity: (): undefined => undefined,
     },
     retirement: {
+      // The Host owns the Agent and a Client reference release never stops it:
+      // a navigation detaches this Client's view only (see
+      // `SessionNavigationOwnership`).
+      navigationKind: 'detach-client',
       whenIdleOrAbort,
       cancel,
       cancelForNavigation,

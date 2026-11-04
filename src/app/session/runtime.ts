@@ -399,7 +399,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
    *   the failure wording distinguishes "requested, not yet confirmed" from
    *   "quiesced, cannot be resumed";
    * - `nothing` — the surface is sessionless (there is no old owner to stop),
-   *   or the runner is exiting (the transition is moot);
+   *   the runner is exiting (the transition is moot), or the backend's
+   *   `navigationKind` is `detach-client` (leaving a Session only releases
+   *   THIS Client's reference; the Host Turn keeps running and is never
+   *   addressed by a navigation cancel);
    * - `failed` — ONLY a `committed` cancellation is permission to enter the
    *   next phase. A proven refusal (`rejected`), a confirmed pre-dispatch
    *   refusal (`cancelled`) and a dispatched-unproven stop (`indeterminate`)
@@ -426,6 +429,10 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     if (!deps.isScopeCurrent(scope)) {
       return { kind: 'failed', failure: { settlement: 'stale', detail: '' } }
     }
+    // A detach-client backend keeps the Host Turn alive across the navigation:
+    // leaving the Session releases THIS Client's reference and never stops the
+    // Host Agent, so there is no stop to address and no stop fact to admit.
+    if (deps.retirement.navigationKind === 'detach-client') return { kind: 'nothing' }
     const owner = core.owner()
     if (owner === undefined) return { kind: 'nothing' }
     // The PHASE-RESOLVED navigation settlement: a pre-dispatch refusal is
@@ -505,14 +512,15 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     runNavigationGate(() => runNavigationTransition(intent, task))
 
   /**
-   * Run one ordinary session transition/switch: quiesce + flush the old owner,
-   * run the caller's preflight/create, commit the visible handle through the
-   * fixed order (`runOrdinaryCommit`, plan §4A) and retire the old owner. The
-   * committed child always stands: a post-commit failure is contained and
-   * reported as a failed step. ONE deliberate exception: when the lifecycle
-   * aborts during the post-commit child quiesce, the transition returns early —
-   * the surface init and the switch report are skipped (the exiting runner's
-   * retirement takes over) and the outcome stays successful.
+   * Run one ordinary session transition/switch: quiesce (only when the backend
+   * owns the replaced owner's Host lifecycle) the old owner, run the caller's
+   * preflight/create, commit the visible handle through the fixed order
+   * (`runOrdinaryCommit`, plan §4A) and retire the old owner. The committed
+   * child always stands: a post-commit failure is contained and reported as a
+   * failed step. ONE deliberate exception: when the lifecycle aborts during the
+   * post-commit child quiesce, the transition returns early — the surface init
+   * and the switch report are skipped (the exiting runner's retirement takes
+   * over) and the outcome stays successful.
    */
   const transitionTo = async <T>(steps: TransitionSteps<T>): Promise<TransitionOutcome<T>> => {
     // The accepted navigation stop's generation receipt, if this transition is
@@ -544,6 +552,14 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     try {
       return await runTransitionTo<T>({
         quiesceOld: async () => {
+          // A detach-client backend keeps the replaced Host Turn alive: the
+          // admitted Client writers already drained in the barrier, the replaced
+          // Client reference is released only AFTER the synchronous commit, and
+          // `flush` is a Client no-op that proves no durability. Waiting for the
+          // old Host owner's idle here would reintroduce exactly the implicit
+          // wait this navigation contract removes, and an `'unobservable'`
+          // quiesce would abort a navigation the Host never blocked.
+          if (deps.retirement.navigationKind === 'detach-client') return
           const owner = core.owner()
           if (owner === undefined) return
           // QUIESCE first: after whenIdle the old owner can no longer produce turn
@@ -749,8 +765,16 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           // disposed and the retirement takes over: skip the surface
           // initialization below (it would repaint into the disposed app) and
           // let the committed child stand.
-          const aborted = await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)
-          if (aborted === true) {
+          //
+          // A detach-client backend keeps the committed child's Host Turn
+          // running — the target may legitimately be busy when the Client
+          // arrives — so it must not wait for that child's idle. The lifecycle
+          // check still runs: an exit during this phase owns the same
+          // skip-the-surface-init behavior on BOTH backends.
+          const aborted = deps.retirement.navigationKind === 'detach-client'
+            ? deps.lifecycleSignal.aborted
+            : (await deps.retirement.whenIdleOrAbort(nextOwner, deps.lifecycleSignal)) === true
+          if (aborted) {
             // The lifecycle is exiting: the committed child stands and the
             // retirement takes over. Skip the surface init AND the switch
             // report (the `finally` still clears the opening journal).

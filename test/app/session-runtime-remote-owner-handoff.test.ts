@@ -835,6 +835,8 @@ test('a Direct-shaped owned fork handle adopts directly without any lifecycle op
   const runtime = bindSessionRuntime(core, {
     owners,
     retirement: {
+      // Direct shape: this adapter owns the Host Agent lifecycle.
+      navigationKind: 'stop-and-quiesce',
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
       cancelForNavigation: async () => ({ kind: 'committed' as const }),
@@ -983,6 +985,8 @@ test('a Direct pre-publication commit throw releases the child once and never re
       completionIdentity: (): string | undefined => 'direct-child',
     },
     retirement: {
+      // Direct shape: this adapter owns the Host Agent lifecycle.
+      navigationKind: 'stop-and-quiesce',
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
       cancelForNavigation: async () => ({ kind: 'committed' as const }),
@@ -1103,6 +1107,8 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
       completionIdentity: (): string | undefined => 'direct-child',
     },
     retirement: {
+      // Direct shape: this adapter owns the Host Agent lifecycle.
+      navigationKind: 'stop-and-quiesce',
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
       cancelForNavigation: async () => ({ kind: 'committed' as const }),
@@ -1198,6 +1204,8 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
       completionIdentity: (): string | undefined => undefined,
     },
     retirement: {
+      // Direct shape: this adapter owns the Host Agent lifecycle.
+      navigationKind: 'stop-and-quiesce',
       whenIdleOrAbort: async () => false,
       cancel: async () => ({ kind: 'committed', value: undefined }),
       cancelForNavigation: async () => ({ kind: 'committed' as const }),
@@ -1459,17 +1467,15 @@ test('the control interrupt reaches the EXACT old binding while a navigation tra
   assert.equal(h.core.barrier.inTransition, true, 'the navigation transition froze the writer barrier')
   assert.equal(h.core.barrier.activeWriters, 1, 'the admitted writer is still outstanding')
   assert.equal(h.events.includes('open:session-b'), false, 'the transition body has not run yet')
-  // The navigation admission already stopped the captured old generation ONCE,
-  // before the drain (the PR-B order).
-  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1,
-    'the navigation stop reached the exact old binding before the writer drain')
+  // A detach-client navigation never addresses the Host Turn: the old binding
+  // received no navigation cancel while the writer still drains.
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 0,
+    'a Remote navigation must not cancel the Host Turn it is leaving')
 
   // The Busy Esc / Stop control entry: it is admitted while frozen, captures
-  // the SAME exact OLD owner and cancels only that generation's binding again
-  // (a user Stop after the navigation stop is a Host no-op, but it must still
-  // be addressed exactly).
+  // the SAME exact OLD owner and cancels only that generation's binding.
   assert.deepEqual(await h.runtime.interrupt(oldScope), { kind: 'committed', value: undefined })
-  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 2, 'the OLD exact binding received the control cancel')
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 1, 'the OLD exact binding received the control cancel')
   assert.equal(h.bindingOf('session-b'), undefined, 'the NEW binding was not even materialized by the control')
   assert.equal(h.events.includes('open:session-b'), false, 'the control did not shortcut the writer drain')
 
@@ -1514,17 +1520,59 @@ test('the control interrupt with an aborted runner is cancelled and never reache
   assert.equal(h.bindingOf('session-a')!.cancelCalls(), 0)
 })
 
-// ── the navigation admission: stop the captured old generation, then switch ─
+// ── the navigation admission: apply the backend's navigation ownership ─────
 //
-// A selected-session switch and `/new` are USER NAVIGATIONS: the captured OLD
-// generation is stopped EXACTLY once, after the barrier freeze and BEFORE the
-// admitted-writer drain, and a refused/unproven stop aborts BEFORE any target
-// open/create. The stop is the official one-shot Host cancel of the exact
-// binding generation (`SessionFace.cancel` in the fake model), never a
-// `preCancel` no-op.
+// A selected-session switch and `/new` are USER NAVIGATIONS: after the barrier
+// freeze and BEFORE the admitted-writer drain, the runtime applies the owning
+// backend's `navigationKind`. A `stop-and-quiesce` backend (Direct) stops the
+// captured OLD generation EXACTLY once and a refused/unproven stop aborts
+// BEFORE any target open/create. A `detach-client` backend (Remote) dispatches
+// NO Host cancel: the old Host Turn keeps running, and the replaced Client
+// reference is released only after the synchronous commit.
 
-test('a selected-session switch stops the exact captured owner BEFORE its writer drain, then commits', async () => {
+test('a Remote switch detaches the Client view: the busy Host owner is neither cancelled nor waited for', async () => {
   const h = harness()
+  h.publishRetained('session-a')
+  const scopeAuthority = installScope(h)
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+  // The Host owner is BUSY for the whole navigation: a stop-and-quiesce
+  // backend would have to stop and idle it before creating the target.
+  const oldBinding = h.bindingOf('session-a')!
+  oldBinding.setRunning(true)
+
+  // An ordinary writer admitted BEFORE the navigation holds the drain open.
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const writer = h.runtime.withWriter(oldScope, async () => {
+    h.events.push('writer-start')
+    await writerGate
+    h.events.push('writer-end')
+  })
+  const transition = h.runtime.switchSession('session-b', oldScope)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.core.barrier.inTransition, true, 'the switch froze the barrier')
+  assert.equal(h.core.barrier.activeWriters, 1, 'the admitted writer is still outstanding')
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 0,
+    'a Remote navigation must not send a Host cancel for the owner it leaves')
+  assert.deepEqual(h.calls.opens, [], 'the target open has not run before the drain')
+
+  releaseWriter()
+  await writer
+  assert.equal(await transition, undefined)
+  assert.equal(h.core.currentSessionId(), 'session-b', 'the switch committed after the drain')
+  assert.equal(h.bindingOf('session-b')!.cancelCalls(), 0, 'the target generation never receives a cancel')
+  assert.deepEqual(h.calls.opens, ['session-b'], 'the target is opened exactly once, after the drain')
+  assert.equal(h.countRefs('session-a'), 0, 'the replaced owner is released exactly once')
+  assert.equal(h.isLive('session-a'), false, 'the replaced Client reference was fully released')
+  // The Host-side turn was never stopped by the Client: the fake binding is
+  // still running (a Client reference release is not a Host stop contract).
+  assert.equal(oldBinding.session.getSnapshot().running, true,
+    'the navigation must leave the Host Turn running')
+})
+
+test('a stop-and-quiesce backend (Direct shape) still stops the exact captured owner BEFORE its writer drain', async () => {
+  const h = harness({ retirement: { navigationKind: 'stop-and-quiesce' } })
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const oldScope = scopeAuthority.captureLive()
@@ -1555,8 +1603,41 @@ test('a selected-session switch stops the exact captured owner BEFORE its writer
   assert.equal(h.countRefs('session-a'), 0, 'the replaced owner is released exactly once')
 })
 
-test('a REFUSED navigation stop keeps the old session current and never opens the target', async () => {
-  const h = harness()
+test('a Remote switch into a RUNNING target commits without waiting for either owner to go idle', async () => {
+  const h = harness({
+    retirement: {
+      // Any Host idle wait here is a failure of the detached-navigation
+      // contract: neither the owner being left nor the committed child may be
+      // awaited (the target is legitimately busy, the old Turn keeps running).
+      whenIdleOrAbort: async () => {
+        throw new Error('a detach-client navigation must not wait for Host idle')
+      },
+    },
+  })
+  h.publishRetained('session-a')
+  const oldBinding = h.bindingOf('session-a')!
+  oldBinding.setRunning(true)
+  // The TARGET is running too: `/resume` must project it immediately. The arm
+  // runs after the official open retained B and before the commit.
+  h.arms.set('session-b', {
+    duringOpen: () => { h.bindingOf('session-b')!.setRunning(true) },
+  })
+  const outcome = await h.runtime.switchSessionOutcome('session-b')
+  assert.equal(outcome.kind, 'committed', 'a running target still commits the Client view')
+  assert.equal(h.core.currentSessionId(), 'session-b')
+  assert.deepEqual(h.calls.opens, ['session-b'], 'the running target is opened exactly once')
+  assert.equal(oldBinding.cancelCalls(), 0, 'the old Host owner was never cancelled')
+  assert.equal(h.bindingOf('session-b')!.cancelCalls(), 0, 'the running target was never cancelled')
+  assert.ok(h.events.includes('init:session-b'), 'the committed target surface was initialized')
+  assert.ok(h.events.includes('catalog:session-b'), 'the committed target catalog was refreshed')
+  assert.equal(oldBinding.session.getSnapshot().running, true,
+    'the old Host Turn is still running after the Client detached')
+  assert.equal(h.bindingOf('session-b')!.session.getSnapshot().running, true,
+    'the committed target is still running: the switch never waited for its idle')
+})
+
+test('a REFUSED stop on a stop-and-quiesce backend keeps the old session current and never opens the target', async () => {
+  const h = harness({ retirement: { navigationKind: 'stop-and-quiesce' } })
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const oldScope = scopeAuthority.captureLive()
@@ -1578,8 +1659,8 @@ test('a REFUSED navigation stop keeps the old session current and never opens th
   assert.match(String(message), /the session was not switched/)
 })
 
-test('an INDETERMINATE navigation stop aborts with the may-have-stopped statement and never opens the target', async () => {
-  const h = harness()
+test('an INDETERMINATE stop on a stop-and-quiesce backend aborts with the may-have-stopped statement', async () => {
+  const h = harness({ retirement: { navigationKind: 'stop-and-quiesce' } })
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const oldScope = scopeAuthority.captureLive()
@@ -1619,8 +1700,39 @@ test('a stale captured scope never stops the replacement session', async () => {
   assert.equal(h.core.currentSessionId(), 'session-b')
 })
 
-test('withNavigation writes the admission fact BEFORE the body and stops the captured owner once', async () => {
+test('withNavigation on a detach-client backend records "no stop" and never addresses the busy Host owner', async () => {
   const h = harness()
+  h.publishRetained('session-a')
+  h.bindingOf('session-a')!.setRunning(true)
+  const scopeAuthority = installScope(h)
+  const intent = {
+    scope: scopeAuthority.capture(),
+    admission: { oldStopAccepted: false },
+  }
+  // A held writer keeps the drain open: the body must not run until it settles,
+  // and no Host cancel may be dispatched while it waits.
+  let releaseWriter!: () => void
+  const writerGate = new Promise<void>(resolve => { releaseWriter = resolve })
+  const oldScope = scopeAuthority.captureLive()
+  assert.ok(oldScope !== undefined)
+  const writer = h.runtime.withWriter(oldScope, async () => { await writerGate })
+  const task = h.runtime.withNavigation(intent, async () => {
+    assert.equal(intent.admission.oldStopAccepted, false,
+      'a detach-client navigation dispatches no stop, so it may report none')
+    h.events.push('navigation-body')
+    return 'created'
+  })
+  await new Promise<void>(resolve => setImmediate(resolve))
+  assert.equal(h.bindingOf('session-a')!.cancelCalls(), 0, 'a detach-client navigation never cancels the Host owner')
+  assert.equal(h.events.includes('navigation-body'), false, 'the body still waits for the writer drain')
+  releaseWriter()
+  await writer
+  assert.equal(await task, 'created')
+  assert.ok(h.events.includes('navigation-body'))
+})
+
+test('withNavigation on a stop-and-quiesce backend records the accepted stop BEFORE the body', async () => {
+  const h = harness({ retirement: { navigationKind: 'stop-and-quiesce' } })
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const intent = {
@@ -1649,8 +1761,8 @@ test('withNavigation writes the admission fact BEFORE the body and stops the cap
   assert.ok(h.events.includes('navigation-body'))
 })
 
-test('a refused navigation stop aborts withNavigation BEFORE its body (create is never dispatched)', async () => {
-  const h = harness()
+test('a refused stop on a stop-and-quiesce backend aborts withNavigation BEFORE its body', async () => {
+  const h = harness({ retirement: { navigationKind: 'stop-and-quiesce' } })
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const intent = {
@@ -1676,8 +1788,8 @@ test('a refused navigation stop aborts withNavigation BEFORE its body (create is
   assert.equal(h.core.barrier.activeWriters, 0)
 })
 
-test('a caller-cancelled cancel still aborts navigation: only a COMMITTED stop may proceed', async () => {
-  const h = harness()
+test('a caller-cancelled cancel still aborts a stop-and-quiesce navigation: only a COMMITTED stop may proceed', async () => {
+  const h = harness({ retirement: { navigationKind: 'stop-and-quiesce' } })
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const scope = scopeAuthority.captureLive()
@@ -1698,8 +1810,8 @@ test('a caller-cancelled cancel still aborts navigation: only a COMMITTED stop m
     'a DISPATCHED caller cancellation is the dispatched-unproven settlement for navigation')
 })
 
-test('an UNADDRESSABLE exact generation aborts navigation: cancelled is NOT permission to switch', async () => {
-  const h = harness()
+test('an UNADDRESSABLE exact generation still aborts a stop-and-quiesce navigation', async () => {
+  const h = harness({ retirement: { navigationKind: 'stop-and-quiesce' } })
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const scope = scopeAuthority.captureLive()
@@ -1719,8 +1831,8 @@ test('an UNADDRESSABLE exact generation aborts navigation: cancelled is NOT perm
   assert.equal(oldBinding.cancelCalls(), 0, 'no cancel was dispatched on the disconnected generation')
 })
 
-test('a RELEASED exact owner reference aborts navigation: cancelled is not permission to switch', async () => {
-  const h = harness()
+test('a RELEASED exact owner reference still aborts a stop-and-quiesce navigation', async () => {
+  const h = harness({ retirement: { navigationKind: 'stop-and-quiesce' } })
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const scope = scopeAuthority.captureLive()
@@ -1745,8 +1857,8 @@ test('a RELEASED exact owner reference aborts navigation: cancelled is not permi
   replacement.release()
 })
 
-test('a failed navigation stop restores the deferred queue recall AFTER the gate clears (no leak into a later transition)', async () => {
-  const h = harness()
+test('a failed stop-and-quiesce admission restores the deferred queue recall AFTER the gate clears', async () => {
+  const h = harness({ retirement: { navigationKind: 'stop-and-quiesce' } })
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const scope = scopeAuthority.captureLive()
@@ -1813,8 +1925,8 @@ test('a scoped switch to the CURRENT session is a no-op: no stop, no open (seam 
     'the navigation gate close runs after the task cleared and before any next task')
 })
 
-test('a failed admission aborts its deferred recall BEFORE the queued next navigation starts', async () => {
-  const h = harness()
+test('a failed stop-and-quiesce admission aborts its deferred recall BEFORE the queued next navigation starts', async () => {
+  const h = harness({ retirement: { navigationKind: 'stop-and-quiesce' } })
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const scope = scopeAuthority.captureLive()
@@ -1896,7 +2008,7 @@ test('a recall deferred at a boundary is settled by the QUEUED stale navigation,
   assert.equal(injected, true, 'the boundary deferral was actually injected')
   assert.deepEqual(recallLog, ['abort'],
     'the queued stale navigation still closed the deferred-recall window instead of leaking it')
-  assert.equal(binding.cancelCalls(), 1, 'only the first navigation stopped the old owner')
+  assert.equal(binding.cancelCalls(), 0, 'a Remote navigation never stops the Host owner it leaves')
 })
 
 test('a binding rollover after an accepted cancel reports "requested, not confirmed", never a stopped Turn', async () => {
@@ -1906,6 +2018,7 @@ test('a binding rollover after an accepted cancel reports "requested, not confir
   // claim.
   const h = harness({
     retirement: {
+      navigationKind: 'stop-and-quiesce',
       cancelForNavigation: async () => ({ kind: 'committed' }),
       whenIdleOrAbort: async () => 'unobservable',
       flush: async () => {},
@@ -1925,7 +2038,7 @@ test('a binding rollover after an accepted cancel reports "requested, not confir
 })
 
 test('an accepted stop cannot be quiesced against a generation captured after a mid-drain reconnect', async () => {
-  const h = harness()
+  const h = harness({ retirement: { navigationKind: 'stop-and-quiesce' } })
   h.publishRetained('session-a')
   const scopeAuthority = installScope(h)
   const scope = scopeAuthority.captureLive()

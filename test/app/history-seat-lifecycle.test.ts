@@ -321,6 +321,7 @@ function buildSessionFixture(life: TestLifecycle, options: {
   }
 
   const retirement: SessionOwnerRetirement = {
+    navigationKind: 'stop-and-quiesce',
     whenIdleOrAbort: async () => false,
     cancel: async () => ({ kind: 'committed', value: undefined }),
     cancelForNavigation: async () => ({ kind: 'committed' as const }),
