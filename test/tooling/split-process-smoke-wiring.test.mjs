@@ -524,6 +524,12 @@ test('two real TUI Clients must both show one Host Question or Approval before f
 
   // Identity, cleanup and the final Host durable counts are explicit asserts,
   // never trace-only claims.
+  assert.equal((m5c.match(/typeof call\.data\.callId === 'string' && call\.data\.callId !== ''/gu) ?? []).length, 3,
+    'every M5C scene must validate the durable tool call id BEFORE coercion/correlation')
+  assert.equal((m5c.match(/host\.exited === true && host\.exitResult\?\.code === 0 && host\.exitResult\?\.signal === null/gu) ?? []).length, 3,
+    'every M5C scene must assert a normal Host shutdown instead of the swallowing helper')
+  assert.match(m5c, /hostExitCode: host\.exitResult\.code/u,
+    'the trace must report the asserted Host exit code')
   assert.match(m5c, /assertHostIdentityKept\(host, hostBefore/u)
   assert.match(m5c, /exitC1Client\(clientA/u)
   assert.match(m5c, /exitC1Client\(clientB/u)
