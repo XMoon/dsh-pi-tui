@@ -1516,6 +1516,11 @@ export function registerTuiCommands(
       localCwd: completionLocalCwd,
       skillReferences,
       hostShellCompletion,
+      // The ONE signal that distinguishes "this source failed" from "this
+      // catalog is legitimately empty", so the renderer can refuse a plugin
+      // fallback instead of painting a menu for a command source that was
+      // withdrawn. Claims and health accounting above are unaffected.
+      sourceFailed: options.display === 'none',
     })
   }
   /** The saved probed scoped overrides (see installSurfaceSnapshot). */

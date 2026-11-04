@@ -3883,7 +3883,7 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         // makes and this renderer deliberately does not inherit.
         localFdPath: null,
       })
-      slash.install(provider)
+      slash.install(provider, installation.sourceFailed === true)
     },
     bindInput: (handlers) => {
       if (disposed) throw new Error('the TSP renderer is disposed')

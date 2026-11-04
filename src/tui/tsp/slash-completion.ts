@@ -62,8 +62,12 @@ export interface SlashCompletionPopup {
 }
 
 export interface TspSlashCompletion {
-  /** Replace the provider AND its catalog source (ONE catalog commit). */
-  install(provider: AutocompleteProvider): void
+  /** Replace the provider AND its catalog source (ONE catalog commit).
+   *  `sourceFailed` is the command layer's FAILED-SOURCE state (a name
+   *  collision withdrew every candidate while the Host claims stayed live): the
+   *  seat then queries NOTHING AT ALL, so no plugin fallback can resurrect a
+   *  menu whose command source is known-bad. */
+  install(provider: AutocompleteProvider, sourceFailed?: boolean): void
   /** Re-derive the seat after an accepted composer edit. Never submits. */
   onComposerEdit(): void
   /** The Tab trigger. `true` = this seat owned the key (a query started). */
@@ -71,10 +75,12 @@ export interface TspSlashCompletion {
   /** Handle one key the ladder reached this seat on. `true` = consumed here. */
   handleKey(key: Key): boolean
   /** Accept the highlighted candidate through the shared Provider and the ONE
-   *  composer conditional write. Returns whether a completion was actually
-   *  WRITTEN: `false` means there was nothing left to accept (the token already
-   *  names that command, the provider handed the document back, or the fence
-   *  refused), and the caller then leaves the key with its existing owner.
+   *  composer conditional write. Returns whether the gesture was CONSUMED as a
+   *  completion. `false` — the only such case — means the token under the caret
+   *  already names that candidate in full, so there was nothing to complete and
+   *  the key stays the existing gesture it always was (Enter submits). A refused,
+   *  out-of-token or no-op accept is still consumed: failing to complete must
+   *  never turn into executing the draft.
    *  Never called for a key this seat did not own. */
   accept(): boolean
   /** Accept the row a click named, ONLY while that row is the current frame's. */
@@ -141,6 +147,8 @@ export function createTspSlashCompletion(
   ports: TspSlashCompletionPorts,
 ): TspSlashCompletion {
   let provider: AutocompleteProvider | undefined
+  /** Whether the current source is a FAILED catalog synthesis (see `install`). */
+  let sourceFailed = false
   /** Bumped by every catalog install: a newer commit makes an older request,
    *  an older list and an older painted row permanently unusable. */
   let sourceRevision = 0
@@ -170,6 +178,18 @@ export function createTspSlashCompletion(
    *  caret in the middle of `/new` with trailing text both sees the right prefix
    *  and preserves that tail. `SeatDocument.cursor` keeps the flat UTF-16 offset
    *  the live-document fence compares against. */
+  /** The command token under the caret: from the first non-space at/behind the
+   *  caret to the first whitespace after it, on the FIRST logical line only. */
+  const commandToken = (document: SeatDocument): { start: number; end: number } | undefined => {
+    if (document.cursorLine !== 0) return undefined
+    const line = document.lines[0] ?? ''
+    let start = document.cursorCol
+    while (start > 0 && !/\s/.test(line.charAt(start - 1))) start -= 1
+    let end = document.cursorCol
+    while (end < line.length && !/\s/.test(line.charAt(end))) end += 1
+    return { start, end }
+  }
+
   const documentOf = (): SeatDocument => {
     const state = ports.composer.state()
     const lines = state.text.split('\n')
@@ -207,9 +227,10 @@ export function createTspSlashCompletion(
 
   const query = (): boolean => {
     const installed = provider
-    if (installed === undefined) {
-      // No catalog source installed (yet, or anymore): nothing to query, no
-      // application policy call, no popup.
+    if (installed === undefined || sourceFailed) {
+      // No catalog source installed (yet, or anymore), or the source is a FAILED
+      // synthesis: nothing to query, no application policy call, no plugin
+      // fallback asked, no popup.
       withdraw()
       return false
     }
@@ -289,44 +310,62 @@ export function createTspSlashCompletion(
       item,
       shown.prefix,
     )
-    // The Provider's own `prefix` naming the candidate exactly is the "already
-    // complete" fact. A byte compare cannot see it: the command-name rule ALWAYS
-    // appends one separator space, so a fully typed `/new` still differs from
-    // what the Provider hands back by that one space. A gesture with nothing
-    // left to complete must not be swallowed — for Enter that is the plain
-    // submit that ran `/new` before this seat existed.
-    const alreadyComplete = `/${item.value}` === shown.prefix
-    if (alreadyComplete) {
-      // Nothing to complete, so nothing is consumed and NOTHING is withdrawn
-      // here either: the Composer's own frame for this key drops the list
-      // through the document fence, which keeps the most common gesture
-      // (type a whole command, press Enter) at the frame count it had before
-      // this seat existed.
-      return false
-    }
     const nextText = applied.lines.join('\n')
     const lineStart = applied.lines.slice(0, Math.max(0, applied.cursorLine))
       .reduce((length, line) => length + line.length + 1, 0)
     const nextCursor = lineStart + applied.cursorCol
-    // The Provider handing the document back unchanged is the other half of the
-    // same fact: there was nothing left to write.
-    const writes = nextText !== document.text || nextCursor !== document.cursor
+    const token = commandToken(document)
+    // The ONLY case that hands the key back to its existing owner: the WHOLE
+    // token under the caret already names the highlighted candidate and the caret
+    // sits at that token's end, so there is genuinely nothing left to complete
+    // and Enter is the submit it has always been (type `/new`, press Enter, run
+    // `/new`). Decided on the DOCUMENT alone, never on what the Provider chose to
+    // return: in `/newbie` with the caret after `/new` the before-caret prefix
+    // matches `/new` while the token does not, and the Provider's apply is a
+    // no-op there — treating "wrote nothing" as "nothing to complete" would hand
+    // that Enter to the submit path and execute a command the user never finished
+    // typing.
+    const tokenAlreadyComplete = token !== undefined
+      && (document.lines[0] ?? '').slice(token.start, token.end) === `/${item.value}`
+      && document.cursorCol === token.end
+    if (tokenAlreadyComplete) {
+      // Nothing is consumed and NOTHING is withdrawn here either: the Composer's
+      // own frame for this key drops the list through the document fence, which
+      // keeps the most common gesture at the frame count it had before this seat
+      // existed.
+      return false
+    }
+    // A completion may rewrite the COMMAND TOKEN and nothing else: the text
+    // before the token (the indentation the user typed) and everything from the
+    // token end onward (an argument, a tail, a following line) must survive
+    // byte-for-byte. The shared provider is a plugin extension point and may
+    // hand back an arbitrary `prefix`; whoever produced that answer must not be
+    // able to move the `/`, eat the indentation or overwrite the tail, so an
+    // out-of-token result is refused here rather than written and undone.
+    const tokenOnlySpan = token !== undefined
+      && nextText.startsWith(document.text.slice(0, token.start))
+      && nextText.endsWith(document.text.slice(token.end))
+      && nextCursor >= token.start
+      && nextCursor <= nextText.length - (document.text.length - token.end)
+    // The Provider handing the document back unchanged, or an answer whose
+    // replacement reaches outside the token, writes nothing.
+    const writes = tokenOnlySpan
+      && (nextText !== document.text || nextCursor !== document.cursor)
     // The popup goes BEFORE the write, so the ONE frame the composer commits
     // already carries the finished text with no stale list beside it.
     const hadPopup = withdraw()
-    if (!writes) {
-      // Nothing was completed, so the gesture that asked for it is still the
-      // gesture it always was. `handleKey` only reaches this for a key the seat
-      // owned, and a click never submits — see the callers.
-      if (hadPopup) ports.requestRender()
-      return false
+    if (writes) {
+      ports.composer.applyCompletionEdit(
+        { text: document.text, cursor: document.cursor },
+        { text: nextText, cursor: nextCursor },
+      )
+    } else if (hadPopup) {
+      ports.requestRender()
     }
-    const accepted = ports.composer.applyCompletionEdit(
-      { text: document.text, cursor: document.cursor },
-      { text: nextText, cursor: nextCursor },
-    )
-    if (!accepted && hadPopup) ports.requestRender()
-    return accepted
+    // CONSUMED in every case except `tokenAlreadyComplete`. An accept gesture that
+    // could not write must never degrade into executing the user's draft: the
+    // list is gone and the NEXT Enter is the explicit submit.
+    return true
   }
 
   const move = (step: 1 | -1): void => {
@@ -342,13 +381,14 @@ export function createTspSlashCompletion(
   const rowId = (item: AutocompleteItem, index: number): string => `${index}:${item.value}`
 
   return {
-    install: (installed) => {
+    install: (installed, failedSource = false) => {
       // A catalog commit REPLACES the source: the previous list, every in-flight
       // answer and every painted row identity go with it, so a withdrawn command
       // can never stay in the menu or be accepted afterwards. The next edit (or
       // Tab) queries the new source.
       sourceRevision += 1
       provider = installed
+      sourceFailed = failedSource
       if (withdraw()) ports.requestRender()
     },
     onComposerEdit: () => {
@@ -405,11 +445,11 @@ export function createTspSlashCompletion(
             withdraw()
             return false
           }
-          if (accept()) return true
-          // `accept()` already withdrew the list; the token was complete (or the
-          // fence refused), so this Enter goes to the Composer reducer, which
-          // classifies and submits exactly as it did before this seat existed.
-          return false
+          // `false` here can ONLY mean "the token is already complete in full":
+          // the Enter then goes to the Composer reducer and classifies/submits
+          // exactly as it did before this seat existed. Every other outcome —
+          // including a refused or no-op accept — is consumed here.
+          return accept()
         }
         case 'escape': {
           // Close the popup; the draft and the caret stay untouched and the key

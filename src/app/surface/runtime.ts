@@ -265,6 +265,13 @@ export interface TspCommandCompletionInstallation {
   readonly localCwd: () => string
   readonly skillReferences: readonly import('../../domain/catalog/skill.ts').HumanSkillSummary[]
   readonly hostShellCompletion: boolean
+  /**
+   * The command source FAILED (a contribution/host name collision withdrew every
+   * displayed candidate while the Host claims stayed live). A renderer's
+   * completion seat must then offer NOTHING — including from a plugin fallback —
+   * until a later, successful commit replaces it. Absent means a normal commit.
+   */
+  readonly sourceFailed?: boolean
 }
 
 /**
