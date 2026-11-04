@@ -129,20 +129,22 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
       inject: [commands, connection]
 
     # The package's ONE built-in Host Runtime row: the private contribution plus
-    # the two private business services. Business features are NOT separate
+    # the three private business services. Business features are NOT separate
     # Loader rows or package subpaths.
     - id: split-host-pi-tui-runtime
       name: '@xmoon76/dsh-pi-tui/host-runtime'
-      inject: [typert, agents, fileReferences, workingDirectory]
+      inject: [typert, agents, fileReferences, workingDirectory, loader]
 
-# ── Official Web composition (M5-W PR-A) ────────────────────────────────────
+# ── Official Web composition (M5-W PR-A/PR-B) ───────────────────────────────
 # The official Browser Web rows, declared here ONCE and DISABLED BY DEFAULT.
-# This is a Loader declaration, not a Host state machine: there is no Web
-# enable/disable switch, no runtime remount and no user-facing surface in this
-# stage, so a plain Split Host still serves only the TUI and its own loopback
-# /connect + /api owner. Only the isolated qualification run overrides these
-# 59 rows through SPLIT_PROCESS_EXTRA_PATCH; that internal test channel is not
-# a user API.
+# This declaration is the ONE roster the private 'piTuiWebAccess' Host service
+# toggles at runtime: it flips 'disabled' on exactly these rows through
+# 'Entry.update', never a second declaration, never a profile patch write, and
+# never a separate Web process. The toggle is per Host lifetime and this
+# default-off state is what every cold boot starts from; there is still no
+# user-facing surface in this stage (no /web command, no flag, no setting).
+# Only the isolated qualification runs additionally override rows through
+# SPLIT_PROCESS_EXTRA_PATCH; that internal test channel is not a user API.
 #
 # The roster is the official rc.5 browser graph minus every row whose
 # authority ALREADY exists in this Host: the second 'connection',

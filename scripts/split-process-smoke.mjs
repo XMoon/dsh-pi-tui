@@ -25,6 +25,12 @@
  *   T14/T16/T17 forged registry, unresponsive Host, protocol/identity/auth failures
  *                and non-destructive installed-payload drift
  *   T15 a dead Host leaves only a stale candidate; a Client safely starts a new one
+ *   T73 the official Web frontend runtime toggle on ONE Host: default-off
+ *                serving, setEnabled(true) mounting the 59 declared rows,
+ *                setEnabled(false) while a real TUI holds an accepted Turn (the
+ *                Turn settles, the TUI keeps its Session and keeps prompting),
+ *                a second enable on the SAME process with a real Chromium run,
+ *                a second disable, and the refusing negative lanes
  *   T18 installed package shape and Direct `--help` remain unchanged
  *   T19 signal admission precedes publication; repeated same signals stay idempotent (no ready)
  *   T20 an early forced exit removes the Host-created scratch before profile boot
@@ -1365,6 +1371,48 @@ async function connectCookie(origin, launch) {
   assert(setCookie.length > 0, '/connect returned no signed cookie')
   await response.body?.cancel()
   return setCookie[0].split(';', 1)[0].trim()
+}
+
+/**
+ * The official authenticated index chain: launch token -> 303 + signed cookie
+ * -> 200 DSH index carrying the composed browser graph. Returns every fact so a
+ * caller's predicate can assert them and a negative control can prove the same
+ * predicate rejects a mutation. Shared by the PR-A static composition and the
+ * PR-B runtime-toggle lanes.
+ */
+async function readHostWebIndex(origin, launch, label) {
+  const token = new URL(launch.connectUrl).searchParams.get('token')
+  const exchangeUrl = new URL('/', origin)
+  exchangeUrl.searchParams.set('token', token)
+  const exchange = await fetchStatus(exchangeUrl)
+  const cookie = exchange.setCookie[0]?.split(';', 1)[0] ?? ''
+  const index = cookie === ''
+    ? { status: 0, body: '', headers: new Headers() }
+    : await fetchStatus(`${origin}/`, { headers: { cookie } })
+  const boot = /<script>\s*globalThis\["__DSH_BOOT__"\]\s*=\s*([\s\S]*?)<\/script>/u.exec(index.body)
+  let graph
+  if (boot !== null) {
+    try {
+      graph = JSON.parse(boot[1])
+    } catch {
+      graph = undefined
+    }
+  }
+  return { label, token, cookie, exchange, index, graph, hasModuleLoader: index.body.includes('__ModuleLoader__') }
+}
+
+/** Assert the official Web index chain is a real authenticated DSH shell. */
+function assertWebIndexQualified(facts, label, dshVersion) {
+  assert(facts.exchange.status === 303, `${label}: the launch-token exchange must be 303, got ${facts.exchange.status}`)
+  assert(/\bno-store\b/iu.test(facts.exchange.headers.get('cache-control') ?? ''), `${label}: the token exchange is not no-store`)
+  assert(facts.cookie !== '', `${label}: the token exchange minted no browser cookie`)
+  assert(facts.index.status === 200, `${label}: the authenticated index must be 200, got ${facts.index.status}`)
+  assert(facts.hasModuleLoader, `${label}: the index carries no __ModuleLoader__ bootstrap`)
+  assert(facts.graph !== undefined, `${label}: the index carries no readable __DSH_BOOT__ graph`)
+  assert(facts.graph.release?.version === dshVersion,
+    `${label}: the browser graph release ${JSON.stringify(facts.graph.release?.version)} != ${dshVersion}`)
+  assert(Array.isArray(facts.graph.entries) && facts.graph.entries.length > 0, `${label}: the browser graph has no entries`)
+  assert(Array.isArray(facts.graph.batches) && facts.graph.batches.length > 0, `${label}: the browser graph has no startup batches`)
 }
 
 /** Open or refuse one raw mux WebSocket with the Cookie header. */
@@ -7070,43 +7118,6 @@ async function main() {
       }
       /** Read the Host's own launch material for the ONE browser cookie chain. */
       const launchOf = ready => readJson(join(dshHome, 'run', 'dsh-pi-tui', ready.localHost.scopeId, 'launch.json'))
-      /**
-       * The official authenticated index chain: token -> 303 + signed cookie ->
-       * 200 DSH index carrying the composed browser graph. Returns every fact
-       * so the negative controls prove THIS predicate rejects them.
-       */
-      const readWebIndex = async (ready, launch, label) => {
-        const token = new URL(launch.connectUrl).searchParams.get('token')
-        const exchangeUrl = new URL('/', ready.localHost.origin)
-        exchangeUrl.searchParams.set('token', token)
-        const exchange = await fetchStatus(exchangeUrl)
-        const cookie = exchange.setCookie[0]?.split(';', 1)[0] ?? ''
-        const index = cookie === ''
-          ? { status: 0, body: '', headers: new Headers() }
-          : await fetchStatus(`${ready.localHost.origin}/`, { headers: { cookie } })
-        const boot = /<script>\s*globalThis\["__DSH_BOOT__"\]\s*=\s*([\s\S]*?)<\/script>/u.exec(index.body)
-        let graph
-        if (boot !== null) {
-          try {
-            graph = JSON.parse(boot[1])
-          } catch {
-            graph = undefined
-          }
-        }
-        return { label, token, cookie, exchange, index, graph, hasModuleLoader: index.body.includes('__ModuleLoader__') }
-      }
-      const assertWebIndexQualified = (facts, label) => {
-        assert(facts.exchange.status === 303, `${label}: the launch-token exchange must be 303, got ${facts.exchange.status}`)
-        assert(/\bno-store\b/iu.test(facts.exchange.headers.get('cache-control') ?? ''), `${label}: the token exchange is not no-store`)
-        assert(facts.cookie !== '', `${label}: the token exchange minted no browser cookie`)
-        assert(facts.index.status === 200, `${label}: the authenticated index must be 200, got ${facts.index.status}`)
-        assert(facts.hasModuleLoader, `${label}: the index carries no __ModuleLoader__ bootstrap`)
-        assert(facts.graph !== undefined, `${label}: the index carries no readable __DSH_BOOT__ graph`)
-        assert(facts.graph.release?.version === targetDshVersion,
-          `${label}: the browser graph release ${JSON.stringify(facts.graph.release?.version)} != ${targetDshVersion}`)
-        assert(Array.isArray(facts.graph.entries) && facts.graph.entries.length > 0, `${label}: the browser graph has no entries`)
-        assert(Array.isArray(facts.graph.batches) && facts.graph.batches.length > 0, `${label}: the browser graph has no startup batches`)
-      }
       /** The official Web-created marker fact in the Host's OWN Session log. */
       const waitBrowserTurn = async (sessionId, marker, label) => {
         const userMessage = await waitForHostSessionEventAfter(
@@ -7230,8 +7241,8 @@ async function main() {
         // it and does not claim Deliverables support; the fact is recorded.
         const deliverablesState = webEntriesById.get('ui-deliverables')?.state
         const launch = launchOf(webReady)
-        const facts = await readWebIndex(webReady, launch, 'PA-02')
-        assertWebIndexQualified(facts, 'PA-02')
+        const facts = await readHostWebIndex(webReady.localHost.origin, launch, 'PA-02')
+        assertWebIndexQualified(facts, 'PA-02', targetDshVersion)
         const graph = facts.graph
         for (const id of [
           '@deepseek-ai/dsh-client-ui-theme',
@@ -7529,9 +7540,9 @@ async function main() {
           const outcome = await waitForOutcome(absentHost, 'PR-A dist-absent Host', 240_000)
           let refusedBy = outcome.m4a0 === 'failure' ? 'host-startup' : undefined
           if (refusedBy === undefined) {
-            const absentFacts = await readWebIndex(outcome, launchOf(outcome), 'PA-09')
+            const absentFacts = await readHostWebIndex(outcome.localHost.origin, launchOf(outcome), 'PA-09')
             try {
-              assertWebIndexQualified(absentFacts, 'PA-09')
+              assertWebIndexQualified(absentFacts, 'PA-09', targetDshVersion)
             } catch {
               refusedBy = `http-${absentFacts.index.status}`
             }
@@ -7591,6 +7602,617 @@ async function main() {
     assert(!REQUIRE_WEB_BROWSER || webQualification.browser === 'PASS',
       `PA-05 the required real-Browser qualification ended as ${String(webQualification.browser)}; only PASS qualifies this lane`)
 
+    /**
+     * M5-W PR-B (t73): the official Web frontend runtime toggle on ONE Host.
+     *
+     * PB-01  an ordinary default-off Host serves no SPA root and no `/plugins`
+     *        graph while the real TUI and the authenticated Peer work;
+     * PB-02  `setEnabled(true)` mounts exactly the 59 declared rows (the one
+     *        allowed PENDING row recorded) and serves the authenticated index;
+     * PB-04/06  `setEnabled(false)` withdraws the SPA fallback and unloads the
+     *        whole Web roster while the attached TUI keeps its Session, finishes
+     *        an ALREADY ACCEPTED held Turn and accepts a new Prompt;
+     * PB-07  a second `setEnabled(true)` on the SAME Host serves the graph again
+     *        and a real Chromium run starts, authenticates and completes a Turn;
+     * PB-10  the toggle never persisted: the same Host's next state is the
+     *        second `setEnabled(false)`, and the installed profile patch is
+     *        byte-identical before and after;
+     * PB-08/09  the negative lanes (missing official Web asset, duplicate module
+     *        owner, malformed wire argument) refuse instead of serving a partial
+     *        Web surface.
+     */
+    const qualifyWebRuntimeToggle = async () => {
+      const toggleRoot = join(workDir, 'pr-b-toggle')
+      mkdirSync(toggleRoot, { recursive: true, mode: 0o700 })
+      chmodSync(toggleRoot, 0o700)
+      const hosts = []
+      const clients = []
+      const peers = []
+      /** The durable Host owners whose fiber identity must never change. */
+      const PROTECTED_OWNER_KEYS = [
+        'connection', 'apiRemotes', 'typertGateway', 'workspaceRegistry', 'workspaceController',
+        'sessionController', 'fileUpload', 'settingsController', 'jobController', 'piTuiHostRuntime',
+      ]
+      /** `id -> live Loader fiber UID` for EVERY row the Host status reports. */
+      const rowUids = ready => Object.fromEntries((ready.entries ?? [])
+        .filter(entry => typeof entry.fiberUid === 'number')
+        .map(entry => [entry.id, entry.fiberUid]))
+      /** `id -> Loader state label` for the frozen Web roster. */
+      const webStates = ready => new Map(PR_A_WEB_ROWS.map(row => [row.id, {
+        state: (ready.entries ?? []).find(entry => entry.id === row.id)?.state,
+        present: (ready.entries ?? []).some(entry => entry.id === row.id),
+      }.state]))
+      const assertProtectedOwners = (ready, label) => {
+        for (const owner of PROTECTED_OWNER_KEYS) {
+          assert(ready.ownerEntries?.[owner]?.length === 1,
+            `${label}: the ${owner} owner count is ${JSON.stringify(ready.ownerEntries?.[owner])}, expected exactly one`)
+        }
+        assert(ready.webServer?.host === '127.0.0.1' && typeof ready.webServer?.port === 'number' && ready.webServer.port > 0,
+          `${label}: the ONE loopback listener is not a bound 127.0.0.1 port (${JSON.stringify(ready.webServer)})`)
+        assert(ready.services?.piTuiWebAccess === true,
+          `${label}: the private Web access service is not part of the Host readiness record`)
+      }
+      /** Every declared Web row is plainly disabled: disabled rows have no fiber. */
+      const assertWebFullyOff = (ready, label) => {
+        const live = [...webStates(ready)]
+          .filter(([, state]) => state !== 'absent')
+          .map(([id, state]) => `${id}:${state ?? 'missing'}`)
+        assert(live.length === 0, `${label}: these Web rows are not plainly disabled: ${live.join(',')}`)
+        assert((ready.entries ?? []).filter(entry => entry.name === PR_A_CLIENT_MODULES_PACKAGE && entry.state === 'active').length === 0,
+          `${label}: an official Web module graph owner is active with Web off`)
+      }
+      /** Every Web row is ACTIVE except the ONE allowed PENDING row. */
+      const assertWebFullyOn = (ready, label) => {
+        const states = webStates(ready)
+        const missing = [...states].filter(([, state]) => state === undefined).map(([id]) => id)
+        assert(missing.length === 0, `${label}: the Web roster is not declared: ${missing.join(',')}`)
+        const notActive = [...states]
+          .filter(([id, state]) => id !== 'ui-deliverables' && state !== 'active')
+          .map(([id, state]) => `${id}:${state}`)
+        assert(notActive.length === 0, `${label}: these Web rows are not active: ${notActive.join(',')}`)
+        return states
+      }
+      /** The Host's own HTTP surface in the OFF state. */
+      const assertWebOffHttp = async (origin, label) => {
+        const root = await fetchStatus(`${origin}/`)
+        const plugin = await fetchStatus(`${origin}/plugins/@deepseek-ai/dsh-client-ui-theme/client.js`)
+        const sse = await sseProbe(origin, '/plugins/events')
+        const api = await fetchStatus(`${origin}/api`)
+        const connect = await fetchStatus(`${origin}/connect`)
+        assert(root.status === 404, `${label}: GET / must be 404 with Web off, got ${root.status}`)
+        assert(plugin.status === 404, `${label}: a Web browser bundle must be 404 with Web off, got ${plugin.status}`)
+        assert(!(sse.status === 200 && sse.contentType.startsWith('text/event-stream')),
+          `${label}: the Web SSE channel is still live (${sse.status} ${sse.contentType})`)
+        assert(api.status === 401, `${label}: unauthenticated /api must stay 401, got ${api.status}`)
+        assert(connect.status === 401, `${label}: unfunded /connect must stay 401, got ${connect.status}`)
+        return { root: root.status, plugin: plugin.status, sse: sse.status, api: api.status, connect: connect.status }
+      }
+      /** The authenticated Web index + module graph + SSE on a serving Host. */
+      const assertWebServing = async (origin, launch, label) => {
+        const facts = await readHostWebIndex(origin, launch, label)
+        assertWebIndexQualified(facts, label, targetDshVersion)
+        const graph = facts.graph
+        const batches = []
+        for (const batch of graph.batches) {
+          const response = await fetchStatus(new URL(batch.url, `${origin}/`).href)
+          batches.push({ phase: batch.phase, status: response.status, bytes: response.body.length })
+          assert(response.status === 200, `${label}: the ${batch.phase} startup bundle returned HTTP ${response.status}`)
+          assert(response.body.length > 1024, `${label}: the ${batch.phase} startup bundle is empty`)
+        }
+        const unknown = await fetchStatus(`${origin}/plugins/@deepseek-ai/dsh-client-does-not-exist/client.js`)
+        assert(unknown.status === 404, `${label}: an unknown plugin id returned HTTP ${unknown.status}`)
+        const sse = await sseProbe(origin, '/plugins/events')
+        assert(sse.status === 200 && sse.contentType.startsWith('text/event-stream'),
+          `${label}: /plugins/events is not a live event stream (${sse.status} ${sse.contentType})`)
+        const frames = sse.chunk.split('\n').filter(line => line.startsWith('data: ')).map(line => line.slice(6))
+        assert(frames.length > 0, `${label}: /plugins/events pushed no data frame`)
+        const first = JSON.parse(frames[0])
+        assert(first.type === 'graph' && first.graph?.rev === graph.rev,
+          `${label}: the SSE graph generation differs from the served index graph`)
+        const cookie = await connectCookie(origin, launch)
+        assert(cookie !== '', `${label}: the authenticated /connect minted no peer cookie`)
+        return {
+          exchange: facts.exchange.status,
+          index: facts.index.status,
+          graphEntries: graph.entries.length,
+          graphBatches: batches,
+          sse: sse.status,
+          unknownPlugin: unknown.status,
+          token: facts.token,
+        }
+      }
+      const startPeer = async label => {
+        const peer = new EntryProcess('peer', entries.client, {
+          ...base,
+          env: { ...base.env, SPLIT_PROCESS_CLIENT_MODE: 'peer' },
+        })
+        peers.push(peer)
+        const peerReady = await peer.waitFor(record => record.m4a0 === 'ready', `${label} peer ready`, 180_000)
+        return { peer, peerReady }
+      }
+      /** One correlated `qualification-web-access` round trip on the live Peer. */
+      const webAccess = async (peer, label, value) => {
+        const requestId = `prb-${++statusSequence}`
+        peer.send({
+          op: 'qualification-web-access',
+          requestId,
+          ...(value === undefined ? {} : { webAccessEnabled: value }),
+        })
+        const record = await peer.waitFor(entry => entry.op === 'web-access' && entry.requestId === requestId,
+          `${label} web-access`, 300_000)
+        return record
+      }
+      /** Assert one toggle result is the reached state, never the requested one. */
+      const assertToggle = (record, expected, label) => {
+        assert(record.ok === true, `${label}: the private Web access call failed: ${JSON.stringify(record.errorCode ?? null)}`)
+        assert(record.status?.state === expected,
+          `${label}: the Host reported ${JSON.stringify(record.status)} instead of ${expected}`)
+        return record.status
+      }
+      /** The durable Host prompt/answer of one Session, counted exactly once. */
+      const waitDurableTurn = async (sessionId, marker, label) => {
+        await waitForHostSessionEventAfter(dshHome, sessionId, 0,
+          event => event.type === 'user/message' && JSON.stringify(event).includes(marker), `${label} user/message`, 180_000)
+        await waitForHostSessionEventAfter(dshHome, sessionId, 0,
+          event => event.type === 'turn/end', `${label} turn/end`, 180_000)
+        const events = hostSessionEvents(dshHome, sessionId) ?? []
+        const users = hostUserTexts(events).filter(text => text === marker).length
+        assert(users === 1, `${label}: the Host committed the prompt ${users} times, expected exactly 1`)
+        return events
+      }
+      // The isolated Host patch: the C1 long-turn model (so a real Turn can be
+      // HELD across the toggle) plus the two isolated-fixture facts the official
+      // Web UI needs. Both are row CONFIG on rows that stay disabled until the
+      // toggle enables them — the patch never enables a Web row.
+      const documentsDirectory = join(toggleRoot, 'documents')
+      mkdirSync(documentsDirectory, { recursive: true, mode: 0o700 })
+      chmodSync(documentsDirectory, 0o700)
+      const hostPatch = join(toggleRoot, 'pr-b-host.patch.yml')
+      writeFileSync(hostPatch, [
+        readFileSync(c1Work.patchPath, 'utf8').trimEnd(),
+        '- id: ui-settings-general',
+        '  config:',
+        `    welcomeNoticeVersion: '${PR_A_WELCOME_NOTICE_VERSION}'`,
+        '- id: workspace-controller',
+        '  config:',
+        `    documentsDirectory: '${documentsDirectory}'`,
+        '',
+      ].join('\n'), { mode: 0o600 })
+      chmodSync(hostPatch, 0o600)
+      const longTurnBarrier = join(toggleRoot, 'long-turn.release')
+      const workRoot = join(profileDir, 'pr-b-toggle-work')
+      mkdirSync(workRoot, { recursive: true, mode: 0o700 })
+      chmodSync(workRoot, 0o700)
+      const hostProfiles = { profilePath: join(profileDir, 'cordis.patch.yml') }
+      const profilePatchBefore = existsSync(hostProfiles.profilePath)
+        ? readFileSync(hostProfiles.profilePath)
+        : undefined
+      const playwrightRoot = process.env.SPLIT_PROCESS_PLAYWRIGHT_ROOT
+      /** The real Chromium verdict: only a completed driver run is a PASS. */
+      let browserCase = 'NOT_RUN'
+      const verdict = {}
+      try {
+        // ── A. Default-off Host (PB-01) ─────────────────────────────────────
+        await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 15_000)
+        const host = new EntryProcess('host', entries.host, {
+          ...base,
+          env: {
+            ...base.env,
+            SPLIT_PROCESS_EXTRA_PATCH: hostPatch,
+            C1_SCENARIO: 'long-turn',
+            C1_WORK_ROOT: workRoot,
+            C1_HOLD_LONG_TURN: longTurnBarrier,
+          },
+        })
+        hosts.push(host)
+        const ready = await host.waitFor(record => record.m4a0 === 'ready', 'PR-B default-off Host ready', 240_000)
+        const origin = ready.localHost.origin
+        const launch = readJson(join(dshHome, 'run', 'dsh-pi-tui', ready.localHost.scopeId, 'launch.json'))
+        assertWebFullyOff(ready, 'PB-01')
+        assertProtectedOwners(ready, 'PB-01')
+        const offHttp = await assertWebOffHttp(origin, 'PB-01')
+        const protectedUids = rowUids(ready)
+        const { peer } = await startPeer('PB-01')
+        assertToggle(await webAccess(peer, 'PB-01', undefined), 'disabled', 'PB-01 getStatus')
+        // A real Split TUI works on the default-off Host and owns Session T.
+        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+        const tui = new SurfaceEntryProcess(entries.client, { ...base, workDir })
+        clients.push(tui)
+        const tuiReady = await tui.waitFor(record => record.m4a0 === 'ready', 'PB-01 TUI ready', 180_000)
+        assertClientHostFacts(tuiReady.host, ready.localHost, 'PB-01 TUI vs Host')
+        assert(tuiReady.surfaceMounted === true && tuiReady.transport === 'connected',
+          'PB-01 the default-off Host does not serve a real TUI surface')
+        tui.send('pr-b plain tui\r')
+        await tui.waitForScreen('pr-b plain tui', 'PB-01 TUI prompt painted', 120_000)
+        const sessionT = (await waitForSurfaceStatus(tui,
+          record => record.sessionOpen === true && typeof record.openSessionId === 'string',
+          'PB-01 TUI Session')).openSessionId
+        // Release the held Turn exactly once; the barrier is removed again so the
+        // NEXT Turn can be held across the toggle.
+        writeFileSync(longTurnBarrier, 'release\n', { mode: 0o600 })
+        await tui.waitForScreen('long-turn answer 1', 'PB-01 TUI answer painted', 120_000)
+        await waitDurableTurn(sessionT, 'pr-b plain tui', 'PB-01')
+        rmSync(longTurnBarrier, { force: true })
+        trace('t73-web-default-off', {
+          webRowsDeclared: PR_A_WEB_ROWS.length,
+          webRowsLive: 0,
+          rootStatus: offHttp.root,
+          pluginStatus: offHttp.plugin,
+          sseStatus: offHttp.sse,
+          apiStatus: offHttp.api,
+          connectStatus: offHttp.connect,
+          tuiSession: sessionT,
+          tuiAnswer: 'painted',
+          hostServices: ready.services?.piTuiWebAccess === true ? 'piTuiWebAccess live' : 'missing',
+        })
+
+        // ── B. Enable the official Web frontend (PB-02/PB-03) ───────────────
+        assertToggle(await webAccess(peer, 'PB-02', true), 'enabled', 'PB-02 setEnabled(true)')
+        const enabledStatus = await hostStatus(host)
+        const enabledStates = assertWebFullyOn(enabledStatus, 'PB-02')
+        assertProtectedOwners(enabledStatus, 'PB-02')
+        assertIdentityFields(enabledStatus.localHost, ready.localHost, 'PB-02 Host identity')
+        for (const id of ['web-runtime', 'modules', 'client-hmr', 'cordis-client-runner', 'terminal-controller']) {
+          assert(enabledStates.get(id) === 'active', `PB-02 the "${id}" row is ${enabledStates.get(id)}, not active`)
+        }
+        // `ui-deliverables` is the ONE row allowed to stay PENDING on its
+        // `workspaceChanges` dependency; this stage does not mount it. Either
+        // verdict is allowed, but WHICH one must be recorded, never assumed.
+        const deliverablesState = enabledStates.get('ui-deliverables')
+        assert(deliverablesState === 'state-0' || deliverablesState === 'active',
+          `PB-02 the optional deliverables row is ${deliverablesState}; an optional Web feature may be pending or active, never silently broken`)
+        // The shared Host owners keep their LIVE fiber: the toggle mounted the Web
+        // rows and nothing else.
+        const enabledUids = rowUids(enabledStatus)
+        for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
+          'split-host-api-remotes', 'split-host-session-controller', 'split-host-pi-tui-runtime']) {
+          assert(enabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner was re-mounted by the Web enable`)
+        }
+        const serving = await assertWebServing(origin, launch, 'PB-03')
+        assertProtectedOwners(await hostStatus(host), 'PB-03')
+        trace('t73-web-enabled', {
+          rowsActive: [...enabledStates].filter(([, state]) => state === 'active').length,
+          rowsNotActive: [...enabledStates].filter(([, state]) => state !== 'active').map(([id, state]) => `${id}:${state}`),
+          tokenExchange: serving.exchange,
+          indexStatus: serving.index,
+          graphEntries: serving.graphEntries,
+          graphBatches: serving.graphBatches,
+          sseStatus: serving.sse,
+          unknownPluginStatus: serving.unknownPlugin,
+          uiDeliverables: enabledStates.get('ui-deliverables'),
+          hostOwnersRemounted: false,
+        })
+
+        // ── C. Disable while a real TUI holds an accepted Turn (PB-04/PB-05/PB-06) ──
+        const tuiGeneration = lastSurfaceStatus(tui)?.generationId
+        assert(typeof tuiGeneration === 'number', 'PB-05 the TUI published no transport generation to freeze')
+        const heldStart = (hostSessionEvents(dshHome, sessionT) ?? []).length
+        tui.send('pr-b held turn\r')
+        const held = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionT && event.userText.includes('pr-b held turn'),
+          'PB-05 held Turn', 120_000)
+        assert(held.agentStatus === 'running', `PB-05 the Host Agent was ${JSON.stringify(held.agentStatus)} while the Turn was held`)
+        await tui.waitForScreen('long-turn started', 'PB-06 the running Turn is painted', 120_000)
+        assertToggle(await webAccess(peer, 'PB-04', false), 'disabled', 'PB-04 setEnabled(false)')
+        const disabledStatus = await hostStatus(host)
+        assertWebFullyOff(disabledStatus, 'PB-04')
+        assertProtectedOwners(disabledStatus, 'PB-04')
+        assertIdentityFields(disabledStatus.localHost, ready.localHost, 'PB-04 Host identity')
+        const disabledUids = rowUids(disabledStatus)
+        for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
+          'split-host-api-remotes', 'split-host-session-controller', 'split-host-pi-tui-runtime']) {
+          assert(disabledUids[id] === protectedUids[id], `PB-05 the "${id}" Host owner changed identity across the disable`)
+        }
+        const offAfterDisable = await assertWebOffHttp(origin, 'PB-04')
+        const tuiStillOn = await waitForSurfaceStatus(tui,
+          record => record.sessionOpen === true && record.openSessionId === sessionT && record.transport === 'connected',
+          'PB-04 the TUI kept its Session')
+        assert(tuiStillOn.generationId === tuiGeneration, 'PB-05 the TUI transport generation changed across the disable')
+        // The accepted Turn was NOT cancelled: release it AFTER the disable and
+        // read its settlement from the durable Host log and the TUI frame.
+        writeFileSync(longTurnBarrier, 'release\n', { mode: 0o600 })
+        const settled = await waitForHostSessionEventAfter(dshHome, sessionT, heldStart,
+          event => event.type === 'turn/end', 'PB-06 the held Turn settled after the disable', 180_000)
+        assert(settled !== undefined, 'PB-05 the accepted Turn produced no settlement')
+        const settledEvents = hostSessionEvents(dshHome, sessionT) ?? []
+        assert(hostUserTexts(settledEvents).filter(text => text === 'pr-b held turn').length === 1,
+          'PB-05 the accepted prompt was committed more than once across the toggle')
+        assert(hostAssistantHasText(settledEvents, 'long-turn answer 1'),
+          'PB-05 the Host persisted no assistant answer after the disable')
+        await tui.waitForScreen('long-turn answer 1 long-turn-', 'PB-06 the TUI painted the answer after the disable', 180_000)
+        // The same TUI Session accepts a NEW prompt with Web still off.
+        const afterDisableStart = (hostSessionEvents(dshHome, sessionT) ?? []).length
+        tui.send('pr-b after disable\r')
+        await tui.waitForScreen('pr-b after disable', 'PB-06 the TUI prompt painted with Web off', 120_000)
+        await waitForHostSessionEventAfter(dshHome, sessionT, afterDisableStart,
+          event => event.type === 'user/message' && JSON.stringify(event).includes('pr-b after disable'),
+          'PB-06 the Host accepted a new prompt with Web off', 180_000)
+        await waitForHostSessionEventAfter(dshHome, sessionT, afterDisableStart,
+          event => event.type === 'turn/end', 'PB-06 the post-disable Turn settled', 180_000)
+        await tui.waitForScreen('long-turn answer 2 long-turn-', 'PB-06 the TUI painted the post-disable answer', 180_000)
+        trace('t73-web-disabled-live', {
+          webRowsLive: 0,
+          rootStatus: offAfterDisable.root,
+          pluginStatus: offAfterDisable.plugin,
+          sseStatus: offAfterDisable.sse,
+          apiStatus: offAfterDisable.api,
+          connectStatus: offAfterDisable.connect,
+          tuiSessionRetained: sessionT,
+          tuiGenerationUnchanged: true,
+          acceptedTurnSettled: true,
+          postDisablePrompt: 'answered',
+          hostOwnersRemounted: false,
+        })
+
+        // ── D. Enable again on the SAME Host (PB-07) ────────────────────────
+        assertToggle(await webAccess(peer, 'PB-07', true), 'enabled', 'PB-07 setEnabled(true) again')
+        const reenabledStatus = await hostStatus(host)
+        assertWebFullyOn(reenabledStatus, 'PB-07')
+        assertProtectedOwners(reenabledStatus, 'PB-07')
+        assertIdentityFields(reenabledStatus.localHost, ready.localHost, 'PB-07 Host identity')
+        const reenabledUids = rowUids(reenabledStatus)
+        for (const id of ['agent', 'session', 'job-controller', 'typert-gateway', 'split-host-connection',
+          'split-host-api-remotes', 'split-host-session-controller', 'split-host-pi-tui-runtime']) {
+          assert(reenabledUids[id] === protectedUids[id], `PB-07 the "${id}" Host owner changed identity across the re-enable`)
+        }
+        const servingAgain = await assertWebServing(origin, launch, 'PB-07')
+        // The real Chromium run: a NEW Browser Session on the SAME Host process.
+        if (playwrightRoot === undefined || playwrightRoot === '') {
+          assert(!REQUIRE_WEB_BROWSER,
+            'PB-07 the real-Browser case is REQUIRED (SPLIT_PROCESS_REQUIRE_WEB_BROWSER=1) but SPLIT_PROCESS_PLAYWRIGHT_ROOT names no pinned Playwright install; an HTTP-only run must never be accepted as the Browser proof')
+          trace('t73-web-browser', {
+            status: 'NOT_RUN',
+            reason: 'SPLIT_PROCESS_PLAYWRIGHT_ROOT is not set; this run does NOT exercise a real Browser after the re-enable and does not claim it',
+          })
+        } else {
+          const coordination = join(toggleRoot, 'browser')
+          mkdirSync(coordination, { recursive: true, mode: 0o700 })
+          chmodSync(coordination, 0o700)
+          const marker = `pr-b browser ${randomUUID().slice(0, 8)}`
+          const chromiumLibs = process.env.SPLIT_PROCESS_CHROMIUM_LIBS ?? join(playwrightRoot, 'libs', 'usr', 'lib', 'x86_64-linux-gnu')
+          const browsers = process.env.SPLIT_PROCESS_PLAYWRIGHT_BROWSERS ?? join(playwrightRoot, 'browsers')
+          const browserProcess = spawn(process.execPath, [
+            join(SCRIPT_DIR, 'fixtures', 'pr-a-web-browser.mjs'),
+            coordination,
+            marker,
+          ], {
+            cwd: workDir,
+            env: {
+              ...env,
+              PR_A_DSH_HOME: dshHome,
+              PR_A_PLAYWRIGHT_ROOT: playwrightRoot,
+              PR_A_EXPECTED_ANSWER_PREFIX: 'long-turn answer 1',
+              PLAYWRIGHT_BROWSERS_PATH: browsers,
+              LD_LIBRARY_PATH: `${chromiumLibs}${process.env.LD_LIBRARY_PATH === undefined ? '' : `:${process.env.LD_LIBRARY_PATH}`}`,
+            },
+            stdio: ['ignore', 'pipe', 'pipe'],
+            detached: true,
+          })
+          let browserOut = ''
+          let browserErr = ''
+          browserProcess.stdout.setEncoding('utf8')
+          browserProcess.stdout.on('data', chunk => { browserOut += chunk })
+          browserProcess.stderr.setEncoding('utf8')
+          browserProcess.stderr.on('data', chunk => { browserErr += chunk })
+          const browserExit = new Promise(resolveExit => browserProcess.on('close', (code, signal) => resolveExit({ code, signal })))
+          const browserExitBounded = async timeoutMs => {
+            const bounded = await raceWithAbortableDeadline(browserExit, timeoutMs, { code: null, signal: 'EXIT_TIMEOUT' })
+            if (bounded.signal === 'EXIT_TIMEOUT') {
+              process.stderr.write('PR_B_BROWSER_EXIT_TIMEOUT the real-Browser driver did not exit inside its bound; the lane cleanup owns it\n')
+            }
+            return bounded
+          }
+          try {
+            await waitForCondition(() => existsSync(join(coordination, 'browser-session.json')),
+              'PR-B Browser Session creation', 240_000)
+            const browserSession = readJson(join(coordination, 'browser-session.json')).sessionId
+            assert(typeof browserSession === 'string' && browserSession !== '', 'PB-07 the Browser created no Host Session')
+            // The Browser's Turn answers immediately: this case proves the
+            // re-enabled graph serves a REAL Browser, not a second held Turn.
+            writeFileSync(longTurnBarrier, 'release\n', { mode: 0o600 })
+            writeFileSync(join(coordination, 'browser-go'), `${Date.now()}\n`, { mode: 0o600 })
+            await waitDurableTurn(browserSession, marker, 'PB-07 Browser')
+            // The still-attached TUI shows the Browser-written prompt and answer.
+            await tui.waitForScreen(marker, 'PB-07 the TUI painted the Browser prompt', 180_000)
+            await tui.waitForScreen('long-turn answer 1 long-turn-', 'PB-07 the TUI painted the Browser answer', 180_000)
+            const browserResult = await browserExitBounded(180_000)
+            const browserReport = readJson(join(coordination, 'browser-result.json'))
+            assert(browserResult.code === 0,
+              `PB-07 the real Chromium driver failed (exit ${JSON.stringify(browserResult.code)}/${String(browserResult.signal)}): ${redactWebQualificationText(browserReport.error ?? 'driver-failure', [servingAgain.token])}`)
+            assert(browserReport.indexStatus === 200,
+              `PB-07 the real Browser loaded no authenticated index (${browserReport.indexStatus})`)
+            assert(browserReport.sessionId === browserSession, 'PB-07 the Browser reported a different Session')
+            assert(browserReport.answerSeen === true, 'PB-07 the Browser never painted the Host answer')
+            browserCase = 'PASS'
+            verdict.browser = {
+              indexStatus: browserReport.indexStatus,
+              sessionId: browserSession,
+              tuiPainted: [marker, 'long-turn answer 1'],
+              hostTurn: 'complete',
+              consoleErrors: browserReport.consoleErrors.length,
+              screenshot: browserReport.screenshot,
+            }
+          } finally {
+            try { process.kill(-browserProcess.pid, 'SIGKILL') } catch { /* already exited */ }
+            const cleanupExit = await browserExitBounded(15_000)
+            if (browserCase !== 'PASS') {
+              browserCase = existsSync(join(coordination, 'browser-result.json')) ? 'FAILED' : 'INCOMPLETE'
+              process.stderr.write(`PR_B_BROWSER_DIAGNOSTIC: ${redactWebQualificationText(
+                `${browserErr} ${browserOut}`, [servingAgain.token],
+              ).trim().split('\n').slice(-3).map(line => line.slice(0, 300)).join(' | ')}\n`)
+            }
+            trace('t73-web-browser-result', {
+              status: browserCase,
+              ...(verdict.browser ?? {}),
+              driverExit: cleanupExit.code,
+              driverSignal: cleanupExit.signal,
+            })
+          }
+        }
+        trace('t73-web-reenabled', {
+          rowsActive: [...webStates(reenabledStatus)].filter(([, state]) => state === 'active').length,
+          tokenExchange: servingAgain.exchange,
+          indexStatus: servingAgain.index,
+          graphEntries: servingAgain.graphEntries,
+          sseStatus: servingAgain.sse,
+          sameHostProcess: true,
+          hostOwnersRemounted: false,
+        })
+
+        // ── E. Disable again and finish the official Host (PB-04/PB-10) ──────
+        assertToggle(await webAccess(peer, 'PB-10', false), 'disabled', 'PB-10 setEnabled(false) again')
+        const finalOff = await hostStatus(host)
+        assertWebFullyOff(finalOff, 'PB-10')
+        assertProtectedOwners(finalOff, 'PB-10')
+        assertIdentityFields(finalOff.localHost, ready.localHost, 'PB-10 Host identity')
+        const finalOffHttp = await assertWebOffHttp(origin, 'PB-10')
+        // The toggle never persisted anything: the profile patch the Host booted
+        // with is byte-identical, so the next cold boot is default-off again.
+        const profilePatchAfter = existsSync(hostProfiles.profilePath)
+          ? readFileSync(hostProfiles.profilePath)
+          : undefined
+        assert(profilePatchBefore === undefined
+          ? profilePatchAfter === undefined
+          : profilePatchAfter !== undefined && profilePatchAfter.equals(profilePatchBefore),
+        'PB-10 the Web toggle wrote the profile patch')
+        // The TUI is still usable after the second disable.
+        tui.send('/exit\r')
+        const tuiExit = await tui.waitForExit(60_000)
+        assert(tuiExit.code === 0 && tuiExit.signal === null, `PB-10 TUI exit was ${JSON.stringify(tuiExit)}`)
+        const hostShutdown = await host.shutdown()
+        assert(hostShutdown.code === 0, `PB-10 official Host shutdown exit was ${JSON.stringify(hostShutdown)}`)
+        trace('t73-web-toggle-final', {
+          rootStatus: finalOffHttp.root,
+          pluginStatus: finalOffHttp.plugin,
+          sseStatus: finalOffHttp.sse,
+          apiStatus: finalOffHttp.api,
+          connectStatus: finalOffHttp.connect,
+          tuiUsable: true,
+          profilePatchUnchanged: true,
+          hostShutdownExit: hostShutdown.code,
+        })
+
+        // ── F. Negative lanes: a partial Web surface is never served (PB-08/PB-09) ──
+        const negatives = {}
+        // (1) The official Web asset is missing: the enable must refuse and no
+        // index may be served. The dist is restored byte for byte.
+        const distIndex = join(dirname(createRequire(anchor).resolve('@deepseek-ai/dsh-web-frontend/package.json')), 'dist', 'index.html')
+        const savedDist = saveFile(distIndex)
+        const missingDist = `${distIndex}.missing-pr-b`
+        try {
+          renameSync(distIndex, missingDist)
+          await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 15_000)
+          const absentHost = new EntryProcess('host', entries.host, {
+            ...base,
+            env: {
+              ...base.env,
+              SPLIT_PROCESS_EXTRA_PATCH: hostPatch,
+              C1_SCENARIO: 'long-turn',
+              C1_WORK_ROOT: workRoot,
+              C1_HOLD_LONG_TURN: longTurnBarrier,
+            },
+          })
+          hosts.push(absentHost)
+          const absentReady = await absentHost.waitFor(record => record.m4a0 === 'ready', 'PB-09 dist-absent Host ready', 240_000)
+          const { peer: absentPeer } = await startPeer('PB-09')
+          const absentRecord = await webAccess(absentPeer, 'PB-09', true)
+          assert(absentRecord.ok === true && absentRecord.status?.state === 'unavailable',
+            `PB-09 a Host with NO official frontend dist reported ${JSON.stringify(absentRecord.status)}`)
+          const absentRoot = await fetchStatus(`${absentReady.localHost.origin}/`)
+          assert(absentRoot.status === 404, `PB-09 the refused enable served an index (HTTP ${absentRoot.status})`)
+          const absentRows = webStates(await hostStatus(absentHost))
+          const absentActive = [...absentRows].filter(([, state]) => state === 'active').map(([id]) => id)
+          assert(absentActive.length === 0,
+            `PB-09 a refused enable left these Web rows mounted: ${absentActive.join(',')}`)
+          negatives.distAbsent = {
+            reported: absentRecord.status?.state,
+            rootStatus: absentRoot.status,
+            rowsLeftMounted: absentActive.length,
+          }
+          try { await absentHost.shutdown() } catch { /* the outcome owns it */ }
+        } finally {
+          renameSync(missingDist, distIndex)
+          assert(existsSync(distIndex) && readFileSync(distIndex).equals(savedDist.bytes),
+            'PB-09 the official frontend dist was not restored byte for byte')
+        }
+        // (2) A second owner of the same official Web package: the roster is
+        // refused before any row is toggled.
+        const duplicatePatch = join(toggleRoot, 'pr-b-duplicate-modules.patch.yml')
+        writeFileSync(duplicatePatch, `${readFileSync(hostPatch, 'utf8').trimEnd()}\n- insert:\n    - id: modules-duplicate\n      name: '${PR_A_CLIENT_MODULES_PACKAGE}'\n      disabled: true\n`, { mode: 0o600 })
+        chmodSync(duplicatePatch, 0o600)
+        await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 15_000)
+        const duplicateHost = new EntryProcess('host', entries.host, {
+          ...base,
+          env: {
+            ...base.env,
+            SPLIT_PROCESS_EXTRA_PATCH: duplicatePatch,
+            C1_SCENARIO: 'long-turn',
+            C1_WORK_ROOT: workRoot,
+            C1_HOLD_LONG_TURN: longTurnBarrier,
+          },
+        })
+        hosts.push(duplicateHost)
+        const duplicateReady = await duplicateHost.waitFor(record => record.m4a0 === 'ready', 'PB-09 duplicate-modules Host ready', 240_000)
+        const { peer: duplicatePeer } = await startPeer('PB-09 duplicate')
+        const duplicateRecord = await webAccess(duplicatePeer, 'PB-09', true)
+        assert(duplicateRecord.ok === true && duplicateRecord.status?.state === 'unavailable',
+          `PB-09 a Host with a SECOND official module owner reported ${JSON.stringify(duplicateRecord.status)}`)
+        assert(/second .*dsh-client-modules/u.test(String(duplicateRecord.status.reason ?? '')),
+          `PB-09 the refusal did not name the duplicate owner: ${String(duplicateRecord.status.reason ?? '')}`)
+        const duplicateRoot = await fetchStatus(`${duplicateReady.localHost.origin}/`)
+        assert(duplicateRoot.status === 404, `PB-09 the refused duplicate composition served an index (HTTP ${duplicateRoot.status})`)
+        negatives.duplicateModules = { reported: duplicateRecord.status?.state, rootStatus: duplicateRoot.status }
+        try { await duplicateHost.shutdown() } catch { /* the outcome owns it */ }
+        rmSync(duplicatePatch, { force: true })
+        // (3) A malformed `enabled` is refused by the v2 Remote contract, not by
+        // the control channel: the Host never runs a mutation for it.
+        await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 15_000)
+        const contractHost = new EntryProcess('host', entries.host, {
+          ...base,
+          env: {
+            ...base.env,
+            SPLIT_PROCESS_EXTRA_PATCH: hostPatch,
+            C1_SCENARIO: 'long-turn',
+            C1_WORK_ROOT: workRoot,
+            C1_HOLD_LONG_TURN: longTurnBarrier,
+          },
+        })
+        hosts.push(contractHost)
+        const contractReady = await contractHost.waitFor(record => record.m4a0 === 'ready', 'PB-09 contract Host ready', 240_000)
+        const { peer: contractPeer } = await startPeer('PB-09 contract')
+        const malformed = await webAccess(contractPeer, 'PB-09 malformed', 'yes')
+        assert(malformed.ok === false, `PB-09 a malformed boolean was accepted: ${JSON.stringify(malformed)}`)
+        assert(malformed.errorCode === 'gateway/input-invalid',
+          `PB-09 the malformed argument was refused as ${String(malformed.errorCode)}, not by the v2 contract`)
+        const contractRoot = await fetchStatus(`${contractReady.localHost.origin}/`)
+        assert(contractRoot.status === 404, `PB-09 a refused mutation served an index (HTTP ${contractRoot.status})`)
+        assertToggle(await webAccess(contractPeer, 'PB-09 after-refusal', undefined), 'disabled',
+          'PB-09 the refused mutation must not change the Host state')
+        negatives.malformedArgument = { code: malformed.errorCode, rootStatus: contractRoot.status }
+        assert(createHash('sha256').update(readFileSync(tarball)).digest('hex') === candidateSha256,
+          'PB-09 the candidate artifact changed during the Web toggle qualification')
+        try { await contractHost.shutdown() } catch { /* the outcome owns it */ }
+        trace('t73-web-negative-controls', negatives)
+      } finally {
+        for (const client of clients) {
+          try { await client.dispose() } catch { /* best effort */ }
+        }
+        for (const peer of peers) {
+          if (peer.exited) continue
+          try { await peer.shutdown() } catch { /* the global backstop owns leftovers */ }
+        }
+        for (const host of hosts) {
+          if (host.exited) continue
+          try { await host.shutdown() } catch { /* the global backstop owns leftovers */ }
+        }
+        rmSync(longTurnBarrier, { force: true })
+      }
+      return { browser: browserCase }
+    }
+    const toggleQualification = await qualifyWebRuntimeToggle()
+    assert(!REQUIRE_WEB_BROWSER || toggleQualification.browser === 'PASS',
+      `PB-07 the required real-Browser qualification ended as ${String(toggleQualification.browser)}; only PASS qualifies this lane`)
+
     // T18: installed package shape is already checked above; Direct `--help`
     // and the role-only negative control ran before any Host existed.
     assert(manifest.dependencies?.ws === '8.21.3', 'T18 ws runtime dependency missing')
@@ -7617,6 +8239,10 @@ async function main() {
         ? 'PASS_OFFICIAL_WEB_COMPOSITION_REAL_BROWSER'
         : `NOT_RUN_OR_INCOMPLETE(${webBrowserVerdict})`,
       webBrowser: webBrowserVerdict,
+      webRuntimeToggle: toggleQualification.browser === 'PASS'
+        ? 'PASS_OFFICIAL_WEB_RUNTIME_TOGGLE_REAL_BROWSER'
+        : `NOT_RUN_OR_INCOMPLETE(${toggleQualification.browser})`,
+      webRuntimeToggleBrowser: toggleQualification.browser,
       m4c1: 'PASS_REAL_SPLIT_PROCESS',
       m5b: 'pass (two REAL surface Clients retained ONE Session X; shared pending inbox + official Ctrl+S steer of the other Client\'s occurrence; two independent same-text submits stayed two; A -> Y navigation kept B writing X; B-only exit kept A/Host)',
       t44t48: 'pass',
