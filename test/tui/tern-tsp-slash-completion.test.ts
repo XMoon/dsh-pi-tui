@@ -276,6 +276,107 @@ async function mountSlashPane(
 
 // ── The natural query and the accept-only rule ───────────────────────────────
 
+test('a caret partway through a longer token completes it instead of submitting the half-typed command', async (t) => {
+  const m = await mountSlashPane(t, { chrome: true, commands: [{ name: 'new', description: 'Create a session' }] })
+  // `/newbie` with the caret parked after `/new` — the shape of editing a token
+  // in place. The candidate `/new` matches the before-caret text exactly, so an
+  // implementation that reads that as "already complete" gives Enter to the
+  // submit path and runs a command the user never finished typing.
+  await m.type('/newbie')
+  for (let step = 0; step < 3; step += 1) await m.key(LEFT)
+  await m.key(TAB)
+  await waitUntil('the token-under-caret list painted', () => m.rows().length > 0)
+  await m.key(ENTER)
+  // The shared provider replaces the token PREFIX it was given and keeps the
+  // rest of the line, so the completed draft is `/new bie` — the point of the
+  // case is that the half-typed `/newbie` was never EXECUTED.
+  assert.deepEqual(m.editor(), { text: '/new bie', cursor: 5 },
+    'the provider separator lands the caret before the untouched tail')
+  assert.deepEqual(m.calls.submits, [], 'Enter on an open list is never a submission')
+  assert.equal(m.rows().length, 0, 'the list is gone after the accept gesture')
+  // The user's NEXT Enter is the explicit submit, carrying the live draft.
+  await m.key(ENTER)
+  assert.deepEqual(m.calls.submits, [{ text: '/new bie', gesture: 'enter' }],
+    'only the later Enter submits, and it submits the completed draft')
+})
+
+test('an answer whose replacement reaches outside the command token is refused without touching indentation or the tail', async (t) => {
+  // The plugin chain is a real extension point and may hand back an arbitrary
+  // `prefix`. One computed on the WIRE-ish indentation would, if applied, drop
+  // the leading spaces and the `/` — so the accept layer must refuse it.
+  const answers: Array<{ prefix: string; value: string }> = [
+    { prefix: '  /z', value: 'xyz' },
+    { prefix: '/z', value: 'zoom' },
+  ]
+  let call = 0
+  let pluginAsked = 0
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    commands: [],
+    extensionSuggest: async () => {
+      const answer = answers[Math.min(call, answers.length - 1)]
+      call += 1
+      return { items: [{ value: answer.value, label: answer.value }], prefix: answer.prefix }
+    },
+  })
+  await m.type('  /z')
+  await m.key(TAB)
+  await waitUntil('the indented-token answer painted', () => m.rows().length > 0)
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '  /z', cursor: 4 },
+    'the out-of-token replacement wrote nothing: the indentation and the slash survive')
+  assert.deepEqual(m.calls.submits, [], 'a refused completion never becomes a submission')
+  // Positive control: the SAME chain with a well-formed command prefix DOES
+  // complete, so the guard above is a token rule and not a blanket refusal.
+  await m.type('  /z')
+  call = 1
+  await m.key(TAB)
+  await waitUntil('the well-formed answer painted again', () => m.rows().length > 0)
+  await m.key(ENTER)
+  assert.equal(m.editor().text.startsWith('  /zoom '), true,
+    'a prefix inside the token still completes, keeping the indentation intact')
+  assert.deepEqual(m.calls.submits, [], 'and completing still submitted nothing')
+})
+
+test('a failed catalog synthesis closes the seat so no plugin answer can revive the menu', async (t) => {
+  let pluginAsked = 0
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    commands: [{ name: 'model', description: 'Choose a model' }],
+    extensionSuggest: async () => {
+      pluginAsked += 1
+      return { items: [{ value: 'revived', label: 'revived' }], prefix: '/rev' }
+    },
+  })
+  // CONTROL first: the plugin chain really is reachable for this seat when the
+  // catalog has no answer, so the negative below cannot be a vacuous green.
+  await m.type('/re')
+  await m.key('v')
+  await waitUntil('the plugin fallback painted', () => m.rows().length > 0)
+  assert.equal(pluginAsked > 0, true, 'the plugin chain was consulted for an unmatched token')
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›/revived'])
+
+  // The collision state: the command layer withdraws every candidate AND marks
+  // the source failed. The seat must then ask NOTHING — plugin fallback
+  // included — so a known-bad command source cannot come back as a menu.
+  pluginAsked = 0
+  m.install({ commands: [], sourceFailed: true })
+  await m.type('/re')
+  await m.key('v')
+  await m.quietKey(TAB)
+  assert.equal(m.rows().length, 0, 'a failed source offers no candidates, plugin answer or not')
+  assert.equal(pluginAsked, 0, 'and the plugin chain is not even consulted')
+  assert.deepEqual(m.calls.submits, [], 'nothing was submitted by any of it')
+
+  // A later successful commit reopens the same seat on the real catalog.
+  m.install({ commands: [{ name: 'model', description: 'Choose a model' }] })
+  await m.type('/mo')
+  await m.key('d')
+  await waitUntil('the recovered source paints', () => m.rows().length > 0)
+  assert.deepEqual(m.rows().map(node => m.rowText(node)), ['›/modelChoose a model'],
+    'the recovered catalog is the source again')
+})
+
 test('a fully typed command name still submits on Enter, while a partial one only completes', async (t) => {
   const m = await mountSlashPane(t, { chrome: true })
   // Partial token: the list is open and Enter accepts, submitting nothing.
