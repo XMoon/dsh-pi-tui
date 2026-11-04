@@ -13,7 +13,8 @@
  *   T05 one mux socket per authenticated peer; old Peer is dead after release
  *   T07 private-file permissions/symlinks fail closed
  *   T08 sixteen concurrent Host launches produce exactly one Host
- *   T09 a second Client is refused before it can spawn or steal a Host
+ *   T09 two REAL Surface Clients (distinct PTYs/PIDs) admit to the SAME Host
+ *   T09Q two qualification Clients race the ONE qualification-only Client seat
  *   T10/T11/T12 Client normal exit, SIGKILL and SIGTERM leave the Host alive
  *   T13 a physical mux drop clears the generation and the same Host replaces it
  *   T14/T16/T17 forged registry, unresponsive Host, protocol/identity/auth failures
@@ -1909,29 +1910,31 @@ async function main() {
     assert(existsSync(outsideScratch), 'a scope-outside directory was deleted through SPLIT_PROCESS_SCRATCH')
     trace('t08-scratch', { winnerScratch: 1, liveHostScratchKept: true, outsideKept: true, foreignScratchTargets: 2 })
 
-    // T09: two Clients race for the one kernel TUI seat. Only the winner may
-    // create a Client Context or reach the Host.
+    // T09Q: two QUALIFICATION Clients race for the one qualification-only
+    // kernel Client seat. Only the winner may create a Client Context or reach
+    // the Host. This is the frozen qualification negative control; the real
+    // `surface` mode holds no such seat (its concurrent positive is T09).
     const clients = [
       new EntryProcess('client', entries.client, probeClientBase),
       new EntryProcess('client', entries.client, probeClientBase),
     ]
-    const clientOutcomes = await Promise.all(clients.map((client, index) => waitForOutcome(client, `T09 client ${String(index)}`)))
+    const clientOutcomes = await Promise.all(clients.map((client, index) => waitForOutcome(client, `T09Q client ${String(index)}`)))
     const clientWinners = clients.filter(client => client.records.some(record => record.m4a0 === 'ready'))
     assert(clientWinners.length === 1,
-      `T09 expected one active Client, got ${String(clientWinners.length)};`
+      `T09Q expected one active qualification Client, got ${String(clientWinners.length)};`
       + ` outcomes=${JSON.stringify(clientOutcomes)};`
       + ` records=${JSON.stringify(clients.map(client => client.records.slice(-4)))};`
       + ` stderr=${JSON.stringify(clients.map(client => client.stderr.slice(-1200)))}`)
     const c1 = clientWinners[0]
     const c1Ready = clientOutcomes[clients.indexOf(c1)]
-    assert(c1Ready.m4a0 === 'ready', 'T09 winning Client did not become ready')
+    assert(c1Ready.m4a0 === 'ready', 'T09Q winning qualification Client did not become ready')
     const clientLoser = clients.find(client => client !== c1)
-    expectFailureRecord(clientLoser, 'T09 loser', 'CLIENT_ALREADY_ACTIVE')
+    expectFailureRecord(clientLoser, 'T09Q loser', 'CLIENT_ALREADY_ACTIVE')
     const loserExit = await clientLoser.waitForExit(30_000)
-    assert(loserExit.code === 1, `T09 losing Client exit was ${JSON.stringify(loserExit)}`)
-    trace('t09', {
-      activeClientPid: c1Ready.pid,
-      refusedClientPid: clientLoser.child.pid,
+    assert(loserExit.code === 1, `T09Q losing qualification Client exit was ${JSON.stringify(loserExit)}`)
+    trace('t09-qualification', {
+      activeQualificationClientPid: c1Ready.pid,
+      refusedQualificationClientPid: clientLoser.child.pid,
       refusalCode: 'CLIENT_ALREADY_ACTIVE',
     })
 
@@ -3051,8 +3054,11 @@ async function main() {
     }
 
     await seatFree(`\0dsh-pi-tui-h-${scopeSuffix}`, 10_000)
+    // Only the qualification Client seat is verified free here: every client
+    // above in this block is an `EntryProcess` qualification Client. A real
+    // `surface` Client holds no profile-global Client seat.
     await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 10_000)
-    trace('seats-free', { hostSeat: 'free', clientSeat: 'free' })
+    trace('seats-free', { hostSeat: 'free', qualificationClientSeat: 'free' })
 
     // ── Real-surface qualification (T27–T39) ─────────────────────────────
     // Everything above proves the authenticated control/data link. This
@@ -3071,10 +3077,17 @@ async function main() {
     // scoped witness discriminating. Both are created BEFORE the Host starts.
     const clientWorkspaceA = join(workDir, 'ws2-client-workspace-A')
     const clientWorkspaceC = join(workDir, 'ws2-client-workspace-C')
+    // T09: the SECOND concurrently admitted real Surface Client gets its OWN
+    // launch directory (B), so its Host Workspace is a different registered
+    // path. Never reuse the WS-2 sequential Client C workspace: that would
+    // change the persisted membership the later C scenario proves.
+    const m5aWorkspaceB = join(workDir, 'm5a-client-workspace-B')
     mkdirSync(clientWorkspaceA, { recursive: true })
     mkdirSync(clientWorkspaceC, { recursive: true })
+    mkdirSync(m5aWorkspaceB, { recursive: true })
     const canonicalClientWorkspaceA = realpathSync(clientWorkspaceA)
     const canonicalClientWorkspaceC = realpathSync(clientWorkspaceC)
+    const canonicalM5aWorkspaceB = realpathSync(m5aWorkspaceB)
     // The SAME-NAMED marker in the Host Profile B carries different content: the
     // Host read must answer A's marker, never B's.
     writeFileSync(join(clientWorkspaceA, 'ws2-host-marker.txt'), 'client-workspace-A\n', { mode: 0o600 })
@@ -3177,6 +3190,147 @@ async function main() {
         durableCwd: headerA.cwd,
         hostProfileCwd: realpathSync(profileDir),
         clientLaunchCwd: canonicalClientWorkspaceA,
+      })
+
+      // T09 (M5-A): a SECOND real Surface Client starts on its OWN PTY while A
+      // is still live and connected. Both carry two different business PIDs,
+      // mount their own surface and authenticate THE SAME Host Singleton
+      // (same hostPid/starttime/instanceId/buildId). B opens its OWN Session in
+      // its OWN Host Workspace; A's Session, durable log and painted transcript
+      // stay untouched. B then exits normally and A keeps going (proved by the
+      // T31 navigation below). `surface` holds no profile-global Client seat;
+      // the qualification-only seat is proved separately by T09Q.
+      const m5aClientB = new SurfaceEntryProcess(entries.client, {
+        ...base,
+        cwd: m5aWorkspaceB,
+        workDir,
+        env: base.env,
+      })
+      surfaceClients.push(m5aClientB)
+      const m5aClientBReady = await m5aClientB.waitFor(
+        record => record.m4a0 === 'ready',
+        'T09 second surface Client ready',
+        180_000,
+      )
+      assert(m5aClientBReady.processRole === 'client', 'T09 the second surface Client role mismatch')
+      assert(m5aClientBReady.surfaceMounted === true, 'T09 Client B did not mount its own physical surface')
+      assert(m5aClientBReady.transport === 'connected', `T09 Client B transport is ${JSON.stringify(m5aClientBReady.transport)}`)
+      assert(m5aClientBReady.activeWrappers === 1, `T09 Client B owns ${String(m5aClientBReady.activeWrappers)} transport wrappers`)
+      assert(m5aClientBReady.liveSockets === 1, `T09 Client B owns ${String(m5aClientBReady.liveSockets)} mux sockets`)
+      for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+        assert(m5aClientBReady.owners?.[owner] === 1, `T09 Client B expected exactly one ${owner} owner`)
+      }
+      assertClientHostFacts(m5aClientBReady.host, surfaceHostFacts, 'T09 Client B')
+      // A's own ready facts already named the same Host; both business PIDs are
+      // live at the same time and neither is the Host nor a `script(1)` wrapper.
+      assertClientHostFacts(c1Ready.host, surfaceHostFacts, 'T09 Client A')
+      assert(c1Ready.activeWrappers === 1 && c1Ready.liveSockets === 1,
+        'T09 Client A lost its own transport wrappers/sockets while B was admitted')
+      for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+        assert(c1Ready.owners?.[owner] === 1, `T09 Client A expected exactly one ${owner} owner`)
+      }
+      assert(typeof c1Ready.pid === 'number' && typeof m5aClientBReady.pid === 'number'
+        && c1Ready.pid !== m5aClientBReady.pid,
+        'T09 the two surface Clients must be two different business PIDs')
+      assert(c1Ready.pid !== surfaceHostPid && m5aClientBReady.pid !== surfaceHostPid,
+        'T09 a surface Client business PID collided with the Host PID')
+      assert(alive(c1Ready.pid), 'T09 Client A was not alive when B became ready')
+      assert(alive(m5aClientBReady.pid), 'T09 Client B was not a live business process after ready')
+      await m5aClientB.waitForScreen('type a message to start a session', 'T09 Client B sessionless Welcome')
+      m5aClientB.send('m5a client b\r')
+      const openedM5aB = await m5aClientB.waitFor(
+        record => record.m4b2s === 'surface-status' && record.sessionOpen === true,
+        'T09 Client B Session open',
+        120_000,
+      )
+      const sessionM5aB = openedM5aB.openSessionId
+      assert(typeof sessionM5aB === 'string' && sessionM5aB.startsWith('session-'),
+        'T09 Client B opened no official Session')
+      assert(sessionM5aB !== sessionA, 'T09 Client B must open its OWN Session, never A\'s')
+      await m5aClientB.waitForScreen('m5a client b', 'T09 Client B user message painted')
+      await m5aClientB.waitForScreen('stub answer', 'T09 Client B assistant answer painted')
+      const durableM5aB = await (async () => {
+        const deadline = Date.now() + 60_000
+        while (Date.now() < deadline) {
+          const events = hostSessionEvents(dshHome, sessionM5aB)
+          if (events !== undefined) {
+            const users = hostUserTexts(events).filter(message => message === 'm5a client b').length
+            const assistant = hostAssistantHasText(events, 'stub answer')
+            if (users === 1 && assistant) return { users, assistant, events }
+          }
+          await sleep(100)
+        }
+        return undefined
+      })()
+      assert(durableM5aB !== undefined,
+        'T09 the Host durable log did not carry exactly one accepted "m5a client b" write and its assistant message')
+      const headerM5aB = await waitForHostSessionHeader(dshHome, sessionM5aB, 'T09 durable Host header B')
+      assert(headerM5aB.cwd === canonicalM5aWorkspaceB,
+        `T09 Client B's durable Session cwd must be the Host canonical B workspace: ${String(headerM5aB.cwd)} != ${canonicalM5aWorkspaceB}`)
+      // Cross-session isolation in BOTH directions, on the durable logs and on
+      // the painted frames: a shared Host PID must never leak one Session's
+      // human text into the other.
+      const durableAAfterB = hostSessionEvents(dshHome, sessionA) ?? []
+      assert(hostUserTexts(durableAAfterB).every(text => text !== 'm5a client b'),
+        'T09 Client A\'s Host durable log carried B\'s private user text')
+      assert(hostUserTexts(durableM5aB.events).every(text => text !== 'session a'),
+        'T09 Client B\'s Host durable log carried A\'s private user text')
+      assert(hostUserTexts(durableAAfterB).filter(text => text === 'session a').length === 1,
+        'T09 Client A\'s accepted write changed while B was admitted')
+      assert((await waitForHostSessionHeader(dshHome, sessionA, 'T09 A header after B')).cwd === canonicalClientWorkspaceA,
+        'T09 Client B changed A\'s durable Session Workspace')
+      await c1.waitForScreen('session a', 'T09 Client A kept its own painted transcript')
+      assert(!(await c1.viewport()).join('\n').includes('m5a client b'),
+        'T09 Client A painted Client B\'s private text')
+      assert(!(await m5aClientB.viewport()).join('\n').includes('session a'),
+        'T09 Client B painted Client A\'s private transcript')
+      assert(alive(c1Ready.pid), 'T09 Client A died while B was admitted')
+      assert(alive(surfaceHostPid), 'T09 the Host died while both surface Clients were admitted')
+
+      // B exits NORMALLY while A keeps running: only B's own Client resources
+      // are released; A, the Host identity and the registry/launch material
+      // stay. A's continued navigation is the next real T31 action.
+      m5aClientB.send('/exit\r')
+      const m5aClientBExit = await m5aClientB.waitForExit(60_000)
+      assert(m5aClientBExit.code === 0, `T09 Client B normal exit was ${JSON.stringify(m5aClientBExit)}`)
+      const m5aClientBClosed = await m5aClientB.waitFor(
+        record => record.m4b2s === 'client-closed',
+        'T09 Client B client-closed',
+        30_000,
+      )
+      for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+        assert(m5aClientBClosed.owners?.[owner] === 0, `T09 Client B left ${owner} alive after its normal exit`)
+      }
+      assert(m5aClientBClosed.sessionOpen === false && m5aClientBClosed.surfaceMounted === false,
+        'T09 Client B still claimed an open surface/Session after its normal exit')
+      assert(m5aClientBClosed.activeWrappers === 0 && m5aClientBClosed.liveSockets === 0,
+        'T09 Client B still owned transport wrappers/sockets after its normal exit')
+      await m5aClientB.dispose()
+      assert(alive(c1Ready.pid), 'T09 Client A died when Client B exited')
+      assert(alive(surfaceHostPid), 'T09 the Host died when Client B exited')
+      const registryAfterM5aB = readJson(join(scopeDir, 'instance.json'))
+      assert(registryAfterM5aB.instanceId === surfaceHostFacts.instanceId,
+        'T09 the Host instance changed when Client B exited')
+      assert(registryAfterM5aB.buildId === surfaceHostFacts.buildId,
+        'T09 the Host build changed when Client B exited')
+      await c1.waitForScreen('session a', 'T09 Client A survived B\'s exit')
+      assert(!(await c1.viewport()).join('\n').includes('m5a client b'),
+        'T09 Client A painted Client B\'s private text after B exited')
+      trace('t09', {
+        hostPid: surfaceHostPid,
+        hostInstanceId: surfaceHostFacts.instanceId,
+        clientAPid: c1Ready.pid,
+        clientBPid: m5aClientBReady.pid,
+        sessionIdA: sessionA,
+        sessionIdB: sessionM5aB,
+        workspaceADigest: sha16(canonicalClientWorkspaceA),
+        workspaceBDigest: sha16(canonicalM5aWorkspaceB),
+        distinctBusinessPids: c1Ready.pid !== m5aClientBReady.pid,
+        bothReadyConcurrently: true,
+        clientBNormalExit: m5aClientBExit.code,
+        clientBClosed: true,
+        clientAKept: true,
+        hostIdentityKept: true,
       })
 
       // T31: Session switch A -> B -> A, each with retained-window hydration.
@@ -3304,7 +3458,8 @@ async function main() {
 
       // WS-2: a SECOND, SEQUENTIAL real Client whose launch directory (C) is
       // separate from A selects its OWN Host Workspace under the SAME Host
-      // PID/instance. The single-seat contract (T09) stays: c1 is already gone.
+      // PID/instance. This sequential Client-C scenario keeps its original
+      // position after c1 exited; the concurrent same-Host positive is T09.
       const ws2ClientC = new SurfaceEntryProcess(entries.client, {
         ...base,
         cwd: clientWorkspaceC,
@@ -3461,9 +3616,10 @@ async function main() {
       })
 
       // T41/T42: a SIGTERM during the assembly must be owned by ONE coordinator:
-      // no ready, no duplicate cleanup, the Client seat immediately reusable,
-      // and the Host untouched. Two deterministic stages are held: after the
-      // Domain readiness and after the runner fiber mount/before surface ready.
+      // no ready, no duplicate cleanup, the same Host immediately usable by a
+      // fresh surface Client, and the Host untouched. Two deterministic stages
+      // are held: after the Domain readiness and after the runner fiber
+      // mount/before surface ready.
       for (const [stage, traceName] of [['domain', 't41'], ['surface', 't42']]) {
         const barrier = join(workDir, `${traceName}-assembly-barrier`)
         rmSync(barrier, { force: true })
@@ -3502,8 +3658,8 @@ async function main() {
         assert(!stopping.records.some(record => record.m4a0 === 'cleanup-failure'),
           `${traceName} ${stage} stop reported a duplicate/failed cleanup`)
         await stopping.dispose()
-        // The kernel Client seat is free immediately: a NEW Client acquires it
-        // and reaches a real surface over the SAME Host.
+        // A NEW surface Client mounts immediately over the SAME Host: `surface`
+        // holds no profile-global Client seat to release or reuse.
         const reusable = new SurfaceEntryProcess(entries.client, { ...base, workDir })
         surfaceClients.push(reusable)
         const reusableReady = await reusable.waitFor(record => record.m4a0 === 'ready', `${traceName} reusable Client ready`, 180_000)
@@ -3521,15 +3677,15 @@ async function main() {
           heldAt: held.stage,
           readyEmitted: false,
           cleanupFailures: 0,
-          seatReusable: true,
+          clientReusable: true,
           hostAlive: true,
         })
       }
 
       // T41-gate: a SIGTERM while the REAL Cordis Loader gate is still pending
       // must enter the ONE stop coordinator before any Gateway start. The
-      // process must exit cleanly, release the seat, leave no fake ready and
-      // keep the Host alive; the same Host then accepts a fresh Client.
+      // process must exit cleanly, leave no fake ready and keep the Host alive;
+      // the same Host then accepts a fresh Client.
       {
         const gateBarrier = join(workDir, 't41-gate-barrier')
         rmSync(gateBarrier, { force: true })
@@ -3555,7 +3711,6 @@ async function main() {
         assert(!gateStopping.records.some(record => record.m4a0 === 'transport-ready'),
           'T41-gate stop allowed transport readiness after the signal')
         await gateStopping.dispose()
-        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
         assert(alive(surfaceHostPid), 'T41-gate the Host died on the gate stop')
         const gateReusable = new SurfaceEntryProcess(entries.client, { ...base, workDir })
         surfaceClients.push(gateReusable)
@@ -3570,7 +3725,7 @@ async function main() {
           readyEmitted: false,
           transportReady: false,
           cleanupFailures: 0,
-          seatReusable: true,
+          clientReusable: true,
           hostAlive: true,
         })
       }
@@ -3620,7 +3775,7 @@ async function main() {
         stage: 'pre-startup-assignment',
         readyEmitted: false,
         cleanupFailures: 0,
-        seatReusable: true,
+        clientReusable: true,
         hostAlive: true,
       })
 
@@ -4006,7 +4161,8 @@ async function main() {
       try { await host.shutdown() } catch { /* the global backstop kills leftovers */ }
     }
     const startC1Client = async (label, extraEnv = {}) => {
-      await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+      // A real `surface` Client holds no profile-global Client seat, so a new
+      // scenario only has to start its own process and authenticate the Host.
       const client = new SurfaceEntryProcess(entries.client, {
         ...base,
         workDir,
@@ -4495,8 +4651,8 @@ async function main() {
 
       // T12-surface-PTY-HUP: closing the REAL PTY master (the `script(1)`
       // wrapper dies) is a HUP, not a SIGTERM sent to the business Client. The
-      // business PID must observe the terminal end and exit; the seat frees and
-      // the Host survives for a fresh Client.
+      // business PID must observe the terminal end and exit; the Host survives
+      // for a fresh Client.
       {
         const { host, ready } = await startC1Host('job', 't12-hup')
         const { client } = await startC1Client('T12 HUP Client')
@@ -4507,12 +4663,11 @@ async function main() {
         await waitGone(businessPid, 20_000)
         assert(!alive(businessPid), 'T12 the business Client survived a real PTY master close')
         await client.dispose().catch(() => {})
-        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
         assert(alive(ready.pid), 'T12 the Host died on a Client PTY HUP')
         const { client: recovered } = await startC1Client('T12 HUP recovery Client')
         await exitC1Client(recovered, 'T12 HUP recovery Client')
         await stopC1Host(host)
-        trace('t12-pty-hup', { hostPid: ready.pid, clientPid: businessPid, scriptPid, masterClosed: true, seatReusable: true, hostAlive: true })
+        trace('t12-pty-hup', { hostPid: ready.pid, clientPid: businessPid, scriptPid, masterClosed: true, clientReusable: true, hostAlive: true })
       }
 
       // T49/T50: an official pending Question survives C1 SIGKILL and a clean
@@ -5117,11 +5272,10 @@ async function main() {
         }
         assert(alive(ready.pid), 'T59 HMR failure killed the Host')
         await client.dispose()
-        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
         const reuse = await startC1Client('T59 reuse Client')
         await exitC1Client(reuse.client, 'T59 reuse Client')
         await stopC1Host(host)
-        trace('t59-failure', { hostPid: ready.pid, clientPid: c1Pid, exit: failureExit.code, seatReusable: true, hostAlive: true })
+        trace('t59-failure', { hostPid: ready.pid, clientPid: c1Pid, exit: failureExit.code, clientReusable: true, hostAlive: true })
 
         const barrier = join(workDir, 't59-hmr-hold')
         const { host: stopHost, ready: stopReady } = await startC1Host('job', 't59-stop')
@@ -5197,9 +5351,10 @@ async function main() {
       })
 
       // T62: a real SIGINT delivered to the Client BUSINESS PID (never to the
-      // `script(1)` wrapper) is the official 130 disposition: the seat is
-      // released, the Host keeps its live identity, and a fresh Client reads the
-      // existing Session history back. The Client never signals the Host.
+      // `script(1)` wrapper) is the official 130 disposition: the Client's own
+      // resources are released, the Host keeps its live identity, and a fresh
+      // Client reads the existing Session history back. The Client never
+      // signals the Host.
       {
         // The `long-turn` fixture REQUIRES its barrier; release it immediately so
         // the first Turn settles before the signal is sent.
@@ -5224,7 +5379,6 @@ async function main() {
         assert(exit.code === 130 && exit.signal === null,
           `T62 Client SIGINT exit was ${JSON.stringify(exit)}, expected code 130`)
         await client.dispose()
-        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
         assert(alive(ready.pid), 'T62 the Client SIGINT killed the Host')
         await assertHostIdentityKept(host, hostBefore, 'T62 Host after Client SIGINT')
         const { client: reader } = await startC1Client('T62 reader Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
@@ -5236,7 +5390,7 @@ async function main() {
           clientPid: businessPid,
           signal: 'SIGINT',
           exitCode: exit.code,
-          seatReleased: true,
+          clientResourcesReleased: true,
           hostIdentityKept: true,
           historyReadback: true,
         })
@@ -5275,7 +5429,6 @@ async function main() {
         assert(ctrlCExit.code === 0 && ctrlCExit.signal === null,
           `T63 Ctrl+C double press exit was ${JSON.stringify(ctrlCExit)}`)
         await ctrlC.dispose()
-        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
         assert(alive(ready.pid), 'T63 the Ctrl+C exit killed the Host')
         await assertHostIdentityKept(host, hostBefore, 'T63 Host after Ctrl+C')
 
@@ -5294,7 +5447,6 @@ async function main() {
         assert(ctrlDExit.code === 0 && ctrlDExit.signal === null,
           `T63 Ctrl+D double press exit was ${JSON.stringify(ctrlDExit)}`)
         await ctrlD.dispose()
-        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
         assert(alive(ready.pid), 'T63 the Ctrl+D exit killed the Host')
         await assertHostIdentityKept(host, hostBefore, 'T63 Host after Ctrl+D')
         const { client: recovered } = await startC1Client('T63 recovery Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
@@ -5351,7 +5503,6 @@ async function main() {
         assert(!client.records.some(record => record.m4a0 === 'cleanup-failure'),
           'T64 the Client reported a cleanup failure after the Host SIGHUP')
         await client.dispose()
-        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
         // Stale discovery: a fresh Client must create a NEW instance, never
         // revive the dead one, and must not claim the old Session is open.
         const { client: fresh, ready: freshReady } = await startC1Client('T64 fresh Client')
@@ -5378,7 +5529,7 @@ async function main() {
           clientExit: exit.code,
           newHostPid: newHost.hostPid,
           newInstanceId,
-          seatReleased: true,
+          clientResourcesReleased: true,
         })
       }
 
@@ -5415,7 +5566,6 @@ async function main() {
         const exit = await client.waitForExit(60_000)
         assert(exit.code === 0 && exit.signal === null, `T65 Client cleanup exit was ${JSON.stringify(exit)}`)
         await client.dispose()
-        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
         // No cross-Host continuity: a sessionless Client gets a NEW Host and no
         // inherited Session; only one Host owner exists at a time.
         const { client: fresh, ready: freshReady } = await startC1Client('T65 fresh Client')
@@ -5426,14 +5576,14 @@ async function main() {
         assert(JSON.stringify(liveHostPids()) === JSON.stringify([newHost.hostPid]),
           `T65 expected exactly one live Host owner, found ${JSON.stringify(liveHostPids())}`)
         const newInstanceId = newHost.instanceId
-        // ONE Client seat per scope: the sessionless Client must leave BEFORE the
-        // cold-resume Client can acquire the seat.
+        // The sessionless Client is disposed before the cold-resume Client
+        // starts; the two real surfaces could legally coexist, but this case
+        // needs the cold resume to run after that Client released its state.
         fresh.signalBusiness('SIGTERM')
         const freshExit65 = await fresh.waitForExit(60_000)
         assert(freshExit65.code === 0 && freshExit65.signal === null,
           `T65 fresh Client exit was ${JSON.stringify(freshExit65)}`)
         await fresh.dispose()
-        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
         // A COLD resume of the same Session reads the durable history: the user
         // write is there exactly once and NO answer is invented for the lost Turn.
         const { client: resumed } = await startC1Client('T65 cold-resume Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
@@ -5525,7 +5675,6 @@ async function main() {
         const exit = await client.waitForExit(60_000)
         assert(exit.code === 0 && exit.signal === null, `T66 Client cleanup exit was ${JSON.stringify(exit)}`)
         await client.dispose()
-        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
         // A NEW Host on stale discovery, then a real cold resume of the SAME
         // Session: the durable log must still carry the unknown write EXACTLY ONCE
         // and no fabricated settlement.
@@ -5538,7 +5687,6 @@ async function main() {
         const freshExit = await fresh.waitForExit(60_000)
         assert(freshExit.code === 0 && freshExit.signal === null, `T66 fresh Client exit was ${JSON.stringify(freshExit)}`)
         await fresh.dispose()
-        await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
         const { client: resumed } = await startC1Client('T66 cold-resume Client', { SPLIT_PROCESS_CLIENT_SESSION: sessionId })
         await resumed.waitForScreen(unknownToken, 'T66 cold-resume history')
         const recovered = await waitForHostSessionEvent(dshHome, sessionId, event => event.type === 'turn/end', 'T66 cold-resume orphan settlement', 120_000)
@@ -5655,7 +5803,7 @@ async function main() {
       // T01-T60 inventory. They are listed explicitly so a later edit cannot
       // silently drop one while T60 still claims the full inventory.
       t61StaleGeneration: 'pass (real mux rollover, one stale write not dispatched, one new-generation commit)',
-      t62ClientSigint: 'pass (business PID SIGINT -> exit 130, seat released, Host identity kept)',
+      t62ClientSigint: 'pass (business PID SIGINT -> exit 130, client resources released, Host identity kept)',
       t63KeyboardExit: 'pass (real PTY double Ctrl+C and double Ctrl+D, empty draft)',
       t64HostSighup: 'pass (process failure, no fabricated settlement, new Host instance on stale discovery)',
       t65HostSigkill: 'pass (attached Client, no fake success, no cross-Host view continuity, no replayed write)',
@@ -5694,10 +5842,13 @@ async function main() {
       let seatsOk = true
       if (isolatedScopeId !== undefined) {
         const seatName = `\0dsh-pi-tui-h-${isolatedScopeId.slice(0, 40)}`
-        const clientSeatName = `\0dsh-pi-tui-c-${isolatedScopeId.slice(0, 40)}`
+        // The Client seat belongs to the qualification mode only; a real
+        // `surface` Client never binds it, so verifying it is free here is a
+        // cleanup fact, not a Surface lifecycle proof.
+        const qualificationClientSeatName = `\0dsh-pi-tui-c-${isolatedScopeId.slice(0, 40)}`
         try {
           await seatFree(seatName, 15_000)
-          await seatFree(clientSeatName, 15_000)
+          await seatFree(qualificationClientSeatName, 15_000)
         } catch {
           // The verdict is the fact; the thrown seat text (an abstract socket
           // name derived from this run's scope) is not default output.

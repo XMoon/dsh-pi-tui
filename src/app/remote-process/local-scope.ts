@@ -3,10 +3,10 @@
  *
  * The ordinary DSH profile is the scope authority: this module derives a
  * stable id from the canonical profile directory and the current UID, then
- * owns the private run directory and the two Linux abstract-socket seats. The
- * installed-build fingerprint remains the Host's own publication/identity
- * material; `LOCAL_PROTOCOL` below is the Host/Client compatibility contract
- * and is independent of package builds.
+ * owns the private run directory, the Host Singleton seat and the
+ * qualification-only Client seat. The installed-build fingerprint remains the
+ * Host's own publication/identity material; `LOCAL_PROTOCOL` below is the
+ * Host/Client compatibility contract and is independent of package builds.
  *
  * The abstract sockets are admission primitives only. No business traffic
  * travels over them, and no PID file, registry record or `O_EXCL` marker can
@@ -32,7 +32,9 @@ export const LOCAL_PROTOCOL = 'dsh-pi-tui/local/1'
 const RUN_ROOT_NAME = 'run'
 const SCOPE_ROOT_NAME = 'dsh-pi-tui'
 
-/** Linux abstract-socket prefixes; both names stay well below `sun_path`. */
+/** Linux abstract-socket prefixes; both names stay well below `sun_path`. The
+ *  Host prefix is the singleton admission seat; the Client prefix is held by
+ *  the frozen `qualification` mode only. */
 const HOST_SEAT_PREFIX = '\0dsh-pi-tui-h-'
 const CLIENT_SEAT_PREFIX = '\0dsh-pi-tui-c-'
 
@@ -90,7 +92,8 @@ export interface LocalScope {
   readonly dir: string
   /** Linux abstract Host claim name. */
   readonly hostSocketName: string
-  /** Linux abstract single-Client seat name. */
+  /** Linux abstract qualification-only Client seat name; `surface` and `peer`
+   *  Clients never bind it. */
   readonly clientSeatSocketName: string
   /**
    * Installed-build fingerprint described below. The Host publishes and the
@@ -372,7 +375,9 @@ export function readLinuxStarttime(pid: number = process.pid): string {
 /**
  * Claim one kernel abstract-socket seat. `EADDRINUSE` means another process
  * of this scope already holds the seat and is the sole winner; any other
- * listen error is a real failure. The returned close is idempotent.
+ * listen error is a real failure. The Host Singleton and the frozen
+ * `qualification` Client are the two live users; a real `surface` Client holds
+ * no seat. The returned close is idempotent.
  */
 export function bindProcessSeat(
   name: string,
