@@ -1602,3 +1602,329 @@ test('an edit INSIDE a pasted image path retires its tracked span', async () => 
     await harness.session.close()
   }
 })
+
+// ── The ONE conditional slash-completion write (reducer layer) ────────────────
+//
+// `applyCompletionEdit(expected, next)` is the only write a slash completion may
+// make. Every failed check is a REJECTION that touches nothing — no text, no
+// caret, no paste lease, no frame — and every accepted one replaces the command
+// token, lands the caret where the Provider put it (never at the document end),
+// retires the ↑/↓ browse bookmark, follows the exact splice with every other
+// paste lease and commits exactly ONE `onChanged`.
+
+test('`/ne` at caret 3 -> the draft becomes `/new `, the caret sits at 5 and exactly one frame commits', () => {
+  const { composer, changes } = composerWithSinks()
+  for (const ch of '/ne') composer.applyKey(key(ch, { text: ch }))
+  assert.deepEqual(composer.state(), { text: '/ne', cursor: 3, focused: false }, 'the fixture draft')
+
+  const painted = changes()
+  assert.equal(composer.applyCompletionEdit({ text: '/ne', cursor: 3 }, { text: '/new ', cursor: 5 }), true)
+  assert.deepEqual(composer.state(), { text: '/new ', cursor: 5, focused: false },
+    'the token is replaced and the caret sits after the written name')
+  assert.equal(changes() - painted, 1, 'one accepted completion commits exactly one frame')
+})
+
+test('an indented `/ne` with text after the caret -> the indentation and the tail survive and the caret sits right after `/new `', () => {
+  const { composer, changes } = composerWithSinks()
+  const draft = '  /ne and more'
+  for (const ch of draft) composer.applyKey(key(ch, { text: ch }))
+  for (let step = 0; step < draft.length - 5; step += 1) composer.applyKey(key('left'))
+  assert.deepEqual(composer.state(), { text: draft, cursor: 5, focused: false },
+    'the caret sits just after the indented token, with a tail behind it')
+
+  const painted = changes()
+  assert.equal(composer.applyCompletionEdit(
+    { text: draft, cursor: 5 },
+    { text: '  /new  and more', cursor: 7 },
+  ), true)
+  const after = composer.state()
+  assert.equal(after.text.slice(0, 2), '  ', 'the leading indentation is untouched')
+  assert.equal(after.text.slice(7), ' and more', 'the tail behind the caret is untouched')
+  assert.equal(after.cursor, 7, 'the caret is exactly after `/new `, not at the document end')
+  assert.equal(changes() - painted, 1, 'exactly one frame for the accepted completion')
+})
+
+test('a completion on the first line of a multi-line draft -> the caret stays inside line 1 instead of the document end', () => {
+  const { composer, changes } = composerWithSinks()
+  composer.setDraft('/neb\nsecond line')
+  composer.applyKey(key('up'))
+  const before = composer.state()
+  assert.deepEqual(before, { text: '/neb\nsecond line', cursor: 4, focused: false },
+    'the fixture caret is at the end of the first line')
+
+  const next = '/new 🖼️ \nsecond line'
+  const nextCursor = 8
+  assert.ok(caretBoundaries(next).includes(nextCursor), 'the requested caret is a legal grapheme boundary')
+  const painted = changes()
+  assert.equal(composer.applyCompletionEdit({ text: before.text, cursor: before.cursor }, { text: next, cursor: nextCursor }), true)
+  const after = composer.state()
+  assert.deepEqual(after, { text: next, cursor: nextCursor, focused: false })
+  assert.equal(after.text.slice(9), '\nsecond line', 'the second line is byte-identical')
+  assert.equal(after.cursor, 8, 'the caret is where the Provider put it, right after the emoji cluster')
+  assert.notEqual(after.cursor, next.length,
+    'a completion never lands the caret at the document end the way setDraft would')
+  assert.equal(changes() - painted, 1, 'exactly one frame')
+
+  // The same document through the OTHER port member proves the difference this
+  // contract exists for: `setDraft` puts the caret at the very end.
+  composer.setDraft(next)
+  assert.equal(composer.state().cursor, next.length, 'setDraft lands at the document end')
+})
+
+test('an emoji and ZWJ left context -> the clusters are copied whole, and a caret inside a cluster is refused with nothing touched', () => {
+  const family = '👨‍👩‍👧'
+  const { composer, changes } = composerWithSinks()
+  for (const ch of [family, ' ', '/', 'n', 'e']) composer.applyKey(key(ch, { text: ch }))
+  const draft = `${family} /ne`
+  assert.equal(draft.length, 12, 'the ZWJ family is 8 UTF-16 units of left context')
+  assert.deepEqual(composer.state(), { text: draft, cursor: draft.length, focused: false })
+
+  const painted = changes()
+  assert.equal(composer.applyCompletionEdit(
+    { text: draft, cursor: draft.length },
+    { text: `${family} /new `, cursor: 14 },
+  ), true)
+  const after = composer.state()
+  assert.deepEqual(after, { text: `${family} /new `, cursor: 14, focused: false })
+  assert.equal(after.text.slice(0, family.length), family,
+    'the multi-byte left context is byte-identical — no surrogate or ZWJ piece of it was rewritten')
+  assert.ok(caretBoundaries(after.text).includes(after.cursor), 'the new caret sits on a cluster boundary')
+  assert.equal(changes() - painted, 1, 'the accepted completion painted one frame')
+
+  // The rejection: the same document, a caret INSIDE the appended family cluster.
+  const grown = `${family} /new ${family}`
+  const insideCluster = family.length + 6 + 1
+  assert.ok(!caretBoundaries(grown).includes(insideCluster), 'the fixture caret really is inside a cluster')
+  const beforeRefusal = changes()
+  assert.equal(composer.applyCompletionEdit({ text: after.text, cursor: after.cursor }, { text: grown, cursor: insideCluster }), false,
+    'a completion may never leave the caret inside a grapheme cluster')
+  assert.deepEqual(composer.state(), after, 'the refusal touched neither the text nor the caret')
+  assert.equal(changes(), beforeRefusal, 'the refusal painted nothing')
+
+  // Control: the IDENTICAL replacement is accepted when the caret is on the
+  // boundary, so the refusal above was the caret and not the document.
+  assert.equal(composer.applyCompletionEdit(
+    { text: after.text, cursor: after.cursor },
+    { text: grown, cursor: family.length + 6 },
+  ), true, 'the same write IS accepted at a boundary caret')
+  assert.deepEqual(composer.state(), { text: grown, cursor: 14, focused: false })
+})
+
+test('a change that would split a CRLF pair -> refused with the pair intact; a same-line completion in a CRLF draft -> accepted', () => {
+  const { composer, changes } = composerWithSinks()
+  composer.setDraft('one\r\ntwo')
+  const crlfDraft = composer.state()
+  assert.deepEqual(crlfDraft, { text: 'one\r\ntwo', cursor: 8, focused: false },
+    'the CRLF pair is 2 UTF-16 units, so the fixture caret is at 8')
+
+  const split = 'one\ntwo'
+  assert.ok(caretBoundaries(split).includes(4), 'the requested caret is a legal boundary — the refusal is about the CRLF pair')
+  const painted = changes()
+  assert.equal(composer.applyCompletionEdit({ text: crlfDraft.text, cursor: crlfDraft.cursor }, { text: split, cursor: 4 }), false,
+    'a change may not end between a CR and its LF')
+  assert.deepEqual(composer.state(), crlfDraft, 'the CRLF document is untouched by the refusal')
+  assert.equal(changes(), painted, 'and it painted no frame')
+  // The same write with the caret INSIDE the changed span: only the CR/LF rule
+  // can refuse it, so the refusal above was provably the split, not the caret.
+  assert.equal(composer.applyCompletionEdit({ text: crlfDraft.text, cursor: crlfDraft.cursor }, { text: split, cursor: 3 }), false,
+    'the CR/LF split refuses the change even when the caret is legal')
+  assert.deepEqual(composer.state(), crlfDraft, 'and that refusal touched nothing either')
+  assert.equal(changes(), painted, 'nor painted a frame')
+
+  // The legitimate sibling: the completion stays inside line 2 of a CRLF draft.
+  composer.setDraft('one\r\n/ne')
+  const before = composer.state()
+  assert.deepEqual(before, { text: 'one\r\n/ne', cursor: 8, focused: false })
+  const accepted = changes()
+  assert.equal(composer.applyCompletionEdit(
+    { text: before.text, cursor: before.cursor },
+    { text: 'one\r\n/new ', cursor: 10 },
+  ), true, 'a completion on one line of a CRLF draft is accepted')
+  const after = composer.state()
+  assert.deepEqual(after, { text: 'one\r\n/new ', cursor: 10, focused: false })
+  assert.equal(after.text.slice(3, 5), '\r\n', 'the line break kept both of its bytes')
+  assert.ok(!caretBoundaries(after.text).includes(4),
+    'the CR and LF are still ONE grapheme cluster — the caret can never sit between them')
+  assert.equal(changes() - accepted, 1, 'exactly one frame')
+})
+
+test('a completion whose change would cross a line break -> refused and the two-line draft is untouched', () => {
+  const { composer, changes } = composerWithSinks()
+  composer.applyKey(key('a', { text: 'a' }))
+  composer.applyKey(key('enter', { shift: true }))
+  composer.applyKey(key('b', { text: 'b' }))
+  const before = composer.state()
+  assert.deepEqual(before, { text: 'a\nb', cursor: 3, focused: false })
+
+  const painted = changes()
+  assert.equal(composer.applyCompletionEdit({ text: 'a\nb', cursor: 3 }, { text: 'ab', cursor: 2 }), false,
+    'a completion replaces a command name, never the document shape')
+  assert.deepEqual(composer.state(), before, 'the second line and the caret are exactly as they were')
+  assert.equal(changes(), painted, 'and the refusal painted nothing')
+})
+
+test('the draft moved after the Provider computed the replacement -> refused and the live post-edit draft stays exactly as typed', () => {
+  const { composer, changes } = composerWithSinks()
+  for (const ch of '/ne') composer.applyKey(key(ch, { text: ch }))
+  composer.applyKey(key('x', { text: 'x' }))
+  const live = composer.state()
+  assert.deepEqual(live, { text: '/nex', cursor: 4, focused: false }, 'a real edit landed after the snapshot')
+
+  const painted = changes()
+  assert.equal(composer.applyCompletionEdit({ text: '/ne', cursor: 3 }, { text: '/new ', cursor: 5 }), false,
+    'a stale document is a rejection, never a repair')
+  assert.deepEqual(composer.state(), live, 'the live draft stays byte-identical to the post-edit state')
+  assert.equal(changes(), painted, 'the stale completion painted nothing')
+
+  // A caret-only stale snapshot is refused the same way: same bytes, moved caret.
+  composer.applyKey(key('home'))
+  const afterHome = changes()
+  assert.equal(composer.applyCompletionEdit({ text: '/nex', cursor: 4 }, { text: '/new x', cursor: 6 }), false,
+    'the moved caret alone makes the answer stale')
+  assert.deepEqual(composer.state(), { text: '/nex', cursor: 0, focused: false })
+  assert.equal(changes(), afterHome, 'and that refusal painted nothing either')
+})
+
+test('a completion rewrites one pasted path -> that lease dies, the other lease follows the splice, and a late replacement cannot touch it', () => {
+  const pasted = '/tmp/a.png'
+  const placeholder = '[image #1 (1×1)]'
+  const { composer, changes } = composerWithSinks()
+  // Two real bracketed pastes of the SAME path, plus the separator the user typed.
+  composer.applyKey(key('paste', { text: pasted }))
+  const firstId = composer.registerPastedPathSpan({ start: 0, end: pasted.length, expected: pasted })
+  composer.applyKey(key(' ', { text: ' ' }))
+  composer.applyKey(key('paste', { text: pasted }))
+  const secondId = composer.registerPastedPathSpan({ start: pasted.length + 1, end: 2 * pasted.length + 1, expected: pasted })
+  assert.ok(firstId !== undefined && secondId !== undefined, 'both leases are live')
+  const draft = composer.state()
+  assert.deepEqual(draft, { text: `${pasted} ${pasted}`, cursor: 2 * pasted.length + 1, focused: false })
+
+  // The completion replaces the leading token — the bytes the FIRST lease held.
+  const painted = changes()
+  assert.equal(composer.applyCompletionEdit(
+    { text: `${pasted} ${pasted}`, cursor: draft.cursor },
+    { text: '/tmp/x.png /tmp/a.png', cursor: 6 },
+  ), true)
+  const afterCompletion = composer.state()
+  assert.deepEqual(afterCompletion, { text: '/tmp/x.png /tmp/a.png', cursor: 6, focused: false })
+  assert.equal(changes() - painted, 1, 'the completion painted exactly one frame')
+  assert.equal(composer.hasLivePath(firstId!, pasted), false,
+    'the lease whose bytes the completion consumed is retired')
+  assert.equal(composer.hasLivePath(secondId!, pasted), true,
+    'the unrelated lease is still live and still holds the path')
+
+  // A late replacement for the retired lease fails and must not fall through to
+  // the OTHER occurrence of the same path text.
+  const beforeLateCall = changes()
+  assert.equal(composer.replacePastedPathOccurrence(firstId!, pasted, placeholder), false,
+    'a retired lease never replaces anything')
+  assert.deepEqual(composer.state(), afterCompletion,
+    'the failed call rewrote neither the text nor the caret — the surviving occurrence is intact')
+  assert.equal(composer.state().text.slice(11, 21), pasted, 'the second occurrence stayed where the splice left it')
+  assert.equal(changes(), beforeLateCall, 'and the failed call painted nothing')
+
+  // The surviving lease still works at ITS OWN position, with the caret shifted
+  // by the placeholder's length change.
+  composer.applyKey(key('end'))
+  const beforeReplace = changes()
+  assert.equal(composer.replacePastedPathOccurrence(secondId!, pasted, placeholder), true)
+  assert.deepEqual(composer.state(), { text: `/tmp/x.png ${placeholder}`, cursor: 11 + placeholder.length, focused: false },
+    'the replacement landed on the second occurrence and the caret at the end shifted with it')
+  assert.equal(changes() - beforeReplace, 1, 'the replacement is one atomic edit')
+  assert.equal(composer.hasLivePath(secondId!, pasted), false, 'a lease never survives its own replacement')
+})
+
+test('a completion accepted during an ↑ browse -> ↓ cannot restore the draft browse replaced', () => {
+  const { composer, changes } = composerWithSinks({ entries: ['/ne', 'older'] })
+  composer.setDraft('mine')
+  composer.applyKey(key('home'))
+  composer.applyKey(key('up'))
+  assert.deepEqual(composer.state(), { text: '/ne', cursor: 0, focused: false }, '↑ entered the browse on the recalled row')
+
+  const painted = changes()
+  assert.equal(composer.applyCompletionEdit({ text: '/ne', cursor: 0 }, { text: '/new ', cursor: 5 }), true)
+  assert.deepEqual(composer.state(), { text: '/new ', cursor: 5, focused: false })
+  assert.equal(changes() - painted, 1, 'the accepted completion painted one frame')
+
+  assert.deepEqual(composer.applyKey(key('down')), { kind: 'none' }, '↓ has no newer row and no bookmark to give back')
+  assert.deepEqual(composer.state(), { text: '/new ', cursor: 5, focused: false },
+    'the recalled row is ordinary content: ↓ restores neither the pre-browse draft nor the pre-completion one')
+
+  // The bookmark is retired, not broken: the NEXT ↑ walk records the completed
+  // draft and ↓ gives exactly that back.
+  composer.applyKey(key('up'))
+  composer.applyKey(key('up'))
+  assert.equal(composer.state().text, '/ne', 'browsing works again from the completed draft')
+  composer.applyKey(key('down'))
+  assert.deepEqual(composer.state(), { text: '/new ', cursor: 5, focused: false },
+    'the new bookmark is the post-completion draft')
+})
+
+test('every rejection path leaves the text, the caret, the live paste lease and the frame count untouched', () => {
+  const pasted = '/tmp/a.png'
+  const family = '👨‍👩‍👧'
+  const draft = `${pasted} /neb`
+  const { composer, changes } = composerWithSinks()
+  composer.setDraft(draft)
+  const lease = composer.registerPastedPathSpan({ start: 0, end: pasted.length, expected: pasted })
+  assert.ok(lease !== undefined, 'the lease is live before the refusals')
+  const live = { text: draft, cursor: draft.length, focused: false }
+  assert.deepEqual(composer.state(), live)
+
+  const insideCluster = `${pasted} /new ${family}`
+  const refusals: Array<{ label: string; next: { text: string; cursor: number } }> = [
+    { label: 'a caret inside a grapheme cluster', next: { text: insideCluster, cursor: insideCluster.length - 7 } },
+    { label: 'a caret beyond the changed span', next: { text: `${pasted} /new b`, cursor: draft.length + 2 } },
+    { label: 'a change that appends a line break', next: { text: `${draft}\n`, cursor: draft.length + 1 } },
+    { label: 'a stale document', next: { text: `${pasted} /new`, cursor: 15 } },
+  ]
+  for (const refusal of refusals) {
+    const expected = refusal.label === 'a stale document'
+      ? { text: `${pasted} /ne`, cursor: 13 }
+      : { text: live.text, cursor: live.cursor }
+    const painted = changes()
+    assert.equal(composer.applyCompletionEdit(expected, refusal.next), false, `${refusal.label} is refused`)
+    assert.deepEqual(composer.state(), live, `${refusal.label} changed neither the text nor the caret`)
+    assert.equal(changes(), painted, `${refusal.label} committed no render`)
+    assert.equal(composer.hasLivePath(lease, pasted), true, `${refusal.label} retired no paste lease`)
+  }
+})
+
+test('a completion that hands the draft back byte-identical still counts as an edit: the ↑ browse in flight is dropped', () => {
+  // The write bumps the edit epoch, so an admission callback whose reentrant
+  // completion left the SAME text and caret still invalidates that gesture.
+  let target!: TspComposer
+  let roundTrip = false
+  const { composer, changes, admissions } = composerWithSinks({
+    entries: ['r1'],
+    admitDraft: () => {
+      if (roundTrip) return true
+      roundTrip = true
+      composer.applyCompletionEdit({ text: '/ne', cursor: 0 }, { text: ' /ne', cursor: 1 })
+      composer.applyCompletionEdit({ text: ' /ne', cursor: 1 }, { text: '/ne', cursor: 0 })
+      return true
+    },
+  })
+  target = composer
+  target.setDraft('/ne')
+  target.applyKey(key('home'))
+  assert.deepEqual(target.state(), { text: '/ne', cursor: 0, focused: false })
+
+  const painted = changes()
+  assert.deepEqual(target.applyKey(key('up')), { kind: 'none' },
+    'the ↑ sees an epoch that moved and drops its own gesture')
+  assert.deepEqual(target.state(), { text: '/ne', cursor: 0, focused: false },
+    'the draft the callback restored stands — no recalled row was written over it')
+  assert.equal(changes() - painted, 2,
+    'the two completion writes committed two frames; the dropped gesture added no third')
+  assert.deepEqual(admissions(), ['/ne'], 'the dropped attempt still consulted the application once')
+
+  // And it left no bookmark behind: the next walk records the LIVE draft.
+  target.applyKey(key('down'))
+  target.applyKey(key('up'))
+  target.applyKey(key('up'))
+  assert.equal(target.state().text, 'r1', 'the next ↑ enters the browse normally')
+  target.applyKey(key('down'))
+  assert.deepEqual(target.state(), { text: '/ne', cursor: 3, focused: false },
+    '↓ gives back the draft the walk actually began from')
+})

@@ -3453,8 +3453,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       retireQuickMenu()
       // TSP I-C: the same rule for the slash candidate list — the popup retires
       // FIRST and the cancel intent still reaches its original owner exactly
-      // once. An open list never turns Ctrl+C into a no-op.
-      slash.retire()
+      // once. An open list never turns Ctrl+C into a no-op. The frame is owed
+      // only when a list actually went away (the Permission menu's own shape).
+      if (slash.retire()) render()
       handlers.cancel()
       return false
     }
@@ -3480,6 +3481,14 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // the list). Everything else retires the list first and then reaches its
     // existing owner exactly once, so an open popup never hijacks Escape,
     // Ctrl+V, a visual chord, a printable edit or an I-B History arrow.
+    //
+    // The painted state is read BEFORE the seat runs, because a key the seat
+    // does not own also ends the browse: if that key then changes nothing in the
+    // composer (a modified arrow, an unknown chord), NO editor frame is coming —
+    // and the list would stay on screen while the seat already considers itself
+    // closed, so the NEXT Escape would cancel the agent instead of dismissing a
+    // list the user still sees. That one case owes exactly one frame.
+    const listWasPainted = slash.isOpen()
     if (slash.handleKey(key)) return false
     if (key.name === 'escape') {
       handlers.cancel()
@@ -3524,11 +3533,15 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // composer's own before/after state — never from the draft text.
       if (key.name === 'paste') acceptPastedPath(before, key, handlers)
       // TSP I-C: the natural trigger runs off the composer's OWN committed
-      // change (never from the paint, which would cycle render → query → render).
-      // A submit or an exit-empty is not an edit, so neither re-queries, and the
-      // seat itself decides whether the new document still sits in the
-      // first-line command seat at all.
-      slash.onComposerEdit()
+      // change, and only off a change to the TEXT (never a pure caret move): a
+      // Home/Left/End step inside a `/` token must not raise a candidate list,
+      // because the ↑/↓ that reach that draft are the I-B History browse. A
+      // caret-only move still retires the painted list at its own fence — the
+      // accept is admitted only for the exact document AND caret it was built
+      // for, so a list nobody can accept never stays on screen.
+      if (composer.state().text !== before.text) slash.onComposerEdit()
+    } else if (edit.kind === 'none' && listWasPainted && !slash.isOpen()) {
+      render()
     }
     if (edit.kind === 'exit-empty') return true
     return false
