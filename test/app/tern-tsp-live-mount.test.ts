@@ -1844,9 +1844,19 @@ test('a routed PTC child start/settle reaches the mounted renderer wire', async 
  * the accepted input → original writer → same-stack settlement → reseed chain is
  * one run, not a splice.
  * STAND-IN: the scripted pane is not a physical Tern client; the routing source
- * is the minimal PR2 harness family (no Host Session); the recorder on the
- * mounted renderer's own display seam is a one-to-one observer that calls the
- * UNBOUND original through, so the kernel commit still runs.
+ * is the minimal PR2 harness family (no Host, no live DSH Session); the recorder
+ * on the mounted renderer's own display seam is a one-to-one observer that calls
+ * the UNBOUND original through, so the kernel commit still runs.
+ * NOT IN THIS RUN: in production the real `SubmissionController` sits between
+ * `events.onSubmit` and the history writer; this case calls the PRODUCTION
+ * `InputHistory` owner at that point, so the controller hop is the one labelled
+ * substitution. That hop — the real controller, the real writer and the real
+ * file, including an identical repeat taking the real policy SKIP and a
+ * genuinely staged attachment persisting no row — is pinned on the official
+ * Direct composition by `test/integration/tern-tsp-history-persist-direct.test.ts`.
+ * The occurrence token itself has no file-level witness (the persisted row
+ * carries no occurrence identity), so the two lanes are the occurrence half and
+ * the writer half of ONE contract, and neither is claimed as the other.
  */
 
 /* One real draft + one Enter through the mounted renderer, awaited on the

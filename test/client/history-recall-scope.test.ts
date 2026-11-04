@@ -105,11 +105,18 @@ test('a replaced owner drops its pending occurrences, its settlements and its pr
   scope.reset(['c row'], 'C')
   assert.deepEqual(scope.snapshot(), ['c row'], 'C carries only its own snapshot')
 
-  // The symmetric A→B→A shape: the outgoing B scope leaves nothing behind.
+  // The A→B→A shape in the REAL publication order (a scope is only ever
+  // published, then reseeded by its OWN owner): B's pending occurrence and its
+  // settlement leave nothing behind when A is re-published and re-hydrated.
   scope.begin('B')
-  assert.deepEqual(scope.snapshot(), [], 'a re-published owner starts from its own rows only')
+  const bPending = scope.rememberAccepted('b again')
+  settleToken(scope, bPending, 'B', 'written', 'b again')
+  scope.begin('A')
+  assert.equal(scope.scopeFactCountForTest(), 0,
+    "the replaced owner's durable settlement fact goes with its scope")
   scope.reset(['a row'], 'A')
-  assert.deepEqual(scope.snapshot(), ['a row'])
+  assert.deepEqual(scope.snapshot(), ['a row'],
+    'A recalls only its own rows — nothing accepted for B crosses back')
 })
 
 test('skipped, written and unsettled occurrences interleave in append order, not by outcome', () => {
