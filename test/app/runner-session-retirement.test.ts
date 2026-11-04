@@ -26,6 +26,7 @@ import {
 } from '../support/runner-harness.ts'
 import { installProbe } from '../support/runner-session-fixtures.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { provideFakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
 
 process.env.NO_COLOR = ''
 process.env.FORCE_COLOR = ''
@@ -867,6 +868,8 @@ test('a pre-mount unload while the resume whenIdle is pending cancels the agent 
   context.provide('sessionPersistence', harness.persistence as never)
   context.provide('sessionQuery', harness.sessionQuery as never)
   context.provide('agents', harness.agents as never)
+  // WS-2: the official Host Workspace registry the Direct lifecycle pre-selects through.
+  provideFakeHostWorkspaceRegistry(context)
   context.provide('sessions', harness.sessions as never)
   context.provide('agentDefaultModel', harness.defaultModel as never)
   context.provide('llm', harness.llm as never)

@@ -80,6 +80,7 @@ import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import WorkspaceRegistry from '@deepseek-ai/dsh-workspace'
+import WorkspaceController from '@deepseek-ai/dsh-api-workspace-controller'
 import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
 import * as toolJobs from '@deepseek-ai/dsh-tool-jobs'
 import { LlmAdapter } from '@deepseek-ai/dsh-llm'
@@ -452,6 +453,10 @@ export async function createRemoteApplicationHostFixture(
     await ctx.plugin(StorageJson, { root: join(workRoot, 'storages') })
     await ctx.plugin(StorageDomain, { backend: 'json' })
     await ctx.plugin(WorkspaceRegistry)
+    // The official `workspace` Remote owner (the `workspace-controller` Host
+    // row): an ordinary Remote create names a Host WorkspaceId, so the Host must
+    // serve `workspace/create` and `workspace/follow` like production does.
+    await ctx.plugin(WorkspaceController)
     // The REAL writable credential provider the production base composition
     // mounts (`packages/bundle/base/cordis.patch.yml`, id `credentials`):
     // the abstract `@deepseek-ai/dsh-credentials` seam has no set/unset, so

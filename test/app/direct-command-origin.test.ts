@@ -26,6 +26,7 @@ import { TUI_STARTUP_SERVICE } from '../../src/startup.ts'
 import { VirtualTerminal } from '../support/virtual-terminal.ts'
 import { installVirtualProcessTerminal } from '../support/runner-harness.ts'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
+import { provideFakeHostWorkspaceRegistry } from '../support/workspace-registry.ts'
 
 const SESSION_FORMAT_VERSION = 4
 
@@ -191,6 +192,8 @@ test('a successful Host-registry compatibility mirror stays CLIENT_COMMAND — /
     ctx.provide('sessionPersistence', harness.persistence as never)
     ctx.provide('sessionQuery', harness.sessionQuery as never)
     ctx.provide('agents', harness.agents as never)
+  // WS-2: the official Host Workspace registry the Direct lifecycle pre-selects through.
+  provideFakeHostWorkspaceRegistry(ctx)
     ctx.provide('sessions', harness.sessions as never)
     ctx.provide('agentDefaultModel', harness.defaultModel as never)
     ctx.provide('llm', harness.llm as never)
@@ -283,6 +286,8 @@ test('a genuine Agent-SCOPED Host shadow over our global mirror stays HOST autho
     ctx.provide('sessionPersistence', harness.persistence as never)
     ctx.provide('sessionQuery', harness.sessionQuery as never)
     ctx.provide('agents', harness.agents as never)
+    // WS-2: the official Host Workspace registry the Direct create resolves through.
+    provideFakeHostWorkspaceRegistry(ctx)
     ctx.provide('sessions', harness.sessions as never)
     ctx.provide('agentDefaultModel', harness.defaultModel as never)
     ctx.provide('llm', harness.llm as never)

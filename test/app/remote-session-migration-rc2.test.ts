@@ -34,7 +34,6 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import WorkspaceController from '@deepseek-ai/dsh-api-workspace-controller'
 import { RemoteSessionLifecycle } from '../../src/runtime/remote/session-lifecycle-remote.ts'
 import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { createRemoteSessionOwnerServices } from '../../src/app/remote/session-owners.ts'
@@ -117,9 +116,6 @@ async function seedMigrationArtifact(
 test('a migration-required generation is listed read-only, refuses an explicit fork, and is never rewritten', async (t) => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 's3-migration-preset')
-  // The official Host Workspace Controller row (the `workspace` Remote owner):
-  // the ordinary create now names an official WorkspaceId instead of a cwd.
-  await host.ctx.plugin(WorkspaceController)
   const { id, sourcePath, sourceHash, sessionDir, sourceName } = await seedMigrationArtifact(host)
 
   const runtime = await createExperimentalRemoteRuntime({
@@ -179,7 +175,6 @@ test('a migration-required generation is listed read-only, refuses an explicit f
 test('a failed Remote open never replaces the current Session, its draft, or reports success', async (t) => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 's3-open-failure-preset')
-  await host.ctx.plugin(WorkspaceController)
   const { id: migrationId } = await seedMigrationArtifact(host)
   const runtime = await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
@@ -358,7 +353,6 @@ test('the Remote owner cancel reaches the real official Host and settles committ
   const life = testLifecycle(t)
   const llm = new HeldWireLlmAdapter()
   const host = await createRemoteApplicationHostFixture(life, 's3-owner-cancel-wire', { llmAdapter: llm })
-  await host.ctx.plugin(WorkspaceController)
   const runtime = await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
