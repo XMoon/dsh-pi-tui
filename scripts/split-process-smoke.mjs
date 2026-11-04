@@ -5674,8 +5674,14 @@ async function main() {
 
         // NB-04 (N-04): a Host-queued occurrence on the running X, then A
         // leaves X. The occurrence belongs to X and must survive the release.
+        // The text is typed and CONFIRMED in the composer before Enter: an
+        // input that a closing overlay or an unfocused seat drops is lost for
+        // good, so the readiness fact (the editor holds the line) must be
+        // observed instead of guessed.
         const xQueueIndex = durableOf(sessionX).length
-        clientA.send('m5n-x-queued\r')
+        clientA.send('m5n-x-queued')
+        await clientA.waitForComposerDraft('m5n-x-queued')
+        clientA.send('\r')
         const queuedX = await waitForHostSessionEventAfter(dshHome, sessionX, xQueueIndex,
           event => event.type === 'agent/inbox/spliced'
             && event.data?.target === 'next-turn'

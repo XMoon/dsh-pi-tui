@@ -593,6 +593,20 @@ test('the non-destructive Split Remote navigation witness stays between M5-C and
   assert.match(m5n, /long-turn started/u)
   assert.match(m5n, /already on this session/u)
 
+  // The queued occurrence is submitted through the PAINTED composer: type,
+  // confirm the composer holds the exact text, then Enter. A one-shot
+  // `send('...\\r')` could be dropped by a closing overlay while the durable
+  // wait still blamed the Host, so the readiness step is part of the proof.
+  {
+    const typed = m5n.indexOf("clientA.send('m5n-x-queued')")
+    const confirmed = m5n.indexOf("await clientA.waitForComposerDraft('m5n-x-queued')")
+    const entered = m5n.indexOf("clientA.send('\\r')", confirmed)
+    assert.ok(typed >= 0 && confirmed > typed && entered > confirmed,
+      'M5N must type the queued text, confirm the painted composer, then press Enter')
+    assert.doesNotMatch(m5n, /send\('m5n-x-queued\\r'\)/u,
+      'M5N must never submit the queued occurrence one-shot without the composer readiness fact')
+  }
+
   // The old X Turn must COMPLETE (never be cancelled) after A left, and the
   // Host-queued occurrence must stay with X (exact identity, exactly once).
   assert.match(m5n, /waitForTurnEnds/u)
