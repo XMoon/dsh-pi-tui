@@ -593,6 +593,22 @@ test('the non-destructive Split Remote navigation witness stays between M5-C and
   assert.match(m5n, /long-turn started/u)
   assert.match(m5n, /already on this session/u)
 
+  // A refused command line is RESTORED by the production editor contract
+  // ("an error outcome keeps the draft"). The case must observe that restore
+  // and clear it through the real editor before the next ordinary submit;
+  // otherwise the queued text would be appended to `/resume <id>` and the
+  // durable queue wait would blame the Host for a harness mistake.
+  assert.match(m5n, /const refusedLine = `\/resume \$\{sessionX\}`/u,
+    'M5N must name the refused line it expects the editor to restore')
+  assert.match(m5n, /await clientA\.waitForComposerDraft\(refusedLine\)/u,
+    'M5N must OBSERVE the restored refused line before clearing it')
+  assert.match(m5n, /clientA\.send\('\\x15'\)/u,
+    'M5N must clear the restored line with the real editor gesture (Ctrl+U)')
+  assert.match(m5n, /cleared the refused command line/u,
+    'M5N must wait until the refused line is gone from the composer')
+  assert.match(m5n, /includes\('\/resume'\)/u,
+    'M5N must reject a queued line that inherits the refused command line')
+
   // The queued occurrence is submitted through the PAINTED composer: type,
   // confirm the composer holds the exact text, then Enter. A one-shot
   // `send('...\\r')` could be dropped by a closing overlay while the durable
