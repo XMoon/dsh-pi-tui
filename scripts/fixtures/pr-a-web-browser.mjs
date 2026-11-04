@@ -83,7 +83,10 @@ const browser = await chromium.launch({ headless: true })
 const context = await browser.newContext({ viewport: { width: 1400, height: 900 } })
 const page = await context.newPage()
 page.on('console', message => {
-  if (message.type() === 'error') result.consoleErrors.push(message.text().slice(0, 300))
+  // Console text is retained evidence, so it passes the same redaction as every
+  // other retained driver string: a future error message may carry the
+  // authenticated page URL.
+  if (message.type() === 'error') result.consoleErrors.push(redacted(message.text()).slice(0, 300))
 })
 page.on('response', response => {
   if (response.status() < 400 || result.failedResponses.length >= 20) return
