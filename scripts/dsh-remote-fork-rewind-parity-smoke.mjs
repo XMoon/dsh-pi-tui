@@ -87,6 +87,8 @@ const SOURCES = {
   p7DirectParent: 'b3-p7-direct-parent',
   p7Host: 'b3-p7-host-source',
   p7Direct: 'b3-p7-direct-source',
+  p9Host: 'b3-p9-host-source',
+  p9Direct: 'b3-p9-direct-source',
 }
 
 const IMAGE_LIMITS = Object.freeze({
@@ -664,6 +666,60 @@ async function main() {
       assert.equal(subagentMembership().includes(directChildId), true,
         'Direct child must inherit the nearest ancestor workspace')
       scenarios.p7SubagentWorkspace = { status: 'covered', workspaceId: subagentWorkspace.id }
+    }
+
+    // P9 — WS-2: an ORDINARY create (Host WorkspaceId, never a cwd) attaches
+    // the durable membership, and BOTH fork paths inherit the source Workspace.
+    {
+      const resolved = await direct.resolveWorkspace({ kind: 'host-path', path: anchorDir })
+      assert.equal(resolved.workspaceId, String(workspace.id),
+        'both adapters must observe the ONE Host Workspace registry')
+      const createParent = async (sessionId) => {
+        const created = await direct.create({ sessionId, workspaceId: resolved.workspaceId, agentPreset: PRESET })
+        assert.equal(created.outcome.kind, 'created',
+          `P9 ordinary create failed: ${created.ownership}/${created.outcome.kind}`)
+        if (created.outcome.kind !== 'created') throw new Error('unreachable')
+        const parent = host.ctx.sessions.get(SessionId(sessionId))
+        assert.ok(parent !== undefined, 'P9 ordinary create must publish the Host Session')
+        appendClosedTurn(parent, 1, 'p9 prompt')
+        return created.outcome.handle
+      }
+      const hostParent = await createParent(SOURCES.p9Host)
+      const directParent = await createParent(SOURCES.p9Direct)
+      for (const [label, sessionId] of [['Host', SOURCES.p9Host], ['Direct', SOURCES.p9Direct]]) {
+        const parent = host.ctx.sessions.get(SessionId(sessionId))
+        assert.ok(parent !== undefined, `P9 ${label} parent is missing from the Host registry`)
+        assert.equal(parent.header.cwd, workspace.path,
+          `P9 ${label} parent durable cwd must be the Host Workspace path`)
+        assert.equal(workspaceMembership().includes(sessionId), true,
+          `P9 ${label} parent must be attached to the Host Workspace`)
+      }
+
+      const hostOutcome = await hostFork(SOURCES.p9Host)
+      const directOutcome = await directFork(SOURCES.p9Direct)
+      assert.equal(hostOutcome.ok, true, `Host P9 fork failed: ${JSON.stringify(hostOutcome)}`)
+      assert.equal(directOutcome.kind, 'forked', `Direct P9 fork settled as ${directOutcome.kind}`)
+      const hostChildId = hostOutcome.ok ? hostOutcome.childId : ''
+      const directChildId = directOutcome.kind === 'forked' ? directOutcome.handle.session.id : ''
+      const hostChild = childSnapshot(host, hostChildId)
+      const directChild = childSnapshot(host, directChildId)
+      assertChildrenParity(host, hostChild, directChild, SOURCES.p9Host, SOURCES.p9Direct, { cwd: workspace.path })
+      for (const [label, childId] of [['Host', hostChildId], ['Direct', directChildId]]) {
+        assert.equal(workspaceMembership().includes(childId), true,
+          `${label} P9 child must inherit the source Workspace membership`)
+        const child = host.ctx.sessions.get(SessionId(childId))
+        assert.equal(child?.header.cwd, workspace.path,
+          `${label} P9 child durable cwd must be the same Host Workspace path`)
+      }
+      // The parent owners are retired after the forks: no lease outlives the
+      // scenario (the child owners stay live for the teardown).
+      await hostParent.direct?.ownerHandle?.dispose?.()
+      await directParent.direct?.ownerHandle?.dispose?.()
+      scenarios.p9OrdinaryCreateWorkspaceFork = {
+        status: 'covered',
+        workspaceId: String(workspace.id),
+        canonicalPath: workspace.path,
+      }
     }
 
     console.log(JSON.stringify({ ok: true, scenarios }))

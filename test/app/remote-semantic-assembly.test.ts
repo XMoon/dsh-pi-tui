@@ -63,6 +63,18 @@ function runtimeSource(): { source: RemoteM3ARuntimeSource; sessions: object; re
       answer: async () => ({ ok: true as const, value: true }),
     },
     pluginManager: { list: async () => ({ ok: true as const, value: {} }) },
+    // The official generated `workspace` namespace (WS-2): the lifecycle's ONE
+    // pre-selection authority is passed through this SAME source object.
+    workspace: {
+      create: async () => ({
+        ok: true as const,
+        value: { workspace: { workspaceId: 'workspace-wiring', path: '/wiring', sessionIds: [] }, created: true },
+      }),
+      follow: () => ({
+        [Symbol.asyncIterator]: () => (async function* () { /* no frames */ })(),
+        dispose: () => {},
+      }),
+    },
     $on: () => () => {},
     subagents: {
       prompt: async () => ({ ok: true as const, value: { messageId: 'm' } }),

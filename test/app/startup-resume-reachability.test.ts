@@ -37,6 +37,7 @@ import { mountAgentLoopTestDependencies, mountAgentLoopTestHarness } from '@deep
 import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { SqliteSessionQueryEngine } from '@deepseek-ai/dsh-session-query-sqlite'
 import { CommandRuntime } from '@deepseek-ai/dsh-commands'
+import WorkspaceController from '@deepseek-ai/dsh-api-workspace-controller'
 import { RemoteSessionLifecycle } from '../../src/runtime/remote/session-lifecycle-remote.ts'
 import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { createRemoteSessionOwnerServices } from '../../src/app/remote/session-owners.ts'
@@ -236,6 +237,7 @@ test('an official Remote running binding keeps the pre-mount idle wait open unti
   const life = testLifecycle(t)
   const llm = new HeldWireLlmAdapter()
   const host = await createRemoteApplicationHostFixture(life, 'prd-remote-startup-running', { llmAdapter: llm })
+  await host.ctx.plugin(WorkspaceController)
   const runtime = await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
@@ -243,9 +245,10 @@ test('an official Remote running binding keeps the pre-mount idle wait open unti
   life.defer(() => runtime.dispose().catch(() => {}))
   const sessions = runtime.client.sessions
   await sessions.refresh()
-  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation)
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace)
   const id = 'prd-remote-startup-running'
-  const created = await lifecycle.create({ sessionId: id, cwd: host.anchorDir })
+  const workspaceId = (await lifecycle.resolveWorkspace({ kind: 'host-path', path: host.anchorDir })).workspaceId
+  const created = await lifecycle.create({ sessionId: id, workspaceId })
   assert.equal(created.outcome.kind, 'created', `the official create must commit: ${created.ownership}/${created.outcome.kind}`)
   if (created.outcome.kind !== 'created') return
   const handle = created.outcome.handle

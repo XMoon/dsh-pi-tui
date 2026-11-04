@@ -55,6 +55,7 @@ test('the Direct backend is the current production surface and serves EXACTLY th
     refreshTitle: async () => ({ kind: 'ok' as const, title: undefined }),
   }
   const sessionLifecycle = {
+    resolveWorkspace: async () => ({}) as never,
     create: async () => ({}) as never,
     open: async () => ({}) as never,
     fork: async () => ({}) as never,

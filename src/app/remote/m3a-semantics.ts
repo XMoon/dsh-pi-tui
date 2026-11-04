@@ -33,7 +33,7 @@ import type { RemoteLlmRemotes, RemoteModelRemotes, RemoteModelSessionsSource } 
 import type { RemotePendingSessionsSource } from '../../runtime/remote/pending-input-reader-remote.ts'
 import type { RemoteWriteSessionsSource } from '../../runtime/remote/session-writer-remote.ts'
 import type { RemoteSerializerSessionsSource } from '../../runtime/remote/prompt-serializer-remote.ts'
-import type { RemoteLifecycleSessions } from '../../runtime/remote/session-lifecycle-remote.ts'
+import type { RemoteLifecycleSessions, RemoteWorkspaceNamespaceLike } from '../../runtime/remote/session-lifecycle-remote.ts'
 import type { RemoteSubagentSource } from '../../runtime/remote/subagent-remote.ts'
 import type { RemotePresetRemotes } from '../../runtime/remote/preset-remote.ts'
 import type { RemoteSkillRemotes } from '../../runtime/remote/skill-remote.ts'
@@ -152,6 +152,11 @@ export interface RemoteM3ARuntimeSource {
     /** The official generated `workspaceFiles` namespace (Delivered files
      *  PR2): bounded Host file reads for the preview. */
     readonly workspaceFiles: RemoteWorkspaceFilesNamespace | undefined
+    /** The official generated `workspace` namespace (WS-1): the Host Workspace
+     *  Controller's Remote face. The SAME Client Domain mounts it and the
+     *  lifecycle adopts it as the one pre-selection authority — never a second
+     *  Client, store or cached Workspace list. */
+    readonly workspace: RemoteWorkspaceNamespaceLike
     /** The official generated config-plane namespaces (the SAME Client
      *  Remote service): settings, credentials and permission presets. The
      *  M3-3A adapters ignore them; the Remote Backend's ConfigPort reads them
@@ -217,7 +222,7 @@ export function createRemoteM3ASemantics(
       options.promptSerializer,
       options.isDispatchAllowed === undefined ? undefined : { isDispatchAllowed: options.isDispatchAllowed },
     ),
-    sessionLifecycle: new RemoteSessionLifecycle(sessions, generation),
+    sessionLifecycle: new RemoteSessionLifecycle(sessions, generation, remote.workspace),
     subagent: new RemoteSubagentPort(remote.subagents),
     catalog: {
       models: modelCatalog,

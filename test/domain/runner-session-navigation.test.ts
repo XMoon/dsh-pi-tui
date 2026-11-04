@@ -1601,6 +1601,7 @@ function ctxOf(context: Context): B3CordisPlane & { provide(name: string, value:
 
 /** The Cordis plane the witnesses drive (the official event/waterfall API). */
 interface B3CordisPlane {
+  get(name: string): unknown
   emit(name: string, ...args: unknown[]): void
   waterfall(agent: unknown, name: string, payload: unknown, fallback: () => Promise<unknown>): Promise<unknown>
   /**
@@ -2949,6 +2950,77 @@ test('an accepted stop whose quiesce fails reports "requested, not confirmed" �
     assert.equal(presentedScope(owned.pane), scopeA, 'A stays current')
   } finally {
     // Bounded fixture teardown (the owned runner is closed, not a timing window).
+    await owned.settle()
+  }
+})
+
+// ── WS-2: the Host Workspace pre-selection precedes /new's navigation stop ──
+
+test('a refused /new Host Workspace preflight never stops the old owner, creates no Session, and keeps the draft', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-ws2-new-preflight-')
+  const sessionA = fakeSession({
+    id: 'ws2-new-preflight-a',
+    // A historical Session with neither membership nor a persisted directory:
+    // the pre-selection cannot name a Host Workspace, so it must refuse BEFORE
+    // the navigation stop.
+    header: { id: 'ws2-new-preflight-a', cwd: '', createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const { owned, harness } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
+  try {
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
+    const result = await commandOf(owned, 'new')() as { kind: string; text?: string }
+    assert.equal(result.kind, 'error', 'an unresolvable Host Workspace is a reported failure')
+    assert.match(result.text ?? '', /no Host recorded workspace directory/u)
+    assert.equal(harness.createdSessions.length, 0, 'no Session was dispatched')
+    assert.equal(harness.retirementEvents.some(event =>
+      event === `cancel:${sessionA.id}` || event === `flush:${sessionA.id}` || event === `dispose:${sessionA.id}`), false,
+    'the old owner was never stopped, flushed or retired')
+    // "A stays current" as wire facts: no replacement was ever painted.
+    assert.deepEqual(presentedScopes(owned.pane), [scopeA], 'no replacement subject was ever painted')
+    assert.equal(presentedScope(owned.pane), scopeA, 'A stays current')
+  } finally {
+    await owned.settle()
+  }
+})
+
+test('the real /new uses the captured Session Host Workspace membership, never the launch cwd', async (t) => {
+  const life = testLifecycle(t)
+  const home = life.tempDir('dsh-pi-tui-ws2-new-membership-')
+  const sessionA = fakeSession({
+    id: 'ws2-new-membership-a',
+    header: { id: 'ws2-new-membership-a', cwd: home, createdAt: 0, version: SESSION_FORMAT_VERSION },
+    events: sessionEvents('A standing state'),
+  })
+  const { owned, harness, ctx } = await bootB3Tsp({ life, home, standing: sessionA, resume: sessionA.id })
+  try {
+    const scopeA = await waitUntilMainPresents(owned.pane, 'A standing state')
+    // The live Session BELONGS to a Host Workspace whose directory differs from
+    // both the Client launch directory and the Session's own header cwd.
+    const workspaceDir = join(home, 'host-project-y')
+    const registry = ctx.get('workspaceRegistry') as {
+      create(path: string): Promise<{
+        readonly id: string
+        readonly path: string
+        readonly sessionIds: string[]
+        attachSession(sessionId: unknown): Promise<void>
+      }>
+    }
+    const workspaceY = await registry.create(workspaceDir)
+    await workspaceY.attachSession(sessionA.id)
+    const before = [...workspaceY.sessionIds]
+
+    const result = await commandOf(owned, 'new')() as { kind: string; text?: string }
+    assert.equal(result.kind, 'success', `the /new must commit: ${result.text ?? ''}`)
+    await waitUntil('the fresh Session', () => harness.createdSessions.length === 1, 15_000)
+    const child = harness.createdSessions[0]!
+    assert.equal(child.header.cwd, workspaceY.path,
+      'the durable cwd is the captured Session’s Host membership, never the launch/header cwd')
+    await waitUntilReplacementPresented(owned.pane, scopeA, 'B publication')
+    assert.deepEqual(workspaceY.sessionIds, [child.id, ...before],
+      'the fresh Session is attached to the SAME Workspace as its source')
+  } finally {
     await owned.settle()
   }
 })

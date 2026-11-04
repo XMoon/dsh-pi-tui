@@ -186,6 +186,7 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
   }
 
   const lifecycle: SessionLifecycle = {
+    resolveWorkspace: async (intent) => ({ workspaceId: 'ws-a', path: intent.kind === 'host-path' ? intent.path : '/workspace' }),
     create: async (request): Promise<CreateResult> => {
       calls.creates += 1
       const wrapper = retain(request.sessionId)
@@ -277,7 +278,7 @@ function harness(options: { retirement?: Partial<SessionOwnerRetirement> } = {})
     notifyResumeFailure: () => {},
     awaitPendingDefaultWrite: async () => {},
     newSessionId: () => 'session-first',
-    sessionCreateCwd: () => '/workspace',
+    initialWorkspaceIntent: () => ({ kind: 'host-path', path: '/workspace' }),
     currentOpening: () => undefined,
     resetOpening: () => {},
   }
@@ -844,6 +845,7 @@ test('a Direct-shaped owned fork handle adopts directly without any lifecycle op
       retireParked: async () => ({ failures: [], durabilityFailure: undefined }),
     },
     lifecycle: {
+      resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/workspace' }),
       create: async () => { throw new Error('unexpected create') },
       open: async (request) => {
         h.calls.opens.push(request.sessionId)
@@ -887,7 +889,7 @@ test('a Direct-shaped owned fork handle adopts directly without any lifecycle op
       notifyResumeFailure: () => {},
       awaitPendingDefaultWrite: async () => {},
       newSessionId: () => 'session-first',
-      sessionCreateCwd: () => '/workspace',
+      initialWorkspaceIntent: () => ({ kind: 'host-path', path: '/workspace' }),
       currentOpening: () => undefined,
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,
@@ -994,6 +996,7 @@ test('a Direct pre-publication commit throw releases the child once and never re
       retireParked: async () => ({ failures: [], durabilityFailure: undefined }),
     },
     lifecycle: {
+      resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/workspace' }),
       create: async () => { throw new Error('unexpected create') },
       open: async () => ({ ownership: 'current' as const, outcome: { kind: 'unavailable' as const, message: 'unexpected open' } }),
       fork: async () => ({
@@ -1039,7 +1042,7 @@ test('a Direct pre-publication commit throw releases the child once and never re
       notifyResumeFailure: () => {},
       awaitPendingDefaultWrite: async () => {},
       newSessionId: () => 'session-first',
-      sessionCreateCwd: () => '/workspace',
+      initialWorkspaceIntent: () => ({ kind: 'host-path', path: '/workspace' }),
       currentOpening: () => undefined,
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,
@@ -1113,6 +1116,7 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
       retireParked: async () => ({ failures: [], durabilityFailure: undefined }),
     },
     lifecycle: {
+      resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/workspace' }),
       create: async () => { throw new Error('unexpected create') },
       open: async () => ({ ownership: 'current' as const, outcome: { kind: 'unavailable' as const, message: 'unexpected open' } }),
       fork: async () => ({
@@ -1158,7 +1162,7 @@ test('a Direct fork post-publication completion-seam throw never rolls back or r
       notifyResumeFailure: () => {},
       awaitPendingDefaultWrite: async () => {},
       newSessionId: () => 'session-first',
-      sessionCreateCwd: () => '/workspace',
+      initialWorkspaceIntent: () => ({ kind: 'host-path', path: '/workspace' }),
       currentOpening: () => undefined,
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,
@@ -1208,6 +1212,7 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
       retireParked: async () => ({ failures: [], durabilityFailure: undefined }),
     },
     lifecycle: {
+      resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/workspace' }),
       create: async () => { throw new Error('unexpected create') },
       open: async () => ({
         ownership: 'current' as const,
@@ -1247,7 +1252,7 @@ test('the ordinary pre-publication release is AWAITED: a slow Direct retire keep
       notifyResumeFailure: () => {},
       awaitPendingDefaultWrite: async () => {},
       newSessionId: () => 'session-first',
-      sessionCreateCwd: () => '/workspace',
+      initialWorkspaceIntent: () => ({ kind: 'host-path', path: '/workspace' }),
       currentOpening: () => undefined,
       resetOpening: () => {},
     } satisfies SessionRuntimeSurface,

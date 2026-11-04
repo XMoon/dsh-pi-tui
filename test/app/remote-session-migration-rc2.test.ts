@@ -34,6 +34,7 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import WorkspaceController from '@deepseek-ai/dsh-api-workspace-controller'
 import { RemoteSessionLifecycle } from '../../src/runtime/remote/session-lifecycle-remote.ts'
 import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { createRemoteSessionOwnerServices } from '../../src/app/remote/session-owners.ts'
@@ -116,6 +117,9 @@ async function seedMigrationArtifact(
 test('a migration-required generation is listed read-only, refuses an explicit fork, and is never rewritten', async (t) => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 's3-migration-preset')
+  // The official Host Workspace Controller row (the `workspace` Remote owner):
+  // the ordinary create now names an official WorkspaceId instead of a cwd.
+  await host.ctx.plugin(WorkspaceController)
   const { id, sourcePath, sourceHash, sessionDir, sourceName } = await seedMigrationArtifact(host)
 
   const runtime = await createExperimentalRemoteRuntime({
@@ -130,7 +134,7 @@ test('a migration-required generation is listed read-only, refuses an explicit f
   assert.equal(listed?.formatStatus, 'migration-required',
     'the official Client reports the released artifact as needing migration')
 
-  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation)
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace)
   // The TUI fork always refuses implicit migration, and the official Host then
   // refuses a fork of a source that needs migration.
   const forked = await lifecycle.fork({ sourceSessionId: String(id) })
@@ -175,6 +179,7 @@ test('a migration-required generation is listed read-only, refuses an explicit f
 test('a failed Remote open never replaces the current Session, its draft, or reports success', async (t) => {
   const life = testLifecycle(t)
   const host = await createRemoteApplicationHostFixture(life, 's3-open-failure-preset')
+  await host.ctx.plugin(WorkspaceController)
   const { id: migrationId } = await seedMigrationArtifact(host)
   const runtime = await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
@@ -186,9 +191,9 @@ test('a failed Remote open never replaces the current Session, its draft, or rep
   assert.equal(sessions.list.getSnapshot().byId[migrationId]?.formatStatus, 'migration-required',
     'the target is the real migration-required artifact')
 
-  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation)
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace)
   const currentId = 'session-open-failure-current'
-  const created = await lifecycle.create({ sessionId: currentId, cwd: host.anchorDir })
+  const created = await lifecycle.create({ sessionId: currentId, workspaceId: (await lifecycle.resolveWorkspace({ kind: 'host-path', path: host.anchorDir })).workspaceId })
   assert.equal(created.outcome.kind, 'created', `the current Session must be created: ${created.ownership}/${created.outcome.kind}`)
   if (created.outcome.kind !== 'created') throw new Error('unreachable')
   const handleA: SessionHandle = created.outcome.handle
@@ -231,7 +236,7 @@ test('a failed Remote open never replaces the current Session, its draft, or rep
     notifyResumeFailure: () => {},
     awaitPendingDefaultWrite: async () => {},
     newSessionId: () => 'session-first',
-    sessionCreateCwd: () => host.anchorDir,
+    initialWorkspaceIntent: () => ({ kind: 'host-path', path: host.anchorDir }),
     currentOpening: () => undefined,
     resetOpening: () => {},
   }
@@ -353,6 +358,7 @@ test('the Remote owner cancel reaches the real official Host and settles committ
   const life = testLifecycle(t)
   const llm = new HeldWireLlmAdapter()
   const host = await createRemoteApplicationHostFixture(life, 's3-owner-cancel-wire', { llmAdapter: llm })
+  await host.ctx.plugin(WorkspaceController)
   const runtime = await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
     waitForHostPrerequisites: async () => {},
@@ -360,9 +366,9 @@ test('the Remote owner cancel reaches the real official Host and settles committ
   life.defer(() => runtime.dispose().catch(() => {}))
   const sessions = runtime.client.sessions
   await sessions.refresh()
-  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation)
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace)
   const id = 'remote-owner-cancel-wire'
-  const created = await lifecycle.create({ sessionId: id, cwd: host.anchorDir })
+  const created = await lifecycle.create({ sessionId: id, workspaceId: (await lifecycle.resolveWorkspace({ kind: 'host-path', path: host.anchorDir })).workspaceId })
   assert.equal(created.outcome.kind, 'created', `the official create must commit: ${created.ownership}/${created.outcome.kind}`)
   if (created.outcome.kind !== 'created') return
   const handle = created.outcome.handle

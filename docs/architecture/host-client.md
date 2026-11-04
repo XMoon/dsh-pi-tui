@@ -417,9 +417,36 @@ The Client mounts the generated `workspace` namespace and nothing beside it: no
 `ClientWorkspaceModel`, no Client Workspace store, no cached Workspace list and
 no extra Host plugin. Its state arrives only as the Host baseline and increments
 of `workspace.follow`, so a Client reload, HMR revision or process exit disposes
-its own `/remote` descriptor and never the Host controller or registry. Session
-creation still passes its existing `cwd` intent; mounting the Workspace
-Controller does not make a Client directory an authoritative Host Workspace.
+its own `/remote` descriptor and never the Host controller or registry.
+
+Session creation has exactly ONE directory authority. A Client's local directory
+(`cd foo && dsh`) is only a PROPOSAL: the Client resolves an intent — the launch
+or immutable-header directory, an official `workspace-id`, or the captured
+source Session — through the Host Workspace Controller, and the resulting
+official WorkspaceId, never a `cwd`, is the sole directory input to Session
+create. The Host registry realpaths and validates the proposed directory, and
+the Session Controller reads the durable directory from its own Workspace
+record, so the persisted `header.cwd` and the Workspace membership always agree
+and a Client can never make its own filesystem authoritative. The source-Session
+route is membership-first: `/new` asks for the captured Session's official
+membership, and only a historical Session without one falls back to that
+Session's persisted immutable header directory, re-validated by the Host
+registry. A status/effective working directory is never used, an unknown or
+unreadable directory fails closed instead of falling back to a Host profile
+directory, `HOME` or a default Workspace, and the pre-selection publishes no
+Session and stops no owner — so a refusal leaves the current Session, its draft
+and any running Turn untouched.
+
+An ordinary create naming an unknown WorkspaceId is refused before publication.
+A create that published and then failed to attach its membership reports the
+real published identity (`published-with-error`), and a create dispatched
+before a connection loss stays `indeterminate` with the requested id as
+correlation only; neither is ever retried. `open`/`resume`/`--session` keep
+addressing a Session by identity only: they never rewrite the header directory,
+replace membership or attach a historical Session to the Client's current
+directory. There is no implicit "current Workspace" global — each Client holds
+its own selection intent, and two Clients of one Host may create in different
+Workspaces.
 
 Above the Domains, the Client mounts exactly one Client UI subtree (extension
 host + first-party builtins), one split application runtime (Backend + the ONE

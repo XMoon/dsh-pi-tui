@@ -734,6 +734,49 @@ export function hostSessionEvents(dshHome, sessionId) {
     .filter(event => event !== undefined)
 }
 
+/** The first persisted line (the durable Session header) of one Host Session. */
+export function hostSessionHeader(dshHome, sessionId) {
+  const events = hostSessionEvents(dshHome, sessionId)
+  const header = events?.[0]
+  return header !== undefined && header.type === 'session' ? header : undefined
+}
+
+/** The number of durable Host Session logs under the isolated home. */
+export function hostSessionLogCount(dshHome) {
+  const sessionsRoot = join(dshHome, 'sessions')
+  if (!existsSync(sessionsRoot)) return 0
+  let count = 0
+  for (const dirent of readdirSync(sessionsRoot, { withFileTypes: true })) {
+    if (!dirent.isDirectory()) continue
+    const sessionDir = join(sessionsRoot, dirent.name)
+    for (const entry of readdirSync(sessionDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        for (const file of readdirSync(join(sessionDir, entry.name))) {
+          if (file.endsWith('.jsonl.zstd')) count += 1
+        }
+      }
+    }
+  }
+  return count
+}
+
+/** A bounded wait for one Session's durable header line (the Host writes it on
+ *  the first accepted append, so a just-created Session may lag briefly). */
+export async function waitForHostSessionHeader(dshHome, sessionId, label, timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const header = hostSessionHeader(dshHome, sessionId)
+    if (header !== undefined) return header
+    await sleep(100)
+  }
+  throw new Error(`timed out waiting for ${label}: no durable Host header for "${sessionId}"`)
+}
+
+/** Bounded digest (the shape the WS-2 qualification records carry). */
+export function sha16(value) {
+  return createHash('sha256').update(String(value)).digest('hex').slice(0, 16)
+}
+
 /** The human-authored `user/message` texts of one persisted Host Session. */
 function hostUserTexts(events) {
   return events
@@ -3007,15 +3050,26 @@ async function main() {
     // painted transcript, then exit/kill/reconnect without touching the Host.
     // T34 (writer pre-dispatch stop), T35 post-write ACK drop and T36 (private
     // PiFile/terminal-progress business reads) run before the continuity cases.
-    // The private PiFile business reads (T36) resolve files in the Host
-    // WORKSPACE, which is the installed profile: `t36notes.md` is inside the
-    // official provider's search tree, and `dist/` is a directory the OFFICIAL
-    // provider EXCLUDES while the Host explicit-path scanner still serves it —
-    // that difference makes the scoped witness discriminating. Both are created
-    // BEFORE the Host starts, so the official workspace index sees them.
-    writeFileSync(join(profileDir, 't36notes.md'), 'private file reference\n', { mode: 0o600 })
-    mkdirSync(join(profileDir, 'dist'), { recursive: true })
-    writeFileSync(join(profileDir, 'dist', 't36only-scoped.js'), 'x\n', { mode: 0o600 })
+    // WS-2: the Client launch directory (A) is a DIFFERENT real directory from
+    // the Host Profile (B). The Host realpaths and registers A as the Session's
+    // Workspace, so the private PiFile business reads (T36) now resolve in A:
+    // `t36notes.md` is inside the official provider's search tree for that
+    // Workspace, and `dist/` is a directory the OFFICIAL provider EXCLUDES while
+    // the Host explicit-path scanner still serves it — that difference makes the
+    // scoped witness discriminating. Both are created BEFORE the Host starts.
+    const clientWorkspaceA = join(workDir, 'ws2-client-workspace-A')
+    const clientWorkspaceC = join(workDir, 'ws2-client-workspace-C')
+    mkdirSync(clientWorkspaceA, { recursive: true })
+    mkdirSync(clientWorkspaceC, { recursive: true })
+    const canonicalClientWorkspaceA = realpathSync(clientWorkspaceA)
+    const canonicalClientWorkspaceC = realpathSync(clientWorkspaceC)
+    // The SAME-NAMED marker in the Host Profile B carries different content: the
+    // Host read must answer A's marker, never B's.
+    writeFileSync(join(clientWorkspaceA, 'ws2-host-marker.txt'), 'client-workspace-A\n', { mode: 0o600 })
+    writeFileSync(join(profileDir, 'ws2-host-marker.txt'), 'host-profile-B\n', { mode: 0o600 })
+    writeFileSync(join(clientWorkspaceA, 't36notes.md'), 'private file reference\n', { mode: 0o600 })
+    mkdirSync(join(clientWorkspaceA, 'dist'), { recursive: true })
+    writeFileSync(join(clientWorkspaceA, 'dist', 't36only-scoped.js'), 'x\n', { mode: 0o600 })
     // The `~/` shorthand must expand to the HOST's home — the isolated home in
     // this lane, never the operator's. One known file there turns the absolute
     // answer into a real sink instead of a vacuous "some absolute path".
@@ -3036,6 +3090,9 @@ async function main() {
       // Welcome painted on the real pty, no JSON on the terminal.
       const c1 = new SurfaceEntryProcess(entries.client, {
         ...base,
+        // WS-2: the REAL Client launch directory (A), distinct from the Host
+        // Profile cwd (B) the Host process itself was started in.
+        cwd: clientWorkspaceA,
         workDir,
         env: { ...base.env, SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF: '1' },
       })
@@ -3094,12 +3151,20 @@ async function main() {
       })()
       assert(durableA !== undefined,
         'T30 the Host durable log did not carry exactly one accepted "session a" write and its assistant message')
+      // WS-2: the durable Host header cwd is the Host canonical form of the
+      // Client launch directory — never the Host Profile the Host process runs in.
+      const headerA = await waitForHostSessionHeader(dshHome, sessionA, 'T29 durable Host header')
+      assert(headerA.cwd === canonicalClientWorkspaceA,
+        `T29 the durable Session cwd must be the Host canonical launch directory: ${String(headerA.cwd)} != ${canonicalClientWorkspaceA}`)
       trace('t29-t30', {
         sessionId: sessionA,
         userMessage: 'painted',
         assistant: 'painted',
         hostUserMessages: durableA.users,
         hostAssistant: durableA.assistant,
+        durableCwd: headerA.cwd,
+        hostProfileCwd: realpathSync(profileDir),
+        clientLaunchCwd: canonicalClientWorkspaceA,
       })
 
       // T31: Session switch A -> B -> A, each with retained-window hydration.
@@ -3135,7 +3200,12 @@ async function main() {
         120_000,
       )
       await c1.waitForScreen('session a', 'T31 final Session A hydration')
-      trace('t31', { first: sessionA, second: sessionB, switches: 'A->B->A' })
+      // WS-2: `/new` created B in the CAPTURED Session's Host Workspace (A), not
+      // in the Client launch directory of some other process.
+      const headerB = await waitForHostSessionHeader(dshHome, sessionB, 'T31 durable Host header')
+      assert(headerB.cwd === canonicalClientWorkspaceA,
+        `T31 the /new Session cwd must be the captured Host Workspace: ${String(headerB.cwd)} != ${canonicalClientWorkspaceA}`)
+      trace('t31', { first: sessionA, second: sessionB, switches: 'A->B->A', durableCwd: headerB.cwd })
 
       // T36: the private PiFile + terminal-progress RPCs through the ALREADY
       // mounted Domain namespaces on the SAME Client Context (no second
@@ -3164,6 +3234,20 @@ async function main() {
         `T36 the explicit-path scope did not reach the Host scanner (observed ${String(privateProof.scopedCount)} items)`)
       assert(privateProof.homeAbsolute === true,
         'T36 the HOME shorthand did not answer absolute Host paths')
+      // WS-2: the Host Workspace authority behind the SAME Session, read through
+      // the official Client namespace and the Host's own file read.
+      assert(privateProof.workspaceMatchesClientCwd === true,
+        'T36 the Session Workspace path is not the Client launch directory')
+      assert(privateProof.workspacePathDigest === sha16(canonicalClientWorkspaceA),
+        `T36 the Session Workspace path digest is not A: ${String(privateProof.workspacePathDigest)}`)
+      assert(Array.isArray(privateProof.workspaceSessionDigests)
+        && privateProof.workspaceSessionDigests.includes(sha16(sessionA))
+        && privateProof.workspaceSessionDigests.includes(sha16(sessionB)),
+      'T36 both /new Sessions must belong to the SAME Host Workspace')
+      assert(privateProof.workspaceListCwdDigest === sha16(canonicalClientWorkspaceA),
+        'T36 the Host list-row cwd digest is not the Workspace path')
+      assert(privateProof.workspaceMarkerText === 'client-workspace-A\n',
+        `T36 the Host file read did not return THIS Workspace's marker: ${JSON.stringify(privateProof.workspaceMarkerText)}`)
       trace('t36', {
         sessionId: privateProof.sessionId,
         fileOk: privateProof.fileOk,
@@ -3203,6 +3287,106 @@ async function main() {
         sockets: closed.liveSockets,
       })
       await c1.dispose()
+
+      // WS-2: a SECOND, SEQUENTIAL real Client whose launch directory (C) is
+      // separate from A selects its OWN Host Workspace under the SAME Host
+      // PID/instance. The single-seat contract (T09) stays: c1 is already gone.
+      const ws2ClientC = new SurfaceEntryProcess(entries.client, {
+        ...base,
+        cwd: clientWorkspaceC,
+        workDir,
+        env: { ...base.env, SPLIT_PROCESS_CLIENT_PRIVATE_RPC_PROOF: '1' },
+      })
+      surfaceClients.push(c2)
+      const ws2ClientCReady = await ws2ClientC.waitFor(record => record.m4a0 === 'ready', 'WS2 second Client ready', 180_000)
+      assert(ws2ClientCReady.processRole === 'client', 'WS2 second Client role mismatch')
+      assert(ws2ClientCReady.pid !== surfaceHostPid, 'WS2 the second Client must be its own OS process')
+      assert(ws2ClientCReady.host.hostPid === surfaceHostFacts.hostPid, 'WS2 the second Client must reach the SAME Host PID')
+      assert(ws2ClientCReady.host.instanceId === surfaceHostFacts.instanceId, 'WS2 the second Client must reach the SAME Host instance')
+      ws2ClientC.send('ws2 session c\r')
+      const ws2ClientCOpened = await ws2ClientC.waitFor(
+        record => record.m4b2s === 'surface-status' && record.sessionOpen === true,
+        'WS2 session C open',
+        120_000,
+      )
+      const sessionC = ws2ClientCOpened.openSessionId
+      assert(typeof sessionC === 'string' && sessionC.startsWith('session-'), 'WS2 session C has no official Session id')
+      await ws2ClientC.waitForScreen('ws2 session c', 'WS2 session C user message')
+      const headerC = await waitForHostSessionHeader(dshHome, sessionC, 'WS2 durable C header')
+      assert(headerC.cwd === canonicalClientWorkspaceC,
+        `WS2 session C header cwd must be the Host canonical C path: ${String(headerC.cwd)} != ${canonicalClientWorkspaceC}`)
+      ws2ClientC.signalBusiness('SIGUSR2')
+      const ws2ClientCProof = await ws2ClientC.waitFor(
+        record => record.m4b2s === 'qualification' && record.op === 'private-rpc-proof',
+        'WS2 second Client workspace proof',
+        60_000,
+      )
+      assert(ws2ClientCProof.workspaceMatchesClientCwd === true,
+        'WS2 the C Session Workspace path is not the C Client launch directory')
+      assert(ws2ClientCProof.workspacePathDigest === sha16(canonicalClientWorkspaceC),
+        `WS2 the C Session Workspace path digest is not C: ${String(ws2ClientCProof.workspacePathDigest)}`)
+      assert(Array.isArray(ws2ClientCProof.workspaceSessionDigests)
+        && ws2ClientCProof.workspaceSessionDigests.includes(sha16(sessionC)),
+      'WS2 the C Session is missing from its own Host Workspace membership')
+      // A's marker is NOT readable from C's Session: the Host file authority is
+      // the Session's OWN Workspace, never a global "current directory".
+      assert(ws2ClientCProof.workspaceMarkerText === undefined,
+        `WS2 the C Session must not read A's Workspace marker: ${JSON.stringify(ws2ClientCProof.workspaceMarkerText)}`)
+      // No cross-Client reassignment: A/B keep their own durable Workspace.
+      const headerAAfterC = await waitForHostSessionHeader(dshHome, sessionA, 'WS2 A header after C')
+      const headerBAfterC = await waitForHostSessionHeader(dshHome, sessionB, 'WS2 B header after C')
+      assert(headerAAfterC.cwd === canonicalClientWorkspaceA, 'WS2 a second Client changed A\'s durable Workspace')
+      assert(headerBAfterC.cwd === canonicalClientWorkspaceA, 'WS2 a second Client changed B\'s durable Workspace')
+      ws2ClientC.send('/exit\r')
+      const ws2ClientCExit = await ws2ClientC.waitForExit(60_000)
+      assert(ws2ClientCExit.code === 0, `WS2 second Client exit was ${JSON.stringify(ws2ClientCExit)}`)
+      await ws2ClientC.dispose()
+      assert(alive(surfaceHostPid), 'WS2 the Host died on the second Client exit')
+      trace('ws2-second-client', {
+        hostPid: surfaceHostPid,
+        clientPid: ws2ClientCReady.pid,
+        sessionId: sessionC,
+        workspacePathDigest: ws2ClientCProof.workspacePathDigest,
+        clientLaunchCwd: canonicalClientWorkspaceC,
+        aWorkspaceKept: headerAAfterC.cwd,
+        markerIsolated: true,
+      })
+
+      // WS-2 negative control: an invalid Host path proposal refuses BEFORE any
+      // Session create, surfaces a meaningful failure, and leaves the Host alive.
+      // The injection uses the SAME `initialWorkspaceIntent` seam (a path, never
+      // a pre-validated WorkspaceId).
+      const sessionLogsBefore = hostSessionLogCount(dshHome)
+      const ws2InvalidClient = new SurfaceEntryProcess(entries.client, {
+        ...base,
+        cwd: clientWorkspaceA,
+        workDir,
+        env: {
+          ...base.env,
+          SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH: join(workDir, 'ws2-invalid-host-path'),
+        },
+      })
+      surfaceClients.push(c3)
+      const ws2InvalidClientReady = await ws2InvalidClient.waitFor(record => record.m4a0 === 'ready', 'WS2 negative Client ready', 180_000)
+      assert(ws2InvalidClientReady.sessionOpen === false, 'WS2 the negative Client must start sessionless')
+      ws2InvalidClient.send('ws2 invalid path probe\r')
+      await ws2InvalidClient.waitForScreen('could not start a session', 'WS2 negative failure notice')
+      assert(!ws2InvalidClient.records.some(record => record.m4b2s === 'surface-status' && record.sessionOpen === true),
+        'WS2 the invalid Host path must never open/create a Session')
+      assert(hostSessionLogCount(dshHome) === sessionLogsBefore,
+        'WS2 the invalid Host path created a durable Host Session')
+      assert(alive(surfaceHostPid), 'WS2 the Host died on the invalid path refusal')
+      assert(readJson(join(scopeDir, 'instance.json')).instanceId === surfaceHostFacts.instanceId,
+        'WS2 the Host instance changed on the invalid path refusal')
+      ws2InvalidClient.send('/exit\r')
+      const ws2InvalidClientExit = await ws2InvalidClient.waitForExit(60_000)
+      assert(ws2InvalidClientExit.code === 0, `WS2 negative Client exit was ${JSON.stringify(ws2InvalidClientExit)}`)
+      await ws2InvalidClient.dispose()
+      trace('ws2-invalid-path', {
+        sessionOpen: false,
+        hostSessionLogs: sessionLogsBefore,
+        hostAlive: true,
+      })
 
       // T41/T42: a SIGTERM during the assembly must be owned by ONE coordinator:
       // no ready, no duplicate cleanup, the Client seat immediately reusable,

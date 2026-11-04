@@ -56,6 +56,8 @@ import * as piTuiHostRuntime from '../../../src/app/host/pi-tui-host-runtime.ts'
 import * as performanceHost from '../../../src/app/host/performance-host.ts'
 import { createExperimentalRemoteRuntime } from '../../support/m3-inprocess/runtime.ts'
 import { RemoteJobObservationPort } from '../../../src/runtime/remote/job-observation-remote.ts'
+import { RemoteSessionLifecycle } from '../../../src/runtime/remote/session-lifecycle-remote.ts'
+import { WorkspaceSelectionError } from '../../../src/runtime/session-lifecycle-port.ts'
 import type { JobObservedSnapshot } from '../../../src/runtime/job-observation-port.ts'
 import {
   disposeRemoteContributions,
@@ -1420,6 +1422,52 @@ test('WORKSPACE. the official workspace namespace creates and follows the Host W
     } finally {
       ownerController.abort()
     }
+  })
+
+  await t.test('an ordinary Remote create names the Host WorkspaceId and attaches the Session', async () => {
+    const lifecycle = new RemoteSessionLifecycle(
+      composed.client.sessions,
+      composed.client.connection.generation,
+      remote as never,
+    )
+    // Pre-selection resolves the EXISTING Host Workspace by its canonical path.
+    const resolved = await lifecycle.resolveWorkspace({ kind: 'host-path', path: target })
+    assert.deepEqual(resolved, { workspaceId: createdId, path: canonical },
+      'the pre-selection must resolve the Host Workspace, never re-create it')
+    assert.equal(registry.list().length, 1, 'the pre-selection must not add a second Workspace')
+
+    const requested = 'session-ws2-workspace-create'
+    const created = await lifecycle.create({ sessionId: requested, workspaceId: resolved.workspaceId })
+    assert.equal(created.ownership, 'current', `WS2 create ownership: ${created.ownership}/${created.outcome.kind}`)
+    assert.equal(created.outcome.kind, 'created', `WS2 create failed: ${created.ownership}/${created.outcome.kind}`)
+    if (created.outcome.kind !== 'created') return
+    const published = created.outcome.handle.session.id
+    const hostSession = host.ctx.sessions.get(SessionId(published))
+    assert.ok(hostSession !== undefined, 'the Host must own the created Session')
+    assert.equal(hostSession.header.cwd, canonical,
+      'the durable Host header cwd must be the Workspace canonical path (never a Client cwd)')
+    const row = registry.list().find(candidate => String(candidate.id) === createdId)
+    assert.ok(row !== undefined, 'the Host registry must still own the Workspace')
+    assert.ok([...row.sessionIds].map(String).includes(published),
+      'the published Session must be attached to the Host Workspace')
+
+    // The source-Session route reads the OFFICIAL membership, not a status cwd.
+    const viaSource = await lifecycle.resolveWorkspace({ kind: 'source-session', sessionId: published })
+    assert.deepEqual(viaSource, { workspaceId: createdId, path: canonical })
+
+    // An unknown WorkspaceId is refused at preflight with ZERO Session dispatch
+    // and, once dispatched, is a single proven Host refusal (never a cwd retry).
+    const preflight = await lifecycle.resolveWorkspace({ kind: 'workspace-id', workspaceId: 'workspace-does-not-exist' })
+      .then(() => undefined, (error: unknown) => error)
+    assert.ok(preflight instanceof WorkspaceSelectionError)
+    assert.equal(preflight.kind, 'refused')
+    assert.equal(preflight.code, 'workspace/not-found')
+    const refused = await lifecycle.create({ sessionId: 'session-ws2-unknown-workspace', workspaceId: 'workspace-does-not-exist' })
+    assert.equal(refused.outcome.kind, 'rejected', `WS2 unknown Workspace must refuse: ${refused.ownership}/${refused.outcome.kind}`)
+    if (refused.outcome.kind === 'rejected') assert.equal(refused.outcome.error.code, 'workspace/not-found')
+    assert.equal(host.ctx.sessions.get(SessionId('session-ws2-unknown-workspace')), undefined,
+      'a refused create publishes no Host Session')
+    created.outcome.handle.client?.release()
   })
 
   await t.test('dispose ends the iterator and a new stream restores the complete Host baseline', async () => {

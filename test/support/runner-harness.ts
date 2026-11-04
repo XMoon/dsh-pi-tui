@@ -353,8 +353,9 @@ export function makeHarness(
       await resumeGate?.(String(resumeSessionId))
       return handle
     },
-    create: async ({ sessionId, agentOptions, setup, seed, inheritedEventCount, signal }: {
+    create: async ({ sessionId, meta, agentOptions, setup, seed, inheritedEventCount, signal }: {
       sessionId: unknown
+      meta?: { readonly cwd?: string }
       agentOptions?: { provider?: string; model?: string }
       setup?: (agentCtx: unknown, agent: Agent) => unknown
       seed?: readonly SessionEvent[]
@@ -368,7 +369,10 @@ export function makeHarness(
       const id = String(sessionId)
       const session: FakeSession = fakeSession({
         id,
-        header: { id, cwd: home, createdAt: Date.now(), version: SESSION_FORMAT_VERSION },
+        // The durable header cwd is the semantic create's Host-resolved
+        // directory (the Direct adapter passes the Workspace path); `home` is
+        // only the fixture fallback for creates without one.
+        header: { id, cwd: meta?.cwd ?? home, createdAt: Date.now(), version: SESSION_FORMAT_VERSION },
         events: seed === undefined ? sessionEvents('created answer') : [...seed],
       })
       createdSessions.push(session)
@@ -545,6 +549,35 @@ export async function mountRunner(
   ctx.provide(TUI_STARTUP_SERVICE, { ...startup, shippedPresetRoot: home })
   ctx.provide('sessionPersistence', harness.persistence as never)
   ctx.provide('sessionQuery', harness.sessionQuery as never)
+  // WS-2: the official Host Workspace registry stand-in. `create` canonicalizes
+  // by identity (the harness runs no realpath), `get`/`list` expose the durable
+  // rows, and membership is the header-validated Session account — the same
+  // three faces the Direct lifecycle consumes.
+  const workspaces: Array<{
+    readonly id: string
+    readonly path: string
+    readonly sessionIds: string[]
+    attachSession(sessionId: unknown): Promise<void>
+  }> = []
+  ctx.provide('workspaceRegistry', {
+    create: async (path: string) => {
+      const existing = workspaces.find(workspace => workspace.path === path)
+      if (existing !== undefined) return existing
+      const created = {
+        id: `workspace-${workspaces.length + 1}`,
+        path,
+        sessionIds: [] as string[],
+        attachSession: async (sessionId: unknown) => {
+          const id = String(sessionId)
+          if (!created.sessionIds.includes(id)) created.sessionIds.unshift(id)
+        },
+      }
+      workspaces.push(created)
+      return created
+    },
+    get: (id: string) => workspaces.find(workspace => workspace.id === id),
+    list: () => workspaces,
+  } as never)
   ctx.provide('agents', harness.agents as never)
   ctx.provide('sessions', harness.sessions as never)
   ctx.provide('agentDefaultModel', harness.defaultModel as never)

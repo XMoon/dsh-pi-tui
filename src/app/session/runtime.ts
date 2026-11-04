@@ -21,8 +21,11 @@ import {
   LifecycleError,
   requireCreated,
   requireOpened,
+  WorkspaceSelectionError,
+  type ResolvedWorkspaceSelection,
   type SessionHandle,
   type SessionLifecycle,
+  type WorkspaceSelectionIntent,
 } from '../../runtime/session-lifecycle-port.ts'
 import { isRewindIdentityCurrent, type RewindNavigationIdentity } from './navigation-identity.ts'
 import { runFirstSessionCommit, runForkCommit, runOrdinaryCommit, runResumeCommit } from './commit-order.ts'
@@ -138,8 +141,10 @@ export interface SessionRuntimeSurface {
   awaitPendingDefaultWrite(signal: AbortSignal): Promise<void>
   /** Generate the first session's id (the runner owns the Host id type). */
   newSessionId(): string
-  /** The cwd the first-session create request carries. */
-  sessionCreateCwd(): string
+  /** The CLIENT-LOCAL workspace intent the first-session create pre-selects
+   *  through the Host. The Client's launch directory is only a proposal: the
+   *  Host Workspace registry decides the durable Session directory. */
+  initialWorkspaceIntent(): WorkspaceSelectionIntent
   /** The current opening-journal token (opaque to the session layer). */
   currentOpening(): unknown
   /** Reset the whole opening journal (the first-session finally). */
@@ -1640,6 +1645,35 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
     if (core.owner() !== undefined) return
     if (creating !== undefined) return creating
     creating = core.gate.run(() => core.barrier.runTransition(async () => {
+      // The Host Workspace pre-selection precedes every Session side-effect: a
+      // refused/unavailable workspace leaves the surface sessionless without a
+      // Session create, an opening journal entry or a consumed draft.
+      let workspace: ResolvedWorkspaceSelection
+      try {
+        workspace = await deps.lifecycle.resolveWorkspace(deps.surface.initialWorkspaceIntent(), deps.lifecycleSignal)
+      } catch (error) {
+        if (deps.lifecycleSignal.aborted
+          || (error instanceof WorkspaceSelectionError && error.kind === 'superseded')) {
+          // A superseded/aborted pre-selection publishes nothing: no notice, no
+          // Session. The surface stays sessionless.
+          deps.diag.warn('first session workspace selection superseded', {
+            settlement: error instanceof WorkspaceSelectionError ? error.kind : 'aborted',
+            code: error instanceof WorkspaceSelectionError ? error.code : undefined,
+          })
+          return
+        }
+        // A refused/unavailable workspace is a real first-session failure under
+        // the existing sessionless contract (notice + retry on the next input);
+        // NO Session was dispatched and nothing is retried automatically.
+        const message = safeErrorMessage(error)
+        deps.surface.reportFirstSessionCreateFailure(message)
+        throw error
+      }
+      // The pre-selection awaited Host IO: re-check the two existing authorities
+      // before creating anything. A lifetime abort wins; a Session that appeared
+      // while the selection ran makes this attempt obsolete.
+      deps.lifecycleSignal.throwIfAborted()
+      if (core.owner() !== undefined) return
       const launched = await deps.surface.launchComposition()
       if (launched.failure !== undefined) deps.surface.setResumeFailure(launched.failure)
       // The first-session creation follows the same transaction shape as every
@@ -1661,8 +1695,9 @@ export function bindSessionRuntime(core: SessionOwnershipCore, deps: SessionRunt
           sessionId,
           // The semantic `agentPreset` is the sole preset authority; the Direct
           // adapter writes the actually composed preset into the durable header
-          // (never a duplicated meta field).
-          cwd: deps.surface.sessionCreateCwd(),
+          // (never a duplicated meta field). The Host Workspace id is the ONE
+          // directory authority: no cwd crosses this request.
+          workspaceId: workspace.workspaceId,
           agentPreset: launched.composition.agentPreset,
           signal: deps.lifecycleSignal,
         }))
