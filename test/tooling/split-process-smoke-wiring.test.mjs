@@ -14,13 +14,14 @@
 
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parse as parseYaml } from 'yaml'
 import { testLifecycle } from '../support/temp-lifecycle.ts'
-import { EntryProcess, statusMatches } from '../../scripts/split-process-smoke.mjs'
+import { EntryProcess, PR_A_WEB_ROWS, redactWebQualificationText, statusMatches } from '../../scripts/split-process-smoke.mjs'
+import { HOST_ONLY_PATCH } from '../../src/app/remote-process/local-host-entry.ts'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const SCRIPT = join(ROOT, 'scripts', 'split-process-smoke.mjs')
@@ -261,8 +262,8 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     assert.ok(source.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 12,
-    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated surface LLM overlay, the isolated Host Schedule overlay and the isolated armed-Goal overlay')
+  assert.equal(extraPatchUses.length, 15,
+    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated surface LLM overlay, the isolated Host Schedule overlay, the isolated armed-Goal overlay and the three bounded PR-A Web composition runs')
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
@@ -271,6 +272,12 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: surfaceLlm\.patchPath/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: hostRuntimeMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: workspaceControllerMutationPatch/u)
+  // The PR-A Web composition owns exactly three of these runs: the isolated
+  // enable, the missing-frontend-dist control and the duplicate-modules control.
+  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: webPatch/u)
+  assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: duplicatePatch/u)
+  assert.equal((source.match(/SPLIT_PROCESS_EXTRA_PATCH: webPatch/gu) ?? []).length, 2,
+    'the isolated enable patch is reused by the positive run and the dist-absent control')
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(source, /mutationEnv/u)
@@ -554,4 +561,116 @@ test('the Client peer set is installed into the profile that actually runs it', 
   assert.match(source, /reachableAncestorCopies/u)
   assert.match(source, /packageScopeBarrier/u)
   assert.ok(source.includes("appendFileSync(clientChunk, '\\n// harmless client build drift: protocol unchanged\\n')"))
+})
+
+test('the official Web composition qualification is discoverable and never fakes a pass', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  for (const marker of [
+    't67-web-default-off',
+    't68-web-qualified',
+    't69-web-browser',
+    't70-web-hmr',
+    't71-web-shutdown',
+    't72-web-negative-controls',
+    'qualifyOfficialWebComposition',
+    'PR_A_WEB_ROWS',
+    'PR_A_SINGLETON_PACKAGES',
+    'readWebIndex',
+    'assertWebIndexQualified',
+    'assertSingleWebOwners',
+    'assertDeclaredWebRows',
+    'pr-a-web-enabled.patch.yml',
+    'pr-a-duplicate-modules.patch.yml',
+    'SPLIT_PROCESS_PLAYWRIGHT_ROOT',
+    'pr-a-web-browser.mjs',
+    'PR_A_WELCOME_NOTICE_VERSION',
+    'welcomeNoticeVersion',
+    'documentsDirectory',
+  ]) {
+    assert.ok(source.includes(marker), `missing PR-A marker ${marker}`)
+  }
+  // Both states must exist: the plain (default-off) Host and the ONE isolated
+  // enable patch. A script that only ran the enabled path could never prove the
+  // product default, and one that only ran the default could never qualify Web.
+  assert.match(source, /const plainHost = new EntryProcess\('host', entries\.host, base\)/u)
+  assert.match(source, /env: \{ \.\.\.base\.env, SPLIT_PROCESS_EXTRA_PATCH: webPatch \}/u)
+  // The Browser case is a hand/isolated-qualification proof, not a CI lane: it
+  // runs only when the pinned external Playwright install is named. A run that
+  // requires it (SPLIT_PROCESS_REQUIRE_WEB_BROWSER=1) FAILS without it, and the
+  // inventory/summary carry the verdict instead of claiming a full pass.
+  assert.match(source, /const playwrightRoot = process\.env\.SPLIT_PROCESS_PLAYWRIGHT_ROOT/u)
+  assert.match(source, /const REQUIRE_WEB_BROWSER = process\.env\.SPLIT_PROCESS_REQUIRE_WEB_BROWSER === '1'/u)
+  assert.match(source, /assert\(!REQUIRE_WEB_BROWSER,/u)
+  assert.match(source, /this run does NOT exercise the real Browser and does not claim it/u)
+  assert.match(source, /const webQualification = await qualifyOfficialWebComposition\(\)/u)
+  assert.match(source, /webComposition: webBrowserVerdict === 'PASS'/u)
+  assert.match(source, /PASS_OFFICIAL_WEB_COMPOSITION_REAL_BROWSER/u)
+  assert.match(source, /NOT_QUALIFIED \(\$\{webBrowserVerdict\}\)/u)
+  // EVERY non-PASS verdict fails a required run, not only the absent root.
+  assert.match(source, /assert\(!REQUIRE_WEB_BROWSER \|\| webQualification\.browser === 'PASS'/u)
+  assert.match(source, /browserCase = existsSync\(join\(coordination, 'browser-result\.json'\)\) \? 'FAILED' : 'INCOMPLETE'/u)
+  // No raw driver output may be retained: only fixed facts and redacted text.
+  assert.doesNotMatch(source, /stderr: browserErr/u)
+  assert.doesNotMatch(source, /stdout: browserOut/u)
+  assert.match(source, /redactWebQualificationText/u)
+  // The driver exit is awaited through a bound, never unbounded.
+  assert.match(source, /const browserExitBounded = async/u)
+  assert.match(source, /EXIT_TIMEOUT/u)
+  assert.doesNotMatch(source, /await browserExit\.catch/u)
+  // The real-Browser driver redacts its own retained failure text.
+  const driver = readFileSync(join(ROOT, 'scripts', 'fixtures', 'pr-a-web-browser.mjs'), 'utf8')
+  assert.match(driver, /function redacted\(text\)/u)
+  assert.match(driver, /result\.error = redacted\(String\(error\.message\)\)/u)
+  assert.match(driver, /console\.error\(`PR_A_BROWSER_FAILURE: \$\{redacted\(result\.error\)\}`\)/u)
+  // The negative controls must restore the isolated install byte for byte.
+  assert.match(source, /renameSync\(distIndex, missingDist\)/u)
+  assert.match(source, /renameSync\(missingDist, distIndex\)/u)
+  assert.match(source, /the official frontend dist was not restored byte for byte/u)
+  assert.ok(existsSync(join(ROOT, 'scripts', 'fixtures', 'pr-a-web-browser.mjs')),
+    'the real-Browser driver fixture must exist')
+  // The two isolated-fixture facts ride the SAME private enable patch as the
+  // roster: the first-run notice acknowledgement (the official UI cannot persist
+  // it while the roster rides a CLI overlay) and the Workspace Controller's
+  // Documents override (an isolated HOME has no usable Documents directory).
+  // Neither is a product default.
+  assert.match(source, /welcomeNoticeVersion: '\$\{PR_A_WELCOME_NOTICE_VERSION\}'/u)
+  assert.match(source, /- id: workspace-controller\\n  config:\\n    documentsDirectory: '\$\{documentsDirectory\}'/u)
+})
+
+test('the frozen Web roster matches the Host-only overlay exactly and stays default-disabled', () => {
+  assert.equal(PR_A_WEB_ROWS.length, 59, 'the PR-A Web roster is exactly 59 official rows')
+  const ids = PR_A_WEB_ROWS.map(row => row.id)
+  assert.equal(new Set(ids).size, ids.length, 'the frozen roster owns each row id once')
+  const overlay = parseYaml(HOST_ONLY_PATCH)
+  const inserts = overlay.filter(entry => Array.isArray(entry.insert))
+  assert.equal(inserts.length, 2, 'the overlay declares the Host execution insert and ONE Web insert')
+  const declared = inserts[inserts.length - 1].insert
+  assert.deepEqual(declared.map(row => row.id), ids, 'the overlay Web ids drifted from the frozen roster')
+  assert.deepEqual(declared.map(row => row.name), PR_A_WEB_ROWS.map(row => row.name),
+    'the overlay Web packages drifted from the frozen roster')
+  assert.ok(declared.every(row => row.disabled === true), 'every Web row stays disabled by default')
+  // A deleted roster row must fail the comparison above instead of being
+  // silently accepted: this control proves the assertion is discriminating.
+  assert.notDeepEqual(declared.slice(1).map(row => row.id), ids, 'a dropped row must change the comparison')
+})
+
+test('the Web qualification redactor removes every credential shape from retained text', () => {
+  const token = 'Zr3secretLaunchTokenValue'
+  const raw = [
+    `page.goto: Timeout 90000ms exceeded while loading http://127.0.0.1:41234/?token=${token}`,
+    `net::ERR_FAILED at http://127.0.0.1:41234/plugins/events`,
+    `cookie exchange ?token=${token}&interactions=answer`,
+    `bare launch token ${token} in a log line`,
+  ].join('\n')
+  const redacted = redactWebQualificationText(raw, [token])
+  assert.equal(redacted.includes(token), false, 'the exact launch token must not survive redaction')
+  assert.equal(/[?&]token=(?!<redacted>)/u.test(redacted), false, 'a token query value must not survive redaction')
+  assert.equal(/127\.0\.0\.1:\d+/u.test(redacted), false, 'a loopback origin must not survive redaction')
+  assert.match(redacted, /bare launch token <redacted-token> in a log line/u)
+  assert.match(redacted, /token=<redacted>/u)
+  assert.match(redacted, /http:\/\/127\.0\.0\.1:<port>/u)
+  // Discriminating control: the SAME assertion group rejects the raw text.
+  assert.throws(() => {
+    assert.equal(raw.includes(token), false)
+  })
 })
