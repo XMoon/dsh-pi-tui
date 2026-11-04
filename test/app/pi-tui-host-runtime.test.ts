@@ -124,7 +124,7 @@ test('disposing the ONE built-in fiber withdraws every service, the contribution
 })
 
 test('every required Host inject keeps the fiber from completing when missing', async () => {
-  for (const missing of ['typert', 'agents', 'fileReferences', 'workingDirectory', 'loader'] as const) {
+  for (const missing of ['typert', 'agents', 'fileReferences', 'workingDirectory'] as const) {
     const ctx = await hostContext({ [missing]: false })
     const fiber = ctx.plugin(piTuiHostRuntime)
     await new Promise<void>(resolve => setImmediate(resolve))
@@ -150,6 +150,19 @@ test('a failing second service mount unwinds the first service and the contribut
     'the package contribution must be withdrawn on failure')
   assert.equal(ctx.reflect.get(piTuiHostRuntime.PI_TUI_HOST_READY_SERVICE), undefined,
     'readiness must never be published by a failed mount')
+  await ctx.fiber.dispose()
+})
+
+test('a Host without a Loader keeps readiness and reports the Web access row unusable', async () => {
+  const ctx = await hostContext({ loader: false })
+  const fiber = ctx.plugin(piTuiHostRuntime)
+  await fiber
+  assert.equal(fiber.state, FIBER_ACTIVE,
+    'the built-in runtime must still mount without a Loader service')
+  const webAccess = ctx.reflect.get('piTuiWebAccess') as { getStatus(): Promise<{ state: string; reason?: string }> }
+  const status = await webAccess.getStatus()
+  assert.equal(status.state, 'unavailable', 'a Host without a Loader cannot describe the Web frontend')
+  assert.match(String(status.reason ?? ''), /Loader/u)
   await ctx.fiber.dispose()
 })
 

@@ -212,8 +212,14 @@ function reasonOf(error: unknown): string {
  * service leaves with the owning fiber.
  */
 export class PiTuiWebAccessHostService extends TypertRemoteService {
-  /** The Typert registry owns the descriptors; the Loader owns the rows. */
-  static readonly inject = ['typert', 'loader']
+  /**
+   * The Typert registry owns the descriptors. The Host's Loader is read PER CALL
+   * (`loader()` below) instead of declared here: this service is mounted by a
+   * Loader row, so the Loader is guaranteed in every real composition, and a
+   * Host that somehow lacks one must report `unavailable` rather than hold the
+   * mounting row pending forever.
+   */
+  static readonly inject = ['typert']
   /** The serialized mutation chain: one toggle runs at a time, failures do not poison it. */
   private tail: Promise<unknown> = Promise.resolve()
   /** The number of serialized mutations currently running (the `changing` state). */

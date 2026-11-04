@@ -128,7 +128,7 @@ const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string
   },
   { id: 'split-host-settings-controller', inject: ['typert'] },
   { id: 'split-host-session-log-download', inject: ['commands', 'connection'] },
-  { id: 'split-host-pi-tui-runtime', inject: ['typert', 'agents', 'fileReferences', 'workingDirectory', 'loader'] },
+  { id: 'split-host-pi-tui-runtime', inject: ['typert', 'agents', 'fileReferences', 'workingDirectory'] },
 ]
 
 /**

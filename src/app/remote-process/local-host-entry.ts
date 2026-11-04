@@ -133,7 +133,7 @@ export const HOST_ONLY_PATCH = `# M4-B1 Host-only profile overlay: production Ho
     # Loader rows or package subpaths.
     - id: split-host-pi-tui-runtime
       name: '@xmoon76/dsh-pi-tui/host-runtime'
-      inject: [typert, agents, fileReferences, workingDirectory, loader]
+      inject: [typert, agents, fileReferences, workingDirectory]
 
 # ── Official Web composition (M5-W PR-A/PR-B) ───────────────────────────────
 # The official Browser Web rows, declared here ONCE and DISABLED BY DEFAULT.
