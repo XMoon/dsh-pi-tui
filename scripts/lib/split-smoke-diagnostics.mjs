@@ -147,6 +147,10 @@ export const LANE_ERROR_CODES = Object.freeze([
   'SEAT_RELEASE_TIMEOUT',
   'REGISTRY_COMMIT_EXITED',
   'EVIDENCE_WRITE_FAILED',
+  // The PR-A Web qualification's generic bounded condition wait (Browser
+  // Session creation, client-hmr frames): declared here so its failure detail
+  // survives the report projection instead of being dropped as unknown.
+  'QUALIFICATION_CONDITION_TIMEOUT',
 ])
 
 /** A POSIX errno NAME (`EACCES`, `ENOENT`, …) is a fixed vocabulary. */
