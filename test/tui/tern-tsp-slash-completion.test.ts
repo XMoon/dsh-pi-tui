@@ -53,6 +53,9 @@ const UP = `${ESCAPE}[A`
 const DOWN = `${ESCAPE}[B`
 const ALT_UP = `${ESCAPE}[1;3A`
 const LEFT = `${ESCAPE}[D`
+const CTRL_V = String.fromCharCode(22)
+// kitty CSI-u: 'v' (118) with the Alt modifier (3).
+const ALT_V = `${ESCAPE}[118;3u`
 const TAB = '\t'
 const SHIFT_TAB = `${ESCAPE}[27;2Z`
 const ENTER = '\r'
@@ -446,6 +449,34 @@ test('clicking an already-complete candidate closes the list instead of looking 
   assert.deepEqual(m.editor(), { text: '/new', cursor: 4 }, 'the draft was not rewritten or submitted by the click')
   assert.deepEqual(m.calls.submits, [], 'a click never submits')
   assert.equal(m.rows().length, 0, 'and the list the user clicked dismisses itself')
+})
+
+test('Ctrl+V with an empty clipboard still takes the dismissed list off the wire', async (t) => {
+  const m = await mountSlashPane(t, { chrome: true })
+  await m.key('/mo')
+  await waitUntil('the list painted', () => m.rows().length > 0)
+  // The application owns the OS probe: with nothing to paste it writes no draft
+  // and notifies nothing, so no frame is coming from that owner.
+  await m.quietKey(CTRL_V)
+  assert.equal(m.calls.pastes, 1, 'the existing paste owner still ran exactly once')
+  assert.deepEqual(m.editor(), { text: '/mo', cursor: 3 }, 'the paste intent edited nothing in the draft')
+  assert.equal(m.rows().length, 0, 'and the list it dismissed is off the wire')
+  await m.quietKey(ESCAPE)
+  assert.equal(m.calls.cancels, 1, 'so Escape reaches its original cancel owner, not a hidden list')
+})
+
+test('Alt+V with no visual on the frame still takes the dismissed list off the wire', async (t) => {
+  const m = await mountSlashPane(t, { chrome: true })
+  await m.key('/mo')
+  await waitUntil('the list painted', () => m.rows().length > 0)
+  // The chord is consumed even when no figure exists (a documented no-op that
+  // leaves the draft untouched), which is exactly the frame-less owner case.
+  await m.quietKey(ALT_V)
+  assert.deepEqual(m.editor(), { text: '/mo', cursor: 3 }, 'the chord changed neither the draft nor the caret')
+  assert.equal(m.rows().length, 0, 'the dismissed list is gone from the wire')
+  assert.deepEqual(m.calls.submits, [], 'and nothing was submitted on the way')
+  await m.quietKey(ESCAPE)
+  assert.equal(m.calls.cancels, 1, 'Escape still belongs to cancel')
 })
 
 test('a fully typed command name still submits on Enter, while a partial one only completes', async (t) => {

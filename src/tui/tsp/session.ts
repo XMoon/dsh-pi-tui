@@ -3494,6 +3494,18 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // list the user still sees. That one case owes exactly one frame.
     const listWasPainted = slash.isOpen()
     if (slash.handleKey(key)) return false
+    // A key the seat does not own ends the browse first, and the branches below
+    // that hand the key to a NON-composer owner return before the composer block
+    // at the end of the ladder. When such an owner produces no frame of its own
+    // (an empty clipboard, a visual chord with no figure on this frame), the
+    // withdrawn list would stay painted while the seat already considers itself
+    // closed, so the user's next Escape would hit Cancel instead of dismissing
+    // what they can still see. The frame is owed exactly then: only when a list
+    // WAS painted above and is now gone, so a normal edit (which renders through
+    // the composer's own sink) is never double-rendered.
+    const dismissOwedFrame = (): void => {
+      if (listWasPainted && !slash.isOpen()) render()
+    }
     if (key.name === 'escape') {
       handlers.cancel()
       return false
@@ -3506,10 +3518,12 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     // when no figure exists (a no-op that leaves the composer draft untouched).
     if (matchesKeyId(key, TSP_VISUAL_CHORDS.select)) {
       selectNextVisual()
+      dismissOwedFrame()
       return false
     }
     if (matchesKeyId(key, TSP_VISUAL_CHORDS.copy)) {
       copySelectedVisual()
+      dismissOwedFrame()
       return false
     }
     // PR4: the paste-media gesture. The SDK decodes Ctrl+V as the formal
@@ -3521,6 +3535,9 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
     if (key.name === 'v' && key.ctrl === true && key.alt !== true && key.meta !== true && key.shift !== true) {
       handlers.noteUserInput()
       handlers.pasteMedia()
+      // The application owns the OS probe and may legitimately write nothing
+      // (no image on the clipboard), so this branch cannot assume a frame.
+      dismissOwedFrame()
       return false
     }
     // 5. The composer reducer owns everything else (Ctrl+D empty-exit,
@@ -3544,8 +3561,8 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
       // accept is admitted only for the exact document AND caret it was built
       // for, so a list nobody can accept never stays on screen.
       if (composer.state().text !== before.text) slash.onComposerEdit()
-    } else if (edit.kind === 'none' && listWasPainted && !slash.isOpen()) {
-      render()
+    } else if (edit.kind === 'none') {
+      dismissOwedFrame()
     }
     if (edit.kind === 'exit-empty') return true
     return false
