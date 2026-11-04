@@ -735,6 +735,14 @@ test('the Web runtime toggle lane drives the private Peer control, never a Host 
     'the smoke may only reach the toggle through the authenticated Remote call')
   assert.doesNotMatch(lane, /registerFallback|loader\.resolve|Entry\.update/u,
     'the smoke must not drive the Loader directly')
+  // The lane owns its own C1 fixture and profile paths: the outer C1 section's
+  // `c1Work`/`profileDir` bindings are BLOCK-SCOPED to that section, so reaching
+  // for them throws a ReferenceError only when the lane finally runs.
+  assert.match(lane, /const c1Fixture = writeC1WorkFixture\(/u,
+    'the lane must build the C1 fixture it owns')
+  assert.match(lane, /readFileSync\(c1Fixture\.patchPath/u)
+  assert.doesNotMatch(lane, /\bc1Work\b|\bprofileDir\b/u,
+    'the lane may not reference a binding declared inside another lane\'s block')
   // The three traces carry the verdicts the inventory reports.
   for (const marker of [
     't73-web-default-off',
@@ -775,7 +783,8 @@ test('the Web runtime toggle lane drives the private Peer control, never a Host 
   // PB-07: the real Browser run happens on the SAME Host process after the
   // second enable, and the TUI observes the Browser-written Turn.
   assert.match(lane, /assertToggle\(await webAccess\(peer, 'PB-07', true\), 'enabled'/u)
-  assert.match(lane, /PR_A_EXPECTED_ANSWER_PREFIX: 'long-turn answer 1'/u)
+  assert.match(lane, /PR_A_EXPECTED_ANSWER_PREFIX: 'long-turn answer'/u,
+    'the Browser driver must wait for the real model answer of this run')
   assert.match(lane, /await waitDurableTurn\(browserSession, marker, 'PB-07 Browser'\)/u)
   assert.match(lane, /browserCase = 'PASS'/u)
   assert.match(source, /assert\(!REQUIRE_WEB_BROWSER \|\| toggleQualification\.browser === 'PASS'/u,
@@ -784,7 +793,10 @@ test('the Web runtime toggle lane drives the private Peer control, never a Host 
   assert.match(lane, /profilePatchAfter\.equals\(profilePatchBefore\)/u)
   assert.match(lane, /const hostShutdown = await host\.shutdown\(\)/u)
   // PB-08/09: the three refusing lanes and their byte-for-byte restore.
-  assert.match(lane, /absentRecord\.status\?\.state === 'unavailable'/u)
+  assert.match(lane, /absentRecord\.status\?\.state === 'enabled' \|\| absentRecord\.status\?\.state === 'unavailable'/u,
+    'the missing-asset lane must accept the request-time read while refusing a served index')
+  assert.match(lane, /indexServed: absentRoot\.status === 200 && absentRoot\.body\.includes\('__DSH_BOOT__'\)/u,
+    'the missing-asset lane must record whether an index was actually served')
   assert.match(lane, /duplicateRecord\.status\?\.state === 'unavailable'/u)
   assert.match(lane, /second \.\*dsh-client-modules/u)
   assert.match(lane, /malformed\.errorCode === 'gateway\/input-invalid'/u)
