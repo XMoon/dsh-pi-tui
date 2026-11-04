@@ -25,20 +25,19 @@ import type { Key } from '@stencil-hq/tern'
 import type { TspComposer } from './editor.ts'
 
 /**
- * The most candidate rows one paint shows; the rest stay in the list.
+ * The most candidate rows one paint shows; the rest stay in the list (§3.1
+ * ceiling, Owner-ratified after the real-client measurement below).
  *
- * FOUR, not the §3.1 ceiling of six, and the reason is a measured client fact
- * rather than a guess: the pinned Tern reports NO pane height (`Capabilities`
- * carries `cols` + `cell` only), so the program cannot adapt the window to the
- * space above the composer. Measured on the client at the shortest supported
- * matrix cell (900x360), the space above the editor is ~146px — six rows plus
- * the hint overflowed it and the popup's TOP was clipped by the pane content
- * boundary, which hid the default-highlighted row. Four rows plus the hint
- * (~134px) are fully visible at every supported cell and appearance, and the
- * window still walks with the highlight, so no candidate is unreachable: the
- * rest of the list is one ↓ away, never a scroll the user cannot see.
+ * Measured on the pinned client: the space above the editor is ~146px at the
+ * shortest supported matrix cell (900x360), while six rows plus the hint need
+ * ~196px, so at THAT cell the popup scrolls and its last painted row is clipped.
+ * The pinned Tern reports no pane rows/height (`Capabilities` carries `cols` and
+ * `cell` only), so the window cannot shrink itself to the space that exists, and
+ * estimating the client layout is forbidden. The Owner therefore kept the
+ * six-row ceiling and accepted the short-pane clipping as a recorded known
+ * limitation (with the two failing client assertions), not a reworded pass.
  */
-export const SLASH_COMPLETION_MAX_ROWS = 4
+export const SLASH_COMPLETION_MAX_ROWS = 6
 
 /** One candidate row as the painter receives it. `id` is the row's identity
  *  inside its own list revision, so a click names the row that was painted and

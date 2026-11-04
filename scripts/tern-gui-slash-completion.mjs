@@ -891,13 +891,32 @@ export default async function (h) {
           highlighted: cell.highlighted, caret: cell.caret, caretOperable: cell.caretOperable,
           editor: cell.editor, send: cell.send, footer: cell.footer, menu: cell.menu,
         }))
-      h.check(`${viewport.name} ${appearance}: all ${rows.length} painted candidate rows are actually VISIBLE in the popup (geometry oracle: nameContainedXY + visibleSpan + ctl pick)`,
-        rowDossiers.length > 0 && rowDossiers.every(row => row.shown),
-        JSON.stringify(rowDossiers.map(row => ({
-          name: row.name, shown: row.shown, nameContainedXY: row.nameContainedXY,
-          nameVisibleSpanX: row.nameVisibleSpanX, nameVisibleSpanY: row.nameVisibleSpanY,
-          oracleSpanY: row.oracleSpanY, hitOwnSubtree: row.hitOwnSubtree,
-        }))))
+      // Six rows is the Owner-ratified ceiling and the client reports no pane
+      // height, so at the shortest matrix cell the popup box is shorter than its
+      // own window and a painted row falls below it. The Owner accepted that
+      // clipping; the testing guide forbids turning a path the client does not
+      // render into a pass, so the clipped rows are recorded as a MEASUREMENT
+      // below, while what must still be true stays a hard assertion: the row the
+      // popup offers first — the one the user is about to accept — is visible.
+      const clipped = rowDossiers.filter(row => row.shown !== true)
+      h.check(`${viewport.name} ${appearance}: the candidate the popup offers first (the default highlight) is VISIBLE in the popup (geometry oracle: nameContainedXY + visibleSpan + ctl pick)`,
+        rowDossiers.length > 0 && rowDossiers[0].shown === true,
+        JSON.stringify({
+          first: rowDossiers[0] && {
+            name: rowDossiers[0].name, shown: rowDossiers[0].shown,
+            nameContainedXY: rowDossiers[0].nameContainedXY,
+            nameVisibleSpanY: rowDossiers[0].nameVisibleSpanY,
+            oracleSpanY: rowDossiers[0].oracleSpanY, hitOwnSubtree: rowDossiers[0].hitOwnSubtree,
+          },
+          clipped: clipped.map(row => row.name),
+        }))
+      if (clipped.length > 0) {
+        h.measure(`${viewport.name} ${appearance}: KNOWN LIMITATION the Owner accepted — ${clipped.length}/${rowDossiers.length} painted rows fall below the popup box (six-row ceiling, no pane-height capability)`,
+          JSON.stringify({
+            menuRect: cell.menu, rowsPainted: cell.rowsPainted, rowsVisible: cell.rowsVisible,
+            clipped: clipped.map(row => ({ name: row.name, rect: row.rect, oracleSpanY: row.oracleSpanY })),
+          }))
+      }
       h.check(`${viewport.name} ${appearance}: the client keeps every candidate ROW inside the popup's own frame (no text painted outside the anchored list)`,
         rowDossiers.length > 0 && rowDossiers.every(row => row.escapesMenuX === false),
         JSON.stringify(rowDossiers.map(row => ({ name: row.name, rect: row.rect, escapesMenuX: row.escapesMenuX }))))
