@@ -377,6 +377,77 @@ test('a failed catalog synthesis closes the seat so no plugin answer can revive 
     'the recovered catalog is the source again')
 })
 
+test('a candidate the composer refuses to write still clears the painted list, so Escape stays Escape', async (t) => {
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    commands: [],
+    // A plugin may hand back ANY text as a candidate value. This one carries a
+    // line break: the accept layer's token check passes (the tail after the
+    // token survives), and the composer then correctly refuses a change that
+    // crosses a line. The seat must not treat that planned write as a committed
+    // one, or the withdrawn list stays painted and the next Escape hits Cancel.
+    extensionSuggest: async () => ({
+      items: [{ value: 'x\ny', label: 'x' }],
+      prefix: '/z',
+    }),
+  })
+  await m.type('/z\nsecond')
+  for (let step = 0; step < 7; step += 1) await m.key(LEFT)
+  await m.key(TAB)
+  await waitUntil('the plugin candidate painted', () => m.rows().length > 0)
+  assert.deepEqual(m.editor(), { text: '/z\nsecond', cursor: 2 }, 'the caret sits at the end of the command token')
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '/z\nsecond', cursor: 2 }, 'the cross-line candidate wrote nothing')
+  assert.deepEqual(m.calls.submits, [], 'a refused accept never became a submission')
+  assert.equal(m.rows().length, 0, 'the dismissed list is off the wire, not left painted')
+  await m.quietKey(ESCAPE)
+  assert.equal(m.calls.cancels, 1, 'so the next Escape reaches its original cancel owner')
+})
+
+test('a tab-separated argument position is not a command-name seat, even for a plugin answer', async (t) => {
+  let asked = 0
+  const m = await mountSlashPane(t, {
+    chrome: true,
+    commands: [],
+    extensionSuggest: async () => {
+      asked += 1
+      return { items: [{ value: 'revived', label: 'revived' }], prefix: '/new\targ' }
+    },
+  })
+  // `/new<TAB>argument`: the token ended at the tab, so this is an argument
+  // position, which I-C never completes.
+  await m.type('/new\targument')
+  await m.quietKey(TAB)
+  assert.equal(m.rows().length, 0, 'a tab-separated tail opens no command-name list')
+  assert.equal(asked, 0, 'and the plugin chain is never consulted for that position')
+  // CONTROL: the same draft with the caret INSIDE the command name is a real
+  // seat, so the negative above is the whitespace rule and not a dead path.
+  await m.type('/new\targument')
+  // `/new\targument` is 13 units; nine LEFT steps park the caret at column 4,
+  // inside the command name and before the tab.
+  for (let step = 0; step < 9; step += 1) await m.key(LEFT)
+  await m.key(TAB)
+  await waitUntil('the in-token query reached the plugin chain', () => asked > 0)
+  assert.deepEqual(m.editor(), { text: '/new\targument', cursor: 4 },
+    'the control draft is caret-inside-token, and the answer completed nothing else')
+})
+
+test('clicking an already-complete candidate closes the list instead of looking inert', async (t) => {
+  const m = await mountSlashPane(t, { chrome: true, commands: [{ name: 'new', description: 'Create a session' }] })
+  // Typing the last character is what makes the token complete while the list
+  // that character opened is still up — the state where a click has nothing to
+  // complete.
+  await m.type('/ne')
+  await m.key('w')
+  await waitUntil('the exact-name list painted', () => m.rows().length > 0)
+  assert.deepEqual(m.editor(), { text: '/new', cursor: 4 }, 'the token is complete and the list is open')
+  const row = m.rows()[0]!
+  await m.click(row, false)
+  assert.deepEqual(m.editor(), { text: '/new', cursor: 4 }, 'the draft was not rewritten or submitted by the click')
+  assert.deepEqual(m.calls.submits, [], 'a click never submits')
+  assert.equal(m.rows().length, 0, 'and the list the user clicked dismisses itself')
+})
+
 test('a fully typed command name still submits on Enter, while a partial one only completes', async (t) => {
   const m = await mountSlashPane(t, { chrome: true })
   // Partial token: the list is open and Enter accepts, submitting nothing.
