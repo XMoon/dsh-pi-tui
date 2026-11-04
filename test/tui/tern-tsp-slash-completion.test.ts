@@ -268,6 +268,27 @@ async function mountSlashPane(
 
 // ── The natural query and the accept-only rule ───────────────────────────────
 
+test('a fully typed command name still submits on Enter, while a partial one only completes', async (t) => {
+  const m = await mountSlashPane(t, { chrome: true })
+  // Partial token: the list is open and Enter accepts, submitting nothing.
+  await m.key('/ne')
+  await waitUntil('the partial list painted', () => m.rows().length > 0)
+  await m.key(ENTER)
+  assert.deepEqual(m.editor(), { text: '/new ', cursor: 5 }, 'the partial token completed')
+  assert.deepEqual(m.calls.submits, [], 'the accept submitted nothing')
+  // Fully typed token with the list still open: there is nothing left to
+  // complete, so Enter stays the submit it always was. Regression: swallowing
+  // this turns `type /new, press Enter` into a draft that only grows a space,
+  // which is what broke the pre-existing Direct history lane.
+  await m.type('/ne')
+  await m.key('w')
+  await waitUntil('the exact-name list painted', () => m.rows().length > 0)
+  await m.key(ENTER)
+  assert.deepEqual(m.calls.submits, [{ text: '/new', gesture: 'enter' }],
+    'a completed token submits exactly once instead of adding a space')
+  assert.deepEqual(m.editor(), { text: '', cursor: 0 }, 'and the submitted draft left the composer')
+})
+
 test('typing a first-line slash command token paints the installed candidates and changes nothing else', async (t) => {
   const m = await mountSlashPane(t, { chrome: true })
   await m.key('/mo')

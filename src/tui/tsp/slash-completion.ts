@@ -59,8 +59,12 @@ export interface TspSlashCompletion {
   /** Handle one key the ladder reached this seat on. `true` = consumed here. */
   handleKey(key: Key): boolean
   /** Accept the highlighted candidate through the shared Provider and the ONE
-   *  composer conditional write. Never called for a key this seat did not own. */
-  accept(): void
+   *  composer conditional write. Returns whether a completion was actually
+   *  WRITTEN: `false` means there was nothing left to accept (the token already
+   *  names that command, the provider handed the document back, or the fence
+   *  refused), and the caller then leaves the key with its existing owner.
+   *  Never called for a key this seat did not own. */
+  accept(): boolean
   /** Accept the row a click named, ONLY while that row is the current frame's. */
   acceptClick(id: string, revision: number): void
   /** The popup projection for this frame (`undefined` = nothing to paint). */
@@ -239,7 +243,7 @@ export function createTspSlashCompletion(
     return true
   }
 
-  const accept = (): void => {
+  const accept = (): boolean => {
     const shown = list
     const installed = provider
     const item = shown === undefined ? undefined : shown.items[shown.selected]
@@ -248,7 +252,7 @@ export function createTspSlashCompletion(
       || shown.query !== pending || shown.query.sourceRevision !== sourceRevision
       || !documentStillLive(shown.document)) {
       if (withdraw()) ports.requestRender()
-      return
+      return false
     }
     const document = shown.document
     const applied = installed.applyCompletion(
@@ -258,20 +262,44 @@ export function createTspSlashCompletion(
       item,
       shown.prefix,
     )
+    // The Provider's own `prefix` naming the candidate exactly is the "already
+    // complete" fact. A byte compare cannot see it: the command-name rule ALWAYS
+    // appends one separator space, so a fully typed `/new` still differs from
+    // what the Provider hands back by that one space. A gesture with nothing
+    // left to complete must not be swallowed — for Enter that is the plain
+    // submit that ran `/new` before this seat existed.
+    const alreadyComplete = `/${item.value}` === shown.prefix
+    if (alreadyComplete) {
+      // Nothing to complete, so nothing is consumed and NOTHING is withdrawn
+      // here either: the Composer's own frame for this key drops the list
+      // through the document fence, which keeps the most common gesture
+      // (type a whole command, press Enter) at the frame count it had before
+      // this seat existed.
+      return false
+    }
     const nextText = applied.lines.join('\n')
     const lineStart = applied.lines.slice(0, Math.max(0, applied.cursorLine))
       .reduce((length, line) => length + line.length + 1, 0)
     const nextCursor = lineStart + applied.cursorCol
-    // The Provider handing the document back unchanged is a no-op, not an edit.
+    // The Provider handing the document back unchanged is the other half of the
+    // same fact: there was nothing left to write.
     const writes = nextText !== document.text || nextCursor !== document.cursor
     // The popup goes BEFORE the write, so the ONE frame the composer commits
     // already carries the finished text with no stale list beside it.
     const hadPopup = withdraw()
-    const accepted = writes && ports.composer.applyCompletionEdit(
+    if (!writes) {
+      // Nothing was completed, so the gesture that asked for it is still the
+      // gesture it always was. `handleKey` only reaches this for a key the seat
+      // owned, and a click never submits — see the callers.
+      if (hadPopup) ports.requestRender()
+      return false
+    }
+    const accepted = ports.composer.applyCompletionEdit(
       { text: document.text, cursor: document.cursor },
       { text: nextText, cursor: nextCursor },
     )
     if (!accepted && hadPopup) ports.requestRender()
+    return accepted
   }
 
   const move = (step: 1 | -1): void => {
@@ -332,22 +360,29 @@ export function createTspSlashCompletion(
         case 'tab': {
           // Tab walks the list, Shift+Tab walks back. With ONE candidate there is
           // nowhere to walk, so the gesture accepts that one candidate — and
-          // accepting is NEVER an execution.
-          if (shown.items.length === 1) accept()
-          else move(key.shift === true ? -1 : 1)
+          // accepting is NEVER an execution. Tab is always the completion
+          // gesture here (never a literal tab): unlike Enter it has no existing
+          // submit meaning to preserve.
+          if (shown.items.length > 1) move(key.shift === true ? -1 : 1)
+          else accept()
           return true
         }
         case 'enter': {
-          // Only a PLAIN Enter is intercepted, and it only edits the composer.
-          // A Ctrl/Alt/Meta Enter already retired the list in the `modified`
-          // guard above and keeps its existing submit owner, and Shift+Enter
-          // keeps its newline — so a popup never replaces an intentional submit.
+          // A plain Enter ACCEPTS the highlighted candidate — it never executes
+          // it. The one exception is the case where there is nothing left to
+          // accept: the typed token already names that command exactly, so the
+          // Enter the user has always pressed (type `/new`, press Enter, run it)
+          // must stay the submit gesture it was. A modified Enter is not this
+          // seat's business at all.
           if (key.shift === true) {
             withdraw()
             return false
           }
-          accept()
-          return true
+          if (accept()) return true
+          // `accept()` already withdrew the list; the token was complete (or the
+          // fence refused), so this Enter goes to the Composer reducer, which
+          // classifies and submits exactly as it did before this seat existed.
+          return false
         }
         case 'escape': {
           // Close the popup; the draft and the caret stay untouched and the key
