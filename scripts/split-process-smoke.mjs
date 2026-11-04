@@ -15,6 +15,11 @@
  *   T08 sixteen concurrent Host launches produce exactly one Host
  *   T09 two REAL Surface Clients (distinct PTYs/PIDs) admit to the SAME Host
  *   T09Q two qualification Clients race the ONE qualification-only Client seat
+ *   M5B-01 two REAL Surface Clients retain the SAME Session X: shared history
+ *                and Host stream, shared pending inbox plus the official
+ *                empty-draft Ctrl+S steer of the other Client's occurrence,
+ *                two independent same-text submits (never merged), A -> Y
+ *                navigation while B keeps writing X, B-only exit
  *   T10/T11/T12 Client normal exit, SIGKILL and SIGTERM leave the Host alive
  *   T13 a physical mux drop clears the generation and the same Host replaces it
  *   T14/T16/T17 forged registry, unresponsive Host, protocol/identity/auth failures
@@ -4541,6 +4546,375 @@ async function main() {
     }
 
     try {
+      // M5B-01 (M5-B): TWO real Surface Clients — distinct `script(1)` PTYs and
+      // distinct business PIDs — retain the SAME Host Session X at the same
+      // time. A opens X and starts a real Host Turn the fixture holds; B
+      // auto-opens the SAME X from its own pty, reads A's durable history and
+      // the in-flight Host stream; B queues into the shared Host inbox, A
+      // observes it on its own frame and steers it with the existing
+      // empty-draft Ctrl+S gesture (official updateQueue over B's occurrence
+      // identity); both Clients submit; the same text from two independent
+      // real gestures is never merged; A navigates to Y while B keeps writing
+      // X; B's normal exit leaves A, the Host and X's durable facts untouched.
+      // This is one isolated Host scene so WS-2 and the T44-T66 Cases keep
+      // their own Hosts and durable counts.
+      {
+        const releaseBarrier = join(workDir, 'm5b-long-turn.release')
+        const { host, ready: hostReady, workRoot } = await startC1Host('long-turn', 'm5b-same-session', {
+          C1_HOLD_LONG_TURN: releaseBarrier,
+        })
+        const hostBefore = await hostIdentityFacts(host)
+        assert(hostBefore.hostPid === hostReady.pid, 'M5B the Host ready record does not own the Host identity')
+        const { client: clientA, ready: aReady } = await startC1Client('M5B A')
+        const sessionX = await openC1Session(clientA, 'm5b-seed-a', 'M5B A')
+        assert(Number.isInteger(aReady.pid) && aReady.pid > 0 && aReady.pid !== hostBefore.hostPid,
+          'M5B Client A published no live business PID distinct from the Host')
+        assert(alive(aReady.pid), 'M5B Client A is not a live business process before B is admitted')
+        const held = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.sessionId === sessionX, 'M5B held Turn')
+        assert(held.agentStatus === 'running',
+          `M5B the Host Agent was ${JSON.stringify(held.agentStatus)} while the Turn was held`)
+        await waitForHostSessionEvent(dshHome, sessionX, event => event.type === 'turn/start', 'M5B turn/start')
+        assert(!existsSync(releaseBarrier), 'M5B the held Turn was released before the shared-queue proof')
+        /** The plain text of one durable/inbox message (bounded, never a payload dump). */
+        const textOf = message => (message?.content ?? [])
+          .map(part => (part?.type === 'text' && typeof part.text === 'string' ? part.text : ''))
+          .join('')
+        /** The attempt-labelled prefix the fixture paints for one settled answer. */
+        const answerPrefix = event => {
+          const text = textOf(event?.data?.message)
+          const prefix = text.match(/^long-turn answer \d+/u)?.[0]
+          assert(prefix !== undefined, `M5B unexpected Host assistant text: ${JSON.stringify(text.slice(0, 80))}`)
+          return prefix
+        }
+
+        // MB-01: B is a SECOND real pty — its own `script(1)` wrapper and its
+        // own business PID — whose startup intent opens the SAME Session X.
+        const { client: clientB, ready: bReady } = await startC1Client('M5B B', {
+          SPLIT_PROCESS_CLIENT_SESSION: sessionX,
+        })
+        const bOpen = await waitForSurfaceStatus(clientB,
+          record => record.sessionOpen === true
+            && record.openSessionId === sessionX
+            && record.transport === 'connected'
+            && record.surfaceMounted === true,
+          'M5B B retained the exact Session X')
+        assertClientHostFacts(bOpen.host, hostBefore, 'M5B B')
+        assert(Number.isInteger(bReady.pid) && bReady.pid > 0 && bReady.pid !== hostBefore.hostPid,
+          'M5B Client B published no live business PID distinct from the Host')
+        assert(aReady.pid !== bReady.pid, 'M5B the two Clients must be two different business PIDs')
+        assert(clientA.child.pid !== clientB.child.pid,
+          'M5B the two Clients must run under distinct script(1) wrappers')
+        assert(aReady.pid !== clientA.child.pid && bReady.pid !== clientB.child.pid,
+          'M5B a business PID was mistaken for its script(1) wrapper')
+        assert(alive(aReady.pid) && alive(bReady.pid), 'M5B a Client was not a live business process after B was admitted')
+        assert(bReady.activeWrappers === 1 && bReady.liveSockets === 1,
+          `M5B Client B owns wrappers=${String(bReady.activeWrappers)} sockets=${String(bReady.liveSockets)}`)
+        for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+          assert(bReady.owners?.[owner] === 1, `M5B Client B owns ${owner} ${String(bReady.owners?.[owner])}`)
+        }
+        // B never typed the seed: its painted frame is the shared Host history
+        // plus the in-flight Host stream A started before B existed.
+        await clientB.waitForScreen('m5b-seed-a', 'M5B B read A\'s durable history', 120_000)
+        await clientB.waitForScreen('long-turn started', 'M5B B read the running Host stream', 120_000)
+        await clientA.waitForScreen('long-turn started', 'M5B A still shows the running Host stream', 120_000)
+        assert(alive(hostBefore.hostPid), 'M5B the Host died while both Clients retained Session X')
+
+        // MB-02: B queues into the shared Host inbox while the Turn is held.
+        // A never typed that text, so A's frame can only carry the Host
+        // occurrence — never B's client-local optimistic echo.
+        const bQueueIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+        clientB.send('m5b-b-queued\r')
+        const bQueue = await waitForHostSessionEventAfter(dshHome, sessionX, bQueueIndex,
+          event => event.type === 'agent/inbox/spliced'
+            && event.data?.target === 'next-turn'
+            && (event.data.inserted ?? []).some(message => textOf(message) === 'm5b-b-queued'),
+          'M5B B queued into the shared Host inbox',
+          120_000)
+        const bQueuedItem = (bQueue.data.inserted ?? []).find(message => textOf(message) === 'm5b-b-queued')
+        assert(typeof bQueuedItem?.id === 'string' && bQueuedItem.id !== '',
+          'M5B the Host queued occurrence carries no identity')
+        await clientA.waitForScreen('m5b-b-queued', 'M5B A read B\'s Host pending', 120_000)
+        const aOnX = lastSurfaceStatus(clientA)
+        assert(aOnX?.sessionOpen === true && aOnX.openSessionId === sessionX
+          && aOnX.transport === 'connected', 'M5B Client A left Session X while B was pending')
+
+        // MB-03: the existing empty-draft Ctrl+S is the official FIFO steer-all.
+        // It addresses B's Host occurrence, and the Host moves the SAME identity
+        // from next-turn into next-step. It never creates an A prompt.
+        const steerStart = (hostSessionEvents(dshHome, sessionX) ?? []).length
+        clientA.send('\x13')
+        await waitForHostSessionEventAfter(dshHome, sessionX, steerStart,
+          event => event.type === 'agent/inbox/spliced'
+            && event.data?.target === 'next-turn'
+            && event.data?.removedCount === 1
+            && (event.data.inserted ?? []).length === 0,
+          'M5B Ctrl+S removed B\'s queued occurrence',
+          120_000)
+        const steered = await waitForHostSessionEventAfter(dshHome, sessionX, steerStart,
+          event => event.type === 'agent/inbox/spliced'
+            && event.data?.target === 'next-step'
+            && (event.data.inserted ?? []).some(message => message?.id === bQueuedItem.id),
+          'M5B Ctrl+S steered the exact Host occurrence identity',
+          120_000)
+        assert((steered.data.inserted ?? []).filter(message => message?.id === bQueuedItem.id).length === 1,
+          'M5B the steer path duplicated the Host occurrence')
+        const steerEvents = hostSessionEvents(dshHome, sessionX) ?? []
+        const queueRemovalIndex = steerEvents.findIndex((event, index) => index >= steerStart
+          && event.type === 'agent/inbox/spliced'
+          && event.data?.target === 'next-turn'
+          && event.data?.removedCount === 1
+          && (event.data.inserted ?? []).length === 0)
+        const steerInsertIndex = steerEvents.findIndex((event, index) => index >= steerStart
+          && event.type === 'agent/inbox/spliced'
+          && event.data?.target === 'next-step'
+          && (event.data.inserted ?? []).some(message => message?.id === bQueuedItem.id))
+        assert(queueRemovalIndex >= 0 && steerInsertIndex > queueRemovalIndex,
+          'M5B Ctrl+S did not move B\'s occurrence from next-turn into next-step')
+        assert(!steerEvents.some(event => event.type === 'user/message'
+          && textOf(event.data) === 'm5b-b-queued'),
+          'M5B the steered occurrence was committed before the running step settled')
+
+        // MB-04: A's own submission enters the same shared queue while the
+        // Turn is held; B — which never typed it — reads it on its own frame.
+        const aQueueIndex = (hostSessionEvents(dshHome, sessionX) ?? []).length
+        clientA.send('m5b-a-queued\r')
+        const aQueue = await waitForHostSessionEventAfter(dshHome, sessionX, aQueueIndex,
+          event => event.type === 'agent/inbox/spliced'
+            && event.data?.target === 'next-turn'
+            && (event.data.inserted ?? []).some(message => textOf(message) === 'm5b-a-queued'),
+          'M5B A queued into the shared Host inbox',
+          120_000)
+        const aQueuedItem = (aQueue.data.inserted ?? []).find(message => textOf(message) === 'm5b-a-queued')
+        assert(typeof aQueuedItem?.id === 'string' && aQueuedItem.id !== '',
+          'M5B A\'s Host queued occurrence carries no identity')
+        await clientB.waitForScreen('m5b-a-queued', 'M5B B read A\'s Host pending', 120_000)
+        const bOnX = lastSurfaceStatus(clientB)
+        assert(bOnX?.sessionOpen === true && bOnX.openSessionId === sessionX
+          && bOnX.transport === 'connected', 'M5B Client B left Session X while A was pending')
+
+        // Release the held Turn ONCE. The steered occurrence is claimed at the
+        // next step boundary of the SAME Turn; A's queued occurrence starts the
+        // following Turn. Both settlements are durable Host facts.
+        writeFileSync(releaseBarrier, 'release\n', { mode: 0o600 })
+        const claimedB = await waitForHostSessionEventAfter(dshHome, sessionX, aQueueIndex,
+          event => event.type === 'user/message' && event.data?.id === bQueuedItem.id,
+          'M5B the steered occurrence was claimed',
+          120_000)
+        assert(textOf(claimedB.data) === 'm5b-b-queued', 'M5B the steered occurrence changed content')
+        const claimedA = await waitForHostSessionEventAfter(dshHome, sessionX, aQueueIndex,
+          event => event.type === 'user/message' && event.data?.id === aQueuedItem.id,
+          'M5B A\'s queued occurrence was claimed',
+          120_000)
+        assert(textOf(claimedA.data) === 'm5b-a-queued', 'M5B A\'s queued occurrence changed content')
+        const claimEvents = hostSessionEvents(dshHome, sessionX) ?? []
+        const bClaimIndex = claimEvents.findIndex(event => event.type === 'user/message' && event.data?.id === bQueuedItem.id)
+        const aClaimIndex = claimEvents.findIndex(event => event.type === 'user/message' && event.data?.id === aQueuedItem.id)
+        assert(bClaimIndex >= 0 && aClaimIndex > bClaimIndex,
+          'M5B the Host did not claim the steered occurrence before the queued Turn')
+        const steerAnswer = claimEvents.slice(bClaimIndex, aClaimIndex).find(event => event.type === 'assistant/message')
+        assert(steerAnswer !== undefined, 'M5B the steered occurrence produced no Host answer')
+        // The queued Turn's own settlement: wait for its durable end, then read
+        // its answer. The claim index is the observation boundary, never a timer.
+        await waitForHostSessionEventAfter(dshHome, sessionX, aClaimIndex,
+          event => event.type === 'turn/end', 'M5B the queued Turn settled', 120_000)
+        const settledEvents = hostSessionEvents(dshHome, sessionX) ?? []
+        const aAnswer = settledEvents.slice(aClaimIndex).find(event => event.type === 'assistant/message')
+        assert(aAnswer !== undefined, 'M5B A\'s queued Turn produced no Host answer')
+        for (const [label, client] of [['A', clientA], ['B', clientB]]) {
+          await client.waitForScreen(answerPrefix(steerAnswer), `M5B ${label} read the steered settlement`, 120_000)
+          await client.waitForScreen(answerPrefix(aAnswer), `M5B ${label} read the queued settlement`, 120_000)
+        }
+        const queueDurable = hostUserTexts(settledEvents)
+        for (const [text, expected] of [['m5b-seed-a', 1], ['m5b-b-queued', 1], ['m5b-a-queued', 1]]) {
+          const count = queueDurable.filter(entry => entry === text).length
+          assert(count === expected,
+            `M5B the Host committed ${JSON.stringify(text)} ${String(count)} time(s), expected ${String(expected)}`)
+        }
+        assert(settledEvents.filter(event => event.type === 'user/message' && event.data?.id === bQueuedItem.id).length === 1,
+          'M5B the steered occurrence was committed more than once')
+        assert(settledEvents.filter(event => event.type === 'user/message' && event.data?.id === aQueuedItem.id).length === 1,
+          'M5B A\'s queued occurrence was committed more than once')
+
+        // MB-05: the SAME text from two independent real gestures is NOT a Host
+        // identity. Sequential submits; the second wait uses the durable length
+        // before its own send as the observation boundary.
+        const aSameBoundary = (hostSessionEvents(dshHome, sessionX) ?? []).length
+        clientA.send('m5b-same-text\r')
+        await clientA.waitForScreen('m5b-same-text', 'M5B A same-text submission painted', 120_000)
+        const aSame = await waitForHostSessionEventAfter(dshHome, sessionX, aSameBoundary,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5b-same-text',
+          'M5B A same-text accepted', 120_000)
+        await waitForHostSessionEventAfter(dshHome, sessionX, aSameBoundary,
+          event => event.type === 'turn/end', 'M5B A same-text Turn settled', 120_000)
+        const afterASame = hostSessionEvents(dshHome, sessionX) ?? []
+        assert(hostUserTexts(afterASame).filter(text => text === 'm5b-same-text').length === 1,
+          'M5B the first same-text submission was lost or duplicated')
+        const bSameBoundary = afterASame.length
+        clientB.send('m5b-same-text\r')
+        const bSame = await waitForHostSessionEventAfter(dshHome, sessionX, bSameBoundary,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5b-same-text',
+          'M5B B same-text accepted', 120_000)
+        await waitForHostSessionEventAfter(dshHome, sessionX, bSameBoundary,
+          event => event.type === 'turn/end', 'M5B B same-text Turn settled', 120_000)
+        const afterBSame = hostSessionEvents(dshHome, sessionX) ?? []
+        assert(hostUserTexts(afterBSame).filter(text => text === 'm5b-same-text').length === 2,
+          'M5B the Host merged two independent same-text submissions')
+        assert(aSame.data?.id !== bSame.data?.id,
+          'M5B the two same-text submissions reused one Host message identity')
+        const bSameAnswer = afterBSame.slice(bSameBoundary).find(event => event.type === 'assistant/message')
+        assert(bSameAnswer !== undefined, 'M5B the second same-text Turn produced no Host answer')
+        for (const [label, client] of [['A', clientA], ['B', clientB]]) {
+          await client.waitForScreen(answerPrefix(bSameAnswer), `M5B ${label} read the second same-text settlement`, 120_000)
+        }
+
+        // MB-06: A navigates to its own new Session Y while B still owns X.
+        const xHeaderBefore = await waitForHostSessionHeader(dshHome, sessionX, 'M5B X durable header')
+        const aNavigationBoundary = clientA.records.length
+        clientA.send('/new\r')
+        const aLeft = await clientA.waitFor(
+          record => clientA.records.indexOf(record) >= aNavigationBoundary
+            && record.m4b2s === 'surface-status'
+            && record.sessionOpen === true
+            && typeof record.openSessionId === 'string'
+            && record.openSessionId !== sessionX,
+          'M5B A navigated away from Session X',
+          120_000,
+        )
+        const sessionY = aLeft.openSessionId
+        assert(sessionY !== sessionX, 'M5B A did not leave Session X')
+        // A's CURRENT facts: after B was admitted AND after A's own navigation.
+        assertClientHostFacts(aLeft.host, hostBefore, 'M5B A after navigation')
+        assert(aLeft.transport === 'connected' && aLeft.surfaceMounted === true,
+          'M5B Client A lost its transport/surface while navigating')
+        assert(aLeft.activeWrappers === 1 && aLeft.liveSockets === 1,
+          `M5B Client A owns wrappers=${String(aLeft.activeWrappers)} sockets=${String(aLeft.liveSockets)}`)
+        for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+          assert(aLeft.owners?.[owner] === 1, `M5B Client A owns ${owner} ${String(aLeft.owners?.[owner])}`)
+        }
+        assert(alive(aReady.pid) && alive(bReady.pid) && alive(hostBefore.hostPid),
+          'M5B a process died during A\'s navigation')
+        // Y is A's own new Session in the same Host; A writes there so the
+        // separation below is a real write, not an empty selection.
+        clientA.send('m5b-y-only\r')
+        await clientA.waitForScreen('m5b-y-only', 'M5B A Y prompt painted', 120_000)
+        await waitForHostSessionEventAfter(dshHome, sessionY, 0,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5b-y-only',
+          'M5B A wrote Y', 120_000)
+        await waitForHostSessionEventAfter(dshHome, sessionY, 0,
+          event => event.type === 'turn/end', 'M5B A Y Turn settled', 120_000)
+        // B still owns X and writes there while A is on Y.
+        const bAfterBoundary = (hostSessionEvents(dshHome, sessionX) ?? []).length
+        clientB.send('m5b-b-after-a-left-x\r')
+        await waitForHostSessionEventAfter(dshHome, sessionX, bAfterBoundary,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5b-b-after-a-left-x',
+          'M5B B wrote X after A left', 120_000)
+        await waitForHostSessionEventAfter(dshHome, sessionX, bAfterBoundary,
+          event => event.type === 'turn/end', 'M5B B X Turn settled', 120_000)
+        await clientB.waitForScreen('m5b-b-after-a-left-x', 'M5B B X write painted', 120_000)
+        const bAfterEvents = hostSessionEvents(dshHome, sessionX) ?? []
+        const bAfterAnswer = bAfterEvents.slice(bAfterBoundary).find(event => event.type === 'assistant/message')
+        assert(bAfterAnswer !== undefined, 'M5B B\'s X write produced no Host answer')
+        await clientB.waitForScreen(answerPrefix(bAfterAnswer), 'M5B B read its X settlement', 120_000)
+        const bStillOnX = lastSurfaceStatus(clientB)
+        assert(bStillOnX?.sessionOpen === true && bStillOnX.openSessionId === sessionX
+          && bStillOnX.transport === 'connected', 'M5B B lost Session X when A navigated')
+        const aOnY = lastSurfaceStatus(clientA)
+        assert(aOnY?.sessionOpen === true && aOnY.openSessionId === sessionY,
+          'M5B A is not on its own Session Y')
+        // A's Y frame can never carry B's X-only text; Y's durable log neither.
+        assert(!(await clientA.viewport()).join('\n').includes('m5b-b-after-a-left-x'),
+          'M5B A painted B\'s X-only write on Y')
+        assert(!(hostSessionEvents(dshHome, sessionY) ?? []).some(event => event.type === 'user/message'
+          && textOf(event.data) === 'm5b-b-after-a-left-x'),
+          'M5B B\'s X write leaked into Session Y')
+        // X's immutable header (id/createdAt/cwd) never moved.
+        const xHeaderAfter = await waitForHostSessionHeader(dshHome, sessionX, 'M5B X durable header after A left')
+        assert(JSON.stringify(xHeaderAfter) === JSON.stringify(xHeaderBefore),
+          'M5B A leaving X changed the durable Session header/workspace')
+        await assertHostIdentityKept(host, hostBefore, 'M5B Host after A navigated')
+
+        // MB-07: B's normal exit releases ONLY B while A (on Y), the Host and
+        // X's durable facts stay live.
+        clientB.send('/exit\r')
+        const bExit = await clientB.waitForExit(60_000)
+        assert(bExit.code === 0 && bExit.signal === null, `M5B Client B exit was ${JSON.stringify(bExit)}`)
+        const bClosed = await clientB.waitFor(record => record.m4b2s === 'client-closed', 'M5B B client-closed', 30_000)
+        for (const owner of ['typert', 'connection', 'remote', 'fileUpload', 'sessions', 'jobs']) {
+          assert(bClosed.owners?.[owner] === 0, `M5B Client B left ${owner} alive after its normal exit`)
+        }
+        assert(bClosed.sessionOpen === false && bClosed.surfaceMounted === false,
+          'M5B Client B still claimed an open surface/Session after its normal exit')
+        assert(bClosed.activeWrappers === 0 && bClosed.liveSockets === 0,
+          'M5B Client B still owned transport wrappers/sockets after its normal exit')
+        await clientB.dispose()
+        assert(alive(aReady.pid), 'M5B Client A died when Client B exited')
+        assert(alive(hostBefore.hostPid), 'M5B the Host died when Client B exited')
+        await assertHostIdentityKept(host, hostBefore, 'M5B Host after B exit')
+        // A can still read AND write Y after B is gone.
+        assert(lastSurfaceStatus(clientA)?.openSessionId === sessionY, 'M5B A lost Session Y when B exited')
+        const yAfterBoundary = (hostSessionEvents(dshHome, sessionY) ?? []).length
+        clientA.send('m5b-y-after-b-exit\r')
+        await clientA.waitForScreen('m5b-y-after-b-exit', 'M5B A Y prompt after B exit painted', 120_000)
+        await waitForHostSessionEventAfter(dshHome, sessionY, yAfterBoundary,
+          event => event.type === 'user/message' && textOf(event.data) === 'm5b-y-after-b-exit',
+          'M5B A wrote Y after B exited', 120_000)
+        await waitForHostSessionEventAfter(dshHome, sessionY, yAfterBoundary,
+          event => event.type === 'turn/end', 'M5B A Y Turn after B exit settled', 120_000)
+
+        // Final durable accounting on the COMPLETE logs after every Turn
+        // settled: two same-text submits stay two, nothing crossed Sessions.
+        const xFinal = hostSessionEvents(dshHome, sessionX) ?? []
+        const xTexts = hostUserTexts(xFinal)
+        for (const [text, expected] of [
+          ['m5b-seed-a', 1],
+          ['m5b-b-queued', 1],
+          ['m5b-a-queued', 1],
+          ['m5b-same-text', 2],
+          ['m5b-b-after-a-left-x', 1],
+        ]) {
+          const count = xTexts.filter(entry => entry === text).length
+          assert(count === expected,
+            `M5B Session X committed ${JSON.stringify(text)} ${String(count)} time(s), expected ${String(expected)}`)
+        }
+        // The Session's own runtime/time context rows are also official
+        // `user/message` events: the human-write accounting below is scoped to
+        // THIS case's prefixes, never a raw total that would count them.
+        const xHumanTexts = xTexts.filter(entry => entry.startsWith('m5b-'))
+        assert(xHumanTexts.length === 6,
+          `M5B Session X carried ${String(xHumanTexts.length)} m5b-* user messages, expected 6`)
+        assert(xTexts.every(entry => entry !== 'm5b-y-only' && entry !== 'm5b-y-after-b-exit'),
+          'M5B a Y-only write leaked into Session X')
+        const yFinal = hostUserTexts(hostSessionEvents(dshHome, sessionY) ?? [])
+        assert(yFinal.filter(entry => entry === 'm5b-y-only').length === 1
+          && yFinal.filter(entry => entry === 'm5b-y-after-b-exit').length === 1,
+          'M5B Session Y lost one of A\'s own writes')
+        assert(yFinal.every(entry => !['m5b-seed-a', 'm5b-b-queued', 'm5b-a-queued', 'm5b-same-text', 'm5b-b-after-a-left-x'].includes(entry)),
+          'M5B an X-only write leaked into Session Y')
+
+        await exitC1Client(clientA, 'M5B A')
+        await stopC1Host(host)
+        trace('m5b-same-session', {
+          hostPid: hostBefore.hostPid,
+          clientAPid: aReady.pid,
+          clientBPid: bReady.pid,
+          wrapperPids: [clientA.child.pid, clientB.child.pid],
+          sessionX,
+          sessionY,
+          sameHost: true,
+          distinctPtys: true,
+          hostUserMessages: { seed: 1, bQueued: 1, aQueued: 1, sameText: 2, bAfterALeftX: 1 },
+          queueSteer: 'B occurrence moved next-turn -> next-step; claimed once',
+          sameTextCommitCount: 2,
+          bWroteXAfterALeft: true,
+          yOnlyWrites: 2,
+          clientBNormalExit: bExit.code,
+          clientBResourcesReleased: true,
+          clientAKept: true,
+          hostIdentityKept: true,
+        })
+      }
+
       // T44: a real accepted Turn survives a Client SIGKILL. The LLM stream is
       // held by the Host fixture; the Client disappears while the Host Agent is
       // running, then the SAME Host writes the final assistant message.
@@ -6715,6 +7089,7 @@ async function main() {
         : `NOT_RUN_OR_INCOMPLETE(${webBrowserVerdict})`,
       webBrowser: webBrowserVerdict,
       m4c1: 'PASS_REAL_SPLIT_PROCESS',
+      m5b: 'pass (two REAL surface Clients retained ONE Session X; shared pending inbox + official Ctrl+S steer of the other Client\'s occurrence; two independent same-text submits stayed two; A -> Y navigation kept B writing X; B-only exit kept A/Host)',
       t44t48: 'pass',
       t49t55: 'pass (T49-T55, including detached pending UNKNOWN, real Gateway owner-stream eligibility, the old-peer protocol negatives and same-PID HMR pending question/approval)',
       t56t59: 'pass',
@@ -6734,7 +7109,7 @@ async function main() {
       releaseGates: 'not run by this smoke; stage-final lane records the separate release-gate verdict',
     })
 
-    console.log(`split-process authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion}; official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}`)
+    console.log(`split-process authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (incl. M5B-01 two real surfaces on one Session); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}`)
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the

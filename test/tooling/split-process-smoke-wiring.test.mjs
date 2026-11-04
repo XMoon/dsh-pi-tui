@@ -348,6 +348,61 @@ test('T09 is two real Surface Clients on one Host while T09Q keeps the qualifica
     'the real dual-surface positive must exist exactly once')
 })
 
+test('M5-B same-Session real two-PTY witness remains wired', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  // The M5-B Case is the FIRST C1 scenario: it owns one isolated Host and runs
+  // before the T44 inventory it must not renumber.
+  const start = source.indexOf('// M5B-01 (M5-B):')
+  const end = source.indexOf('// T44: a real accepted Turn survives')
+  assert.ok(start > 0 && end > start, 'M5B-01 must stay immediately before the T44 Case')
+  assert.ok(start > source.indexOf('const startC1Client = async'),
+    'M5B-01 must run inside the C1 helper section')
+  assert.equal((source.match(/\/\/ M5B-01 \(M5-B\):/gu) ?? []).length, 1,
+    'the shared-Session positive must exist exactly once')
+  const m5b = source.slice(start, end)
+  // One real Host with a HELD Turn: the queue proof needs the running Turn.
+  assert.match(m5b, /startC1Host\('long-turn', 'm5b-same-session'/u)
+  assert.match(m5b, /C1_HOLD_LONG_TURN: releaseBarrier/u)
+  // TWO real SurfaceEntryProcess Clients (never the qualification EntryProcess);
+  // B's startup intent names the SAME Session A opened.
+  assert.equal((m5b.match(/startC1Client\(/gu) ?? []).length, 2,
+    'M5B-01 must start exactly two real Surface Clients')
+  assert.doesNotMatch(m5b, /new EntryProcess\('client'/u,
+    'M5B-01 must never downgrade to the qualification EntryProcess')
+  assert.match(m5b, /SPLIT_PROCESS_CLIENT_SESSION: sessionX/u)
+  // Live, distinct business PIDs, distinct script(1) wrappers, and B's real
+  // status opens exactly Session X.
+  assert.match(m5b, /Number\.isInteger\(aReady\.pid\) && aReady\.pid > 0 && aReady\.pid !== hostBefore\.hostPid/u)
+  assert.match(m5b, /Number\.isInteger\(bReady\.pid\) && bReady\.pid > 0 && bReady\.pid !== hostBefore\.hostPid/u)
+  assert.match(m5b, /aReady\.pid !== bReady\.pid/u)
+  assert.match(m5b, /clientA\.child\.pid !== clientB\.child\.pid/u)
+  assert.match(m5b, /record\.openSessionId === sessionX/u)
+  // B's durable-history read, and A's frame observing B's Host pending.
+  assert.match(m5b, /clientB\.waitForScreen\('m5b-seed-a'/u)
+  assert.match(m5b, /clientA\.waitForScreen\('m5b-b-queued'/u)
+  // Ctrl+S is the official gesture, and the Host queue movement carries the
+  // SAME occurrence identity (next-turn -> next-step).
+  assert.match(m5b, /clientA\.send\('\\x13'\)/u)
+  assert.match(m5b, /event\.data\?\.target === 'next-turn'/u)
+  assert.match(m5b, /event\.data\?\.target === 'next-step'/u)
+  assert.match(m5b, /message\?\.id === bQueuedItem\.id/u)
+  assert.match(m5b, /event\.data\?\.id === bQueuedItem\.id/u)
+  // Durable exact counts, including the two same-text commits; never a
+  // text-guessed requestId.
+  assert.match(m5b, /hostUserTexts\(settledEvents\)/u)
+  assert.match(m5b, /text === 'm5b-same-text'\)\.length === 2/u)
+  assert.match(m5b, /hostUserTexts\(xFinal\)/u)
+  assert.doesNotMatch(m5b, /requestId/iu, 'M5B must not infer a requestId from a text match')
+  // A navigates to Y, then B writes X and exits ONLY itself.
+  assert.match(m5b, /clientA\.send\('\/new\\r'\)/u)
+  assert.match(m5b, /'m5b-b-after-a-left-x'/u)
+  assert.match(m5b, /record\.m4b2s === 'client-closed'/u)
+  assert.match(m5b, /owners\?\.\[owner\] === 0/u)
+  assert.match(m5b, /alive\(aReady\.pid\)/u)
+  assert.match(m5b, /alive\(hostBefore\.hostPid\)/u)
+  assert.match(m5b, /trace\('m5b-same-session'/u)
+})
+
 test('the question lanes wait for the real review frame, never the permanent Submit tab', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   // Every question page paints the `○ Submit` nav tab permanently, so a
