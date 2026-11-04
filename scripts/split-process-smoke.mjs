@@ -3380,9 +3380,13 @@ async function main() {
       assert(alive(surfaceHostPid), 'WS2 the Host died on the invalid path refusal')
       assert(readJson(join(scopeDir, 'instance.json')).instanceId === surfaceHostFacts.instanceId,
         'WS2 the Host instance changed on the invalid path refusal')
-      ws2InvalidClient.send('/exit\r')
+      // The failed first-session submission RESTORED the draft into the editor,
+      // so a typed `/exit` would be appended to it and submitted as ordinary
+      // text. Use the same admitted business stop the T41/T66 witnesses use.
+      ws2InvalidClient.signalBusiness('SIGTERM')
       const ws2InvalidClientExit = await ws2InvalidClient.waitForExit(60_000)
-      assert(ws2InvalidClientExit.code === 0, `WS2 negative Client exit was ${JSON.stringify(ws2InvalidClientExit)}`)
+      assert(ws2InvalidClientExit.code === 0 && ws2InvalidClientExit.signal === null,
+        `WS2 negative Client stop was ${JSON.stringify(ws2InvalidClientExit)}`)
       await ws2InvalidClient.dispose()
       trace('ws2-invalid-path', {
         sessionOpen: false,
