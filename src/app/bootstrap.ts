@@ -1079,7 +1079,18 @@ export function applyRunnerWithRuntime(
         },
         awaitPendingDefaultWrite: (signal) => model.awaitPendingDefaultWrite(signal),
         newSessionId: () => String(SessionId(`session-${randomUUID()}`)),
-        sessionCreateCwd: () => process.cwd(),
+        // The local launch directory is a PROPOSAL only: the Host Workspace
+        // registry realpaths and validates it, and the resulting official
+        // WorkspaceId (never this path) is what the create names. Client-local
+        // cwd consumers are untouched.
+        // The qualification-only override feeds the SAME intent seam with a
+        // deliberately invalid Host path (the split-process negative control);
+        // it can never inject a pre-validated WorkspaceId and production leaves
+        // it unset.
+        initialWorkspaceIntent: () => ({
+          kind: 'host-path',
+          path: process.env.SPLIT_PROCESS_CLIENT_WORKSPACE_INTENT_PATH ?? process.cwd(),
+        }),
         currentOpening: () => surface.openingJournal.current(),
         resetOpening: () => {
           // The whole journal is dropped (the first-session finally): the SAME
@@ -2450,6 +2461,10 @@ export function applyRunnerWithRuntime(
     // All command/fork/rewind lifecycle calls share this composition-root
     // bridge so no child-creation path can bypass the runner lifetime.
     const lifecycleAgents: TuiCommandRunner['agents'] = {
+      // The /new pre-selection: the SAME backend lifecycle port resolves the
+      // Host Workspace. This bridge adds no second Workspace owner and no
+      // composition-root registry query.
+      resolveWorkspace: (intent, signal) => backend.sessionLifecycle.resolveWorkspace(intent, signal),
       create: async (options) => requireCreated(await backend.sessionLifecycle.create({ ...options, signal })),
       open: async (options) => requireOpened(await backend.sessionLifecycle.open({ ...options, signal })),
     }

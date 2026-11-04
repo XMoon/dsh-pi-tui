@@ -42,6 +42,7 @@ import test from 'node:test'
 import { LlmAdapter, createUserMessage, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
+import WorkspaceController from '@deepseek-ai/dsh-api-workspace-controller'
 import { RemoteSessionLifecycle } from '../../src/runtime/remote/session-lifecycle-remote.ts'
 import { createExperimentalRemoteRuntime } from '../support/m3-inprocess/runtime.ts'
 import { TranscriptFolder } from '../../src/transcript.ts'
@@ -207,6 +208,9 @@ async function prepareTimeContextHost(
     'this fixture requires the controlled UTC process zone')
   const llm = new CapturingLlmAdapter()
   const host = await createRemoteApplicationHostFixture(life, 's3-time-context-preset', { llmAdapter: llm })
+  // The official Host Workspace Controller: the ordinary create names an
+  // official WorkspaceId and the Host resolves the durable directory.
+  await host.ctx.plugin(WorkspaceController)
   if (options.plugin) await mountTimeContext(host.ctx, options.config ?? { timeZone: HOST_ZONE })
   const runtime = await createExperimentalRemoteRuntime({
     hostContext: host.ctx,
@@ -214,8 +218,9 @@ async function prepareTimeContextHost(
   })
   life.defer(() => runtime.dispose().catch(() => {}))
   const sessions = runtime.client.sessions
-  const created = await new RemoteSessionLifecycle(sessions, runtime.client.connection.generation)
-    .create({ sessionId: SESSION, cwd: host.anchorDir })
+  const lifecycle = new RemoteSessionLifecycle(sessions, runtime.client.connection.generation, runtime.client.remote.workspace)
+  const workspaceId = (await lifecycle.resolveWorkspace({ kind: 'host-path', path: host.anchorDir })).workspaceId
+  const created = await lifecycle.create({ sessionId: SESSION, workspaceId })
   assert.equal(created.outcome.kind, 'created',
     `the real create must publish the Session: ${created.ownership}/${created.outcome.kind}`)
   return { host, sessions, clock, llm }

@@ -49,12 +49,18 @@ import type {
   ForkSessionRequest,
   OpenResult,
   OpenSessionRequest,
+  ResolvedWorkspaceSelection,
   SessionHandle,
   SessionLifecycle,
+  WorkspaceSelectionIntent,
 } from '../session-lifecycle-port.ts'
+import { WorkspaceSelectionError } from '../session-lifecycle-port.ts'
 import type { OperationOwnership } from '../write-outcome.ts'
 import { GATEWAY_PRE_INVOCATION_CODES } from '../write-outcome.ts'
-import type { RemoteConnectionGenerationSource } from './session-reader-remote.ts'
+import type {
+  RemoteConnectionGenerationSource,
+  RemoteReadResult,
+} from './session-reader-remote.ts'
 import {
   acquireMainSurfaceReference,
   type MainSurfaceReference,
@@ -64,6 +70,42 @@ import {
 } from './session-reference.ts'
 import { remoteFailureCode, remoteFailureMessage } from './write-failure.ts'
 
+/** One official `workspace.follow` frame subset. The first frame of every
+ *  generation is a `baseline`; increments only follow it. */
+export interface RemoteWorkspaceFollowFrameLike {
+  readonly type: string
+  readonly value?: { readonly items: readonly RemoteWorkspaceViewLike[] }
+}
+
+/** One official Workspace row (`WorkspaceView`): the stable id, the Host
+ *  canonical directory and the header-validated Session membership. */
+export interface RemoteWorkspaceViewLike {
+  readonly workspaceId: string
+  readonly path: string
+  readonly sessionIds: readonly string[]
+}
+
+/** The Host-authoritative Session list subset the pre-selection needs: the
+ *  list row's persisted directory. */
+export interface RemoteLifecycleSessionListSnapshot {
+  getSnapshot(): {
+    readonly phase: 'pending' | 'ready'
+    readonly byId: Readonly<Record<string, { readonly cwd?: string } | undefined>>
+  }
+}
+
+/** The official generated `workspace` Remote namespace subset this adapter
+ *  consumes: `create` adopts an existing Host directory and `follow` carries
+ *  the reconnect-safe state stream. The SAME Client Domain owns it; this
+ *  adapter never mounts, constructs or caches it. */
+export interface RemoteWorkspaceNamespaceLike {
+  create(request: { readonly path: string }): Promise<RemoteReadResult<{
+    readonly workspace: RemoteWorkspaceViewLike
+    readonly created: boolean
+  }>>
+  follow(signal?: AbortSignal): AsyncIterable<RemoteWorkspaceFollowFrameLike> & { dispose(): void }
+}
+
 /** The official `ClientSessions` subset the lifecycle needs. The generated
  * RemoteResult is already unwrapped by ClientSessions.create/fork, so only the
  * returned identity crosses this boundary. */
@@ -71,10 +113,11 @@ export interface RemoteLifecycleSessions {
   /** The official rc.2 `create()`: ordinary and explicit-preset creates are
    * the SAME call — `agentPreset` is a creation-time input the Host consumes
    * atomically, and the Client records the published catalog row before
-   * resolving. The optional argument shape mirrors the published `ISessions`. */
+   * resolving. The optional argument shape mirrors the published `ISessions`.
+   * The durable directory is NEVER an input: the Host resolves it from the
+   * named official Workspace. */
   create(opts?: {
     workspaceId?: string
-    cwd?: string
     sessionId?: string
     agentPreset?: string
   }): Promise<string>
@@ -89,6 +132,10 @@ export interface RemoteLifecycleSessions {
     target: RemoteSessionTarget,
     options: { readonly source: TuiSessionReferenceSource; readonly signal?: AbortSignal },
   ): RemoteSessionReferenceLike
+  /** The Host-authoritative Session list: the only source for a historical
+   *  Session's persisted directory when it has no Workspace membership. */
+  readonly list: RemoteLifecycleSessionListSnapshot
+  refresh(): Promise<void>
 }
 
 /** Read the caller's cancellation state. Kept behind a call so a re-read after
@@ -206,19 +253,170 @@ function classifyForkFailure(error: unknown): ForkResult['outcome'] {
 export class RemoteSessionLifecycle implements SessionLifecycle {
   private readonly sessions: RemoteLifecycleSessions
   private readonly generation: RemoteConnectionGenerationSource
+  private readonly workspace: RemoteWorkspaceNamespaceLike
 
   constructor(
     sessions: RemoteLifecycleSessions,
     generation: RemoteConnectionGenerationSource,
+    workspace: RemoteWorkspaceNamespaceLike,
   ) {
     this.sessions = sessions
     this.generation = generation
+    this.workspace = workspace
+  }
+
+  /**
+   * Resolve ONE Host Workspace before a create (WS-2). Pre-selection only:
+   * nothing here publishes a Session, moves the visible surface or consumes a
+   * draft. Every await re-checks the Connection generation identity and the
+   * caller's signal, so a result is never handed to a newer generation.
+   */
+  async resolveWorkspace(intent: WorkspaceSelectionIntent, signal?: AbortSignal): Promise<ResolvedWorkspaceSelection> {
+    const captured = this.generation.getSnapshot()
+    if (captured === undefined) {
+      throw new WorkspaceSelectionError('unavailable', 'the remote connection is not connected')
+    }
+    if (isAborted(signal)) {
+      throw new WorkspaceSelectionError('superseded', 'the workspace selection was superseded before it settled')
+    }
+    switch (intent.kind) {
+      case 'host-path':
+        return this.adoptHostPath(captured, intent.path, signal)
+      case 'workspace-id': {
+        const items = await this.readWorkspaceBaseline(captured, signal)
+        const workspace = items.find(item => item.workspaceId === intent.workspaceId)
+        if (workspace === undefined) {
+          throw new WorkspaceSelectionError('refused', `workspace "${intent.workspaceId}" is not registered on the Host`, 'workspace/not-found')
+        }
+        return { workspaceId: workspace.workspaceId, path: workspace.path }
+      }
+      case 'source-session': {
+        // Membership FIRST: the official Host account of the captured Session,
+        // never the Client's launch directory or an effective status cwd.
+        const items = await this.readWorkspaceBaseline(captured, signal)
+        const member = items.find(item => item.sessionIds.includes(intent.sessionId))
+        if (member !== undefined) return { workspaceId: member.workspaceId, path: member.path }
+        const headerPath = await this.sourceSessionHeaderPath(captured, intent.sessionId, signal)
+        return this.adoptHostPath(captured, headerPath, signal)
+      }
+    }
+  }
+
+  /** The ONE generation/currentness fence for every pre-selection await. */
+  private requireCurrent(
+    captured: NonNullable<ReturnType<RemoteConnectionGenerationSource['getSnapshot']>>,
+    signal: AbortSignal | undefined,
+  ): void {
+    if (isAborted(signal) || !Object.is(captured, this.generation.getSnapshot())) {
+      throw new WorkspaceSelectionError('superseded', 'the workspace selection was superseded by a newer connection generation')
+    }
+  }
+
+  /** Adopt an existing Host directory as the target Workspace through the
+   *  official `workspace.create` (the Host realpaths and validates it). A
+   *  create that the Host already committed stays durable if the reply is
+   *  lost — the selection then reports `unavailable`, never a fabricated id. */
+  private async adoptHostPath(
+    captured: NonNullable<ReturnType<RemoteConnectionGenerationSource['getSnapshot']>>,
+    path: string,
+    signal: AbortSignal | undefined,
+  ): Promise<ResolvedWorkspaceSelection> {
+    let result: RemoteReadResult<{ readonly workspace: RemoteWorkspaceViewLike; readonly created: boolean }>
+    try {
+      result = await this.workspace.create({ path })
+    } catch (error) {
+      this.requireCurrent(captured, signal)
+      throw new WorkspaceSelectionError(
+        'unavailable',
+        `the Host did not answer the workspace create: ${remoteFailureMessage(error)}`,
+        errorCode(error),
+      )
+    }
+    this.requireCurrent(captured, signal)
+    if (!result.ok) {
+      const code = errorCode(result.error)
+      const message = remoteFailureMessage(result.error)
+      if (code === 'workspace/invalid-path' || code === 'workspace/name-conflict') {
+        throw new WorkspaceSelectionError('refused', message, code)
+      }
+      throw new WorkspaceSelectionError('unavailable', message, code)
+    }
+    const workspace = result.value.workspace
+    if (typeof workspace?.workspaceId !== 'string' || workspace.workspaceId === ''
+      || typeof workspace.path !== 'string' || workspace.path === '') {
+      throw new WorkspaceSelectionError('unavailable', 'the Host returned an unusable Workspace record', 'workspace/create-result-invalid')
+    }
+    return { workspaceId: workspace.workspaceId, path: workspace.path }
+  }
+
+  /** Open ONE `workspace.follow` generation and read only its baseline. A
+   *  stream that fails, ends early or starts with a non-baseline frame never
+   *  becomes an empty Workspace set. The handle is disposed exactly once. */
+  private async readWorkspaceBaseline(
+    captured: NonNullable<ReturnType<RemoteConnectionGenerationSource['getSnapshot']>>,
+    signal: AbortSignal | undefined,
+  ): Promise<readonly RemoteWorkspaceViewLike[]> {
+    const stream = this.workspace.follow(signal)
+    try {
+      for await (const frame of stream) {
+        if (frame.type !== 'baseline') {
+          throw new WorkspaceSelectionError('unavailable', 'the Host Workspace stream did not begin with a baseline', 'workspace/follow-invalid')
+        }
+        const items = frame.value?.items
+        if (!Array.isArray(items)) {
+          throw new WorkspaceSelectionError('unavailable', 'the Host Workspace baseline carries no item list', 'workspace/follow-invalid')
+        }
+        this.requireCurrent(captured, signal)
+        return items
+      }
+      throw new WorkspaceSelectionError('unavailable', 'the Host Workspace stream ended before its baseline', 'workspace/follow-unavailable')
+    } catch (error) {
+      this.requireCurrent(captured, signal)
+      if (error instanceof WorkspaceSelectionError) throw error
+      throw new WorkspaceSelectionError(
+        'unavailable',
+        `the Host Workspace state is unavailable: ${remoteFailureMessage(error)}`,
+        errorCode(error),
+      )
+    } finally {
+      stream.dispose()
+    }
+  }
+
+  /** The captured Session's persisted immutable header directory, read from
+   *  the Host-authoritative Session list. Never the Client's launch directory
+   *  and never an effective/runtime status cwd. */
+  private async sourceSessionHeaderPath(
+    captured: NonNullable<ReturnType<RemoteConnectionGenerationSource['getSnapshot']>>,
+    sessionId: string,
+    signal: AbortSignal | undefined,
+  ): Promise<string> {
+    try {
+      await this.sessions.refresh()
+    } catch (error) {
+      this.requireCurrent(captured, signal)
+      throw new WorkspaceSelectionError(
+        'unavailable',
+        `the Host Session list is unavailable: ${remoteFailureMessage(error)}`,
+        errorCode(error),
+      )
+    }
+    this.requireCurrent(captured, signal)
+    const snapshot = this.sessions.list.getSnapshot()
+    if (snapshot.phase !== 'ready') {
+      throw new WorkspaceSelectionError('unavailable', 'the Host Session list has not settled', 'session/list-unavailable')
+    }
+    const cwd = snapshot.byId[sessionId]?.cwd
+    if (typeof cwd !== 'string' || cwd === '') {
+      throw new WorkspaceSelectionError('unavailable', `session "${sessionId}" has no Host recorded workspace directory`)
+    }
+    return cwd
   }
 
   async create(request: CreateSessionRequest): Promise<CreateResult> {
     // A provable PRE-dispatch cancellation is `cancelled` (never a throw).
     if (isAborted(request.signal)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
-    const cwd = request.cwd
+    const workspaceId = request.workspaceId
     const captured = this.generation.getSnapshot()
     // A disconnected client must not dispatch through stale/queued state.
     if (captured === undefined) return { ownership: 'current', outcome: { kind: 'cancelled' } }
@@ -232,10 +430,11 @@ export class RemoteSessionLifecycle implements SessionLifecycle {
     // ONE official Client create for every create: rc.2 `ClientSessions.create`
     // accepts `agentPreset` as a creation-time input and records the published
     // catalog row before resolving, so `retain()` below is immediately valid.
+    // The workspace id is the SINGLE directory authority; `cwd` is never sent.
     let id: unknown
     try {
       id = await this.sessions.create({
-        ...cwd === undefined ? {} : { cwd },
+        workspaceId,
         sessionId: request.sessionId,
         ...request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset },
       })

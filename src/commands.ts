@@ -66,7 +66,13 @@ import type { SessionStatsFacts } from './domain/status/stats.ts'
 import type { SessionReader } from './runtime/session-reader-port.ts'
 import type { SessionWriter } from './runtime/session-writer-port.ts'
 import type { InteractionPort } from './runtime/interaction-port.ts'
-import type { CreateSessionRequest, OpenSessionRequest, SessionHandle } from './runtime/session-lifecycle-port.ts'
+import type {
+  CreateSessionRequest,
+  OpenSessionRequest,
+  ResolvedWorkspaceSelection,
+  SessionHandle,
+  WorkspaceSelectionIntent,
+} from './runtime/session-lifecycle-port.ts'
 import type { Catalog } from './runtime/catalog-port.ts'
 import type { SkillDefinitionResult } from './runtime/catalog-port.ts'
 import type { ConfigPort } from './runtime/config-port.ts'
@@ -384,6 +390,10 @@ export interface TuiCommandRunner {  ctx: Context
    * through semantic requests (the Direct adapter resolves the preset
    * composition internally). */
   readonly agents: {
+    /** Resolve ONE Host Workspace before a create (WS-2): pre-selection only,
+     *  so a bad directory / unknown Workspace / offline Host refuses BEFORE any
+     *  owner stop, draft flush or Session dispatch. */
+    resolveWorkspace(intent: WorkspaceSelectionIntent, signal?: AbortSignal): Promise<ResolvedWorkspaceSelection>
     create(options: CreateSessionRequest): Promise<SessionHandle>
     open(options: OpenSessionRequest): Promise<SessionHandle>
   }

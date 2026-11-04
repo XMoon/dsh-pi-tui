@@ -298,7 +298,7 @@ function buildSessionFixture(life: TestLifecycle, options: {
     notifyResumeFailure: () => {},
     awaitPendingDefaultWrite: async () => {},
     newSessionId: () => 'session-first',
-    sessionCreateCwd: () => '/work/a',
+    initialWorkspaceIntent: () => ({ kind: 'host-path', path: '/work/a' }),
     currentOpening: () => undefined,
     resetOpening: () => {},
   }
@@ -332,6 +332,7 @@ function buildSessionFixture(life: TestLifecycle, options: {
   }
 
   const lifecycle = {
+    resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/work/a' }),
     create: async () => { throw new Error('unexpected create in this fixture') },
     open: async (request: { sessionId: string }) => ({
       ownership: 'current' as const,

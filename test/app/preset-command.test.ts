@@ -302,6 +302,7 @@ function stubRunner(options: {
     tuiSettings: options.tuiSettings,
     applyFooterSettings: () => {},
     agents: options.agents ?? {
+      resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/ws' }),
       create: async () => ({}) as never,
       open: async () => ({}) as never,
     },
@@ -726,6 +727,7 @@ test('/new refuses a registry default no declaration supplies — no guessed rep
   const t = setup({
     defaultPresetId: 'code',
     agents: {
+      resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/ws' }),
       create: async options => {
         created.push({ agentPreset: options.agentPreset })
         return {} as never
@@ -771,6 +773,7 @@ test('/new honors the launch-time effective preset', async () => {
   const t = setup({
     effectivePresetId: 'minimal',
     agents: {
+      resolveWorkspace: async () => ({ workspaceId: 'ws-a', path: '/ws' }),
       create: async options => {
         created.push({ agentPreset: options.agentPreset })
         return {} as never

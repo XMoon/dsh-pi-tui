@@ -28,6 +28,7 @@
  * @module app/remote-process/client-bootstrap
  */
 
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import { PI_TUI_EXTENSIONS_SERVICE } from '../../extensions.ts'
@@ -950,6 +951,70 @@ async function startSurfaceLocalClient(
         } finally {
           watch.dispose()
         }
+        // WS-2: the SAME official Client Domain reads the Host Workspace
+        // authority (its baseline) and the Host's own Workspace file read. The
+        // record carries bounded facts only: digests, counts and predicates —
+        // never a raw path.
+        const digest = (value: unknown): string =>
+          createHash('sha256').update(String(value)).digest('hex').slice(0, 16)
+        const wsRemote = currentDomains.remote as unknown as {
+          readonly workspace?: {
+            follow(signal?: AbortSignal): AsyncIterable<{
+              readonly type: string
+              readonly value?: {
+                readonly items?: readonly {
+                  readonly workspaceId?: unknown
+                  readonly path?: unknown
+                  readonly sessionIds?: readonly unknown[]
+                }[]
+              }
+            }> & { dispose(): void }
+          }
+          readonly workspaceFiles?: {
+            read(
+              sessionId: string,
+              path: string,
+              range: { readonly offset?: number; readonly limit?: number },
+            ): Promise<{ readonly ok: boolean; readonly value?: { readonly text?: unknown } }>
+          }
+        }
+        let workspaceCount = 0
+        let workspacePathDigest: string | undefined
+        let workspaceMatchesClientCwd = false
+        let workspaceSessionDigests: string[] = []
+        if (wsRemote.workspace !== undefined) {
+          const stream = wsRemote.workspace.follow()
+          try {
+            for await (const frame of stream) {
+              if (frame.type !== 'baseline') break
+              const items = frame.value?.items ?? []
+              workspaceCount = items.length
+              const member = items.find(item =>
+                Array.isArray(item.sessionIds) && item.sessionIds.map(String).includes(sessionId))
+              if (member !== undefined) {
+                workspacePathDigest = digest(member.path)
+                // The Client's launch directory reaching the Host canonical
+                // Workspace path is the whole intent→authority chain.
+                workspaceMatchesClientCwd = member.path === process.cwd()
+                workspaceSessionDigests = (member.sessionIds ?? []).map(digest)
+              }
+              break
+            }
+          } finally {
+            stream.dispose()
+          }
+        }
+        // The Host's OWN read: a relative path resolved from the durable header
+        // cwd (the Workspace). A different Workspace must not answer it.
+        let workspaceMarkerText: unknown
+        if (wsRemote.workspaceFiles !== undefined) {
+          const marker = await wsRemote.workspaceFiles.read(sessionId, 'ws2-host-marker.txt', {})
+            .catch(() => ({ ok: false as const }))
+          workspaceMarkerText = marker.ok ? marker.value?.text : undefined
+        }
+        const listRows = currentDomains.sessions.list.getSnapshot().byId as unknown as
+          Readonly<Record<string, { readonly cwd?: string } | undefined>>
+        const listRow = listRows[sessionId]
         composition.onQualification?.({
           op: 'private-rpc-proof',
           sessionId,
@@ -983,6 +1048,16 @@ async function startSurfaceLocalClient(
             && homeItems.every(item => typeof item.path === 'string' && item.path.startsWith('/'))
             && homeItems.some(item => typeof item.path === 'string' && item.path.endsWith('/t36home-note.md')),
           terminalKind,
+          // WS-2 Host Workspace facts (bounded): the active Session's Workspace
+          // path digest, its full membership digests, whether the Client launch
+          // directory IS that Host path, the Host list-row cwd digest (the
+          // durable header fact) and the marker text the HOST read.
+          workspaceCount,
+          workspacePathDigest,
+          workspaceMatchesClientCwd,
+          workspaceSessionDigests,
+          workspaceListCwdDigest: listRow?.cwd === undefined ? undefined : digest(listRow.cwd),
+          workspaceMarkerText,
           owners: status().owners,
           privateNamespaces: status().privateNamespaces,
         })

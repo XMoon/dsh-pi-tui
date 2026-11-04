@@ -20,7 +20,7 @@ import { SessionNavigationStopError, type NavigationIntent } from '../../app/ses
 import type { SessionSwitchOutcome } from '../../app/session/runtime.ts'
 import { cancellationError, isCancellation, runOwned } from '../../runtime/process/tasks.ts'
 import { safeErrorMessage } from '../../runtime/process/errors.ts'
-import { LifecycleError } from '../../runtime/session-lifecycle-port.ts'
+import { LifecycleError, WorkspaceSelectionError, type ResolvedWorkspaceSelection } from '../../runtime/session-lifecycle-port.ts'
 import {
   CONTENT_SEARCH_DEBOUNCE_MS,
   PROJECTION_BATCH_SIZE,
@@ -1075,6 +1075,28 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
             : '; turn stop requested (not yet confirmed)'
         }
         try {
+          // WS-2 Workspace pre-selection BEFORE the navigation transition: a
+          // refused directory, an unknown Workspace or an offline Host must not
+          // stop the old owner, flush/consume drafts or dispatch a Session.
+          // `source-session` asks for the captured Session's official Host
+          // membership (never the Client launch/effective cwd); a sessionless
+          // `/new` offers the Client launch directory as a Host path proposal.
+          const intent = navigation.scope.sessionId === undefined
+            ? { kind: 'host-path' as const, path: cwd }
+            : { kind: 'source-session' as const, sessionId: navigation.scope.sessionId }
+          let workspace: ResolvedWorkspaceSelection
+          try {
+            workspace = await runner.agents.resolveWorkspace(intent, signal)
+          } catch (error) {
+            if (!runner.isSessionScopeCurrent(navigation.scope)
+              || (error instanceof WorkspaceSelectionError && error.kind === 'superseded')) {
+              // A stale/superseded selection owns nothing: silent, exactly like
+              // a superseded create. Nothing was stopped, flushed or created.
+              return { kind: 'success' }
+            }
+            return { kind: 'error', text: `fresh session creation failed: ${safeErrorMessage(error)}` }
+          }
+          if (!runner.isSessionScopeCurrent(navigation.scope)) return { kind: 'success' }
           return await runner.withSessionTransition(async () => {
             // The unified transaction: the old session is flushed BEFORE the
             // fresh session is created, the commit is synchronous, and a failure
@@ -1112,7 +1134,10 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
               return { kind: 'error', text: `fresh session creation cancelled: ${safeErrorMessage(error)}${stopNote()}` }
             }
             const result = await runner.transitionTo({
-              target: { id: String(sessionId), header: { cwd } },
+              // The Host-verified canonical Workspace directory is a display
+              // hint only; the durable header cwd is resolved by the Host from
+              // the Workspace id below.
+              target: { id: String(sessionId), header: { cwd: workspace.path } },
               onOldOwnerQuiesced: () => { oldOwnerQuiesced = true },
               create: async () => {
                 // Re-wait immediately before dispatch: a newer sessionless /model may
@@ -1121,10 +1146,13 @@ export function createSessionCommands(deps: SessionCommandDeps): SessionCommandR
                 await runner.awaitPendingDefaultWrite(signal)
                 return runner.agents.create({
                   sessionId: String(sessionId),
+                  // The official Host Workspace identity is the ONE directory
+                  // authority; no cwd crosses this request. The Host resolves
+                  // the durable directory from its own registry.
+                  workspaceId: workspace.workspaceId,
                   // The semantic `agentPreset` is the SINGLE preset authority; the
                   // Direct adapter persists the actually composed preset into the
                   // durable header. Never duplicate it into generic meta.
-                  cwd,
                   agentPreset: resolved.id,
                 })
               },

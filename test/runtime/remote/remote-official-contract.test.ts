@@ -25,7 +25,7 @@
  * |--------------------------------|-------------------------------------------------|
  * | RemoteSessionReader            | `ISessions`                                     |
  * | RemoteSessionWriter            | `ISessions`                                     |
- * | RemoteSessionLifecycle         | `ISessions` + `ClientRemote['session']`         |
+ * | RemoteSessionLifecycle         | `ISessions` + `ClientRemote['session']` + `['workspace']` |
  * | RemoteModelCatalog             | `ClientRemote['session']` + `ISessions`         |
  * | RemotePresetCatalog            | `ClientRemote['agentPresets']`                  |
  * | RemotePendingInputReader       | `ISessions`                                     |
@@ -58,7 +58,7 @@ import type { ClientRemote } from '@deepseek-ai/dsh-api-gateway/client'
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import { RemoteSessionReader } from '../../../src/runtime/remote/session-reader-remote.ts'
 import { RemoteSessionWriter, type RemotePromptSerializer } from '../../../src/runtime/remote/session-writer-remote.ts'
-import { RemoteSessionLifecycle } from '../../../src/runtime/remote/session-lifecycle-remote.ts'
+import { RemoteSessionLifecycle, type RemoteWorkspaceNamespaceLike } from '../../../src/runtime/remote/session-lifecycle-remote.ts'
 import { RemoteModelCatalog, type RemoteLlmRemotes } from '../../../src/runtime/remote/model-remote.ts'
 import { RemotePresetCatalog } from '../../../src/runtime/remote/preset-remote.ts'
 import { RemotePendingInputReader } from '../../../src/runtime/remote/pending-input-reader-remote.ts'
@@ -95,8 +95,15 @@ function officialSessionWriter(
 function officialSessionLifecycle(
   sessions: ISessions,
   generation: ConnectionGenerationState,
+  workspace: ClientRemote['workspace'],
 ): RemoteSessionLifecycle {
-  return new RemoteSessionLifecycle(sessions, generation)
+  return new RemoteSessionLifecycle(sessions, generation, workspace)
+}
+
+/** WS-2: the official generated `workspace` namespace satisfies the
+ *  lifecycle's narrow pre-selection source with no cast. */
+function officialWorkspaceNamespace(remote: ClientRemote): RemoteWorkspaceNamespaceLike {
+  return remote.workspace
 }
 
 function officialModelCatalog(
@@ -258,6 +265,7 @@ test('every Remote adapter accepts the published DSH public Client/Remote face (
     officialSessionReader,
     officialSessionWriter,
     officialSessionLifecycle,
+    officialWorkspaceNamespace,
     officialModelCatalog,
     officialPresetCatalog,
     officialPendingInputReader,

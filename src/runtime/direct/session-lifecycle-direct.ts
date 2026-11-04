@@ -32,8 +32,11 @@ import type {
   ForkResult,
   OpenResult,
   OpenSessionRequest,
+  ResolvedWorkspaceSelection,
   SessionLifecycle,
+  WorkspaceSelectionIntent,
 } from '../session-lifecycle-port.ts'
+import { WorkspaceSelectionError } from '../session-lifecycle-port.ts'
 
 /** The minimal Host context surface the adapter needs (structural — never
  * a package dependency; the services resolve from the dsh installation). */
@@ -93,15 +96,23 @@ export interface ForkSessionQueryLike {
   }>
 }
 
-/** The official workspace subset used by the Host fork algorithm. */
-export interface ForkWorkspaceLike {
+/** The official Host Workspace entity subset: one durable record over an
+ * existing Host directory, with its header-validated Session membership. */
+export interface WorkspaceEntityLike {
   readonly id: string
+  readonly path: string
   readonly sessionIds: readonly string[]
   attachSession(sessionId: ReturnType<typeof SessionId>): Promise<void>
 }
 
-export interface ForkWorkspaceRegistryLike {
-  list(): readonly ForkWorkspaceLike[]
+/** The official Host `workspaceRegistry` subset. It is the ONLY Workspace
+ * authority this adapter consults: `create` canonicalizes and validates the
+ * Host path, `get` reads an existing identity and `list` exposes the durable
+ * membership rows. */
+export interface WorkspaceRegistryLike {
+  create(path: string): Promise<WorkspaceEntityLike>
+  get(id: string): WorkspaceEntityLike | undefined
+  list(): readonly WorkspaceEntityLike[]
 }
 
 /** Direct-only owner handoff. The runner parks a child when navigation is
@@ -153,8 +164,117 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     return selection === undefined ? {} : { provider: selection.provider, model: selection.model }
   }
 
+  /**
+   * Resolve ONE Host Workspace for a later create (WS-2). Pre-selection only:
+   * nothing here publishes a Session, stops a Turn or touches a draft. The
+   * official `workspaceRegistry` is the ONLY authority — this adapter never
+   * canonicalizes a Client path itself, never scans the filesystem and never
+   * caches a Workspace.
+   */
+  async resolveWorkspace(intent: WorkspaceSelectionIntent, signal?: AbortSignal): Promise<ResolvedWorkspaceSelection> {
+    const throwIfSuperseded = (): void => {
+      if (signal?.aborted === true) {
+        throw new WorkspaceSelectionError('superseded', 'the workspace selection was superseded before it settled')
+      }
+    }
+    throwIfSuperseded()
+    const registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+    if (registry === undefined) {
+      throw new WorkspaceSelectionError('unavailable', 'the Host Workspace registry is unavailable')
+    }
+    switch (intent.kind) {
+      case 'host-path':
+        return resolvedSelection(await this.createWorkspace(registry, intent.path, signal))
+      case 'workspace-id': {
+        const workspace = registry.get(intent.workspaceId)
+        throwIfSuperseded()
+        if (workspace === undefined) {
+          throw new WorkspaceSelectionError('refused', `workspace "${intent.workspaceId}" is not registered on the Host`, 'workspace/not-found')
+        }
+        return resolvedSelection(workspace)
+      }
+      case 'source-session': {
+        // Membership FIRST: the official durable account of the captured
+        // Session, never the Client's launch or effective directory.
+        const member = registry.list().find(workspace => workspace.sessionIds.includes(intent.sessionId))
+        throwIfSuperseded()
+        if (member !== undefined) return resolvedSelection(member)
+        // A historical Session without membership falls back to its OWN
+        // persisted immutable header directory, read through the official
+        // Host observation seam. It is re-validated by the registry create.
+        const headerPath = await this.sourceSessionHeaderPath(intent.sessionId)
+        throwIfSuperseded()
+        return resolvedSelection(await this.createWorkspace(registry, headerPath, signal))
+      }
+    }
+  }
+
+  /** Create-or-reuse a Workspace from a Host path proposal. A path the Host
+   *  refuses is a `refused` selection; no Session is dispatched. A signal that
+   *  aborts AFTER the durable create leaves the Workspace record in place and
+   *  reports `superseded` — creation is never rolled back. */
+  private async createWorkspace(
+    registry: WorkspaceRegistryLike,
+    path: string,
+    signal: AbortSignal | undefined,
+  ): Promise<WorkspaceEntityLike> {
+    let workspace: WorkspaceEntityLike
+    try {
+      workspace = await registry.create(path)
+    } catch (error) {
+      if (signal?.aborted === true) {
+        throw new WorkspaceSelectionError('superseded', 'the workspace selection was superseded while the Host validated the directory')
+      }
+      throw new WorkspaceSelectionError(
+        'refused',
+        `the Host refused workspace path "${path}": ${safeErrorMessage(error)}`,
+        'workspace/invalid-path',
+      )
+    }
+    if (signal?.aborted === true) {
+      throw new WorkspaceSelectionError('superseded', 'the workspace selection was superseded after the Host created the workspace')
+    }
+    return workspace
+  }
+
+  /** The captured Session's persisted immutable header directory. Only the
+   *  official Host observation is read; a missing/unreadable header is
+   *  `unavailable`, never a Client-side guess. */
+  private async sourceSessionHeaderPath(sessionId: string): Promise<string> {
+    const query = this.ctx.get('sessionQuery') as ForkSessionQueryLike | undefined
+    if (query === undefined) {
+      throw new WorkspaceSelectionError('unavailable', 'the Host session query service is unavailable')
+    }
+    let cwd: string | undefined
+    try {
+      const observation = await query.observeSession(SessionId(sessionId))
+      try {
+        cwd = observation.header.cwd
+      } finally {
+        observation[Symbol.dispose]()
+      }
+    } catch (error) {
+      throw new WorkspaceSelectionError('unavailable', `session "${sessionId}" has no readable Host header: ${safeErrorMessage(error)}`)
+    }
+    if (cwd === undefined || cwd === '') {
+      throw new WorkspaceSelectionError('unavailable', `session "${sessionId}" has no Host recorded workspace directory`)
+    }
+    return cwd
+  }
+
   async create(request: CreateSessionRequest): Promise<CreateResult> {
     if (Boolean(request.signal?.aborted)) return { ownership: 'current', outcome: { kind: 'cancelled' } }
+    // The Workspace is resolved BEFORE any Agent work: its canonical Host path
+    // is the durable Session cwd and an unknown identity never reaches
+    // `agents.create`.
+    const registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+    if (registry === undefined) {
+      return currentCreateRejected('gateway/internal', 'workspace registry unavailable')
+    }
+    const workspace = registry.get(request.workspaceId)
+    if (workspace === undefined) {
+      return currentCreateRejected('workspace/not-found', `workspace "${request.workspaceId}" is not registered on the Host`)
+    }
     const agents = this.ctx.get('agents') as AgentsServiceLike | undefined
     if (agents === undefined) {
       return currentCreateRejected('session/create-unavailable', 'agents service unavailable')
@@ -162,30 +282,23 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     // Capture the Host default at ADMISSION (v2 §0.8.3): a later sessionless
     // `/model` default write must not rewrite an already-started create.
     const agentOptions = this.agentOptions()
+    let handle: AgentHandle
     try {
       // The preset composition (with its agent-setup callback) is a Direct
       // concern: resolved inside the adapter from the request's preset id.
       const composition = await this.compose(request.agentPreset)
       // The semantic `agentPreset` is the SINGLE preset authority: the adapter
       // persists the preset it actually composed in the ordinary header.
-      const handle = await agents.create({
+      handle = await agents.create({
         sessionId: SessionId(request.sessionId),
         meta: {
-          ...request.cwd === undefined ? {} : { cwd: request.cwd },
+          cwd: workspace.path,
           ...composition.agentPreset === undefined ? {} : { agentPreset: composition.agentPreset },
         },
         agentOptions,
         setup: composition.setup,
         signal: request.signal,
       })
-      // Preserve both the live Agent and the real AgentHandle. The latter is
-      // the ownership capability the runner disposes at retirement. The Direct
-      // adapter is the only writer for its own in-process Agent, so its result
-      // always owns the current surface.
-      return {
-        ownership: 'current',
-        outcome: { kind: 'created', handle: { session: { id: String(handle.agent.session.id) }, direct: { agent: handle.agent, ownerHandle: handle } } },
-      }
     } catch (error) {
       // The upstream `agents.create` signal is a PRE-PUBLICATION cancellation
       // contract: an abort mid-create provably did not publish (v2 §0.2.4), so
@@ -194,6 +307,54 @@ export class DirectSessionLifecycle implements SessionLifecycle {
       // Any other in-process create failure is a proven pre-publication
       // rejection (there is no wire ambiguity in the Direct path).
       return currentCreateRejected('session/create-failed', safeErrorMessage(error))
+    }
+    const sessionId = String(handle.agent.session.id)
+    try {
+      // Membership is part of the ordinary create: the official registry
+      // validates the persisted header cwd against its own canonical path.
+      await workspace.attachSession(SessionId(sessionId))
+    } catch (error) {
+      // POST-publication: the Session exists. Hand its live AgentHandle to the
+      // existing owner lifetime (park) or, without an owner pool, dispose it —
+      // an attach failure must never leak an active write lease, and it must
+      // never be reported as "no Session was created".
+      const cleanup = await this.releasePublishedOwner(handle)
+      return {
+        ownership: 'current',
+        outcome: {
+          kind: 'published-with-error',
+          sessionId,
+          error: {
+            code: 'session/workspace-attach-failed',
+            message: `Session "${sessionId}" was created but could not attach to workspace "${workspace.id}": ${safeErrorMessage(error)}`
+              + (cleanup === undefined ? '' : ` (owner cleanup also failed: ${cleanup})`),
+            details: { workspaceId: workspace.id },
+          },
+        },
+      }
+    }
+    // Preserve both the live Agent and the real AgentHandle. The latter is
+    // the ownership capability the runner disposes at retirement. The Direct
+    // adapter is the only writer for its own in-process Agent, so its result
+    // always owns the current surface.
+    return {
+      ownership: 'current',
+      outcome: { kind: 'created', handle: { session: { id: sessionId }, direct: { agent: handle.agent, ownerHandle: handle } } },
+    }
+  }
+
+  /** Release a published-but-unadoptable Direct owner. Returns a secondary
+   *  cleanup failure message, or undefined when the handoff succeeded. */
+  private async releasePublishedOwner(handle: AgentHandle): Promise<string | undefined> {
+    if (this.ownerPool !== undefined) {
+      this.ownerPool.park(handle)
+      return undefined
+    }
+    try {
+      await handle.dispose()
+      return undefined
+    } catch (error) {
+      return safeErrorMessage(error)
     }
   }
 
@@ -330,7 +491,7 @@ export class DirectSessionLifecycle implements SessionLifecycle {
         )
       }
 
-      let workspace: ForkWorkspaceLike | undefined
+      let workspace: WorkspaceEntityLike | undefined
       try {
         workspace = await this.forkWorkspace(source)
       } catch (error) {
@@ -402,8 +563,8 @@ export class DirectSessionLifecycle implements SessionLifecycle {
     }
   }
 
-  private async forkWorkspace(source: ForkObservationLike): Promise<ForkWorkspaceLike | undefined> {
-    const registry = this.ctx.get('workspaceRegistry') as ForkWorkspaceRegistryLike | undefined
+  private async forkWorkspace(source: ForkObservationLike): Promise<WorkspaceEntityLike | undefined> {
+    const registry = this.ctx.get('workspaceRegistry') as WorkspaceRegistryLike | undefined
     if (registry === undefined) return undefined
     const workspaces = registry.list()
     const direct = workspaces.find(workspace => workspace.sessionIds.includes(source.header.id))
@@ -441,6 +602,11 @@ function latestCompletedPrefixBoundary(events: readonly SessionEvent[]): ReturnT
 /** A Direct create rejection that still owns the local surface. */
 function currentCreateRejected(code: string, message: string): CreateResult {
   return { ownership: 'current', outcome: { kind: 'rejected', error: { code, message } } }
+}
+
+/** The transport-neutral projection of one Host Workspace row. */
+function resolvedSelection(workspace: WorkspaceEntityLike): ResolvedWorkspaceSelection {
+  return { workspaceId: workspace.id, path: workspace.path }
 }
 
 function currentForkRejected(code: string, message: string): ForkResult {
