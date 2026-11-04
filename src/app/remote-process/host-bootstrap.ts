@@ -22,6 +22,7 @@ import {
 import { PI_TUI_HOST_READY_SERVICE } from '../host/pi-tui-host-runtime.ts'
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
+import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
 
 /** Cordis `FiberState.ACTIVE` (the enum is a const enum with no runtime value). */
 const FIBER_ACTIVE = 2
@@ -141,10 +142,11 @@ const WORKSPACE_OWNER_PACKAGES = [
   { owner: 'workspaceController', id: 'workspace-controller', name: '@deepseek-ai/dsh-api-workspace-controller' },
 ] as const
 
-/** The package's two private endpoint bindings. */
+/** The package's three private endpoint bindings. */
 const PRIVATE_TYPERT_BINDINGS = [
   { serviceKey: 'piTuiFileReferences', namespace: PI_TUI_FILE_REFERENCES_NAMESPACE },
   { serviceKey: 'piTuiTerminalProgress', namespace: PI_TUI_TERMINAL_PROGRESS_NAMESPACE },
+  { serviceKey: 'piTuiWebAccess', namespace: PI_TUI_WEB_ACCESS_NAMESPACE },
 ] as const
 
 /**
@@ -220,6 +222,10 @@ export function collectHostEntryStatus(
     'workspaceController',
     PI_TUI_FILE_REFERENCES_NAMESPACE,
     PI_TUI_TERMINAL_PROGRESS_NAMESPACE,
+    // The Web frontend toggle is a Host-ready service even though the Web
+    // frontend itself stays OFF by default: the Host must be Ready with Web
+    // disabled, and the toggle must never be a Web-composition prerequisite.
+    PI_TUI_WEB_ACCESS_NAMESPACE,
     PI_TUI_HOST_READY_SERVICE,
     'piTuiPerformanceReady',
   ]) {

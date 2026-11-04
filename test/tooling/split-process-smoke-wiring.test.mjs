@@ -262,8 +262,8 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
     assert.ok(source.includes(marker), `missing smoke marker ${marker}`)
   }
   const extraPatchUses = source.match(/SPLIT_PROCESS_EXTRA_PATCH/gu) ?? []
-  assert.equal(extraPatchUses.length, 15,
-    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated surface LLM overlay, the isolated Host Schedule overlay, the isolated armed-Goal overlay and the three bounded PR-A Web composition runs')
+  assert.equal(extraPatchUses.length, 19,
+    'the extra patch may only implement the two child mutations, the T26 Host-Runtime/official-row/Workspace-Controller mutations, the whole-smoke mutation mode, the isolated surface LLM overlay, the isolated Host Schedule overlay, the isolated armed-Goal overlay, the three bounded PR-A Web composition runs and the four bounded PR-B Web-toggle runs')
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: tuiMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: connectionMutationPatch/u)
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: sessionControllerMutationPatch/u)
@@ -278,6 +278,14 @@ test('the upgraded smoke carries every inventory gate and the critical negative 
   assert.match(source, /SPLIT_PROCESS_EXTRA_PATCH: duplicatePatch/u)
   assert.equal((source.match(/SPLIT_PROCESS_EXTRA_PATCH: webPatch/gu) ?? []).length, 2,
     'the isolated enable patch is reused by the positive run and the dist-absent control')
+  // The PR-B toggle lane owns exactly four of these runs: the one default-off
+  // Host that carries the whole toggle, its missing-asset negative control, the
+  // duplicate-module-owner control and the malformed-argument control. The
+  // toggle itself never needs a second patch: it flips the declared rows.
+  assert.equal((source.match(/SPLIT_PROCESS_EXTRA_PATCH: hostPatch/gu) ?? []).length, 3,
+    'the toggle patch is reused by the default-off Host and its two isolated negative lanes')
+  assert.equal((source.match(/SPLIT_PROCESS_EXTRA_PATCH: duplicatePatch/gu) ?? []).length, 2,
+    'the duplicate-module control keeps its own patch in both Web lanes')
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(source, /SPLIT_PROCESS_SMOKE_MUTATION/u)
   assert.match(source, /mutationEnv/u)
@@ -630,7 +638,7 @@ test('the official Web composition qualification is discoverable and never fakes
     'qualifyOfficialWebComposition',
     'PR_A_WEB_ROWS',
     'PR_A_SINGLETON_PACKAGES',
-    'readWebIndex',
+    'readHostWebIndex',
     'assertWebIndexQualified',
     'assertSingleWebOwners',
     'assertDeclaredWebRows',
@@ -710,6 +718,80 @@ test('the official Web composition qualification is discoverable and never fakes
   // Neither is a product default.
   assert.match(source, /welcomeNoticeVersion: '\$\{PR_A_WELCOME_NOTICE_VERSION\}'/u)
   assert.match(source, /- id: workspace-controller\\n  config:\\n    documentsDirectory: '\$\{documentsDirectory\}'/u)
+})
+
+test('the Web runtime toggle lane drives the private Peer control, never a Host shortcut', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  const start = source.indexOf('const qualifyWebRuntimeToggle = async () => {')
+  const end = source.indexOf('const toggleQualification = await qualifyWebRuntimeToggle()')
+  assert.ok(start > 0 && end > start, 'the t73 lane must stay one bounded function')
+  const lane = source.slice(start, end)
+  // The control path is the REAL authenticated Peer through the v2 Gateway: the
+  // qualification op of the internal Client entry, correlated by requestId.
+  assert.match(lane, /op: 'qualification-web-access'/u)
+  assert.match(lane, /webAccessEnabled/u)
+  assert.match(lane, /entry\.op === 'web-access' && entry\.requestId === requestId/u)
+  assert.doesNotMatch(lane, /piTuiWebAccess\.(getStatus|setEnabled)\(/u,
+    'the smoke may only reach the toggle through the authenticated Remote call')
+  assert.doesNotMatch(lane, /registerFallback|loader\.resolve|Entry\.update/u,
+    'the smoke must not drive the Loader directly')
+  // The three traces carry the verdicts the inventory reports.
+  for (const marker of [
+    't73-web-default-off',
+    't73-web-enabled',
+    't73-web-disabled-live',
+    't73-web-reenabled',
+    't73-web-toggle-final',
+    't73-web-browser-result',
+    't73-web-negative-controls',
+  ]) {
+    assert.ok(lane.includes(marker), `missing t73 marker ${marker}`)
+  }
+  // PB-01: the default-off Host must be asserted on the REAL HTTP surface, and
+  // the TUI must really own a Session on it.
+  assert.match(lane, /assertWebOffHttp\(origin, 'PB-01'\)/u)
+  assert.match(lane, /tui\.send\('pr-b plain tui\\r'\)/u)
+  assert.match(lane, /record\.openSessionId === sessionT/u)
+  // PB-02/03: exactly the frozen roster is asserted active, and the ONE allowed
+  // PENDING row is recorded instead of being ignored.
+  assert.match(lane, /assertWebFullyOn\(enabledStatus, 'PB-02'\)/u)
+  assert.match(lane, /const deliverablesState = enabledStates\.get\('ui-deliverables'\)/u)
+  assert.match(lane, /deliverablesState === 'state-0' \|\| deliverablesState === 'active'/u,
+    'the optional Web row may be pending or active, but the verdict must be recorded')
+  assert.match(lane, /new Map\(PR_A_WEB_ROWS\.map\(row => \[row\.id/u,
+    'the lane must assert the FROZEN roster, never a list derived from the Host')
+  // PB-05/06: an ACCEPTED held Turn is in flight across the disable, the TUI
+  // keeps its Session and transport generation, and it accepts a new prompt.
+  assert.match(lane, /event\.kind === 'long-turn-held'/u)
+  assert.match(lane, /assertToggle\(await webAccess\(peer, 'PB-04', false\), 'disabled', 'PB-04 setEnabled\(false\)'\)/u)
+  assert.match(lane, /tuiStillOn\.generationId === tuiGeneration/u)
+  assert.match(lane, /tui\.send\('pr-b after disable\\r'\)/u)
+  assert.match(lane, /'PB-06 the TUI painted the post-disable answer'/u)
+  // The shared Host owners are proved by LIVE fiber identity across every edge:
+  // the sample below is the protected-row set the Host status reports.
+  assert.match(lane, /enabledUids\[id\] === protectedUids\[id\]/u)
+  assert.match(lane, /disabledUids\[id\] === protectedUids\[id\]/u)
+  assert.match(lane, /reenabledUids\[id\] === protectedUids\[id\]/u)
+  // PB-07: the real Browser run happens on the SAME Host process after the
+  // second enable, and the TUI observes the Browser-written Turn.
+  assert.match(lane, /assertToggle\(await webAccess\(peer, 'PB-07', true\), 'enabled'/u)
+  assert.match(lane, /PR_A_EXPECTED_ANSWER_PREFIX: 'long-turn answer 1'/u)
+  assert.match(lane, /await waitDurableTurn\(browserSession, marker, 'PB-07 Browser'\)/u)
+  assert.match(lane, /browserCase = 'PASS'/u)
+  assert.match(source, /assert\(!REQUIRE_WEB_BROWSER \|\| toggleQualification\.browser === 'PASS'/u,
+    'a required Browser run may only be satisfied by a PASS verdict')
+  // PB-10: nothing was persisted, and the official Host shutdown owns the exit.
+  assert.match(lane, /profilePatchAfter\.equals\(profilePatchBefore\)/u)
+  assert.match(lane, /const hostShutdown = await host\.shutdown\(\)/u)
+  // PB-08/09: the three refusing lanes and their byte-for-byte restore.
+  assert.match(lane, /absentRecord\.status\?\.state === 'unavailable'/u)
+  assert.match(lane, /duplicateRecord\.status\?\.state === 'unavailable'/u)
+  assert.match(lane, /second \.\*dsh-client-modules/u)
+  assert.match(lane, /malformed\.errorCode === 'gateway\/input-invalid'/u)
+  assert.match(lane, /renameSync\(missingDist, distIndex\)/u)
+  // The lane may not invent a product surface: no flag, setting or CLI switch
+  // selects the Web frontend.
+  assert.doesNotMatch(lane, /--web\b|WEB_ENABLED|M5_WEB_MODE/u)
 })
 
 test('the frozen Web roster matches the Host-only overlay exactly and stays default-disabled', () => {

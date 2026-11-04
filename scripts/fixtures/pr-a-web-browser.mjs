@@ -20,6 +20,10 @@
  * Usage: node pr-a-web-browser.mjs <coordination-dir> <marker>
  * Env:   PR_A_DSH_HOME        isolated DSH home of the running Host
  *        PR_A_PLAYWRIGHT_ROOT directory that owns the pinned Playwright install
+ *        PR_A_EXPECTED_ANSWER_PREFIX  the Host model's answer prefix this run
+ *                                     asserts (default: the stub fixture's
+ *                                     `stub answer`). PR-B's toggle lane boots
+ *                                     the C1 long-turn model instead.
  *
  * @module scripts/fixtures/pr-a-web-browser
  */
@@ -37,6 +41,8 @@ if (dshHome === undefined || dshHome === '') throw new Error('PR_A_DSH_HOME is r
 if (playwrightRoot === undefined || playwrightRoot === '') throw new Error('PR_A_PLAYWRIGHT_ROOT is required')
 mkdirSync(coordinationDir, { recursive: true, mode: 0o700 })
 const resultPath = join(coordinationDir, 'browser-result.json')
+/** The Host model's answer prefix this run must read inside the conversation. */
+const expectedAnswer = process.env.PR_A_EXPECTED_ANSWER_PREFIX ?? 'stub answer'
 
 /** The running Host's launch material (an origin plus this process's token). */
 function launchRecord() {
@@ -288,7 +294,7 @@ try {
   // not for a guessed delay.
   await waitControl({ aria: 'Send message' }, 30_000)
   await clickSend()
-  result.answerSeen = await waitAnswerInConversation(marker, 'stub answer', 120_000)
+  result.answerSeen = await waitAnswerInConversation(marker, expectedAnswer, 120_000)
   const shot = join(coordinationDir, 'pr-a-browser-composed.png')
   await page.screenshot({ path: shot, fullPage: false })
   result.screenshot = 'pr-a-browser-composed.png'

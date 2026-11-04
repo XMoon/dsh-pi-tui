@@ -58,6 +58,14 @@ export interface EntryControlRequest {
   readonly clientId?: string
   readonly sessionId?: string
   readonly value?: unknown
+  /**
+   * Qualification-only target of the `qualification-web-access` op: absent asks
+   * for the official Web frontend status, otherwise the value is passed to the
+   * Host's private `piTuiWebAccess.setEnabled` UNVALIDATED so the v2 Remote
+   * contract is the only authority on it. Internal control channel only — never
+   * a published CLI, Surface or HTTP surface.
+   */
+  readonly webAccessEnabled?: unknown
 }
 
 /** Handles one control request; `true` means the process should stop reading. */

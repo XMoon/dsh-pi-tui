@@ -820,6 +820,18 @@ interface PeerRemoteService {
   readonly userQuestions?: {
     answer(sessionId: string, callId: string, answer: unknown): Promise<{ readonly ok: boolean; readonly value?: boolean; readonly error?: { readonly code?: string } }>
   }
+  /** The package's private official-Web-frontend toggle (`piTuiWebAccess`). */
+  readonly piTuiWebAccess?: {
+    getStatus(): Promise<PeerRemoteResult>
+    setEnabled(enabled: boolean): Promise<PeerRemoteResult>
+  }
+}
+
+/** One RemoteResult as the Client face resolves it (structural, non-secret). */
+interface PeerRemoteResult {
+  readonly ok: boolean
+  readonly value?: unknown
+  readonly error?: { readonly code?: string; readonly message?: string }
 }
 
 /** Production fail-closed preflight for the interaction startup gate.
@@ -1402,6 +1414,41 @@ export async function runLocalClientEntry(options: LocalClientEntryOptions): Pro
               ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
               ok: result.ok === true,
               ...(result.ok ? { value: result.value === true } : { errorCode: result.error?.code, error: result.error }),
+            })
+            return false
+          }
+          if (request.op === 'qualification-web-access') {
+            // Qualification-only: the SAME authenticated non-TUI Peer drives
+            // the Host's private official-Web-frontend toggle through the real
+            // v2 Gateway. It is a control op of this internal entry: it never
+            // appears on a published CLI, a Surface stream or an HTTP bypass,
+            // and the response carries only the status vocabulary.
+            const enabled = request.webAccessEnabled
+            const webAccess = remoteService?.piTuiWebAccess
+            if (webAccess === undefined) {
+              throw new Error('local client entry: the qualification Peer has no piTuiWebAccess namespace')
+            }
+            // A supplied value is NOT validated here: the v2 Remote contract's
+            // argument codec is the one authority, so a malformed value is
+            // refused by the Gateway exactly like any other Remote caller.
+            const result = enabled === undefined
+              ? await webAccess.getStatus()
+              : await webAccess.setEnabled(enabled as boolean)
+            emit({
+              m4a0: 'qualification',
+              op: 'web-access',
+              processRole: 'client',
+              pid: process.pid,
+              action: enabled === undefined ? 'getStatus' : 'setEnabled',
+              ...(enabled === undefined ? {} : { enabled }),
+              ok: result.ok === true,
+              ...(result.ok
+                ? { status: result.value }
+                : {
+                    errorCode: result.error?.code,
+                    ...(result.error?.message === undefined ? {} : { error: result.error.message.slice(0, 300) }),
+                  }),
+              ...(request.requestId === undefined ? {} : { requestId: request.requestId }),
             })
             return false
           }

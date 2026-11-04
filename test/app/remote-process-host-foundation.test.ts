@@ -24,6 +24,8 @@ import { REMOTE_HOST_PREREQUISITE_SERVICES } from '../../src/app/remote/host-pre
 import { PI_TUI_HOST_READY_SERVICE } from '../../src/app/host/pi-tui-host-runtime.ts'
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../src/runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-terminal-progress-contract.ts'
+import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../src/runtime/remote/pi-tui-web-access-contract.ts'
+import { PI_TUI_WEB_ACCESS_ROWS } from '../../src/app/host/features/web-access.ts'
 
 /** One row of a real patch file (in-place override or `insert` entry). */
 interface OverlayRow {
@@ -126,7 +128,7 @@ const HOST_EXECUTION_INJECT: ReadonlyArray<{ id: string; inject: readonly string
   },
   { id: 'split-host-settings-controller', inject: ['typert'] },
   { id: 'split-host-session-log-download', inject: ['commands', 'connection'] },
-  { id: 'split-host-pi-tui-runtime', inject: ['typert', 'agents', 'fileReferences', 'workingDirectory'] },
+  { id: 'split-host-pi-tui-runtime', inject: ['typert', 'agents', 'fileReferences', 'workingDirectory', 'loader'] },
 ]
 
 /**
@@ -475,6 +477,67 @@ test('the Web composition reuses the existing Host authorities instead of declar
   assertWebOwnerDedupe(BUNDLE_ENTRIES, OVERLAY_ENTRIES)
 })
 
+/**
+ * M5-W PR-B — the runtime toggle's roster must BE the overlay's roster.
+ *
+ * The service owns a frozen 59-row table (id + official package) because it
+ * flips those exact rows at runtime. This assertion compares that table with
+ * the real `HOST_ONLY_PATCH` insert, so a silently added, dropped, renamed or
+ * reordered declaration cannot leave the toggle driving a different graph than
+ * the Host booted.
+ */
+function assertWebAccessRoster(web: readonly OverlayRow[]): void {
+  assert.deepEqual(PI_TUI_WEB_ACCESS_ROWS.map(row => row.id), web.map(row => row.id),
+    'the toggle roster must be the overlay roster: same ids, same order')
+  assert.deepEqual(PI_TUI_WEB_ACCESS_ROWS.map(row => row.name), web.map(row => row.name),
+    'the toggle roster must keep every row`s official package')
+  const ids = PI_TUI_WEB_ACCESS_ROWS.map(row => row.id)
+  assert.equal(new Set(ids).size, ids.length, 'the toggle roster must not repeat a row id')
+  for (const row of web) {
+    assert.equal(row.disabled, true, `the "${row.id}" row must start disabled for the toggle to enable it`)
+  }
+}
+
+test('the runtime toggle owns exactly the overlay Web roster', () => {
+  assertWebAccessRoster(webInsertGroup(OVERLAY_ENTRIES))
+  assert.equal(PI_TUI_WEB_ACCESS_ROWS.length, 59, 'the toggle owns the complete 59-row Web roster')
+})
+
+test('the toggle roster assertion rejects a missing, renamed, duplicated or foreign row', () => {
+  const webGroups = OVERLAY_ENTRIES.filter(entry => entry.insert !== undefined)
+  const webGroup = webGroups[webGroups.length - 1]
+  assert.ok(webGroup.insert !== undefined, 'the negative controls need the real Web insert group')
+  const mutateWeb = (
+    mutate: (rows: readonly OverlayRow[]) => readonly OverlayRow[],
+  ): readonly OverlayRow[] => mutate(webGroup.insert ?? [])
+  // Drift 1: a removed declaration row would make the toggle's 59-id table name
+  // a row this Host never mounts.
+  assert.throws(
+    () => assertWebAccessRoster(mutateWeb(rows => rows.filter(row => row.id !== 'terminal-controller'))),
+    /same ids, same order/u,
+  )
+  // Drift 2: the same id pointed at a different official package.
+  assert.throws(
+    () => assertWebAccessRoster(mutateWeb(rows => rows.map(row =>
+      row.id === WEB_RUNTIME_ID ? { ...row, name: '@deepseek-ai/dsh-host-webserver' } : row))),
+    /official package/u,
+  )
+  // Drift 3: a duplicated graph composer would register the browser module
+  // table twice.
+  assert.throws(
+    () => assertWebAccessRoster(mutateWeb(rows => [...rows, { id: 'modules', name: CLIENT_MODULES_PACKAGE, disabled: true }])),
+    /same ids, same order|repeat a row id/u,
+  )
+  // Drift 4: a protected Host owner inside the roster would be disposed by the
+  // toggle. The exactly-one-owner rule rejects it before the toggle can.
+  assert.throws(
+    () => assertWebOwnerDedupe(BUNDLE_ENTRIES, OVERLAY_ENTRIES.map(entry => entry === webGroup
+      ? { ...entry, insert: [...(entry.insert ?? []), { id: 'workspace-controller-copy', name: WORKSPACE_CONTROLLER_PACKAGE, disabled: true }] }
+      : entry)),
+    /must not re-declare the existing "@deepseek-ai\/dsh-api-workspace-controller"|exactly ONE "@deepseek-ai\/dsh-api-workspace-controller"/u,
+  )
+})
+
 test('the Web composition assertion rejects a re-enabled row, a browser launch and duplicate owners', () => {
   const webGroups = OVERLAY_ENTRIES.filter(entry => entry.insert !== undefined)
   const webGroup = webGroups[webGroups.length - 1]
@@ -600,6 +663,7 @@ function hostContext(rows: FixtureRow[], overrides: Record<string, unknown> = {}
     ...typertService('piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE),
     records: new Map(),
   })
+  services.set('piTuiWebAccess', typertService('piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE))
   services.set(PI_TUI_HOST_READY_SERVICE, {})
   services.set('piTuiPerformanceReady', {})
   for (const [name, value] of Object.entries(overrides)) services.set(name, value)

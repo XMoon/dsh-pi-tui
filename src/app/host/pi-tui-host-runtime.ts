@@ -4,16 +4,17 @@
  *
  * This is a HOST-plane Cordis plugin, not a TUI module and not a
  * user-configurable business plugin. A real Host Profile mounts it exactly
- * once to own the two private business modules that belong to this package:
+ * once to own the three private business modules that belong to this package:
  *
  * ```text
- * the package's ONE private Typert contribution (both private descriptors)
+ * the package's ONE private Typert contribution (all private descriptors)
  * the private `piTuiFileReferences` Host service
  * the private `piTuiTerminalProgress` Host service
+ * the private `piTuiWebAccess` Host service (official Web frontend toggle)
  * ```
  *
  * The row publishes the data-free `piTuiHostReady` gate only after the
- * contribution and BOTH service bindings are actually live, so a Host
+ * contribution and ALL service bindings are actually live, so a Host
  * readiness audit can depend on ordering instead of trusting a declared row.
  * It never mounts a second Connection/Gateway/Session stack, never registers
  * the official Session-serving services, and never owns a Host root: the
@@ -26,6 +27,7 @@ import type { Context, Fiber } from '@deepseek-ai/cordis'
 import { PI_TUI_HOST_CONTRIBUTION } from '../../runtime/remote/pi-tui-remote-contribution.ts'
 import { PI_TUI_FILE_REFERENCES_NAMESPACE } from '../../runtime/remote/pi-tui-file-reference-contract.ts'
 import { PI_TUI_TERMINAL_PROGRESS_NAMESPACE } from '../../runtime/remote/pi-tui-terminal-progress-contract.ts'
+import { PI_TUI_WEB_ACCESS_NAMESPACE } from '../../runtime/remote/pi-tui-web-access-contract.ts'
 import { mergeCause } from '../remote/dispose-cause.ts'
 import {
   PiTuiFileReferenceHostService,
@@ -36,16 +38,19 @@ import {
   PiTuiTerminalProgressHostService,
   type LiveAgentLike as TerminalProgressLiveAgentLike,
 } from './features/terminal-progress.ts'
+import { PiTuiWebAccessHostService } from './features/web-access.ts'
 
 /** Stable Cordis plugin name (the Loader row id in the Host-only overlay). */
 export const name = 'pi-tui-host-runtime'
 
 /**
- * Explicit Host dependencies: the private Typert registry plus the two live
- * Host facts the business rows resolve per call. `tuiStartup` remains a Loader
- * row gate (see the Host-only overlay), not a plugin inject.
+ * Explicit Host dependencies: the private Typert registry, the two live Host
+ * facts the business rows resolve per call, and the Host's OWN Loader — the
+ * official Web frontend toggle drives that Loader's rows, so the row may not
+ * complete without it. `tuiStartup` remains a Loader row gate (see the
+ * Host-only overlay), not a plugin inject.
  */
-export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory']
+export const inject = ['typert', 'agents', 'fileReferences', 'workingDirectory', 'loader']
 
 /** Data-free readiness gate published after the whole built-in runtime is live. */
 export const PI_TUI_HOST_READY_SERVICE = 'piTuiHostReady'
@@ -96,11 +101,12 @@ function assertPrivateBinding(ctx: Context, serviceKey: string, namespace: strin
  * Mount the built-in PiTui Host Runtime on the launching Host Context.
  *
  * Startup order is fixed: register the package's ONE contribution, mount the
- * file-reference service, mount the terminal-progress service, verify both
- * live bindings, then publish the readiness gate. Every child fiber is recorded
- * BEFORE it is awaited; a partial rejection disposes the recorded children in
- * reverse order (contribution last) while keeping the original error primary
- * and attaching cleanup failures to its cause chain.
+ * file-reference service, mount the terminal-progress service, mount the Web
+ * access service, verify ALL live bindings, then publish the readiness gate.
+ * Every child fiber is recorded BEFORE it is awaited; a partial rejection
+ * disposes the recorded children in reverse order (contribution last) while
+ * keeping the original error primary and attaching cleanup failures to its
+ * cause chain.
  */
 export async function apply(ctx: Context): Promise<void> {
   const fibers: Fiber[] = []
@@ -128,8 +134,14 @@ export async function apply(ctx: Context): Promise<void> {
     })
     fibers.push(terminalProgressFiber)
     await terminalProgressFiber
+    const webAccessFiber = ctx.inject(PiTuiWebAccessHostService.inject, pluginCtx => {
+      new PiTuiWebAccessHostService(pluginCtx)
+    })
+    fibers.push(webAccessFiber)
+    await webAccessFiber
     assertPrivateBinding(ctx, 'piTuiFileReferences', PI_TUI_FILE_REFERENCES_NAMESPACE)
     assertPrivateBinding(ctx, 'piTuiTerminalProgress', PI_TUI_TERMINAL_PROGRESS_NAMESPACE)
+    assertPrivateBinding(ctx, 'piTuiWebAccess', PI_TUI_WEB_ACCESS_NAMESPACE)
     ctx.provide(PI_TUI_HOST_READY_SERVICE, {})
   } catch (error) {
     const cleanupErrors: unknown[] = []

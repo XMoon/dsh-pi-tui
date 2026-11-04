@@ -619,10 +619,11 @@ export async function mountRemoteClientDomainPrerequisites(
     // The private pi-tui contribution: mounted explicitly, AFTER the official
     // generated contributions and deliberately kept separate from that list.
     // It is the package's ONE contribution (rc.2 admits exactly one per
-    // package), carrying BOTH private descriptors — the
+    // package), carrying every private descriptor — the
     // `piTuiFileReferences` augmentation (the official `fileReferences`
-    // namespace stays mounted and authoritative for bare queries) and the
-    // `piTuiTerminalProgress` status stream.
+    // namespace stays mounted and authoritative for bare queries), the
+    // `piTuiTerminalProgress` status stream and the `piTuiWebAccess` official
+    // Web frontend toggle.
     state.contributionDisposers.push(await remote.$mount(PI_TUI_CLIENT_CONTRIBUTION))
     // Domain Clients: fileUpload before Sessions is contractual (the Session
     // Client injects `fileUpload`). Each fiber is assigned BEFORE it is

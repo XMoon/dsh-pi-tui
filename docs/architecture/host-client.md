@@ -73,7 +73,7 @@ Host service resolution belongs to:
 `src/app/host/**` is the bundle's permanent Host plane: it registers with
 explicit `inject` and `ctx.reflect.get`, and consumers read only semantic DTOs or
 port values. `src/app/host/pi-tui-host-runtime.ts` is the ONE built-in Host
-Runtime Loader row; `src/app/host/features/**` are its two internal business
+Runtime Loader row; `src/app/host/features/**` are its three internal business
 modules, not independent plugins.
 
 Three real OS processes compose this package. Exactly TWO of them are roots of
@@ -97,8 +97,8 @@ runner and does not compose through that facade:
   profile through `runProfile()` with the Host-only overlay; it does NOT enter
   `app/bootstrap.ts`. The overlay's single built-in
   `@xmoon76/dsh-pi-tui/host-runtime` row owns the package's ONE private Typert
-  contribution and its two business services. Base/profile-owned Host services
-  are reused, never remounted.
+  contribution and its three business services. Base/profile-owned Host
+  services are reused, never remounted.
 - **Retired in-process carrier (test-only).** The former M3 in-process
   composition lives in `test/support/m3-inprocess/**`. It is not a real process
   composition at all: `src/**` must never import it, it must never enter the
@@ -336,10 +336,11 @@ The Host Profile's Loader is the only Host composition authority: one
 that Loader. The Host-only overlay disables the TUI surface rows, keeps the B1
 Connection and API-remotes rows, and adds exactly the official Session-serving
 rows plus ONE built-in `@xmoon76/dsh-pi-tui/host-runtime` row. That built-in row
-owns the package's ONE private Typert contribution and its two private business
-services (`piTuiFileReferences`, `piTuiTerminalProgress`); the feature modules
-are not independent Loader rows, configurable plugins or package subpaths. The
-row publishes `piTuiHostReady` only after both service bindings are live.
+owns the package's ONE private Typert contribution and its three private
+business services (`piTuiFileReferences`, `piTuiTerminalProgress`,
+`piTuiWebAccess`); the feature modules are not independent Loader rows,
+configurable plugins or package subpaths. The row publishes `piTuiHostReady`
+only after every service binding is live.
 
 Host Workspace authority has exactly two owners, both official bundle rows with
 the stable ids the official web bundle uses: `workspace`
@@ -376,6 +377,43 @@ itself remains mounted for the consumers that genuinely need its parsed startup
 facts and keeps following the official HMR lifecycle, so this contract is
 scoped to the listed execution rows and does not claim that every Host plugin,
 service or setting survives an arbitrary reload.
+
+### Official Web frontend availability (Host-owned, default off)
+
+A Split Host owns the official Web frontend as a TOGGLEABLE Host capability, not
+as a boot mode. The Host-only overlay declares the 59 official Web-only Loader
+rows once, every one `disabled: true`, so an ordinary Split Host serves no SPA
+root and no `/plugins` browser graph; `/connect` and `/api` remain the only
+network surface, and a real TUI Client connects and operates without Web. The
+private `piTuiWebAccess` namespace of the same built-in runtime's ONE Typert
+contribution is the ONLY control surface: `getStatus()` and `setEnabled(enabled)`
+flip `disabled` on exactly those 59 rows through the official `Entry.update` on
+the live Loader. The authority is therefore the Loader row plus the official
+`webApp`/`clientModules`/`terminalController` services, read on every query; there
+is no persisted `enabled` flag, no settings file, no profile patch write and no
+second listener, Host process or Web bundle. Activation is per Host lifetime:
+the next cold boot starts default-off.
+
+Enable assembles the browser graph first (`modules`, `client-hmr`,
+`cordis-client-runner`, `terminal-controller`, then the presentation rows) and
+mounts the SPA fallback LAST, so the official index never advertises a graph that
+does not exist. Disable withdraws the SPA fallback FIRST and then unloads the
+whole Web-only roster, including `terminal-controller`, `client-hmr`,
+`cordis-client-runner` and `clientModules`. Neither direction touches the shared
+Host owners: `webserver`, Gateway, Connection, Session/Agent/Job/Workspace/LLM
+rows and the built-in PiTui Host Runtime keep their lifetime, accepted Host work
+continues, and `/connect` plus `/api` stay authenticated and reachable. A failed
+enable withdraws whatever it mounted; a disable that cannot prove the Web state
+closed reports `unavailable` instead of claiming success. `ui-deliverables` may
+legitimately remain PENDING on its `workspaceChanges` dependency; that pending
+optional Browser feature is not a Web failure.
+
+This is a frontend SERVING switch, not an authorization boundary. It makes no
+promise about an already-loaded browser page, an existing Browser cookie or a
+live Browser WebSocket, and it must never be described as revoking Browser
+access, blocking Browser operations or logging Web out. Sessions, Agent
+ownership, Host identity, TUI transport generation and DSH data formats are
+invariant across a toggle.
 
 `performance-host` remains an independent Host projection row, and
 `visual-tools` remains an independent Loader row; neither is absorbed into the
