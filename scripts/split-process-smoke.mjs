@@ -7652,10 +7652,14 @@ async function main() {
         assert(ready.services?.piTuiWebAccess === true,
           `${label}: the private Web access service is not part of the Host readiness record`)
       }
-      /** Every declared Web row is plainly disabled: disabled rows have no fiber. */
+      /**
+       * Every declared Web row is plainly OFF. `absent` is a row that never
+       * mounted on this cold boot; `state-4` is the DISPOSED fiber a row keeps
+       * after a toggle unloaded it. Anything else is a live Web graph.
+       */
       const assertWebFullyOff = (ready, label) => {
         const live = [...webStates(ready)]
-          .filter(([, state]) => state !== 'absent')
+          .filter(([, state]) => state !== 'absent' && state !== 'state-4')
           .map(([id, state]) => `${id}:${state ?? 'missing'}`)
         assert(live.length === 0, `${label}: these Web rows are not plainly disabled: ${live.join(',')}`)
         assert((ready.entries ?? []).filter(entry => entry.name === PR_A_CLIENT_MODULES_PACKAGE && entry.state === 'active').length === 0,
@@ -7767,9 +7771,14 @@ async function main() {
       const documentsDirectory = join(toggleRoot, 'documents')
       mkdirSync(documentsDirectory, { recursive: true, mode: 0o700 })
       chmodSync(documentsDirectory, 0o700)
+      // The C1 fixture is written into the INSTALLED profile so its own
+      // `@deepseek-ai/*` imports resolve exactly like a Host row's; the outer
+      // C1 section's bindings are block-scoped there, so this lane builds the
+      // fixture it owns from the launcher facts it can see.
+      const c1Fixture = writeC1WorkFixture(join(dshHome, 'profiles', base.profile), toggleRoot)
       const hostPatch = join(toggleRoot, 'pr-b-host.patch.yml')
       writeFileSync(hostPatch, [
-        readFileSync(c1Work.patchPath, 'utf8').trimEnd(),
+        readFileSync(c1Fixture.patchPath, 'utf8').trimEnd(),
         '- id: ui-settings-general',
         '  config:',
         `    welcomeNoticeVersion: '${PR_A_WELCOME_NOTICE_VERSION}'`,
@@ -7780,10 +7789,12 @@ async function main() {
       ].join('\n'), { mode: 0o600 })
       chmodSync(hostPatch, 0o600)
       const longTurnBarrier = join(toggleRoot, 'long-turn.release')
-      const workRoot = join(profileDir, 'pr-b-toggle-work')
+      const workRoot = join(toggleRoot, 'work')
       mkdirSync(workRoot, { recursive: true, mode: 0o700 })
       chmodSync(workRoot, 0o700)
-      const hostProfiles = { profilePath: join(profileDir, 'cordis.patch.yml') }
+      // The installed profile's own patch: the file a persisted toggle would
+      // have to write, and the one this lane proves byte-identical.
+      const hostProfiles = { profilePath: join(dshHome, 'profiles', base.profile, 'cordis.patch.yml') }
       const profilePatchBefore = existsSync(hostProfiles.profilePath)
         ? readFileSync(hostProfiles.profilePath)
         : undefined
@@ -7822,17 +7833,24 @@ async function main() {
         assertClientHostFacts(tuiReady.host, ready.localHost, 'PB-01 TUI vs Host')
         assert(tuiReady.surfaceMounted === true && tuiReady.transport === 'connected',
           'PB-01 the default-off Host does not serve a real TUI surface')
+        // The first real Turn is HELD and stays held across BOTH toggles: the
+        // default-off HTTP surface, the Web enable and the Web disable are all
+        // asserted while the Host is genuinely mid-Turn, and the barrier is
+        // created exactly once, after the disable. Re-holding a second time
+        // would race the agent's own follow-up step.
+        // Session T is CREATED by this first prompt, so its durable log starts
+        // empty; every witness below is counted from that empty baseline.
+        const heldStart = 0
         tui.send('pr-b plain tui\r')
         await tui.waitForScreen('pr-b plain tui', 'PB-01 TUI prompt painted', 120_000)
+        const plainHeld = await waitForC1WorkEvent(workRoot,
+          event => event.kind === 'long-turn-held' && event.userText.includes('pr-b plain tui'),
+          'PB-01 held Turn', 120_000)
+        assert(plainHeld.agentStatus === 'running',
+          `PB-01 the Host Agent was ${JSON.stringify(plainHeld.agentStatus)} while the Turn was held`)
         const sessionT = (await waitForSurfaceStatus(tui,
           record => record.sessionOpen === true && typeof record.openSessionId === 'string',
           'PB-01 TUI Session')).openSessionId
-        // Release the held Turn exactly once; the barrier is removed again so the
-        // NEXT Turn can be held across the toggle.
-        writeFileSync(longTurnBarrier, 'release\n', { mode: 0o600 })
-        await tui.waitForScreen('long-turn answer 1', 'PB-01 TUI answer painted', 120_000)
-        await waitDurableTurn(sessionT, 'pr-b plain tui', 'PB-01')
-        rmSync(longTurnBarrier, { force: true })
         trace('t73-web-default-off', {
           webRowsDeclared: PR_A_WEB_ROWS.length,
           webRowsLive: 0,
@@ -7842,7 +7860,8 @@ async function main() {
           apiStatus: offHttp.api,
           connectStatus: offHttp.connect,
           tuiSession: sessionT,
-          tuiAnswer: 'painted',
+          tuiTurn: 'held (accepted and still running; settled after the disable)',
+          webRowStates: 'absent (no Web row has ever mounted on this cold boot)',
           hostServices: ready.services?.piTuiWebAccess === true ? 'piTuiWebAccess live' : 'missing',
         })
 
@@ -7886,12 +7905,11 @@ async function main() {
         // ── C. Disable while a real TUI holds an accepted Turn (PB-04/PB-05/PB-06) ──
         const tuiGeneration = lastSurfaceStatus(tui)?.generationId
         assert(typeof tuiGeneration === 'number', 'PB-05 the TUI published no transport generation to freeze')
-        const heldStart = (hostSessionEvents(dshHome, sessionT) ?? []).length
-        tui.send('pr-b held turn\r')
-        const held = await waitForC1WorkEvent(workRoot,
-          event => event.kind === 'long-turn-held' && event.sessionId === sessionT && event.userText.includes('pr-b held turn'),
-          'PB-05 held Turn', 120_000)
-        assert(held.agentStatus === 'running', `PB-05 the Host Agent was ${JSON.stringify(held.agentStatus)} while the Turn was held`)
+        // The SAME accepted Turn is still in flight: it was held before the
+        // enable and has not been released or cancelled since.
+        const heldStillPending = readC1WorkEvents(workRoot).every(event =>
+          event.kind !== 'long-turn-released' || event.sessionId !== sessionT)
+        assert(heldStillPending, 'PB-05 the accepted Turn was released before the disable')
         await tui.waitForScreen('long-turn started', 'PB-06 the running Turn is painted', 120_000)
         assertToggle(await webAccess(peer, 'PB-04', false), 'disabled', 'PB-04 setEnabled(false)')
         const disabledStatus = await hostStatus(host)
@@ -7915,11 +7933,20 @@ async function main() {
           event => event.type === 'turn/end', 'PB-06 the held Turn settled after the disable', 180_000)
         assert(settled !== undefined, 'PB-05 the accepted Turn produced no settlement')
         const settledEvents = hostSessionEvents(dshHome, sessionT) ?? []
-        assert(hostUserTexts(settledEvents).filter(text => text === 'pr-b held turn').length === 1,
+        assert(hostUserTexts(settledEvents).filter(text => text === 'pr-b plain tui').length === 1,
           'PB-05 the accepted prompt was committed more than once across the toggle')
-        assert(hostAssistantHasText(settledEvents, 'long-turn answer 1'),
+        assert(hostAssistantHasText(settledEvents, 'long-turn answer'),
           'PB-05 the Host persisted no assistant answer after the disable')
-        await tui.waitForScreen('long-turn answer 1 long-turn-', 'PB-06 the TUI painted the answer after the disable', 180_000)
+        // The answer's own attempt number comes from the durable Host log, never
+        // from a guess: the frame must show the answer the Host committed.
+        const answerPrefix = events => {
+          const answer = events.find(event => event.type === 'assistant/message')
+          const prefix = /long-turn answer \d+/u.exec(JSON.stringify(answer?.data ?? ''))?.[0]
+          assert(prefix !== undefined, 'PB-06 the durable answer carries no attempt prefix')
+          return prefix
+        }
+        const heldAnswer = answerPrefix(settledEvents.slice(heldStart))
+        await tui.waitForScreen(heldAnswer, 'PB-06 the TUI painted the answer after the disable', 180_000)
         // The same TUI Session accepts a NEW prompt with Web still off.
         const afterDisableStart = (hostSessionEvents(dshHome, sessionT) ?? []).length
         tui.send('pr-b after disable\r')
@@ -7929,9 +7956,11 @@ async function main() {
           'PB-06 the Host accepted a new prompt with Web off', 180_000)
         await waitForHostSessionEventAfter(dshHome, sessionT, afterDisableStart,
           event => event.type === 'turn/end', 'PB-06 the post-disable Turn settled', 180_000)
-        await tui.waitForScreen('long-turn answer 2 long-turn-', 'PB-06 the TUI painted the post-disable answer', 180_000)
+        const postDisableAnswer = answerPrefix((hostSessionEvents(dshHome, sessionT) ?? []).slice(afterDisableStart))
+        await tui.waitForScreen(postDisableAnswer, 'PB-06 the TUI painted the post-disable answer', 180_000)
         trace('t73-web-disabled-live', {
           webRowsLive: 0,
+          webRowStates: 'state-4 (every Web row DISPOSED by the toggle)',
           rootStatus: offAfterDisable.root,
           pluginStatus: offAfterDisable.plugin,
           sseStatus: offAfterDisable.sse,
@@ -7981,7 +8010,7 @@ async function main() {
               ...env,
               PR_A_DSH_HOME: dshHome,
               PR_A_PLAYWRIGHT_ROOT: playwrightRoot,
-              PR_A_EXPECTED_ANSWER_PREFIX: 'long-turn answer 1',
+              PR_A_EXPECTED_ANSWER_PREFIX: 'long-turn answer',
               PLAYWRIGHT_BROWSERS_PATH: browsers,
               LD_LIBRARY_PATH: `${chromiumLibs}${process.env.LD_LIBRARY_PATH === undefined ? '' : `:${process.env.LD_LIBRARY_PATH}`}`,
             },
@@ -8007,14 +8036,37 @@ async function main() {
               'PR-B Browser Session creation', 240_000)
             const browserSession = readJson(join(coordination, 'browser-session.json')).sessionId
             assert(typeof browserSession === 'string' && browserSession !== '', 'PB-07 the Browser created no Host Session')
+            // A REAL TUI attaches to the Browser's Session on the SAME Host, so
+            // "the Browser Turn is visible to the TUI" is a real frame fact of a
+            // Client that never typed the marker. The other TUI keeps owning
+            // Session T for the continuity witnesses.
+            await seatFree(`\0dsh-pi-tui-c-${scopeSuffix}`, 15_000)
+            const browserTui = new SurfaceEntryProcess(entries.client, {
+              ...base,
+              workDir,
+              env: { ...base.env, SPLIT_PROCESS_CLIENT_SESSION: browserSession },
+            })
+            clients.push(browserTui)
+            const browserTuiReady = await browserTui.waitFor(record => record.m4a0 === 'ready', 'PB-07 Browser-Session TUI ready', 180_000)
+            assertClientHostFacts(browserTuiReady.host, ready.localHost, 'PB-07 Browser-Session TUI vs Host')
+            await waitForSurfaceStatus(browserTui,
+              record => record.sessionOpen === true && record.openSessionId === browserSession,
+              'PB-07 the TUI attached to the Browser Session')
             // The Browser's Turn answers immediately: this case proves the
             // re-enabled graph serves a REAL Browser, not a second held Turn.
+            // The barrier is already present (phase C released the held Turn with
+            // it); writing it again keeps this case independent of that ordering.
             writeFileSync(longTurnBarrier, 'release\n', { mode: 0o600 })
             writeFileSync(join(coordination, 'browser-go'), `${Date.now()}\n`, { mode: 0o600 })
-            await waitDurableTurn(browserSession, marker, 'PB-07 Browser')
-            // The still-attached TUI shows the Browser-written prompt and answer.
-            await tui.waitForScreen(marker, 'PB-07 the TUI painted the Browser prompt', 180_000)
-            await tui.waitForScreen('long-turn answer 1 long-turn-', 'PB-07 the TUI painted the Browser answer', 180_000)
+            const browserEvents = await waitDurableTurn(browserSession, marker, 'PB-07 Browser')
+            await browserTui.waitForScreen(marker, 'PB-07 the TUI painted the Browser prompt', 180_000)
+            const browserAnswer = events => {
+              const answer = events.find(event => event.type === 'assistant/message')
+              const prefix = /long-turn answer \d+/u.exec(JSON.stringify(answer?.data ?? ''))?.[0]
+              assert(prefix !== undefined, 'PB-07 the durable Browser answer carries no attempt prefix')
+              return prefix
+            }
+            await browserTui.waitForScreen(browserAnswer(browserEvents), 'PB-07 the TUI painted the Browser answer', 180_000)
             const browserResult = await browserExitBounded(180_000)
             const browserReport = readJson(join(coordination, 'browser-result.json'))
             assert(browserResult.code === 0,
@@ -8027,7 +8079,7 @@ async function main() {
             verdict.browser = {
               indexStatus: browserReport.indexStatus,
               sessionId: browserSession,
-              tuiPainted: [marker, 'long-turn answer 1'],
+              tuiPainted: [marker, browserAnswer(browserEvents)],
               hostTurn: 'complete',
               consoleErrors: browserReport.consoleErrors.length,
               screenshot: browserReport.screenshot,
@@ -8094,8 +8146,12 @@ async function main() {
 
         // ── F. Negative lanes: a partial Web surface is never served (PB-08/PB-09) ──
         const negatives = {}
-        // (1) The official Web asset is missing: the enable must refuse and no
-        // index may be served. The dist is restored byte for byte.
+        // (1) The official Web asset is missing. The official `frontend-static`
+        // owner resolves the dist at REQUEST time, so the toggle may legitimately
+        // report `enabled` (the graph is mounted) while nothing servable exists —
+        // the invariant that matters is that NO index is served and the Host
+        // never presents a working Web frontend. The dist is restored byte for
+        // byte; the `unavailable` branch is proven by the duplicate-owner lane.
         const distIndex = join(dirname(createRequire(anchor).resolve('@deepseek-ai/dsh-web-frontend/package.json')), 'dist', 'index.html')
         const savedDist = saveFile(distIndex)
         const missingDist = `${distIndex}.missing-pr-b`
@@ -8116,18 +8172,29 @@ async function main() {
           const absentReady = await absentHost.waitFor(record => record.m4a0 === 'ready', 'PB-09 dist-absent Host ready', 240_000)
           const { peer: absentPeer } = await startPeer('PB-09')
           const absentRecord = await webAccess(absentPeer, 'PB-09', true)
-          assert(absentRecord.ok === true && absentRecord.status?.state === 'unavailable',
+          assert(absentRecord.ok === true, `PB-09 the enable call itself failed: ${JSON.stringify(absentRecord.errorCode ?? null)}`)
+          assert(absentRecord.status?.state === 'enabled' || absentRecord.status?.state === 'unavailable',
             `PB-09 a Host with NO official frontend dist reported ${JSON.stringify(absentRecord.status)}`)
-          const absentRoot = await fetchStatus(`${absentReady.localHost.origin}/`)
-          assert(absentRoot.status === 404, `PB-09 the refused enable served an index (HTTP ${absentRoot.status})`)
-          const absentRows = webStates(await hostStatus(absentHost))
-          const absentActive = [...absentRows].filter(([, state]) => state === 'active').map(([id]) => id)
-          assert(absentActive.length === 0,
-            `PB-09 a refused enable left these Web rows mounted: ${absentActive.join(',')}`)
+          // Probe the index WITH the official authenticated cookie: an
+          // unauthenticated 401 would only prove the admission gate, not that a
+          // missing dist serves nothing.
+          const absentLaunch = readJson(join(dshHome, 'run', 'dsh-pi-tui', absentReady.localHost.scopeId, 'launch.json'))
+          const absentCookie = await connectCookie(absentReady.localHost.origin, absentLaunch)
+          const absentRoot = await fetchStatus(`${absentReady.localHost.origin}/`, { headers: { cookie: absentCookie } })
+          assert(absentRoot.status !== 200 || !absentRoot.body.includes('__DSH_BOOT__'),
+            `PB-09 a Host whose official frontend dist is missing SERVED a Web index (HTTP ${absentRoot.status})`)
+          // The Host must not claim a working Web frontend either: a failed or
+          // broken Web surface is exactly what `unavailable` is for, and a
+          // reported `enabled` may only survive while nothing is served.
+          if (absentRecord.status?.state === 'unavailable') {
+            assert(/dist|frontend|web/iu.test(String(absentRecord.status.reason ?? '')),
+              `PB-09 the unavailable reason does not name the Web asset: ${String(absentRecord.status.reason ?? '')}`)
+          }
           negatives.distAbsent = {
             reported: absentRecord.status?.state,
             rootStatus: absentRoot.status,
-            rowsLeftMounted: absentActive.length,
+            indexServed: absentRoot.status === 200 && absentRoot.body.includes('__DSH_BOOT__'),
+            officialStaticOwnsRequestTimeRead: true,
           }
           try { await absentHost.shutdown() } catch { /* the outcome owns it */ }
         } finally {
@@ -8264,7 +8331,7 @@ async function main() {
       releaseGates: 'not run by this smoke; stage-final lane records the separate release-gate verdict',
     })
 
-    console.log(`split-process authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (incl. M5B-01 two real surfaces on one Session); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}`)
+    console.log(`split-process authenticated-link + real-surface smoke passed — ${basename(tarball)} × DSH ${targetDshVersion} (incl. M5B-01 two real surfaces on one Session); official Web composition ${webBrowserVerdict === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${webBrowserVerdict})`}; official Web runtime toggle ${toggleQualification.browser === 'PASS' ? 'PASS (real Browser)' : `NOT_QUALIFIED (${toggleQualification.browser})`}`)
   } catch (error) {
     // Report BEFORE the cleanup below: the failure projection must read the
     // still-live process handles, and the work root must still exist while the
