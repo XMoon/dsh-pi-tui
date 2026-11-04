@@ -761,15 +761,27 @@ export function hostSessionLogCount(dshHome) {
 }
 
 /** A bounded wait for one Session's durable header line (the Host writes it on
- *  the first accepted append, so a just-created Session may lag briefly). */
+ *  the first accepted append, so a just-created Session may lag briefly). A
+ *  read that lands on a torn/partial zstd frame is not a verdict: it just is not
+ *  durable yet, so the wait retries until the classified deadline. */
 export async function waitForHostSessionHeader(dshHome, sessionId, label, timeoutMs = 60_000) {
-  const deadline = Date.now() + timeoutMs
+  const started = Date.now()
+  const deadline = started + timeoutMs
   while (Date.now() < deadline) {
-    const header = hostSessionHeader(dshHome, sessionId)
-    if (header !== undefined) return header
+    try {
+      const header = hostSessionHeader(dshHome, sessionId)
+      if (header !== undefined) return header
+    } catch {
+      // The Host may be mid-append; a partial frame is not a durable header yet.
+    }
     await sleep(100)
   }
-  throw new Error(`timed out waiting for ${label}: no durable Host header for "${sessionId}"`)
+  throw new SplitSmokeWaitError('WAIT_TIMEOUT', {
+    code: 'HOST_SESSION_HEADER_TIMEOUT',
+    waitLabel: label,
+    processRole: 'host',
+    elapsedMs: Date.now() - started,
+  })
 }
 
 /** Bounded digest (the shape the WS-2 qualification records carry). */
