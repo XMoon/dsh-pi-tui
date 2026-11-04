@@ -444,6 +444,23 @@ export interface TspRenderer extends TspInputBinding {
    * callers awaiting it can safely touch the terminal afterwards.
    */
   readonly dispose: () => Promise<void>
+  /**
+   * TSP I-A: the TWO relocated headless recall diagnostics of this mount's ONE
+   * kernel — the durable per-occurrence settlement fact count of the open
+   * scope, and the number of positions the last reseed reconcile visited.
+   * They are the SAME members, with the same definitions and bounds, that the
+   * PiTui adapter already exposes on `TuiApp`; the recall kernel itself
+   * declares them (`src/client/history/recall-scope.ts`).
+   *
+   * They read THIS MOUNT's recall state and nothing else: no render, no draft,
+   * no seat, no Session read, no file, no persistence. Production has no
+   * consumer — they exist so a headless case can prove that a display-seam
+   * commit actually changed the mount's recall state instead of merely
+   * reaching the seam. I-A presents no recall UI, so this is state
+   * verification, not a visible surface (that is I-B).
+   */
+  scopeFactCountForTest(): number
+  reconcileStepsForTest(): number
 }
 
 /**
@@ -3692,6 +3709,10 @@ export function mountTspRenderer(session: Session, options: TspRendererOptions):
         render()
       }
     },
+    // TSP I-A: the mount kernel's own headless diagnostics, passed through with
+    // no consumer in production code (see `TspRenderer`).
+    scopeFactCountForTest: () => historyRecall.scopeFactCountForTest(),
+    reconcileStepsForTest: () => historyRecall.reconcileStepsForTest(),
     bindInput: (handlers) => {
       if (disposed) throw new Error('the TSP renderer is disposed')
       if (inputBound) throw new Error('the TSP renderer input is already bound')
